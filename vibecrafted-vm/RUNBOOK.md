@@ -1,5 +1,11 @@
 # vc-workspace — Runbook dla teamu / Team Runbook
 
+> **Personal-dev legacy surface only.** This runbook describes the optional
+> broad-mount compose/wizard workflow. It is not the hardened Runtime Pack
+> carrier, not a security boundary, and not the Workshop `local-vm` selector
+> backend. Set `VC_PERSONAL_DEV_IMAGE` explicitly before using it. For the
+> exact carrier build, use [`README.md`](README.md).
+
 > **PL:** Praktyczny przewodnik dla pierwszych użytkowników. Co się spodziewać, jak używać, co kontrolować, gdzie szukać pomocy.
 >
 > **EN:** Practical guide for first-time users. What to expect, how to use it, what's tunable, where to get help.
@@ -35,7 +41,7 @@ accessed via SSH or `docker exec`, feels like a local shell.
 | Scenariusz / Scenario                                        | Oczekiwane / Expected                                                      |
 | ------------------------------------------------------------ | -------------------------------------------------------------------------- |
 | **Local Docker** (127.0.0.1, container na Twoim laptopie)    | <1 ms — pomiędzy local terminal a containerem to UNIX socket, nie ma sieci |
-| **Tailnet mesh** (np. dragon @ tailnet, Ty piszesz z silver) | 1-5 ms na LAN, 20-50 ms WAN — SSH-grade, bez IDE-protokołów                |
+| **Tailnet mesh** (np. host-a @ tailnet, Ty piszesz z host-d) | 1-5 ms na LAN, 20-50 ms WAN — SSH-grade, bez IDE-protokołów                |
 | **JetBrains Gateway / VSCode Remote** (porównanie)           | Zaczyna ~100 ms, wskakuje 200-500 ms przy autocomplete / index sync        |
 
 ### Co działa natywnie / What works natively
@@ -125,15 +131,15 @@ tailscale status
 # Spodziewane wyjście:
 # 100.x.y.z    vc-workspace-<hostname>    -        linux   active
 
-# Z dowolnego mesh peer (dragon, silver, ops) możesz teraz:
+# Z dowolnego mesh peer (host-a, host-d, host-e) możesz teraz:
 ssh root@vc-workspace-<hostname>
 # albo: ssh root@100.x.y.z
 ```
 
 > **Jak działa SSH bez sshd:** kontener **nie ma** openssh-server. `entry.sh`
 > odpala `tailscale up --ssh`, czyli **Tailscale SSH** — to tailscaled obsługuje
-> sesję SSH, gated przez tailnet ACL. Dlatego `ssh root@vc-workspace-dragon`
-> wchodzi z silver/div0 bez żadnego demona SSH w obrazie. Warunek: w panelu
+> sesję SSH, gated przez tailnet ACL. Dlatego `ssh root@vc-workspace-host-a`
+> wchodzi z host-d/host-b bez żadnego demona SSH w obrazie. Warunek: w panelu
 > Tailscale (admin → Access controls) tag `tag:devbox` musi mieć regułę `ssh`
 > dopuszczającą `root` (np. `"users": ["autogroup:nonroot", "root"]`).
 
@@ -184,10 +190,10 @@ docker system df                    # disk usage per image/container/volume
 
 Użytkownik nie potrzebuje znać Docker'a żeby z tego korzystać:
 
-1. **Operator raz uruchamia wizard** + ustawia container na dragon (tailnet-accessible)
-2. **Użytkownik z `silver` odpali:**
+1. **Operator raz uruchamia wizard** + ustawia container na host-a (tailnet-accessible)
+2. **Użytkownik z `host-d` odpali:**
    ```bash
-   ssh root@vc-workspace-dragon
+   ssh root@vc-workspace-host-a
    # ← dropujesz do zsh w container, masz pełen framework
    ```
 3. **Standard workflow:**
@@ -201,14 +207,14 @@ Użytkownik nie potrzebuje znać Docker'a żeby z tego korzystać:
 Każdy dev ma własny container na własnym hostie + wszyscy widzą się przez tailnet:
 
 ```bash
-# Twój local container na div0
+# Twój local container na host-b
 docker compose exec dev zsh
 
 # Możesz ssh do containera kolegi (jeśli tailnet)
 ssh root@vc-workspace-emilek
 
-# Lub: shared host (dragon), wszyscy ssh tam
-ssh root@vc-workspace-dragon
+# Lub: shared host (host-a), wszyscy ssh tam
+ssh root@vc-workspace-host-a
 ```
 
 ### GPG signing (release-tag etc.)
@@ -319,7 +325,7 @@ PL: Po pierwszym buildzie — tak. Container ma wszystko inside. Tailnet wymaga 
 
 EN: After first build — yes. Container has everything inside. Tailnet requires internet (or tailnet relays).
 
-**Q: Co jeśli host dragon padnie?**
+**Q: Co jeśli host host-a padnie?**
 
 PL: Twoje persistent volumes (`~/.aicx`, `~/.vibecrafted`) są na hoście. Jeśli host padnie, dane są jako hostide. Container można rebuild na innym hoście — wystarczy mount te same volumes (rsync z backupu jeśli trzeba).
 

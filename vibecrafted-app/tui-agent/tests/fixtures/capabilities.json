@@ -1,0 +1,1665 @@
+{
+ "agents": [
+  "agy",
+  "claude",
+  "codex",
+  "cursor",
+  "grok",
+  "junie",
+  "swarm"
+ ],
+ "environments": {
+  "cloud-soon": {
+   "available": false,
+   "label": "Fleet VM cloud",
+   "reason": "coming soon",
+   "skill_launcher_flags": [],
+   "skill_launcher_supported": false
+  },
+  "local-native": {
+   "available": true,
+   "label": "Living Tree",
+   "reason": "",
+   "skill_launcher_flags": [],
+   "skill_launcher_supported": true
+  },
+  "local-vm": {
+   "available": false,
+   "label": "Fleet VM local",
+   "reason": "no canonical VM entrypoint",
+   "skill_launcher_flags": [],
+   "skill_launcher_supported": false
+  },
+  "local-worktrees": {
+   "available": true,
+   "label": "Fleet Worktrees",
+   "reason": "",
+   "skill_launcher_flags": [
+    "--worktree",
+    "true"
+   ],
+   "skill_launcher_supported": true
+  }
+ },
+ "providers": {
+  "agy": {
+   "available": true,
+   "binary": "agy",
+   "controls": [
+    {
+     "permissions": "",
+     "permissions_effective": "bypass",
+     "provider_flags": [
+      "--dangerously-skip-permissions"
+     ],
+     "reason": "",
+     "sandbox": "",
+     "sandbox_effective": "provider-default",
+     "supported": true
+    },
+    {
+     "permissions": "",
+     "permissions_effective": "bypass",
+     "provider_flags": [
+      "--dangerously-skip-permissions",
+      "--sandbox"
+     ],
+     "reason": "",
+     "sandbox": "true",
+     "sandbox_effective": "enabled",
+     "supported": true
+    },
+    {
+     "permissions": "",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "agy: agy 1.1.27 exposes only the opt-in --sandbox flag and keeps its own persistent terminal-sandbox settings, so --sandbox false cannot be enforced from the launcher. Omit --sandbox to keep agy's own setting (receipted as provider-default) or pass --sandbox true.",
+     "sandbox": "false",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "bypass",
+     "permissions_effective": "bypass",
+     "provider_flags": [
+      "--dangerously-skip-permissions"
+     ],
+     "reason": "",
+     "sandbox": "",
+     "sandbox_effective": "provider-default",
+     "supported": true
+    },
+    {
+     "permissions": "bypass",
+     "permissions_effective": "bypass",
+     "provider_flags": [
+      "--dangerously-skip-permissions",
+      "--sandbox"
+     ],
+     "reason": "",
+     "sandbox": "true",
+     "sandbox_effective": "enabled",
+     "supported": true
+    },
+    {
+     "permissions": "bypass",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "agy: agy 1.1.27 exposes only the opt-in --sandbox flag and keeps its own persistent terminal-sandbox settings, so --sandbox false cannot be enforced from the launcher. Omit --sandbox to keep agy's own setting (receipted as provider-default) or pass --sandbox true.",
+     "sandbox": "false",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "auto",
+     "permissions_effective": "auto",
+     "provider_flags": [],
+     "reason": "",
+     "sandbox": "",
+     "sandbox_effective": "provider-default",
+     "supported": true
+    },
+    {
+     "permissions": "auto",
+     "permissions_effective": "auto",
+     "provider_flags": [
+      "--sandbox"
+     ],
+     "reason": "",
+     "sandbox": "true",
+     "sandbox_effective": "enabled",
+     "supported": true
+    },
+    {
+     "permissions": "auto",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "agy: agy 1.1.27 exposes only the opt-in --sandbox flag and keeps its own persistent terminal-sandbox settings, so --sandbox false cannot be enforced from the launcher. Omit --sandbox to keep agy's own setting (receipted as provider-default) or pass --sandbox true.",
+     "sandbox": "false",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "accept-edits",
+     "permissions_effective": "accept-edits",
+     "provider_flags": [
+      "--mode",
+      "accept-edits"
+     ],
+     "reason": "",
+     "sandbox": "",
+     "sandbox_effective": "provider-default",
+     "supported": true
+    },
+    {
+     "permissions": "accept-edits",
+     "permissions_effective": "accept-edits",
+     "provider_flags": [
+      "--mode",
+      "accept-edits",
+      "--sandbox"
+     ],
+     "reason": "",
+     "sandbox": "true",
+     "sandbox_effective": "enabled",
+     "supported": true
+    },
+    {
+     "permissions": "accept-edits",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "agy: agy 1.1.27 exposes only the opt-in --sandbox flag and keeps its own persistent terminal-sandbox settings, so --sandbox false cannot be enforced from the launcher. Omit --sandbox to keep agy's own setting (receipted as provider-default) or pass --sandbox true.",
+     "sandbox": "false",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "read-only",
+     "permissions_effective": "read-only",
+     "provider_flags": [
+      "--mode",
+      "plan"
+     ],
+     "reason": "",
+     "sandbox": "",
+     "sandbox_effective": "provider-default",
+     "supported": true
+    },
+    {
+     "permissions": "read-only",
+     "permissions_effective": "read-only",
+     "provider_flags": [
+      "--mode",
+      "plan",
+      "--sandbox"
+     ],
+     "reason": "",
+     "sandbox": "true",
+     "sandbox_effective": "enabled",
+     "supported": true
+    },
+    {
+     "permissions": "read-only",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "agy: agy 1.1.27 exposes only the opt-in --sandbox flag and keeps its own persistent terminal-sandbox settings, so --sandbox false cannot be enforced from the launcher. Omit --sandbox to keep agy's own setting (receipted as provider-default) or pass --sandbox true.",
+     "sandbox": "false",
+     "sandbox_effective": "",
+     "supported": false
+    }
+   ],
+   "executable": "/opt/agents/bin/agy",
+   "model_override": {
+    "flag": "--model",
+    "reason": "",
+    "supported": true
+   },
+   "permissions_default": "bypass",
+   "reason": ""
+  },
+  "claude": {
+   "available": true,
+   "binary": "claude",
+   "controls": [
+    {
+     "permissions": "",
+     "permissions_effective": "bypass",
+     "provider_flags": [
+      "--permission-mode",
+      "bypassPermissions"
+     ],
+     "reason": "",
+     "sandbox": "",
+     "sandbox_effective": "provider-default",
+     "supported": true
+    },
+    {
+     "permissions": "",
+     "permissions_effective": "bypass",
+     "provider_flags": [
+      "--permission-mode",
+      "bypassPermissions",
+      "--settings",
+      "{\"sandbox\":{\"enabled\":true,\"failIfUnavailable\":true,\"allowUnsandboxedCommands\":false}}"
+     ],
+     "reason": "",
+     "sandbox": "true",
+     "sandbox_effective": "enabled",
+     "supported": true
+    },
+    {
+     "permissions": "",
+     "permissions_effective": "bypass",
+     "provider_flags": [
+      "--permission-mode",
+      "bypassPermissions",
+      "--settings",
+      "{\"sandbox\":{\"enabled\":false}}"
+     ],
+     "reason": "",
+     "sandbox": "false",
+     "sandbox_effective": "disabled",
+     "supported": true
+    },
+    {
+     "permissions": "bypass",
+     "permissions_effective": "bypass",
+     "provider_flags": [
+      "--permission-mode",
+      "bypassPermissions"
+     ],
+     "reason": "",
+     "sandbox": "",
+     "sandbox_effective": "provider-default",
+     "supported": true
+    },
+    {
+     "permissions": "bypass",
+     "permissions_effective": "bypass",
+     "provider_flags": [
+      "--permission-mode",
+      "bypassPermissions",
+      "--settings",
+      "{\"sandbox\":{\"enabled\":true,\"failIfUnavailable\":true,\"allowUnsandboxedCommands\":false}}"
+     ],
+     "reason": "",
+     "sandbox": "true",
+     "sandbox_effective": "enabled",
+     "supported": true
+    },
+    {
+     "permissions": "bypass",
+     "permissions_effective": "bypass",
+     "provider_flags": [
+      "--permission-mode",
+      "bypassPermissions",
+      "--settings",
+      "{\"sandbox\":{\"enabled\":false}}"
+     ],
+     "reason": "",
+     "sandbox": "false",
+     "sandbox_effective": "disabled",
+     "supported": true
+    },
+    {
+     "permissions": "auto",
+     "permissions_effective": "auto",
+     "provider_flags": [
+      "--permission-mode",
+      "auto"
+     ],
+     "reason": "",
+     "sandbox": "",
+     "sandbox_effective": "provider-default",
+     "supported": true
+    },
+    {
+     "permissions": "auto",
+     "permissions_effective": "auto",
+     "provider_flags": [
+      "--permission-mode",
+      "auto",
+      "--settings",
+      "{\"sandbox\":{\"enabled\":true,\"failIfUnavailable\":true,\"allowUnsandboxedCommands\":false}}"
+     ],
+     "reason": "",
+     "sandbox": "true",
+     "sandbox_effective": "enabled",
+     "supported": true
+    },
+    {
+     "permissions": "auto",
+     "permissions_effective": "auto",
+     "provider_flags": [
+      "--permission-mode",
+      "auto",
+      "--settings",
+      "{\"sandbox\":{\"enabled\":false}}"
+     ],
+     "reason": "",
+     "sandbox": "false",
+     "sandbox_effective": "disabled",
+     "supported": true
+    },
+    {
+     "permissions": "accept-edits",
+     "permissions_effective": "accept-edits",
+     "provider_flags": [
+      "--permission-mode",
+      "acceptEdits"
+     ],
+     "reason": "",
+     "sandbox": "",
+     "sandbox_effective": "provider-default",
+     "supported": true
+    },
+    {
+     "permissions": "accept-edits",
+     "permissions_effective": "accept-edits",
+     "provider_flags": [
+      "--permission-mode",
+      "acceptEdits",
+      "--settings",
+      "{\"sandbox\":{\"enabled\":true,\"failIfUnavailable\":true,\"allowUnsandboxedCommands\":false}}"
+     ],
+     "reason": "",
+     "sandbox": "true",
+     "sandbox_effective": "enabled",
+     "supported": true
+    },
+    {
+     "permissions": "accept-edits",
+     "permissions_effective": "accept-edits",
+     "provider_flags": [
+      "--permission-mode",
+      "acceptEdits",
+      "--settings",
+      "{\"sandbox\":{\"enabled\":false}}"
+     ],
+     "reason": "",
+     "sandbox": "false",
+     "sandbox_effective": "disabled",
+     "supported": true
+    },
+    {
+     "permissions": "read-only",
+     "permissions_effective": "read-only",
+     "provider_flags": [
+      "--permission-mode",
+      "plan"
+     ],
+     "reason": "",
+     "sandbox": "",
+     "sandbox_effective": "provider-default",
+     "supported": true
+    },
+    {
+     "permissions": "read-only",
+     "permissions_effective": "read-only",
+     "provider_flags": [
+      "--permission-mode",
+      "plan",
+      "--settings",
+      "{\"sandbox\":{\"enabled\":true,\"failIfUnavailable\":true,\"allowUnsandboxedCommands\":false}}"
+     ],
+     "reason": "",
+     "sandbox": "true",
+     "sandbox_effective": "enabled",
+     "supported": true
+    },
+    {
+     "permissions": "read-only",
+     "permissions_effective": "read-only",
+     "provider_flags": [
+      "--permission-mode",
+      "plan",
+      "--settings",
+      "{\"sandbox\":{\"enabled\":false}}"
+     ],
+     "reason": "",
+     "sandbox": "false",
+     "sandbox_effective": "disabled",
+     "supported": true
+    }
+   ],
+   "executable": "/opt/agents/bin/claude",
+   "model_override": {
+    "flag": "--model",
+    "reason": "",
+    "supported": true
+   },
+   "permissions_default": "bypass",
+   "reason": ""
+  },
+  "codex": {
+   "available": true,
+   "binary": "codex",
+   "controls": [
+    {
+     "permissions": "",
+     "permissions_effective": "bypass",
+     "provider_flags": [
+      "--dangerously-bypass-approvals-and-sandbox"
+     ],
+     "reason": "",
+     "sandbox": "",
+     "sandbox_effective": "disabled",
+     "supported": true
+    },
+    {
+     "permissions": "",
+     "permissions_effective": "bypass",
+     "provider_flags": [
+      "--sandbox",
+      "workspace-write"
+     ],
+     "reason": "",
+     "sandbox": "true",
+     "sandbox_effective": "enabled",
+     "supported": true
+    },
+    {
+     "permissions": "",
+     "permissions_effective": "bypass",
+     "provider_flags": [
+      "--dangerously-bypass-approvals-and-sandbox"
+     ],
+     "reason": "",
+     "sandbox": "false",
+     "sandbox_effective": "disabled",
+     "supported": true
+    },
+    {
+     "permissions": "bypass",
+     "permissions_effective": "bypass",
+     "provider_flags": [
+      "--dangerously-bypass-approvals-and-sandbox"
+     ],
+     "reason": "",
+     "sandbox": "",
+     "sandbox_effective": "disabled",
+     "supported": true
+    },
+    {
+     "permissions": "bypass",
+     "permissions_effective": "bypass",
+     "provider_flags": [
+      "--sandbox",
+      "workspace-write"
+     ],
+     "reason": "",
+     "sandbox": "true",
+     "sandbox_effective": "enabled",
+     "supported": true
+    },
+    {
+     "permissions": "bypass",
+     "permissions_effective": "bypass",
+     "provider_flags": [
+      "--dangerously-bypass-approvals-and-sandbox"
+     ],
+     "reason": "",
+     "sandbox": "false",
+     "sandbox_effective": "disabled",
+     "supported": true
+    },
+    {
+     "permissions": "auto",
+     "permissions_effective": "auto",
+     "provider_flags": [
+      "--approve-for-me"
+     ],
+     "reason": "",
+     "sandbox": "",
+     "sandbox_effective": "enabled",
+     "supported": true
+    },
+    {
+     "permissions": "auto",
+     "permissions_effective": "auto",
+     "provider_flags": [
+      "--approve-for-me"
+     ],
+     "reason": "",
+     "sandbox": "true",
+     "sandbox_effective": "enabled",
+     "supported": true
+    },
+    {
+     "permissions": "auto",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "codex: --permissions auto runs under --approve-for-me, which is bound to the workspace-write sandbox, so --sandbox false cannot be enforced. Use `--permissions bypass --sandbox false` or omit --sandbox.",
+     "sandbox": "false",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "accept-edits",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "codex: cannot enforce --permissions accept-edits (codex exposes no native accept-edits policy); supported: bypass, auto, read-only",
+     "sandbox": "",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "accept-edits",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "codex: cannot enforce --permissions accept-edits (codex exposes no native accept-edits policy); supported: bypass, auto, read-only",
+     "sandbox": "true",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "accept-edits",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "codex: cannot enforce --permissions accept-edits (codex exposes no native accept-edits policy); supported: bypass, auto, read-only",
+     "sandbox": "false",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "read-only",
+     "permissions_effective": "read-only",
+     "provider_flags": [
+      "--sandbox",
+      "read-only"
+     ],
+     "reason": "",
+     "sandbox": "",
+     "sandbox_effective": "enabled",
+     "supported": true
+    },
+    {
+     "permissions": "read-only",
+     "permissions_effective": "read-only",
+     "provider_flags": [
+      "--sandbox",
+      "read-only"
+     ],
+     "reason": "",
+     "sandbox": "true",
+     "sandbox_effective": "enabled",
+     "supported": true
+    },
+    {
+     "permissions": "read-only",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "codex: --permissions read-only is enforced by the read-only sandbox, so --sandbox false cannot be enforced. Omit --sandbox or pass --sandbox true.",
+     "sandbox": "false",
+     "sandbox_effective": "",
+     "supported": false
+    }
+   ],
+   "executable": "/opt/agents/bin/codex",
+   "model_override": {
+    "flag": "-m",
+    "reason": "",
+    "supported": true
+   },
+   "permissions_default": "bypass",
+   "reason": ""
+  },
+  "cursor": {
+   "available": true,
+   "binary": "cursor-agent",
+   "controls": [
+    {
+     "permissions": "",
+     "permissions_effective": "bypass",
+     "provider_flags": [
+      "--force",
+      "--trust"
+     ],
+     "reason": "",
+     "sandbox": "",
+     "sandbox_effective": "provider-default",
+     "supported": true
+    },
+    {
+     "permissions": "",
+     "permissions_effective": "bypass",
+     "provider_flags": [
+      "--force",
+      "--trust",
+      "--sandbox",
+      "enabled"
+     ],
+     "reason": "",
+     "sandbox": "true",
+     "sandbox_effective": "enabled",
+     "supported": true
+    },
+    {
+     "permissions": "",
+     "permissions_effective": "bypass",
+     "provider_flags": [
+      "--force",
+      "--trust",
+      "--sandbox",
+      "disabled"
+     ],
+     "reason": "",
+     "sandbox": "false",
+     "sandbox_effective": "disabled",
+     "supported": true
+    },
+    {
+     "permissions": "bypass",
+     "permissions_effective": "bypass",
+     "provider_flags": [
+      "--force",
+      "--trust"
+     ],
+     "reason": "",
+     "sandbox": "",
+     "sandbox_effective": "provider-default",
+     "supported": true
+    },
+    {
+     "permissions": "bypass",
+     "permissions_effective": "bypass",
+     "provider_flags": [
+      "--force",
+      "--trust",
+      "--sandbox",
+      "enabled"
+     ],
+     "reason": "",
+     "sandbox": "true",
+     "sandbox_effective": "enabled",
+     "supported": true
+    },
+    {
+     "permissions": "bypass",
+     "permissions_effective": "bypass",
+     "provider_flags": [
+      "--force",
+      "--trust",
+      "--sandbox",
+      "disabled"
+     ],
+     "reason": "",
+     "sandbox": "false",
+     "sandbox_effective": "disabled",
+     "supported": true
+    },
+    {
+     "permissions": "auto",
+     "permissions_effective": "auto",
+     "provider_flags": [
+      "--trust"
+     ],
+     "reason": "",
+     "sandbox": "",
+     "sandbox_effective": "provider-default",
+     "supported": true
+    },
+    {
+     "permissions": "auto",
+     "permissions_effective": "auto",
+     "provider_flags": [
+      "--trust",
+      "--sandbox",
+      "enabled"
+     ],
+     "reason": "",
+     "sandbox": "true",
+     "sandbox_effective": "enabled",
+     "supported": true
+    },
+    {
+     "permissions": "auto",
+     "permissions_effective": "auto",
+     "provider_flags": [
+      "--trust",
+      "--sandbox",
+      "disabled"
+     ],
+     "reason": "",
+     "sandbox": "false",
+     "sandbox_effective": "disabled",
+     "supported": true
+    },
+    {
+     "permissions": "accept-edits",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "cursor: cannot enforce --permissions accept-edits (cursor exposes no native accept-edits policy); supported: bypass, auto, read-only",
+     "sandbox": "",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "accept-edits",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "cursor: cannot enforce --permissions accept-edits (cursor exposes no native accept-edits policy); supported: bypass, auto, read-only",
+     "sandbox": "true",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "accept-edits",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "cursor: cannot enforce --permissions accept-edits (cursor exposes no native accept-edits policy); supported: bypass, auto, read-only",
+     "sandbox": "false",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "read-only",
+     "permissions_effective": "read-only",
+     "provider_flags": [
+      "--mode",
+      "ask",
+      "--trust"
+     ],
+     "reason": "",
+     "sandbox": "",
+     "sandbox_effective": "provider-default",
+     "supported": true
+    },
+    {
+     "permissions": "read-only",
+     "permissions_effective": "read-only",
+     "provider_flags": [
+      "--mode",
+      "ask",
+      "--trust",
+      "--sandbox",
+      "enabled"
+     ],
+     "reason": "",
+     "sandbox": "true",
+     "sandbox_effective": "enabled",
+     "supported": true
+    },
+    {
+     "permissions": "read-only",
+     "permissions_effective": "read-only",
+     "provider_flags": [
+      "--mode",
+      "ask",
+      "--trust",
+      "--sandbox",
+      "disabled"
+     ],
+     "reason": "",
+     "sandbox": "false",
+     "sandbox_effective": "disabled",
+     "supported": true
+    }
+   ],
+   "executable": "/opt/agents/bin/cursor-agent",
+   "model_override": {
+    "flag": "--model",
+    "reason": "",
+    "supported": true
+   },
+   "permissions_default": "bypass",
+   "reason": ""
+  },
+  "grok": {
+   "available": false,
+   "binary": "grok",
+   "controls": [
+    {
+     "permissions": "",
+     "permissions_effective": "bypass",
+     "provider_flags": [
+      "--permission-mode",
+      "bypassPermissions"
+     ],
+     "reason": "",
+     "sandbox": "",
+     "sandbox_effective": "provider-default",
+     "supported": true
+    },
+    {
+     "permissions": "",
+     "permissions_effective": "bypass",
+     "provider_flags": [
+      "--permission-mode",
+      "bypassPermissions",
+      "--sandbox",
+      "workspace"
+     ],
+     "reason": "",
+     "sandbox": "true",
+     "sandbox_effective": "enabled",
+     "supported": true
+    },
+    {
+     "permissions": "",
+     "permissions_effective": "bypass",
+     "provider_flags": [
+      "--permission-mode",
+      "bypassPermissions",
+      "--sandbox",
+      "off"
+     ],
+     "reason": "",
+     "sandbox": "false",
+     "sandbox_effective": "disabled",
+     "supported": true
+    },
+    {
+     "permissions": "bypass",
+     "permissions_effective": "bypass",
+     "provider_flags": [
+      "--permission-mode",
+      "bypassPermissions"
+     ],
+     "reason": "",
+     "sandbox": "",
+     "sandbox_effective": "provider-default",
+     "supported": true
+    },
+    {
+     "permissions": "bypass",
+     "permissions_effective": "bypass",
+     "provider_flags": [
+      "--permission-mode",
+      "bypassPermissions",
+      "--sandbox",
+      "workspace"
+     ],
+     "reason": "",
+     "sandbox": "true",
+     "sandbox_effective": "enabled",
+     "supported": true
+    },
+    {
+     "permissions": "bypass",
+     "permissions_effective": "bypass",
+     "provider_flags": [
+      "--permission-mode",
+      "bypassPermissions",
+      "--sandbox",
+      "off"
+     ],
+     "reason": "",
+     "sandbox": "false",
+     "sandbox_effective": "disabled",
+     "supported": true
+    },
+    {
+     "permissions": "auto",
+     "permissions_effective": "auto",
+     "provider_flags": [
+      "--permission-mode",
+      "auto"
+     ],
+     "reason": "",
+     "sandbox": "",
+     "sandbox_effective": "provider-default",
+     "supported": true
+    },
+    {
+     "permissions": "auto",
+     "permissions_effective": "auto",
+     "provider_flags": [
+      "--permission-mode",
+      "auto",
+      "--sandbox",
+      "workspace"
+     ],
+     "reason": "",
+     "sandbox": "true",
+     "sandbox_effective": "enabled",
+     "supported": true
+    },
+    {
+     "permissions": "auto",
+     "permissions_effective": "auto",
+     "provider_flags": [
+      "--permission-mode",
+      "auto",
+      "--sandbox",
+      "off"
+     ],
+     "reason": "",
+     "sandbox": "false",
+     "sandbox_effective": "disabled",
+     "supported": true
+    },
+    {
+     "permissions": "accept-edits",
+     "permissions_effective": "accept-edits",
+     "provider_flags": [
+      "--permission-mode",
+      "acceptEdits"
+     ],
+     "reason": "",
+     "sandbox": "",
+     "sandbox_effective": "provider-default",
+     "supported": true
+    },
+    {
+     "permissions": "accept-edits",
+     "permissions_effective": "accept-edits",
+     "provider_flags": [
+      "--permission-mode",
+      "acceptEdits",
+      "--sandbox",
+      "workspace"
+     ],
+     "reason": "",
+     "sandbox": "true",
+     "sandbox_effective": "enabled",
+     "supported": true
+    },
+    {
+     "permissions": "accept-edits",
+     "permissions_effective": "accept-edits",
+     "provider_flags": [
+      "--permission-mode",
+      "acceptEdits",
+      "--sandbox",
+      "off"
+     ],
+     "reason": "",
+     "sandbox": "false",
+     "sandbox_effective": "disabled",
+     "supported": true
+    },
+    {
+     "permissions": "read-only",
+     "permissions_effective": "read-only",
+     "provider_flags": [
+      "--permission-mode",
+      "plan"
+     ],
+     "reason": "",
+     "sandbox": "",
+     "sandbox_effective": "provider-default",
+     "supported": true
+    },
+    {
+     "permissions": "read-only",
+     "permissions_effective": "read-only",
+     "provider_flags": [
+      "--permission-mode",
+      "plan",
+      "--sandbox",
+      "read-only"
+     ],
+     "reason": "",
+     "sandbox": "true",
+     "sandbox_effective": "enabled",
+     "supported": true
+    },
+    {
+     "permissions": "read-only",
+     "permissions_effective": "read-only",
+     "provider_flags": [
+      "--permission-mode",
+      "plan",
+      "--sandbox",
+      "off"
+     ],
+     "reason": "",
+     "sandbox": "false",
+     "sandbox_effective": "disabled",
+     "supported": true
+    }
+   ],
+   "executable": "",
+   "model_override": {
+    "flag": "--model",
+    "reason": "",
+    "supported": true
+   },
+   "permissions_default": "bypass",
+   "reason": "grok executable not found"
+  },
+  "junie": {
+   "available": true,
+   "binary": "junie",
+   "controls": [
+    {
+     "permissions": "",
+     "permissions_effective": "auto",
+     "provider_flags": [],
+     "reason": "",
+     "sandbox": "",
+     "sandbox_effective": "provider-default",
+     "supported": true
+    },
+    {
+     "permissions": "",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "junie: junie 26.8.31 exposes no sandbox control, so --sandbox true cannot be enforced. Omit --sandbox.",
+     "sandbox": "true",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "junie: junie 26.8.31 exposes no sandbox control, so --sandbox false cannot be enforced. Omit --sandbox.",
+     "sandbox": "false",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "bypass",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "junie: cannot enforce --permissions bypass (junie bypass is interactive-only); supported: auto",
+     "sandbox": "",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "bypass",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "junie: cannot enforce --permissions bypass (junie bypass is interactive-only); supported: auto",
+     "sandbox": "true",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "bypass",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "junie: cannot enforce --permissions bypass (junie bypass is interactive-only); supported: auto",
+     "sandbox": "false",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "auto",
+     "permissions_effective": "auto",
+     "provider_flags": [],
+     "reason": "",
+     "sandbox": "",
+     "sandbox_effective": "provider-default",
+     "supported": true
+    },
+    {
+     "permissions": "auto",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "junie: junie 26.8.31 exposes no sandbox control, so --sandbox true cannot be enforced. Omit --sandbox.",
+     "sandbox": "true",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "auto",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "junie: junie 26.8.31 exposes no sandbox control, so --sandbox false cannot be enforced. Omit --sandbox.",
+     "sandbox": "false",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "accept-edits",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "junie: cannot enforce --permissions accept-edits (junie exposes no native accept-edits policy); supported: auto",
+     "sandbox": "",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "accept-edits",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "junie: cannot enforce --permissions accept-edits (junie exposes no native accept-edits policy); supported: auto",
+     "sandbox": "true",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "accept-edits",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "junie: cannot enforce --permissions accept-edits (junie exposes no native accept-edits policy); supported: auto",
+     "sandbox": "false",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "read-only",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "junie: cannot enforce --permissions read-only (junie read-only is interactive-only); supported: auto",
+     "sandbox": "",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "read-only",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "junie: cannot enforce --permissions read-only (junie read-only is interactive-only); supported: auto",
+     "sandbox": "true",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "read-only",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "junie: cannot enforce --permissions read-only (junie read-only is interactive-only); supported: auto",
+     "sandbox": "false",
+     "sandbox_effective": "",
+     "supported": false
+    }
+   ],
+   "executable": "/opt/agents/bin/junie",
+   "model_override": {
+    "flag": "",
+    "reason": "unsupported_agent_model_flag",
+    "supported": false
+   },
+   "permissions_default": "auto",
+   "reason": ""
+  }
+ },
+ "research": {
+  "default_agents": [
+   "claude",
+   "codex",
+   "agy"
+  ],
+  "selection": {
+   "agents": [
+    "claude",
+    "codex",
+    "agy"
+   ],
+   "lane_models": {},
+   "source": "builtin-default",
+   "synthesizer": {
+    "agent": "",
+    "fallback": "last_surviving_lane",
+    "model": "",
+    "source": ""
+   },
+   "unsupported_configured": []
+  },
+  "supported_agents": [
+   "claude",
+   "codex",
+   "agy",
+   "junie",
+   "grok",
+   "cursor"
+  ]
+ },
+ "schema": "vibecrafted.workflow_capabilities.v1",
+ "schema_version": 1,
+ "workflows": [
+  {
+   "aliases": [],
+   "cadence": "meta",
+   "can_modify_code": false,
+   "default_agent": "claude",
+   "execution_target": "single_agent",
+   "input_policy": "required",
+   "lifecycle_order": 5,
+   "name": "partner",
+   "requested_agent_policy": "honored",
+   "runtime_kind": "direct_agent",
+   "supports_count": false,
+   "supports_depth": false,
+   "terminal_layout": "",
+   "tooling": [
+    "vc-init",
+    "vc-partner",
+    "vc-scaffold"
+   ]
+  },
+  {
+   "aliases": [],
+   "cadence": "read",
+   "can_modify_code": false,
+   "default_agent": "claude",
+   "execution_target": "single_agent",
+   "input_policy": "required",
+   "lifecycle_order": 10,
+   "name": "scaffold",
+   "requested_agent_policy": "honored",
+   "runtime_kind": "direct_agent",
+   "supports_count": false,
+   "supports_depth": false,
+   "terminal_layout": "",
+   "tooling": [
+    "vc-init",
+    "vc-loctree",
+    "vc-research"
+   ]
+  },
+  {
+   "aliases": [],
+   "cadence": "read",
+   "can_modify_code": false,
+   "default_agent": "swarm",
+   "effective_agents": [
+    "claude",
+    "codex",
+    "agy"
+   ],
+   "execution_target": "swarm",
+   "input_policy": "required",
+   "lifecycle_order": 12,
+   "name": "research",
+   "positional_agent_semantics": {
+    "execution_agent": "swarm",
+    "multiple": "lanes_with_first_as_synthesizer",
+    "single": "synthesizer_override",
+    "unsupported_token": "launch_rejected"
+   },
+   "requested_agent_policy": "fail_closed",
+   "runtime_kind": "supervised_research",
+   "selection_source": "/Users/operator/.vibecrafted/worktrees/vetcoders/vibecrafted/2026_0909/VOC-launchers-20260909-075653/install.toml",
+   "supports_count": false,
+   "supports_depth": false,
+   "synthesizer": {
+    "agent": "",
+    "fallback": "last_surviving_lane",
+    "model": "",
+    "source": ""
+   },
+   "terminal_layout": "research",
+   "tooling": [
+    "vc-init",
+    "vc-research"
+   ],
+   "unsupported_configured": []
+  },
+  {
+   "aliases": [],
+   "cadence": "write",
+   "can_modify_code": true,
+   "default_agent": "claude",
+   "execution_target": "single_agent",
+   "input_policy": "required",
+   "lifecycle_order": 15,
+   "name": "ownership",
+   "requested_agent_policy": "honored",
+   "runtime_kind": "direct_agent",
+   "supports_count": false,
+   "supports_depth": false,
+   "terminal_layout": "",
+   "tooling": [
+    "vc-init",
+    "vc-ownership"
+   ]
+  },
+  {
+   "aliases": [],
+   "cadence": "write",
+   "can_modify_code": true,
+   "default_agent": "claude",
+   "execution_target": "single_agent",
+   "input_policy": "required",
+   "lifecycle_order": 16,
+   "name": "justdo",
+   "requested_agent_policy": "honored",
+   "runtime_kind": "direct_agent",
+   "supports_count": false,
+   "supports_depth": false,
+   "terminal_layout": "",
+   "tooling": [
+    "vc-init",
+    "vc-justdo",
+    "vc-ownership"
+   ]
+  },
+  {
+   "aliases": [],
+   "cadence": "write",
+   "can_modify_code": true,
+   "default_agent": "claude",
+   "execution_target": "single_agent",
+   "input_policy": "required",
+   "lifecycle_order": 17,
+   "name": "canary",
+   "requested_agent_policy": "honored",
+   "runtime_kind": "direct_agent",
+   "supports_count": false,
+   "supports_depth": false,
+   "terminal_layout": "",
+   "tooling": [
+    "vc-init",
+    "vc-loctree",
+    "vc-canary",
+    "vc-agents"
+   ]
+  },
+  {
+   "aliases": [],
+   "cadence": "write",
+   "can_modify_code": true,
+   "default_agent": "claude",
+   "execution_target": "single_agent",
+   "input_policy": "required",
+   "lifecycle_order": 20,
+   "name": "implement",
+   "requested_agent_policy": "honored",
+   "runtime_kind": "direct_agent",
+   "supports_count": false,
+   "supports_depth": false,
+   "terminal_layout": "",
+   "tooling": [
+    "vc-init",
+    "vc-operator",
+    "vc-agents"
+   ]
+  },
+  {
+   "aliases": [],
+   "cadence": "write",
+   "can_modify_code": true,
+   "default_agent": "claude",
+   "execution_target": "single_agent",
+   "input_policy": "required",
+   "lifecycle_order": 25,
+   "name": "delegate",
+   "requested_agent_policy": "honored",
+   "runtime_kind": "direct_agent",
+   "supports_count": false,
+   "supports_depth": false,
+   "terminal_layout": "",
+   "tooling": [
+    "vc-init",
+    "vc-delegate"
+   ]
+  },
+  {
+   "aliases": [],
+   "cadence": "read",
+   "can_modify_code": false,
+   "default_agent": "claude",
+   "execution_target": "single_agent",
+   "input_policy": "required",
+   "lifecycle_order": 30,
+   "name": "review",
+   "requested_agent_policy": "honored",
+   "runtime_kind": "direct_agent",
+   "supports_count": false,
+   "supports_depth": false,
+   "terminal_layout": "",
+   "tooling": [
+    "vc-init",
+    "vc-loctree",
+    "vc-review",
+    "vc-screenscribe",
+    "vc-prview"
+   ]
+  },
+  {
+   "aliases": [],
+   "cadence": "write",
+   "can_modify_code": true,
+   "default_agent": "claude",
+   "execution_target": "single_agent",
+   "input_policy": "required",
+   "lifecycle_order": 40,
+   "name": "workflow",
+   "requested_agent_policy": "honored",
+   "runtime_kind": "direct_agent",
+   "supports_count": false,
+   "supports_depth": false,
+   "terminal_layout": "",
+   "tooling": [
+    "vc-init",
+    "vc-research",
+    "vc-justdo"
+   ]
+  },
+  {
+   "aliases": [],
+   "cadence": "read",
+   "can_modify_code": false,
+   "default_agent": "claude",
+   "execution_target": "single_agent",
+   "input_policy": "required",
+   "lifecycle_order": 45,
+   "name": "intents",
+   "requested_agent_policy": "honored",
+   "runtime_kind": "direct_agent",
+   "supports_count": false,
+   "supports_depth": false,
+   "terminal_layout": "",
+   "tooling": [
+    "vc-init",
+    "vc-intents",
+    "vc-loctree"
+   ]
+  },
+  {
+   "aliases": [],
+   "cadence": "read",
+   "can_modify_code": false,
+   "default_agent": "claude",
+   "execution_target": "single_agent",
+   "input_policy": "required",
+   "lifecycle_order": 50,
+   "name": "followup",
+   "requested_agent_policy": "honored",
+   "runtime_kind": "direct_agent",
+   "supports_count": false,
+   "supports_depth": false,
+   "terminal_layout": "",
+   "tooling": [
+    "vc-init",
+    "vc-intents",
+    "vc-loctree"
+   ]
+  },
+  {
+   "aliases": [],
+   "cadence": "read",
+   "can_modify_code": false,
+   "default_agent": "claude",
+   "execution_target": "single_agent",
+   "input_policy": "optional_with_default",
+   "lifecycle_order": 55,
+   "name": "prune",
+   "requested_agent_policy": "honored",
+   "runtime_kind": "direct_agent",
+   "supports_count": false,
+   "supports_depth": false,
+   "terminal_layout": "",
+   "tooling": [
+    "vc-init",
+    "vc-loctree"
+   ]
+  },
+  {
+   "aliases": [],
+   "cadence": "write",
+   "can_modify_code": true,
+   "default_agent": "claude",
+   "execution_target": "single_agent",
+   "input_policy": "optional",
+   "lifecycle_order": 60,
+   "name": "marbles",
+   "requested_agent_policy": "honored",
+   "runtime_kind": "supervised_marbles",
+   "supports_count": true,
+   "supports_depth": true,
+   "swarm_agent_fallback": "codex",
+   "terminal_layout": "",
+   "tooling": [
+    "vc-init",
+    "vc-marbles"
+   ]
+  },
+  {
+   "aliases": [],
+   "cadence": "read",
+   "can_modify_code": false,
+   "default_agent": "claude",
+   "execution_target": "single_agent",
+   "input_policy": "required",
+   "lifecycle_order": 70,
+   "name": "audit",
+   "requested_agent_policy": "honored",
+   "runtime_kind": "direct_agent",
+   "supports_count": false,
+   "supports_depth": false,
+   "terminal_layout": "",
+   "tooling": [
+    "vc-init",
+    "vc-loctree",
+    "vc-aicx",
+    "vc-research"
+   ]
+  },
+  {
+   "aliases": [],
+   "cadence": "read",
+   "can_modify_code": false,
+   "default_agent": "claude",
+   "execution_target": "single_agent",
+   "input_policy": "required",
+   "lifecycle_order": 75,
+   "name": "trust",
+   "requested_agent_policy": "honored",
+   "runtime_kind": "direct_agent",
+   "supports_count": false,
+   "supports_depth": false,
+   "terminal_layout": "",
+   "tooling": [
+    "vc-init",
+    "vc-loctree",
+    "vc-aicx",
+    "vc-trust"
+   ]
+  },
+  {
+   "aliases": [],
+   "cadence": "read",
+   "can_modify_code": false,
+   "default_agent": "claude",
+   "execution_target": "single_agent",
+   "input_policy": "required",
+   "lifecycle_order": 76,
+   "name": "guard",
+   "requested_agent_policy": "honored",
+   "runtime_kind": "direct_agent",
+   "supports_count": false,
+   "supports_depth": false,
+   "terminal_layout": "",
+   "tooling": [
+    "vc-init",
+    "vc-trust",
+    "vc-guard"
+   ]
+  },
+  {
+   "aliases": [],
+   "cadence": "write",
+   "can_modify_code": true,
+   "default_agent": "claude",
+   "execution_target": "single_agent",
+   "input_policy": "optional",
+   "lifecycle_order": 80,
+   "name": "polarize",
+   "requested_agent_policy": "honored",
+   "runtime_kind": "supervised_marbles",
+   "supports_count": true,
+   "supports_depth": true,
+   "swarm_agent_fallback": "codex",
+   "terminal_layout": "",
+   "tooling": [
+    "vc-init",
+    "vc-polarize"
+   ]
+  },
+  {
+   "aliases": [],
+   "cadence": "read",
+   "can_modify_code": false,
+   "default_agent": "claude",
+   "execution_target": "single_agent",
+   "input_policy": "required",
+   "lifecycle_order": 90,
+   "name": "dou",
+   "requested_agent_policy": "honored",
+   "runtime_kind": "direct_agent",
+   "supports_count": false,
+   "supports_depth": false,
+   "terminal_layout": "",
+   "tooling": [
+    "vc-init",
+    "vc-intents",
+    "vc-loctree"
+   ]
+  },
+  {
+   "aliases": [],
+   "cadence": "write",
+   "can_modify_code": true,
+   "default_agent": "claude",
+   "execution_target": "single_agent",
+   "input_policy": "required",
+   "lifecycle_order": 100,
+   "name": "hydrate",
+   "requested_agent_policy": "honored",
+   "runtime_kind": "direct_agent",
+   "supports_count": false,
+   "supports_depth": false,
+   "terminal_layout": "",
+   "tooling": [
+    "vc-init",
+    "vc-operator",
+    "vc-decorate"
+   ]
+  },
+  {
+   "aliases": [],
+   "cadence": "write",
+   "can_modify_code": true,
+   "default_agent": "claude",
+   "execution_target": "single_agent",
+   "input_policy": "required",
+   "lifecycle_order": 102,
+   "name": "decorate",
+   "requested_agent_policy": "honored",
+   "runtime_kind": "direct_agent",
+   "supports_count": false,
+   "supports_depth": false,
+   "terminal_layout": "",
+   "tooling": [
+    "vc-init",
+    "vc-decorate"
+   ]
+  },
+  {
+   "aliases": [],
+   "cadence": "write",
+   "can_modify_code": true,
+   "default_agent": "claude",
+   "execution_target": "single_agent",
+   "input_policy": "required",
+   "lifecycle_order": 110,
+   "name": "release",
+   "requested_agent_policy": "honored",
+   "runtime_kind": "direct_agent",
+   "supports_count": false,
+   "supports_depth": false,
+   "terminal_layout": "",
+   "tooling": [
+    "vc-init",
+    "vc-release"
+   ]
+  }
+ ]
+}

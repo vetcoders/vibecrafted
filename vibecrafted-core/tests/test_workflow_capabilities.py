@@ -244,6 +244,7 @@ def _launch_research(
     # probe would otherwise drive the process-global subprocess.run into the
     # faked Popen below.
     monkeypatch.setattr(workflow, "shutil", SimpleNamespace(which=lambda _name: None))
+    monkeypatch.setattr(workflow, "git_toplevel", lambda _root: "")
     _fake_popen(monkeypatch, [])
     brief = tmp_path / "brief.md"
     brief.write_text("map the target\n", encoding="utf-8")
@@ -302,3 +303,129 @@ def test_receipt_parity_research_multi_positional(
     assert accepted["research_agents"] == ["claude", "codex"]
     assert accepted["research_synthesizer"] == accepted["research_agents"][0]
     assert accepted["research_agent_source"] == "positional-override"
+
+
+# --- Launcher catalog for GUI/TUI clients (VOC reads exactly this) -----------
+#
+# These rows are the single owner of "which agents exist, which of them can be
+# pinned to a model, and which permission/sandbox and environment combinations
+# the launcher will accept". A client that keeps its own copy drifts; a client
+# that reads these cannot offer a combination the launcher already refuses.
+
+
+def test_provider_rows_cover_the_declarable_agent_universe(
+    isolated_config: Path,
+) -> None:
+    payload = caps.workflow_capabilities_payload()
+
+    # `swarm` is a research execution target, not a declarable launcher agent.
+    assert sorted(payload["providers"]) == sorted(workflow.SUPPORTED_AGENTS - {"swarm"})
+    assert "gemini" not in payload["providers"]
+    for name, provider in payload["providers"].items():
+        assert set(provider) == {
+            "binary",
+            "executable",
+            "available",
+            "reason",
+            "model_override",
+            "permissions_default",
+            "controls",
+        }, name
+        # An unavailable provider must say why; silence would read as a bug.
+        if not provider["available"]:
+            assert provider["reason"], name
+
+
+def test_model_pin_support_matches_the_launcher_override_table(
+    isolated_config: Path,
+) -> None:
+    from vibecrafted_core.model_overrides import MODEL_OVERRIDE_FLAGS
+
+    payload = caps.workflow_capabilities_payload()
+
+    for name, provider in payload["providers"].items():
+        override = provider["model_override"]
+        expected = name in MODEL_OVERRIDE_FLAGS
+        assert override["supported"] is expected, name
+        if expected:
+            assert override["flag"] == MODEL_OVERRIDE_FLAGS[name]
+        else:
+            # A client must be able to explain the refusal, not just grey a row.
+            assert override["reason"], name
+            assert not override["flag"]
+
+
+def test_every_permission_sandbox_cell_is_resolved_and_refusals_carry_reasons(
+    isolated_config: Path,
+) -> None:
+    payload = caps.workflow_capabilities_payload()
+
+    words = ("", "true", "false")
+    expected_cells = {
+        (permission, sandbox)
+        for permission in ("",) + tuple(caps.PERMISSION_POLICIES)
+        for sandbox in words
+    }
+    for name, provider in payload["providers"].items():
+        cells = {
+            (cell["permissions"], cell["sandbox"]) for cell in provider["controls"]
+        }
+        assert cells == expected_cells, name
+        for cell in provider["controls"]:
+            if cell["supported"]:
+                # A supported cell states what the provider will actually enforce.
+                assert cell["permissions_effective"], (name, cell)
+                assert cell["sandbox_effective"], (name, cell)
+            else:
+                # A refused cell is refused out loud, before any worker exists.
+                assert cell["reason"], (name, cell)
+
+
+def test_environment_rows_cover_every_runtime_policy_with_launcher_flags(
+    isolated_config: Path,
+) -> None:
+    from vibecrafted_core.spawn import RUNTIME_POLICIES
+
+    payload = caps.workflow_capabilities_payload()
+
+    assert sorted(payload["environments"]) == sorted(RUNTIME_POLICIES)
+    for policy, environment in payload["environments"].items():
+        assert environment["label"], policy
+        if not environment["available"]:
+            assert environment["reason"], policy
+            assert not environment["skill_launcher_supported"], policy
+        if not environment["skill_launcher_supported"]:
+            assert environment["skill_launcher_flags"] == [], policy
+
+    # The two environments a skill launcher can actually express today.
+    assert payload["environments"]["local-native"]["skill_launcher_flags"] == []
+    assert payload["environments"]["local-worktrees"]["skill_launcher_flags"] == [
+        "--worktree",
+        "true",
+    ]
+    # VM environments have no launcher entrypoint yet and must say so rather
+    # than silently falling back to the local tree.
+    assert payload["environments"]["local-vm"]["available"] is False
+    assert payload["environments"]["cloud-soon"]["available"] is False
+
+
+def test_catalog_payload_is_json_serialisable_for_gui_clients(
+    isolated_config: Path,
+) -> None:
+    payload = caps.workflow_capabilities_payload()
+
+    reparsed = json.loads(json.dumps(payload))
+    assert reparsed["schema"] == "vibecrafted.workflow_capabilities.v1"
+    assert reparsed["providers"] == payload["providers"]
+    assert reparsed["environments"] == payload["environments"]
+
+
+def test_human_rendering_lists_providers_and_environments(
+    isolated_config: Path,
+) -> None:
+    lines = caps.render_capabilities_lines(caps.workflow_capabilities_payload())
+    text = "\n".join(lines)
+
+    assert "claude" in text
+    assert "Fleet Worktrees" in text
+    assert "gemini" not in text

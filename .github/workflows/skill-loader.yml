@@ -65,15 +65,21 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
 
-      - name: Install vibecrafted (non-interactive)
-        # The smoke's subject is the skill loader, not server supervision.
-        # CI runners share no operator launchd/systemd domain, and service
-        # activation cannot prove a healthy managed pair there (macOS leg
-        # died on exactly that). Same isolation the portable suite uses.
-        run: make install INSTALL_SERVER_SERVICE_POLICY=isolated
+      - name: Install the repo-owned skill and shell surfaces
+        # This workflow owns the skill-loader contract. Exercise its granular
+        # source installer directly; the full product Runtime Pack is built and
+        # installed by the platform install workflows.
+        run: |
+          set -euo pipefail
+          bash vibecrafted-core/vibecrafted_core/runtime/scripts/install.sh \
+            --source "$GITHUB_WORKSPACE" \
+            --tool codex --tool claude --tool agy \
+            --skills-only --with-shell --write-shell-rc
 
       - name: Run skill-loader smoke
-        run: make test-skills
+        # Full product health is owned by Install (Linux Matrix) and the macOS
+        # release gates. This workflow verifies the granular skill surfaces.
+        run: bash tests/skill_loader_smoke.sh --doctor-preverified
 
       - name: Verify negative fixture is caught
         run: |

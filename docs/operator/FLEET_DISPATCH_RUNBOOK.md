@@ -1,105 +1,134 @@
-# Fleet Dispatch Runbook — for an operator `claude` in ultra mode
+# Fleet Dispatch Runbook
 
-> How to dispatch the Vetcoders fleet effectively. Hand this to any operator agent.
+This is the Founder-facing path for one typed Fleet Worktree dispatch. It is
+deliberately narrow: one explicit project root, three independent write cuts,
+two providers, and Root Agent-Operator as the only integrator.
 
-## 0. The ultra-mode trap (read first)
+The commands below were checked against the source parser and the installed
+`vibecrafted 4.3.0+g76c6c25f` help surface on 2026-09-08. Source and installed
+generations are distinct evidence: a source test does not install a new
+launcher, and an installed help page does not prove the source checkout.
 
-Ultra / ultracode mode nudges you toward the native **`Workflow` tool** (the `vc-delegate`
-native-subagent pattern). For **fleet** work that is the WRONG reflex. The doctrine: dispatch the
-REAL external fleet via **`vc-agents`** (`vibecrafted <workflow> <agent>`), not the native Workflow.
-Native Workflow / `vc-delegate` is for _in-process bounded_ cuts only. When the operator says
-"fleet", "dispatch", or `/vc-agents` — launch external agents through the framework launcher.
+## 1. Enter the project once and declare the typed fleet
 
-If you catch yourself reaching for `Workflow({...})` to run codex/claude/gemini: STOP. Use the launcher.
-
-> **The harness will say it out loud.** In ultracode the runtime injects _"Ultracode is on — use the
-> Workflow tool on every substantive task."_ That directive governs **in-process** work and does NOT
-> override this doctrine for **fleet** dispatch. The native `Workflow` tool spawns in-thread subagents
-> only — it physically cannot launch a real external agent (codex/claude/gemini) as its own process,
-> with its own context, branch, commits, and report artifacts. Fleet = `vibecrafted` launcher (Bash,
-> degrades to headless in-repo); native `Workflow` = bounded in-process analysis/cuts. Operator
-> doctrine > harness default.
-
-## 1. Always start with `/vc-scaffold` (the commandment)
-
-**No fleet dispatch without a scaffold.** `/vc-scaffold` is the WRITE entry of the read/write cadence:
-it produces a numbered **master plan** (wave atlas + dependency graph + a `state` column) and a
-**12-section brief for EVERY cut** (hard-gate: a cut without a brief does not exist).
-
-- **Reality-check FIRST** (Orient gate): dogfood loct — `loct context --scope 'path:<dir>' --markdown`
-  (slim; `--full` is too big for routine), `loct find --literal`, `loct slice/impact`. Map what
-  ACTUALLY landed before you plan or claim "done". Overclaiming "all waves done" is a fireable sin.
-
-## 2. Numbering (sequential LP — never reuse)
-
-- **Master / Atlas** = `#N` (e.g. `#12`, `#24`), strictly consecutive.
-- **Cuts / waves** = `<N>-<Wave><slot>` (e.g. `12-A1`, `24.B-1`) or the operator's `<N><wave>-<slot>`
-  shorthand (e.g. `12d-e`). The wave letter groups parallelizable cuts; the slot is the cut index.
-- Every cut row carries: a **Vector** (stabilize/implement/recon/e2e), the four-term delta
-  `intent | baseline | claim | delivery`, a `state` marker `[ ] [~] [?] [!] [x]`, and a
-  **delivery-verifier**. Only the verifier flips `[~]→[x]`; a claim never reaches `[x]` alone.
-
-## 3. Dispatch (the proven shape)
+Choose the project root once; do not rely on the terminal's inherited cwd.
 
 ```bash
-vibecrafted <workflow> <agent> --file briefs/<N>-<cut>_<slug>.md   # e.g. vibecrafted implement codex --file briefs/24-A1_mcp.md
-vibecrafted <workflow> <agent> --prompt '<inline intent>'
+PROJECT_ROOT="$(git -C /absolute/path/to/project rev-parse --show-toplevel)"
+PLAN="$PROJECT_ROOT/fleet-acceptance.dispatch.toml"
 ```
 
-- `agent` ∈ {codex, claude, agy, junie, grok}. Pick via the **why-matrix** (gemini deprecated; agy for Google-family)
-  **codex = precision/surgery** (contract-gated refactors, exact edits), **claude = forensics/audit**
-  (deep unknowns, bug hunts), **agy = Google-family (antigravity rewire; gemini deprecated)** (architecture leaps, simplification).
-- Headless (non-TTY agent bash) **degrades to in-repo dispatch automatically**. A launch receipt
-  prints `run_id` + report/transcript/meta paths — capture them.
-- **Disjoint file-domains → safe parallel dispatch** (Living Tree). Overlapping domains → sequence them.
+Create `"$PLAN"` from
+[`examples/dispatch/ship-acceptance-fleet.dispatch.toml`](../../examples/dispatch/ship-acceptance-fleet.dispatch.toml),
+replacing only its placeholder `meta.repo` with the exact value of
+`$PROJECT_ROOT` and replacing the three cut prompts/verifiers with the three
+real, disjoint acceptance cuts. Keep this topology:
 
-## 4. Commit doctrine (per dispatched agent — encode it in the brief)
+| Cut    | Provider | Role                  |
+| ------ | -------- | --------------------- |
+| `W0-a` | `codex`  | independent owned cut |
+| `W0-b` | `claude` | independent owned cut |
+| `W0-c` | `codex`  | independent owned cut |
 
-- **ONE commit per round** (marbles: one round = one commit), local, on the current branch,
-  well-formed per the commit-msg hook. **Never leave delivered work uncommitted.**
-- **Multi-commit per dispatch** is expected when a mission spans rounds; a `vc-workflow` run produces
-  **up to 3 commits** (Implement / Marbles / Polarize each commit their round).
-- **NO push / merge / PR / deploy** — that is the operator's button only. No `--no-verify`, ever.
+The plan must retain `schema = "vibecrafted.dispatch.v1"`, one declared
+`Acceptance` phase, `concurrency = 3`, `allow_concurrency = true`, and
+`require_commit = true`. Do not add an `integrator = true` cut to this fleet:
+the three workers stay isolated and Root integrates separately.
 
-## 5. Observe (metadata-first, not pane-first)
+Validate, render, then launch the same declared plan:
 
-- Ordinary fleet workers are detached and headless by default. vc-frame is an
-  optional projection of state and transcripts, never the process owner. A true
-  PTY is reserved for the User Session, a bare resume, or an explicit
-  `--runtime terminal` for a proven TTY-required path.
-- After dispatch, arm `vibecrafted await <agent> --run-id <id>` immediately,
-  supervisor-side. Control-plane JSON, report files, transcripts, viewer panes, and
-  scheduled wakeups are diagnostic only, not wake signals. Hedging await with
-  ad-hoc pollers/watchers is a Class 3 violation; fix `control_plane.await_run`,
-  do not normalize the hedge. See `docs/runtime/AGENT_OPS.md`.
-- Liveness is always 3-signal: await verdict, terminal-state run meta, worker pid
-  dead, plus promised report presence. Two agreeing signals are enough to act;
-  three are required to declare done. Any disagreement means treat as live and
-  re-arm await. Known skew: rc=0-on-live and meta stuck `active`/`stalled` after
-  real completion.
-- Durable artifacts (`*.meta.json`, `*.transcript.log`, report paths) are
-  diagnostic drilldowns after await is armed. The fleet stays operable from
-  artifacts even with no panes open, but artifact polling does not replace the
-  canonical await.
-- **Verify each cut** against its brief acceptance + run its gates (tests / clippy -D warnings /
-  `make check`). Confirm the agent **committed its round**; if it left work uncommitted, flag the
-  doctrine regression. **STOP is recovery, not surrender** — on stall/fail, issue a focused
-  recovery-dispatch; do not 502-and-die.
+```bash
+vibecrafted dispatch "$PLAN" --doctor --json
+vibecrafted dispatch "$PLAN" --dry-run --json
+vibecrafted dispatch "$PLAN"
+```
 
-## 6. Dogfood the tools (non-negotiable — it's also the product)
+Expected evidence before launch: doctor returns `ok: true`; dry-run renders
+three prompts. On launch record the printed dispatch `run_id`, tracker path,
+and journal path. The dispatcher creates one branch and worktree per
+non-integrator cut under its canonical worktree plane, and one isolated target
+directory per worktree. Workers must not select another checkout, branch, or
+target directory.
 
-- **Loctree first** for structure + repo-literal: `loct context`, `loct find --literal`,
-  `loct occurrences`, `loct body`, `loct slice`/`impact`. rg/grep = fallback / local magnifier only.
-- **AICX** for intent + session memory: `aicx intents -p <project>`, `aicx search`.
-- If loct is wrong/stale/awkward/misses a surface → append (never overwrite) a dated line to
-  `~/.vibecrafted/loctree/loctree-fail.md`.
+## 2. Observe from the server, not from a pane
 
-## 7. Tend the loop
+Use the dispatch-provided tracker and journal as live fleet evidence. The
+dispatcher is intentionally quiet on stdout after admission until settlement.
+Use the general server board for provider-run observations:
 
-After dispatch: **observe → verify → next wave**. Do NOT drift onto side-quests and abandon the
-loop. Report honestly: `state`, SHAs, what is `[x]` vs `[?]` — nothing faked. Stop at the operator's
-button.
+```bash
+vibecrafted status --all --json
+vibecrafted await codex --run-id <owned-provider-run-id>
+vibecrafted await claude --run-id <owned-provider-run-id>
+vibecrafted observe codex --run-id <owned-provider-run-id>
+```
 
----
+`await` is qualified by provider run identity, not by a PID. A completed
+worker needs all of: its report, its commit, its verifier receipt, and its
+dispatch receipt state. The receipt ledger is the authority for cut state and
+worktree/branch/baseline/tip identity; do not hand-edit `state.json`, a
+tracker, or a receipt.
 
-_𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. — Loctree gives sight · AICX gives insight · Vibecrafted gives hands._
+`vibecrafted start` may open or re-open the terminal/App projection:
+
+```bash
+vibecrafted start
+```
+
+Closing the terminal or App projection does not grant permission to relaunch
+the fleet. Re-open it with `vibecrafted start`, then query `status` and the
+same tracker. The server/control plane owns the run; the UI is an attachment.
+
+## 3. One owned failure: stop and retry only that cut
+
+Suppose only `W0-b` fails and its receipt identifies an owned lifecycle run
+`<life-ship-run-id>`. First confirm the failure by its provider/run identity
+and report, not a similarly named PID. The lifecycle control verb is nested
+under `ship`:
+
+```bash
+vibecrafted ship interrupt <life-ship-run-id> --json
+```
+
+Then resume the declared dispatch, never a sibling by hand:
+
+```bash
+vibecrafted dispatch "$PLAN" --resume <dispatch-run-id>
+```
+
+The dispatcher consumes its receipt ledger and Git ancestry: it awaits a
+still-live cut rather than duplicating it, and retries from the first
+non-verified cut. Preserve the original failed report, interruption evidence,
+and retry receipt. Do not invoke `vibecrafted resume` with a dispatch id:
+that command resumes a provider/control-plane agent run, whereas Fleet retry
+is `dispatch "$PLAN" --resume <dispatch-run-id>`.
+
+Important public-surface boundary: `vibecrafted interrupt` is not a command in
+the installed command deck. Use the proven `vibecrafted ship interrupt …`
+shape for a lifecycle run. If the failing fleet cut has no lifecycle run that
+accepts this control, the public CLI has no documented per-cut interrupt
+command; stop there, preserve receipts, and report the concrete gap rather
+than editing state or signalling an unrelated process.
+
+## 4. Close the fleet; Root alone integrates
+
+For each cut, record the dispatcher-created worktree root, branch, baseline
+SHA, terminal tip SHA, report path, commit SHA, verifier output, and receipt
+state. `verified` means the supervisor verified that cut; it is not proof that
+its branch reached the project root.
+
+Root Agent-Operator manually reviews all three reports and their independent
+verifiers, checks exact ancestry or patch equivalence into the destination
+tree, and only then performs the separate integration decision. Workers do not
+merge, push, deploy, clean worktrees, or claim integration. A clean worktree,
+an agent success message, or a copied report is not an integration receipt.
+
+After settlement, cleanup is explicit and only removes settled worktree
+payloads; it retains branches and durable evidence:
+
+```bash
+vibecrafted dispatch "$PLAN" --cleanup-settled <dispatch-run-id>
+```
+
+Run this only after Root has recorded the integration disposition. It never
+substitutes for Root's review.

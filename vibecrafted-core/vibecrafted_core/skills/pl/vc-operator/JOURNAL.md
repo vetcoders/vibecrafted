@@ -1,40 +1,61 @@
 # Dziennik `vc-operator`
 
-Dziennik operatora to dziennik misji tylko do dopisywania (append-only) dla orkiestracji.
+Dziennik Operatora to stały, repozytoryjny zapis decyzji append-only dla orkiestracji.
 
-Zapisuje, dlaczego fale zostały odpalone, spauzowane, odzyskane, eskalowane lub
-zatrzymane. Uzupełnia tracker fal.
+Zapisuje materialne działania, decyzje, evidence, ryzyka, odzyskiwania,
+integracje i wymagane luki akceptacji. Uzupełnia datowane evidence runów bez
+jego dublowania.
 
 ## Ścieżka
 
 ```text
-$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/operator/journal.md
+<repo-root>/.vibecrafted/JOURNAL.md
 ```
+
+To jeden kanoniczny dziennik na repozytorium. Jest celowo śledzony przez Git.
+Pozostałe pliki pod repozytoryjnym `.vibecrafted/` pozostają ignorowanym stanem
+runtime'u.
 
 Artefakt powiązany:
 
 ```text
-$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/operator/tracker.md
+$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/<run>/tracker.md
 ```
 
 ## Dziennik vs tracker
 
-| Artefakt     | Cel                                                                             |
-| ------------ | ------------------------------------------------------------------------------- |
-| `tracker.md` | bieżący status fal, checkboxy, run ID, gałęzie, SHA, bramki                     |
-| `journal.md` | decyzje, przesunięcia ról, zacięcia, logika odzyskiwania, uzasadnienie zamknięć |
+| Artefakt                   | Cel                                                             |
+| -------------------------- | --------------------------------------------------------------- |
+| datowany tracker/raport    | stan runu, run ID, gałęzie, SHA, bramki, transkrypty i metadane |
+| repozytoryjny `JOURNAL.md` | materialne decyzje Operatora i historia misji repozytorium      |
 
 Tracker odpowiada na pytanie „co wylądowało?".
 Dziennik odpowiada na pytanie „dlaczego operator zrobił to dalej?".
 
 ## Reguły
 
-- Tylko dopisywanie (append-only).
-- Pierwszy wpis deklaruje postawę operatora i plan.
-- Każde odpalenie, await, powiadomienie, zacięcie, odzyskanie, eskalacja, zamknięcie
-  i punkt stopu dostaje wpis.
-- Każda mutacja planu i incydent na guardrailu bezpieczeństwa dostaje wpis.
-- Korekty zapisuje się jako nowe wpisy.
+- Tylko dopisywanie; korekty są nowymi wpisami.
+- Tylko aktywny Operator pisze do tego dziennika.
+- Zapisuj materialne dispatche, decyzje, evidence, ryzyka, odzyskiwania,
+  integracje, guardraile bezpieczeństwa i wymagane luki akceptacji.
+- Zapisuj każde materialne odchylenie od bieżącego ITP lub TD: dodane,
+  pominięte lub przestawione cięcie; zmianę substratu; kształt odzyskiwania;
+  cherry-pick lub integrację; oraz powód.
+- Uzasadnione cięcie odzyskiwania/poprawki może wyjść poza bieżący ITP lub TD,
+  gdy wspiera je kontekst repozytorium/runtime'u, a finalny cel pozostaje spójny.
+- Istniejące punkty stopu na granicach zaufania nadal obowiązują.
+- Datowane raporty artefaktów, trackery, transkrypty i metadane runu to
+  projekcje/evidence, nie alternatywne dzienniki.
+- Agenci downstream dopisują zredagowane findingi frameworka do
+  `~/.vibecrafted/vibecrafted/vibecrafted-fail.md`.
+- Zdispatchowany Worker pozostaje w briefie, przekazuje aktywnemu Operatorowi
+  falsyfikowalny finding, nie poprawia sąsiedniego scope'u i nie pisze do tego
+  dziennika.
+- Operator ocenia finding, zapisuje decyzję, tworzy bounded brief, aktywnie
+  dispatchuje poprawkę do dedykowanego worktree, weryfikuje ją i integruje.
+  Operator nie implementuje osobiście odkrytej poprawki.
+- Nie zapisuj rutynowych twierdzeń o pracy niewykonanej. Git, metadane runtime'u,
+  receipty i raporty już ich dowodzą.
 - Klamry zamykające workera nie pojawiają się we wpisach dziennika operatora.
 - Nie zwijaj osobnych stanów workerów w mglisty status fali.
 
@@ -46,7 +67,7 @@ Dziennik odpowiada na pytanie „dlaczego operator zrobił to dalej?".
 ```yaml
 operator_run:
   plan_name: ""
-  artifact_root: ""
+  repository: ""
   source_plan: ""
   init_evidence: ""
   stop_point: "operator button"
@@ -68,19 +89,6 @@ operator_run:
 - Run IDs:
 - Dependency state:
 - Await path:
-```
-
-## Wpis await
-
-```md
-## <timestamp> - await wave <n>
-
-- Completed:
-- Running:
-- Stalled:
-- Reports:
-- Gates:
-- Next:
 ```
 
 ## Wpis odzyskiwania
@@ -106,6 +114,22 @@ operator_run:
 - Final goal unchanged because:
 - Evidence:
 - Next:
+```
+
+Użyj tego kształtu dla dodanych, pominiętych lub przestawionych cięć, zmian
+substratu, kształtu odzyskiwania oraz decyzji cherry-pick/integracja.
+
+## Wpis odkrytej poprawki
+
+```md
+## <timestamp> - decyzja o odkrytej poprawce
+
+- Finding Workera:
+- Decyzja Operatora i powód:
+- Bounded brief:
+- Dispatch do dedykowanego worktree:
+- Evidence weryfikacji i integracji:
+- Ryzyko lub luka akceptacji:
 ```
 
 ## Wpis guardrailu bezpieczeństwa

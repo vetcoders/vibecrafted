@@ -22,6 +22,42 @@ from vibecrafted_mcp import server, synthesis
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.fixture(autouse=True)
+def _server_observation_contract_stub(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep MCP unit tests isolated while exercising the server-client seam."""
+
+    def observe(run_id: str) -> dict[str, Any]:
+        run = server._control_plane.lookup_run(run_id)
+        terminal = server._run_terminal(run)
+        return {
+            "schema": "vibecrafted.run-observation.v1",
+            "run_id": run_id,
+            "control_plane": str(server._control_plane.control_plane_home()),
+            "found": run is not None,
+            "terminal": terminal,
+            "worker_alive": False if terminal else None,
+            "process_truth": "terminal" if terminal else "unknown",
+            "evidence_disagreement": False,
+            "run": run,
+        }
+
+    def await_run(run_id: str, **kwargs: Any) -> dict[str, Any]:
+        observation = observe(run_id)
+        return {
+            **observation,
+            "schema": "vibecrafted.run-await-verdict.v1",
+            "outcome": "terminal" if observation["terminal"] else "idle_stall",
+            "reason": "terminal" if observation["terminal"] else "idle_stall",
+            "completed": observation["terminal"],
+            "timed_out": not observation["terminal"],
+            "idle_timeout_seconds": kwargs["idle_timeout_seconds"],
+            "hard_cap_seconds": kwargs["hard_cap_seconds"],
+        }
+
+    monkeypatch.setattr(server._server_observation, "observe_run", observe)
+    monkeypatch.setattr(server._server_observation, "await_run", await_run)
+
+
 def test_version_matches_repository_contract() -> None:
     expected = (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip()
     pyproject = tomllib.loads(
@@ -373,6 +409,31 @@ def test_observe_reports_missing_when_run_not_on_disk_yet(tmp_path: Path) -> Non
     assert payload["transcript"]["bytes"] == 0
 
 
+def test_mcp_observe_wait_argument_never_creates_a_private_poll_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / ".vibecrafted"
+    (home / "control_plane").mkdir(parents=True)
+    calls = 0
+    original = server._server_observation.observe_run
+
+    def counted(run_id: str) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        return original(run_id)
+
+    monkeypatch.setattr(server._server_observation, "observe_run", counted)
+
+    payload = server._observe_run(
+        "ghost-run",
+        home=str(home),
+        wait_seconds=30,
+    )
+
+    assert calls == 1
+    assert payload["wait_semantics"] == "one_shot; use vc_await_run for blocking"
+
+
 def test_vc_loct_capabilities_routes_to_core(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
 
@@ -398,6 +459,58 @@ def test_vc_loct_capabilities_routes_to_core(monkeypatch: pytest.MonkeyPatch) ->
     payload = _run(_call()).data
     assert payload["schema"] == "vibecrafted.capabilities.v1"
     assert captured["timeout"] == 2.0
+
+
+def test_vc_caretaker_projects_the_published_envelope(tmp_path: Path) -> None:
+    """MCP reads the same published bytes; it never builds a second truth."""
+    from vibecrafted_core import caretaker as _caretaker
+
+    home = tmp_path / ".vibecrafted"
+    plane = home / "control_plane"
+    for child in ("runs", "runtime_runs", "lifecycle_runs"):
+        (plane / child).mkdir(parents=True)
+    (plane / "events.jsonl").write_text("", encoding="utf-8")
+    envelope = _caretaker.build_caretaker_snapshot(
+        home=home, control_plane=plane, probe=False
+    )
+    _caretaker.publish_caretaker_snapshot(envelope, control_plane=plane)
+
+    from fastmcp import Client
+
+    mcp = server.build_server()
+
+    async def _call() -> Any:
+        async with Client(mcp) as client:
+            return await client.call_tool("vc_caretaker", {"home": str(home)})
+
+    payload = _run(_call()).data
+    assert payload["published"] is True
+    assert payload["stale"] is False
+    assert payload["snapshot"]["schema"] == "vibecrafted.caretaker.v1"
+    # The verdict crosses verbatim — deriving a second opinion here would be
+    # the truth competition the envelope exists to end.
+    assert payload["snapshot"]["verdict"] == envelope["verdict"]
+    assert payload["snapshot"]["actions"] == envelope["actions"]
+
+
+def test_vc_caretaker_reports_absence_honestly(tmp_path: Path) -> None:
+    """Never-published is a named condition, not an exception or a fake OK."""
+    home = tmp_path / ".vibecrafted"
+    (home / "control_plane").mkdir(parents=True)
+
+    from fastmcp import Client
+
+    mcp = server.build_server()
+
+    async def _call() -> Any:
+        async with Client(mcp) as client:
+            return await client.call_tool("vc_caretaker", {"home": str(home)})
+
+    payload = _run(_call()).data
+    assert payload["published"] is False
+    assert payload["stale"] is True
+    assert "not published" in payload["reason"]
+    assert payload["snapshot"] is None
 
 
 def test_vc_launch_delegates_to_core_workflow(

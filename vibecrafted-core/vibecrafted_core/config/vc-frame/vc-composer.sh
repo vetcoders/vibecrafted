@@ -3,7 +3,7 @@
 #
 # Contract (same door as compact-bar chip and Super+e / Cmd+E — Alt+e is free
 # for Polish `ę` on macOS):
-#   1. Draft in vim with: number, laststatus=0, nowrap (clean -- INSERT --)
+#   1. Draft in vim with: nonumber, laststatus=0, nowrap (clean -- INSERT --)
 #   2. Ctrl+p opens the Paste Stack picker and inserts at cursor
 #   3. `?` in normal mode toggles the built-in cheat sheet (q/Esc closes) —
 #      backward-search is deliberately traded away; `/` still searches
@@ -18,9 +18,7 @@
 # the number of -c / +cmd arguments (~10) and dies with:
 #   Too many "+command", "-c command" or "--cmd command" arguments
 #
-# Install/symlink to:
-#   ~/.config/vetcoders/frontier/vc-frame/vc-composer.sh
-#   or ~/.config/vc-frame/vc-composer.sh
+# Installed at: $XDG_CONFIG_HOME/vibecrafted/vc-frame/vc-composer.sh
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,8 +27,7 @@ resolve_tool() {
   local candidate
   for candidate in \
     "${SCRIPT_DIR}/${name}" \
-    "${HOME}/.config/vetcoders/frontier/vc-frame/${name}" \
-    "${HOME}/.config/vc-frame/${name}"
+    "${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-frame/${name}"
   do
     if [[ -x "$candidate" ]]; then
       printf '%s\n' "$candidate"
@@ -89,6 +86,7 @@ set nocompatible
 " No line numbers: the Composer is prose, not code, and a mouse selection
 " copies rendered cells — numbers in the gutter would ride into every paste.
 set nonumber
+set norelativenumber
 set laststatus=0
 set noshowcmd
 set noruler
@@ -138,6 +136,7 @@ function! VcComposerHelp() abort
 endfunction
 
 " One-line orientation hint in the free cmdline (laststatus=0 keeps it clear).
+autocmd VimEnter * set nonumber norelativenumber
 autocmd VimEnter * echo 'Composer: i = type · :wq = send · ? = help'
 VIMRC_HEAD
   printf '%s\n' "$wrap_line"

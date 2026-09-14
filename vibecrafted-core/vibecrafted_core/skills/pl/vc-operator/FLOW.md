@@ -30,7 +30,7 @@ flowchart TD
     P --> M
     N -->|green| Q[Verify reports, gates, branch, SHA]
     Q --> R[Scan landed commits for leaks/local-only material]
-    R --> T[Append tracker and journal]
+    R --> T[Update tracker and append material decisions to repo JOURNAL.md]
     T --> U[Synthesize wave close-out]
     U --> S
     S -->|yes| K
@@ -59,16 +59,20 @@ flowchart TD
 
 ## Dziennik operatora
 
-Tryb operatora utrzymuje dwa żywe artefakty:
+Tryb operatora utrzymuje dwie różne powierzchnie prawdy:
 
-- `tracker.md` - status fal, stan checkboxów, run ID, gałęzie, SHA, bramki.
-- `journal.md` - dziennik misji tylko do dopisywania dla decyzji, zacięć, odzyskań,
-  przesunięć framingu i punktów stopu.
+- datowane trackery/raporty pod `$VIBECRAFTED_HOME/artifacts/...` - stan runu,
+  run ID, gałęzie, SHA, bramki, transkrypty i metadane.
+- `<repo-root>/.vibecrafted/JOURNAL.md` - jeden stały, append-only, śledzony
+  przez Git Dziennik Operatora.
 
 Tracker pozwala operatorowi zaudytować, co wylądowało, bez czytania każdego raportu.
 Dziennik wyjaśnia, dlaczego fala poruszyła się tak, jak się poruszyła.
-Mutacje planu i incydenty na guardrailach bezpieczeństwa to wpisy do dziennika, a nie
-wyjaśnienia istniejące tylko w pamięci.
+Mutacje planu, decyzje o odkrytych poprawkach, integracje i incydenty na
+guardrailach bezpieczeństwa to wpisy do dziennika, a nie wyjaśnienia istniejące
+tylko w pamięci. Datowane artefakty to projekcje evidence, nigdy alternatywne
+kanoniczne dzienniki. Tylko Operator pisze do dziennika; Workerzy przekazują
+falsyfikowalne findingi i pozostają wewnątrz briefów.
 
 ## Trasy
 
@@ -90,8 +94,8 @@ wyjaśnienia istniejące tylko w pamięci.
 
 - Korzeń artefaktów: `$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/`
 - Stan trackera/wyniku: pliki specyficzne dla dispatchu pod korzeniem artefaktów runu
-- Dziennik/briefy/zamknięcia: artefakty zarządzane przez operatora, gdy postawa
-  dyryguje wielofalowym planem
+- Kanoniczny dziennik: `<repo-root>/.vibecrafted/JOURNAL.md`
+- Briefy/zamknięcia: datowane projekcje runu zarządzane przez operatora
 - Lock: `$VIBECRAFTED_HOME/locks/<org>/<repo>/<run_id>.lock`
 
 ## Antywzorce
@@ -101,4 +105,8 @@ wyjaśnienia istniejące tylko w pamięci.
 - Kompresowanie statusu fali do „green" bez SHA i evidence bramek.
 - Traktowanie natywnych subagentów jako zewnętrznych dispatchów floty.
 - Przypisywanie osiągnięć workera jako osiągnięć operatora.
+- Osobiste implementowanie odkrytej sąsiedniej poprawki zamiast podjęcia
+  decyzji, stworzenia briefu, dispatchu do dedykowanego worktree, weryfikacji i
+  integracji.
+- Wypełnianie dziennika lub handoffu rutynowymi twierdzeniami o pracy niewykonanej.
 - Kontynuowanie poza niedozwolonym operator button.

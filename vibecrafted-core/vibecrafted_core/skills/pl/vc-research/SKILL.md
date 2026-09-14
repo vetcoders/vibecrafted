@@ -146,7 +146,7 @@ Utwórz jeden plik planu. Każdy agent dostaje ten plan:
 ```markdown
 ---
 run_id: <generated-unique-id>
-agent: <claude|codex|gemini>
+agent: <claude|codex|gemini|cursor>
 skill: vc-research
 project: <repo-name>
 status: in-progress

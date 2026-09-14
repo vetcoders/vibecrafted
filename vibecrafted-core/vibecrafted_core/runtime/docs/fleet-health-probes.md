@@ -143,21 +143,21 @@ the honest "couldn't probe" fallback (probe binary absent, permission denied).
 
 ### Probe 4 — TAILSCALE (dispatching into the void)
 
-- **Measured:** mesh peer reachability — which fleet hosts (dragon, div0, …)
+- **Measured:** mesh peer reachability — which fleet hosts (host-a, host-b, …)
   are online in the tailnet, from `tailscale status --json` (local daemon
   query).
 - **Threshold semantics:**
   - `Ok` — all expected dispatch-target peers online.
   - `Warn` — a non-critical peer offline.
-  - `Fail` (`Blocked`) — a dispatch-target peer (dragon/div0) offline.
+  - `Fail` (`Blocked`) — a dispatch-target peer (host-a/host-b) offline.
 - **Collection cost:** cheap-medium. `tailscale status --json` hits the
   **local** daemon (no remote round-trip). On-read or short cadence.
   Confirmed available: `/opt/homebrew/bin/tailscale`, `tailscale status` lists
-  peers (`div0 100.73.193.98`, `blacky`, …).
+  peers (`host-b 100.64.0.11`, `host-f`, …).
 - **Surface:** `FleetHealthSignal{label:"tailscale <peer>", …}`.
 - **Motivating incident:** remote fleet dispatch depends on mesh reachability;
   a down peer = a silently-failed remote dispatch.
-- **How it surfaces EARLIER:** the operator reads `div0 unreachable ✗` _before_
+- **How it surfaces EARLIER:** the operator reads `host-b unreachable ✗` _before_
   firing a remote wave at it, instead of discovering it through a dead
   dispatch. **Gating note:** the remote half of the DISK probe (`PLAN_23` §5
   `df -h over Tailscale ssh`) depends on this probe — Tailscale must be `Ok`
@@ -283,7 +283,7 @@ would be empty for this worker.
 | **DISK**      | free-% per substrate mount + `ulimit -f` (RLIMIT_FSIZE) + largest file vs cap     | free>15% & unlimited / free 5–15% or cap>256MB / free<5% or cap≤64MB or file≥80%cap | Fleet health panel + `vc-admin health` (`FleetHealthSignal` "disk <mount>", "ulimit -f") | 182MB `logs_2.sqlite` + `ulimit -f 65336` → SIGXFSZ exit 153, workers dead <10s (`5c6c439`) |
 | **AICX**      | index lag hours + missing-sidecar count + extractor failures (`aicx health` JSON) | lag<24h & 0 missing / lag 24–72h or few missing / lag>72h or extractor fail         | `FleetHealthSignal` "aicx index", TTL-cached                                             | postcompact hooks fail on missing extracts; staleness silently degrades recall              |
 | **MCP**       | per-server process-alive + loctree snapshot-vs-HEAD staleness                     | alive & snapshot fresh / alive but snapshot stale / critical server down            | `FleetHealthSignal` "mcp <server>"                                                       | loctree-mcp snapshot staleness mid-session; servers dying between rounds                    |
-| **TAILSCALE** | peer reachability (`tailscale status --json`, local daemon)                       | all targets online / non-critical peer down / dispatch-target (dragon/div0) down    | `FleetHealthSignal` "tailscale <peer>"                                                   | remote fleet dispatch depends on mesh reachability; down peer = silent dispatch failure     |
+| **TAILSCALE** | peer reachability (`tailscale status --json`, local daemon)                       | all targets online / non-critical peer down / dispatch-target (host-a/host-b) down  | `FleetHealthSignal` "tailscale <peer>"                                                   | remote fleet dispatch depends on mesh reachability; down peer = silent dispatch failure     |
 
 ---
 

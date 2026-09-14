@@ -6,46 +6,53 @@ claude-decorate() { _vetcoders_skill claude decorate "$@"; }
 agy-decorate() { _vetcoders_skill agy decorate "$@"; }
 junie-decorate() { _vetcoders_skill junie decorate "$@"; }
 grok-decorate() { _vetcoders_skill grok decorate "$@"; }
+cursor-decorate() { _vetcoders_skill cursor decorate "$@"; }
 
 codex-followup() { _vetcoders_skill codex followup "$@"; }
 claude-followup() { _vetcoders_skill claude followup "$@"; }
 agy-followup() { _vetcoders_skill agy followup "$@"; }
 junie-followup() { _vetcoders_skill junie followup "$@"; }
 grok-followup() { _vetcoders_skill grok followup "$@"; }
+cursor-followup() { _vetcoders_skill cursor followup "$@"; }
 
 codex-prune() { _vetcoders_skill codex prune "$@"; }
 claude-prune() { _vetcoders_skill claude prune "$@"; }
 agy-prune() { _vetcoders_skill agy prune "$@"; }
 junie-prune() { _vetcoders_skill junie prune "$@"; }
 grok-prune() { _vetcoders_skill grok prune "$@"; }
+cursor-prune() { _vetcoders_skill cursor prune "$@"; }
 
 codex-scaffold() { _vetcoders_skill codex scaffold "$@"; }
 claude-scaffold() { _vetcoders_skill claude scaffold "$@"; }
 agy-scaffold() { _vetcoders_skill agy scaffold "$@"; }
 junie-scaffold() { _vetcoders_skill junie scaffold "$@"; }
 grok-scaffold() { _vetcoders_skill grok scaffold "$@"; }
+cursor-scaffold() { _vetcoders_skill cursor scaffold "$@"; }
 
 codex-release() { _vetcoders_skill codex release "$@"; }
 claude-release() { _vetcoders_skill claude release "$@"; }
 agy-release() { _vetcoders_skill agy release "$@"; }
 junie-release() { _vetcoders_skill junie release "$@"; }
 grok-release() { _vetcoders_skill grok release "$@"; }
+cursor-release() { _vetcoders_skill cursor release "$@"; }
 
 codex-justdo() { _vetcoders_skill codex justdo "$@"; }
 claude-justdo() { _vetcoders_skill claude justdo "$@"; }
 agy-justdo() { _vetcoders_skill agy justdo "$@"; }
 junie-justdo() { _vetcoders_skill junie justdo "$@"; }
 grok-justdo() { _vetcoders_skill grok justdo "$@"; }
+cursor-justdo() { _vetcoders_skill cursor justdo "$@"; }
 
-codex-partner() { _vetcoders_skill codex partner "$@"; }
-claude-partner() { _vetcoders_skill claude partner "$@"; }
-agy-partner() { _vetcoders_skill agy partner "$@"; }
-junie-partner() { _vetcoders_skill junie partner "$@"; }
-grok-partner() { _vetcoders_skill grok partner "$@"; }
+codex-partner() { _vetcoders_skill_partner codex "$@"; }
+claude-partner() { _vetcoders_skill_partner claude "$@"; }
+agy-partner() { _vetcoders_skill_partner agy "$@"; }
+junie-partner() { _vetcoders_skill_partner junie "$@"; }
+grok-partner() { _vetcoders_skill_partner grok "$@"; }
+cursor-partner() { _vetcoders_skill_partner cursor "$@"; }
 
 # Per-agent skill-* helpers. The deck (`vibecrafted <skill> <agent>` and
 # `vibecrafted init <agent>`) resolves `${agent}-skill-${skill}` by name.
-# All five fleet agents must be present — missing one is a hard fail at
+# All six fleet agents must be present — missing one is a hard fail at
 # the launcher. cmd_init / cmd_skill also know the generic
 # _vetcoders_skill_* entrypoints as a defense-in-depth fallback.
 codex-skill-agents() { _vetcoders_skill_entry codex agents "$@"; }
@@ -53,54 +60,70 @@ claude-skill-agents() { _vetcoders_skill_entry claude agents "$@"; }
 agy-skill-agents() { _vetcoders_skill_entry agy agents "$@"; }
 junie-skill-agents() { _vetcoders_skill_entry junie agents "$@"; }
 grok-skill-agents() { _vetcoders_skill_entry grok agents "$@"; }
+cursor-skill-agents() { _vetcoders_skill_entry cursor agents "$@"; }
 
 codex-skill-audit() { _vetcoders_skill_entry codex audit "$@"; }
 claude-skill-audit() { _vetcoders_skill_entry claude audit "$@"; }
 agy-skill-audit() { _vetcoders_skill_entry agy audit "$@"; }
 junie-skill-audit() { _vetcoders_skill_entry junie audit "$@"; }
 grok-skill-audit() { _vetcoders_skill_entry grok audit "$@"; }
+cursor-skill-audit() { _vetcoders_skill_entry cursor audit "$@"; }
 
 codex-skill-decorate() { _vetcoders_skill_entry codex decorate "$@"; }
 claude-skill-decorate() { _vetcoders_skill_entry claude decorate "$@"; }
 agy-skill-decorate() { _vetcoders_skill_entry agy decorate "$@"; }
 junie-skill-decorate() { _vetcoders_skill_entry junie decorate "$@"; }
 grok-skill-decorate() { _vetcoders_skill_entry grok decorate "$@"; }
+cursor-skill-decorate() { _vetcoders_skill_entry cursor decorate "$@"; }
 
 codex-skill-delegate() { _vetcoders_skill_entry codex delegate "$@"; }
 claude-skill-delegate() { _vetcoders_skill_entry claude delegate "$@"; }
 agy-skill-delegate() { _vetcoders_skill_entry agy delegate "$@"; }
 junie-skill-delegate() { _vetcoders_skill_entry junie delegate "$@"; }
 grok-skill-delegate() { _vetcoders_skill_entry grok delegate "$@"; }
+cursor-skill-delegate() { _vetcoders_skill_entry cursor delegate "$@"; }
 
 codex-skill-dou() { _vetcoders_skill_entry codex dou "$@"; }
 claude-skill-dou() { _vetcoders_skill_entry claude dou "$@"; }
 agy-skill-dou() { _vetcoders_skill_entry agy dou "$@"; }
 junie-skill-dou() { _vetcoders_skill_entry junie dou "$@"; }
 grok-skill-dou() { _vetcoders_skill_entry grok dou "$@"; }
+cursor-skill-dou() { _vetcoders_skill_entry cursor dou "$@"; }
 
 codex-skill-followup() { _vetcoders_skill_entry codex followup "$@"; }
 claude-skill-followup() { _vetcoders_skill_entry claude followup "$@"; }
 agy-skill-followup() { _vetcoders_skill_entry agy followup "$@"; }
 junie-skill-followup() { _vetcoders_skill_entry junie followup "$@"; }
 grok-skill-followup() { _vetcoders_skill_entry grok followup "$@"; }
+cursor-skill-followup() { _vetcoders_skill_entry cursor followup "$@"; }
 
 codex-skill-hydrate() { _vetcoders_skill_entry codex hydrate "$@"; }
 claude-skill-hydrate() { _vetcoders_skill_entry claude hydrate "$@"; }
 agy-skill-hydrate() { _vetcoders_skill_entry agy hydrate "$@"; }
 junie-skill-hydrate() { _vetcoders_skill_entry junie hydrate "$@"; }
 grok-skill-hydrate() { _vetcoders_skill_entry grok hydrate "$@"; }
+cursor-skill-hydrate() { _vetcoders_skill_entry cursor hydrate "$@"; }
 
 codex-skill-init() { _vetcoders_skill_init codex "$@"; }
 claude-skill-init() { _vetcoders_skill_init claude "$@"; }
 agy-skill-init() { _vetcoders_skill_init agy "$@"; }
 junie-skill-init() { _vetcoders_skill_init junie "$@"; }
 grok-skill-init() { _vetcoders_skill_init grok "$@"; }
+cursor-skill-init() { _vetcoders_skill_init cursor "$@"; }
+
+codex-skill-operator() { _vetcoders_skill_operator codex "$@"; }
+claude-skill-operator() { _vetcoders_skill_operator claude "$@"; }
+agy-skill-operator() { _vetcoders_skill_operator agy "$@"; }
+junie-skill-operator() { _vetcoders_skill_operator junie "$@"; }
+grok-skill-operator() { _vetcoders_skill_operator grok "$@"; }
+cursor-skill-operator() { _vetcoders_skill_operator cursor "$@"; }
 
 codex-skill-justdo() { _vetcoders_skill_entry codex justdo "$@"; }
 claude-skill-justdo() { _vetcoders_skill_entry claude justdo "$@"; }
 agy-skill-justdo() { _vetcoders_skill_entry agy justdo "$@"; }
 junie-skill-justdo() { _vetcoders_skill_entry junie justdo "$@"; }
 grok-skill-justdo() { _vetcoders_skill_entry grok justdo "$@"; }
+cursor-skill-justdo() { _vetcoders_skill_entry cursor justdo "$@"; }
 
 # vc-implement is the front-face brand for vc-justdo. Both helper families hit
 # the same dispatcher (skill id stays "justdo" so run_id prefix, locks, and
@@ -110,42 +133,49 @@ claude-skill-implement() { _vetcoders_skill_entry claude justdo "$@"; }
 agy-skill-implement() { _vetcoders_skill_entry agy justdo "$@"; }
 junie-skill-implement() { _vetcoders_skill_entry junie justdo "$@"; }
 grok-skill-implement() { _vetcoders_skill_entry grok justdo "$@"; }
+cursor-skill-implement() { _vetcoders_skill_entry cursor justdo "$@"; }
 
 codex-skill-marbles() { _vetcoders_marbles codex "$@"; }
 claude-skill-marbles() { _vetcoders_marbles claude "$@"; }
 agy-skill-marbles() { _vetcoders_marbles agy "$@"; }
 junie-skill-marbles() { _vetcoders_marbles junie "$@"; }
 grok-skill-marbles() { _vetcoders_marbles grok "$@"; }
+cursor-skill-marbles() { _vetcoders_marbles cursor "$@"; }
 
-codex-skill-partner() { _vetcoders_skill_entry codex partner "$@"; }
-claude-skill-partner() { _vetcoders_skill_entry claude partner "$@"; }
-agy-skill-partner() { _vetcoders_skill_entry agy partner "$@"; }
-junie-skill-partner() { _vetcoders_skill_entry junie partner "$@"; }
-grok-skill-partner() { _vetcoders_skill_entry grok partner "$@"; }
+codex-skill-partner() { _vetcoders_skill_partner codex "$@"; }
+claude-skill-partner() { _vetcoders_skill_partner claude "$@"; }
+agy-skill-partner() { _vetcoders_skill_partner agy "$@"; }
+junie-skill-partner() { _vetcoders_skill_partner junie "$@"; }
+grok-skill-partner() { _vetcoders_skill_partner grok "$@"; }
+cursor-skill-partner() { _vetcoders_skill_partner cursor "$@"; }
 
 codex-skill-polarize() { _vetcoders_skill_entry codex polarize "$@"; }
 claude-skill-polarize() { _vetcoders_skill_entry claude polarize "$@"; }
 agy-skill-polarize() { _vetcoders_skill_entry agy polarize "$@"; }
 junie-skill-polarize() { _vetcoders_skill_entry junie polarize "$@"; }
 grok-skill-polarize() { _vetcoders_skill_entry grok polarize "$@"; }
+cursor-skill-polarize() { _vetcoders_skill_entry cursor polarize "$@"; }
 
 codex-skill-prune() { _vetcoders_skill_entry codex prune "$@"; }
 claude-skill-prune() { _vetcoders_skill_entry claude prune "$@"; }
 agy-skill-prune() { _vetcoders_skill_entry agy prune "$@"; }
 junie-skill-prune() { _vetcoders_skill_entry junie prune "$@"; }
 grok-skill-prune() { _vetcoders_skill_entry grok prune "$@"; }
+cursor-skill-prune() { _vetcoders_skill_entry cursor prune "$@"; }
 
 codex-skill-release() { _vetcoders_skill_entry codex release "$@"; }
 claude-skill-release() { _vetcoders_skill_entry claude release "$@"; }
 agy-skill-release() { _vetcoders_skill_entry agy release "$@"; }
 junie-skill-release() { _vetcoders_skill_entry junie release "$@"; }
 grok-skill-release() { _vetcoders_skill_entry grok release "$@"; }
+cursor-skill-release() { _vetcoders_skill_entry cursor release "$@"; }
 
 codex-skill-research() { _vetcoders_skill_entry codex research "$@"; }
 claude-skill-research() { _vetcoders_skill_entry claude research "$@"; }
 agy-skill-research() { _vetcoders_skill_entry agy research "$@"; }
 junie-skill-research() { _vetcoders_skill_entry junie research "$@"; }
 grok-skill-research() { _vetcoders_skill_entry grok research "$@"; }
+cursor-skill-research() { _vetcoders_skill_entry cursor research "$@"; }
 # Public shortcuts are exact deck pass-throughs (see _vetcoders_vc_passthrough).
 # Do not route to legacy _vetcoders_research / shell help — that diverged from
 # vibecrafted research flags (--json, --model, --prompt-stdin, …).
@@ -158,35 +188,38 @@ claude-skill-review() { _vetcoders_skill_entry claude review "$@"; }
 agy-skill-review() { _vetcoders_skill_entry agy review "$@"; }
 junie-skill-review() { _vetcoders_skill_entry junie review "$@"; }
 grok-skill-review() { _vetcoders_skill_entry grok review "$@"; }
+cursor-skill-review() { _vetcoders_skill_entry cursor review "$@"; }
 
 codex-skill-scaffold() { _vetcoders_skill_entry codex scaffold "$@"; }
 claude-skill-scaffold() { _vetcoders_skill_entry claude scaffold "$@"; }
 agy-skill-scaffold() { _vetcoders_skill_entry agy scaffold "$@"; }
 junie-skill-scaffold() { _vetcoders_skill_entry junie scaffold "$@"; }
 grok-skill-scaffold() { _vetcoders_skill_entry grok scaffold "$@"; }
+cursor-skill-scaffold() { _vetcoders_skill_entry cursor scaffold "$@"; }
 
 codex-skill-workflow() { _vetcoders_skill_entry codex workflow "$@"; }
 claude-skill-workflow() { _vetcoders_skill_entry claude workflow "$@"; }
 agy-skill-workflow() { _vetcoders_skill_entry agy workflow "$@"; }
 junie-skill-workflow() { _vetcoders_skill_entry junie workflow "$@"; }
 grok-skill-workflow() { _vetcoders_skill_entry grok workflow "$@"; }
+cursor-skill-workflow() { _vetcoders_skill_entry cursor workflow "$@"; }
 
 _vetcoders_skill_wrapper_usage() {
   local skill="$1"
   case "$skill" in
     init)
-      printf 'Usage: vc-init <claude|codex|agy|junie|grok> [--prompt <text>] [--file <path>]\n' >&2
+      printf 'Usage: vc-init <claude|codex|agy|junie|grok|cursor> [--prompt <text>] [--file <path>]\n' >&2
       ;;
     marbles)
-      printf 'Usage: vc-marbles <claude|codex|agy|junie|grok> [--prompt <text>|--file <path>|--depth <n>] [--count <n>]\n' >&2
+      printf 'Usage: vc-marbles <claude|codex|agy|junie|grok|cursor> [--prompt <text>|--file <path>|--depth <n>] [--count <n>]\n' >&2
       printf '       vc-marbles <pause|stop|resume|session|inspect|delete|gc> [args]\n' >&2
       ;;
     polarize)
-      printf 'Usage: vc-polarize <claude|codex|agy|junie|grok> --task <text> [--prompt <text>] [--file <path>] [--no-aicx] [--no-context-corpus]\n' >&2
-      printf '       vc-polarize <claude|codex|agy|junie|grok> [--count <n>] [--prompt <text>] [--file <path>]\n' >&2
+      printf 'Usage: vc-polarize <claude|codex|agy|junie|grok|cursor> --task <text> [--prompt <text>] [--file <path>] [--no-aicx] [--no-context-corpus]\n' >&2
+      printf '       vc-polarize <claude|codex|agy|junie|grok|cursor> [--count <n>] [--prompt <text>] [--file <path>]\n' >&2
       ;;
     *)
-      printf 'Usage: vc-%s <claude|codex|agy|junie|grok> [--prompt <text>] [--file <path>]\n' "$skill" >&2
+      printf 'Usage: vc-%s <claude|codex|agy|junie|grok|cursor> [--prompt <text>] [--file <path>]\n' "$skill" >&2
       ;;
   esac
 }
@@ -194,7 +227,7 @@ _vetcoders_skill_wrapper_usage() {
 _vetcoders_has_agent() {
   local candidate="${1:-}"
   case "$candidate" in
-    claude|codex|agy|junie|grok) return 0 ;;
+    claude|codex|agy|junie|grok|cursor) return 0 ;;
     gemini) return 1 ;;  # deprecated - gemini CLI is dead upstream, use agy (Google Antigravity CLI)
     *) return 1 ;;
   esac
@@ -302,7 +335,7 @@ _vetcoders_skill_wrapper() {
     return 1
   }
   _vetcoders_has_agent "$tool" || {
-    printf 'vc-%s expects claude|codex|agy|junie|grok as the first argument (not a placeholder with angle brackets).\n' "$skill" >&2
+    printf 'vc-%s expects claude|codex|agy|junie|grok|cursor as the first argument (not a placeholder with angle brackets).\n' "$skill" >&2
     _vetcoders_deck_help "$skill"
     return 1
   }
@@ -315,6 +348,7 @@ _vetcoders_skill_wrapper() {
 
   case "$skill" in
     init) _vetcoders_skill_init "$tool" "$@" ;;
+    partner) _vetcoders_skill_partner "$tool" "$@" ;;
     operator) _vetcoders_skill_operator "$tool" "$@" ;;
     marbles) _vetcoders_marbles "$tool" "$@" ;;
     *) _vetcoders_skill_entry "$tool" "$skill" "$@" ;;
@@ -372,7 +406,9 @@ fi
 # that is the interactive-zsh split-brain (2026-07-28 audit).
 # Deck/LAUNCHERS skills → exact pass-through (help/flags owned by Python CLI).
 vc-audit() { _vetcoders_vc_passthrough audit "$@"; }
+vc-canary() { _vetcoders_vc_passthrough canary "$@"; }
 vc-decorate() { _vetcoders_vc_passthrough decorate "$@"; }
+vc-fork() { _vetcoders_vc_passthrough fork "$@"; }
 vc-delegate() { _vetcoders_vc_passthrough delegate "$@"; }
 vc-dou() { _vetcoders_vc_passthrough dou "$@"; }
 vc-hydrate() { _vetcoders_vc_passthrough hydrate "$@"; }
@@ -405,10 +441,10 @@ vc-trust() { _vetcoders_vc_passthrough trust "$@"; }
 vc-guard() { _vetcoders_vc_passthrough guard "$@"; }
 vc-workflow() { _vetcoders_vc_passthrough workflow "$@"; }
 vc-dispatch() { _vetcoders_vc_passthrough dispatch "$@"; }
-# Agent-first skills without a deck LAUNCHERS verb — safe help via skill_wrapper,
-# execution still goes agent → skill entry (not a false vibecrafted operator verb).
+# Agent-first skills without a deck LAUNCHERS verb — safe help via skill_wrapper.
 vc-agents() { _vetcoders_skill_dispatch agents "$@"; }
-vc-operator() { _vetcoders_skill_dispatch operator "$@"; }
+# Deck now owns `vibecrafted operator` (interactive face). Passthrough matches vc-init.
+vc-operator() { _vetcoders_vc_passthrough operator "$@"; }
 
 vc-help() {
   _vetcoders_vc_passthrough help "$@"
@@ -474,7 +510,6 @@ Utilities:
   repo-full                      Legacy full git context helper
   skills-sync                    Sync skills to agents
   vc-frontier-paths              Show frontier config paths
-  vc-frontier-install            Install frontier presets (starship/atuin/vc_frame)
   vc-help                        This help
 
 Frontier docs:  docs/FRONTIER.md (starship, atuin, optional vc_frame)
@@ -627,7 +662,7 @@ repo-full() {
 
   local cwd root repo branch head_short head_full upstream origin_url default_remote default_branch
   local last_tag stash_count staged_count unstaged_count untracked_count worktree_count
-  local upstream_ahead upstream_behind
+  local upstream_ahead upstream_behind upstream_status
 
   cwd="$(pwd)"
   root="$(git rev-parse --show-toplevel 2>/dev/null)"
@@ -639,9 +674,29 @@ repo-full() {
   origin_url="$(git remote get-url origin 2>/dev/null || echo "no origin")"
   last_tag="$(git describe --tags --abbrev=0 2>/dev/null || echo "no tags")"
   stash_count="$(git stash list 2>/dev/null | wc -l | tr -d ' ')"
-  staged_count="$(git diff --cached --name-only 2>/dev/null | wc -l | tr -d ' ')"
-  unstaged_count="$(git diff --name-only 2>/dev/null | wc -l | tr -d ' ')"
-  untracked_count="$(git ls-files --others --exclude-standard 2>/dev/null | wc -l | tr -d ' ')"
+  _repo_full_status_counts() {
+    local porcelain line staged=0 unstaged=0 untracked=0
+    if ! porcelain="$(git -C "$1" status --porcelain 2>/dev/null)"; then
+      printf 'unknown unknown unknown'
+      return 1
+    fi
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      [[ -n "$line" ]] || continue
+      if [[ "$line" == '??'* ]]; then
+        ((untracked += 1))
+      else
+        [[ "${line:0:1}" != ' ' ]] && ((staged += 1))
+        [[ "${line:1:1}" != ' ' ]] && ((unstaged += 1))
+      fi
+    done <<< "$porcelain"
+    printf '%s %s %s' "$staged" "$unstaged" "$untracked"
+  }
+  local root_status
+  if root_status="$(_repo_full_status_counts "$root")"; then
+    read -r staged_count unstaged_count untracked_count <<< "$root_status"
+  else
+    staged_count="unknown"; unstaged_count="unknown"; untracked_count="unknown"
+  fi
   worktree_count="$(git worktree list 2>/dev/null | wc -l | tr -d ' ')"
 
   default_remote="$(git remote | awk 'NR==1{print; exit}')"
@@ -653,11 +708,67 @@ repo-full() {
 
   # shellcheck disable=SC1083 # @{u} is git upstream ref syntax, not shell braces
   if git rev-parse '@{u}' >/dev/null 2>&1; then
-    read -r upstream_ahead upstream_behind <<< "$(git rev-list --left-right --count HEAD...'@{u}' 2>/dev/null)"
+    if read -r upstream_ahead upstream_behind <<< "$(git rev-list --left-right --count HEAD...'@{u}' 2>/dev/null)" && [[ "$upstream_ahead" =~ ^[0-9]+$ && "$upstream_behind" =~ ^[0-9]+$ ]]; then
+      upstream_status="known"
+    else
+      upstream_ahead="unknown"
+      upstream_behind="unknown"
+      upstream_status="unknown"
+    fi
   else
-    upstream_ahead="-"
-    upstream_behind="-"
+    upstream_ahead="not configured"
+    upstream_behind="not configured"
+    upstream_status="not configured"
   fi
+
+  _repo_full_worktree_truth() {
+    local wt_path="" wt_head="" wt_branch="detached" locked="false" prunable="false" line integration unmatched staged unstaged untracked merge_commits dirt
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      if [[ -z "$line" ]]; then
+        [[ -n "$wt_path" ]] || continue
+        integration="unknown"
+        unmatched=""
+        if [[ -n "$wt_head" ]] && git merge-base --is-ancestor "$wt_head" "$head_full" >/dev/null 2>&1; then
+          integration="merged (exact ancestor)"
+        elif [[ -n "$wt_head" ]]; then
+          if ! merge_commits="$(git rev-list --merges "$head_full..$wt_head" 2>/dev/null)"; then
+            integration="unknown"
+          elif [[ -n "$merge_commits" ]]; then
+            if git diff --quiet "$head_full" "$wt_head" 2>/dev/null; then
+              integration="integrated by exact tree equivalence (unique merge commits)"
+            elif [[ $? -eq 1 ]]; then
+              integration="WARN unmerged (unique merge commits; patch equivalence unavailable)"
+            fi
+          elif unmatched="$(git cherry --abbrev "$head_full" "$wt_head" 2>/dev/null)"; then
+            if [[ -z "$(printf '%s\n' "$unmatched" | awk '$1 == "+" { print; exit }')" ]]; then
+              integration="integrated by patch equivalence"
+            else
+              integration="WARN unmerged ($(printf '%s\n' "$unmatched" | awk '$1 == "+" { count++ } END { print count+0 }') unmatched commits)"
+            fi
+          fi
+        fi
+        if [[ -d "$wt_path" ]]; then
+          if dirt="$(_repo_full_status_counts "$wt_path")"; then
+            read -r staged unstaged untracked <<< "$dirt"
+          else
+            staged="unknown"; unstaged="unknown"; untracked="unknown"
+          fi
+        else
+          staged="unknown"; unstaged="unknown"; untracked="unknown"
+        fi
+        printf 'Worktree: %s [%s] %s\n  Comparison target: HEAD %s\n  Integration: %s\n  Dirt: staged %s, unstaged %s, untracked %s; locked %s; prunable %s\n' "$wt_path" "$wt_branch" "${wt_head:0:9}" "${head_full:0:9}" "$integration" "$staged" "$unstaged" "$untracked" "$locked" "$prunable"
+        wt_path=""; wt_head=""; wt_branch="detached"; locked="false"; prunable="false"
+        continue
+      fi
+      case "$line" in
+        worktree\ *) wt_path="${line#worktree }" ;;
+        HEAD\ *) wt_head="${line#HEAD }" ;;
+        branch\ *) wt_branch="${line#branch refs/heads/}" ;;
+        locked*) locked="true" ;;
+        prunable*) prunable="true" ;;
+      esac
+    done < <(git worktree list --porcelain 2>/dev/null)
+  }
 
   _repo_full_compare_ref() {
     local ref="$1"
@@ -692,7 +803,8 @@ repo-full() {
   echo "Default remote:    $default_remote"
   echo "Default branch:    $default_branch"
   echo "Upstream:          $upstream"
-  echo "Ahead / Behind:    $upstream_ahead / $upstream_behind"
+  echo "Ahead:             $upstream_ahead (vs $upstream; $upstream_status)"
+  echo "Behind:            $upstream_behind (vs $upstream; $upstream_status)"
   echo "Origin:            $origin_url"
   echo "HEAD short:        $head_short"
   echo "HEAD full:         $head_full"
@@ -757,6 +869,9 @@ repo-full() {
   echo "==================== WORKTREES ===================="
   git worktree list 2>/dev/null
   echo
+  echo "==================== WORKTREE INTEGRATION ===================="
+  _repo_full_worktree_truth
+  echo
 
   echo "==================== SUBMODULES ===================="
   if [[ -f "$root/.gitmodules" ]]; then
@@ -801,28 +916,17 @@ vc-start() {
     _vetcoders_vc_passthrough start --help
     return $?
   fi
-  # Product lifecycle: pin config, project Super/scripts, poke CP eye.
-  if declare -F _vetcoders_product_entry_prepare >/dev/null 2>&1; then
-    _vetcoders_product_entry_prepare
+  # Required lifecycle helpers belong to the admitted facade (dashboard.sh).
+  # `command -v`, not `declare -F`: under zsh `-F` means float, not function.
+  if ! command -v _vetcoders_start_entry >/dev/null 2>&1 \
+    || ! command -v _vetcoders_product_entry_prepare >/dev/null 2>&1; then
+    printf 'vc-start: required product start helper missing\n' >&2
+    return 1
   fi
-  # Tests/doctor: print env effects without attach (no TUI, no session create).
-  if [[ "${VIBECRAFTED_PRODUCT_ENTRY_PROBE:-0}" == "1" ]]; then
-    if declare -F _vetcoders_product_entry_probe_print >/dev/null 2>&1; then
-      _vetcoders_product_entry_probe_print
-    else
-      printf 'VC_FRAME_CONFIG_DIR=%s\n' "${VC_FRAME_CONFIG_DIR:-}"
-    fi
-    return 0
-  fi
-  if [[ "${1:-}" == "resume" ]]; then
-    shift || true
-    _vetcoders_resume_operator_session "$@"
-    return
-  fi
-  if [[ "${1:-}" == "operator" || "${1:-}" == "vibecrafted" ]]; then
-    shift || true
-  fi
-  _vetcoders_launch_dashboard operator "$@"
+  # One parser, one owner: the create-only workspace contract in dashboard.sh
+  # (root → name → live inventory → exclusive create → enter / VC Terminal).
+  _vetcoders_start_prepare_arguments "$@" || return $?
+  _vetcoders_start_entry "${_vetcoders_start_frame_argv[@]}"
 }
 
 vc-dashboard() {
@@ -843,20 +947,4 @@ vc-frontier-paths() {
   [[ -n "$atuin_config" ]] && printf 'ATUIN_CONFIG=%s\n' "$atuin_config"
   [[ -n "$vc_frame_config" ]] && printf 'VC_FRAME_CONFIG_DIR=%s\n' "$(dirname "$vc_frame_config")"
   return 0
-}
-
-vc-frontier-install() {
-  local repo_root script base
-  repo_root="$(_vetcoders_frontier_source_root)" || {
-    echo "Repo-owned frontier source not found." >&2
-    return 1
-  }
-  base="$(_vetcoders_spawn_home "vc-agents")"
-  script="$base/scripts/install-frontier-config.sh"
-  
-  [[ -f "$script" ]] || {
-    echo "Frontier installer not found: $script" >&2
-    return 1
-  }
-  bash "$script" --source "$repo_root" "$@"
 }

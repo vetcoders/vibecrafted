@@ -37,14 +37,68 @@ def test_vc_frame_config_uses_plain_ctrl_without_option_layer() -> None:
     assert "Ctrl Shift" not in payload
 
 
+def test_composer_bind_does_not_enable_line_numbers() -> None:
+    """Composer is prose. A mouse selection copies cells; a gutter rides into paste.
+
+    The Super+e fallback must not resurrect `set number` after 60d9986f dropped
+    the gutter from vc-composer.sh.
+    """
+    payload = VC_FRAME_CONFIG.read_text(encoding="utf-8")
+    composer = (
+        REPO_ROOT
+        / "vibecrafted-core"
+        / "vibecrafted_core"
+        / "config"
+        / "vc-frame"
+        / "vc-composer.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "-c 'set number'" not in payload
+    assert "-c 'set nonumber'" in payload
+    assert "set nonumber" in composer
+    assert "set norelativenumber" in composer
+    assert "Draft in vim with: number," not in composer
+
+
 def test_vc_frame_config_enables_kitty_protocol_for_super_switcher() -> None:
     # Key-contract v3 (8a0f14e65): the global Super/Cmd switcher rides kitty
     # CSI-u sequences. Disabling this strands "Super Left/Right/Up/Down" and
-    # "Super e" as raw escape passthrough in every pane — see kronika
+    # "Super e" as raw escape passthrough in every pane — see doctrine
     # 2026-08-05 for the live-session repro.
     payload = VC_FRAME_CONFIG.read_text(encoding="utf-8")
 
     assert "support_kitty_keyboard_protocol true" in payload
+
+
+def test_quick_cmd_shortcut_reuses_active_compact_bar_including_locked_mode() -> None:
+    """Cmd+Shift+. is a shared message, not a second quick-command launcher."""
+    payload = VC_FRAME_CONFIG.read_text(encoding="utf-8")
+    shared = payload[payload.index("    shared {") : payload.index("    shared_except")]
+    quick_cmd = shared[
+        shared.index('bind "Super Shift ."') : shared.index(
+            "        // Command Composer"
+        )
+    ]
+
+    assert 'bind "Super Shift ."' in quick_cmd
+    assert 'MessagePlugin "compact-bar"' in quick_cmd
+    assert 'name "vc_quick_cmd"' in quick_cmd
+    assert "Run " not in quick_cmd
+
+
+def test_cmd_n_opens_existing_session_manager_not_a_direct_tab() -> None:
+    """Cmd+N is Create new workspace through the existing Session Manager."""
+    payload = VC_FRAME_CONFIG.read_text(encoding="utf-8")
+    shared = payload[payload.index("    shared {") : payload.index("    shared_except")]
+    workspace = shared[
+        shared.index('bind "Super n"') : shared.index('bind "Super Shift ."')
+    ]
+
+    assert 'bind "Super n"' in workspace
+    assert 'LaunchOrFocusPlugin "session-manager"' in workspace
+    assert "floating true" in workspace
+    assert "move_to_focused_tab true" in workspace
+    assert "NewTab" not in workspace
 
 
 def test_vc_frame_config_ctrl_q_closes_focus_not_session() -> None:
@@ -95,6 +149,15 @@ def test_vc_frame_config_session_resilience() -> None:
     assert "serialize_pane_viewport true" in payload
 
 
+def test_native_default_names_the_packaged_operator_layout() -> None:
+    payload = VC_FRAME_CONFIG.read_text(encoding="utf-8")
+    operator = LAYOUTS_DIR / "operator.kdl"
+
+    assert 'default_layout "operator"' in payload
+    assert operator.is_file()
+    assert not operator.is_symlink()
+
+
 def test_vc_frame_config_has_plugin_aliases() -> None:
     payload = VC_FRAME_CONFIG.read_text(encoding="utf-8")
 
@@ -136,9 +199,11 @@ def test_layout_tab_branding_matches_frame_contract() -> None:
     for layout_file in sorted(LAYOUTS_DIR.glob("*.kdl")):
         payload = layout_file.read_text(encoding="utf-8")
         if layout_file.name == "operator.kdl":
-            # Launch alias for default_layout "vibecrafted": Start here + Shell.
+            # Launch alias for default_layout "vibecrafted": product workspace tabs.
             assert 'tab name="Start here"' in payload
+            assert 'tab name="Agents"' in payload
             assert 'tab name="Shell"' in payload
+            assert 'tab name="voc"' in payload
             continue
         assert "𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍." in payload, f"{layout_file.name} missing branded tab name"
 
@@ -153,17 +218,26 @@ def test_marbles_layout_is_operator_centric() -> None:
 
 
 def test_operator_layout_matches_vibecrafted_standard() -> None:
-    """vc-start operator.kdl is the launch alias of default_layout vibecrafted:
-    Start here + Shell, SESSIONS rail on every tab, no strider, no spaced names."""
+    """vc-start operator.kdl is the native default layout:
+    Start here + Agents + Shell + voc, SESSIONS rail on every tab, no strider."""
     payload = (LAYOUTS_DIR / "operator.kdl").read_text(encoding="utf-8")
     assert 'tab name="Start here"' in payload
+    assert 'tab name="Agents"' in payload
     assert 'tab name="Shell"' in payload
-    assert 'guide_mode "mission-control"' in payload
+    assert 'tab name="voc"' in payload
+    assert "vc-start-here.py" in payload
+    assert "vc-agent-workshop.py" in payload
+    assert "pane-python" in payload
+    assert "VIBECRAFTED_PYTHON" in payload
+    assert "$HOME/.local/bin/voc" in payload
+    assert "vibecrafted tui" in payload
     assert "session-manager" in payload
     assert "rail true" in payload
     assert "default_tab_template" in payload
     assert "compact-bar" in payload
     assert "status-bar" in payload
+    assert "session_layer" in payload
+    assert 'tab name="Start here" focus=true' in payload
     assert "vibecrafted start" in payload
     # Rejected parallel path (ignore comments).
     active = "\n".join(
@@ -176,9 +250,23 @@ def test_operator_layout_matches_vibecrafted_standard() -> None:
     assert "VibeCrafted" not in active
 
 
-def test_operator_layout_guide_and_shell_tabs() -> None:
+def test_dashboard_and_marbles_probe_packaged_mission_control() -> None:
+    """Runtime Pack helpers live under vibecrafted_core/runtime, not ~/.vibecrafted/runtime."""
+    for name in ("dashboard.kdl", "marbles.kdl"):
+        payload = (LAYOUTS_DIR / name).read_text(encoding="utf-8")
+        assert "vibecrafted-core/vibecrafted_core/runtime" in payload, name
+        assert "vc-operator/mission-control/" in payload, name
+
+
+def test_operator_layout_start_here_and_shell_tabs() -> None:
     payload = (LAYOUTS_DIR / "operator.kdl").read_text(encoding="utf-8")
-    assert 'plugin location="about"' in payload
+    assert 'command="bash" name="Start Here"' in payload
+    assert 'plugin location="about"' not in payload
+    assert "pane-python" in payload
+    # `config install` is retired (e1d7a791); the Runtime Pack installer owns
+    # product configuration and the repair hint routes through make install.
+    assert "config install" not in payload
+    assert "make install" in payload
     assert 'name="Shell"' in payload
     # Shell wakes with banner then zsh (not bare suspended /bin/zsh).
     assert "exec zsh" in payload or "zsh -l" in payload

@@ -17,7 +17,7 @@ from vibecrafted_core.workflow import reserve_run_id
 
 from .doctor import diagnose_file
 from .model import STATE_VERIFIED, Dispatch
-from .receipts import ReceiptContractError
+from .receipts import DispatchReceiptStore, ReceiptContractError
 from .schema import render_cell_prompt
 from .supervisor import DispatchResult, cleanup_settled_run, run_dispatch
 from .worktrees import canonical_artifact_root
@@ -102,6 +102,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     run_id = args.resume or reserve_run_id("dispatch")
     artifacts_dir = _artifacts_dir(dispatch, run_id=run_id)
     _copy_validated_source(source, artifacts_dir)
+    # The supervisor is silent on stdout until the whole DAG settles; its live
+    # surface is tracker.md/journal.md, rewritten from second zero. Say so
+    # BEFORE launching, or every observer concludes the launch hung
+    # (measured: an agent waited on a mute handshake, 2026-08-24).
+    tracker_path = (
+        Path(dispatch.meta.tracker).expanduser()
+        if dispatch.meta.tracker
+        else artifacts_dir / "tracker.md"
+    )
+    if not args.json:
+        print(
+            f"dispatch admission started: run_id={run_id}\n"
+            f"live state: tracker={tracker_path}\n"
+            f"live journal: {artifacts_dir / 'journal.md'}\n"
+            "no worker is accepted until envelope and path-claim admission pass; "
+            "then stdout stays silent until the run settles — watch the tracker, "
+            "not this stream.",
+            flush=True,
+        )
     try:
         dispatch_result = run_dispatch(
             dispatch,
@@ -110,8 +129,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             manage_worktrees=True,
             resume=bool(args.resume),
         )
-    except ReceiptContractError as exc:
-        print(f"dispatch refused: {exc}")
+    except Exception as exc:  # noqa: BLE001 - detached owners need durable failure truth
+        # A parent-side reaper disappears when the initiating terminal/App
+        # exits.  The owner itself therefore records the failure in the ledger
+        # that a fresh lifecycle observer already projects, rather than relying
+        # on a disposable caller thread to notice its non-zero exit.
+        try:
+            DispatchReceiptStore(run_id, (), create=False).update_metadata(
+                scheduler_error=f"{type(exc).__name__}: {exc}",
+                scheduler_error_at=datetime.now(timezone.utc).isoformat(
+                    timespec="seconds"
+                ),
+            )
+        except ReceiptContractError:
+            pass
+        print(f"dispatch failed: {exc}")
         return 1
     if args.json:
         print(json.dumps(dispatch_result.to_dict(), ensure_ascii=False, indent=2))

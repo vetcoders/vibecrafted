@@ -3,16 +3,28 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
 from vibecrafted_core import control_plane, ship, wrappers
+from vibecrafted_core.dispatch.supervisor import CellRun
 from vibecrafted_core.lifecycle_delivery import claim_digest_for_text
+from vibecrafted_core.lifecycle_fleet import (
+    CutDispatchContract,
+    join_stage_dispatch,
+    live_vc_dispatch_permitted,
+    load_cut_records,
+    stage_dispatch_error,
+    stage_dispatch_run_id,
+    stage_fleet_receipts,
+)
 from vibecrafted_core.lifecycle_runner import (
     LIFECYCLE_SCHEMA_ID,
     LifecycleRunner,
     LifecycleRunSpec,
     LifecycleSupervisor,
+    _lifecycle_stage_run_id,
     record_stage_worker_completion,
 )
 from vibecrafted_core.workflows.model import WorkflowManifest, WorkflowStage
@@ -112,6 +124,14 @@ def test_lifecycle_runner_honors_reserved_parent_run_id(
     assert state["run_id"] == "parent-session-123"
     assert Path(state["state_path"]).parent.name == "parent-session-123"
     assert state["stages"][0]["launch"]["run_id"] == "child-implement"
+
+
+def test_lifecycle_stage_identity_is_stable_per_attempt_not_content() -> None:
+    first = _lifecycle_stage_run_id("parent-1", "implement", 0)
+
+    assert first == _lifecycle_stage_run_id("parent-1", "implement", 0)
+    assert first != _lifecycle_stage_run_id("parent-2", "implement", 0)
+    assert first != _lifecycle_stage_run_id("parent-1", "implement", 1)
 
 
 def test_lifecycle_runner_preserves_terminal_stage_failure(
@@ -1752,7 +1772,10 @@ def test_mission_stage_agents_parses_inline_and_nested() -> None:
     from vibecrafted_core.lifecycle_runner import _mission_stage_agents
 
     inline = "---\nstage_agents: scaffold=claude, review=codex\n---\nmission"
-    assert _mission_stage_agents(inline) == {"scaffold": "claude", "review": "codex"}
+    assert _mission_stage_agents(inline) == {
+        "scaffold": ["claude"],
+        "review": ["codex"],
+    }
 
     nested = (
         "---\n"
@@ -1764,7 +1787,10 @@ def test_mission_stage_agents_parses_inline_and_nested() -> None:
         "---\n"
         "mission body\n"
     )
-    assert _mission_stage_agents(nested) == {"marbles": "codex", "audit": "claude"}
+    assert _mission_stage_agents(nested) == {
+        "marbles": ["codex"],
+        "audit": ["claude"],
+    }
 
     assert _mission_stage_agents("plain mission, no frontmatter") == {}
 
@@ -1962,3 +1988,291 @@ def test_lifecycle_run_rejects_invalid_stage_casting(
                 )
             )
         )
+
+
+def test_write_stage_with_n_cuts_records_n_cut_id_children(
+    monkeypatch, tmp_path: Path
+) -> None:
+    home = tmp_path / ".vibecrafted"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    monkeypatch.setattr(
+        "vibecrafted_core.lifecycle_runner.load_context_atlas",
+        lambda *_args, **_kwargs: {"ok": True, "command": ["loct", "context"]},
+    )
+    launched: list[str] = []
+
+    def supervisor(contract: CutDispatchContract) -> dict:
+        launched.append(contract.cut_id)
+        return {
+            "accepted": True,
+            "cut_id": contract.cut_id,
+            "spawned": True,
+            "live_dispatch": True,
+            "provider_run_id": f"provider-{contract.cut_id}",
+        }
+
+    def fake_launcher(spec, _source_dir):
+        # The root supervisor must register every child before this detached
+        # stage-worker launch can make a provider session invisible.
+        records = {item["cut_id"]: item for item in load_cut_records("life-impl-fleet")}
+        assert set(records) == {"W0-a", "W0-b", "W1-c"}
+        assert all(record["spawned"] is True for record in records.values())
+        report = tmp_path / f"{spec.skill}.md"
+        report.write_text(f"{spec.skill} ok\n", encoding="utf-8")
+        return {
+            "accepted": True,
+            "run_id": f"{spec.skill}-run",
+            "report": str(report),
+            "transcript": str(tmp_path / f"{spec.skill}.log"),
+            "meta": str(tmp_path / f"{spec.skill}.json"),
+        }
+
+    mission = (
+        "---\n"
+        "cuts:\n"
+        "  - W0-a\n"
+        "  - W0-b\n"
+        "  - W1-c\n"
+        "---\n"
+        "# Mission: fleet the WRITE stage\n"
+    )
+    runner = LifecycleRunner(
+        launcher=fake_launcher,
+        awaiter=lambda payload: {
+            "completed": True,
+            "artifact_ok": True,
+            "report": payload["report"],
+        },
+        fleet_supervisor=supervisor,
+    )
+    state = asyncio.run(
+        runner.run(
+            LifecycleRunSpec(
+                workflow_id="vc-implement",
+                agent="codex",
+                run_id="life-impl-fleet",
+                prompt=mission,
+                root=str(tmp_path),
+                await_stages=True,
+            )
+        )
+    )
+
+    fleet = state["stages"][0]["fleet"]
+    assert fleet["exception_granted"] is True
+    assert fleet["live_dispatch"] is True
+    assert fleet["cuts"] == ["W0-a", "W0-b", "W1-c"]
+    assert launched == ["W0-a", "W0-b", "W1-c"]
+    assert live_vc_dispatch_permitted() is False
+    records = load_cut_records("life-impl-fleet")
+    assert len(records) >= 3
+    by_cut = {item["cut_id"]: item for item in records}
+    for cut_id in ("W0-a", "W0-b", "W1-c"):
+        worktree = Path(by_cut[cut_id]["worktree_path"])
+        assert "worktrees" in worktree.parts
+        assert worktree.parts[-2:] == ("life-impl-fleet", cut_id)
+        assert worktree.is_relative_to(home / "worktrees")
+        assert len(worktree.relative_to(home / "worktrees").parts) == 4
+        assert by_cut[cut_id]["provider_run_id"] == f"provider-{cut_id}"
+
+
+def test_read_stage_with_cuts_does_not_record_fleet(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    monkeypatch.setattr(
+        "vibecrafted_core.lifecycle_runner.load_context_atlas",
+        lambda *_args, **_kwargs: {"ok": True, "command": ["loct", "context"]},
+    )
+    prompts: list[str] = []
+
+    def fake_launcher(spec, _source_dir):
+        prompts.append(spec.prompt)
+        report = tmp_path / f"{spec.skill}.md"
+        report.write_text(f"{spec.skill} ok\n", encoding="utf-8")
+        return {
+            "accepted": True,
+            "run_id": f"{spec.skill}-run",
+            "report": str(report),
+        }
+
+    runner = LifecycleRunner(
+        launcher=fake_launcher,
+        awaiter=lambda payload: {
+            "completed": True,
+            "artifact_ok": True,
+            "report": payload["report"],
+        },
+    )
+    state = asyncio.run(
+        runner.run(
+            LifecycleRunSpec(
+                workflow_id="vc-dou",
+                agent="codex",
+                run_id="life-dou-nofleet",
+                prompt="---\ncuts: W0-a, W0-b\n---\nREAD mission\n",
+                root=str(tmp_path),
+                await_stages=True,
+            )
+        )
+    )
+    assert "fleet" not in state["stages"][0]
+    assert load_cut_records("life-dou-nofleet") == []
+    assert "WRITE fleet exception" not in prompts[0]
+    assert "must not launch external agent lines" in prompts[0]
+
+
+def test_write_stage_prompt_names_fleet_exception_when_cuts_listed(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    monkeypatch.setattr(
+        "vibecrafted_core.lifecycle_runner.load_context_atlas",
+        lambda *_args, **_kwargs: {"ok": True, "command": ["loct", "context"]},
+    )
+    prompts: list[str] = []
+
+    def fake_launcher(spec, _source_dir):
+        prompts.append(spec.prompt)
+        return {
+            "accepted": True,
+            "run_id": "impl-run",
+            "report": str(tmp_path / "implement.md"),
+        }
+
+    asyncio.run(
+        LifecycleRunner(launcher=fake_launcher).run(
+            LifecycleRunSpec(
+                workflow_id="vc-implement",
+                agent="codex",
+                run_id="life-impl-prompt",
+                prompt="---\ncuts: A, B\n---\nship the cuts\n",
+                root=str(tmp_path),
+            )
+        )
+    )
+    assert "WRITE fleet exception" in prompts[0]
+    assert "Listed cuts: A, B" in prompts[0]
+    assert "stage workers still never invoke vc-dispatch" in prompts[0]
+    assert "life-impl-prompt" in prompts[0]
+
+
+def test_public_lifecycle_construction_dispatches_the_fleet_by_default(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """No fleet seam injected at all — the ordinary public construction path.
+
+    Only the provider spawn is bounded (the lowest transport boundary). The
+    real mission parser, the production ``DispatchSupervisor``, the dispatcher's
+    own worktree manager and its durable receipt ledger all execute.
+    """
+    home = tmp_path / ".vibecrafted"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    monkeypatch.setattr(
+        "vibecrafted_core.lifecycle_runner.load_context_atlas",
+        lambda *_args, **_kwargs: {"ok": True, "command": ["loct", "context"]},
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for args in (
+        ("init", "-q"),
+        ("config", "user.email", "agents@vetcoders.io"),
+        ("config", "user.name", "lifecycle-public-test"),
+    ):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+    (repo / "README.md").write_text("seed\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "seed"], cwd=repo, check=True, capture_output=True
+    )
+
+    # Three cuts must be open at once or this barrier never clears.
+    barrier = threading.Barrier(3, timeout=30)
+    observed: dict[str, tuple[str, str]] = {}
+    lock = threading.Lock()
+
+    def cell_launcher(cut, _prompt: str, kind: str):
+        with lock:
+            observed[cut.id] = (cut.agent, cut.runtime_root)
+        barrier.wait()
+        report = Path(cut.artifact_path) / f"{cut.id}.md"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(f"{cut.id} done\n", encoding="utf-8")
+        return CellRun(
+            cut_id=cut.id,
+            kind=kind,
+            accepted=True,
+            run_id=f"provider-{cut.id}",
+            report_path=str(report),
+            exit_code=0,
+        )
+
+    def stage_worker(spec, _source_dir):
+        # The fleet identities must already be durable and named before the
+        # detached stage worker can make anything invisible.
+        records = {item["cut_id"]: item for item in load_cut_records("life-public-run")}
+        assert set(records) == {"W0-a", "W0-b", "W0-c"}
+        assert all(item["spawned"] is True for item in records.values())
+        assert all(item["receipts_path"] for item in records.values())
+        report = tmp_path / f"{spec.skill}.md"
+        report.write_text(f"{spec.skill} ok\n", encoding="utf-8")
+        return {
+            "accepted": True,
+            "run_id": f"{spec.skill}-run",
+            "report": str(report),
+            "transcript": str(tmp_path / f"{spec.skill}.log"),
+            "meta": str(tmp_path / f"{spec.skill}.json"),
+        }
+
+    mission = (
+        "---\n"
+        "cuts: W0-a: codex, W0-b: claude, W0-c: codex\n"
+        "---\n"
+        "# Mission: three disjoint cuts on two providers\n"
+    )
+    runner = LifecycleRunner(
+        launcher=stage_worker,
+        awaiter=lambda payload: {
+            "completed": True,
+            "artifact_ok": True,
+            "report": payload["report"],
+        },
+        cell_launcher=cell_launcher,
+        fleet_await_config={"poll_s": 0.01, "timeout_min": 1.0},
+    )
+    state = asyncio.run(
+        runner.run(
+            LifecycleRunSpec(
+                workflow_id="vc-implement",
+                agent="codex",
+                run_id="life-public-run",
+                prompt=mission,
+                root=str(repo),
+                await_stages=True,
+            )
+        )
+    )
+
+    dispatch_run_id = stage_dispatch_run_id("life-public-run", "implement")
+    # The lifecycle default backgrounds the scheduler so the stage stays
+    # observable while cuts are in flight; join it before reading the ledger.
+    assert join_stage_dispatch(dispatch_run_id, timeout=30)
+    assert stage_dispatch_error(dispatch_run_id) == ""
+
+    fleet = state["stages"][0]["fleet"]
+    assert fleet["exception_granted"] is True
+    assert fleet["live_dispatch"] is True
+    assert fleet["cuts"] == ["W0-a", "W0-b", "W0-c"]
+    assert fleet["dispatch_run_id"] == dispatch_run_id
+
+    # Two providers, three disjoint real worktrees, one scheduler.
+    assert {agent for agent, _ in observed.values()} == {"codex", "claude"}
+    roots = {Path(root) for _, root in observed.values()}
+    assert len(roots) == 3
+    assert all(root.is_dir() and (root / ".git").exists() for root in roots)
+
+    receipts = stage_fleet_receipts("life-public-run", "implement")
+    assert receipts["run_id"] == dispatch_run_id
+    assert receipts["configured_concurrency"] == 3
+    for cut_id in ("W0-a", "W0-b", "W0-c"):
+        assert receipts["cuts"][cut_id]["provider_run_id"] == f"provider-{cut_id}"

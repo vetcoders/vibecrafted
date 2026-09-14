@@ -12,18 +12,6 @@ from .capabilities import (
     foundation_capabilities,
     probe_tool,
 )
-from .control_plane import (
-    Event,
-    RunStatus,
-    await_run,
-    control_plane_home,
-    event_stream_path,
-    lookup_run,
-    read_event_tail,
-    run_snapshot_dir,
-    subscribe_events,
-    sync_state,
-)
 from .doctor import doctor_run, doctor_summary
 from .events import append_event
 from .git import repo_full, repo_full_summary
@@ -53,7 +41,6 @@ from .runtime_paths import (
     vibecrafted_home,
     xdg_config_home,
 )
-from .supervisor_async import AsyncRunHandle, AsyncSupervisor
 
 
 def _version_from_git(package_dir: Path, base: str) -> str | None:
@@ -147,23 +134,35 @@ def _resolve_installed_version() -> str:
 __version__ = _resolve_installed_version()
 
 _LAZY_EXPORTS = {
+    "AsyncRunHandle": ".supervisor_async",
+    "AsyncSupervisor": ".supervisor_async",
     "DELIVERY_EVENT_KINDS": ".events",
     "DeliveryAxes": ".control_plane",
+    "Event": ".control_plane",
     "DeliveryEventKind": ".events",
     "DeliveryStore": ".delivery",
     "DeliveryStoreError": ".delivery",
     "ProviderCapability": ".continuity",
+    "RunStatus": ".control_plane",
     "SettlementLedgerAppendResult": ".settlement_ledger",
     "SettlementLedgerCollision": ".settlement_ledger",
     "SettlementLedgerCorrupt": ".settlement_ledger",
     "SettlementLedgerError": ".settlement_ledger",
     "SettlementLedgerOrderError": ".settlement_ledger",
     "append_delivery_event": ".events",
+    "await_run": ".control_plane",
     "capability_registry": ".continuity",
+    "control_plane_home": ".control_plane",
+    "event_stream_path": ".control_plane",
+    "lookup_run": ".control_plane",
     "probe_provider": ".continuity",
     "read_delivery_axes": ".control_plane",
+    "read_event_tail": ".control_plane",
     "read_settlement_ledger": ".settlement_ledger",
     "settlement_ledger_path": ".settlement_ledger",
+    "run_snapshot_dir": ".control_plane",
+    "subscribe_events": ".control_plane",
+    "sync_state": ".control_plane",
     "WorkflowLaunchSpec": ".workflow",
     "await_launch_truth": ".workflow",
     "build_launch_command": ".workflow",
@@ -220,6 +219,10 @@ def __getattr__(name: str) -> Any:
         import vibecrafted_core.settlement_ledger
 
         module = vibecrafted_core.settlement_ledger
+    elif module_name == ".supervisor_async":
+        import vibecrafted_core.supervisor_async
+
+        module = vibecrafted_core.supervisor_async
     else:  # pragma: no cover - _LAZY_EXPORTS is the whitelist.
         raise AttributeError(f"module {__name__!r} has no lazy module for {name!r}")
 

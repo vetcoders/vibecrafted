@@ -30,6 +30,9 @@ activators** so each repo can stay native to its language ecosystem.
 - **Per-repo extension** — `.husky/local/<hook>.d/*.sh` scripts run in
   addition to template steps; lets repos keep one-off concerns without
   forking the template.
+- **Living Tree integrity** — pre-commit rejects paths claimed by another live
+  session and formats the Git index through a temporary projection, leaving
+  unstaged hunks untouched. Pre-push checks commit objects, not ambient files.
 
 ## Install into a target repo
 
@@ -91,8 +94,9 @@ HUSKY_WARN_RETENTION=5
 
 # Pre-commit steps
 HUSKY_PRECOMMIT_SECRETS=1
+HUSKY_PRECOMMIT_CLAIMS=1
 HUSKY_PRECOMMIT_ENV_FILES=1
-HUSKY_PRECOMMIT_LINT_STAGED=1
+HUSKY_PRECOMMIT_LINT_STAGED=0 # arbitrary tasks mutate the shared worktree
 HUSKY_PRECOMMIT_PRETTIER_STAGED=1
 HUSKY_PRECOMMIT_ESLINT_STAGED=1
 HUSKY_PRECOMMIT_TSC=0
@@ -106,6 +110,7 @@ HUSKY_PRECOMMIT_SH_SHELLCHECK=0
 
 # Pre-push gates
 HUSKY_PREPUSH_PRETTIER_FULL=1
+HUSKY_PREPUSH_RUFF_FULL=1
 HUSKY_PREPUSH_SEMGREP_FULL=1
 HUSKY_PREPUSH_TSC=1
 HUSKY_PREPUSH_LOCT_CYCLES=0
@@ -132,14 +137,14 @@ vendor/
 
 ## Hook responsibilities
 
-| Hook                 | Purpose                                                                                                                                          |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `pre-commit`         | Stage-scoped checks (only staged files): secret scan, env guard, lint-staged, tsc on staged, semgrep on staged, loctree health. WARN-mode aware. |
-| `pre-push`           | Full-repo gates: prettier --check, semgrep --config auto, tsc --noEmit, loctree cycles, cargo clippy, vitest.                                    |
-| `pre-merge-commit`   | Codex-agent / vendored-path cleanup before merge commit.                                                                                         |
-| `prepare-commit-msg` | Adds missing mechanical agent/runtime trailers before `commit-msg`, then appends `Vibecrafted-Warn-Signature` if WARN mode demoted pre-commit.   |
-| `post-commit`        | Warns if agent-artifact filenames (`RAPORT_*`, `_SESSION_*`, etc.) landed in commit.                                                             |
-| `commit-msg`         | Conventional commit regex with optional `[agent/workflow]` prefix.                                                                               |
+| Hook                 | Purpose                                                                                                                                                   |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pre-commit`         | Strict foreign-claim fence plus stage-scoped checks. Formatters rewrite only index blobs from a temporary projection; unstaged hunks stay byte-identical. |
+| `pre-push`           | Ruff, Prettier, and Semgrep run on a temporary tree projected from each pushed tip. Other optional repo gates retain their documented semantics.          |
+| `pre-merge-commit`   | Codex-agent / vendored-path cleanup before merge commit.                                                                                                  |
+| `prepare-commit-msg` | Adds missing mechanical agent/runtime trailers before `commit-msg`, then appends `Vibecrafted-Warn-Signature` if WARN mode demoted pre-commit.            |
+| `post-commit`        | Warns if agent-artifact filenames (`RAPORT_*`, `_SESSION_*`, etc.) landed in commit.                                                                      |
+| `commit-msg`         | Conventional commit regex with optional `[agent/workflow]` prefix.                                                                                        |
 
 ## WARN mode — how it works
 

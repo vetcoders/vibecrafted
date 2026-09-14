@@ -240,6 +240,7 @@ def step_mounts(state: WizardState) -> None:
         "claude_sessions": True,
         "codex_sessions": True,
         "gemini_sessions": True,
+        "cursor_sessions": True,
         "vibecrafted_artifacts": True,
         "vetcoders_config": True,
     }
@@ -418,6 +419,7 @@ MOUNT_SPEC: dict[str, tuple[str, str, str]] = {
     "claude_sessions": ("${HOME}/.claude", "/root/.claude", "rw"),
     "codex_sessions": ("${HOME}/.codex", "/root/.codex", "rw"),
     "gemini_sessions": ("${HOME}/.gemini", "/root/.gemini", "rw"),
+    "cursor_sessions": ("${HOME}/.cursor", "/root/.cursor", "rw"),
     "vibecrafted_artifacts": ("${HOME}/.vibecrafted", "/root/.vibecrafted", "rw"),
     "vetcoders_config": ("${HOME}/.config/vetcoders", "/root/.config/vetcoders", "rw"),
 }

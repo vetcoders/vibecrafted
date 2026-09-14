@@ -62,13 +62,15 @@ _session_dir_for_run_id() {
 }
 
 _find_active_sessions() {
+  local py
+  py="$(spawn_python_bin)"
   find "$MARBLES_DIR" -maxdepth 2 -name "state.json" 2>/dev/null | while IFS= read -r sf; do
     local dir
     dir="$(dirname "$sf")"
     local rid
     rid="$(basename "$dir")"
     local status
-    status=$(python3 - "$sf" <<'PY' 2>/dev/null || echo "?"
+    status=$("$py" - "$sf" <<'PY' 2>/dev/null || echo "?"
 import json
 import sys
 
@@ -145,7 +147,7 @@ cmd_session() {
   mkdir -p "$MARBLES_DIR"
 
   if ((json_mode)); then
-    python3 - "$MARBLES_DIR" <<'PY'
+    "$(spawn_python_bin)" - "$MARBLES_DIR" <<'PY'
 import json, os, sys, glob
 
 marbles_dir = sys.argv[1]
@@ -169,10 +171,12 @@ PY
   printf '%b──────────────────────────────────────────────────────────────%b\n' "$_steel" "$_reset"
 
   local found=0
+  local py
+  py="$(spawn_python_bin)"
   for sf in "$MARBLES_DIR"/*/state.json; do
     [[ -f "$sf" ]] || continue
     local row
-    row=$(python3 - "$sf" <<'PY'
+    row=$("$py" - "$sf" <<'PY'
 import json, sys, os
 
 try:
@@ -220,7 +224,7 @@ cmd_inspect() {
   local sf="$session_dir/state.json"
   [[ -f "$sf" ]] || spawn_die "No state found for $rid"
 
-  python3 - "$sf" <<'PY'
+  "$(spawn_python_bin)" - "$sf" <<'PY'
 import json, sys
 
 with open(sys.argv[1]) as f:
@@ -283,7 +287,7 @@ cmd_delete() {
   [[ -f "$state_file" ]] || spawn_die "No state found for $rid"
 
   local session_meta status watcher_alive
-  session_meta=$(python3 - "$state_file" <<'PY'
+  session_meta=$("$(spawn_python_bin)" - "$state_file" <<'PY'
 import json
 import os
 import sys
@@ -328,8 +332,10 @@ PY
 
   local archived_dir
   archived_dir="$(spawn_archive_marbles_state_dir "$rid" "deleted")" || spawn_die "Could not archive $rid"
-  if [[ -f "$archived_dir/state.json" ]] && command -v python3 >/dev/null 2>&1; then
-    python3 - "$archived_dir/state.json" <<'PY' || true
+  local py
+  py="$(spawn_python_bin)"
+  if [[ -f "$archived_dir/state.json" ]] && command -v "$py" >/dev/null 2>&1; then
+    "$py" - "$archived_dir/state.json" <<'PY' || true
 import datetime
 import json
 import sys
@@ -376,7 +382,7 @@ cmd_gc() {
 
   mkdir -p "$MARBLES_DIR"
 
-  python3 - "$MARBLES_DIR" "$stale_minutes" "$dry_run" "$hard" "$auto_archive" <<'PY'
+  "$(spawn_python_bin)" - "$MARBLES_DIR" "$stale_minutes" "$dry_run" "$hard" "$auto_archive" <<'PY'
 import datetime
 import json
 import os

@@ -30,7 +30,7 @@ def test_bundle_uninstall_removes_owned_payload_and_printed_restore_works(
     runtime_bin = runtime_home / "bin"
     uv_tool = home / ".local" / "share" / "uv" / "tools" / "vibecrafted"
     launcher = home / ".local" / "bin" / "vibecrafted"
-    helper = home / ".config" / "vetcoders" / "vc-skills.sh"
+    helper = home / ".config" / "vibecrafted" / "shell" / "vc-skills.sh"
     zshrc = home / ".zshrc"
 
     monkeypatch.setenv("HOME", str(home))

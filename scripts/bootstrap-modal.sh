@@ -26,7 +26,7 @@
 #   curl -fsSL .../bootstrap-modal.sh | bash -s -- \
 #     --branch release/v2.0.1 \
 #     --ts-authkey tskey-auth-XXXX-YYYY \
-#     --ts-hostname runtime-dragon \
+#     --ts-hostname runtime-host-a \
 #     --workdir /opt/vibecrafted
 #
 # Env overrides (in addition to flags):

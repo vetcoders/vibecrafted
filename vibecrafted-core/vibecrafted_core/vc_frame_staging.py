@@ -1,8 +1,8 @@
 """Stdlib-only vc-frame config materialization for unpublished runtimes.
 
 This module deliberately has no package-relative imports.  The installer loads
-the copy inside a candidate runtime before publishing that runtime, while the
-installed package reuses the same functions for explicit config maintenance.
+the copy inside a candidate runtime before publishing that runtime. Published
+generations and active product configuration are never materializer targets.
 """
 
 from __future__ import annotations
@@ -18,6 +18,9 @@ _DEFAULT_ZSH_RE = re.compile(r'default_shell\s+"zsh"')
 _EXEC_ZSH_RE = re.compile(r"exec\s+(?:/bin/)?zsh\s+-l")
 _COPY_PBCOPY_RE = re.compile(r'copy_command\s+"pbcopy"')
 _PBCOPY_STDIN_RE = re.compile(r"\bpbcopy(?=\s*<)")
+_EXECUTABLE_CONFIG_NAMES = frozenset(
+    {"pane-python", "vc-agent-workshop.py", "vc-start-here.py"}
+)
 
 
 def resolve_pane_shell(path_env: str | None = None) -> str:
@@ -91,16 +94,22 @@ def materialize_vc_frame_config(
         raise OSError(f"vc-frame config source is not a directory: {source}")
     if not (source_root / "config.kdl").is_file():
         raise OSError(f"vc-frame config source has no config.kdl: {source}")
-    if destination.is_symlink():
-        raise OSError(
-            f"refusing to materialize vc-frame config through symlink: {destination}"
-        )
-    if destination.exists():
-        if not destination.is_dir():
+    # Never refresh an existing tree. Only the installer may supply a fresh,
+    # unpublished destination; in particular a missing generated/ tree inside
+    # a published generation is an install error, not permission to repair it.
+    for ancestor in (destination, *destination.parents):
+        if ancestor.is_symlink():
             raise OSError(
-                f"vc-frame config destination is not a directory: {destination}"
+                f"refusing vc-frame materialization through symlink: {ancestor}"
             )
-        shutil.rmtree(destination)
+        if (ancestor / "runtime-manifest.json").exists():
+            raise OSError(
+                f"refusing vc-frame materialization in sealed runtime: {ancestor}"
+            )
+    if destination.exists():
+        raise OSError(
+            f"vc-frame materialization destination already exists: {destination}"
+        )
     destination.mkdir(parents=True, exist_ok=False)
 
     for root, directories, files in os.walk(source_root):
@@ -124,7 +133,7 @@ def materialize_vc_frame_config(
                 )
             else:
                 shutil.copy2(source_file, destination_file)
-            if name.endswith(".sh"):
+            if name.endswith(".sh") or name in _EXECUTABLE_CONFIG_NAMES:
                 mode = destination_file.stat().st_mode
                 destination_file.chmod(
                     mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH

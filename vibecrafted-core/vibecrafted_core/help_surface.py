@@ -11,9 +11,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .package_resources import skills_path
+from .workflow import SUPPORTED_AGENTS
 from .workflows.registry import workflow_definition, workflow_manifest
 
-AGENT_SELECTOR = "<claude|codex|agy|junie|grok>"
+# Canonical fleet display order. Membership is derived from SUPPORTED_AGENTS so
+# a fleet change lands here automatically; `swarm` is a research meta-lane, not
+# a provider CLI, so it never appears in agent selectors.
+_FLEET_AGENT_ORDER = ("claude", "codex", "agy", "junie", "grok", "cursor")
+FLEET_AGENTS = tuple(agent for agent in _FLEET_AGENT_ORDER if agent in SUPPORTED_AGENTS)
+AGENT_SELECTOR = "<" + "|".join(FLEET_AGENTS) + ">"
+AGENTS_LINE = " · ".join(FLEET_AGENTS)
 
 
 @dataclass(frozen=True)
@@ -205,8 +212,8 @@ WORKFLOW_HELP: dict[str, WorkflowHelp] = {
             "carry the chosen cut forward",
         ),
         (
-            'vibecrafted partner codex --prompt "Help me choose the right architecture"',
-            "vc-partner claude --file /path/to/context.md",
+            "vibecrafted partner codex",
+            "vibecrafted partner claude --runtime plain",
         ),
     ),
     "paste": WorkflowHelp(
@@ -274,7 +281,10 @@ WORKFLOW_HELP: dict[str, WorkflowHelp] = {
             "vc-research codex agy --file /path/to/research-plan.md",
             'vibecrafted research trio claude codex agy --prompt "Compare independent evidence"',
         ),
-        ("uno|duo|trio declare an exact lane count and require that many agents.",),
+        (
+            "uno|duo|trio declare an exact positional lane count and require that many agents.",
+            "omitting uno|duo|trio uses research.yaml lanes (any N, including four); lane_count truncates that roster.",
+        ),
     ),
     "review": WorkflowHelp(
         "Bounded PR, branch, commit-range, or artifact-pack review with findings-first output.",
@@ -311,7 +321,7 @@ WORKFLOW_HELP: dict[str, WorkflowHelp] = {
             "append pass, pass-with-gaps, or block and project f/x/n",
         ),
         (
-            'vibecrafted trust codex --prompt "Judge the commits from this run"',
+            'vibecrafted trust <claude|codex|agy|junie|grok|cursor> --prompt "Judge the commits from this run"',
             "vc-trust claude --file /path/to/trust-brief.md",
             "python -m vibecrafted_core.trust inspect <sha>",
         ),
@@ -351,14 +361,57 @@ WORKFLOW_HELP: dict[str, WorkflowHelp] = {
         (
             'vibecrafted workflow codex --prompt "Examine and implement the fix"',
             "vc-workflow claude --file /path/to/brief.md",
+            (
+                "vibecrafted workflow claude --model claude-fable-5-1 --worktree true "
+                "--permissions auto --sandbox true --repo ~/Projects/app "
+                '--prompt "Ship it in an isolated, sandboxed checkout"'
+            ),
+            (
+                "vibecrafted workflow agy --session <provider-uuid> "
+                "--file /path/to/brief.md --runtime headless"
+            ),
+        ),
+        (
+            "--session continues a native provider session; it is not a run id, PID, or workspace id",
+            "task continuation with --session is headless; fork remains a separate verb",
         ),
     ),
 }
 
 
+# Compact-help verbs owned by ``vibecrafted_core.cli`` (not workflow skills).
+# The shell deck must route these to Python. Do not invent ``vc-*`` twins:
+# they are absent from the installer owned-alias inventory on purpose.
+CORE_SURFACE_COMMANDS = (
+    "claims",
+    "message",
+    "relocate",
+    "resume-session",
+    "settlements",
+)
+
+
 def has_workflow_help(topic: str) -> bool:
     """Return True when ``topic`` (with an optional ``vc-`` prefix) has help content."""
     return topic.removeprefix("vc-") in WORKFLOW_HELP
+
+
+def advertised_compact_verbs(version: str = "test") -> tuple[str, ...]:
+    """Return command tokens listed under the compact ``Commands:`` block.
+
+    ``<skill>`` is a placeholder, not a verb. The rendered compact help is
+    the owner; this parser exists so tests do not grow a second manual list.
+    """
+    section = (
+        render_root_help(version).split("Commands:", 1)[1].split("Ship cycle:", 1)[0]
+    )
+    verbs: list[str] = []
+    for line in section.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("<"):
+            continue
+        verbs.append(stripped.split()[0])
+    return tuple(verbs)
 
 
 def _skill_version(topic: str) -> str:
@@ -392,24 +445,77 @@ Commands:
   init [agent]         Orient an agent in this repo
   <skill> <agent>      Run a workflow with an agent
   resume <agent>       Continue a stopped run (--run-id) or a provider session
+  fork <agent>         Branch a provider session (--session | --run-id) into a new one: claude, codex, grok
   resume-session       Continue an exact provider session as a tracked run
+  relocate             Snapshot open sessions + worktrees for a machine move (snapshot|restore)
   status               Today's agent activity
   doctor               Installation health — pass/fail
   receipt              Delivery/runtime receipt (source ↔ installed)
+  message              Persist/inspect run-addressed Codex queue receipts
+  capabilities         Launcher catalog: agents, models, controls, environments (--json)
+  claims               Atomic Living Tree path claims (acquire|heartbeat|status|list|release)
   settlements          Read-only f/x/n ledger query (summary|list|inspect)
   update               Update to the latest release
+  uninstall            Remove runtime; preserve Founder data and unknowns
   help [topic|--all]   This deck · full reference
 
 Ship cycle:
   {cycle}
   More workflows: vibecrafted help --all
 
-Agents:  claude · codex · agy · junie · grok
+Agents:  {AGENTS_LINE}
 
 Examples:
   vibecrafted init claude
   vibecrafted implement codex -p "Ship dark mode"
   vibecrafted marbles claude -p "Loop until clean"
+  vibecrafted workflow claude --model claude-fable-5-1 --worktree true --permissions auto --sandbox true --repo ~/Projects/app -p "Ship it"
+  vibecrafted uninstall --dry-run
+
+Repository:
+  --repo <path>  selects the repository for every repository-aware command, from any
+                 directory (even outside Git). --root is the legacy spelling; passing
+                 both with different paths is an error, never a silent pick.
+
+Words:
+  run        one dispatched agent job; its report + transcript live under ~/.vibecrafted
+  stage      one step of the ship cycle above (scaffold, implement, review, …)
+  workspace  the repository root a run works in, tracked by the control plane
+""".lstrip("\n")
+
+
+def render_message_help() -> str:
+    """Render the fixed help text for ``vibecrafted message``.
+
+    Codex ``queue --thread`` is the only supported provider steering
+    primitive. Do not advertise Claude or other-provider steering.
+    """
+    return """
+⚒  message
+─────────────────────────────────────────
+  Persist and inspect run-addressed Codex queue receipts.
+
+Usage:
+  vibecrafted message --run-id <id> --file <path> \\
+    [--idempotency-key <key>] [--retry] [--json]
+  vibecrafted message --inspect <message-id>
+
+Options:
+  --run-id <id>            Tracked run that already has a Codex thread
+  --file <path>            UTF-8 message body (kept out of argv)
+  --idempotency-key <key>  Replay key; same body+run is a receipt replay
+  --retry                  Resubmit only unresolved or failed receipts
+  --inspect <message-id>   Read one durable receipt (JSON)
+  --json                   Machine-readable send receipt
+
+Contract:
+  Codex `queue --thread` is the only supported steering primitive.
+  This command does not start a worker, does not exec-resume, and does
+  not invent Claude (or any other provider) steering. A missing provider
+  session is a bounded refusal. provider_accepted is never an agent ACK.
+
+Example:
+  vibecrafted message --run-id work-... --file ./note.txt --json
 """.lstrip("\n")
 
 
@@ -430,7 +536,7 @@ Options:
   -f, --prompt-file <path>  Read the continuation prompt from a file
   --prompt-stdin            Read the prompt from stdin and keep it out of argv
   --runtime                 Not accepted: this command is always headless
-  --root <path>             Repository root
+  --repo <path>             Repository, usable from any directory (--root: legacy spelling)
   --source-dir <path>       Vibecrafted core source/package root
   --model <name>            Agent model override where the runner supports it
   --json                    Machine-readable launch receipt
@@ -453,7 +559,7 @@ def _usage_lines(topic: str) -> list[str]:
             "  vibecrafted research [agents...] [flags]",
             "  vibecrafted research <uno|duo|trio> <agents...> [flags]",
             "  vibecrafted swarm [agents...] [flags]  # alias for research",
-            "  vc-research [agents...] [flags]",
+            "  vc-research [agents...] [flags]  # YAML lanes when arity is omitted",
         ]
     if topic == "paste":
         return ["  vibecrafted paste [--skill <workflow>] [flags]"]
@@ -477,18 +583,31 @@ def _option_lines(topic: str) -> list[str]:
     if topic == "paste":
         return [
             "  --skill <workflow>              Workflow to prepare (default: workflow)",
-            "  --root <path>                   Repository root",
+            "  --repo <path>                   Repository, from any directory (--root: legacy)",
             "  --print-prompt                  Print the prepared prompt",
             "  --dry-run                       Resolve without launching",
             "  --json                          Machine-readable output",
         ]
+    if topic == "partner":
+        return [
+            "  -p, --prompt <text>            Extra seed context for /vc-partner (not a job)",
+            "  -f, --file <path.md>           Extra seed file context (not a job)",
+            "  --runtime <terminal|visible|plain>  Interactive face (default: terminal)",
+            "  --repo <path>                  Repository, from any directory (--root: legacy)",
+        ]
     lines = [
         "  -p, --prompt <text>            Inline prompt",
         "  -f, --file <path.md>           Input file as prompt context",
-        "  --prompt-stdin                 Read prompt from stdin; no argv/temp copy",
-        "  --runtime <terminal|headless>  Worker surface (default: headless)",
-        "  --root <path>                  Repository root",
-        "  --model <name>                 Agent model override",
+        "  --prompt-stdin                 Read prompt from stdin into a private snapshot",
+        "  --runtime <terminal|headless>  Presentation (default: headless)",
+        "  --repo <path|org/name>         Repository (--root: identical legacy alias)",
+        "  --base <ref|SHA|HEAD>          Pinned commit; local HEAD or identity remote HEAD by default",
+        "  --execution-runtime <living-tree|local-worktrees>  Execution location",
+        "  --worktree [true|false]        Alias for local-worktrees; dirty parent preserved",
+        "  --permissions <policy>         bypass|auto|accept-edits|read-only, enforced by the agent CLI (default: bypass)",
+        "  --sandbox [true|false]         Agent CLI sandbox on/off; refused before launch when it cannot be enforced",
+        "  --model <name>                 Exact model; CLI > plan frontmatter > provider default",
+        "  --session <id|current|last>    Continue this provider-native session (never a work-* run id)",
     ]
     definition = workflow_definition(topic)
     if definition and definition.supports_count:

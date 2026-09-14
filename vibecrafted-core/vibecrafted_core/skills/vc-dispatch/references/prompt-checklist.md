@@ -32,7 +32,9 @@ Must cover (assembled FROM context, not copied from a template):
       UNTOUCHABLE paths/values, config precedence
 - [ ] language/toolchain footguns relevant to the repo (e.g. Rust 2024
       if-let temp scope: snapshot-into-let before `if let` on locks)
-- [ ] hard prohibitions: ZERO push/PR/release; NEVER --no-verify; repo
+- [ ] hard prohibitions: ZERO worker push/PR/release; `--no-verify` only for a
+      declared Founder-authorized local compile-embargo checkpoint with a
+      skipped-gate receipt; push with it is Founder-only; repo
       linter taboos (no unwrap(), no sleep() in tests, …)
 - [ ] commit contract: format + trailers the hook enforces (worker's own
       agent/runtime identity, real session id, date command)

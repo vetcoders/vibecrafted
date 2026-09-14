@@ -12,6 +12,7 @@ order: 10
 ```bash
 vibecrafted doctor
 vibecrafted doctor --verbose      # list every check, including passing ones
+vibecrafted doctor --release      # VERSION vs GitHub Latest + last source gate
 ```
 
 ## What doctor audits
@@ -28,6 +29,18 @@ vibecrafted doctor --verbose      # list every check, including passing ones
 Launcher audits are scoped by **ownership, not naming**: doctor judges only the launchers Vibecrafted publishes itself (the installer's wrappers and Python entrypoints, the legacy packs, and the provider-published `vc-slack`). Another product that shares `~/.local/bin` and the `vc-` prefix — and legitimately links into its own checkout — keeps its own installation contract and is left alone.
 
 This is the same audit that gates publication of a new generation: what fails a publish also fails doctor afterward.
+
+## Release valve (`--release`)
+
+Default doctor does **not** ask GitHub anything. That is why VERSION could sit at 4.1.0 while GitHub Latest and the last successful `Release source gate` stayed on v3.5.0, and every local gate still printed green.
+
+`vibecrafted doctor --release` is the named probe:
+
+- local `VERSION` (the checkout file, stamp stripped to `vX.Y.Z`)
+- `gh release view --json tagName` (GitHub Latest)
+- latest `gh run list --workflow "Release source gate" --limit 1` conclusion
+
+Mismatch, a missing release, or a non-success source-gate conclusion is **red** and names the operator button: **tag/publish**. Missing `gh` is a loud **warn**, never a silent skip and never a fake green. The probe is off the public network in unit tests; it only talks to GitHub when you actually run `--release`.
 
 ## Reading the output
 

@@ -43,6 +43,8 @@ pub mod events;
 pub mod model;
 pub mod read;
 pub mod scaffold;
+pub mod scaffold_verifiers;
+pub mod workspace;
 
 pub use events::{
     ConnectionWindow, EventBatch, EventStream, STREAM_BATCH_MAX_BYTES, STREAM_BATCH_MAX_EVENTS,
@@ -59,12 +61,20 @@ pub use model::{
     is_active_state, is_final_state, merge_status, operator_session_name, parse_iso,
     skill_from_code, state_health,
 };
-pub use read::{is_safe_run_id, vibecrafted_home, ControlPlane, StateView};
+pub use read::{ControlPlane, StateView, is_safe_run_id, vibecrafted_home};
 pub use scaffold::{
     SCAFFOLD_EXPORT_SCHEMA_VERSION, SCAFFOLD_MANIFEST_SCHEMA_JSON, SCAFFOLD_SCHEMA_VERSION,
     ScaffoldArtifact, ScaffoldArtifactDeclaration, ScaffoldArtifactPatch, ScaffoldArtifactRole,
     ScaffoldArtifactStore, ScaffoldCatalog, ScaffoldCatalogSkip, ScaffoldChange,
     ScaffoldCheckpoint, ScaffoldCheckpointPatch, ScaffoldDoctorError, ScaffoldDoctorReport,
     ScaffoldError, ScaffoldExportArtifact, ScaffoldExportBundle, ScaffoldManifest,
-    ScaffoldPlanSummary, ScaffoldResult, ScaffoldStatusPatch, ScaffoldWorkspace, doctor_plan_root,
+    ScaffoldPlanSummary, ScaffoldResult, ScaffoldStatusPatch, ScaffoldVerifierProbe,
+    ScaffoldWorkspace, apply_plan_geometry, collect_delivery_verifiers, doctor_plan_root,
+    doctor_plan_root_in_repo,
+};
+pub use scaffold_verifiers::{execute_brief_verifiers, extract_brief_verifier_commands};
+pub use workspace::{
+    FrameSessionInventory, FrameSessionOwner, LiveFrameSession, RuntimeSessionAttachment,
+    WorkspaceCatalogProjection, WorkspaceProjection, WorkspaceProjectionError, WorkspaceRecord,
+    WorkspaceSession,
 };

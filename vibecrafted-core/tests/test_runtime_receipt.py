@@ -21,10 +21,14 @@ _SOURCE_PAYLOAD = {
 }
 _RUNTIME_FILE_BYTES = {
     "VERSION": f"{_RUNTIME_VERSION}\n".encode(),
+    "scripts/distribution_manifest.py": b"MANIFEST = True\n",
+    "scripts/installer_brand.py": b"BRAND = True\n",
     "scripts/vibecrafted": b"#!/usr/bin/env bash\n",
+    "scripts/vetcoders_install.py": b"#!/usr/bin/env python3\n",
     pc.RUNTIME_GENERATION_CANONICAL_CONFIG: b"layout {}\n",
     pc.RUNTIME_GENERATION_ENTRYPOINT: b"#!/usr/bin/env bash\n",
     "vibecrafted-core/vibecrafted_core/product_contract.py": b"contract = True\n",
+    "vibecrafted-core/vibecrafted_core/runtime_pack_contract.py": b"pack = True\n",
     "vibecrafted-core/vibecrafted_core/walkaround_runner.py": b"runner = True\n",
     "vibecrafted-core/vibecrafted_core/schemas/unified_product.schema.v1.json": (
         b"{}\n"
@@ -125,6 +129,34 @@ def test_parse_installed_provenance_refuses_without_sha() -> None:
     p = rr.parse_installed_provenance("vibecrafted 3.6.0")
     assert isinstance(p["installed_sha"], dict)
     assert p["installed_sha"]["value"] == "unknown"
+
+
+def test_runtime_foundation_provenance_uses_verified_manifest_sha(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "4.3.0+gdeadbee"
+    binary = root / "bin" / "aicx"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"aicx-binary")
+    digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+    revision = "215b8060fc56f3968e5a9a83a85cba845149a8bf"
+    (root / "runtime-foundations.json").write_text(
+        json.dumps(
+            {
+                "schema": "io.vetcoders.vibecrafted.runtime-foundations.v1",
+                "source_revisions": {"aicx": revision},
+                "files": {"aicx": digest},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    proof = rr._runtime_foundation_provenance(str(binary), foundation="aicx")
+
+    assert proof is not None
+    assert proof["installed_sha"] == revision
+    assert proof["installed_dirty"] is False
+    assert proof["sha_source"] == "runtime_foundations"
 
 
 def test_parse_dirty_false_is_not_dirty_build() -> None:
@@ -279,7 +311,7 @@ def test_vibecrafted_receipt_uses_checkout_free_runtime_manifest(
     tmp_path: Path, monkeypatch
 ) -> None:
     generation, deck, manifest = _runtime_generation_fixture(tmp_path)
-    assert len(manifest["hashes"]) == 9
+    assert len(manifest["hashes"]) == 13
     assert (
         pc.verify_installed_runtime_generation(generation, expected_entrypoint=deck)
         == manifest

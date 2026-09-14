@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
 import os
 import shlex
 import shutil
@@ -25,12 +26,6 @@ from .package_resources import (
 )
 from .vc_frame_delivery import (
     OPERATOR_SCRIPT_NAMES,
-    classify_view_path,
-    frontier_root,
-    list_dangling_frontier_links,
-    prefer_repo_vc_frame,
-    resolve_clipboard_command,
-    resolve_pane_shell,
     tools_current_path,
     vc_frame_user_config_dir,
 )
@@ -62,7 +57,12 @@ def _vc_frame_launcher_findings(
             _Finding(
                 "warn",
                 "vc-frame:path",
-                "vc-frame not found on PATH — run `make install` or the foundations installer",
+                (
+                    "optional: vc-frame (cockpit) not on PATH — headless runs work "
+                    "without it; it ships with the Vibecrafted desktop app, or "
+                    "maintainers build it via `make install` with the vc-frame "
+                    "checkout beside this repo"
+                ),
             )
         ]
     path = Path(resolved)
@@ -81,17 +81,41 @@ def _vc_frame_launcher_findings(
                 "vc-frame:path",
                 f"vc-frame on PATH ({path}) is a raw binary, not the product "
                 "wrapper. Claude/CLI will use TMPDIR sockets and overflow "
-                "macOS sockaddr_un. Re-run the foundations installer.",
+                "macOS sockaddr_un. Reinstall the verified Runtime Pack.",
             )
         ]
+    pin_owner = path
     if "pin_darwin_socket_dir" not in head:
+        exec_target = _launcher_exec_target(head)
+        runtime_home = _runtime_home_root()
+        target_head = ""
+        if exec_target is not None and _is_inside(exec_target, runtime_home):
+            try:
+                target_head = exec_target.read_text(encoding="utf-8", errors="ignore")[
+                    :4096
+                ]
+            except OSError:
+                target_head = ""
+        if "pin_darwin_socket_dir" not in target_head:
+            return [
+                _Finding(
+                    "fail",
+                    "vc-frame:path",
+                    f"vc-frame on PATH ({path}) is a wrapper without the Darwin "
+                    "/tmp socket pin. Update scripts/vc-frame-product-entry.sh "
+                    "and reinstall the product entry.",
+                )
+            ]
+        pin_owner = exec_target
+    native = pin_owner.parent.parent / "libexec" / "vc-frame"
+    if not _is_native_executable(native):
         return [
             _Finding(
                 "fail",
                 "vc-frame:path",
-                f"vc-frame on PATH ({path}) is a wrapper without the Darwin "
-                "/tmp socket pin. Update scripts/vc-frame-product-entry.sh "
-                "and reinstall the product entry.",
+                f"product wrapper on PATH resolves through {pin_owner}, but its "
+                f"generation has no native vc-frame at {native}. The wrapper is "
+                "not a usable installation; install a complete Runtime Pack.",
             )
         ]
     kind = "symlink" if path.is_symlink() else "file"
@@ -99,9 +123,27 @@ def _vc_frame_launcher_findings(
         _Finding(
             "ok",
             "vc-frame:path",
-            f"product wrapper on PATH ({kind} {path} -> {target})",
+            f"product wrapper on PATH ({kind} {path} -> {target}; pin={pin_owner})",
         )
     ]
+
+
+def _is_native_executable(path: Path) -> bool:
+    """Recognise the native provider without executing a potentially live TUI."""
+    try:
+        if not path.is_file() or not os.access(path, os.X_OK):
+            return False
+        magic = path.read_bytes()[:4]
+    except OSError:
+        return False
+    return magic == b"\x7fELF" or magic in {
+        b"\xca\xfe\xba\xbe",
+        b"\xbe\xba\xfe\xca",
+        b"\xfe\xed\xfa\xce",
+        b"\xce\xfa\xed\xfe",
+        b"\xfe\xed\xfa\xcf",
+        b"\xcf\xfa\xed\xfe",
+    }
 
 
 def _uv_tool_shim() -> Path:
@@ -459,7 +501,16 @@ def _server_supervision_findings(
             )
         ]
 
-    resolved_launcher = which("vibecrafted")
+    # The public wrapper records the launcher used before it prepends the
+    # immutable generation's bin directory to PATH and execs the Python CLI.
+    # Re-running `which` after that handoff finds the inner deck, whose hash is
+    # intentionally different from the LaunchAgent's declared launcher.
+    declared_launcher = os.environ.get("VIBECRAFTED_DECLARED_LAUNCHER", "").strip()
+    resolved_launcher = (
+        declared_launcher
+        if declared_launcher and Path(declared_launcher).is_file()
+        else which("vibecrafted")
+    )
     if not resolved_launcher:
         return [
             _Finding(
@@ -477,9 +528,11 @@ def _server_supervision_findings(
         status_reader = status_reader or service_status
 
     try:
-        service_launcher = _uv_tool_shim()
-        if not service_launcher.is_file():
-            service_launcher = Path(resolved_launcher)
+        # The launcher that wins PATH is the installed runtime authority.  A
+        # leftover uv-tool shim may point at an older generation and must not
+        # make doctor inspect a different service identity than the public
+        # `vibecrafted server service status` command.
+        service_launcher = Path(resolved_launcher)
         config = config_factory(launcher=service_launcher)
         status = status_reader(config)
     except (
@@ -499,8 +552,23 @@ def _server_supervision_findings(
         ]
 
     supervisor_pid = getattr(status, "supervisor_pid", None)
+    if not bool(getattr(status, "installed", False)):
+        # Never installed is not a broken install. Headless runs, observe,
+        # await and reports work without the LaunchAgent; only the live
+        # dashboard/server surface needs it. A stranger who never asked for a
+        # daemon must not see a red line for one.
+        return [
+            _Finding(
+                "warn",
+                "server-supervisor",
+                "optional: control-plane server service is not installed — "
+                "headless runs, observe/await and reports work without it; "
+                "for the live server/dashboard run "
+                "`vibecrafted server service install`",
+            )
+        ]
     required = {
-        "installed": bool(getattr(status, "installed", False)),
+        "installed": True,
         "loaded": bool(getattr(status, "loaded", False)),
         "supervisor_live": bool(getattr(status, "supervisor_live", False)),
         "supervisor_verified": bool(getattr(status, "supervisor_verified", False)),
@@ -611,353 +679,177 @@ def _packaged_asset_findings() -> list[_Finding]:
     return findings
 
 
+def _config_entry_matches(candidate: Path, expected: Path) -> bool:
+    """True only for an unaliased physical copy with identical closed contents."""
+
+    def inventory(root: Path) -> dict[str, tuple[str, str, int]] | None:
+        if root.is_symlink():
+            return None
+        if root.is_file():
+            try:
+                return {
+                    ".": (
+                        "file",
+                        hashlib.sha256(root.read_bytes()).hexdigest(),
+                        root.stat().st_mode & 0o777,
+                    )
+                }
+            except OSError:
+                return None
+        if not root.is_dir():
+            return None
+        entries: dict[str, tuple[str, str, int]] = {}
+        for path in sorted(root.rglob("*")):
+            if path.name == ".DS_Store":
+                continue
+            if path.is_symlink():
+                return None
+            relative = path.relative_to(root).as_posix()
+            if path.is_dir():
+                entries[relative] = ("dir", "", path.stat().st_mode & 0o777)
+            elif path.is_file():
+                try:
+                    entries[relative] = (
+                        "file",
+                        hashlib.sha256(path.read_bytes()).hexdigest(),
+                        path.stat().st_mode & 0o777,
+                    )
+                except OSError:
+                    return None
+            else:
+                return None
+        return entries
+
+    try:
+        candidate_inventory = inventory(candidate)
+        return candidate_inventory is not None and candidate_inventory == inventory(
+            expected
+        )
+    except OSError:
+        return False
+
+
+def _runtime_config_generation(tools_home: Path | None = None) -> Path:
+    """Inspect the launcher's selected generation; never select a dev config."""
+    selected = (
+        os.environ.get("VIBECRAFTED_RUNTIME_ROOT") if tools_home is None else None
+    )
+    root = Path(selected).expanduser() if selected else tools_current_path(tools_home)
+    if not root.is_absolute():
+        raise OSError(f"selected runtime path is not absolute: {root}")
+    return root.resolve(strict=True)
+
+
 def _vc_frame_delivery_findings(
     *,
     home: Path | None = None,
     tools_home: Path | None = None,
     path_env: str | None = None,
 ) -> list[_Finding]:
-    """Config delivery health: view channel, themes, pane-shell, frontier zombies."""
+    """Inspect installer-owned copies, allowing preferences only in config.kdl."""
     findings: list[_Finding] = []
     view = vc_frame_user_config_dir(home)
-    current = tools_current_path(tools_home)
-    package = current / "vibecrafted-core" / "vibecrafted_core"
-    store_cfg = package / "config" / "vc-frame"
-    checkout = None
+    repair = (
+        "run make install from the Vibecrafted checkout with your verified Runtime Pack"
+    )
     try:
-        from .frontier_assets import vc_frame_config_source
-
-        checkout = vc_frame_config_source()
-    except FileNotFoundError:
-        pass
-    use_repo = prefer_repo_vc_frame()
-    generated = package / "runtime" / "generated" / "vc-frame"
-    materialized_paths = (
-        generated / "config.kdl",
-        generated / "layouts",
-        generated / "themes",
-        generated / "vc-composer.sh",
-    )
-    materialized = all(
-        path.is_file() if path.suffix else path.is_dir() for path in materialized_paths
-    )
-    if use_repo:
-        findings.append(
-            _Finding(
-                "ok",
-                "vc-frame:runtime",
-                "dev-checkout channel does not require a published config generation",
-            )
-        )
-        view_repair = "`vibecrafted config install --prefer-repo`"
-    elif materialized:
-        findings.append(
-            _Finding(
-                "ok",
-                "vc-frame:runtime",
-                f"pre-materialized config present under {generated}",
-            )
-        )
-        view_repair = "`vibecrafted config install`"
-    else:
-        findings.append(
+        generation = _runtime_config_generation(tools_home)
+    except (OSError, RuntimeError) as exc:
+        return [
             _Finding(
                 "fail",
                 "vc-frame:runtime",
-                f"published runtime has no complete pre-materialized config "
-                f"under {generated} — run `vibecrafted update`",
+                f"selected runtime unavailable: {exc}; {repair}",
             )
-        )
-        view_repair = "`vibecrafted update`"
-
-    channels: list[str] = []
-    for name in ("config.kdl", "layouts", "themes"):
-        path = view / name
-        ch = classify_view_path(path, store_current=store_cfg, checkout=checkout)
-        channels.append(ch)
-        if ch == "DANGLING":
+        ]
+    generated = (
+        generation / "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame"
+    )
+    for root in (view, generated):
+        if not root.is_dir() or any(p.is_symlink() for p in (root, *root.parents)):
             findings.append(
                 _Finding(
                     "fail",
                     "vc-frame:view",
-                    f"{path} is a dangling symlink — run {view_repair}",
+                    f"missing or aliased physical config tree: {root}; {repair}",
                 )
             )
-        elif ch == "STALE-FILE":
-            findings.append(
-                _Finding(
-                    "fail",
-                    "vc-frame:view",
-                    f"{path} is a regular file shadowing the store view — "
-                    f"run {view_repair} (backs up as .stale.* when wiring)",
-                )
-            )
-        elif ch == "missing":
-            findings.append(
-                _Finding(
-                    "warn",
-                    "vc-frame:view",
-                    f"{path} missing — run {view_repair}",
-                )
-            )
-        elif ch == "foreign":
-            findings.append(
-                _Finding(
-                    "warn",
-                    "vc-frame:view",
-                    f"{path} is user-managed (foreign) — not store/dev view",
-                )
-            )
-        else:
-            findings.append(_Finding("ok", "vc-frame:view", f"{name}: {ch} -> {path}"))
-
-    # themes presence under view or source
-    themes_dir = view / "themes"
-    if themes_dir.is_dir() or themes_dir.is_symlink():
-        try:
-            resolved = themes_dir.resolve(strict=True)
-            theme_files = list(resolved.glob("*.kdl"))
-            if theme_files:
-                findings.append(
-                    _Finding(
-                        "ok",
-                        "vc-frame:themes",
-                        f"{len(theme_files)} theme file(s) under {themes_dir}",
-                    )
-                )
-            else:
-                findings.append(
-                    _Finding(
-                        "warn",
-                        "vc-frame:themes",
-                        f"themes dir empty: {themes_dir}",
-                    )
-                )
-        except OSError:
-            findings.append(
-                _Finding(
-                    "fail",
-                    "vc-frame:themes",
-                    f"themes path does not resolve: {themes_dir}",
-                )
-            )
-    else:
-        findings.append(
-            _Finding(
-                "warn",
-                "vc-frame:themes",
-                f"themes view missing at {themes_dir}",
-            )
-        )
-
-    # Host commands: every shipped KDL must match the available shell/clipboard.
-    shell = resolve_pane_shell(path_env)
-    clipboard = resolve_clipboard_command(path_env)
-    layouts = view / "layouts"
-    unresolved: list[str] = []
-    kdl_files: list[Path] = []
-    config_file = view / "config.kdl"
-    if config_file.exists():
-        kdl_files.append(config_file)
-    if layouts.exists():
-        try:
-            kdl_files.extend(sorted(layouts.resolve().glob("*.kdl")))
-        except OSError:
-            pass
-    for kdl_file in kdl_files:
-        try:
-            text = kdl_file.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        if shell != "zsh" and any(
-            token in text
-            for token in (
-                'command="zsh"',
-                'default_shell "zsh"',
-                "exec zsh -l",
-                "exec /bin/zsh -l",
-            )
-        ):
-            unresolved.append(f"{kdl_file.name}:zsh")
-        if clipboard is None and (
-            'copy_command "pbcopy"' in text or "pbcopy <" in text
-        ):
-            unresolved.append(f"{kdl_file.name}:pbcopy")
-    if unresolved:
-        remediation = (
-            "dev checkout is intentionally raw; install the referenced host "
-            "commands or unset VIBECRAFTED_PREFER_REPO_VC_FRAME and run "
-            "`vibecrafted update`"
-            if use_repo
-            else "republish host-adapted config via `vibecrafted update`"
-        )
-        findings.append(
-            _Finding(
-                "warn",
-                "vc-frame:pane-shell",
-                f"unresolved host commands for shell={shell!r}, "
-                f"clipboard={clipboard or 'internal'}: {', '.join(unresolved)}; "
-                f"{remediation}",
-            )
-        )
-    else:
-        findings.append(
-            _Finding(
-                "ok",
-                "vc-frame:pane-shell",
-                f"host commands ok (shell={shell}, clipboard={clipboard or 'internal'})",
-            )
-        )
-
-    # frontier zombies
-    froot = frontier_root(home)
-    zombies = list_dangling_frontier_links(froot)
-    if zombies:
-        findings.append(
-            _Finding(
-                "fail",
-                "frontier:zombies",
-                f"{len(zombies)} dangling link(s) under {froot} — "
-                f"re-run install-frontier-config.sh or `vibecrafted update`",
-            )
-        )
-    else:
-        findings.append(
-            _Finding(
-                "ok",
-                "frontier:zombies",
-                f"no dangling frontier links under {froot}",
-            )
-        )
-
-    # Operator scripts + Super/Cmd contract on both projections. The runtime
-    # pins VC_FRAME_CONFIG_DIR to frontier first; a STALE-FILE composer there
-    # shadows every install that only rewires ~/.config/vc-frame.
-    frontier_cfg = froot / "vc-frame"
-    for projection, label in (
-        (view, "view"),
-        (frontier_cfg, "frontier"),
+    if findings:
+        return findings
+    for variable, expected in (
+        ("VC_FRAME_CONFIG_DIR", view),
+        ("VC_FRAME_CONFIG_FILE", view / "config.kdl"),
     ):
-        missing_scripts = [
-            name
-            for name in OPERATOR_SCRIPT_NAMES
-            if name != "auto-theme.sh" and not (projection / name).exists()
-        ]
-        stale_scripts = [
-            name
-            for name in OPERATOR_SCRIPT_NAMES
-            if (projection / name).is_file() and not (projection / name).is_symlink()
-        ]
-        if missing_scripts:
+        selected = os.environ.get(variable)
+        if selected and Path(selected).expanduser().absolute() != expected.absolute():
             findings.append(
                 _Finding(
                     "fail",
-                    f"vc-frame:operator-scripts:{label}",
-                    f"missing {', '.join(missing_scripts)} under {projection} — "
-                    f"{view_repair}",
+                    "vc-frame:view",
+                    f"{variable} routes outside product configuration at {expected}",
                 )
             )
-        elif stale_scripts:
+
+    names = {"config.kdl", "layouts", "themes", *OPERATOR_SCRIPT_NAMES}
+    names.update(path.name for path in generated.iterdir() if path.name != ".DS_Store")
+    for name in sorted(names):
+        path, default = view / name, generated / name
+        if name in {"layouts", "themes"}:
+            expected_type = default.is_dir()
+        elif name in {"config.kdl", *OPERATOR_SCRIPT_NAMES}:
+            expected_type = default.is_file()
+        else:
+            expected_type = default.is_dir() or default.is_file()
+        if (
+            not expected_type
+            or default.is_symlink()
+            or (name in OPERATOR_SCRIPT_NAMES and not os.access(default, os.X_OK))
+        ):
             findings.append(
                 _Finding(
                     "fail",
-                    f"vc-frame:operator-scripts:{label}",
-                    f"STALE-FILE (not install-managed link) for "
-                    f"{', '.join(stale_scripts)} under {projection} — "
-                    f"{view_repair} (backs up and re-wires)",
+                    "vc-frame:runtime",
+                    f"missing, unusable or aliased shipped asset: {default}; {repair}",
+                )
+            )
+            continue
+        if name == "config.kdl":
+            try:
+                if not path.is_file() or path.is_symlink():
+                    raise OSError("expected a physical config.kdl")
+                text = path.read_text(encoding="utf-8")
+                if not text.strip() or "\0" in text:
+                    raise OSError("empty or invalid config text")
+            except (OSError, UnicodeError) as exc:
+                findings.append(
+                    _Finding("fail", "vc-frame:view", f"{path}: {exc}; {repair}")
+                )
+                continue
+            detail = (
+                "shipped defaults"
+                if _config_entry_matches(path, default)
+                else "user preferences (configuration syntax not validated)"
+            )
+            findings.append(
+                _Finding("ok", "vc-frame:view", f"physical {path}: {detail}")
+            )
+        elif not _config_entry_matches(path, default):
+            findings.append(
+                _Finding(
+                    "fail",
+                    "vc-frame:view",
+                    f"missing, modified or misrouted owned asset: {path}; {repair}",
                 )
             )
         else:
             findings.append(
                 _Finding(
                     "ok",
-                    f"vc-frame:operator-scripts:{label}",
-                    f"operator scripts projected under {projection}",
+                    "vc-frame:view",
+                    f"installed physical asset matches selected generation: {path}",
                 )
             )
-
-        cfg = projection / "config.kdl"
-        if cfg.is_file() or cfg.is_symlink():
-            try:
-                text = cfg.read_text(encoding="utf-8")
-            except OSError as exc:
-                findings.append(
-                    _Finding(
-                        "fail",
-                        f"vc-frame:key-contract:{label}",
-                        f"cannot read {cfg}: {exc}",
-                    )
-                )
-            else:
-                kitty_on = (
-                    "support_kitty_keyboard_protocol true" in text
-                    or "support_kitty_keyboard_protocol true" in text
-                )
-                has_super = 'bind "Super' in text or 'bind "Super' in text
-                if not kitty_on:
-                    findings.append(
-                        _Finding(
-                            "fail",
-                            f"vc-frame:key-contract:{label}",
-                            f"{cfg} has support_kitty_keyboard_protocol off — "
-                            "Super/Cmd chords will never reach keybinds; "
-                            f"{view_repair}",
-                        )
-                    )
-                elif not has_super:
-                    findings.append(
-                        _Finding(
-                            "fail",
-                            f"vc-frame:key-contract:{label}",
-                            f"{cfg} enables kitty protocol but binds no Super/* "
-                            f"chords — Cmd switcher/Composer are dead; {view_repair}",
-                        )
-                    )
-                else:
-                    findings.append(
-                        _Finding(
-                            "ok",
-                            f"vc-frame:key-contract:{label}",
-                            "kitty protocol on + Super/* binds present",
-                        )
-                    )
-
-    if use_repo:
-        findings.append(
-            _Finding(
-                "ok",
-                "vc-frame:channel",
-                "VIBECRAFTED_PREFER_REPO_VC_FRAME=1 (dev-checkout preferred)",
-            )
-        )
     return findings
-
-
-_TRUTH_PATTERNS = ("config.kdl", "auto-theme.sh", "layouts/*.kdl", "themes/*.kdl")
-
-
-def _hash_config_tree(root: Path) -> dict[str, str]:
-    """sha256 map of the canonical vc-frame config files under one truth root."""
-    hashes: dict[str, str] = {}
-    if not root.is_dir():
-        return hashes
-    for pattern in _TRUTH_PATTERNS:
-        for path in sorted(root.glob(pattern)):
-            if not path.is_file():
-                continue
-            try:
-                digest = hashlib.sha256(path.read_bytes()).hexdigest()
-            except OSError:
-                continue
-            hashes[str(path.relative_to(root))] = digest
-    return hashes
-
-
-def _diverged_files(left: dict[str, str], right: dict[str, str]) -> list[str]:
-    """Return sorted filenames whose hash differs (or is missing) between the two maps."""
-    return sorted(
-        name for name in left.keys() | right.keys() if left.get(name) != right.get(name)
-    )
 
 
 def _vc_frame_truth_drift_findings(
@@ -965,138 +857,305 @@ def _vc_frame_truth_drift_findings(
     home: Path | None = None,
     tools_home: Path | None = None,
 ) -> list[_Finding]:
-    """Content drift across the vc-frame config truths.
+    """Verify sealed defaults against the generation's existing manifest.
 
-    The delivery checks prove the FORM of the view (symlink channels, dangling
-    links). This proves the CONTENT: the published generation must agree with
-    itself (package config/ vs package runtime/generated/), the dev checkout
-    may run ahead of the store but never silently, and no projection link may
-    resolve into a parked generation instead of vibecrafted-current.
+    Host adaptation happened at install time. Today's PATH or checkout cannot
+    redefine those defaults; doctor neither rematerializes nor repairs them.
+    Product preferences are checked separately from immutable generation bytes.
     """
-    findings: list[_Finding] = []
-    current = tools_current_path(tools_home)
-    package = current / "vibecrafted-core" / "vibecrafted_core"
-    store_cfg = package / "config" / "vc-frame"
-    generated = package / "runtime" / "generated" / "vc-frame"
-
-    store_map = _hash_config_tree(store_cfg)
-    generated_map = _hash_config_tree(generated)
-    if store_map and generated_map:
-        # generated/ is HOST-ADAPTED from config/ (pane-shell + clipboard
-        # substitution in every kdl), so the raw trees legitimately differ on
-        # any host whose adaptation differs from the shipped defaults (a
-        # Linux box without pbcopy diverges on every layout). Compare against
-        # a fresh materialization built by the same production code instead
-        # of raw hashes — self-agreement modulo intended adaptation.
-        expected_map = store_map
-        try:
-            import tempfile
-
-            from .vc_frame_staging import (
-                materialize_vc_frame_config,
-                resolve_clipboard_command,
-                resolve_pane_shell,
-            )
-
-            with tempfile.TemporaryDirectory(prefix="vc-doctor-truth-") as tmp:
-                expected_root = Path(tmp) / "vc-frame"
-                materialize_vc_frame_config(
-                    store_cfg,
-                    expected_root,
-                    pane_shell=resolve_pane_shell(),
-                    clipboard_command=resolve_clipboard_command(),
-                )
-                expected_map = _hash_config_tree(expected_root)
-        except OSError:
-            # Incomplete store tree — raw comparison still beats no signal.
-            expected_map = store_map
-        split = _diverged_files(expected_map, generated_map)
-        if split:
-            findings.append(
-                _Finding(
-                    "fail",
-                    "vc-frame:truth",
-                    "published generation disagrees with itself "
-                    f"(config/ vs runtime/generated/): {', '.join(split[:6])}"
-                    f"{' …' if len(split) > 6 else ''} — run `vibecrafted update`",
-                )
-            )
-        else:
-            findings.append(
-                _Finding(
-                    "ok",
-                    "vc-frame:truth",
-                    f"store truths agree ({len(store_map)} file(s) hashed)",
-                )
-            )
-
-    checkout: Path | None = None
     try:
-        from .frontier_assets import vc_frame_config_source
-
-        checkout = vc_frame_config_source()
-    except FileNotFoundError:
-        checkout = None
-    if checkout is not None and store_map:
-        drift = _diverged_files(_hash_config_tree(checkout), store_map)
-        if drift:
-            findings.append(
-                _Finding(
-                    "warn",
-                    "vc-frame:truth",
-                    f"dev checkout differs from published store on {len(drift)} "
-                    f"file(s): {', '.join(drift[:6])}"
-                    f"{' …' if len(drift) > 6 else ''} — legal mid-development; "
-                    "republish via `vibecrafted update` before trusting "
-                    "env-less sessions",
-                )
+        generation = _runtime_config_generation(tools_home)
+        installer = _installer_module()
+        manifest, error = installer._load_runtime_generation_manifest(generation)
+        if manifest is None:
+            raise OSError(error or "missing runtime generation manifest")
+        relative = (
+            "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame/config.kdl"
+        )
+        path = generation / relative
+        if any(p.is_symlink() for p in (path, *path.parents)):
+            raise OSError(f"aliased shipped defaults: {path}")
+        expected = manifest["hashes"].get(relative)
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        if not expected or actual != expected:
+            raise OSError(
+                f"shipped config.kdl differs from its generation manifest: {path}"
             )
-        else:
-            findings.append(
-                _Finding("ok", "vc-frame:truth", "dev checkout matches published store")
-            )
-
-    tools_root = current.parent
-    try:
-        current_real = current.resolve(strict=True)
-    except OSError:
-        return findings
-    projection_roots = (
-        vc_frame_user_config_dir(home),
-        frontier_root(home) / "vc-frame",
-    )
-    stale: list[Path] = []
-    for root in projection_roots:
-        if not root.is_dir():
-            continue
-        for path in sorted(root.rglob("*")):
-            if not path.is_symlink():
-                continue
-            try:
-                target = path.resolve(strict=True)
-            except OSError:
-                continue  # dangling links are the delivery check's finding
-            if target.is_relative_to(tools_root) and not target.is_relative_to(
-                current_real
-            ):
-                stale.append(path)
-    if stale:
-        listed = ", ".join(str(path) for path in stale[:4])
-        findings.append(
+    except (OSError, RuntimeError, ValueError, ImportError) as exc:
+        return [
             _Finding(
                 "fail",
                 "vc-frame:truth",
-                f"{len(stale)} projection link(s) resolve into a parked "
-                f"generation instead of vibecrafted-current: {listed}"
-                f"{' …' if len(stale) > 4 else ''} — re-run `vibecrafted update`",
+                f"{exc}; reinstall the verified Runtime Pack",
+            )
+        ]
+    return [
+        _Finding(
+            "ok",
+            "vc-frame:truth",
+            "shipped config.kdl matches the sealed generation manifest "
+            f"at {generation}",
+        )
+    ]
+
+
+_RELEASE_REPO_DEFAULT = "vetcoders/vibecrafted"
+_RELEASE_SOURCE_GATE_WORKFLOW = "Release source gate"
+_RELEASE_OPERATOR_BUTTON = (
+    "operator button: tag/publish "
+    "(git tag -a v<VERSION> && git push origin v<VERSION>; "
+    "wait for Release source gate green; then "
+    "scripts/publish-vibecrafted-release.sh)"
+)
+_GH_TIMEOUT_SEC = 20
+
+
+def _release_tag_from_version(version: str) -> str:
+    """Map a VERSION file or GitHub tagName onto a comparable ``vX.Y.Z`` tag."""
+    raw = version.strip()
+    if not raw or raw == "unknown":
+        return ""
+    if raw[0] in "vV" and len(raw) > 1 and raw[1].isdigit():
+        raw = raw[1:]
+    plus = raw.find("+")
+    if plus >= 0:
+        raw = raw[:plus]
+    raw = raw.strip()
+    return f"v{raw}" if raw else ""
+
+
+def _invoke_gh(
+    argv: Sequence[str],
+    *,
+    runner: Callable[..., Any],
+) -> tuple[int, str, str]:
+    """Run one ``gh`` argv and return (rc, stdout, stderr). Never raises."""
+    try:
+        completed = runner(
+            list(argv),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_GH_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired:
+        return 124, "", f"gh timed out after {_GH_TIMEOUT_SEC}s"
+    except OSError as exc:
+        return 127, "", str(exc)
+    return (
+        int(getattr(completed, "returncode", 1) or 0),
+        str(getattr(completed, "stdout", "") or ""),
+        str(getattr(completed, "stderr", "") or ""),
+    )
+
+
+def _release_drift_findings(
+    *,
+    which: Callable[[str], str | None] = shutil.which,
+    runner: Callable[..., Any] | None = None,
+    repo_root: Path | None = None,
+    release_repo: str | None = None,
+) -> list[_Finding]:
+    """Compare local VERSION to GitHub Latest and the last source-gate run.
+
+    This is the C7 release valve: doctor must not stay green while Latest is
+    stuck on an old tag (last successful source gate was v3.5.0). Missing
+    ``gh`` is a loud warn, never a fake pass. A mismatch or a non-success
+    gate conclusion is red and names the tag/publish operator button.
+    """
+    run = runner or subprocess.run
+    repo = (
+        release_repo
+        or os.environ.get("VIBECRAFTED_RELEASE_REPO")
+        or _RELEASE_REPO_DEFAULT
+    )
+    root = repo_root if repo_root is not None else _repo_root_from_source()
+    findings: list[_Finding] = []
+
+    version = "unknown"
+    version_path = (root / "VERSION") if root is not None else None
+    if version_path is not None and version_path.is_file():
+        try:
+            version = version_path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            findings.append(
+                _Finding(
+                    "fail",
+                    "release:version",
+                    f"cannot read {version_path}: {exc}. {_RELEASE_OPERATOR_BUTTON}",
+                )
+            )
+            version = "unknown"
+    expected_tag = _release_tag_from_version(version)
+    if expected_tag:
+        findings.append(
+            _Finding(
+                "ok",
+                "release:version",
+                f"local VERSION {version} ({version_path}) → expected tag {expected_tag}",
             )
         )
     else:
         findings.append(
             _Finding(
+                "fail",
+                "release:version",
+                "local VERSION missing or empty "
+                f"at {version_path or '(no checkout)'}. {_RELEASE_OPERATOR_BUTTON}",
+            )
+        )
+
+    gh = which("gh")
+    if not gh:
+        missing = (
+            "gh is not on PATH — cannot probe GitHub Latest vs VERSION. "
+            "This is not a green pass; the release valve is unproven. "
+            "Install GitHub CLI (https://cli.github.com/). "
+            f"{_RELEASE_OPERATOR_BUTTON}"
+        )
+        findings.append(_Finding("warn", "release:github-latest", missing))
+        findings.append(
+            _Finding(
+                "warn",
+                "release:source-gate",
+                "gh is not on PATH — cannot probe the latest "
+                f"{_RELEASE_SOURCE_GATE_WORKFLOW} conclusion. "
+                f"{_RELEASE_OPERATOR_BUTTON}",
+            )
+        )
+        return findings
+
+    latest_rc, latest_out, latest_err = _invoke_gh(
+        [gh, "release", "view", "--repo", repo, "--json", "tagName"],
+        runner=run,
+    )
+    latest_tag = ""
+    if latest_rc == 0:
+        try:
+            payload = json.loads(latest_out)
+        except json.JSONDecodeError as exc:
+            findings.append(
+                _Finding(
+                    "fail",
+                    "release:github-latest",
+                    "gh release view returned unreadable JSON "
+                    f"({exc}). {_RELEASE_OPERATOR_BUTTON}",
+                )
+            )
+        else:
+            if isinstance(payload, dict):
+                latest_tag = str(payload.get("tagName") or "").strip()
+            if not latest_tag:
+                findings.append(
+                    _Finding(
+                        "fail",
+                        "release:github-latest",
+                        "gh release view returned no tagName. "
+                        f"{_RELEASE_OPERATOR_BUTTON}",
+                    )
+                )
+    else:
+        detail = (latest_err or latest_out).strip() or f"exit {latest_rc}"
+        findings.append(
+            _Finding(
+                "fail",
+                "release:github-latest",
+                f"gh release view failed ({detail}). {_RELEASE_OPERATOR_BUTTON}",
+            )
+        )
+
+    if latest_tag:
+        latest_norm = _release_tag_from_version(latest_tag)
+        if expected_tag and latest_norm == expected_tag:
+            findings.append(
+                _Finding(
+                    "ok",
+                    "release:github-latest",
+                    f"VERSION {version} matches GitHub Latest {latest_tag}",
+                )
+            )
+        else:
+            findings.append(
+                _Finding(
+                    "fail",
+                    "release:github-latest",
+                    f"VERSION {version} ≠ GitHub Latest {latest_tag} "
+                    f"(expected {expected_tag or 'v<VERSION>'}). "
+                    f"{_RELEASE_OPERATOR_BUTTON}",
+                )
+            )
+
+    gate_rc, gate_out, gate_err = _invoke_gh(
+        [
+            gh,
+            "run",
+            "list",
+            "--repo",
+            repo,
+            "--workflow",
+            _RELEASE_SOURCE_GATE_WORKFLOW,
+            "--limit",
+            "1",
+            "--json",
+            "conclusion,status,displayTitle,databaseId,headSha",
+        ],
+        runner=run,
+    )
+    if gate_rc != 0:
+        detail = (gate_err or gate_out).strip() or f"exit {gate_rc}"
+        findings.append(
+            _Finding(
+                "fail",
+                "release:source-gate",
+                f"gh run list for {_RELEASE_SOURCE_GATE_WORKFLOW} failed "
+                f"({detail}). {_RELEASE_OPERATOR_BUTTON}",
+            )
+        )
+        return findings
+    try:
+        gate_payload = json.loads(gate_out)
+    except json.JSONDecodeError as exc:
+        findings.append(
+            _Finding(
+                "fail",
+                "release:source-gate",
+                "gh run list returned unreadable JSON "
+                f"({exc}). {_RELEASE_OPERATOR_BUTTON}",
+            )
+        )
+        return findings
+    if not isinstance(gate_payload, list) or not gate_payload:
+        findings.append(
+            _Finding(
+                "fail",
+                "release:source-gate",
+                f"no {_RELEASE_SOURCE_GATE_WORKFLOW} run exists. "
+                f"{_RELEASE_OPERATOR_BUTTON}",
+            )
+        )
+        return findings
+    row = gate_payload[0] if isinstance(gate_payload[0], dict) else {}
+    conclusion = str(row.get("conclusion") or "").strip().lower()
+    status = str(row.get("status") or "").strip().lower()
+    title = str(row.get("displayTitle") or "").strip() or "(untitled)"
+    run_id = row.get("databaseId")
+    if conclusion == "success" and status in ("", "completed"):
+        findings.append(
+            _Finding(
                 "ok",
-                "vc-frame:truth",
-                "all projection links resolve inside vibecrafted-current",
+                "release:source-gate",
+                f"{_RELEASE_SOURCE_GATE_WORKFLOW} latest is success "
+                f"({title}, run={run_id})",
+            )
+        )
+    else:
+        findings.append(
+            _Finding(
+                "fail",
+                "release:source-gate",
+                f"{_RELEASE_SOURCE_GATE_WORKFLOW} latest is "
+                f"{conclusion or status or 'unknown'} ({title}, run={run_id}). "
+                f"{_RELEASE_OPERATOR_BUTTON}",
             )
         )
     return findings
@@ -1105,6 +1164,8 @@ def _vc_frame_truth_drift_findings(
 def doctor_run(
     store_path: str | Path | None = None,
     state: Any | None = None,
+    *,
+    release: bool = False,
 ) -> list[Any]:
     """Run the existing Vibecrafted installer doctor through a package API."""
     try:
@@ -1128,6 +1189,8 @@ def doctor_run(
     findings.extend(_server_supervision_findings())
     findings.extend(_vc_frame_delivery_findings())
     findings.extend(_vc_frame_truth_drift_findings())
+    if release:
+        findings.extend(_release_drift_findings())
     return findings
 
 

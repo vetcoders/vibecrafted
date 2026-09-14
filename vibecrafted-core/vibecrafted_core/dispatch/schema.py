@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shlex
@@ -13,7 +14,8 @@ import tomllib
 
 from vibecrafted_core.autonomy_surface import destructive_remote_push
 from vibecrafted_core.delivery.model import ContractError, ExecutionEnvelope
-from vibecrafted_core.workflow import SUPPORTED_WORKFLOWS
+from vibecrafted_core.runtime_paths import vibecrafted_home
+from vibecrafted_core.workflow import SUPPORTED_WORKFLOWS, select_plan_model
 
 from .model import (
     CRITICAL_FAIL_POLICIES,
@@ -197,7 +199,11 @@ def render_cell_prompt(
         delivery_contract,
         active_baton.to_json(),
     ]
-    rendered = [_format_known(part, variables).strip() for part in parts if part]
+    rendered = [
+        part if part is body and cut.brief else _format_known(part, variables).strip()
+        for part in parts
+        if part
+    ]
     return "\n\n".join(part for part in rendered if part).rstrip() + "\n"
 
 
@@ -227,10 +233,12 @@ def render_cut_verifies(dispatch: Dispatch, cut: Cut) -> Cut:
 
 def _brief_or_prompt(cut: Cut) -> str:
     """Read the cut's brief file if resolvable, else fall back to its inline prompt."""
+    if cut.source_text is not None:
+        return cut.source_text
     if cut.brief:
         path = Path(cut.brief).expanduser()
         if path.is_file():
-            return path.read_text(encoding="utf-8")
+            return path.read_bytes().decode("utf-8")
     return cut.prompt
 
 
@@ -417,12 +425,32 @@ def _parse_cuts(
         if resolved_workflow not in SUPPORTED_WORKFLOWS:
             errors.append(f"cuts[{index}].workflow: unsupported workflow {workflow!r}")
 
-        prompt = _string(item.get("prompt"))
+        prompt = item.get("prompt") if isinstance(item.get("prompt"), str) else ""
         brief = _string(item.get("brief"))
         if not prompt and not brief:
             errors.append(f"cuts[{index}]: prompt or brief is required")
         if brief:
             _validate_brief_path(brief, base_dir, index, errors)
+
+        plan_text = ""
+        model, model_source = "", "provider_default"
+        raw_model = item.get("model", "")
+        if "model" in item and (
+            not isinstance(raw_model, str) or not raw_model.strip()
+        ):
+            errors.append(f"cuts[{index}].model: expected a non-empty string")
+        else:
+            try:
+                plan_text = (
+                    Path(_resolve_brief(brief, base_dir)).read_bytes().decode("utf-8")
+                    if brief
+                    else prompt
+                )
+                model, model_source = select_plan_model(
+                    _string(item.get("agent")), plan_text, model=raw_model
+                )
+            except (OSError, ValueError) as exc:
+                errors.append(f"cuts[{index}].model: {exc}")
 
         mode = _string(item.get("mode")) or "write"
         mutation = _string(item.get("mutation"))
@@ -444,7 +472,10 @@ def _parse_cuts(
                 resolved_workflow=resolved_workflow,
                 critical=bool(item.get("critical")),
                 mode=mode,
-                model=_string(item.get("model")),
+                model=model,
+                model_source=model_source,
+                source_text=plan_text,
+                source_digest=hashlib.sha256(plan_text.encode("utf-8")).hexdigest(),
                 prompt=prompt,
                 brief=_resolve_brief(brief, base_dir),
                 extra=_string(item.get("extra")),
@@ -473,11 +504,7 @@ def _doctor_policy_errors(dispatch: Dispatch) -> list[str]:
         ("meta.reports_dir", dispatch.meta.reports_dir),
         ("meta.tracker", dispatch.meta.tracker),
     ):
-        normalized = value.replace("\\", "/")
-        if value and any(
-            marker in normalized
-            for marker in ("/.claude/", "/.codex/", "/.gemini/", "/.vibecrafted/")
-        ):
+        if value and _forbidden_runtime_write_root(value):
             errors.append(
                 f"{field}: provider-specific or repo-local runtime roots are recovery-only; new writes use ~/.vibecrafted/artifacts"
             )
@@ -487,6 +514,121 @@ def _doctor_policy_errors(dispatch: Dispatch) -> list[str]:
             "policy.concurrency: shared CARGO_TARGET_DIR is forbidden for concurrent plans; unset CARGO_TARGET_DIR — Vibecrafted assigns $PWD/target per worker"
         )
     return errors
+
+
+_PROVIDER_RUNTIME_MARKERS = (
+    "/.claude/",
+    "/.codex/",
+    "/.gemini/",
+    "/.cursor/",
+)
+
+
+def _posix(path: Path) -> str:
+    return str(path).replace("\\", "/")
+
+
+def _resolve_write_path(value: str) -> Path | None:
+    """Follow existing symlink components. ``None`` means resolution failed.
+
+    A failed resolve is not a safe artifacts write. Callers must not treat the
+    lexical fallback as proof that the path stayed inside the artifacts plane.
+    """
+    expanded = Path(value).expanduser()
+    try:
+        return expanded.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return None
+
+
+def _normalize_write_path(value: str) -> Path:
+    """Expand ``~`` and collapse traversal / existing symlinks without requiring the leaf.
+
+    ``Path.resolve(strict=False)`` follows existing symlink components and
+    normalizes ``..`` even when the destination file does not yet exist.
+    Resolution errors fall back to a lexical collapse for haystack matching
+    only — that fallback is not canonical-artifacts admission.
+    """
+    resolved = _resolve_write_path(value)
+    if resolved is not None:
+        return resolved
+    return Path(os.path.normpath(str(Path(value).expanduser())))
+
+
+def _is_under(path: Path, root: Path) -> bool:
+    path_posix = _posix(path)
+    root_posix = _posix(root)
+    return path_posix == root_posix or path_posix.startswith(root_posix + "/")
+
+
+def _canonical_artifacts_roots() -> tuple[Path, ...]:
+    """Write roots the doctor names in its own refusal: home artifacts plane."""
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for raw in (
+        Path.home() / ".vibecrafted" / "artifacts",
+        vibecrafted_home() / "artifacts",
+    ):
+        normalized = _normalize_write_path(str(raw))
+        key = _posix(normalized)
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(normalized)
+    return tuple(roots)
+
+
+def _lexical_artifacts_roots() -> tuple[Path, ...]:
+    """Artifacts roots with ``..`` collapsed but symlinks not followed."""
+    return tuple(
+        Path(os.path.normpath(str(Path(raw).expanduser())))
+        for raw in (
+            Path.home() / ".vibecrafted" / "artifacts",
+            vibecrafted_home() / "artifacts",
+        )
+    )
+
+
+def _is_canonical_artifacts_write(value: str) -> bool:
+    """True only inside the canonical artifacts *directory*, after symlink resolution.
+
+    An unresolved path is not canonical. Lexical ``normpath`` after ``resolve``
+    raised would keep an escaping symlink looking like ``.../artifacts/escape``.
+    """
+    resolved = _resolve_write_path(value)
+    if resolved is None:
+        return False
+    return any(_is_under(resolved, root) for root in _canonical_artifacts_roots())
+
+
+def _lexically_under_artifacts(value: str) -> bool:
+    """True when the non-symlink-resolved path sits inside an artifacts directory."""
+    lexical = Path(os.path.normpath(str(Path(value).expanduser())))
+    return any(_is_under(lexical, root) for root in _lexical_artifacts_roots())
+
+
+def _forbidden_runtime_write_root(value: str) -> bool:
+    """Reject provider-private and repo-local ``.vibecrafted`` write roots.
+
+    Admission is a normalized directory-boundary check: prefix matches such as
+    ``artifacts-typo`` or ``artifacts/../../.codex`` are not the artifacts plane.
+    Existing symlink components are followed even when the leaf does not exist.
+    A path that is lexically inside artifacts but resolves outside is an escape.
+    If resolution raises, the path is not admitted as the artifacts plane.
+    """
+    if _is_canonical_artifacts_write(value):
+        return False
+    if _lexically_under_artifacts(value):
+        return True
+    raw = value.replace("\\", "/")
+    expanded = _posix(Path(value).expanduser())
+    normalized = _posix(_normalize_write_path(value))
+    haystack = f"{raw}/{expanded}/{normalized}/"
+    if any(marker in haystack for marker in _PROVIDER_RUNTIME_MARKERS):
+        return True
+    return "/.vibecrafted/" in haystack or haystack.rstrip("/").endswith(
+        "/.vibecrafted"
+    )
 
 
 def _parse_verify(value: Any, cut_index: int, errors: list[str]) -> list[Verify]:

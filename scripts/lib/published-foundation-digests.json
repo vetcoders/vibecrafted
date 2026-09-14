@@ -1,0 +1,24 @@
+{
+  "schema": "io.vetcoders.vibecrafted.published-foundation-digests.v1",
+  "comment": "Exact sha256 of unmodified published Mach-O bytes. Hits of this host's HOME inside these files are upstream build-time debug/provenance strings, not locally authored payload. First-party files never match these digests. Do not treat this as a path allowlist.",
+  "artifacts": [
+    {
+      "name": "aicx",
+      "version": "0.13.0",
+      "platform": "darwin-arm64",
+      "package": "@loctree/aicx-darwin-arm64",
+      "sha256": "6c88574eda7646be1850a609313d244c6c0080066d717729f8a3943b4aecb25f",
+      "kind": "upstream-debug-strings",
+      "notes": "Developer ID MW223P3NPX. Contains rustup stdlib debug paths from the publisher toolchain home. Bytes are not stripped or patched."
+    },
+    {
+      "name": "aicx-mcp",
+      "version": "0.13.0",
+      "platform": "darwin-arm64",
+      "package": "@loctree/aicx-darwin-arm64",
+      "sha256": "c8d8d4d94096f780eeba2a9f4060bea25099046b7ff0569878bcaea84daf20ab",
+      "kind": "upstream-debug-strings",
+      "notes": "Same AICX 0.13.0 Darwin publication as aicx."
+    }
+  ]
+}

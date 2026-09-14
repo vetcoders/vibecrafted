@@ -1,11 +1,13 @@
 # Kształty wyjścia — jedna bramka, trzy kształty wg skali
 
 Scaffold to jedna bramka z trzema kształtami wyjścia wybieranymi wg scope'u. Wybierz najmniejszy, który pasuje; nie
-emituj wave-atlasu dla pojedynczego cięcia ani pojedynczego briefu dla całego projektu.
+emituj wave-atlasu dla pojedynczego cięcia ani pojedynczego briefu dla całego projektu. Każdy kształt
+nadal emituje obowiązkową parę `SCAFFOLD.md` + `<plan-id>.dispatch.toml`; skala zmienia artefakty
+pomocnicze, nigdy kontrakt wykonania czytelny dla supervisora.
 
 ## 1. Pojedyncze cięcie → jeden brief
 
-Jeden `SCAFFOLD.md` (zobacz `plan-template.md`). Jeden Vector, garść cięć, każde z
+Jeden `SCAFFOLD.md` plus jednocięciowy `<plan-id>.dispatch.toml` (zobacz `plan-template.md`). Jeden Vector, garść cięć, każde z
 kolumną `state` i delivery-verifierem. Tracker niepotrzebny.
 
 ## 2. Wiele cięć → wave-atlas + briefy + tracker
@@ -15,6 +17,8 @@ kolumną `state` i delivery-verifierem. Tracker niepotrzebny.
 - **Briefy per fala** (12-sekcyjny szablon dispatchu, poniżej), jeden na falę.
 - **Tracker** (`tracker.md`): tabela statusu fal z kolumną `state`, run_id, baseline SHA, commit
   SHA, bramka, raport — widoczność-przez-artefakty dla nieobecnego operatora.
+- **Dispatch** (`<plan-id>.dispatch.toml`): pełny DAG cięć, dozwolona równoległość, ścieżki briefów
+  i bramki verifierów przekazywane do `/vc-ship` i konsumowane przez jego deterministyczny dispatcher.
 
 ## 3. Cały projekt → pipeline read/write z fazami
 
@@ -27,7 +31,7 @@ per Vector oraz recovery-vectory dla stanów STOP.
 ```markdown
 ---
 prompt_id: <slug>
-agent: <claude|codex|gemini>
+agent: <claude|codex|gemini|cursor>
 skill: <vc-implement|...>
 wave: <Wn>            target_repo: <repo>      baseline_branch: <living-tree>
 authored_by: <agent> <agents@vetcoders.io>     report_path: <path>

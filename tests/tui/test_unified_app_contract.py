@@ -4,20 +4,28 @@ import copy
 import hashlib
 import json
 import os
+import platform
 import plistlib
+import re
 import shutil
 import stat
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
+from argparse import Namespace
 from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import pytest
+import tomllib
 from vibecrafted_core import product_contract as contract
+from vibecrafted_core import runtime_pack_contract
+
+from scripts import unified_product_manifest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VERIFY_SCRIPT = REPO_ROOT / "scripts/verify-vibecrafted-product.sh"
@@ -141,6 +149,122 @@ def _codesign_app(app: Path) -> None:
     assert result.returncode == 0, result.stderr
 
 
+def _runtime_pack_macho_preflight(
+    archive: Path,
+    *,
+    cleanup_race: bool = False,
+    temporary_root: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    helper = REPO_ROOT / "scripts/lib/macho-signing.sh"
+    shell = 'set -euo pipefail; source "$1"; '
+    if cleanup_race:
+        shell += r"""
+real_rm="$3"
+race_tmp="${TMPDIR%/}"
+rm() {
+  "$real_rm" "$@"
+  local target="${!#}"
+  case "$target" in
+    "$race_tmp"/vibecrafted-macho-preflight.*)
+      mkdir -p "$target/VibecraftedRuntime"
+      : > "$target/VibecraftedRuntime/.DS_Store"
+      return 1
+      ;;
+  esac
+}
+"""
+    shell += 'verify_runtime_pack_macho_signatures "$2"'
+    return subprocess.run(
+        [
+            "bash",
+            "-c",
+            shell,
+            "runtime-pack-macho-preflight",
+            str(helper),
+            str(archive),
+            shutil.which("rm") or "/bin/rm",
+        ],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            **({"TMPDIR": f"{temporary_root}/"} if temporary_root else {}),
+        },
+    )
+
+
+def test_final_embedded_runtime_pack_rejects_invalid_nested_macho(
+    tmp_path: Path, macho_executable: Path
+) -> None:
+    payload = tmp_path / "payload/VibecraftedRuntime"
+    terminal = payload / "libexec/vc-terminal"
+    terminal.parent.mkdir(parents=True)
+    shutil.copy2(macho_executable, terminal)
+    _codesign_macho(terminal)
+    valid = tmp_path / "valid.tar.gz"
+    with tarfile.open(valid, "w:gz") as archive:
+        archive.add(payload, arcname="VibecraftedRuntime")
+
+    valid_result = _runtime_pack_macho_preflight(valid)
+    assert valid_result.returncode == 0, valid_result.stderr
+
+    data = bytearray(terminal.read_bytes())
+    data[4096] ^= 0x01
+    terminal.write_bytes(data)
+    invalid = tmp_path / "invalid.tar.gz"
+    with tarfile.open(invalid, "w:gz") as archive:
+        archive.add(payload, arcname="VibecraftedRuntime")
+
+    invalid_result = _runtime_pack_macho_preflight(invalid)
+    assert invalid_result.returncode != 0
+    assert "invalid signature: libexec/vc-terminal" in invalid_result.stderr
+
+
+def test_valid_runtime_pack_preserves_success_across_late_cleanup_race(
+    tmp_path: Path, macho_executable: Path
+) -> None:
+    payload = tmp_path / "payload/VibecraftedRuntime"
+    terminal = payload / "libexec/vc-terminal"
+    terminal.parent.mkdir(parents=True)
+    shutil.copy2(macho_executable, terminal)
+    _codesign_macho(terminal)
+    archive_path = tmp_path / "valid-cleanup-race.tar.gz"
+    with tarfile.open(archive_path, "w:gz") as archive:
+        archive.add(payload, arcname="VibecraftedRuntime")
+    temporary_root = tmp_path / "preflight"
+    temporary_root.mkdir()
+
+    for _ in range(5):
+        result = _runtime_pack_macho_preflight(
+            archive_path,
+            cleanup_race=True,
+            temporary_root=temporary_root,
+        )
+        assert result.returncode == 0, result.stderr
+
+
+def test_runtime_pack_extraction_failure_remains_primary_during_cleanup_race(
+    tmp_path: Path,
+) -> None:
+    archive_path = tmp_path / "empty.tar.gz"
+    with tarfile.open(archive_path, "w:gz"):
+        pass
+    temporary_root = tmp_path / "preflight"
+    temporary_root.mkdir()
+
+    result = _runtime_pack_macho_preflight(
+        archive_path,
+        cleanup_race=True,
+        temporary_root=temporary_root,
+    )
+
+    assert result.returncode != 0
+    assert "Runtime Pack archive is empty" in result.stderr
+    assert "could not safely extract empty.tar.gz" in result.stderr
+
+
 def _write_app_manifest(app: Path, manifest: dict[str, Any], *, sign: bool) -> None:
     _write_json(app / "Contents/Resources/product-manifest.json", manifest)
     if sign:
@@ -200,18 +324,139 @@ def _module_fixture(
     return manifest
 
 
+def _runtime_pack_fixture(app: Path, macho_executable: Path) -> str:
+    name = "Vibecrafted_RuntimePack_1.0.0-20260814-22222222-darwin-arm64.tar.gz"
+    embedded = app / "Contents/Resources/runtime-pack" / name
+    with tempfile.TemporaryDirectory(prefix="runtime-pack-fixture.") as temporary:
+        payload = Path(temporary) / "VibecraftedRuntime"
+        payload.mkdir()
+        (payload / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+        launcher = payload / "scripts/vibecrafted"
+        launcher.parent.mkdir(parents=True)
+        launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+        launcher.chmod(0o755)
+        vc_start = payload / "bin/vc-start"
+        vc_start.parent.mkdir(parents=True)
+        vc_start.write_text("#!/bin/sh\n", encoding="utf-8")
+        vc_start.chmod(0o755)
+        frame_wrapper = payload / "bin/vc-frame"
+        frame_wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+        frame_wrapper.chmod(0o755)
+        native_frame = payload / "libexec/vc-frame"
+        native_frame.parent.mkdir(parents=True)
+        shutil.copy2(macho_executable, native_frame)
+        terminal_wrapper = payload / "bin/vc-terminal"
+        terminal_wrapper.write_text(
+            (REPO_ROOT / "scripts/vc-terminal-product-entry.sh").read_text(
+                encoding="utf-8"
+            ),
+            encoding="utf-8",
+        )
+        terminal_wrapper.chmod(0o755)
+        native_terminal = payload / "libexec/vc-terminal"
+        shutil.copy2(macho_executable, native_terminal)
+        frame_config = payload / runtime_pack_contract.VC_FRAME_CONFIG_ROOT
+        (frame_config / "layouts").mkdir(parents=True)
+        (frame_config / "themes").mkdir()
+        (frame_config / "config.kdl").write_text("fixture\n", encoding="utf-8")
+        (frame_config / "layouts/operator.kdl").write_text(
+            "fixture\n", encoding="utf-8"
+        )
+        (frame_config / "themes/default.kdl").write_text("fixture\n", encoding="utf-8")
+        foundation_files: dict[str, str] = {}
+        for executable_name in sorted(
+            runtime_pack_contract.REQUIRED_FOUNDATION_EXECUTABLES
+        ):
+            executable = payload / "bin" / executable_name
+            if not executable.exists():
+                executable.write_text(
+                    f"#!/bin/sh\n# {executable_name} fixture\n", encoding="utf-8"
+                )
+                executable.chmod(0o755)
+            foundation_files[executable_name] = _sha256(executable)
+        _write_json(
+            payload / runtime_pack_contract.FOUNDATIONS_NAME,
+            {
+                "schema": runtime_pack_contract.FOUNDATIONS_SCHEMA,
+                "versions": {},
+                "source_revisions": {},
+                "source_archives": {},
+                "licenses": {},
+                "files": foundation_files,
+            },
+        )
+        _write_json(
+            payload / "source-provenance.json",
+            {
+                "schema": runtime_pack_contract.SOURCE_PROVENANCE_SCHEMA,
+                "owner_repo": "vetcoders/vibecrafted",
+                "source_revision": "2" * 40,
+                "payload": {},
+            },
+        )
+        runtime_pack_contract.write_provenance(
+            payload,
+            carrier_basename=name,
+            version="1.0.0",
+            platform="darwin-arm64",
+            architecture="arm64",
+            source_revision="2" * 40,
+            terminal_revision="4" * 40,
+            frame_revision="6" * 40,
+        )
+        embedded.parent.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(embedded, "w:gz") as archive:
+            archive.add(payload, arcname="VibecraftedRuntime")
+    return name
+
+
+def _terminal_bundle_fixture(
+    app: Path, relative: str, macho_executable: Path
+) -> list[dict[str, Any]]:
+    """One canonical vc-terminal.app, sealed the way the release builder seals it.
+
+    The inner Mach-O is signed as a file and the directory is then sealed as a
+    bundle: only the second step writes Contents/_CodeSignature, which is what
+    carries the Finder/Dock identity the contract proves.
+    """
+    bundle = app / relative
+    executable = bundle / "Contents/MacOS/alacritty"
+    executable.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(macho_executable, executable)
+    _codesign_macho(executable)
+    icon = bundle / "Contents/Resources/alacritty.icns"
+    icon.parent.mkdir(parents=True, exist_ok=True)
+    icon.write_bytes(b"terminal-icns-fixture")
+    with (bundle / "Contents/Info.plist").open("wb") as handle:
+        plistlib.dump(
+            {
+                "CFBundleIdentifier": "io.vetcoders.vc-terminal",
+                "CFBundleExecutable": "alacritty",
+                "CFBundleIconFile": "alacritty.icns",
+                "CFBundleName": "VC Terminal",
+                "CFBundleDisplayName": "VC Terminal",
+                "CFBundlePackageType": "APPL",
+            },
+            handle,
+        )
+    _codesign_app(bundle)
+    return [
+        _entry(app, f"{relative}/Contents/MacOS/alacritty", kind="executable"),
+        _entry(app, f"{relative}/Contents/Info.plist", kind="config"),
+        _entry(app, f"{relative}/Contents/Resources/alacritty.icns", kind="resource"),
+    ]
+
+
 def _app_fixture(app: Path, macho_executable: Path) -> dict[str, Any]:
     terminal_relative = "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
     for relative in (
         "Contents/MacOS/Vibecrafted",
-        terminal_relative,
         "Contents/Helpers/vc-frame",
         "Contents/Resources/runtime/bin/vc-start",
     ):
         (app / relative).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(macho_executable, app / relative)
     for relative in (
-        terminal_relative,
         "Contents/Helpers/vc-frame",
         "Contents/Resources/runtime/bin/vc-start",
     ):
@@ -220,21 +465,14 @@ def _app_fixture(app: Path, macho_executable: Path) -> dict[str, Any]:
     primary_shell.parent.mkdir(parents=True, exist_ok=True)
     primary_shell.write_text('#!/bin/zsh\nexec vc-start "$@"\n', encoding="utf-8")
     primary_shell.chmod(0o755)
-    terminal_app = app / "Contents/Helpers/vc-terminal.app"
-    terminal_icon = terminal_app / "Contents/Resources/alacritty.icns"
-    terminal_icon.parent.mkdir(parents=True, exist_ok=True)
-    terminal_icon.write_bytes(b"terminal-icns-fixture")
-    with (terminal_app / "Contents/Info.plist").open("wb") as handle:
-        plistlib.dump(
-            {
-                "CFBundleIdentifier": "io.vetcoders.vc-terminal",
-                "CFBundleExecutable": "alacritty",
-                "CFBundleIconFile": "alacritty.icns",
-                "CFBundlePackageType": "APPL",
-            },
-            handle,
-        )
-    _codesign_app(terminal_app)
+    # Both declared bundles: the App's Helpers copy and the one the Runtime
+    # Pack materializes for its own standalone install, which arrives inside
+    # the App because the whole pack payload is staged under Resources/runtime.
+    terminal_bundle_entries = [
+        entry
+        for bundle_relative in contract.TERMINAL_APP_BUNDLES
+        for entry in _terminal_bundle_fixture(app, bundle_relative, macho_executable)
+    ]
     terminal_config = app / "Contents/Resources/terminal/vibecrafted.toml"
     terminal_config.parent.mkdir(parents=True, exist_ok=True)
     terminal_config.write_text("[shell]\nprogram = 'vc-start'\n", encoding="utf-8")
@@ -254,7 +492,9 @@ def _app_fixture(app: Path, macho_executable: Path) -> dict[str, Any]:
             },
             handle,
         )
-    terminal_product_entry = _entry(app, terminal_relative, kind="executable")
+    terminal_product_entry = next(
+        entry for entry in terminal_bundle_entries if entry["path"] == terminal_relative
+    )
     frame_product_entry = _entry(app, "Contents/Helpers/vc-frame", kind="executable")
 
     def add_module_binding(
@@ -323,6 +563,7 @@ def _app_fixture(app: Path, macho_executable: Path) -> dict[str, Any]:
         entrypoint_name="frame",
         product_entry=frame_product_entry,
     )
+    runtime_pack_name = _runtime_pack_fixture(app, macho_executable)
     manifest = {
         "schema": contract.PRODUCT_SCHEMA,
         "product": contract.PRODUCT_NAME,
@@ -357,18 +598,8 @@ def _app_fixture(app: Path, macho_executable: Path) -> dict[str, Any]:
                 f"Contents/Resources/{contract.PRODUCT_ICON_FILE}",
                 kind="resource",
             ),
-            terminal_product_entry,
+            *terminal_bundle_entries,
             frame_product_entry,
-            _entry(
-                app,
-                "Contents/Helpers/vc-terminal.app/Contents/Info.plist",
-                kind="config",
-            ),
-            _entry(
-                app,
-                "Contents/Helpers/vc-terminal.app/Contents/Resources/alacritty.icns",
-                kind="resource",
-            ),
             _entry(app, terminal_binding["manifest_path"], kind="config"),
             _entry(app, frame_binding["manifest_path"], kind="config"),
             _entry(app, terminal_binding["assembly_receipt_path"], kind="config"),
@@ -384,6 +615,11 @@ def _app_fixture(app: Path, macho_executable: Path) -> dict[str, Any]:
                 kind="executable",
             ),
             _entry(app, contract._LAUNCH_PRIMARY_SHELL, kind="resource"),
+            _entry(
+                app,
+                f"Contents/Resources/runtime-pack/{runtime_pack_name}",
+                kind="resource",
+            ),
         ],
         "entrypoints": {
             "app": "Contents/MacOS/Vibecrafted",
@@ -437,7 +673,7 @@ def _transaction_fixture(path: Path, macho_executable: Path) -> dict[str, Any]:
             "owner_repo": "vetcoders/vibecrafted",
             "source_revision": "8" * 40,
             "source_payload": _runtime_source_payload(),
-            "entrypoint": "vibecrafted-core/vibecrafted_core/deck/vibecrafted",
+            "entrypoint": contract.RUNTIME_GENERATION_ENTRYPOINT,
             "hashes": {
                 relative: f"{index:x}" * 64
                 for index, relative in enumerate(
@@ -551,6 +787,18 @@ def _release_output_fixture(
     }
     policy = contract._release_policy()
     executable = app / product["outer_bundle_code"]["path"]
+    runtime_pack_name = (
+        f"Vibecrafted_RuntimePack_{product['version']}-20260814-"
+        f"{product['git_sha'][:8]}-darwin-arm64.tar.gz"
+    )
+    embedded_runtime_pack = app / "Contents/Resources/runtime-pack" / runtime_pack_name
+    runtime_pack = root / runtime_pack_name
+    if runtime_pack.resolve() != embedded_runtime_pack.resolve():
+        shutil.copy2(embedded_runtime_pack, runtime_pack)
+    with tarfile.open(runtime_pack, "r:gz") as archive:
+        provenance_bytes = archive.extractfile(
+            f"VibecraftedRuntime/{runtime_pack_contract.PROVENANCE_NAME}"
+        ).read()
     payload = {
         "schema": contract.RELEASE_OUTPUT_SCHEMA,
         "signature_policy": {
@@ -589,6 +837,24 @@ def _release_output_fixture(
             "path": dmg.relative_to(root).as_posix(),
             "sha256": _sha256(dmg),
             "size": dmg.stat().st_size,
+        },
+        "runtime_pack": {
+            "path": runtime_pack_name,
+            "embedded_path": f"Contents/Resources/runtime-pack/{runtime_pack_name}",
+            "sha256": _sha256(runtime_pack),
+            "size": runtime_pack.stat().st_size,
+            "provenance": {
+                "path": runtime_pack_contract.PROVENANCE_NAME,
+                "sha256": hashlib.sha256(provenance_bytes).hexdigest(),
+                "version": product["version"],
+                "platform": "darwin-arm64",
+                "architecture": "arm64",
+                "source_revisions": {
+                    "vibecrafted": product["git_sha"],
+                    "vc-terminal": modules["vc-terminal"]["git_sha"],
+                    "vc-frame": modules["vc-frame"]["git_sha"],
+                },
+            },
         },
         "modules": {
             name: {
@@ -766,23 +1032,75 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     launcher = (REPO_ROOT / "vibecrafted-app/tui-agent/src/bin/vc_start.rs").read_text(
         encoding="utf-8"
     )
+    installer = (REPO_ROOT / "scripts/vetcoders_install.py").read_text(encoding="utf-8")
 
     launch_handler = delegate[
         delegate.index("func applicationDidFinishLaunching") : delegate.index(
             "func applicationShouldTerminateAfterLastWindowClosed"
         )
     ]
-    assert "launchWorkspaceTerminal()" in launch_handler
-    assert "showMainWindowIfNeeded()" not in launch_handler
-    assert "\t<key>LSUIElement</key>\n\t<true/>" in info
-    assert 'withTitle: "Open Console"' in delegate
-    assert 'withTitle: "Open vc-terminal"' in delegate
-    assert 'withTitle: "Quit"' in delegate
-    assert "process.isRunning" in delegate
+    workspace_launch = delegate[
+        delegate.index("private func launchWorkspaceTerminal") : delegate.index(
+            "private func terminalIsLive"
+        )
+    ]
+    terminal_launch = delegate[
+        delegate.index("private func openWorkspaceTerminal") : delegate.index(
+            "private func terminalIsLive"
+        )
+    ]
+    assert "connectCommandDeck()" in launch_handler
+    assert "launchWorkspaceTerminal()" not in launch_handler
+    assert "showMainWindowIfNeeded()" in launch_handler
+    assert "\t<key>LSUIElement</key>\n\t<false/>" in info
+    assert "\t<key>NSQuitAlwaysKeepsWindows</key>\n\t<false/>" in info
+    tray = (
+        REPO_ROOT
+        / "vibecrafted-app/shell-agent/app/Vibecrafted/CommandDeck/StatusItemController.swift"
+    ).read_text()
+    for title in [
+        "Open Vibecrafted",
+        "Open Terminal",
+        "Check for Updates…",
+        "Workspaces",
+        "Help & Diagnostics…",
+        "Advanced",
+        "Stop Runtime Service…",
+        "Repair Runtime…",
+        "Quit Vibecrafted",
+    ]:
+        assert title in tray
+    assert "Command Deck:" not in tray
+    assert "cappedMenuTitle" not in tray
+    help_dialog = delegate[
+        delegate.index("private func showStatusItemHelp") : delegate.index(
+            "private func activeRunSummary"
+        )
+    ]
+    assert 'alert.addButton(withTitle: "Open Diagnostics")' in help_dialog
+    assert "showServerDiagnostics()" in help_dialog
+    assert 'withTitle: "About Vibecrafted"' in delegate
+    assert 'withTitle: "Check for Updates…"' in delegate
+    assert 'withTitle: "Quit Vibecrafted"' in delegate
+    assert "#selector(requestQuit)" in delegate
+    assert 'process.arguments = ["status", "--activity", "--json"]' in delegate
+    assert "func applicationShouldTerminate(" in delegate
+    assert 'withTitle: "Stop Runtime Service"' in delegate
+    # One caretaker/control_plane truth: the tray derives server health from the
+    # caretaker verb, never from a second health JSON read in Swift.
+    assert "process.arguments = serverCaretakerArguments()" in delegate
+    assert 'appendingPathComponent("server/supervisor.status.json")' not in delegate
+    assert "serverActionArguments(for: action)" in delegate
     assert (
-        "NSRunningApplication(processIdentifier: process.processIdentifier)?.activate(options: [])"
-        in delegate
+        'process.arguments = ["server", "service", "status", "--json"]' not in delegate
     )
+    assert 'process.arguments = ["server", "service", "logs", "--json"]' in delegate
+    assert "menu.delegate = self" in tray
+    assert "statusRefreshTimer = Timer.scheduledTimer(" in delegate
+    assert "TrayGlyph.statusImage(health:" in tray
+    assert "NSStatusBar.system.statusItem" not in delegate
+    assert "terminalApplication?.isTerminated" in delegate
+    assert "application.activate(options: [])" in delegate
     termination_handler = delegate[
         delegate.index(
             "func applicationShouldTerminateAfterLastWindowClosed"
@@ -790,44 +1108,317 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     ]
     assert "    false\n" in termination_handler
     assert "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty" in delegate
-    assert "config/alacritty/launch-primary-shell.zsh" in delegate
-    assert 'appendingPathComponent("releases", isDirectory: true)' in delegate
-    assert 'appendingPathComponent("active.json")' in delegate
-    assert 'generation.appendingPathComponent("bin/vc-start")' in delegate
-    assert "let runtimeEntries = try manager.contentsOfDirectory" in delegate
-    assert "launcherHome.appendingPathComponent(name)" in delegate
+    # A normal launch first asks the installer-owned read-only resolver which
+    # generation is current. Only a truly absent runtime may bootstrap the
+    # bundled carrier; an unusable one must be refused rather than overwritten.
+    assert "resolveInstalledRuntime { [weak self] resolution in" in workspace_launch
+    assert "case .ready:" in workspace_launch
+    assert "case .absent(let reason):" in workspace_launch
+    assert "self.installCanonicalRuntime { [weak self] result in" in workspace_launch
+    assert "case .unusable(let reason):" in workspace_launch
+    assert "self.openWorkspaceTerminal(install: install)" in workspace_launch
+    # The selected generation's terminal wrapper receives the explicit primary
+    # shell/start argv. The bundled terminal host remains onboarding material,
+    # never the direct launch target of the App.
+    assert "NSWorkspace.shared.openApplication(" not in terminal_launch
+    assert "generationRoot: install.root, terminal: install.terminal" in terminal_launch
+    terminal_owner = (
+        REPO_ROOT
+        / "vibecrafted-app/shell-agent/app/Vibecrafted/CommandDeck/TerminalLauncher.swift"
+    ).read_text()
+    assert 'arguments = ["-e", primaryShell.path]' in terminal_owner
     assert (
-        'launcherHome.appendingPathComponent("vc-terminal"), common: common, '
-        "executable: terminalHost" in delegate
+        "process.currentDirectoryURL = specification.workingDirectory" in terminal_owner
     )
-    assert 'generation.appendingPathComponent("bin/vc-server")' in delegate
-    assert 'generation.appendingPathComponent("bin/vc-guardian")' in delegate
-    assert 'generation.appendingPathComponent("bin/vc-server-supervisor")' in delegate
-    assert "rename(temporary.path, destination.path)" in delegate
-    assert "assertNoSymlinks(below: generation)" in delegate
-    # PATH composes: the signed generation wins, the caller's PATH survives behind
-    # it. A hard-coded system-only PATH strips Homebrew/~/.local/bin/~/.cargo/bin
-    # from every spawned agent CLI, so `#!/usr/bin/env` shebangs exit 127.
+    assert "environment: environment" in terminal_launch
+    assert (
+        "terminalLaunch = try TerminalLauncher.launch(specification)" in terminal_launch
+    )
+    assert "process.executableURL = install.terminalHost" not in terminal_launch
+    assert "\t<key>CFBundleIconFile</key>\n\t<string>Vibecrafted.icns</string>" in info
+    assert "NSApp.applicationIconImage.copy()" not in delegate
+    assert 'appendingPathComponent("runtime-pack", isDirectory: true)' in delegate
+    assert 'appendingPathComponent("install-runtime-pack.sh")' in delegate
+    assert '"--expected-source-revision"' in delegate
+    assert (
+        'environment["VIBECRAFTED_DECLARED_LAUNCHER"] = install.launcher.path'
+        in delegate
+    )
+    assert '"launcher": str(paths["launcher_home"] / "vibecrafted")' in installer
+    assert (
+        'appendingPathComponent("runtime")'
+        not in delegate[
+            delegate.index("private func installCanonicalRuntime") : delegate.index(
+                "private func uninstallCanonicalRuntime"
+            )
+        ]
+    )
+    assert 'arguments: ["--uninstall"]' in delegate
+    assert '"--payload-root", runtime.path' not in delegate
+    assert '"--terminal-host", terminalHost.path' in delegate
+    assert '"--frame-helper", frameHelper.path' in delegate
+    assert "JSONDecoder().decode(CanonicalRuntimeInstall.self" in delegate
+    native_runner = (
+        REPO_ROOT
+        / "vibecrafted-app/shell-agent/app/Vibecrafted/NativeInstallerProcess.swift"
+    ).read_text()
+    # UI installation never waits on the App's main actor. Every UI-reachable
+    # caller joins the one carrier publication, and both streams are drained
+    # from process start with finite capture rather than after waitUntilExit.
+    # The completion-bearing overload is the UI form. Optional preferenceChoice
+    # sits before completion; do not pin the first parameter name.
+    async_completion = (
+        "completion: @escaping (Result<CanonicalRuntimeInstall, Error>) -> Void"
+    )
+    async_sig = delegate.rfind(
+        "private func installCanonicalRuntime(",
+        0,
+        delegate.index(async_completion) + len(async_completion),
+    )
+    assert async_sig != -1
+    async_installer = delegate[
+        async_sig : delegate.index("private func runtimePackInstallArguments")
+    ]
+    assert "runtimeInstallProcess != nil" in async_installer
+    assert "runtimeInstallWaiters.append(completion)" in async_installer
+    assert "runtimeInstallWaiters.removeAll()" in async_installer
+    assert "waiters.forEach { $0(outcome) }" in async_installer
+    assert "preferenceChoice: PreferenceResolutionChoice? = nil" in async_installer
+    assert (
+        "runRuntimePackInstaller(arguments: runtimePackInstallArguments("
+        "preferenceChoice: preferenceChoice))" in async_installer
+    )
+    args_builder = delegate[
+        delegate.index("private func runtimePackInstallArguments") : delegate.index(
+            "private func decodeCanonicalRuntimeInstall"
+        )
+    ]
+    assert "preferenceChoice: PreferenceResolutionChoice? = nil" in args_builder
+    assert "if let choice = preferenceChoice" in args_builder
+    assert '"--resolve-preference", choice.action' in args_builder
+    assert "installCanonicalRuntime(preferenceChoice: choice)" in delegate
+    ui_installer = delegate[
+        delegate.index(
+            "private func runRuntimePackInstaller(\n    arguments: [String], completion:"
+        ) : delegate.index("private func runtimePackInstallerProcess")
+    ]
+    assert (
+        'runBounded(process, timeout: 300, label: "runtime pack install")'
+        in ui_installer
+    )
+    assert "waitUntilExit()" not in ui_installer
+    sync_installer = delegate[
+        delegate.index(
+            "private func runRuntimePackInstaller(arguments: [String])"
+        ) : delegate.index("/// Asynchronous UI launch")
+    ]
+    assert "DispatchQueue.global" in sync_installer
+    assert "readers.wait()" in sync_installer
+    assert "waitUntilExit()" in sync_installer
+    assert "storage = Data(chunk.suffix(limit))" in native_runner
+    assert "storage.removeFirst(storage.count - limit)" in native_runner
+    assert "let timedOut: Bool" in native_runner
+    assert "timeoutFlag.mark()" in native_runner
+    assert "MainActor.assumeIsolated { completion(result) }" in native_runner
+    assert "process.terminationHandler = nil" in native_runner
+    assert "durable transaction will recover or report its lease state" in delegate
+    reinstall = delegate[
+        delegate.index("private func offerRuntimePackReinstall") : delegate.index(
+            "@objc private func openConsoleFromStatusItem"
+        )
+    ]
+    assert "installCanonicalRuntime { [weak self] result in" in reinstall
+    assert "defer { repairInFlight" not in reinstall
+    # The installer returns POSIX paths, not URL strings. Decoding them directly
+    # as URL produces relative URLs whose `.path` passes file checks but which
+    # Foundation.Process rejects as an executableURL on macOS.
+    assert "container.decode(String.self, forKey: key)" in delegate
+    assert 'guard path.hasPrefix("/")' in delegate
+    assert "URL(fileURLWithPath: path)" in delegate
+    # AppDelegate is the UI/process host, not a second installer implementation.
+    assert "createDirectory(at:" not in delegate
+    assert "createFile(atPath:" not in delegate
+    assert "copyItem(at:" not in delegate
+    assert "writeLauncher(" not in delegate
+    assert 'appendingPathComponent("active.json")' not in delegate
+    # PATH composes: the caller's tools win and the signed generation remains a
+    # fallback. A hard-coded system-only PATH strips Homebrew/~/.local/bin/
+    # ~/.cargo/bin from spawned agent CLIs, so `#!/usr/bin/env` shebangs exit 127.
     assert 'environment["PATH"] = composedPath(' in delegate
     assert 'environment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"' not in delegate
-    assert '"export PATH=\\"\\(shellDoubleQuoteBody(' in delegate
-    assert ':${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}\\""' in delegate
+    assert 'return (entries + [generationBin]).joined(separator: ":")' in delegate
     assert '["server", "service", "reconcile"]' in delegate
     assert "shell-agent" not in delegate
     assert 'name = "vc-start"' in cargo
     assert '"--noprofile"' in launcher
     assert '"--norc"' in launcher
-    assert 'source "$1"; shift; vc-start "$@"' in launcher
+    assert 'source "$1" || exit $?; shift; vc-start "$@"' in launcher
     assert 'Command::new("/bin/bash")' in launcher
     assert "fn host_agent_search_path(" in launcher
     assert '"/opt/homebrew/bin"' in launcher
-    # vc-start composes: the PATH AppDelegate hands it (generation first, the
-    # operator's Homebrew/npm/cargo/nvm tail behind) must survive the handoff,
+    # vc-start composes: the PATH AppDelegate hands it (the Founder's
+    # Homebrew/npm/cargo/nvm entries first, generation fallback last) survives,
     # sanitized rather than amputated — a closed allowlist here re-created the
     # exit-127 shebang failures the composed PATH fixed one process earlier.
     assert 'let inherited_path = env::var("PATH").ok();' in launcher
     assert "inherited_path.as_deref()" in launcher
     assert "!entry.starts_with('/')" in launcher
+
+
+def test_tray_menu_supervises_runtime_pack_carrier_drift() -> None:
+    app_dir = REPO_ROOT / "vibecrafted-app/shell-agent/app/Vibecrafted"
+    delegate = (app_dir / "AppDelegate.swift").read_text(encoding="utf-8")
+    policy = (app_dir / "RuntimePackMenuPolicy.swift").read_text(encoding="utf-8")
+    lifecycle = (app_dir / "LifecycleLog.swift").read_text(encoding="utf-8")
+
+    # The tray supervises the Runtime Pack carrier, not just the server: the
+    # live generation is a first-class status line and the submenu carries the
+    # supervision actions (reveal home, reveal control files, copy identity).
+    tray = (app_dir / "CommandDeck/StatusItemController.swift").read_text()
+    for title in [
+        "Open Runtime Folder",
+        "Open Control Plane Folder",
+        "Copy Runtime Identity",
+    ]:
+        assert title in tray
+    assert "case .revealRuntime: revealRuntimeHomeFromStatusItem()" in delegate
+    assert "case .revealControlPlane: openControlPlaneFromStatusItem()" in delegate
+    assert "case .copyRuntimeIdentity: copyRuntimeIdentityFromStatusItem()" in delegate
+    assert "revealNativePath(install.runtimeHome)" in delegate
+    assert '"control_plane", isDirectory: true' in delegate
+    assert "NSPasteboard.general.setString(blob, forType: .string)" in delegate
+    # Menu state derives through the pure policy, wired from the status refresh
+    # path so opening the tray always shows current drift truth.
+    assert "deriveRuntimePackMenuState(" in delegate
+    assert "applyRuntimePackMenuState()" in delegate
+    assert (
+        "signedCarrierRevisions = (sourceRevision, terminalRevision, frameRevision)"
+        in delegate
+    )
+    assert "generation: canonicalInstall?.root.lastPathComponent" in delegate
+    # The policy owns the drift rule: generation `X.Y.Z+g<sha>` vs the signed
+    # carrier's full manifest revision; drift is amber (runtime-first upgrades
+    # are legitimate), never silent.
+    assert "func generationRevisionToken(_ generation: String) -> String?" in policy
+    assert (
+        "func runtimePackMatchesCarrier(generation: String, signedSourceRevision: String) -> Bool"
+        in policy
+    )
+    assert "func deriveRuntimePackMenuState(" in policy
+    assert "func runtimeIdentityBlob(" in policy
+    # The tray passes its XDG base; the policy derives the product config home.
+    assert "xdgConfigHome: install.configHome.path" in delegate
+    assert 'generation.range(of: "+g", options: .backwards)' in policy
+    assert "signedSourceRevision.lowercased().hasPrefix(token)" in policy
+    assert "Matches this App's signed carrier" in policy
+    assert "the installed runtime moved; update the App to re-sync" in policy
+    # The durable lifecycle trail is supervision evidence, but it is not
+    # installer behavior: it lives in its own unit so the AppDelegate hub stays
+    # a UI/process host (the contract above forbids createDirectory there).
+    assert "func lifecycleLog(_ event: String)" in lifecycle
+    assert 'appendingPathComponent("app-lifecycle.log")' in lifecycle
+    assert "func installLifecycleSignalHandlers()" in lifecycle
+    assert "installLifecycleSignalHandlers()" in delegate
+    assert "lifecycleLog(" in delegate
+    assert "createDirectory(at:" not in delegate
+
+
+def test_runtime_pack_menu_policy_swift_behavior(tmp_path: Path) -> None:
+    swiftc = shutil.which("swiftc")
+    if swiftc is None:
+        pytest.skip("swiftc is unavailable")
+    policy = (
+        REPO_ROOT
+        / "vibecrafted-app/shell-agent/app/Vibecrafted/RuntimePackMenuPolicy.swift"
+    )
+    # Top-level expressions are only allowed in a file named main.swift.
+    harness = tmp_path / "main.swift"
+    harness.write_text(
+        """
+import Foundation
+
+enum TrayServerHealth: String {
+  case checking
+  case healthy
+  case transitioning
+  case failed
+  case neutral
+}
+
+func expect(_ condition: Bool, _ label: String) {
+  if !condition { fatalError(label) }
+}
+
+let fullSha = "0a5eaaea607d07c3dcac1bb321c502d41273e1e0"
+
+let waiting = deriveRuntimePackMenuState(
+  generation: nil, signedSourceRevision: nil, runtimeReady: false)
+expect(waiting.header == "Runtime Pack: WAITING FOR RUNTIME", "waiting header")
+expect(waiting.health == .checking, "waiting health")
+expect(!waiting.actionsEnabled, "waiting actions disabled")
+
+let unknown = deriveRuntimePackMenuState(
+  generation: nil, signedSourceRevision: fullSha, runtimeReady: true)
+expect(unknown.header == "Runtime Pack: UNKNOWN", "unknown header")
+expect(unknown.health == .neutral, "unknown health")
+expect(unknown.actionsEnabled, "unknown actions enabled")
+
+let synced = deriveRuntimePackMenuState(
+  generation: "4.4.0+g0a5eaaea", signedSourceRevision: fullSha, runtimeReady: true)
+expect(synced.header == "Runtime Pack: 4.4.0+g0a5eaaea", "synced header")
+expect(synced.detail == "Matches this App's signed carrier", "synced detail")
+expect(synced.health == .healthy, "synced health")
+expect(synced.actionsEnabled, "synced actions enabled")
+
+let drifted = deriveRuntimePackMenuState(
+  generation: "4.4.0+gdeadbeef", signedSourceRevision: fullSha, runtimeReady: true)
+expect(drifted.header == "Runtime Pack: 4.4.0+gdeadbeef", "drift header")
+expect(drifted.detail.contains("Carrier expects 0a5eaaea"), "drift detail names carrier")
+expect(drifted.health == .transitioning, "drift is amber, not red")
+expect(drifted.actionsEnabled, "drift actions enabled")
+
+let unstamped = deriveRuntimePackMenuState(
+  generation: "4.4.0+UNSTAMPED", signedSourceRevision: fullSha, runtimeReady: true)
+expect(unstamped.health == .neutral, "unstamped health")
+expect(unstamped.detail == "Installed generation carries no source stamp", "unstamped detail")
+
+expect(generationRevisionToken("4.4.0+g0a5eaaea") == "0a5eaaea", "token extraction")
+expect(generationRevisionToken("4.4.0+UNSTAMPED") == nil, "unstamped token")
+expect(runtimePackMatchesCarrier(
+  generation: "4.4.0+g0a5eaaea", signedSourceRevision: fullSha), "carrier match")
+expect(!runtimePackMatchesCarrier(
+  generation: "4.4.0+gdeadbeef", signedSourceRevision: fullSha), "carrier mismatch")
+
+let blob = runtimeIdentityBlob(
+  generation: "4.4.0+g0a5eaaea", sourceRevision: fullSha,
+  terminalRevision: "78d62bb9", frameRevision: "c29b899c",
+  runtimeHome: "/Users/o/.local/share/vibecrafted",
+  xdgConfigHome: "/Users/o/.config")
+expect(blob.contains("vibecrafted-runtime: 4.4.0+g0a5eaaea"), "blob generation")
+expect(blob.contains("carrier-source: \\(fullSha)"), "blob source")
+expect(blob.contains("carrier-vc-terminal: 78d62bb9"), "blob terminal")
+expect(blob.contains("carrier-vc-frame: c29b899c"), "blob frame")
+expect(blob.contains("runtime-home: /Users/o/.local/share/vibecrafted"), "blob home")
+// The App hands over its XDG base; the blob must name the product directory.
+let configLines = blob.split(separator: "\\n").filter { $0.hasPrefix("config-home: ") }
+expect(configLines == ["config-home: /Users/o/.config/vibecrafted"], "blob config")
+print("runtime-pack-policy-ok")
+""",
+        encoding="utf-8",
+    )
+    binary = tmp_path / "runtime-pack-policy-check"
+    compile_result = subprocess.run(
+        [swiftc, "-O", "-o", str(binary), str(policy), str(harness)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert compile_result.returncode == 0, compile_result.stderr
+    run_result = subprocess.run(
+        [str(binary)], check=False, capture_output=True, text=True
+    )
+    assert run_result.returncode == 0, run_result.stderr
+    assert run_result.stdout.strip() == "runtime-pack-policy-ok"
 
 
 def test_tracked_product_source_contains_no_symlinks() -> None:
@@ -973,14 +1564,14 @@ def test_host_path_scan_distinguishes_windows_examples_from_unix_paths(
     tmp_path: Path,
 ) -> None:
     payload = tmp_path / "payload"
-    payload.write_bytes(b"splitroot('C:/Users/Barney')")
+    payload.write_bytes(b"splitroot('C:/Users/tester')")
     contract._reject_host_bound_paths(
         payload,
         relative="payload",
         kind="executable",
     )
 
-    payload.write_bytes(b"panic at /Users/operator/src/main.rs")
+    payload.write_bytes(b"panic at /Users/tester/src/main.rs")
     _assert_error(
         contract.E_PATH,
         lambda: contract._reject_host_bound_paths(
@@ -994,8 +1585,8 @@ def test_host_path_scan_distinguishes_windows_examples_from_unix_paths(
 def test_host_path_scan_allows_only_known_libpython_documentation_paths(
     tmp_path: Path,
 ) -> None:
-    payload = tmp_path / "libpython3.12.dylib"
-    relative = "Contents/Resources/runtime/python/lib/libpython3.12.dylib"
+    payload = tmp_path / "libpython3.14.dylib"
+    relative = "Contents/Resources/runtime/python/lib/libpython3.14.dylib"
     payload.write_bytes(
         b"example /usr/local/lib/python2.5/site-packages "
         b"/usr/local/lib/python2.5/site-packages/bar "
@@ -1004,6 +1595,64 @@ def test_host_path_scan_allows_only_known_libpython_documentation_paths(
     contract._reject_host_bound_paths(payload, relative=relative, kind="dylib")
 
     payload.write_bytes(b"load /usr/local/lib/libescape.dylib")
+    _assert_error(
+        contract.E_PATH,
+        lambda: contract._reject_host_bound_paths(
+            payload,
+            relative=relative,
+            kind="dylib",
+        ),
+    )
+
+
+@pytest.mark.parametrize("name", ["python", "python3", "python3.14"])
+def test_host_path_scan_allows_libpython_documentation_paths_in_portable_python_executables(
+    tmp_path: Path, name: str
+) -> None:
+    """python-build-standalone 3.14 carries site.py's examples in the executable too."""
+    payload = tmp_path / name
+    relative = f"Contents/Resources/runtime/python/bin/{name}"
+    payload.write_bytes(
+        b"example /usr/local/lib/python2.5/site-packages "
+        b"/usr/local/lib/python2.5/site-packages/bar "
+        b"/usr/local/lib/python2.5/site-packages/foo"
+    )
+    contract._reject_host_bound_paths(payload, relative=relative, kind="executable")
+
+    payload.write_bytes(b"load /usr/local/lib/libescape.dylib")
+    _assert_error(
+        contract.E_PATH,
+        lambda: contract._reject_host_bound_paths(
+            payload,
+            relative=relative,
+            kind="executable",
+        ),
+    )
+    # Only the portable interpreter names qualify; a look-alike stays refused.
+    payload.write_bytes(b"example /usr/local/lib/python2.5/site-packages")
+    _assert_error(
+        contract.E_PATH,
+        lambda: contract._reject_host_bound_paths(
+            payload,
+            relative="Contents/Resources/runtime/bin/python3-helper",
+            kind="executable",
+        ),
+    )
+
+
+def test_host_path_scan_allows_vendored_openssl_openssl_dir_strings(
+    tmp_path: Path,
+) -> None:
+    payload = tmp_path / "libcrypto.3.dylib"
+    relative = "Contents/Resources/runtime/lib/libcrypto.3.dylib"
+    payload.write_bytes(
+        b"OPENSSLDIR=/opt/homebrew/etc/openssl@3 "
+        b"/opt/homebrew/Cellar/openssl@3/3.6.3/lib/engines-3 "
+        b"/opt/homebrew/opt/openssl@3/lib/libcrypto.3.dylib"
+    )
+    contract._reject_host_bound_paths(payload, relative=relative, kind="dylib")
+
+    payload.write_bytes(b"panic at /Users/tester/src/main.rs")
     _assert_error(
         contract.E_PATH,
         lambda: contract._reject_host_bound_paths(
@@ -1563,7 +2212,7 @@ def test_app_negative_controls_reject_competing_or_unbound_product_shape(
     app = tmp_path / "Vibecrafted.app"
     manifest = _app_fixture(app, macho_executable)
     if mutation == "wrong_bundle_id":
-        manifest["bundle_id"] = "space.div0.vibecrafted"
+        manifest["bundle_id"] = "io.example.vibecrafted"
     elif mutation == "wrong_executable":
         manifest["bundle_executable"] = "vibecrafted-launch"
     elif mutation == "missing_module":
@@ -1586,6 +2235,200 @@ def test_app_negative_controls_reject_competing_or_unbound_product_shape(
     _write_json(app / "Contents/Resources/product-manifest.json", manifest)
 
     _assert_error(expected_code, lambda: contract.verify_app(app))
+
+
+def test_app_accepts_both_declared_terminal_bundles(
+    tmp_path: Path, macho_executable: Path
+) -> None:
+    """The Runtime Pack's own bundle is product, not contraband.
+
+    Before this, `verify_app` compared every nested .app against a list holding
+    only the Helpers copy, so the moment the pack payload staged under
+    Resources/runtime brought its own vc-terminal.app the whole product was
+    rejected as carrying a forbidden nested bundle.
+    """
+    app = tmp_path / "Vibecrafted.app"
+    manifest = _app_fixture(app, macho_executable)
+
+    nested = sorted(
+        path.relative_to(app).as_posix()
+        for path in app.rglob("*")
+        if path.is_dir() and path.suffix.lower() == ".app"
+    )
+    assert nested == sorted(contract.TERMINAL_APP_BUNDLES)
+    declared = {entry["path"] for entry in manifest["files"]}
+    for bundle in contract.TERMINAL_APP_BUNDLES:
+        assert f"{bundle}/Contents/MacOS/alacritty" in declared
+        assert f"{bundle}/Contents/Resources/alacritty.icns" in declared
+        assert (app / bundle / "Contents/_CodeSignature/CodeResources").is_file()
+        # The seal is proof, never payload: nothing under it may be inventoried.
+        assert not any(
+            item.startswith(f"{bundle}/Contents/_CodeSignature") for item in declared
+        )
+
+    assert contract.verify_app(app) == manifest
+
+
+@pytest.mark.parametrize("stranger", ["Stranger.app", "Stranger.APP"])
+def test_app_refuses_an_undeclared_nested_bundle_in_any_suffix_case(
+    tmp_path: Path, macho_executable: Path, stranger: str
+) -> None:
+    """An inventoried, sealed stranger bundle is contraband whatever its case.
+
+    LaunchServices treats `Stranger.APP` as an application on the default
+    case-insensitive volume; a case-sensitive `*.app` walk accepted it.
+    """
+    app = tmp_path / "Vibecrafted.app"
+    manifest = _app_fixture(app, macho_executable)
+    plist_rel = f"Contents/Resources/{stranger}/Contents/Info.plist"
+    exe_rel = f"Contents/Resources/{stranger}/Contents/MacOS/stranger"
+    (app / exe_rel).parent.mkdir(parents=True)
+    with (app / plist_rel).open("wb") as handle:
+        plistlib.dump(
+            {
+                "CFBundleIdentifier": "io.example.stranger",
+                "CFBundleExecutable": "stranger",
+                "CFBundlePackageType": "APPL",
+            },
+            handle,
+        )
+    shutil.copy2(macho_executable, app / exe_rel)
+    _codesign_macho(app / exe_rel)
+    manifest["files"].append(_entry(app, plist_rel, kind="config"))
+    manifest["files"].append(_entry(app, exe_rel, kind="executable"))
+    manifest["files"].sort(key=lambda item: item["path"])
+    _write_app_manifest(app, manifest, sign=True)
+    # A real producer inventories the stranger's seal too; declare it and
+    # re-sign until the nested seal bytes settle, so the only remaining
+    # objection is the bundle itself.
+    seal_rel = f"Contents/Resources/{stranger}/Contents/_CodeSignature/CodeResources"
+    for _ in range(3):
+        if not (app / seal_rel).is_file():
+            break
+        fresh = _entry(app, seal_rel, kind="config")
+        manifest["files"] = [
+            item for item in manifest["files"] if item["path"] != seal_rel
+        ] + [fresh]
+        manifest["files"].sort(key=lambda item: item["path"])
+        _write_app_manifest(app, manifest, sign=True)
+        if _entry(app, seal_rel, kind="config") == fresh:
+            break
+
+    with pytest.raises(contract.ProductContractError) as refused:
+        contract.verify_app(app)
+
+    assert refused.value.code == contract.E_BUNDLE
+    assert f"Contents/Resources/{stranger}" in str(refused.value)
+
+
+@pytest.mark.parametrize("bundle", contract.TERMINAL_APP_BUNDLES)
+@pytest.mark.parametrize(
+    ("mutation", "expected_code"),
+    [
+        ("wrong_identity", contract.E_BUNDLE),
+        ("wrong_display_name", contract.E_BUNDLE),
+        ("plist_is_not_a_dictionary", contract.E_BUNDLE),
+        ("plist_is_malformed_xml", contract.E_BUNDLE),
+        ("icon_absent_from_inventory", contract.E_INVENTORY),
+        ("bundle_seal_removed", contract.E_PROOF),
+    ],
+)
+def test_every_declared_terminal_bundle_is_held_to_one_identity(
+    tmp_path: Path,
+    macho_executable: Path,
+    bundle: str,
+    mutation: str,
+    expected_code: int,
+) -> None:
+    """Same canonical identity, same proof, whichever payload carries it.
+
+    Parametrized over both declared bundles on purpose: a check that only ever
+    ran against the Helpers copy is how the two assemblies drifted apart in the
+    first place. A malformed Info.plist is a contract failure with a code, not
+    an AttributeError escaping the verifier.
+    """
+    app = tmp_path / "Vibecrafted.app"
+    manifest = _app_fixture(app, macho_executable)
+    plist_path = app / bundle / "Contents/Info.plist"
+
+    def _reseal_plist(payload: Any) -> None:
+        with plist_path.open("wb") as handle:
+            plistlib.dump(payload, handle)
+        _resync_plist_entry()
+
+    def _resync_plist_entry() -> None:
+        relative = f"{bundle}/Contents/Info.plist"
+        entry = next(item for item in manifest["files"] if item["path"] == relative)
+        entry.update(_entry(app, relative, kind="config"))
+
+    if mutation == "wrong_identity":
+        with plist_path.open("rb") as handle:
+            info = plistlib.load(handle)
+        info["CFBundleIdentifier"] = "io.example.vc-terminal"
+        _reseal_plist(info)
+    elif mutation == "wrong_display_name":
+        with plist_path.open("rb") as handle:
+            info = plistlib.load(handle)
+        info["CFBundleDisplayName"] = "Alacritty"
+        _reseal_plist(info)
+    elif mutation == "plist_is_not_a_dictionary":
+        _reseal_plist(["not", "a", "dictionary"])
+    elif mutation == "plist_is_malformed_xml":
+        plist_path.write_bytes(b'<?xml version="1.0"?><plist version="1.0"><dict>\n')
+        _resync_plist_entry()
+    elif mutation == "icon_absent_from_inventory":
+        icon_relative = f"{bundle}/Contents/Resources/alacritty.icns"
+        (app / icon_relative).unlink()
+        manifest["files"] = [
+            item for item in manifest["files"] if item["path"] != icon_relative
+        ]
+    elif mutation == "bundle_seal_removed":
+        shutil.rmtree(app / bundle / "Contents/_CodeSignature")
+
+    _write_app_manifest(app, manifest, sign=False)
+
+    _assert_error(expected_code, lambda: contract.verify_app(app))
+
+
+def test_manifest_producer_inventories_an_undeclared_nested_bundle_seal(
+    tmp_path: Path, macho_executable: Path
+) -> None:
+    """No blanket nested-app exemption on the producer side either.
+
+    The writer used to skip anything whose path contained `_CodeSignature` or
+    was named `CodeResources`. That absolved an undeclared nested bundle of
+    being inventoried at all, so the two sides disagreed about what the payload
+    even contained. The producer now asks the contract for the exact paths the
+    signer owns, and a stranger's seal lands in the inventory.
+    """
+    app = tmp_path / "Vibecrafted.app"
+    _app_fixture(app, macho_executable)
+    intruder = "Contents/Resources/Second.app/Contents/_CodeSignature/CodeResources"
+    (app / intruder).parent.mkdir(parents=True)
+    (app / intruder).write_text("sealed\n", encoding="utf-8")
+
+    unified_product_manifest.produce_app(
+        Namespace(
+            app=app,
+            terminal_source=macho_executable,
+            frame_source=macho_executable,
+            version="1.0.0",
+            build="1",
+            vibecrafted_sha="2" * 40,
+            terminal_sha="4" * 40,
+            frame_sha="6" * 40,
+        )
+    )
+    produced = json.loads(
+        (app / "Contents/Resources/product-manifest.json").read_text(encoding="utf-8")
+    )
+
+    declared = {entry["path"] for entry in produced["files"]}
+    assert intruder in declared
+    for bundle in contract.TERMINAL_APP_BUNDLES:
+        assert f"{bundle}/Contents/_CodeSignature/CodeResources" not in declared
+        assert f"{bundle}/Contents/MacOS/alacritty" in declared
+        assert f"{bundle}/Contents/Resources/alacritty.icns" in declared
 
 
 def test_app_binds_embedded_module_receipt_bytes_and_copied_inventory(
@@ -1802,7 +2645,7 @@ def test_transaction_rejects_exact_legacy_four_hash_runtime_manifest(
             "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame/config.kdl"
         ],
         "vibecrafted-core/vibecrafted_core/deck/vibecrafted": manifest["hashes"][
-            "vibecrafted-core/vibecrafted_core/deck/vibecrafted"
+            contract.RUNTIME_GENERATION_ENTRYPOINT
         ],
     }
     _write_json(manifest_path, manifest)
@@ -2007,6 +2850,7 @@ def test_signed_release_output_binds_live_artifacts_and_signer_policy(
     monkeypatch.setattr(contract, "_codesign_release_evidence", lambda _: signer)
     _patch_release_mount(monkeypatch, app)
 
+    assert contract.verify_release_output(receipt, signature) == payload
     assert contract.verify_release_output(receipt, signature) == payload
 
 
@@ -3083,6 +3927,7 @@ def test_shell_front_door_self_test_exercises_real_verifier() -> None:
     env = {
         "HOME": os.environ["HOME"],
         "PATH": "/usr/bin:/bin",
+        "PYTHON": sys.executable,
     }
     result = subprocess.run(
         [str(VERIFY_SCRIPT), "--self-test"],
@@ -3113,14 +3958,32 @@ def test_unified_release_has_one_top_level_owner() -> None:
     assert 'local terminal_app="$APP/Contents/Helpers/vc-terminal.app"' in builder
     assert '"$terminal_app/Contents/MacOS/alacritty"' in builder
     assert '"$terminal_app/Contents/Resources/alacritty.icns"' in builder
+    assert "Set :CFBundleDisplayName VC Terminal" in builder
+    assert "Set :CFBundleName VC Terminal" in builder
+    terminal_entry = (REPO_ROOT / "scripts/vc-terminal-product-entry.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "vc-terminal.app/Contents/MacOS/alacritty" in terminal_entry
+    assert "_vc_terminal_is_bundle_host" in terminal_entry
+    assert 'exec "$host" --config-file "$config" "$@"' in terminal_entry
     assert "sign_nested_app_bundles" in builder
+    assert "sign_helper_scripts" in builder
+    assert builder.index("sign_nested_app_bundles") < builder.index(
+        "sign_helper_scripts"
+    )
+    assert builder.index("sign_helper_scripts") < builder.index("embed_runtime_pack")
+    assert '"$APP/Contents/Helpers/vc-app-update"' in builder
     assert 'make -C "$FRAME_REPO" release-binary' in builder
     assert 'chmod 0755 "$frame_source"' in builder
     assert "build-server-release" in builder
     assert '"$runtime/bin/vc-server"' in builder
     assert '"$runtime/server/site/"' in builder
-    assert "uv python install 3.12.3" in builder
-    assert "install_name_tool -id '@loader_path/libpython3.12.dylib'" in builder
+    assert "install_portable_python" in builder
+    assert "portable_python_load_pin" in builder
+    assert "scripts/lib/portable-python.sh" in builder
+    assert "uv python install 3.12.3" not in builder
+    assert 'install_name_tool -id "@loader_path/${PORTABLE_PYTHON_DYLIB}"' in builder
+    assert "python3.12" not in builder
     # The remaps are built from PATH_REMAPS rather than written as one literal
     # string, because the snapshot pair is conditional and because rustc applies
     # the LAST match — so the list has to be ordered broadest-first, with $HOME
@@ -3132,6 +3995,9 @@ def test_unified_release_has_one_top_level_owner() -> None:
     assert "run_bundled_verifier release-output" in builder
     assert '"$verifier" -m vibecrafted_core.product_contract "$@"' in builder
     assert '"$runtime/vibecrafted-core/vibecrafted_core/VERSION"' in builder
+    assert '"$runtime/scripts/vetcoders_install.py"' in builder
+    assert '"$runtime/scripts/distribution_manifest.py"' in builder
+    assert '"$runtime/scripts/installer_brand.py"' in builder
     assert '"$REPO_ROOT/scripts/verify-vibecrafted-product.sh"' not in builder
     assert "--noprofile" not in builder  # vc-start, not the release shell, owns this
     assert "vc-frame.real" not in builder
@@ -3156,6 +4022,7 @@ def test_terminal_policy_uses_operator_toml_and_primary_shell_chain() -> None:
     delegate = (
         REPO_ROOT / "vibecrafted-app/shell-agent/app/Vibecrafted/AppDelegate.swift"
     ).read_text(encoding="utf-8")
+    installer = (REPO_ROOT / "scripts/vetcoders_install.py").read_text(encoding="utf-8")
 
     assert 'family = "Spot Mono"' in terminal
     assert "size = 18.5" in terminal
@@ -3166,26 +4033,117 @@ def test_terminal_policy_uses_operator_toml_and_primary_shell_chain() -> None:
     assert 'cyan    = "#56949f"' in light
     assert "live_config_reload = true" in terminal
     assert "save_to_clipboard = true" in terminal
-    assert 'command = "open"' in terminal
+    terminal_policy = tomllib.loads(terminal)
+    enabled_hints = terminal_policy["hints"]["enabled"]
+    assert enabled_hints[0]["command"] == "/usr/bin/open"
+    assert enabled_hints[0]["hyperlinks"] is True
+    path_hint = enabled_hints[1]
+    assert path_hint["hyperlinks"] is False
+    assert path_hint["mouse"] == {"enabled": True, "mods": "Command"}
+    assert path_hint["command"]["program"] == "/bin/zsh"
+    path_command = path_hint["command"]["args"][1]
+    assert "exec /usr/bin/open" in path_command
+    path_pattern = re.compile(path_hint["regex"])
+    for rendered_path in (
+        "/Volumes/vc-workspace/README.md",
+        "/Volumes/vc-workspace/Project With Spaces/README.md",
+        "~/Documents/proof.pdf",
+        "./report.md:12",
+        "../report.md:12:3",
+        "config/vc-terminal/vibecrafted.toml:57",
+    ):
+        assert path_pattern.fullmatch(rendered_path), rendered_path
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        target = Path(temp_dir) / "proof with spaces.md"
+        target.touch()
+        assert path_pattern.fullmatch(f"{target}:12:3")
+        probe = path_command.replace(
+            'exec /usr/bin/open -- "$candidate"', 'printf %s "$candidate"'
+        )
+        line_result = subprocess.run(
+            ["/bin/zsh", "-lc", probe, f"{target}:12:3"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert line_result.stdout == str(target)
+        prose_result = subprocess.run(
+            ["/bin/zsh", "-lc", probe, f"{target} was saved"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert prose_result.stdout == str(target)
     assert 'mods = "Command"' in terminal
-    assert 'key = "Period"' in terminal
+    assert 'key = ">"' in terminal
     assert 'mods = "Command|Shift"' in terminal
     assert 'chars = "\\u001b[46;10u"' in terminal
-    assert "launch-primary-shell.zsh" in terminal
-    assert "$VIBECRAFTED_RUNTIME_ROOT/bin/vc-start" in terminal
+    assert 'key = "N"' in terminal
+    assert 'chars = "\\u001b[110;9u"' in terminal
+    assert (
+        "$VIBECRAFTED_RUNTIME_ROOT/config/alacritty/launch-primary-shell.zsh"
+        not in terminal
+    )
+    assert terminal_policy["terminal"]["shell"] == {
+        "program": "/bin/sh",
+        "args": [
+            "-c",
+            'exec "$HOME/.config/vibecrafted/vc-terminal/launch-primary-shell.zsh"',
+        ],
+    }
     assert "${1##*/}" in primary_shell
     assert '"$0" "$@"' in primary_shell
-    assert "process.executableURL = install.terminalHost" in delegate
-    assert '"-e", install.primaryShell.path, install.start.path, "operator"' in delegate
-    assert 'productConfig.appendingPathComponent("terminal-entry.toml")' in delegate
-    assert 'productConfig.appendingPathComponent("terminal-theme.toml")' in delegate
+    terminal_launch = delegate[
+        delegate.index("private func openWorkspaceTerminal") : delegate.index(
+            "private func terminalIsLive"
+        )
+    ]
+    assert "NSWorkspace.shared.openApplication(" not in terminal_launch
+    assert "generationRoot: install.root, terminal: install.terminal" in terminal_launch
+    assert "environment: environment" in terminal_launch
+    terminal_owner = (
+        REPO_ROOT
+        / "vibecrafted-app/shell-agent/app/Vibecrafted/CommandDeck/TerminalLauncher.swift"
+    ).read_text()
+    assert 'arguments = ["-e", primaryShell.path]' in terminal_owner
+    assert 'product_config / "vc-terminal" / "vc-terminal.toml"' in installer
+    assert 'product_config / "terminal-entry.toml"' not in installer
+    assert 'for debris in terminal.glob("launch-*.zsh"):' in installer
+    assert "if debris.name != _PRODUCT_PRIMARY_SHELL_NAME:" in installer
+    assert "_remove_path(debris)" in installer
+    assert 'product_config / "terminal-policy.toml"' in installer
+    assert 'theme = staged / "terminal-theme.toml"' in installer
+    assert 'generation / "config/vc-terminal/themes/dark.toml"' in installer
+    assert 'tomllib.loads(theme.read_text(encoding="utf-8"))' in installer
+    assert "_materialize_runtime_generation_vc_terminal_entry" in installer
+    assert 'generation / "libexec/vc-terminal"' in installer
     assert 'let socketRoot = "/tmp/vc-frame-\\(getuid())"' in delegate
     assert 'environment["VC_FRAME_SOCKET_DIR"] = socketRoot' in delegate
     assert 'environment["ZELLIJ_SOCKET_DIR"] = socketRoot' in delegate
     assert 'environment["VIBECRAFTED_LEGACY_VC_FRAME_SOCKET_DIR"]' in delegate
 
 
-def test_primary_shell_exits_instead_of_reusing_pty_after_vc_start_failure(
+def test_installed_deck_resolves_server_binary_and_site_from_its_generation() -> None:
+    deck = (REPO_ROOT / "scripts/vibecrafted").read_text(encoding="utf-8")
+    canonical = (
+        REPO_ROOT / "vibecrafted-core/vibecrafted_core/deck/vibecrafted"
+    ).read_bytes()
+
+    assert canonical == (REPO_ROOT / "scripts/vibecrafted").read_bytes()
+    assert "_runtime_payload_root()" in deck
+    assert 'server_bin="${runtime_root:+$runtime_root/bin/vc-server}"' in deck
+    assert 'site_root="${runtime_root:+$runtime_root/server/site}"' in deck
+    assert 'local server_bin="$HOME/.local/bin/vc-server"' not in deck
+    assert "_vc_source_launcher_ulimits()" in deck
+    assert (
+        'candidate="$owner_root/vibecrafted-core/vibecrafted_core/runtime/scripts/lib/ulimits.sh"'
+        in deck
+    )
+    assert 'source "$candidate"' in deck
+
+
+def test_primary_shell_retains_error_and_usable_shell_after_vc_start_failure(
     tmp_path: Path,
 ) -> None:
     failing_start = tmp_path / "vc-start"
@@ -3202,12 +4160,15 @@ def test_primary_shell_exits_instead_of_reusing_pty_after_vc_start_failure(
         cwd=REPO_ROOT,
         env={**os.environ, "HOME": str(tmp_path)},
         capture_output=True,
+        input="printf 'NEXT_COMMAND_WORKS\\n'; exit 0\n",
         text=True,
         check=False,
         timeout=10,
     )
 
-    assert result.returncode == 7
+    assert result.returncode == 0
+    assert "exit 7" in result.stderr
+    assert "NEXT_COMMAND_WORKS" in result.stdout
 
 
 def test_manifest_producer_emits_an_app_accepted_by_the_runtime_verifier(
@@ -3252,3 +4213,612 @@ def test_manifest_producer_emits_an_app_accepted_by_the_runtime_verifier(
         "vc-terminal",
         "vc-frame",
     ]
+
+
+def test_production_release_receipt_platform_passes_staged_bundled_schema_verifier(
+    tmp_path: Path,
+    macho_executable: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = tmp_path / "Vibecrafted.app"
+    _app_fixture(app, macho_executable)
+    product = json.loads(
+        (app / "Contents/Resources/product-manifest.json").read_text(encoding="utf-8")
+    )
+    runtime_pack_name = (
+        f"Vibecrafted_RuntimePack_{product['version']}-20260814-"
+        f"{product['git_sha'][:8]}-darwin-arm64.tar.gz"
+    )
+    embedded_pack = app / "Contents/Resources/runtime-pack" / runtime_pack_name
+    runtime_pack = tmp_path / runtime_pack_name
+    shutil.copy2(embedded_pack, runtime_pack)
+    dmg = _canonical_release_dmg_path(tmp_path, app)
+    dmg.write_bytes(b"synthetic-dmg\n")
+    receipt = tmp_path / "release-output.json"
+
+    signer = {
+        "cdhash": "a" * 40,
+        "team_id": "MW223P3NPX",
+        "designated_requirement": contract._release_policy()["designated_requirement"],
+        "hardened_runtime": True,
+        "entitlements": {},
+    }
+    monkeypatch.setattr(
+        unified_product_manifest.contract,
+        "_codesign_release_evidence",
+        lambda _app: signer,
+    )
+    unified_product_manifest.produce_release(
+        Namespace(app=app, dmg=dmg, runtime_pack=runtime_pack, output=receipt)
+    )
+
+    produced = json.loads(receipt.read_text(encoding="utf-8"))
+    assert produced["runtime_pack"]["provenance"]["platform"] == "darwin-arm64"
+    assert produced["runtime_pack"]["provenance"]["architecture"] == "arm64"
+    assert runtime_pack.name.endswith("-darwin-arm64.tar.gz")
+
+    staged_runtime = app / "Contents/Resources/runtime"
+    bundled_core = staged_runtime / "vibecrafted-core/vibecrafted_core"
+    shutil.copytree(
+        REPO_ROOT / "vibecrafted-core/vibecrafted_core",
+        bundled_core,
+        dirs_exist_ok=True,
+    )
+    (staged_runtime / "bin/python3").write_text(
+        f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8"
+    )
+    (staged_runtime / "bin/python3").chmod(0o755)
+    verified = subprocess.run(
+        [
+            str(staged_runtime / "bin/python3"),
+            "-m",
+            "vibecrafted_core.product_contract",
+            "schema",
+            str(receipt),
+        ],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "PYTHONPATH": str(staged_runtime / "vibecrafted-core"),
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert verified.returncode == 0, verified.stderr
+
+
+# --- Runtime Pack debug-record boundary --------------------------------------
+#
+# MEASURED 2026-09-08 on the f131b81b release candidate: the Runtime Pack payload
+# carried 31 Mach-O files; bin/voc, bin/vc-start, bin/scaffold-doctor, bin/aicx,
+# bin/aicx-mcp and bin/prview reached the hygiene gate naming the rustup sysroot
+# and the Cargo target directory in linker N_OSO stabs, because only
+# libexec/vc-terminal and libexec/vc-frame were ever stripped and cargo's own
+# `strip` had aborted in rust-objcopy with a warning. These tests drive the
+# shared boundary, scripts/lib/macho-signing.sh::strip_macho_debug_tree, with
+# real compiled Mach-O fixtures and the real payload scanner.
+
+MACHO_SIGNING = REPO_ROOT / "scripts/lib/macho-signing.sh"
+PAYLOAD_SCANNER = REPO_ROOT / "scripts/payload_hygiene.py"
+
+
+FIXTURE_SOURCE = "int answer(void) { return 42; }\nint main(void) { return 0; }\n"
+
+
+def _compile_macho_with_debug_object(
+    path: Path,
+    object_dir: Path,
+    *,
+    shared_library: bool = False,
+    source_text: str = FIXTURE_SOURCE,
+    extra_link: tuple[str, ...] = (),
+) -> None:
+    """Two-step compile that leaves the object's path in the linker's N_OSO stab.
+
+    `_compile_macho` compiles from stdin in one step, so its object lives in
+    the OS temp root and names nobody. The release failure this guards against
+    is an object path the linker recorded verbatim, so the fixture is linked
+    from an object whose directory the test controls.
+    """
+    xcrun = _clang()
+    object_dir.mkdir(parents=True, exist_ok=True)
+    source = object_dir / "fixture.c"
+    source.write_text(source_text, encoding="utf-8")
+    obj = object_dir / "fixture.o"
+    common = [
+        xcrun,
+        "--sdk",
+        "macosx",
+        "clang",
+        "-arch",
+        "arm64",
+        "-mmacosx-version-min=14.0",
+        "-g",
+    ]
+    compiled = subprocess.run(
+        [*common, "-c", str(source), "-o", str(obj)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert compiled.returncode == 0, compiled.stderr
+    link = list(common)
+    if shared_library:
+        link += ["-dynamiclib", f"-Wl,-install_name,@rpath/{path.name}"]
+    link += list(extra_link)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    linked = subprocess.run(
+        [*link, str(obj), "-o", str(path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert linked.returncode == 0, linked.stderr
+    path.chmod(0o755)
+    assert str(object_dir).encode() in path.read_bytes(), (
+        "the fixture does not expose its object path; this falsifier is void"
+    )
+
+
+def _oso_stabs(path: Path) -> list[str]:
+    result = subprocess.run(
+        [_clang(), "nm", "-ap", str(path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return [line for line in result.stdout.splitlines() if " OSO " in line]
+
+
+def _strip_macho_debug_tree(
+    *roots: Path, prelude: str = "", shared_libraries: bool = False
+) -> subprocess.CompletedProcess[str]:
+    shell = (
+        'set -euo pipefail; source "$1"; shift; '
+        + prelude
+        + 'strip_macho_debug_tree "$@"'
+    )
+    arguments = ["--shared-libraries"] if shared_libraries else []
+    return subprocess.run(
+        [
+            "bash",
+            "-c",
+            shell,
+            "macho-strip",
+            str(MACHO_SIGNING),
+            *arguments,
+            *map(str, roots),
+        ],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _public_shape(path: Path) -> str:
+    """Exports and load commands: what a consumer of the library binds to."""
+    exports = subprocess.run(
+        [_clang(), "nm", "-gU", str(path)], check=True, capture_output=True, text=True
+    ).stdout
+    load_commands = subprocess.run(
+        [_clang(), "otool", "-l", str(path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    kept = [
+        line
+        for line in load_commands.splitlines()
+        if re.match(r"^ *(cmd|name|path) ", line)
+    ]
+    return exports + "\n".join(kept)
+
+
+def _call_answer_through_dyld(library: Path) -> int:
+    """Load the library the way the Swift host does — dlopen — and call it.
+
+    Runs in a child of this interpreter so a library dyld refuses cannot take
+    the test process down with it. `codesign --verify` is not dyld acceptance.
+    """
+    if platform.machine() != "arm64":
+        pytest.skip("fixture libraries are linked for arm64")
+    probe = (
+        "import ctypes, signal, sys; signal.alarm(20); "
+        "lib = ctypes.CDLL(sys.argv[1], mode=ctypes.RTLD_LOCAL); "
+        "lib.answer.restype = ctypes.c_int; lib.answer.argtypes = []; "
+        "print(lib.answer())"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe, str(library)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    return int(result.stdout.strip())
+
+
+def _scan_payload(root: Path, *forbidden: str) -> subprocess.CompletedProcess[str]:
+    arguments = [
+        sys.executable,
+        str(PAYLOAD_SCANNER),
+        "--root",
+        str(root),
+        "--label",
+        "fixture payload",
+    ]
+    for literal in forbidden:
+        arguments += ["--forbid", literal]
+    return subprocess.run(arguments, check=False, capture_output=True, text=True)
+
+
+def test_runtime_payload_strip_reaches_every_executable_before_the_gate(
+    tmp_path: Path,
+) -> None:
+    """Executables the old two-name list never visited are normalized too."""
+    payload = tmp_path / "payload/VibecraftedRuntime"
+    workshop = tmp_path / "Volumes/workshop"
+    build_host = workshop / "checkout/target/release/deps"
+    executables = [
+        payload / "bin/foundation-tool",
+        payload / "libexec/nested/deeper/helper",
+    ]
+    for executable in executables:
+        _compile_macho_with_debug_object(executable, build_host / executable.name)
+        assert _oso_stabs(executable)
+    refused = _scan_payload(payload, str(workshop))
+    assert refused.returncode == 1, refused.stdout + refused.stderr
+
+    result = _strip_macho_debug_tree(payload / "bin", payload / "libexec")
+
+    assert result.returncode == 0, result.stderr
+    assert "2 executable(s) stripped of debugging records" in result.stdout
+    for executable in executables:
+        assert not _oso_stabs(executable)
+        assert str(workshop).encode() not in executable.read_bytes()
+        run = subprocess.run([str(executable)], check=False, capture_output=True)
+        assert run.returncode == 0, run.stderr
+        # strip re-seals the linker's ad-hoc signature; the file stays loadable
+        # and verifiable exactly as the release binaries did.
+        verify = subprocess.run(
+            ["codesign", "--verify", "--strict", str(executable)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert verify.returncode == 0, verify.stderr
+    gate = _scan_payload(payload, str(workshop))
+    assert gate.returncode == 0, gate.stdout + gate.stderr
+
+
+def test_runtime_payload_strip_leaves_plain_literals_for_the_gate_to_refuse(
+    tmp_path: Path,
+) -> None:
+    """Only debugging records go; a path written as text stays the gate's call."""
+    payload = tmp_path / "payload/VibecraftedRuntime"
+    workshop = str(tmp_path / "Volumes/workshop")
+    launcher = payload / "bin/launcher"
+    _write_executable(launcher, f'#!/bin/sh\nexec {workshop}/checkout/bin/tool "$@"\n')
+    manifest = payload / "bin/runtime-foundations.json"
+    manifest.write_text(json.dumps({"built_at": workshop}), encoding="utf-8")
+    before = {path: path.read_bytes() for path in (launcher, manifest)}
+
+    result = _strip_macho_debug_tree(payload / "bin")
+
+    assert result.returncode == 0, result.stderr
+    assert "0 executable(s) stripped" in result.stdout
+    assert {path: path.read_bytes() for path in before} == before
+    assert _scan_payload(payload, workshop).returncode == 1
+
+
+def test_runtime_payload_strip_never_follows_a_symlink_out_of_the_payload(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside/tool"
+    _compile_macho_with_debug_object(outside, tmp_path / "outside/objects")
+    original = outside.read_bytes()
+    payload = tmp_path / "payload/VibecraftedRuntime"
+    (payload / "bin").mkdir(parents=True)
+    (payload / "bin/tool").symlink_to(outside)
+    (payload / "bin/vendor").symlink_to(tmp_path / "outside", target_is_directory=True)
+
+    result = _strip_macho_debug_tree(payload / "bin")
+
+    assert result.returncode == 0, result.stderr
+    assert "0 executable(s) stripped" in result.stdout
+    assert outside.read_bytes() == original
+    assert (payload / "bin/tool").is_symlink()
+    assert (payload / "bin/vendor").is_symlink()
+
+
+def test_runtime_payload_strip_leaves_shared_libraries_to_the_gate(
+    tmp_path: Path,
+) -> None:
+    """Without --shared-libraries a dylib is not rewritten; the gate reads it.
+
+    Measured on the f131b81b payload: every host path sat in an executable
+    under bin/, while the 24 dylibs and bundles of the uv-seeded CPython and
+    its wheels carried only their CI builders' object paths. The host `strip`
+    has a recorded history of writing dylibs dyld refuses (Xcode 27 beta, see
+    the release builder), so a vendor library is never rewritten for a leak it
+    does not have — and one that does leak is refused exactly as before. The
+    roots this build links its own libraries into opt in explicitly; see the
+    app_frameworks_strip tests below.
+    """
+    payload = tmp_path / "payload/VibecraftedRuntime"
+    workshop = tmp_path / "Volumes/workshop"
+    library = payload / "libexec/lib/libfixture.dylib"
+    _compile_macho_with_debug_object(library, workshop / "objects", shared_library=True)
+    before = library.read_bytes()
+    assert _oso_stabs(library)
+
+    result = _strip_macho_debug_tree(payload / "libexec")
+
+    assert result.returncode == 0, result.stderr
+    assert "0 executable(s) stripped" in result.stdout
+    assert library.read_bytes() == before
+    assert _scan_payload(payload, str(workshop)).returncode == 1
+
+
+def test_runtime_payload_strip_fails_closed_on_a_malformed_executable(
+    tmp_path: Path,
+) -> None:
+    payload = tmp_path / "payload/VibecraftedRuntime"
+    healthy = payload / "bin/healthy"
+    _compile_macho_with_debug_object(healthy, tmp_path / "objects")
+    broken = payload / "bin/broken"
+    # Header intact, segments cut: `file` still calls it a Mach-O executable
+    # and strip refuses to rewrite it.
+    broken.write_bytes(healthy.read_bytes()[:4096])
+    broken.chmod(0o755)
+
+    result = _strip_macho_debug_tree(payload / "bin")
+
+    assert result.returncode != 0
+    assert "strip -S failed on" in result.stderr
+    assert "truncated or malformed" in result.stderr
+
+
+def test_runtime_payload_strip_rewrites_adhoc_and_leaves_real_signatures_alone(
+    tmp_path: Path,
+) -> None:
+    """An ad-hoc seal is staging state; a real signature marks a finished artifact.
+
+    Measured 2026-09-08: the four Loctree binaries from npm arrive Developer ID
+    signed with zero debugging records; `strip -S` left them 64–80 bytes larger
+    with an invalidated signature. Whatever codesign does not report as ad-hoc
+    or unsigned is left exactly as delivered. A `codesign -s -` seal, unlike
+    the linker's, is NOT re-sealed by strip (measured here) — which is fine
+    only because the packager re-signs every Mach-O with the release identity
+    afterwards; this test performs that step to prove the file is still
+    signable and runs.
+    """
+    payload = tmp_path / "payload/VibecraftedRuntime"
+    adhoc = payload / "bin/adhoc-tool"
+    _compile_macho_with_debug_object(adhoc, tmp_path / "objects/adhoc")
+    _codesign_macho(adhoc)
+    vendor = payload / "bin/vendor-tool"
+    _compile_macho_with_debug_object(vendor, tmp_path / "objects/vendor")
+    vendor_before = vendor.read_bytes()
+    # No Developer ID is available to a test; answer codesign's question for
+    # the vendor binary the way a vendor-signed Mach-O does.
+    prelude = (
+        'codesign() { case "$*" in '
+        '*vendor-tool*) printf "Executable=%s\\nCodeDirectory v=20500 '
+        "flags=0x10000(runtime)\\nSignature size=9040\\n"
+        'TeamIdentifier=MW223P3NPX\\n" "${!#}";; '
+        '*) command codesign "$@";; esac; }; '
+    )
+
+    result = _strip_macho_debug_tree(payload / "bin", prelude=prelude)
+
+    assert result.returncode == 0, result.stderr
+    assert (
+        "1 executable(s) stripped of debugging records, 1 signed left as delivered"
+        in result.stdout
+    )
+    assert vendor.read_bytes() == vendor_before
+    assert not _oso_stabs(adhoc)
+    _codesign_macho(adhoc)
+    verify = subprocess.run(
+        ["codesign", "--verify", "--strict", str(adhoc)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert verify.returncode == 0, verify.stderr
+    run = subprocess.run([str(adhoc)], check=False, capture_output=True)
+    assert run.returncode == 0, run.stderr
+
+
+# --- App Frameworks: the libraries this build links --------------------------
+#
+# MEASURED 2026-09-09 on the aa12980d release candidate: the Runtime Pack
+# passed its gate (6739 files) and the App gate refused
+# Contents/Frameworks/libvibecrafted_shell_ffi.dylib — 17 N_OSO stabs, 11
+# naming the Cargo target directory and 6 the rustup sysroot, nothing else in
+# the file naming the host. That dylib is linked by the "Build Rust FFI"
+# phase and embedded by Xcode as it came, so the shared boundary owns it under
+# --shared-libraries, scoped to that one root. The same helper proved on the
+# real library that exports and load commands stayed identical and dyld loads
+# it afterwards; these fixtures make that contract falsifiable here.
+
+
+def test_app_frameworks_strip_normalizes_own_shared_library_and_keeps_it_loadable(
+    tmp_path: Path,
+) -> None:
+    app = tmp_path / "Vibecrafted.app"
+    workshop = tmp_path / "Volumes/workshop"
+    library = app / "Contents/Frameworks/libfixture.dylib"
+    _compile_macho_with_debug_object(
+        library, workshop / "checkout/target/release/deps", shared_library=True
+    )
+    assert _oso_stabs(library)
+    shape_before = _public_shape(library)
+    assert "answer" in shape_before
+    assert _scan_payload(app, str(workshop)).returncode == 1
+
+    result = _strip_macho_debug_tree(app / "Contents/Frameworks", shared_libraries=True)
+
+    assert result.returncode == 0, result.stderr
+    assert (
+        "0 executable(s) and 1 shared library(ies) stripped of debugging records"
+        in result.stdout
+    )
+    assert not _oso_stabs(library)
+    assert str(workshop).encode() not in library.read_bytes()
+    assert _public_shape(library) == shape_before
+    verify = subprocess.run(
+        ["codesign", "--verify", "--strict", str(library)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert verify.returncode == 0, verify.stderr
+    # The packager re-signs every Mach-O afterwards; the library must survive
+    # that and still be the one the Swift host dlopens.
+    _codesign_macho(library)
+    assert _call_answer_through_dyld(library) == 42
+    assert _scan_payload(app, str(workshop)).returncode == 0
+
+
+def test_app_frameworks_strip_leaves_symlinks_vendor_seals_and_plain_text_alone(
+    tmp_path: Path,
+) -> None:
+    """Only the libraries this build linked are rewritten; the gate keeps the rest."""
+    app = tmp_path / "Vibecrafted.app"
+    frameworks = app / "Contents/Frameworks"
+    workshop = tmp_path / "Volumes/workshop"
+    own = frameworks / "libown.dylib"
+    _compile_macho_with_debug_object(own, workshop / "own-objects", shared_library=True)
+    vendor = frameworks / "libvendor.dylib"
+    _compile_macho_with_debug_object(
+        vendor, workshop / "vendor-objects", shared_library=True
+    )
+    vendor_before = vendor.read_bytes()
+    outside = tmp_path / "outside/liboutside.dylib"
+    _compile_macho_with_debug_object(
+        outside, tmp_path / "outside/objects", shared_library=True
+    )
+    outside_before = outside.read_bytes()
+    (frameworks / "liblinked.dylib").symlink_to(outside)
+    notice = frameworks / "NOTICE.txt"
+    notice.write_text(f"built at {workshop}\n", encoding="utf-8")
+    notice_before = notice.read_bytes()
+    prelude = (
+        'codesign() { case "$*" in '
+        '*libvendor.dylib*) printf "Executable=%s\\nCodeDirectory v=20500 '
+        "flags=0x10000(runtime)\\nSignature size=9040\\n"
+        'TeamIdentifier=MW223P3NPX\\n" "${!#}";; '
+        '*) command codesign "$@";; esac; }; '
+    )
+
+    result = _strip_macho_debug_tree(frameworks, prelude=prelude, shared_libraries=True)
+
+    assert result.returncode == 0, result.stderr
+    assert (
+        "0 executable(s) and 1 shared library(ies) stripped of debugging records, "
+        "1 signed left as delivered" in result.stdout
+    )
+    assert not _oso_stabs(own)
+    assert vendor.read_bytes() == vendor_before
+    assert outside.read_bytes() == outside_before
+    assert (frameworks / "liblinked.dylib").is_symlink()
+    assert notice.read_bytes() == notice_before
+    # The vendor library still names the workshop and so does the notice:
+    # the gate, not the strip, is what refuses them.
+    assert _scan_payload(app, str(workshop)).returncode == 1
+
+
+def test_app_frameworks_strip_fails_closed_when_the_library_no_longer_loads(
+    tmp_path: Path,
+) -> None:
+    """`strip -S` succeeding is not acceptance; only a real dyld load is.
+
+    A library whose dependency is gone strips cleanly and verifies, and the
+    Swift host would crash at launch. The boundary must refuse the build.
+    """
+    app = tmp_path / "Vibecrafted.app"
+    dependency_dir = tmp_path / "deps"
+    dependency = dependency_dir / "libgone.dylib"
+    _compile_macho_with_debug_object(
+        dependency,
+        tmp_path / "deps-objects",
+        shared_library=True,
+        source_text="int gone_answer(void) { return 42; }\n",
+    )
+    library = app / "Contents/Frameworks/libfixture.dylib"
+    _compile_macho_with_debug_object(
+        library,
+        tmp_path / "Volumes/workshop/objects",
+        shared_library=True,
+        source_text="int gone_answer(void);\nint answer(void) { return gone_answer(); }\n",
+        extra_link=("-L", str(dependency_dir), "-lgone"),
+    )
+    dependency.unlink()
+
+    result = _strip_macho_debug_tree(app / "Contents/Frameworks", shared_libraries=True)
+
+    assert result.returncode != 0
+    assert "stripped library does not load" in result.stderr
+    assert "libgone.dylib" in result.stderr
+
+
+def test_app_frameworks_strip_fails_closed_on_a_malformed_shared_library(
+    tmp_path: Path,
+) -> None:
+    app = tmp_path / "Vibecrafted.app"
+    healthy = app / "Contents/Frameworks/libhealthy.dylib"
+    _compile_macho_with_debug_object(healthy, tmp_path / "objects", shared_library=True)
+    broken = app / "Contents/Frameworks/libbroken.dylib"
+    broken.write_bytes(healthy.read_bytes()[:4096])
+    broken.chmod(0o755)
+
+    result = _strip_macho_debug_tree(app / "Contents/Frameworks", shared_libraries=True)
+
+    assert result.returncode != 0
+    assert "libbroken.dylib" in result.stderr
+
+
+def test_app_frameworks_strip_runs_the_strip_the_selected_toolchain_resolves(
+    tmp_path: Path,
+) -> None:
+    """The strip that rewrites a library is the one xcrun resolves for the caller.
+
+    The release builder exports DEVELOPER_DIR for the verified stable Xcode
+    and refuses a beta; the Xcode 27 beta strip has written chained-fixups
+    dylibs dyld refused (measured 2026-08-28). Whatever `strip` PATH names is
+    not the contract — `xcrun --find strip` under the caller's DEVELOPER_DIR
+    is, and the log names it.
+    """
+    app = tmp_path / "Vibecrafted.app"
+    library = app / "Contents/Frameworks/libfixture.dylib"
+    _compile_macho_with_debug_object(
+        library, tmp_path / "Volumes/workshop/objects", shared_library=True
+    )
+    ledger = tmp_path / "strip-invocations.log"
+    toolchain_strip = tmp_path / "toolchain/usr/bin/strip"
+    toolchain_strip.parent.mkdir(parents=True)
+    toolchain_strip.write_text(
+        f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{ledger}"\nexec /usr/bin/strip "$@"\n',
+        encoding="utf-8",
+    )
+    toolchain_strip.chmod(0o755)
+    prelude = (
+        'xcrun() { if [[ "$1" == "--find" && "$2" == "strip" ]]; then '
+        f'printf "%s\\n" "{toolchain_strip}"; else command xcrun "$@"; fi; }}; '
+    )
+
+    result = _strip_macho_debug_tree(
+        app / "Contents/Frameworks", prelude=prelude, shared_libraries=True
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"macho-strip: tool {toolchain_strip}" in result.stdout
+    assert ledger.read_text(encoding="utf-8").splitlines() == [f"-S {library}"]
+    assert not _oso_stabs(library)

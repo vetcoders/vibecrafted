@@ -91,17 +91,15 @@ def _wait_process(proc: subprocess.Popen[str], *, timeout: float = 5.0) -> None:
             proc.wait(timeout=1.0)
 
 
-def _write_async_worker(tmp_path: Path, *, sleep_seconds: float = 2.0) -> Path:
+def _write_async_worker(tmp_path: Path) -> Path:
     worker = tmp_path / "worker.py"
     worker.write_text(
-        "\n".join(
-            [
-                "import time",
-                "print('dispatcher-active', flush=True)",
-                f"time.sleep({sleep_seconds!r})",
-            ]
-        )
-        + "\n",
+        "import pathlib\n"
+        "import sys\n"
+        "import time\n"
+        "print('dispatcher-active', flush=True)\n"
+        "while not pathlib.Path(sys.argv[1]).exists():\n"
+        "    time.sleep(0.01)\n",
         encoding="utf-8",
     )
     return worker
@@ -137,6 +135,7 @@ def _launch_python_dispatcher_path(
     """
 
     worker = _write_async_worker(tmp_path)
+    release_worker = tmp_path / f"{run_id}.release-worker"
     transcript = tmp_path / f"{run_id}.dispatcher.transcript.log"
 
     proc = subprocess.Popen(
@@ -157,6 +156,7 @@ def _launch_python_dispatcher_path(
             "--",
             sys.executable,
             str(worker),
+            str(release_worker),
         ],
         cwd=tmp_path,
         env=_child_env(home),
@@ -167,6 +167,7 @@ def _launch_python_dispatcher_path(
     try:
         projection = _wait_for_active_projection(home, run_id, "python-dispatcher path")
     finally:
+        release_worker.touch()
         _wait_process(proc)
 
     stdout, stderr = proc.communicate()
@@ -194,6 +195,7 @@ def _launch_shell_meta_path(
     prompt.write_text("test prompt\n", encoding="utf-8")
     report = tmp_path / "reports" / f"{run_id}.md"
     transcript = tmp_path / f"{run_id}.shell.transcript.log"
+    release_worker = tmp_path / f"{run_id}.release-worker"
     transcript.parent.mkdir(parents=True, exist_ok=True)
     meta = (
         home
@@ -210,7 +212,14 @@ def _launch_shell_meta_path(
             [
                 sys.executable,
                 "-c",
-                "import time; print('shell worker active', flush=True); time.sleep(2.0)",
+                (
+                    "import pathlib, sys, time\n"
+                    "print('shell worker active', flush=True)\n"
+                    "release = pathlib.Path(sys.argv[1])\n"
+                    "while not release.exists():\n"
+                    "    time.sleep(0.01)\n"
+                ),
+                str(release_worker),
             ],
             stdout=transcript_fh,
             stderr=subprocess.STDOUT,
@@ -247,6 +256,7 @@ def _launch_shell_meta_path(
             )
             projection = _wait_for_active_projection(home, run_id, "shell/legacy path")
         finally:
+            release_worker.touch()
             _wait_process(worker)
     return projection
 

@@ -2,8 +2,37 @@
 set -euo pipefail
 
 log() { printf '\n==> %s\n' "$*"; }
-die() { printf 'FATAL: %s\n' "$*" >&2; exit 1; }
+die() {
+  # Dual-stream FATAL so `zsh -ic` / redirected make logs cannot swallow the
+  # reason (HAK-72). Also append to the release log when BUILD_DIR exists.
+  local msg="FATAL: $*"
+  printf '%s\n' "$msg" >&2
+  printf '%s\n' "$msg"
+  if [[ -n "${BUILD_DIR:-}" ]]; then
+    mkdir -p "$BUILD_DIR" 2>/dev/null || true
+    printf '%s\n' "$msg" >> "$BUILD_DIR/release.log" 2>/dev/null || true
+  fi
+  exit 1
+}
 require() { command -v "$1" >/dev/null 2>&1 || die "$1 is required"; }
+
+prefer_rustup_cargo() {
+  # Homebrew `rust` (helix-db/pake) often shadows rustup on login PATH and
+  # then `cargo leptos` dies with a content-free wasm32 E0463. Prefer rustup.
+  if [[ -d "${HOME}/.cargo/bin" ]]; then
+    PATH="${HOME}/.cargo/bin:${PATH}"
+    export PATH
+  fi
+  if command -v rustup >/dev/null 2>&1; then
+    local rustup_cargo
+    rustup_cargo="$(rustup which cargo 2>/dev/null || true)"
+    if [[ -n "$rustup_cargo" && -x "$rustup_cargo" ]]; then
+      PATH="$(dirname "$rustup_cargo"):${PATH}"
+      export PATH
+    fi
+  fi
+}
+prefer_rustup_cargo
 
 # A --remap-path-prefix whose prefix still contains `..` never matches the path
 # the compiler actually sees, because the match is textual. The donor roots used
@@ -26,22 +55,117 @@ SNAPSHOT_DONORS=0
 for argument in "$@"; do
   case "$argument" in
     --app-only) MODE="app" ;;
+    --runtime-pack-only) MODE="runtime-pack" ;;
     --no-notarize) MODE="dmg" ;;
     --notarize-only) MODE="notarize" ;;
     --snapshot-donors) SNAPSHOT_DONORS=1 ;;
+    --help|-h)
+      echo "usage: $0 [--app-only|--runtime-pack-only|--no-notarize|--notarize-only] [--snapshot-donors]" >&2
+      exit 0
+      ;;
     *)
-      echo "usage: $0 [--app-only|--no-notarize|--notarize-only] [--snapshot-donors]" >&2
+      echo "usage: $0 [--app-only|--runtime-pack-only|--no-notarize|--notarize-only] [--snapshot-donors]" >&2
       exit 2
       ;;
   esac
 done
 
+# The build -> install handoff record is owned by this library, and it is loaded
+# HERE rather than beside the other libraries further down: the claim it makes
+# has to happen before the first thing that can fail, and the donor roots, the
+# release date and the Xcode preflight all die above that point.
+# shellcheck source=/dev/null
+. "$REPO_ROOT/scripts/lib/runtime-pack-selection.sh"
+# shellcheck source=/dev/null
+. "$REPO_ROOT/scripts/lib/release-single-flight.sh"
+
+ROOT_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+
+# Exclusive ownership of the shared selection, snapshot and App/output paths
+# BEFORE any of those mutate. --help/-h and unknown argv have already exited
+# above, so usage never takes the lock or creates build/. --notarize-only
+# shares APP, DIST and BUILD_DIR with a full release, so it takes the same
+# lock and still leaves the selection record untouched.
+release_single_flight_acquire "$REPO_ROOT" \
+  || die "another release already owns this checkout's shared build state"
+
+cleanup() {
+  # Host-wide resources first. The keychain session mutates state that outlives
+  # this process and affects every application on the machine; the donor
+  # snapshots are directories under this repo's own build/ and a stale one is
+  # merely untidy. Reaping first meant a hung `git worktree remove` — an index
+  # lock on a busy donor is enough — would strand the keychain instead.
+  #
+  # In practice keychain_session_begin also arms its own EXIT handler which
+  # chains ahead of this one, so the keychain is usually already released by the
+  # time we arrive. That path does not exist when no signing certificate was
+  # present, which is exactly when this ordering is the only ordering.
+  #
+  # Both release descriptors stay held through reap: unlocking first would
+  # let a successor recreate donor-snapshots/vibecrafted or take a shared
+  # output dir, after which this EXIT handler would destroy the successor's
+  # frozen source. Closing our own descriptors is last, and never unlinks
+  # the lock inodes. This function returns; INT/TERM/HUP then exit so no
+  # release work continues after unlock.
+  if declare -F keychain_session_end >/dev/null 2>&1; then
+    keychain_session_end "$SIGNING_KEYCHAIN_LABEL" || true
+  fi
+  if declare -F donor_snapshot_reap >/dev/null 2>&1; then
+    donor_snapshot_reap || true
+  fi
+  release_single_flight_release
+}
+# INT/TERM/HUP must exit after cleanup. A bare shared trap returns into the
+# interrupted command and would keep mutating after the lock was released.
+# keychain_session_begin reads these handlers back and chains in front.
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+trap 'cleanup; exit 129' HUP
+
+# Output may be redirected off this checkout. Take that lock before the
+# selection claim so two roots cannot mark pending and then contend for one
+# dist. A dist that stays under REPO_ROOT is already covered.
+DIST_DIR="${VIBECRAFTED_RELEASE_DIR:-$REPO_ROOT/dist}"
+case "$DIST_DIR" in
+  /*) ;;
+  *) DIST_DIR="$PWD/$DIST_DIR" ;;
+esac
+release_single_flight_acquire_output "$REPO_ROOT" "$DIST_DIR" \
+  || die "another release already owns this output directory"
+
+# Claim the attempt before the first thing that can fail.
+#
+# An unusable argument has already exited above, so `--help`-shaped misuse never
+# touches the record. --notarize-only re-runs notarization for an App that
+# already exists and produces no new carrier, so it must leave the record
+# exactly as it found it. Every other mode reaches produce_runtime_pack, and
+# from here on ANYTHING may die: a missing donor directory, a malformed
+# VIBECRAFTED_RELEASE_DATE, a beta Xcode, cargo, codesign, the packager. A build
+# that dies must not leave the previous success standing as the implicit answer
+# to `make install` -- not even when the failed retry runs at the very same
+# source SHA, which no name derived from HEAD could tell apart.
+RUNTIME_PACK_SELECTION_ATTEMPT=""
+if [[ "$MODE" != "notarize" ]]; then
+  RUNTIME_PACK_SELECTION_ATTEMPT="$(runtime_pack_selection_attempt_id)"
+  runtime_pack_selection_begin "$REPO_ROOT" "$RUNTIME_PACK_SELECTION_ATTEMPT" \
+    "$ROOT_SHA" \
+    || die "could not mark the Runtime Pack build attempt as pending"
+  DONOR_SNAPSHOT_OWNER="$RUNTIME_PACK_SELECTION_ATTEMPT"
+  export DONOR_SNAPSHOT_OWNER
+fi
+
 # The donor is where the source lives; the repo is what we compile. They differ
 # only under --snapshot-donors, where the repo becomes a detached worktree at the
 # donor HEAD so a dirty Living Tree donor can still produce an honest receipt.
+#
+# Main product input is always a detached snapshot at the ROOT_SHA captured
+# above. REPO_ROOT stays the Living Tree so DIST_DIR, BUILD_DIR caches and
+# runtime-pack selection keep living on a path the reaper will not delete.
 TERMINAL_DONOR="$(canonical_dir "${VIBECRAFTED_TERMINAL_REPO:-$REPO_ROOT/../vc-terminal}")"
 FRAME_DONOR="$(canonical_dir "${VIBECRAFTED_FRAME_REPO:-$REPO_ROOT/../vc-frame}")"
 DONOR_SNAPSHOT_ROOT="$REPO_ROOT/build/unified-release/donor-snapshots"
+SOURCE_ROOT="$DONOR_SNAPSHOT_ROOT/vibecrafted"
 if (( SNAPSHOT_DONORS )); then
   TERMINAL_REPO="$DONOR_SNAPSHOT_ROOT/vc-terminal"
   FRAME_REPO="$DONOR_SNAPSHOT_ROOT/vc-frame"
@@ -49,14 +173,14 @@ else
   TERMINAL_REPO="$TERMINAL_DONOR"
   FRAME_REPO="$FRAME_DONOR"
 fi
-ICON_SOURCE="${VIBECRAFTED_ICON_SOURCE:-$TERMINAL_REPO/assets/icon/vc-terminal-icon.png}"
-ICON_REFERENCE="${VIBECRAFTED_ICON_REFERENCE:-$TERMINAL_REPO/assets/icon/terminal.png}"
-DIST_DIR="${VIBECRAFTED_RELEASE_DIR:-$REPO_ROOT/dist}"
+ICON_SOURCE="${VIBECRAFTED_ICON_SOURCE:-$SOURCE_ROOT/docs/presence/logo-master.png}"
+ICON_REFERENCE="${VIBECRAFTED_ICON_REFERENCE:-}"
+# DIST_DIR was resolved and locked immediately after the checkout lock.
 BUILD_DIR="$REPO_ROOT/build/unified-release"
 APP="$DIST_DIR/Vibecrafted.app"
-VERSION="$(tr -d '[:space:]' < "$REPO_ROOT/VERSION")"
+VERSION="$(git -C "$REPO_ROOT" show "$ROOT_SHA:VERSION" | tr -d '[:space:]')"
+[[ -n "$VERSION" ]] || die "VERSION is missing at bound revision $ROOT_SHA"
 RELEASE_DATE="${VIBECRAFTED_RELEASE_DATE:-$(date -u +%Y%m%d)}"
-ROOT_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
 RUNTIME_VERSION="${VERSION}+g${ROOT_SHA:0:8}"
 [[ "$RELEASE_DATE" =~ ^[0-9]{8}$ ]] || {
   printf 'FATAL: VIBECRAFTED_RELEASE_DATE must be YYYYMMDD\n' >&2
@@ -66,6 +190,19 @@ DMG_NAME="Vibecrafted_${VERSION}-${RELEASE_DATE}-${ROOT_SHA:0:8}.dmg"
 DMG="$DIST_DIR/$DMG_NAME"
 DMG_CHECKSUM="$DMG.sha256"
 LEGACY_DMG="$DIST_DIR/Vibecrafted.dmg"
+RUNTIME_PACK_PLATFORM="darwin-arm64"
+RUNTIME_PACK_ARCHITECTURE="$(uname -m | sed 's/^arm64$/arm64/; s/^aarch64$/arm64/; s/^x86_64$/x64/')"
+[[ "$RUNTIME_PACK_ARCHITECTURE" == "arm64" ]] \
+  || die "Vibecrafted.app release currently supports only darwin-arm64"
+RUNTIME_PACK_NAME="Vibecrafted_RuntimePack_${VERSION}-${RELEASE_DATE}-${ROOT_SHA:0:8}-${RUNTIME_PACK_PLATFORM}.tar.gz"
+RUNTIME_PACK="$DIST_DIR/$RUNTIME_PACK_NAME"
+RUNTIME_PACK_CHECKSUM="$RUNTIME_PACK.sha256"
+RUNTIME_PACK_SIGNATURE="$RUNTIME_PACK.sig"
+RUNTIME_PACK_RESOURCE_DIR="$APP/Contents/Resources/runtime-pack"
+EMBEDDED_RUNTIME_PACK="$RUNTIME_PACK_RESOURCE_DIR/$RUNTIME_PACK_NAME"
+EMBEDDED_RUNTIME_PACK_CHECKSUM="$EMBEDDED_RUNTIME_PACK.sha256"
+EMBEDDED_RUNTIME_PACK_SIGNATURE="$EMBEDDED_RUNTIME_PACK.sig"
+RUNTIME_PAYLOAD="$BUILD_DIR/runtime-pack-payload/VibecraftedRuntime"
 KEYS="${KEYS:-$HOME/.keys}"
 SPOT_MONO_FONT="${VIBECRAFTED_SPOT_MONO_FONT:-$KEYS/fonts/SpotMono.ttc}"
 SIGNING_IDENTITY_FILE="$KEYS/signing-identity.txt"
@@ -78,6 +215,28 @@ SIGNING_IDENTITY=""
 TEMP_KEYCHAIN_PATH=""
 SIGNING_KEYCHAIN_LABEL="vibecrafted-signing-$$"
 CODESIGN_KEYCHAIN_ARGS=()
+# The host toolchain is part of the release contract. Apple `strip` shipped in
+# Xcode 27 beta writes a mis-aligned LINKEDIT string pool into chained-fixups
+# dylibs (every dylib once MACOSX_DEPLOYMENT_TARGET >= 12); dyld on macOS 27
+# refuses them and rustc reports the dependency-free proc-macros
+# (`rustversion`, `paste`) as `error[E0463]: can't find crate`. MEASURED
+# 2026-08-28 on a build host with xcode-select pointing at ~/Downloads/Xcode-beta.app;
+# the same tree under /Applications/Xcode.app (26.6) builds clean. A beta
+# Xcode is therefore refused unless the operator opts in explicitly.
+#
+XCODE_DEVELOPER_DIR="${DEVELOPER_DIR:-$(xcode-select -p 2>/dev/null || true)}"
+if [[ -z "$XCODE_DEVELOPER_DIR" || ! -d "$XCODE_DEVELOPER_DIR" ]]; then
+  echo "FATAL: no usable Xcode developer dir (xcode-select -p / DEVELOPER_DIR)" >&2
+  exit 1
+fi
+if [[ "$XCODE_DEVELOPER_DIR" == *[Bb]eta* && -z "${VIBECRAFTED_ALLOW_BETA_XCODE:-}" ]]; then
+  echo "FATAL: release refuses a beta Xcode toolchain: $XCODE_DEVELOPER_DIR" >&2
+  echo "       repair: DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer make release" >&2
+  echo "       (or sudo xcode-select -s /Applications/Xcode.app; VIBECRAFTED_ALLOW_BETA_XCODE=1 overrides)" >&2
+  exit 1
+fi
+export DEVELOPER_DIR="$XCODE_DEVELOPER_DIR"
+echo "==> Xcode developer dir: $DEVELOPER_DIR ($(xcrun --find strip 2>/dev/null || echo 'strip: unresolved'))"
 export MACOSX_DEPLOYMENT_TARGET=14.0
 # Release payloads must not remember the operator account, Cargo registry, or
 # living checkout locations through compiler metadata.
@@ -92,8 +251,9 @@ export MACOSX_DEPLOYMENT_TARGET=14.0
 #     is correct only by accident on this host — every repository happens to
 #     live on /Volumes. On any operator whose checkout sits under $HOME, the
 #     trailing $HOME entry would win and every specific root would be dead.
-#   * the donor snapshots live under $REPO_ROOT/build/..., so they must follow
-#     $REPO_ROOT or they would be rewritten as /usr/src/vibecrafted/build/...
+#   * the donor snapshots and the main SOURCE_ROOT live under
+#     $REPO_ROOT/build/..., so they must follow $REPO_ROOT or they would be
+#     rewritten as /usr/src/vibecrafted/build/...
 #
 # The snapshot pair is emitted only when it exists. Without --snapshot-donors
 # TERMINAL_REPO IS TERMINAL_DONOR, and the duplicate pair merely pinned its own
@@ -101,6 +261,7 @@ export MACOSX_DEPLOYMENT_TARGET=14.0
 PATH_REMAPS=(
   "$HOME=/usr/src/operator-home"
   "$REPO_ROOT=/usr/src/vibecrafted"
+  "$SOURCE_ROOT=/usr/src/vibecrafted"
   "$TERMINAL_DONOR=/usr/src/vc-terminal"
   "$FRAME_DONOR=/usr/src/vc-frame"
 )
@@ -145,22 +306,64 @@ export SWIFT_PREFIX_MAP
 . "$REPO_ROOT/scripts/lib/donor-snapshot.sh"
 # shellcheck source=/dev/null
 . "$REPO_ROOT/scripts/lib/payload-hygiene.sh"
+# shellcheck source=/dev/null
+. "$REPO_ROOT/scripts/lib/macho-signing.sh"
 
-cleanup() {
-  # Host-wide resources first. The keychain session mutates state that outlives
-  # this process and affects every application on the machine; the donor
-  # snapshots are directories under this repo's own build/ and a stale one is
-  # merely untidy. Reaping first meant a hung `git worktree remove` — an index
-  # lock on a busy donor is enough — would strand the keychain instead.
-  #
-  # In practice keychain_session_begin also arms its own EXIT handler which
-  # chains ahead of this one, so the keychain is usually already released by the
-  # time we arrive. That path does not exist when no signing certificate was
-  # present, which is exactly when this ordering is the only ordering.
-  keychain_session_end "$SIGNING_KEYCHAIN_LABEL" || true
-  donor_snapshot_reap || true
+git_sha() { git -C "$1" rev-parse HEAD; }
+
+# require_clean_repo <repo> <label> [allowed-path-prefix...]
+#
+# The allowance exists for exactly one case and is empty everywhere else: under
+# --snapshot-donors this script regenerates vc-frame's bundled plugin assets
+# INSIDE the snapshot, so that tree legitimately differs from its HEAD. That is
+# derived output of the very commit the receipt binds — `plugins-parity
+# double-rebuild` is what asserts it is a function of the source and nothing
+# else — and the snapshot is a detached worktree this script created and will
+# reap. Every other difference still refuses, including an unexpected file
+# under the allowed directory's sibling.
+#
+# Dirt is not identity. A clean checkout whose HEAD moved after launch is
+# still the wrong generation. After the main snapshot exists, identity is
+# `require_bound_revision` against ROOT_SHA on SOURCE_ROOT, never a second
+# dirt check of the living REPO_ROOT.
+require_clean_repo() {
+  local repo="$1" label="$2"
+  shift 2
+  local status line path prefix allowed
+  local -a offending=()
+  status="$(git -C "$repo" status --porcelain --untracked-files=normal)"
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    path="${line:3}"
+    allowed=0
+    for prefix in ${1+"$@"}; do
+      if [[ "$path" == "$prefix"* ]]; then
+        allowed=1
+        break
+      fi
+    done
+    (( allowed )) || offending+=("$line")
+  done <<< "$status"
+  (( ${#offending[@]} == 0 )) \
+    || die "$label is dirty; release receipts refuse moving source: ${offending[*]}"
 }
-trap cleanup EXIT INT TERM HUP
+
+require_bound_revision() {
+  local repo="$1" label="$2" expected="$3"
+  local actual
+  actual="$(git_sha "$repo")"
+  [[ "$actual" == "$expected" ]] \
+    || die "$label HEAD $actual is not the bound release revision $expected"
+}
+
+# Fail closed on a dirty Living Tree before signing or cargo. After this
+# check the parent may keep moving; product bytes come from SOURCE_ROOT.
+if [[ "$MODE" != "notarize" ]]; then
+  require_clean_repo "$REPO_ROOT" vibecrafted
+fi
+# cleanup + signal traps are armed immediately after the release lock so a
+# die() above still reaps nothing it did not create and still closes our
+# descriptor. keychain_session_begin chains onto those handlers.
 
 read_trimmed_file() {
   sed -e 's/[[:space:]]*$//' -e '/^$/d' "$1" | head -n1
@@ -184,7 +387,12 @@ prepare_signing_identity() {
     # old `security default-keychain -d user -s "$TEMP_KEYCHAIN_PATH"` is what
     # made Codescribe (and everything else on the host) prompt for a uuidgen
     # password for the whole length of the release.
-    KEYCHAIN_SESSION_REGISTER_SEARCH_LIST=0 \
+    #
+    # A hosted runner is the one place where registering it is right: nothing
+    # else runs there, and codesign resolves the Developer ID chain through the
+    # search list, not through --keychain alone (run 32597029908: identity
+    # present, "The specified item could not be found in the keychain").
+    KEYCHAIN_SESSION_REGISTER_SEARCH_LIST="${VIBECRAFTED_KEYCHAIN_SEARCH_LIST:-0}" \
       keychain_session_begin "$SIGNING_KEYCHAIN_LABEL"
     TEMP_KEYCHAIN_PATH="$KEYCHAIN_SESSION_PATH"
     temp_password="$(cat "$(keychain_session_password_file)")"
@@ -203,49 +411,31 @@ prepare_signing_identity() {
     || die "Developer ID identity is not available in the keychain"
 }
 
-for command in cargo codesign file git hdiutil install_name_tool make otool uv xcodebuild xcodegen xcrun; do
+for command in cargo codesign file git install_name_tool make otool strip uv; do
   require "$command"
 done
+if [[ "$MODE" != "runtime-pack" ]]; then
+  for command in hdiutil xcodebuild xcodegen xcrun; do
+    require "$command"
+  done
+fi
 [[ -f "$SIGNING_IDENTITY_FILE" ]] || die "missing $SIGNING_IDENTITY_FILE"
-[[ -f "$SPOT_MONO_FONT" ]] || die "missing licensed Spot Mono input: $SPOT_MONO_FONT"
-LC_ALL=C file -b "$SPOT_MONO_FONT" \
-  | grep -Eq '(OpenType|TrueType) font collection data' \
-  || die "Spot Mono input is not an OpenType/TrueType font collection"
+# Every payload that materializes a Darwin vc-terminal.app consumes the
+# licensed family, because embed_terminal_font_resources is inside
+# materialize_vc_terminal_app_bundle and both callers reach it. The App build
+# always does; a Runtime Pack does when its platform is Darwin, which is the
+# very condition materialize_runtime_payload branches on. Exempting
+# MODE=runtime-pack here stopped being true the moment the pack grew its own
+# bundle: the build would run the whole native compile and then die inside the
+# payload walk instead of in this one-line preflight. Linux packs ship the flat
+# native host, have no .app identity, and need no font.
+if [[ "$MODE" != "runtime-pack" || "$RUNTIME_PACK_PLATFORM" == darwin-* ]]; then
+  [[ -f "$SPOT_MONO_FONT" ]] || die "missing licensed Spot Mono input: $SPOT_MONO_FONT"
+  LC_ALL=C file -b "$SPOT_MONO_FONT" \
+    | grep -Eq '(OpenType|TrueType) font collection data' \
+    || die "Spot Mono input is not an OpenType/TrueType font collection"
+fi
 prepare_signing_identity
-
-git_sha() { git -C "$1" rev-parse HEAD; }
-
-# require_clean_repo <repo> <label> [allowed-path-prefix...]
-#
-# The allowance exists for exactly one case and is empty everywhere else: under
-# --snapshot-donors this script regenerates vc-frame's bundled plugin assets
-# INSIDE the snapshot, so that tree legitimately differs from its HEAD. That is
-# derived output of the very commit the receipt binds — `plugins-parity
-# double-rebuild` is what asserts it is a function of the source and nothing
-# else — and the snapshot is a detached worktree this script created and will
-# reap. Every other difference still refuses, including an unexpected file
-# under the allowed directory's sibling.
-require_clean_repo() {
-  local repo="$1" label="$2"
-  shift 2
-  local status line path prefix allowed
-  local -a offending=()
-  status="$(git -C "$repo" status --porcelain --untracked-files=normal)"
-  while IFS= read -r line; do
-    [[ -n "$line" ]] || continue
-    path="${line:3}"
-    allowed=0
-    for prefix in ${1+"$@"}; do
-      if [[ "$path" == "$prefix"* ]]; then
-        allowed=1
-        break
-      fi
-    done
-    (( allowed )) || offending+=("$line")
-  done <<< "$status"
-  (( ${#offending[@]} == 0 )) \
-    || die "$label is dirty; release receipts refuse moving source: ${offending[*]}"
-}
 
 # Empty unless the frame repo is a snapshot we are entitled to regenerate into.
 FRAME_DERIVED=()
@@ -286,10 +476,71 @@ for path in runtime.rglob("*"):
     rewritten += 1
 
 print(f"normalized the embedded interpreter seed path in {rewritten} text file(s)")
+
+# CPython 3.13+ also ships _sysconfig_vars__*.json. python-build-standalone
+# freezes its CI runner's home directory into it (the userbase value). The
+# runtime recomputes userbase at startup, so the frozen value is informational
+# only, but it is an account-home absolute path the product contract refuses.
+import json
+import re
+
+account_home = re.compile(r"^/(?:Users|home)/[^/]+(?=/|$)")
+build_placeholder = "/usr/src/python-build-standalone"
+for path in runtime.rglob("_sysconfig_vars__*.json"):
+    if path.is_symlink() or not path.is_file():
+        continue
+    values = json.loads(path.read_text(encoding="utf-8"))
+    changed = [
+        key
+        for key, value in values.items()
+        if isinstance(value, str) and account_home.match(value)
+    ]
+    if not changed:
+        continue
+    for key in changed:
+        values[key] = account_home.sub(build_placeholder, values[key], count=1)
+    path.write_text(json.dumps(values, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(f"normalized the build account home in {path.relative_to(runtime)}: {', '.join(sorted(changed))}")
 if binary:
     print(f"binary files still naming the seed: {binary}", file=sys.stderr)
     raise SystemExit(1)
 PY
+}
+
+# prune_embedded_python_unreachable <python-home> <interpreter> <libpython>
+#
+# python-build-standalone ships native code the product never loads, and the
+# product contract refuses a declared dylib no declared executable reaches
+# (VCPC027). MEASURED 2026-09-14 on the c71487bf candidate with CPython 3.14.7:
+# - the Tcl/Tk stack (libtcl9, libtcl9tk9, thread, itcl) exists for tkinter and
+#   IDLE, which no Vibecrafted surface imports; only dlopen from _tkinter or a
+#   Tcl `load` would reach those dylibs;
+# - the interpreter links libpython statically, so the shared libpython is an
+#   embedding artifact nothing loads. It stays when the interpreter links it.
+prune_embedded_python_unreachable() {
+  local python="$1" interpreter="$2" libpython="$3"
+  local path restore_nullglob
+  # `shopt -p` exits 1 for an option that is off; under `set -e` that silently
+  # ended release #8 right after the interpreter download.
+  restore_nullglob="$(shopt -p nullglob || true)"
+  shopt -s nullglob
+  for path in \
+    "$python"/lib/tcl[0-9]* "$python"/lib/tk[0-9]* \
+    "$python"/lib/libtcl*.dylib "$python"/lib/libtk*.dylib \
+    "$python"/lib/thread[0-9]* "$python"/lib/itcl[0-9]* \
+    "$python"/lib/python3.*/tkinter "$python"/lib/python3.*/idlelib \
+    "$python"/lib/python3.*/turtledemo \
+    "$python"/lib/python3.*/lib-dynload/_tkinter.* \
+    "$python"/bin/idle3*; do
+    rm -rf "$path"
+  done
+  eval "$restore_nullglob"
+  [[ -f "$python/lib/$libpython" ]] || return 0
+  local links
+  links="$(otool -L "$python/bin/$interpreter")" || return 1
+  if [[ "$links" != *"$libpython"* ]]; then
+    rm -f "$python/lib/$libpython"
+  fi
 }
 
 run_bundled_verifier() {
@@ -299,33 +550,89 @@ run_bundled_verifier() {
     "$verifier" -m vibecrafted_core.product_contract "$@"
 }
 
+notary_profile_from_env_file() {
+  # Read ONLY the profile name. Never source .notary.env — that file may hold
+  # Apple-ID passwords and must not enter process argv or the shell environment.
+  local file="${1:-}"
+  [[ -f "$file" ]] || return 0
+  sed -n 's/^NOTARY_PROFILE=//p' "$file" | head -n1 | tr -d '\r"'
+}
+
 notary_submit() {
   local artifact="$1"
-  if [[ -n "${NOTARY_PROFILE:-}" ]]; then
-    xcrun notarytool submit "$artifact" --keychain-profile "$NOTARY_PROFILE" \
+  local profile="${NOTARY_PROFILE:-}"
+  if [[ -z "$profile" ]]; then
+    profile="$(notary_profile_from_env_file "$NOTARY_ENV")"
+  fi
+  # Explicit Founder profile (env or .notary.env name-only) beats API keys.
+  # Do not invent a default Keychain profile; that made Apple-ID unreachable
+  # and submitted against credentials nobody configured.
+  if [[ -n "$profile" ]]; then
+    xcrun notarytool submit "$artifact" --keychain-profile "$profile" \
       --wait --timeout 30m
     return
   fi
-  [[ -f "$NOTARY_ENV" ]] || die "NOTARY_PROFILE is unset and $NOTARY_ENV is missing"
-  # shellcheck disable=SC1090
-  source "$NOTARY_ENV"
-  : "${NOTARY_APPLE_ID:?NOTARY_APPLE_ID missing}"
-  : "${NOTARY_TEAM_ID:?NOTARY_TEAM_ID missing}"
-  : "${NOTARY_PASSWORD:?NOTARY_PASSWORD missing}"
-  xcrun notarytool submit "$artifact" --apple-id "$NOTARY_APPLE_ID" \
-    --team-id "$NOTARY_TEAM_ID" --password "$NOTARY_PASSWORD" \
+  if [[ -n "${NOTARY_API_KEY_PATH:-}" || -n "${NOTARY_API_KEY_ID:-}" || -n "${NOTARY_API_ISSUER:-}" ]]; then
+    : "${NOTARY_API_KEY_PATH:?NOTARY_API_KEY_PATH missing}"
+    : "${NOTARY_API_KEY_ID:?NOTARY_API_KEY_ID missing}"
+    : "${NOTARY_API_ISSUER:?NOTARY_API_ISSUER missing}"
+    [[ -f "$NOTARY_API_KEY_PATH" ]] \
+      || die "Notary API private key is missing: $NOTARY_API_KEY_PATH"
+    xcrun notarytool submit "$artifact" --key "$NOTARY_API_KEY_PATH" \
+      --key-id "$NOTARY_API_KEY_ID" --issuer "$NOTARY_API_ISSUER" \
+      --wait --timeout 30m
+    return
+  fi
+  [[ -f "$NOTARY_ENV" ]] \
+    || die "NOTARY_PROFILE is unset; store credentials in Keychain first"
+  if [[ ! -t 0 || ! -t 1 ]]; then
+    die "raw Apple-ID notarization credentials are not accepted headlessly; create a Keychain profile and set NOTARY_PROFILE"
+  fi
+  local apple_id team_id fallback_profile
+  apple_id="$(sed -n 's/^NOTARY_APPLE_ID=//p' "$NOTARY_ENV" | head -n1)"
+  team_id="$(sed -n 's/^NOTARY_TEAM_ID=//p' "$NOTARY_ENV" | head -n1)"
+  [[ "$apple_id" =~ ^[^[:space:]@]+@[^[:space:]@]+$ ]] \
+    || die "NOTARY_APPLE_ID in $NOTARY_ENV is invalid"
+  [[ "$team_id" =~ ^[[:alnum:]]{10}$ ]] \
+    || die "NOTARY_TEAM_ID in $NOTARY_ENV is invalid"
+  fallback_profile="${NOTARY_FALLBACK_PROFILE:-vibecrafted-notary}"
+  log "Storing Apple-ID notarization credentials through the secure Keychain prompt"
+  xcrun notarytool store-credentials "$fallback_profile" \
+    --apple-id "$apple_id" --team-id "$team_id"
+  xcrun notarytool submit "$artifact" --keychain-profile "$fallback_profile" \
     --wait --timeout 30m
 }
 
-sign_macho_tree() {
-  local outer="$APP/Contents/MacOS/Vibecrafted" candidate
-  while IFS= read -r -d '' candidate; do
-    [[ "$candidate" != "$outer" ]] || continue
-    if /usr/bin/file -b "$candidate" | grep -q 'Mach-O'; then
-      codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" \
-        "${CODESIGN_KEYCHAIN_ARGS[@]}" "$candidate"
-    fi
-  done < <(find "$APP/Contents" -type f -print0)
+# Debug stabs are the producer no compiler flag reaches. rustc's
+# --remap-path-prefix rewrites SOURCE paths (SO stabs read /usr/src/...), but
+# the linker still records every OBJECT file it consumed as an N_OSO stab —
+# .../target/release/deps/alacritty-*.o and DerivedData/Intermediates.noindex/...
+# — verbatim. MEASURED 2026-08-19 on a fresh af98ebfe build: alacritty carried
+# 249 such stabs and Contents/MacOS/Vibecrafted 40, all naming the build root.
+# Rust 1.95 applies profile `strip = true` while compiling host proc-macros,
+# which makes crates such as include_dir and vte_generate_state_changes
+# disappear before their dependants are compiled, so vc-frame is built
+# unstripped and normalized here instead. The one shared boundary is
+# strip_macho_debug_tree in scripts/lib/macho-signing.sh: the same step the
+# Runtime Pack payload passes through in materialize_runtime_payload, so no
+# binary is ever named twice and none is forgotten. It runs before any
+# signature.
+#
+# Contents/Frameworks is the one root whose LIBRARIES this build linked:
+# xcodegen's "Build Rust FFI" phase runs `cargo build -p vibecrafted-shell-ffi`
+# (its profile strip aborts in rust-objcopy, as a warning) and Xcode embeds
+# the dylib as it came. MEASURED 2026-09-09 on the aa12980d candidate: the
+# Runtime Pack passed (6739 files) and the App gate refused
+# libvibecrafted_shell_ffi.dylib for 17 N_OSO stabs — 11 naming the Cargo
+# target directory, 6 the rustup sysroot — and nothing else. That root is
+# therefore stripped with --shared-libraries, which also proves exports, load
+# commands and a real dyld load afterwards. The Runtime Pack's vendor dylibs
+# under Contents/Resources/runtime are not named here and stay as delivered.
+strip_debug_stabs() {
+  strip_macho_debug_tree "$APP/Contents/MacOS" "$APP/Contents/Helpers" \
+    || die "Vibecrafted.app debug-record strip failed"
+  strip_macho_debug_tree --shared-libraries "$APP/Contents/Frameworks" \
+    || die "Vibecrafted.app framework debug-record strip failed"
 }
 
 sign_nested_app_bundles() {
@@ -333,7 +640,70 @@ sign_nested_app_bundles() {
   while IFS= read -r -d '' nested_app; do
     codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" \
       "${CODESIGN_KEYCHAIN_ARGS[@]}" "$nested_app"
-  done < <(find "$APP/Contents" -mindepth 2 -type d -name '*.app' -print0)
+  done < <(find "$APP/Contents" -mindepth 2 -type d -iname '*.app' -print0)
+}
+
+# Helpers/vc-app-update is a shebang script, not Mach-O, so sign_macho_tree
+# skips it. Outer codesign then refuses: "code object is not signed at all
+# In subcomponent: .../Contents/Helpers/vc-app-update".
+sign_helper_scripts() {
+  local helper
+  [[ -x "$APP/Contents/Helpers/vc-app-update" ]] \
+    || die "missing app-update helper: Contents/Helpers/vc-app-update"
+  while IFS= read -r -d '' helper; do
+    [[ -x "$helper" ]] || continue
+    if is_macho_file "$helper"; then
+      continue
+    fi
+    codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" \
+      "${CODESIGN_KEYCHAIN_ARGS[@]}" "$helper" \
+      || die "could not sign helper ${helper#"$APP"/}"
+  done < <(find "$APP/Contents/Helpers" -maxdepth 1 -type f -print0)
+}
+
+# materialize_vc_terminal_app_bundle <bundle> <terminal binary> <role>
+#
+# The product's Finder/Dock terminal identity, materialized the one way. Two
+# payloads carry a vc-terminal.app — Vibecrafted.app in Contents/Helpers, and
+# the Runtime Pack beside its flat native host in libexec — and until this
+# boundary existed they were assembled by two copies of the same block. They
+# had already drifted: the helper was stamped VC Terminal while the Runtime
+# Pack bundle shipped the donor's own CFBundleName, so the same binary appeared
+# in the Dock under two names depending on which payload the operator installed.
+# One function, one identity, both callers; the role only names the payload in
+# a failure message.
+materialize_vc_terminal_app_bundle() {
+  local terminal_app="$1" terminal_binary="$2" role="$3"
+  /usr/bin/ditto "$TERMINAL_REPO/extra/osx/vc-terminal.app" "$terminal_app"
+  mkdir -p "$terminal_app/Contents/MacOS" "$terminal_app/Contents/Resources"
+  install -m 0755 "$terminal_binary" "$terminal_app/Contents/MacOS/alacritty"
+  "$SOURCE_ROOT/scripts/build-vibecrafted-icon.sh" \
+    "$TERMINAL_REPO/assets/icon/vc-terminal-icon.png" \
+    "$terminal_app/Contents/Resources/alacritty.icns" \
+    "$TERMINAL_REPO/assets/icon/terminal.png"
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' \
+    "$terminal_app/Contents/Info.plist")" == "alacritty" ]] \
+    || die "$role vc-terminal bundle executable contract is invalid"
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' \
+    "$terminal_app/Contents/Info.plist")" == "alacritty.icns" ]] \
+    || die "$role vc-terminal bundle icon contract is invalid"
+  [[ -s "$terminal_app/Contents/Resources/alacritty.icns" ]] \
+    || die "$role vc-terminal bundle icon is missing"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName VC Terminal" \
+    "$terminal_app/Contents/Info.plist" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string VC Terminal" \
+      "$terminal_app/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleName VC Terminal" \
+    "$terminal_app/Contents/Info.plist" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c "Add :CFBundleName string VC Terminal" \
+      "$terminal_app/Contents/Info.plist"
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' \
+    "$terminal_app/Contents/Info.plist")" == "VC Terminal" ]] \
+    || die "$role vc-terminal display name is not canonical"
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' \
+    "$terminal_app/Contents/Info.plist")" == "VC Terminal" ]] \
+    || die "$role vc-terminal bundle name is not canonical"
+  embed_terminal_font_resources "$terminal_app"
 }
 
 remove_ambient_swift_rpath() {
@@ -356,29 +726,301 @@ remove_ambient_swift_rpath() {
 }
 
 # Snapshots are materialised here, not at parse time: --notarize-only reuses an
-# already assembled app and must not touch the donors at all.
+# already assembled app and must not touch the donors or main source at all.
+#
+# Main snapshot lifetime: created here at the ROOT_SHA captured at launch,
+# recorded in DONOR_SNAPSHOTS, reaped by cleanup → donor_snapshot_reap on
+# EXIT/INT/TERM/HUP. DIST_DIR, BUILD_DIR cargo/DerivedData, the App and
+# build/runtime-pack-selection.json stay on the living REPO_ROOT so a reap
+# cannot delete a reusable cache or unpublish a finished carrier.
 materialize_donor_snapshots() {
-  (( SNAPSHOT_DONORS )) || return 0
   require git
-  log "Snapshotting donors at HEAD; their dirty working trees stay untouched"
+  log "Snapshotting main source at $ROOT_SHA; the Living Tree may keep moving"
   # No command substitution here: it would run the snapshot in a subshell and
   # the reaper would lose the record. See scripts/lib/donor-snapshot.sh.
-  local terminal_head frame_head
-  donor_snapshot_create "$TERMINAL_DONOR" "$TERMINAL_REPO"
-  terminal_head="$DONOR_SNAPSHOT_HEAD"
-  donor_snapshot_create "$FRAME_DONOR" "$FRAME_REPO"
-  frame_head="$DONOR_SNAPSHOT_HEAD"
-  log "vc-terminal snapshot at $terminal_head"
-  log "vc-frame snapshot at $frame_head"
-  # Every snapshot build starts from a cold target directory. That is the price
-  # of a receipt that binds a SHA nobody edited mid-build.
+  donor_snapshot_create "$REPO_ROOT" "$SOURCE_ROOT" "$ROOT_SHA"
+  [[ "$DONOR_SNAPSHOT_HEAD" == "$ROOT_SHA" ]] \
+    || die "main snapshot HEAD $DONOR_SNAPSHOT_HEAD is not the bound release revision $ROOT_SHA"
+  log "vibecrafted snapshot at $DONOR_SNAPSHOT_HEAD"
+  if (( SNAPSHOT_DONORS )); then
+    log "Snapshotting donors at HEAD; their dirty working trees stay untouched"
+    local terminal_head frame_head
+    donor_snapshot_create "$TERMINAL_DONOR" "$TERMINAL_REPO"
+    terminal_head="$DONOR_SNAPSHOT_HEAD"
+    donor_snapshot_create "$FRAME_DONOR" "$FRAME_REPO"
+    frame_head="$DONOR_SNAPSHOT_HEAD"
+    log "vc-terminal snapshot at $terminal_head"
+    log "vc-frame snapshot at $frame_head"
+  fi
+  # Every snapshot build starts from a cold donor target directory. Main
+  # cargo/DerivedData stay in the living BUILD_DIR so correct caches reuse.
   [[ -z "${VIBECRAFTED_RELEASE_FAIL_AFTER_SNAPSHOT:-}" ]] \
     || die "VIBECRAFTED_RELEASE_FAIL_AFTER_SNAPSHOT is set; failing on purpose so the reaper is exercised"
 }
 
+produce_runtime_pack() {
+  local -a packager_codesign_args=(--codesign-identity "$SIGNING_IDENTITY")
+  if [[ -n "$TEMP_KEYCHAIN_PATH" ]]; then
+    packager_codesign_args+=(--codesign-keychain "$TEMP_KEYCHAIN_PATH")
+  fi
+  # Read the donor identities ONCE, here, and hand the very same values to the
+  # packager and to the build-selection record. Re-reading a sibling HEAD after
+  # the pack is sealed would let a donor that moved mid-build describe bytes it
+  # did not produce.
+  local terminal_revision frame_revision
+  terminal_revision="$(git_sha "$TERMINAL_REPO")"
+  frame_revision="$(git_sha "$FRAME_REPO")"
+  log "Producing the canonical standalone Runtime Pack"
+  rm -f "$RUNTIME_PACK" "$RUNTIME_PACK_CHECKSUM" "$RUNTIME_PACK_SIGNATURE"
+  "$SOURCE_ROOT/scripts/package-runtime-pack.sh" \
+    --payload-root "$RUNTIME_PAYLOAD" --output "$RUNTIME_PACK" \
+    --source-revision "$ROOT_SHA" \
+    --terminal-revision "$terminal_revision" \
+    --frame-revision "$frame_revision" \
+    --version "$RUNTIME_VERSION" \
+    --platform "$RUNTIME_PACK_PLATFORM" \
+    --architecture "$RUNTIME_PACK_ARCHITECTURE" \
+    "${packager_codesign_args[@]}"
+  verify_runtime_pack_macho_signatures "$RUNTIME_PACK" \
+    || die "standalone Runtime Pack contains an invalid or unsigned Mach-O"
+  /usr/bin/openssl dgst -sha256 -sign "$SIGNING_KEY" \
+    -out "$RUNTIME_PACK_SIGNATURE" "$RUNTIME_PACK"
+  # Completion boundary for the standalone carrier: packaged, its Mach-O payload
+  # verified, its detached signature written. Only now may `make install` treat
+  # this exact path as the artifact the Founder just built. The packager prints
+  # the path much earlier, before signing, which is too early to publish.
+  runtime_pack_selection_publish "$REPO_ROOT" "$RUNTIME_PACK_SELECTION_ATTEMPT" \
+    "$RUNTIME_PACK" "$RUNTIME_VERSION" "$RUNTIME_PACK_PLATFORM" \
+    "$RUNTIME_PACK_ARCHITECTURE" "$ROOT_SHA" "$terminal_revision" \
+    "$frame_revision" \
+    || die "could not record the standalone Runtime Pack build selection"
+}
+
+embed_runtime_pack() {
+  log "Embedding the exact standalone Runtime Pack bytes in Vibecrafted.app"
+  rm -rf "$RUNTIME_PACK_RESOURCE_DIR"
+  mkdir -p "$RUNTIME_PACK_RESOURCE_DIR"
+  install -m 0755 "$SOURCE_ROOT/scripts/install-runtime-pack.sh" \
+    "$RUNTIME_PACK_RESOURCE_DIR/install-runtime-pack.sh"
+  printf '%s\n' "$RUNTIME_VERSION" > "$RUNTIME_PACK_RESOURCE_DIR/VERSION"
+  install -m 0644 \
+    "$SOURCE_ROOT/vibecrafted-core/vibecrafted_core/trust/vibecrafted-signing-v1.pub" \
+    "$RUNTIME_PACK_RESOURCE_DIR/vibecrafted-signing-v1.pub"
+  install -m 0644 "$RUNTIME_PACK" "$EMBEDDED_RUNTIME_PACK"
+  install -m 0644 "$RUNTIME_PACK_CHECKSUM" "$EMBEDDED_RUNTIME_PACK_CHECKSUM"
+  install -m 0644 "$RUNTIME_PACK_SIGNATURE" "$EMBEDDED_RUNTIME_PACK_SIGNATURE"
+  cmp "$RUNTIME_PACK" "$EMBEDDED_RUNTIME_PACK"
+  cmp "$RUNTIME_PACK_CHECKSUM" "$EMBEDDED_RUNTIME_PACK_CHECKSUM"
+  cmp "$RUNTIME_PACK_SIGNATURE" "$EMBEDDED_RUNTIME_PACK_SIGNATURE"
+  verify_runtime_pack_macho_signatures "$EMBEDDED_RUNTIME_PACK" \
+    || die "embedded Runtime Pack contains an invalid or unsigned Mach-O"
+}
+
+# embed_terminal_font_resources <vc-terminal.app>
+#
+# Give the process that actually draws the glyphs its own copy of the licensed
+# terminal family, declared the way Apple documents for a consuming app:
+# ATSApplicationFontsPath names a Resources-relative directory and CoreText
+# registers it privately for that bundle's process.
+#
+# Measured on macOS 27 with an isolated probe (see
+# tests/tui/test_terminal_font_ownership.py):
+#   * a family absent from the host resolves inside the declaring bundle and
+#     stays invisible to every other process, so a user without Spot Mono
+#     installed still gets it;
+#   * a family already registered from /System/Library/Fonts or /Library/Fonts
+#     keeps winning inside the declaring process, so for those stores the
+#     bundled copy is a fallback and not a takeover. The probe deliberately
+#     does not read ~/Library/Fonts, so precedence over the owner's private
+#     collection is not claimed here — only the system stores were measured.
+# That is the whole reason this replaced the parent app's CTFontManager
+# `.session` registration, which reached the entire login session; there the
+# shadowing of a user-installed SpotMono.ttc WAS observed directly.
+embed_terminal_font_resources() {
+  local terminal_app="$1"
+  local resources="$terminal_app/Contents/Resources"
+  local plist="$terminal_app/Contents/Info.plist"
+  [[ -f "$plist" ]] || die "vc-terminal bundle has no Info.plist: $terminal_app"
+  mkdir -p "$resources/fonts"
+  install -m 0644 "$SPOT_MONO_FONT" "$resources/fonts/SpotMono.ttc"
+  /usr/libexec/PlistBuddy -c "Set :ATSApplicationFontsPath fonts" "$plist" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c "Add :ATSApplicationFontsPath string fonts" "$plist"
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :ATSApplicationFontsPath' "$plist")" == "fonts" ]] \
+    || die "vc-terminal bundle does not declare its private font directory"
+  [[ -s "$resources/fonts/SpotMono.ttc" ]] \
+    || die "vc-terminal bundle is missing the bundled Spot Mono fallback"
+}
+
+materialize_runtime_payload() {
+  local runtime="$1"
+  local terminal_source="$2"
+  local frame_source="$3"
+  local start_source="$4"
+  local voc_source="$5"
+  local server_source="$6"
+  local server_site="$7"
+  local scaffold_doctor_source="$8"
+  local canonical_deck python_seed seed_python python_home
+
+  log "Materializing the App-independent Runtime Pack payload"
+  rm -rf "$runtime"
+  mkdir -p "$runtime/bin" "$runtime/libexec" "$runtime/scripts" \
+    "$runtime/vibecrafted-core" "$runtime/vibecrafted-mcp" \
+    "$runtime/config" "$runtime/server/site"
+  printf '%s\n' "$RUNTIME_VERSION" > "$runtime/VERSION"
+  canonical_deck="$SOURCE_ROOT/vibecrafted-core/vibecrafted_core/deck/vibecrafted"
+  install -m 0755 "$canonical_deck" "$runtime/scripts/vibecrafted"
+  install -m 0755 "$canonical_deck" "$runtime/bin/vibecrafted"
+  install -m 0755 "$SOURCE_ROOT/scripts/vetcoders_install.py" \
+    "$runtime/scripts/vetcoders_install.py"
+  install -m 0644 "$SOURCE_ROOT/scripts/distribution_manifest.py" \
+    "$runtime/scripts/distribution_manifest.py"
+  install -m 0644 "$SOURCE_ROOT/scripts/installer_brand.py" \
+    "$runtime/scripts/installer_brand.py"
+  install -m 0755 "$SOURCE_ROOT/scripts/vc-frame-product-entry.sh" \
+    "$runtime/scripts/vc-frame-product-entry.sh"
+  install -m 0755 "$SOURCE_ROOT/scripts/vc-terminal-product-entry.sh" \
+    "$runtime/scripts/vc-terminal-product-entry.sh"
+  "$SOURCE_ROOT/scripts/project-python" "$SOURCE_ROOT/scripts/distribution_manifest.py" \
+    carrier --source "$SOURCE_ROOT" --output "$runtime/source-provenance.json" \
+    --owner-repo vetcoders/vibecrafted --source-revision "$ROOT_SHA"
+  /bin/cp -R "$SOURCE_ROOT/bin/." "$runtime/bin/"
+  /bin/cp -R "$SOURCE_ROOT/vibecrafted-core/vibecrafted_core" \
+    "$runtime/vibecrafted-core/"
+  # MCP is a Vibecrafted-owned public command. Keep it in the signed
+  # generation so its installed launcher never depends on a mutable uv tool
+  # environment or the checkout that happened to assemble the carrier.
+  /bin/cp -R "$SOURCE_ROOT/vibecrafted-mcp/vibecrafted_mcp" \
+    "$runtime/vibecrafted-mcp/"
+  # The MCP package's source VERSION is the release version.  Once copied
+  # into a Runtime Pack it must identify the exact signed generation, just as
+  # vibecrafted-core does below; both --version and MCP initialize serverInfo
+  # resolve this one package-owned file.
+  printf '%s\n' "$RUNTIME_VERSION" \
+    > "$runtime/vibecrafted-mcp/vibecrafted_mcp/VERSION"
+  printf '%s\n' "$RUNTIME_VERSION" \
+    > "$runtime/vibecrafted-core/vibecrafted_core/VERSION"
+  /bin/cp -R "$SOURCE_ROOT/config/." "$runtime/config/"
+  /bin/cp -R "$server_site/." "$runtime/server/site/"
+  install -m 0755 "$start_source" "$runtime/bin/vc-start"
+  install -m 0755 "$voc_source" "$runtime/bin/voc"
+  install -m 0755 "$server_source" "$runtime/bin/vc-server"
+  install -m 0755 "$server_source" "$runtime/bin/vibecrafted-server-web"
+  install -m 0755 "$scaffold_doctor_source" "$runtime/bin/scaffold-doctor"
+  install -m 0755 "$terminal_source" "$runtime/libexec/vc-terminal"
+  # A Runtime Pack is independently launchable: it cannot borrow the enclosing
+  # Vibecrafted.app helper merely to retain Finder/Dock identity.  Materialize
+  # the same branded bundle beside the generation's native fallback so the
+  # public product entry selects generation-owned bytes after a standalone
+  # install as well.  Linux keeps the flat native host because .app identity is
+  # a Darwin-only product contract.
+  if [[ "$RUNTIME_PACK_PLATFORM" == darwin-* ]]; then
+    materialize_vc_terminal_app_bundle "$runtime/libexec/vc-terminal.app" \
+      "$terminal_source" "Runtime Pack"
+  fi
+  install -m 0755 "$runtime/scripts/vc-terminal-product-entry.sh" \
+    "$runtime/bin/vc-terminal"
+  install -m 0755 "$frame_source" "$runtime/libexec/vc-frame"
+  install -m 0755 "$runtime/scripts/vc-frame-product-entry.sh" \
+    "$runtime/bin/vc-frame"
+  # The foundation manifest is a closed inventory of the complete executable
+  # surface. Generate it only after every required runtime executable exists.
+  "$SOURCE_ROOT/scripts/stage-runtime-foundations.sh" "$runtime/bin"
+
+  find "$runtime/vibecrafted-core" \
+    -type d -name __pycache__ -prune -exec rm -rf {} +
+  find "$runtime/vibecrafted-core" \
+    -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
+
+  log "Embedding a private Python runtime; no shell profile or host Python is used"
+  python_seed="$(mktemp -d "$BUILD_DIR/python-seed.XXXXXX")"
+  mkdir -p "$python_seed"
+  # Published python-build-standalone install_only archive, pin+checksum in
+  # scripts/lib/portable-python-artifact.json. Retry transient curl; never compile.
+  # shellcheck source=/dev/null
+  . "$SOURCE_ROOT/scripts/lib/portable-python.sh"
+  portable_python_load_pin ""
+  seed_python="$(install_portable_python "$python_seed")"
+  python_home="$(cd "$(dirname "$seed_python")/.." && pwd)"
+  mkdir -p "$runtime/python" "$runtime/python-site"
+  /bin/cp -RL "$python_home/." "$runtime/python/"
+  prune_embedded_python_unreachable "$runtime/python" \
+    "$PORTABLE_PYTHON_BIN" "$PORTABLE_PYTHON_DYLIB"
+  uv pip install --python "$seed_python" --target "$runtime/python-site" \
+    'jsonschema>=4.23,<5' 'PyYAML>=6.0,<7' 'screenscribe==0.1.19' \
+    'fastmcp>=2.0,<3'
+  if [[ -f "$runtime/python/lib/${PORTABLE_PYTHON_DYLIB}" ]]; then
+    install_name_tool -id "@loader_path/${PORTABLE_PYTHON_DYLIB}" \
+      "$runtime/python/lib/${PORTABLE_PYTHON_DYLIB}"
+  fi
+  rm -rf "$runtime/python-site/bin"
+  normalize_embedded_python_paths "$runtime" "$python_seed"
+
+  find "$runtime" -type f -name '*.pyc' -delete
+  find "$runtime" -depth -type d -name __pycache__ -empty -delete
+  find "$runtime" -type f -name '.DS_Store' -delete
+  # shellcheck disable=SC2016  # writes a launcher; runtime_root expands in the generated script
+  printf '%s\n' \
+    '#!/bin/bash' \
+    'set -euo pipefail' \
+    'runtime_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"' \
+    'export PYTHONNOUSERSITE=1' \
+    'export PYTHONDONTWRITEBYTECODE=1' \
+    'export PYTHONPATH="$runtime_root/vibecrafted-core:$runtime_root/vibecrafted-mcp:$runtime_root/python-site"' \
+    "exec \"\$runtime_root/python/bin/${PORTABLE_PYTHON_BIN}\" \"\$@\"" \
+    > "$runtime/bin/python3"
+  chmod 0755 "$runtime/bin/python3"
+  "$SOURCE_ROOT/scripts/project-python" \
+    "$SOURCE_ROOT/scripts/render-python-entrypoint-launchers.py" \
+    --pyproject "$SOURCE_ROOT/vibecrafted-core/pyproject.toml" \
+    --bin-dir "$runtime/bin"
+  "$SOURCE_ROOT/scripts/project-python" \
+    "$SOURCE_ROOT/scripts/render-python-entrypoint-launchers.py" \
+    --pyproject "$SOURCE_ROOT/vibecrafted-mcp/pyproject.toml" \
+    --bin-dir "$runtime/bin"
+  # shellcheck disable=SC2016
+  printf '%s\n' \
+    '#!/bin/bash' \
+    'set -euo pipefail' \
+    'runtime_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"' \
+    'exec "$runtime_root/bin/python3" -c '\''from screenscribe.bootstrap import main; main()'\'' "$@"' \
+    > "$runtime/bin/screenscribe"
+  chmod 0755 "$runtime/bin/screenscribe"
+  "$runtime/bin/screenscribe" --version >/dev/null
+
+  # Every executable this payload carries — the ones compiled above, the ones
+  # stage-runtime-foundations built from pinned sources, and the donors' — goes
+  # through one debug-record boundary before the gate reads the bytes and
+  # before the packager signs them. MEASURED 2026-09-08 on the f131b81b
+  # candidate: two named files here left six others carrying the rustup
+  # sysroot and the Cargo target directory in linker stabs.
+  log "Stripping linker debug records from the Runtime Pack executables"
+  strip_macho_debug_tree "$runtime/bin" "$runtime/libexec" \
+    || die "Runtime Pack payload debug-record strip failed"
+  if find "$runtime" -type l -print -quit | grep -q .; then
+    die "Runtime Pack payload contains symlinks"
+  fi
+  assert_payload_is_anonymous "$runtime" "Runtime Pack payload"
+}
+
+build_native_voc() {
+  NATIVE_VOC_BUILD_ROOT="$BUILD_DIR/cargo/vibecrafted-app"
+  log "Building the native hermetic vc-start and VOC"
+  (cd "$SOURCE_ROOT/vibecrafted-app" \
+    && CARGO_TARGET_DIR="$NATIVE_VOC_BUILD_ROOT" \
+      cargo build --locked -p voc --bin vc-start --bin voc --release)
+  NATIVE_VC_START_SOURCE="$NATIVE_VOC_BUILD_ROOT/release/vc-start"
+  [[ -x "$NATIVE_VC_START_SOURCE" ]] || die "vc-start release binary is missing"
+  chmod 0755 "$NATIVE_VC_START_SOURCE"
+  NATIVE_VOC_SOURCE="$NATIVE_VOC_BUILD_ROOT/release/voc"
+  [[ -x "$NATIVE_VOC_SOURCE" ]] || die "VOC release binary is missing"
+  chmod 0755 "$NATIVE_VOC_SOURCE"
+}
+
 build_product() {
   materialize_donor_snapshots
-  require_clean_repo "$REPO_ROOT" vibecrafted
+  require_clean_repo "$SOURCE_ROOT" vibecrafted
+  require_bound_revision "$SOURCE_ROOT" vibecrafted "$ROOT_SHA"
   require_clean_repo "$TERMINAL_REPO" vc-terminal
   require_clean_repo "$FRAME_REPO" vc-frame
 
@@ -413,29 +1055,64 @@ build_product() {
   fi
 
   log "Building vc-frame through its provenance-stable donor target"
+  # zellij-utils/build.rs bakes CARGO_MANIFEST_DIR into the binary for
+  # install-freshness (dev builds compare themselves with their checkout). A
+  # release build's checkout is a donor snapshot that is reaped minutes later,
+  # so the baked path would be both useless and a host-path leak (measured
+  # 2026-08-19: 1 hit in Contents/Helpers/vc-frame). Pin it to the same root
+  # the source remap advertises; the freshness probe then reports NoCheckout.
+  # `plugins-assets` deliberately rewrites tracked derived blobs in the
+  # detached snapshot.  That does not make the source revision dirty: the
+  # regenerated bytes are checked by plugins-parity and the release receipt is
+  # bound to the immutable snapshot HEAD.  Resolve that identity before Cargo
+  # asks zellij-utils/build.rs to inspect the derived-output mutation.
+  local frame_release_sha
+  frame_release_sha="$(git_sha "$FRAME_REPO")"
   CARGO_PROFILE_RELEASE_STRIP=false \
+    VC_FRAME_GIT_SHA="$frame_release_sha" \
+    VC_FRAME_GIT_DIRTY=0 \
     VC_FRAME_SOURCE_MANIFEST_DIR=/usr/src/vc-frame/zellij-utils \
     make -C "$FRAME_REPO" release-binary
   local frame_source="$FRAME_REPO/target/release/vc-frame"
   [[ -x "$frame_source" ]] || die "vc-frame release binary is missing"
   chmod 0755 "$frame_source"
 
-  log "Building the native hermetic vc-start"
-  (cd "$REPO_ROOT/vibecrafted-app" && cargo build -p voc --bin vc-start --release)
-  local start_source="$REPO_ROOT/vibecrafted-app/target/release/vc-start"
-  [[ -x "$start_source" ]] || die "vc-start release binary is missing"
-  chmod 0755 "$start_source"
+  build_native_voc
+  local start_source="$NATIVE_VC_START_SOURCE"
+  local voc_source="$NATIVE_VOC_SOURCE"
 
   log "Building the bundled Vibecrafted Server and hydrated site"
   local server_build_root="$BUILD_DIR/cargo"
-  make -C "$REPO_ROOT" CARGO_BUILD_ROOT="$server_build_root" build-server-release
+  if command -v rustup >/dev/null 2>&1; then
+    rustup target list --installed 2>/dev/null | grep -q '^wasm32-unknown-unknown$' \
+      || die "rustup is missing wasm32-unknown-unknown; run: rustup target add wasm32-unknown-unknown"
+  fi
+  make -C "$SOURCE_ROOT" CARGO_BUILD_ROOT="$server_build_root" build-server-release
   local server_source="$server_build_root/vibecrafted-server/release/vibecrafted-server-web"
   local server_site="$server_build_root/vibecrafted-server/site"
   [[ -x "$server_source" ]] || die "Vibecrafted Server release binary is missing"
   [[ -d "$server_site/pkg" ]] || die "Vibecrafted Server hydrated site is missing"
 
+  log "Building the scaffold-doctor gate binary from control-core"
+  (cd "$SOURCE_ROOT/vibecrafted-server" \
+    && CARGO_TARGET_DIR="$server_build_root/vibecrafted-server" \
+      cargo build --release --locked -p control-core --bin scaffold-doctor)
+  local scaffold_doctor_source="$server_build_root/vibecrafted-server/release/scaffold-doctor"
+  [[ -x "$scaffold_doctor_source" ]] || die "scaffold-doctor release binary is missing"
+  chmod 0755 "$scaffold_doctor_source"
+
+  materialize_runtime_payload "$RUNTIME_PAYLOAD" \
+    "$terminal_source" "$frame_source" "$start_source" "$voc_source" \
+    "$server_source" "$server_site" "$scaffold_doctor_source"
+  produce_runtime_pack
+  [[ "$MODE" == "runtime-pack" ]] && return
+
   log "Building the single Swift host app"
-  make -C "$REPO_ROOT/vibecrafted-app/shell-agent" bindings xcode
+  local generated_project="vibecrafted-app/shell-agent/app/Vibecrafted.xcodeproj"
+  if git -C "$SOURCE_ROOT" ls-files --error-unmatch "$generated_project" >/dev/null 2>&1; then
+    die "generated Xcode project must not be tracked; project.yml is the source of truth"
+  fi
+  make -C "$SOURCE_ROOT/vibecrafted-app/shell-agent" bindings xcode
   rm -rf "$BUILD_DIR/DerivedData" "$APP"
   mkdir -p "$BUILD_DIR" "$DIST_DIR"
   # `$(inherited)` is xcodebuild's own build-setting syntax, not a shell
@@ -444,7 +1121,7 @@ build_product() {
   # each setting is spliced from a quoted and an unquoted half.
   # shellcheck disable=SC2016
   xcodebuild \
-    -project "$REPO_ROOT/vibecrafted-app/shell-agent/app/Vibecrafted.xcodeproj" \
+    -project "$SOURCE_ROOT/vibecrafted-app/shell-agent/app/Vibecrafted.xcodeproj" \
     -scheme Vibecrafted -configuration Release \
     -derivedDataPath "$BUILD_DIR/DerivedData" \
     OTHER_SWIFT_FLAGS='$(inherited) '"$SWIFT_PREFIX_MAP" \
@@ -457,7 +1134,7 @@ build_product() {
   local resources="$APP/Contents/Resources"
   mkdir -p "$resources"
   log "Binding the canonical vc-terminal icon to Vibecrafted.app"
-  "$REPO_ROOT/scripts/build-vibecrafted-icon.sh" \
+  "$SOURCE_ROOT/scripts/build-vibecrafted-icon.sh" \
     "$ICON_SOURCE" "$resources/Vibecrafted.icns" "$ICON_REFERENCE"
   if find "$resources" -maxdepth 1 -type f -name '*.icns' \
       ! -name 'Vibecrafted.icns' -print -quit | grep -q .; then
@@ -467,124 +1144,19 @@ build_product() {
     "$APP/Contents/Info.plist" 2>/dev/null \
     || /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string Vibecrafted.icns" \
       "$APP/Contents/Info.plist"
-  log "Embedding the canonical Spot Mono terminal family"
-  mkdir -p "$resources/fonts"
-  install -m 0644 "$SPOT_MONO_FONT" "$resources/fonts/SpotMono.ttc"
   remove_ambient_swift_rpath
 
-  log "Embedding product modules and the checkout-free runtime"
+  log "Embedding the already-materialized Runtime Pack payload"
   local runtime="$resources/runtime"
   local terminal_app="$APP/Contents/Helpers/vc-terminal.app"
-  mkdir -p "$APP/Contents/Helpers" "$resources/terminal" "$runtime/bin"
-  /usr/bin/ditto "$TERMINAL_REPO/extra/osx/vc-terminal.app" "$terminal_app"
-  mkdir -p "$terminal_app/Contents/MacOS" "$terminal_app/Contents/Resources"
-  install -m 0755 "$terminal_source" "$terminal_app/Contents/MacOS/alacritty"
-  install -m 0644 "$resources/Vibecrafted.icns" \
-    "$terminal_app/Contents/Resources/alacritty.icns"
-  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' \
-    "$terminal_app/Contents/Info.plist")" == "alacritty" ]] \
-    || die "vc-terminal helper bundle executable contract is invalid"
-  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' \
-    "$terminal_app/Contents/Info.plist")" == "alacritty.icns" ]] \
-    || die "vc-terminal helper bundle icon contract is invalid"
+  mkdir -p "$APP/Contents/Helpers" "$resources/terminal"
+  /usr/bin/ditto "$RUNTIME_PAYLOAD" "$runtime"
+  materialize_vc_terminal_app_bundle "$terminal_app" "$terminal_source" "helper"
   install -m 0755 "$frame_source" "$APP/Contents/Helpers/vc-frame"
-  install -m 0755 "$start_source" "$runtime/bin/vc-start"
-  install -m 0755 "$server_source" "$runtime/bin/vc-server"
-  install -m 0755 "$server_source" "$runtime/bin/vibecrafted-server-web"
+  install -m 0755 "$SOURCE_ROOT/scripts/vc-app-update.sh" "$APP/Contents/Helpers/vc-app-update"
 
-  # Rust 1.95 applies profile `strip = true` while compiling host proc-macros,
-  # which makes crates such as include_dir and vte_generate_state_changes
-  # disappear before their dependants are compiled. Build vc-frame unstripped
-  # above, then strip the finished Mach-O products here. This also removes the
-  # linker object-file table that otherwise preserves the snapshot/DerivedData
-  # checkout path even when compiler source paths were prefix-mapped.
-  log "Stripping local object-file paths from final Mach-O products"
-  /usr/bin/strip -S \
-    "$APP/Contents/MacOS/Vibecrafted" \
-    "$terminal_app/Contents/MacOS/alacritty" \
-    "$APP/Contents/Helpers/vc-frame"
-  install -m 0644 "$REPO_ROOT/config/vc-terminal/vibecrafted.toml" \
+  install -m 0644 "$SOURCE_ROOT/config/vc-terminal/vibecrafted.toml" \
     "$resources/terminal/vibecrafted.toml"
-  printf '%s\n' "$RUNTIME_VERSION" > "$runtime/VERSION"
-  mkdir -p "$runtime/scripts" "$runtime/vibecrafted-core" "$runtime/config"
-  local canonical_deck="$REPO_ROOT/vibecrafted-core/vibecrafted_core/deck/vibecrafted"
-  install -m 0755 "$canonical_deck" "$runtime/scripts/vibecrafted"
-  install -m 0755 "$canonical_deck" "$runtime/bin/vibecrafted"
-  /bin/cp -R "$REPO_ROOT/bin/." "$runtime/bin/"
-  /bin/cp -R "$REPO_ROOT/vibecrafted-core/vibecrafted_core" \
-    "$runtime/vibecrafted-core/"
-  printf '%s\n' "$RUNTIME_VERSION" \
-    > "$runtime/vibecrafted-core/vibecrafted_core/VERSION"
-  /bin/cp -R "$REPO_ROOT/config/." "$runtime/config/"
-  mkdir -p "$runtime/server/site"
-  /bin/cp -R "$server_site/." "$runtime/server/site/"
-  # The Living Tree may contain ignored interpreter caches. They are never
-  # product inputs: adjacent verifier bytecode could shadow the signed source.
-  find "$runtime/vibecrafted-core" \
-    -type d -name __pycache__ -prune -exec rm -rf {} +
-  find "$runtime/vibecrafted-core" \
-    -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
-
-  log "Embedding a private Python runtime; no shell profile or host Python is used"
-  local python_seed seed_python python_home
-  python_seed="$(mktemp -d "$BUILD_DIR/python-seed.XXXXXX")"
-  uv python install 3.12.3 --install-dir "$python_seed" --no-bin
-  seed_python="$(find "$python_seed" -type f -path '*/bin/python3.12' -print -quit)"
-  [[ -n "$seed_python" ]] || die "uv did not produce the requested CPython"
-  python_home="$(cd "$(dirname "$seed_python")/.." && pwd)"
-  mkdir -p "$runtime/python" "$runtime/python-site"
-  /bin/cp -RL "$python_home/." "$runtime/python/"
-  uv pip install --python "$seed_python" --target "$runtime/python-site" \
-    'jsonschema>=4.23,<5' 'PyYAML>=6.0,<7'
-  install_name_tool -id '@loader_path/libpython3.12.dylib' \
-    "$runtime/python/lib/libpython3.12.dylib"
-
-  # pip writes each console script with a shebang naming the interpreter it
-  # installed against — here, the mktemp seed under $BUILD_DIR that this build
-  # deletes on its way out. MEASURED on the 4.1.0 payload:
-  # runtime/python-site/bin/jsonschema opens with an exec line pointing at
-  # .../python-seed.ZOVHSX/.../bin/python3.12, a path no customer has. So this
-  # directory was never merely a leak: it shipped scripts that cannot run.
-  #
-  # Deleted rather than rewritten, because nothing invokes it. python-site goes
-  # on PYTHONPATH and never on PATH, and every shipped command is rendered into
-  # runtime/bin from pyproject.toml a few lines below.
-  rm -rf "$runtime/python-site/bin"
-
-  # CPython records the prefix it was installed under in `sysconfig`, and uv's
-  # distribution is no exception: 27 occurrences of the same ephemeral seed
-  # directory in runtime/python/lib/python3.12/_sysconfigdata__darwin_darwin.py.
-  # Those values are consulted only when compiling a C extension, which the
-  # shipped runtime never does, so rewriting the literal is honest — and the
-  # rewrite is confined to files that decode as UTF-8. A Mach-O naming the seed
-  # would need a length-preserving patch, so it is deliberately left alone and
-  # left for the payload gate to catch; measured on 4.1.0, no binary does.
-  normalize_embedded_python_paths "$runtime" "$python_seed"
-
-  find "$runtime" -type f -name '*.pyc' -delete
-  find "$runtime" -depth -type d -name __pycache__ -empty -delete
-  find "$runtime" -type f -name '.DS_Store' -delete
-  # These literals are the relocatable wrapper payload and expand only when
-  # the installed wrapper runs inside Vibecrafted.app.
-  # shellcheck disable=SC2016
-  printf '%s\n' \
-    '#!/bin/bash' \
-    'set -euo pipefail' \
-    'runtime_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"' \
-    'export PYTHONNOUSERSITE=1' \
-    'export PYTHONDONTWRITEBYTECODE=1' \
-    'export PYTHONPATH="$runtime_root/vibecrafted-core:$runtime_root/python-site"' \
-    'exec "$runtime_root/python/bin/python3.12" "$@"' \
-    > "$runtime/bin/python3"
-  chmod 0755 "$runtime/bin/python3"
-  # pyproject.toml is the one public Python-command manifest. Preserve curated
-  # native/shell implementations already present in bin and fill every missing
-  # console script from that manifest so the app bootstrap cannot silently
-  # omit a shipped command such as vc-git.
-  "$REPO_ROOT/scripts/project-python" \
-    "$REPO_ROOT/scripts/render-python-entrypoint-launchers.py" \
-    --pyproject "$REPO_ROOT/vibecrafted-core/pyproject.toml" \
-    --bin-dir "$runtime/bin"
 
   if find "$APP" -type l -print -quit | grep -q .; then
     die "assembled app contains symlinks"
@@ -595,20 +1167,26 @@ build_product() {
   # every compiler-side answer is partial: measured on the shipped 4.1.0 DMG,
   # eight files named the operator across five producers rustc cannot all
   # reach. See scripts/payload_hygiene.py.
+  log "Stripping linker debug stabs from the binaries this build produced"
+  strip_debug_stabs
+
   log "Asserting the assembled app does not name the build host"
   assert_payload_is_anonymous "$APP" "Vibecrafted.app"
 
   log "Signing nested code and binding exact source receipts"
-  sign_macho_tree
+  sign_macho_tree "$APP/Contents" "$APP/Contents/MacOS/Vibecrafted"
   sign_nested_app_bundles
-  require_clean_repo "$REPO_ROOT" vibecrafted
+  sign_helper_scripts
+  embed_runtime_pack
+  require_clean_repo "$SOURCE_ROOT" vibecrafted
+  require_bound_revision "$SOURCE_ROOT" vibecrafted "$ROOT_SHA"
   require_clean_repo "$TERMINAL_REPO" vc-terminal
   require_clean_repo "$FRAME_REPO" vc-frame ${FRAME_DERIVED+"${FRAME_DERIVED[@]}"}
-  PYTHONPATH="$REPO_ROOT/vibecrafted-core" "$REPO_ROOT/scripts/project-python" \
-    "$REPO_ROOT/scripts/unified_product_manifest.py" app \
+  PYTHONPATH="$SOURCE_ROOT/vibecrafted-core" "$SOURCE_ROOT/scripts/project-python" \
+    "$SOURCE_ROOT/scripts/unified_product_manifest.py" app \
     --app "$APP" --terminal-source "$terminal_source" --frame-source "$frame_source" \
     --version "$VERSION" --build "$BUILD_NUMBER" \
-    --vibecrafted-sha "$(git_sha "$REPO_ROOT")" \
+    --vibecrafted-sha "$ROOT_SHA" \
     --terminal-sha "$(git_sha "$TERMINAL_REPO")" \
     --frame-sha "$(git_sha "$FRAME_REPO")"
   codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" \
@@ -637,6 +1215,8 @@ create_dmg() {
 
 notarize_product() {
   local app_zip="$BUILD_DIR/Vibecrafted.app.zip"
+  verify_runtime_pack_macho_signatures "$EMBEDDED_RUNTIME_PACK" \
+    || die "refusing notarization: embedded Runtime Pack Mach-O preflight failed"
   rm -f "$app_zip"
   /usr/bin/ditto -c -k --keepParent "$APP" "$app_zip"
   notary_submit "$app_zip"
@@ -653,7 +1233,8 @@ notarize_product() {
 emit_release_tuple() {
   PYTHONPATH="$REPO_ROOT/vibecrafted-core" "$REPO_ROOT/scripts/project-python" \
     "$REPO_ROOT/scripts/unified_product_manifest.py" release \
-    --app "$APP" --dmg "$DMG" --output "$DIST_DIR/release-output.json"
+    --app "$APP" --dmg "$DMG" --runtime-pack "$RUNTIME_PACK" \
+    --output "$DIST_DIR/release-output.json"
   /usr/bin/openssl dgst -sha256 -sign "$SIGNING_KEY" \
     -out "$DIST_DIR/release-output.json.sig" "$DIST_DIR/release-output.json"
   run_bundled_verifier release-output \
@@ -664,14 +1245,29 @@ emit_release_tuple() {
   )
 }
 
+verify_runtime_pack_projection() {
+  log "Verifying App carries the exact standalone Runtime Pack bytes"
+  [[ -s "$RUNTIME_PACK" ]] || die "standalone Runtime Pack is missing: $RUNTIME_PACK"
+  [[ -s "$RUNTIME_PACK_CHECKSUM" ]] \
+    || die "standalone Runtime Pack checksum is missing: $RUNTIME_PACK_CHECKSUM"
+  [[ -s "$RUNTIME_PACK_SIGNATURE" ]] \
+    || die "standalone Runtime Pack signature is missing: $RUNTIME_PACK_SIGNATURE"
+  cmp "$EMBEDDED_RUNTIME_PACK" "$RUNTIME_PACK"
+  cmp "$EMBEDDED_RUNTIME_PACK_CHECKSUM" "$RUNTIME_PACK_CHECKSUM"
+  cmp "$EMBEDDED_RUNTIME_PACK_SIGNATURE" "$RUNTIME_PACK_SIGNATURE"
+}
+
 if [[ "$MODE" == "notarize" ]]; then
   [[ -d "$APP" ]] || die "missing $APP; run make dmg-signed first"
+  verify_runtime_pack_projection
   notarize_product
   emit_release_tuple
   exit 0
 fi
 
 build_product
+[[ "$MODE" == "runtime-pack" ]] && exit 0
+verify_runtime_pack_projection
 [[ "$MODE" == "app" ]] && exit 0
 if [[ "$MODE" == "dmg" ]]; then
   create_dmg

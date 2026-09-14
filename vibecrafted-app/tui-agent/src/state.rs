@@ -235,6 +235,82 @@ pub struct RenderedRun {
     pub recent_events: Vec<RunEvent>,
 }
 
+impl RenderedRun {
+    pub fn workspace_label(&self) -> String {
+        workspace_label(self.snapshot.root.as_deref())
+    }
+
+    pub fn operator_title(&self) -> String {
+        format!(
+            "{} · {} · {}",
+            display_token(self.snapshot.skill.as_deref()),
+            display_token(self.snapshot.agent.as_deref()),
+            self.workspace_label()
+        )
+    }
+
+    pub fn operator_identity(&self) -> String {
+        self.snapshot.run_id.clone()
+    }
+}
+
+pub fn workspace_label(root: Option<&str>) -> String {
+    root.and_then(|value| {
+        Path::new(value)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .map(ToOwned::to_owned)
+    })
+    .unwrap_or_else(|| "—".to_string())
+}
+
+fn display_token(value: Option<&str>) -> String {
+    match value.map(str::trim) {
+        Some(value) if !value.is_empty() && value != "unknown" && value != "None" => {
+            value.to_string()
+        }
+        _ => "—".to_string(),
+    }
+}
+
+pub fn workspace_matches(snapshot: &RunSnapshot, workspace: &Path) -> bool {
+    let Some(root) = snapshot
+        .root
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return true;
+    };
+    let root = Path::new(root);
+    root == workspace
+        || root.starts_with(workspace)
+        || workspace.starts_with(root)
+        || root.file_name() == workspace.file_name()
+}
+
+pub fn is_actionable_kind(kind: RunKind, snapshot: &RunSnapshot, now: DateTime<Utc>) -> bool {
+    match kind {
+        RunKind::Active | RunKind::Paused | RunKind::Recent => true,
+        RunKind::Stalled => !stalled_is_archive(snapshot, now),
+        RunKind::Completed | RunKind::Failed | RunKind::Unknown => false,
+    }
+}
+
+fn stalled_is_archive(snapshot: &RunSnapshot, now: DateTime<Utc>) -> bool {
+    let timestamp = snapshot
+        .last_heartbeat
+        .as_deref()
+        .and_then(parse_timestamp)
+        .or_else(|| snapshot.updated_at.as_deref().and_then(parse_timestamp))
+        .or_else(|| snapshot.started_at.as_deref().and_then(parse_timestamp));
+    match timestamp {
+        Some(ts) => now.signed_duration_since(ts).num_hours() >= 2,
+        None => false,
+    }
+}
+
 pub fn render_runs(state: &ControlPlaneState) -> Vec<RenderedRun> {
     let now = Utc::now();
     let mut runs: Vec<RenderedRun> = state
@@ -307,8 +383,8 @@ pub fn classify_run(snapshot: &RunSnapshot, now: DateTime<Utc>) -> RunKind {
         }
         return RunKind::Active;
     }
-    if is_recent(heartbeat, now) {
-        return RunKind::Recent;
+    if canonical_health == Some("active") && !is_stale(heartbeat, now) {
+        return RunKind::Active;
     }
     RunKind::Unknown
 }
@@ -645,15 +721,22 @@ fn is_stale(timestamp: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
 }
 
 fn is_active_like(state: &str) -> bool {
-    state.contains("active")
-        || state.contains("launch")
-        || state.contains("run")
-        || state.contains("watch")
-        || state.contains("queued")
-        || state.contains("pending")
-        || state.contains("in-progress")
-        || state.contains("progress")
-        || state.contains("loop")
+    matches!(
+        state,
+        "active"
+            | "launching"
+            | "launch"
+            | "running"
+            | "run"
+            | "watching"
+            | "queued"
+            | "pending"
+            | "in-progress"
+            | "in_progress"
+            | "progress"
+            | "loop"
+    ) || state.starts_with("running")
+        || state.starts_with("launch")
 }
 
 #[cfg(test)]
@@ -789,5 +872,48 @@ mod tests {
                 .iter()
                 .all(|run| run.snapshot.run_id != "pytest-fixture-run")
         );
+    }
+
+    #[test]
+    fn classify_run_does_not_treat_unknown_or_day_old_stalls_as_active() {
+        let now = chrono::Utc::now();
+        let mut blank = super::RunSnapshot {
+            run_id: "blank".into(),
+            session_id: None,
+            agent: None,
+            skill: None,
+            mode: None,
+            state: None,
+            status: None,
+            started_at: None,
+            updated_at: None,
+            last_heartbeat: None,
+            root: None,
+            operator_session: None,
+            latest_report: None,
+            latest_transcript: None,
+            last_error: None,
+            extra: Default::default(),
+        };
+        assert_eq!(super::classify_run(&blank, now), super::RunKind::Unknown);
+
+        blank.state = Some("unknown".into());
+        blank.updated_at = Some((now - chrono::Duration::hours(16)).to_rfc3339());
+        assert_eq!(super::classify_run(&blank, now), super::RunKind::Unknown);
+        assert!(!super::is_actionable_kind(
+            super::classify_run(&blank, now),
+            &blank,
+            now
+        ));
+
+        blank.state = Some("running".into());
+        blank.updated_at = Some((now - chrono::Duration::hours(16)).to_rfc3339());
+        let kind = super::classify_run(&blank, now);
+        assert_eq!(kind, super::RunKind::Stalled);
+        assert!(!super::is_actionable_kind(kind, &blank, now));
+
+        blank.updated_at = Some((now - chrono::Duration::minutes(2)).to_rfc3339());
+        blank.last_heartbeat = blank.updated_at.clone();
+        assert_eq!(super::classify_run(&blank, now), super::RunKind::Active);
     }
 }

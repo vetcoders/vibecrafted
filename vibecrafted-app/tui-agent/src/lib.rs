@@ -1,6 +1,8 @@
 pub mod app;
+pub mod catalog;
 pub mod config;
 pub mod launch;
+pub mod layout;
 pub mod memory;
 pub mod mission_control;
 pub mod mux;
@@ -13,7 +15,10 @@ pub mod state;
 pub mod ui;
 
 use anyhow::Context;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
+    MouseButton, MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -21,16 +26,144 @@ use crossterm::terminal::{
 use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use std::io;
+use std::collections::hash_map::DefaultHasher;
+use std::fs;
+use std::hash::{Hash, Hasher};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::sync::mpsc::{self, Sender};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
+
+const CHANGE_DEBOUNCE: Duration = Duration::from_millis(100);
+const RENDER_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+const OBSERVE_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+const WATCHER_FALLBACK_INTERVAL: Duration = Duration::from_secs(30);
+/// Watch events are debounced for 100 ms and serviced by the next UI poll.
+/// The one-second bound includes the default 250 ms tick and watcher delivery jitter.
+pub const MAX_CHANGE_LATENCY: Duration = Duration::from_secs(1);
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RefreshPlan {
+    control_plane: bool,
+    polarize: bool,
+    mission_control: bool,
+    rendered_runs: bool,
+    observe: bool,
+}
+
+#[derive(Debug)]
+struct RefreshScheduler {
+    state_watcher_active: bool,
+    artifact_watcher_active: bool,
+    state_dirty_since: Option<Instant>,
+    polarize_dirty_since: Option<Instant>,
+    mission_dirty_since: Option<Instant>,
+    last_control_plane: Instant,
+    last_artifacts: Instant,
+    last_rendered_runs: Instant,
+    last_observe: Instant,
+    observe_failures: u32,
+}
+
+impl RefreshScheduler {
+    fn new(now: Instant, state_watcher_active: bool, artifact_watcher_active: bool) -> Self {
+        Self {
+            state_watcher_active,
+            artifact_watcher_active,
+            state_dirty_since: None,
+            polarize_dirty_since: None,
+            mission_dirty_since: None,
+            last_control_plane: now,
+            last_artifacts: now,
+            last_rendered_runs: now,
+            last_observe: now,
+            observe_failures: 0,
+        }
+    }
+
+    fn mark_state_changed(&mut self, now: Instant) {
+        self.state_dirty_since.get_or_insert(now);
+    }
+
+    fn mark_artifacts_changed(&mut self, change: ArtifactChange, now: Instant) {
+        if change.polarize {
+            self.polarize_dirty_since.get_or_insert(now);
+        }
+        if change.mission_control {
+            self.mission_dirty_since.get_or_insert(now);
+        }
+    }
+
+    fn note_observe_result(&mut self, ok: bool) {
+        if ok {
+            self.observe_failures = 0;
+        } else {
+            self.observe_failures = self.observe_failures.saturating_add(1).min(4);
+        }
+    }
+
+    fn observe_interval(&self) -> Duration {
+        let shift = self.observe_failures.min(4);
+        OBSERVE_REFRESH_INTERVAL
+            .saturating_mul(1 << shift)
+            .min(WATCHER_FALLBACK_INTERVAL)
+    }
+
+    fn plan(&mut self, now: Instant) -> RefreshPlan {
+        let mut plan = RefreshPlan::default();
+        if due(self.state_dirty_since, now, CHANGE_DEBOUNCE)
+            || (!self.state_watcher_active
+                && now.duration_since(self.last_control_plane) >= WATCHER_FALLBACK_INTERVAL)
+        {
+            plan.control_plane = true;
+            self.state_dirty_since = None;
+            self.last_control_plane = now;
+        }
+        if due(self.polarize_dirty_since, now, CHANGE_DEBOUNCE)
+            || (!self.artifact_watcher_active
+                && now.duration_since(self.last_artifacts) >= WATCHER_FALLBACK_INTERVAL)
+        {
+            plan.polarize = true;
+            self.polarize_dirty_since = None;
+            self.last_artifacts = now;
+        }
+        if due(self.mission_dirty_since, now, CHANGE_DEBOUNCE) {
+            plan.mission_control = true;
+            self.mission_dirty_since = None;
+            self.last_artifacts = now;
+        }
+        if now.duration_since(self.last_rendered_runs) >= RENDER_REFRESH_INTERVAL {
+            plan.rendered_runs = !plan.control_plane;
+            self.last_rendered_runs = now;
+        }
+        if now.duration_since(self.last_observe) >= self.observe_interval() {
+            plan.observe = true;
+            self.last_observe = now;
+        }
+        plan
+    }
+}
+
+fn due(since: Option<Instant>, now: Instant, delay: Duration) -> bool {
+    since.is_some_and(|changed_at| now.duration_since(changed_at) >= delay)
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ArtifactChange {
+    polarize: bool,
+    mission_control: bool,
+}
 
 pub use app::{App, AppTab, DeepAction, DispatchFocus, LaunchFocus, QueueScope};
+pub use catalog::{CatalogState, LauncherCatalog};
 pub use config::{AppConfig, CliOptions, build_config, parse_args};
-pub use launch::{LaunchCommand, LaunchKind};
+pub use launch::{
+    Admission, Confirmation, DeclarationAudit, Environment, LaunchCommand, LaunchExpectation,
+    LaunchKind, LaunchOutcome, LaunchReceipt, LauncherRun, PermissionPolicy, Presentation,
+    SandboxChoice,
+};
 pub use mission_control::{
     ActionPriority, ActionQueueItem, ActionQueueKind, ActiveDispatch, AgentStatsRow, DataQuality,
     FailureEntry, FleetHealthSignal, FleetHealthStatus, MissionControlState, SettlementBoardCounts,
@@ -39,7 +172,36 @@ pub use mission_control::{
 pub use observe::{ConsoleView, ObserveHealth, ObserveRun, ObserveState};
 pub use polarize::{PolarizeBand, PolarizeIntent};
 pub use run_detail::{RunDetail, load_run_detail};
-pub use skills_catalog::{SkillAgent, SkillEntry, SkillPayload, SkillPayloadKind};
+pub use skills_catalog::{SkillEntry, SkillPayloadKind};
+
+/// Work that must not block the draw loop: the launcher catalog probe and
+/// every launch. Both are subprocess calls to the canonical launcher, so they
+/// run on their own threads and report back as messages.
+#[derive(Debug)]
+pub enum BackgroundMessage {
+    Catalog(CatalogState),
+    Launch(Box<LaunchOutcome>),
+    /// Stopped on the worker thread before the launcher was started, so
+    /// nothing was admitted and there is nothing to be uncertain about.
+    LaunchHalted {
+        summary: String,
+        detail: Vec<String>,
+    },
+}
+
+/// Ask the launcher for its catalog off the UI thread.
+fn spawn_catalog_load(app: &App, tx: &Sender<BackgroundMessage>) {
+    let deck = app.config.command_deck.clone();
+    let env = app.launch_env();
+    let tx = tx.clone();
+    thread::spawn(move || {
+        let state = match crate::catalog::LauncherCatalog::load(&deck, &env) {
+            Ok(catalog) => CatalogState::Ready(catalog),
+            Err(error) => CatalogState::Failed(format!("{error:#}")),
+        };
+        let _ = tx.send(BackgroundMessage::Catalog(state));
+    });
+}
 
 pub fn run_cli() -> anyhow::Result<()> {
     let options = parse_args()?;
@@ -52,39 +214,73 @@ pub fn run_cli() -> anyhow::Result<()> {
 fn run_app(config: AppConfig) -> anyhow::Result<()> {
     enable_raw_mode().context("failed to enable raw mode")?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     let result = (|| -> anyhow::Result<()> {
         let mut app = App::new(config)?;
-        let (watch_tx, watch_rx) = mpsc::channel();
-        let _watcher = match start_state_watcher(&app.config.state_root, watch_tx) {
+        let (background_tx, background_rx) = mpsc::channel::<BackgroundMessage>();
+        spawn_catalog_load(&app, &background_tx);
+        let (state_tx, state_rx) = mpsc::channel();
+        let state_watcher = match start_state_watcher(&app.config.state_root, state_tx) {
             Ok(watcher) => Some(watcher),
             Err(error) => {
-                app.append_status(format!("watcher unavailable: {error}"));
+                app.append_status(format!("state watcher unavailable: {error}"));
                 None
             }
         };
-        let mut last_tick = Instant::now();
+        let (artifact_tx, artifact_rx) = mpsc::channel();
+        let artifact_root = artifact_watch_root(&crate::polarize::vibecrafted_home());
+        let artifact_watcher = match start_artifact_watcher(&artifact_root, artifact_tx) {
+            Ok(watcher) => Some(watcher),
+            Err(error) => {
+                app.append_status(format!("artifact watcher unavailable: {error}"));
+                None
+            }
+        };
+        let mut scheduler = RefreshScheduler::new(
+            Instant::now(),
+            state_watcher.is_some(),
+            artifact_watcher.is_some(),
+        );
+        let mut last_projection = projection_revision(&app.config.state_root);
         loop {
             terminal.draw(|frame| ui::draw(frame, &app))?;
+            let last_draw = Instant::now();
             let timeout = app
                 .config
                 .tick_rate
-                .checked_sub(last_tick.elapsed())
+                .checked_sub(last_draw.elapsed())
                 .unwrap_or(Duration::ZERO);
 
-            if event::poll(timeout)?
-                && let Event::Key(key) = event::read()?
-                && handle_key(&mut app, key)?
-            {
-                break;
+            if event::poll(timeout)? {
+                match event::read()? {
+                    Event::Key(key) if handle_key(&mut app, key, &background_tx)? => break,
+                    Event::Mouse(mouse) => handle_mouse(&mut app, mouse)?,
+                    _ => {}
+                }
             }
 
-            let mut watched_change = false;
-            while watch_rx.try_recv().is_ok() {
-                watched_change = true;
+            // Launcher answers arrive here, never inside the draw path: the
+            // console stays interactive while a launch is in flight.
+            while let Ok(message) = background_rx.try_recv() {
+                match message {
+                    BackgroundMessage::Catalog(state) => app.set_catalog(state),
+                    BackgroundMessage::Launch(outcome) => app.record_launch_outcome(*outcome),
+                    BackgroundMessage::LaunchHalted { summary, detail } => {
+                        app.pending_launch = None;
+                        app.show_error(format!("launch halted: {summary}"), detail);
+                    }
+                }
+            }
+
+            let now = Instant::now();
+            while state_rx.try_recv().is_ok() {
+                scheduler.mark_state_changed(now);
+            }
+            while let Ok(change) = artifact_rx.try_recv() {
+                scheduler.mark_artifacts_changed(change, now);
             }
             let mut events = Vec::new();
             if let Some(sub) = &app.mux_subscriber {
@@ -96,16 +292,27 @@ fn run_app(config: AppConfig) -> anyhow::Result<()> {
                 for event in events {
                     app.handle_ipc_event(event);
                 }
-                watched_change = true;
             }
-            if watched_change {
-                app.refresh();
-                last_tick = Instant::now();
+            let plan = scheduler.plan(now);
+            if plan.control_plane {
+                let revision = projection_revision(&app.config.state_root);
+                if revision != last_projection {
+                    app.refresh_control_plane();
+                    last_projection = revision;
+                }
             }
-
-            if last_tick.elapsed() >= app.config.tick_rate {
-                app.refresh();
-                last_tick = Instant::now();
+            if plan.polarize {
+                app.refresh_polarize();
+            }
+            if plan.control_plane || plan.mission_control || plan.polarize {
+                app.refresh_mission_control();
+            }
+            if plan.rendered_runs {
+                app.refresh_rendered_runs();
+            }
+            if plan.observe && app.config.view == crate::observe::ConsoleView::Observe {
+                let ok = app.refresh_observe();
+                scheduler.note_observe_result(ok);
             }
         }
         Ok(())
@@ -117,12 +324,20 @@ fn run_app(config: AppConfig) -> anyhow::Result<()> {
 
 fn shutdown_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Result<()> {
     disable_raw_mode().context("failed to disable raw mode")?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
     Ok(())
 }
 
-fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
+fn handle_key(
+    app: &mut App,
+    key: KeyEvent,
+    tx: &Sender<BackgroundMessage>,
+) -> anyhow::Result<bool> {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         return Ok(true);
     }
@@ -146,6 +361,26 @@ fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 app.launch_prompt.push(c);
+            }
+            _ => {}
+        },
+        LaunchFocus::EditModel => match key.code {
+            KeyCode::Esc => app.finish_model_edit(),
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.finish_model_edit();
+            }
+            KeyCode::Enter => app.finish_model_edit(),
+            KeyCode::Backspace => {
+                app.launch_model.pop();
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.launch_model.push(c);
+            }
+            _ => {}
+        },
+        LaunchFocus::Confirmation => match key.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                app.focus = LaunchFocus::Browse;
             }
             _ => {}
         },
@@ -187,6 +422,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
             _ => {}
         },
         LaunchFocus::Error => match key.code {
+            KeyCode::Char('r') | KeyCode::Char('R') => {
+                app.focus = LaunchFocus::Browse;
+                launch_selected(app, tx)?;
+            }
             KeyCode::Char('f') | KeyCode::Char('F')
                 if app
                     .error_lines
@@ -269,8 +508,28 @@ fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
             }
             KeyCode::Char('v') => {
                 app.set_active_tab(AppTab::Dispatch);
-                app.dispatch_selected = DispatchFocus::Runtime as usize;
-                app.cycle_runtime();
+                app.dispatch_selected = DispatchFocus::Presentation as usize;
+                app.cycle_presentation();
+            }
+            KeyCode::Char('n') => {
+                app.set_active_tab(AppTab::Dispatch);
+                app.dispatch_selected = DispatchFocus::Environment as usize;
+                app.shift_environment(1);
+            }
+            KeyCode::Char('p') => {
+                app.set_active_tab(AppTab::Dispatch);
+                app.dispatch_selected = DispatchFocus::Permissions as usize;
+                app.shift_permissions(1);
+            }
+            KeyCode::Char('s') => {
+                app.set_active_tab(AppTab::Dispatch);
+                app.dispatch_selected = DispatchFocus::Sandbox as usize;
+                app.shift_sandbox(1);
+            }
+            KeyCode::Char('M') => {
+                app.set_active_tab(AppTab::Dispatch);
+                app.dispatch_selected = DispatchFocus::Model as usize;
+                app.focus = LaunchFocus::EditModel;
             }
             KeyCode::Char('f') => app.toggle_filter(),
             KeyCode::Char('/') => {
@@ -285,7 +544,14 @@ fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
                     app.show_error("clipboard failed", vec![format!("{error:#}")]);
                 }
             }
-            KeyCode::Char('r') => app.refresh(),
+            KeyCode::Char('r') => {
+                app.refresh();
+                // A failed catalog probe must be retryable without a restart.
+                if app.catalog.ready().is_none() {
+                    app.set_catalog(CatalogState::Loading);
+                    spawn_catalog_load(app, tx);
+                }
+            }
             KeyCode::Char('m') => {
                 app.refresh_memory();
                 app.focus = LaunchFocus::Memory;
@@ -300,19 +566,19 @@ fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
             }
             KeyCode::Enter => match app.active_tab() {
                 AppTab::Monitor => {
-                    if app.selected_run().is_some() {
+                    if app.config.view == crate::observe::ConsoleView::Observe {
+                        switch_to_selected_observe_session(app)?;
+                    } else if app.selected_run().is_some() {
                         app.set_active_tab(AppTab::Controls);
                     }
                 }
-                AppTab::Dispatch => {
-                    if app.dispatch_focus() == DispatchFocus::Prompt {
-                        app.focus = LaunchFocus::EditPrompt;
-                    } else {
-                        launch_selected(app)?;
-                    }
-                }
+                AppTab::Dispatch => match app.dispatch_focus() {
+                    DispatchFocus::Prompt => app.focus = LaunchFocus::EditPrompt,
+                    DispatchFocus::Model => app.focus = LaunchFocus::EditModel,
+                    _ => launch_selected(app, tx)?,
+                },
                 AppTab::Controls => {
-                    run_selected_deep_control(app)?;
+                    run_selected_deep_control(app, tx)?;
                 }
                 AppTab::MissionControl => {
                     // Mission Control is a read-only situational-awareness
@@ -356,64 +622,319 @@ fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
     Ok(false)
 }
 
+fn handle_mouse(app: &mut App, mouse: MouseEvent) -> anyhow::Result<()> {
+    let (width, height) = crossterm::terminal::size()?;
+    apply_mouse(app, mouse, ratatui::layout::Rect::new(0, 0, width, height))?;
+    Ok(())
+}
+
+fn apply_mouse(
+    app: &mut App,
+    mouse: MouseEvent,
+    area: ratatui::layout::Rect,
+) -> anyhow::Result<()> {
+    if app.focus != LaunchFocus::Browse {
+        return Ok(());
+    }
+    let mux_height = crate::layout::mux_panel_height(app.mux_status_lines().len());
+    let polarize_height = crate::layout::polarize_panel_height(app.polarize_status_lines().len());
+    let Some(hit) = crate::layout::hit_test(
+        area,
+        app.active_tab(),
+        app.config.view,
+        mux_height,
+        polarize_height,
+        mouse.column,
+        mouse.row,
+    ) else {
+        return Ok(());
+    };
+    match mouse.kind {
+        MouseEventKind::ScrollUp => scroll_hit(app, area, hit, -1),
+        MouseEventKind::ScrollDown => scroll_hit(app, area, hit, 1),
+        MouseEventKind::Down(MouseButton::Left) => click_hit(app, hit)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+fn scroll_hit(
+    app: &mut App,
+    area: ratatui::layout::Rect,
+    hit: crate::layout::HitTarget,
+    delta: i16,
+) {
+    use crate::layout::{inner_height, pane_for_hit};
+    if matches!(hit, crate::layout::HitTarget::ObserveList { .. }) {
+        app.move_observe_selection(delta.into());
+        return;
+    }
+    if matches!(hit, crate::layout::HitTarget::MonitorList { .. }) {
+        app.move_selection(delta.into());
+        return;
+    }
+    let Some(pane) = pane_for_hit(hit) else {
+        return;
+    };
+    let Some(rect) = pane_rect(area, app, pane) else {
+        return;
+    };
+    let view_height = inner_height(rect);
+    let view_width = rect.width.saturating_sub(2);
+    let content_len = pane_content_len(app, pane, view_width);
+    app.interaction
+        .scroll_pane(pane, delta, content_len, view_height);
+}
+
+fn click_hit(app: &mut App, hit: crate::layout::HitTarget) -> anyhow::Result<()> {
+    use crate::layout::{HitTarget, pane_for_hit};
+    if let Some(pane) = pane_for_hit(hit) {
+        app.interaction.focused = Some(pane);
+    }
+    match hit {
+        HitTarget::Tab(index) => {
+            app.set_active_tab(AppTab::from_index(index));
+        }
+        HitTarget::DispatchStat(0) => {
+            app.dispatch_selected = DispatchFocus::Kind as usize;
+        }
+        HitTarget::DispatchStat(1) => {
+            app.dispatch_selected = DispatchFocus::Agent as usize;
+        }
+        HitTarget::DispatchStat(_) => {
+            app.dispatch_selected = DispatchFocus::Environment as usize;
+        }
+        HitTarget::DispatchDeck { inner_row } => {
+            let row = usize::from(inner_row.saturating_add(app.interaction.scroll.deck));
+            if row < DispatchFocus::COUNT {
+                app.dispatch_selected = row;
+            }
+        }
+        HitTarget::ObserveList { inner_row } => {
+            let index = usize::from(inner_row.saturating_add(app.interaction.scroll.observe_list));
+            if index < app.observe.runs.len() {
+                if index == app.observe.selected {
+                    switch_to_selected_observe_session(app)?;
+                } else {
+                    app.observe.selected = index;
+                    app.observe.transcript.clear();
+                    app.refresh_observe_transcript();
+                }
+            }
+        }
+        HitTarget::MonitorList { inner_row } => {
+            let index =
+                usize::from(inner_row) / 2 + usize::from(app.interaction.scroll.monitor_list);
+            if index < app.runs.len() {
+                app.selected = index;
+            }
+        }
+        HitTarget::MonitorStat(2) => {
+            app.toggle_filter();
+        }
+        HitTarget::ControlsActions { inner_row } => {
+            let index =
+                usize::from(inner_row.saturating_add(app.interaction.scroll.controls_actions));
+            if index < app.deep_actions().len() {
+                app.deep_selected = index;
+            }
+        }
+        HitTarget::MissionPanel(index) => {
+            app.mission_focus = usize::from(index);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn pane_rect(
+    area: ratatui::layout::Rect,
+    app: &App,
+    pane: crate::layout::PaneId,
+) -> Option<ratatui::layout::Rect> {
+    use crate::layout::{
+        PaneId, controls_layout, dispatch_layout, mission_layout, monitor_layout, mux_panel_height,
+        observe_layout, polarize_panel_height, root_layout,
+    };
+    let body = root_layout(area).body;
+    match pane {
+        PaneId::DispatchDeck => Some(dispatch_layout(body).deck),
+        PaneId::DispatchPlaybook => Some(dispatch_layout(body).playbook),
+        PaneId::DispatchTrail => Some(dispatch_layout(body).trail),
+        PaneId::MonitorList => Some(
+            monitor_layout(
+                body,
+                mux_panel_height(app.mux_status_lines().len()),
+                polarize_panel_height(app.polarize_status_lines().len()),
+            )
+            .list,
+        ),
+        PaneId::MonitorDossier => Some(
+            monitor_layout(
+                body,
+                mux_panel_height(app.mux_status_lines().len()),
+                polarize_panel_height(app.polarize_status_lines().len()),
+            )
+            .dossier,
+        ),
+        PaneId::MonitorTimeline => Some(
+            monitor_layout(
+                body,
+                mux_panel_height(app.mux_status_lines().len()),
+                polarize_panel_height(app.polarize_status_lines().len()),
+            )
+            .timeline,
+        ),
+        PaneId::ObserveList => Some(observe_layout(body).list),
+        PaneId::ObserveTranscript => Some(observe_layout(body).transcript),
+        PaneId::ControlsActions => Some(controls_layout(body).actions),
+        PaneId::ControlsArtifacts => Some(controls_layout(body).artifacts),
+        PaneId::ControlsTimeline => Some(controls_layout(body).timeline),
+        PaneId::Mission(index) => mission_layout(body).panels.get(usize::from(index)).copied(),
+    }
+}
+
+fn pane_content_len(app: &App, pane: crate::layout::PaneId, view_width: u16) -> usize {
+    use crate::app::wrapped_line_count;
+    use crate::layout::PaneId;
+    match pane {
+        PaneId::DispatchDeck => wrapped_line_count(app.prompt_lines(), view_width),
+        PaneId::DispatchPlaybook => 8,
+        PaneId::DispatchTrail => app.launch_history.len().max(3).saturating_add(2),
+        PaneId::MonitorList => app.runs.len(),
+        PaneId::MonitorDossier | PaneId::ControlsArtifacts => app.detail_lines().len(),
+        PaneId::MonitorTimeline | PaneId::ControlsTimeline => app.event_lines().len(),
+        PaneId::ObserveList => app.observe.runs.len(),
+        PaneId::ObserveTranscript => app.observe.transcript.lines().count().saturating_add(6),
+        PaneId::ControlsActions => app.deep_control_lines().len(),
+        PaneId::Mission(0) => app
+            .mission_control
+            .active_dispatches
+            .len()
+            .saturating_mul(2),
+        PaneId::Mission(1) => app.mission_control.wave_atlas.len(),
+        PaneId::Mission(2) => app.mission_control.agent_stats.len(),
+        PaneId::Mission(3) => app.mission_control.skill_stats.len(),
+        PaneId::Mission(4) => app.mission_control.fleet_health.len(),
+        PaneId::Mission(5) => app.mission_control.failures.len(),
+        PaneId::Mission(6) => app.mission_control.action_queue.len(),
+        PaneId::Mission(_) => 0,
+    }
+}
+
+fn switch_to_selected_observe_session(app: &mut App) -> anyhow::Result<()> {
+    let Some(command) = app.observe_switch_command() else {
+        app.show_error(
+            "session switch unavailable",
+            vec!["The canonical session has no vc-frame attach target.".to_string()],
+        );
+        return Ok(());
+    };
+    let summary = command.command_line();
+    if let Err(error) = suspend_and_run(&command) {
+        app.show_error("session switch failed", error.detail_lines(summary));
+    } else {
+        app.append_status(format!("returned from {summary}"));
+        app.refresh();
+    }
+    Ok(())
+}
+
 fn launch_aicx_wizard(app: &mut App) -> anyhow::Result<()> {
-    disable_raw_mode().ok();
-    let _ = execute!(io::stdout(), LeaveAlternateScreen);
-    let result = crate::memory::launch_wizard(&app.memory.project);
-    enable_raw_mode().ok();
-    let _ = execute!(io::stdout(), EnterAlternateScreen);
+    let mut stdout = io::stdout();
+    let leave = (|| -> anyhow::Result<()> {
+        disable_raw_mode().context("failed to disable raw mode before aicx wizard")?;
+        execute!(stdout, DisableMouseCapture, LeaveAlternateScreen)
+            .context("failed to leave alternate screen before aicx wizard")?;
+        stdout.flush().ok();
+        Ok(())
+    })();
+    let result = match leave {
+        Ok(()) => crate::memory::launch_wizard(&app.memory.project, &app.config.repo),
+        Err(error) => Err(error),
+    };
+    let restore_raw = enable_raw_mode();
+    let restore_screen = execute!(stdout, EnterAlternateScreen, EnableMouseCapture);
     match result {
         Ok(()) => app.append_status("returned from aicx wizard"),
         Err(error) => app.show_error("aicx wizard failed", vec![error.to_string()]),
     }
+    restore_raw.context("failed to restore raw mode after aicx wizard")?;
+    restore_screen.context("failed to restore alternate screen after aicx wizard")?;
     Ok(())
 }
 
-fn launch_selected(app: &mut App) -> anyhow::Result<()> {
-    if !app.config.no_verify_gate && app.launch_runtime != launch::LaunchRuntime::Headless {
-        let client_kind = match app.selected_agent() {
+/// Hand the operator's declaration to the canonical launcher.
+///
+/// Nothing about the worker is decided here: no session, no worktree, no
+/// agent environment. VOC validates the declaration against the launcher's
+/// catalog, spawns the launcher on a worker thread, and waits for its receipt
+/// as a message. The UI keeps drawing throughout, and closing a preview never
+/// touches the detached worker — the launcher owns its lifetime.
+fn launch_selected(app: &mut App, tx: &Sender<BackgroundMessage>) -> anyhow::Result<()> {
+    if let Some(summary) = app.pending_launch.clone() {
+        app.append_status(format!(
+            "already launching {summary}; waiting for its receipt"
+        ));
+        return Ok(());
+    }
+    let request = app.launch_request();
+    let command = match app.launch_plan() {
+        Ok(command) => command,
+        Err(refusals) => {
+            // Refused before any worker exists: the operator sees the exact
+            // unsupported part of the declaration, not a half-started run.
+            let mut lines = vec![format!("declared: {}", request.summary()), String::new()];
+            lines.extend(refusals.into_iter().map(|reason| format!("· {reason}")));
+            lines.push(String::new());
+            lines.push("Change the declaration and launch again.".to_string());
+            app.show_error("declaration refused before launch", lines);
+            return Ok(());
+        }
+    };
+    // The readiness probe talks to the mux over a unix socket with its own
+    // timeouts. It runs on the worker thread with the launch, never in the
+    // draw path: a slow or wedged mux must not freeze the console.
+    let verify = (!app.config.no_verify_gate
+        && app.launch_presentation != launch::Presentation::Headless)
+        .then(|| match app.selected_agent() {
             "claude" => rmcp_mux::ipc::ClientKind::Claude,
             "codex" => rmcp_mux::ipc::ClientKind::Codex,
-            "gemini" => rmcp_mux::ipc::ClientKind::Gemini,
+            "cursor" => rmcp_mux::ipc::ClientKind::Cursor,
             "junie" => rmcp_mux::ipc::ClientKind::Junie,
             other => rmcp_mux::ipc::ClientKind::Generic {
                 name: other.to_string(),
             },
-        };
-        if let Err(halt) = launch::pre_launch_verify(client_kind) {
-            let error = LaunchRunError::ClientDrift(halt);
-            app.show_error(
-                "launch failed: client drift",
-                error.detail_lines("".to_string()),
-            );
-
-            return Ok(());
+        });
+    let summary = request.summary();
+    let preview = command.preview();
+    let expectation = app.launch_expectation();
+    app.pending_launch = Some(summary.clone());
+    app.append_status(format!("launching {summary}…"));
+    let tx = tx.clone();
+    thread::spawn(move || {
+        if let Some(client_kind) = verify
+            && let Err(halt) = launch::pre_launch_verify(client_kind)
+        {
+            // Halted before the launcher was ever started: nothing exists to
+            // be uncertain about.
+            let _ = tx.send(BackgroundMessage::LaunchHalted {
+                summary,
+                detail: LaunchRunError::ClientDrift(halt).detail_lines(String::new()),
+            });
+            return;
         }
-    }
-    let command = app.launch_command();
-    let summary = command.command_line();
-    if app.launch_runtime == launch::LaunchRuntime::Headless {
-        match command.spawn_detached() {
-            Ok(child) => {
-                app.push_launch_history(summary.clone());
-                app.append_status(format!("spawned pid {}: {summary}", child.id()));
-            }
-            Err(error) => app.show_error(
-                "launch failed before spawn",
-                vec![format!("{summary}"), format!("{error:#}")],
-            ),
-        }
-    } else if let Err(error) = suspend_and_run(&command) {
-        app.show_error("launch failed", error.detail_lines(summary));
-    } else {
-        app.push_launch_history(summary.clone());
-        app.append_status(format!("launched: {summary}"));
-    }
-    app.refresh();
+        let outcome = launch::LaunchOutcome::from_run(
+            preview,
+            expectation,
+            command.run_capturing(launch::LAUNCH_ANSWER_DEADLINE),
+        );
+        let _ = tx.send(BackgroundMessage::Launch(Box::new(outcome)));
+    });
     Ok(())
 }
 
-fn run_selected_deep_control(app: &mut App) -> anyhow::Result<()> {
+fn run_selected_deep_control(app: &mut App, tx: &Sender<BackgroundMessage>) -> anyhow::Result<()> {
     let Some(action) = app.selected_deep_action() else {
         app.append_status("No deep action is available for the selected run.");
         app.focus = LaunchFocus::Browse;
@@ -434,6 +955,31 @@ fn run_selected_deep_control(app: &mut App) -> anyhow::Result<()> {
         }
         return Ok(());
     }
+    // A skill launch IS a launch: same declaration, same launcher, same
+    // receipt. It must not take a second path with its own argv shape.
+    if let DeepAction::SkillLaunch { skill, agent } = &action {
+        let Some(entry) = crate::skills_catalog::catalog_entry(skill) else {
+            app.show_error(
+                "unknown skill",
+                vec![format!("{skill} is not in the VOC skill catalog")],
+            );
+            return Ok(());
+        };
+        let restore_kind = app.launch_kind;
+        let restore_agent = app.launch_agent;
+        app.launch_kind = LaunchKind::Skill(entry);
+        if let Some(index) = app
+            .agent_choices()
+            .iter()
+            .position(|candidate| candidate == agent)
+        {
+            app.launch_agent = index;
+        }
+        let result = launch_selected(app, tx);
+        app.launch_kind = restore_kind;
+        app.launch_agent = restore_agent;
+        return result;
+    }
     let command = deep_control_command(app, &action);
     let summary = command.command_line();
     if let Err(error) = suspend_and_run(&command) {
@@ -453,6 +999,7 @@ fn deep_control_command(app: &App, action: &DeepAction) -> LaunchCommand {
             program: app.config.command_deck.clone(),
             args: vec!["dashboard".into(), "attach".into(), session.clone().into()],
             env: Default::default(),
+            stdin: None,
         },
         DeepAction::ResumeSession { agent, session } => LaunchCommand {
             program: app.config.command_deck.clone(),
@@ -463,6 +1010,7 @@ fn deep_control_command(app: &App, action: &DeepAction) -> LaunchCommand {
                 session.clone().into(),
             ],
             env: Default::default(),
+            stdin: None,
         },
         DeepAction::MuxHealth { service } => LaunchCommand {
             // `rmcp-mux` is expected on PATH (installed via the rmcp-mux
@@ -474,64 +1022,42 @@ fn deep_control_command(app: &App, action: &DeepAction) -> LaunchCommand {
             program: PathBuf::from("rmcp-mux"),
             args: vec!["health".into(), "--service".into(), service.clone().into()],
             env: Default::default(),
+            stdin: None,
         },
-        DeepAction::SkillLaunch {
-            skill,
-            agent,
-            payload,
-        } => crate::skills_catalog::build_skill_launch_command(
-            &app.config.command_deck,
-            skill,
-            *agent,
-            crate::skills_catalog::SkillAgent::from_cli_token(app.selected_agent()),
-            payload,
-            app.launch_env(),
-        ),
-        DeepAction::OpenReport(_)
+        DeepAction::SkillLaunch { .. }
+        | DeepAction::OpenReport(_)
         | DeepAction::OpenTranscript(_)
         | DeepAction::OpenRoot(_)
         | DeepAction::PolarizeIntent { .. }
         | DeepAction::MuxRestart(_)
         | DeepAction::MuxVerifyClient(_)
         | DeepAction::MuxFixClientDrift(_) => {
-            unreachable!("artifact actions are handled by the native operator viewer")
+            unreachable!(
+                "artifact, skill-launch and polarize actions are handled before this point"
+            )
         }
     }
 }
 
+/// Failure of an interactive deep control (attach / resume / mux health).
+///
+/// Launches no longer appear here: their truth is the launcher's receipt
+/// (`LaunchOutcome`), not a locally observed process.
 #[derive(Debug)]
 pub enum LaunchRunError {
-    Exec {
-        message: String,
-        stderr: String,
-        /// First error observed by the vc_frame readiness probe before the launch
-        /// gave up. Distinguishes "session not visible" from "probe could not
-        /// run" (bad flags, socket/config errors, missing binary). When None,
-        /// the probe either succeeded or was never attempted.
-        probe_error: Option<String>,
-        /// Probe diagnostic captured at the deadline-kill branch, where stderr
-        /// from the killed child is intentionally not drained.
-        probe_error_at_deadline: Option<String>,
-    },
+    Exec { message: String, stderr: String },
     ClientDrift(crate::launch::VerifyHalt),
 }
 
 impl LaunchRunError {
     pub fn detail_lines(&self, summary: String) -> Vec<String> {
         match self {
-            Self::Exec {
-                message,
-                stderr,
-                probe_error,
-                probe_error_at_deadline,
-            } => {
-                let mut lines = vec![format!("command: {summary}"), format!("error: {message}")];
-                if let Some(pe) = probe_error {
-                    lines.push(format!("readiness probe: {pe}"));
+            Self::Exec { message, stderr } => {
+                let mut lines = Vec::new();
+                if !summary.trim().is_empty() {
+                    lines.push(format!("command: {summary}"));
                 }
-                if let Some(pe) = probe_error_at_deadline {
-                    lines.push(format!("readiness timeout probe: {pe}"));
-                }
+                lines.push(format!("error: {message}"));
                 if !stderr.trim().is_empty() {
                     lines.push(String::new());
                     lines.push("stderr:".to_string());
@@ -567,21 +1093,28 @@ impl LaunchRunError {
     }
 }
 
+/// Hand the terminal to an interactive deep control and take it back when the
+/// child exits. Used for attach / resume / health checks only.
 fn suspend_and_run(command: &LaunchCommand) -> Result<(), LaunchRunError> {
     let mut stdout = io::stdout();
     disable_raw_mode()
         .context("failed to disable raw mode before launch")
         .map_err(launch_error)?;
-    execute!(stdout, LeaveAlternateScreen).map_err(launch_error)?;
+    execute!(stdout, DisableMouseCapture, LeaveAlternateScreen).map_err(launch_error)?;
 
     let launch_result: Result<Output, LaunchRunError> =
         match command.spawn_interactive_with_stderr() {
-            Ok(child) => wait_for_interactive_launch(command, child),
+            Ok(child) => child
+                .wait_with_output()
+                .map_err(|err| LaunchRunError::Exec {
+                    message: format!("process failed: {err}"),
+                    stderr: String::new(),
+                }),
             Err(error) => Err(launch_error(error)),
         };
 
-    let leave_result =
-        execute!(stdout, EnterAlternateScreen).context("failed to restore alternate screen");
+    let leave_result = execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
+        .context("failed to restore alternate screen");
     let raw_result = enable_raw_mode().context("failed to re-enable raw mode after launch");
 
     leave_result.map_err(launch_error)?;
@@ -593,134 +1126,8 @@ fn suspend_and_run(command: &LaunchCommand) -> Result<(), LaunchRunError> {
         Err(LaunchRunError::Exec {
             message: format!("command exited with {}", output.status),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-            probe_error: None,
-            probe_error_at_deadline: None,
         })
     }
-}
-
-/// How long `wait_for_interactive_launch` will keep polling the vc_frame
-/// readiness probe before giving up. Kept short so the operator does not
-/// freeze on a launch that never came up; long enough that real interactive
-/// launches on the host can register their named socket.
-/// Bounded startup window for a freshly launched vc-frame session.
-///
-/// Two seconds produced false failures under normal concurrent workspace load:
-/// the child was healthy but had not been scheduled early enough for the
-/// visibility probe. Five seconds remains fail-closed while tolerating brief
-/// host pressure from builds, indexing, and existing terminal sessions.
-pub const READINESS_DEADLINE: Duration = Duration::from_secs(5);
-
-pub fn wait_for_interactive_launch(
-    command: &LaunchCommand,
-    mut child: std::process::Child,
-) -> Result<Output, LaunchRunError> {
-    if let Some(probe) = command.readiness_probe() {
-        let deadline = Instant::now() + READINESS_DEADLINE;
-        let mut probe_error: Option<String> = None;
-        while Instant::now() < deadline {
-            match probe.is_session_visible() {
-                Ok(true) => {
-                    return child
-                        .wait_with_output()
-                        .map_err(|err| LaunchRunError::Exec {
-                            message: format!("launch process failed: {err}"),
-                            stderr: String::new(),
-                            probe_error: probe_error.clone(),
-                            probe_error_at_deadline: None,
-                        });
-                }
-                Ok(false) => {}
-                Err(error) => {
-                    // Preserve the FIRST probe error (P2-02). Bad flags,
-                    // socket/config errors, or permission failures should
-                    // surface in the error overlay instead of being
-                    // collapsed into a generic "session not visible".
-                    if probe_error.is_none() {
-                        probe_error = Some(format!("{error:#}"));
-                    }
-                }
-            }
-            match child.try_wait() {
-                Ok(Some(_)) => {
-                    let output = child
-                        .wait_with_output()
-                        .map_err(|err| LaunchRunError::Exec {
-                            message: format!("launch process failed: {err}"),
-                            stderr: String::new(),
-                            probe_error: probe_error.clone(),
-                            probe_error_at_deadline: None,
-                        })?;
-                    if output.status.success() {
-                        return Err(LaunchRunError::Exec {
-                            message: format!(
-                                "vc_frame session '{}' exited before the readiness probe saw it",
-                                probe.session_name
-                            ),
-                            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-                            probe_error,
-                            probe_error_at_deadline: None,
-                        });
-                    }
-                    return Ok(output);
-                }
-                Ok(None) => {}
-                Err(err) => {
-                    return Err(LaunchRunError::Exec {
-                        message: format!("failed to inspect launch child: {err}"),
-                        stderr: String::new(),
-                        probe_error,
-                        probe_error_at_deadline: None,
-                    });
-                }
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
-        // Deadline exceeded with the named session never visible AND the
-        // child still running. The README contract says a launch that exits
-        // before its session appears is reported as failure; we extend that
-        // to "a launch whose session never appears within the readiness
-        // window is also a failure", and we do NOT silently fall through to
-        // `child.wait_with_output()` (which would either hang on a healthy
-        // vc_frame forever or report success once the operator finally quits
-        // it manually — both produce false-success class outcomes).
-        //
-        // Kill the child so we do not leave a hanging vc_frame socket pointing
-        // at the same session name; subsequent launches with the same
-        // `--session` value would fight an orphan otherwise.
-        let _ = child.kill();
-        // Reap the killed child without `wait_with_output()`: any
-        // grandchild process (e.g. a long `sleep` inside a launched shell)
-        // that inherited our piped stderr would keep the pipe alive past
-        // the SIGKILL, defeating the whole readiness timeout. `wait()`
-        // blocks only on the direct child's exit, which the kill
-        // guarantees promptly.
-        let _ = child.wait();
-        let probe_error_at_deadline = probe_error.as_ref().map(|error| {
-            format!(
-                "killed after {}ms, last probe error: {error}",
-                READINESS_DEADLINE.as_millis()
-            )
-        });
-        return Err(LaunchRunError::Exec {
-            message: format!(
-                "vc_frame session '{}' did not appear within the {}ms readiness window",
-                probe.session_name,
-                READINESS_DEADLINE.as_millis()
-            ),
-            stderr: String::new(),
-            probe_error,
-            probe_error_at_deadline,
-        });
-    }
-    child
-        .wait_with_output()
-        .map_err(|err| LaunchRunError::Exec {
-            message: format!("launch process failed: {err}"),
-            stderr: String::new(),
-            probe_error: None,
-            probe_error_at_deadline: None,
-        })
 }
 
 fn launch_error(error: impl Into<anyhow::Error>) -> LaunchRunError {
@@ -728,15 +1135,46 @@ fn launch_error(error: impl Into<anyhow::Error>) -> LaunchRunError {
     LaunchRunError::Exec {
         message: format!("{error:#}"),
         stderr: String::new(),
-        probe_error: None,
-        probe_error_at_deadline: None,
     }
 }
 
 fn start_state_watcher(path: &Path, tx: Sender<()>) -> anyhow::Result<RecommendedWatcher> {
     let mut watcher = RecommendedWatcher::new(
-        move |_| {
-            let _ = tx.send(());
+        move |event: notify::Result<notify::Event>| {
+            let Ok(event) = event else {
+                return;
+            };
+            if event
+                .paths
+                .iter()
+                .any(|candidate| is_projection_path(candidate))
+            {
+                let _ = tx.send(());
+            }
+        },
+        NotifyConfig::default(),
+    )?;
+    for root in control_plane_watch_roots(path) {
+        if root.exists() {
+            watcher.watch(&root, RecursiveMode::NonRecursive)?;
+        }
+    }
+    Ok(watcher)
+}
+
+fn start_artifact_watcher(
+    path: &Path,
+    tx: Sender<ArtifactChange>,
+) -> anyhow::Result<RecommendedWatcher> {
+    let mut watcher = RecommendedWatcher::new(
+        move |event: notify::Result<notify::Event>| {
+            let Ok(event) = event else {
+                return;
+            };
+            let change = classify_artifact_change(&event.paths);
+            if change.polarize || change.mission_control {
+                let _ = tx.send(change);
+            }
         },
         NotifyConfig::default(),
     )?;
@@ -744,13 +1182,123 @@ fn start_state_watcher(path: &Path, tx: Sender<()>) -> anyhow::Result<Recommende
     Ok(watcher)
 }
 
+fn classify_artifact_change(paths: &[PathBuf]) -> ArtifactChange {
+    ArtifactChange {
+        polarize: paths.iter().any(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == "prism.json")
+                && path
+                    .components()
+                    .any(|component| component.as_os_str() == "polarize")
+        }),
+        mission_control: paths.iter().any(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".meta.json"))
+        }),
+    }
+}
+
+fn artifact_watch_root(home: &Path) -> PathBuf {
+    home.join("artifacts")
+}
+
+fn control_plane_watch_roots(state_root: &Path) -> Vec<PathBuf> {
+    vec![
+        state_root.to_path_buf(),
+        state_root.join("runs"),
+        state_root.join("runs").join(".archived"),
+        state_root.join("runtime_runs"),
+    ]
+}
+
+fn is_projection_path(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    if name.ends_with(".log") || name.ends_with(".tmp") {
+        return false;
+    }
+    if name == "events.jsonl" {
+        return true;
+    }
+    if name.ends_with(".json") {
+        return !path
+            .components()
+            .any(|component| component.as_os_str() == "runtime_runs");
+    }
+    path.components()
+        .any(|component| component.as_os_str() == "runtime_runs")
+}
+
+fn projection_revision(root: &Path) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    hash_mtime(&root.join("events.jsonl"), &mut hasher);
+    hash_dir_entries(&root.join("runs"), &mut hasher);
+    hash_dir_entries(&root.join("runs").join(".archived"), &mut hasher);
+    hash_dir_names(&root.join("runtime_runs"), &mut hasher);
+    hasher.finish()
+}
+
+fn hash_mtime(path: &Path, hasher: &mut DefaultHasher) {
+    path.hash(hasher);
+    // mtime alone misses a rewrite that lands inside one filesystem clock tick
+    // (events.jsonl appended twice within ~1ms hashed identically); size is the
+    // cheap second witness for append-only projection files.
+    let (modified, len) = fs::metadata(path)
+        .map(|meta| {
+            (
+                meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                meta.len(),
+            )
+        })
+        .unwrap_or((SystemTime::UNIX_EPOCH, 0));
+    modified.hash(hasher);
+    len.hash(hasher);
+}
+
+fn hash_dir_entries(path: &Path, hasher: &mut DefaultHasher) {
+    path.hash(hasher);
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+    let mut names = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .collect::<Vec<_>>();
+    names.sort();
+    for file in names {
+        hash_mtime(&file, hasher);
+    }
+}
+
+fn hash_dir_names(path: &Path, hasher: &mut DefaultHasher) {
+    path.hash(hasher);
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+    let mut names = entries
+        .flatten()
+        .map(|entry| entry.file_name())
+        .collect::<Vec<_>>();
+    names.sort();
+    names.len().hash(hasher);
+    for name in names {
+        name.hash(hasher);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::launch::LaunchRuntime;
+    use crate::catalog::fixture_catalog;
     use crate::state::{ControlPlaneState, RenderedRun, RunKind, RunSnapshot};
 
     fn sample_run(run_id: &str, agent: &str, session: &str) -> RenderedRun {
+        let now = chrono::Utc::now();
         RenderedRun {
             snapshot: RunSnapshot {
                 run_id: run_id.to_string(),
@@ -760,9 +1308,9 @@ mod tests {
                 mode: Some("implement".to_string()),
                 state: Some("running".to_string()),
                 status: None,
-                started_at: Some("2026-04-19T10:00:00Z".to_string()),
-                updated_at: Some("2026-04-19T10:01:00Z".to_string()),
-                last_heartbeat: Some("2026-04-19T10:01:30Z".to_string()),
+                started_at: Some((now - chrono::Duration::minutes(2)).to_rfc3339()),
+                updated_at: Some((now - chrono::Duration::minutes(1)).to_rfc3339()),
+                last_heartbeat: Some(now.to_rfc3339()),
                 root: Some(format!("/tmp/{run_id}")),
                 operator_session: Some(session.to_string()),
                 latest_report: Some(format!("/tmp/{run_id}/report.md")),
@@ -783,9 +1331,8 @@ mod tests {
                 no_verify_gate: false,
                 state_root: "/tmp/state".into(),
                 command_deck: "/usr/bin/vibecrafted".into(),
-                launch_root: "/tmp/repo".into(),
-                launch_runtime: LaunchRuntime::Terminal,
-                terminal_binary: "vc-frame".into(),
+                repo: "/tmp/repo".into(),
+                presentation: Presentation::Terminal,
                 tick_rate: Duration::from_millis(250),
                 server: "http://127.0.0.1:3024".into(),
                 view: crate::observe::ConsoleView::Full,
@@ -800,7 +1347,14 @@ mod tests {
             launch_kind: LaunchKind::Workflow,
             launch_agent: 0,
             launch_prompt: "Ship the operator surface.".to_string(),
-            launch_runtime: LaunchRuntime::Terminal,
+            launch_model: String::new(),
+            launch_presentation: Presentation::Terminal,
+            launch_environment: Environment::LivingTree,
+            launch_permissions: PermissionPolicy::Default,
+            launch_sandbox: SandboxChoice::Default,
+            catalog: CatalogState::Ready(fixture_catalog()),
+            pending_launch: None,
+            launch_outcome: None,
             dispatch_selected: DispatchFocus::Kind as usize,
             focus: LaunchFocus::Browse,
             status_line: String::new(),
@@ -819,6 +1373,7 @@ mod tests {
             mission_artifact_root: std::path::PathBuf::from("/tmp/vc-op-mission-test"),
             observe: Default::default(),
             memory: Default::default(),
+            interaction: Default::default(),
         }
     }
 
@@ -826,44 +1381,61 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn dispatch_area() -> ratatui::layout::Rect {
+        ratatui::layout::Rect::new(0, 0, 120, 40)
+    }
+
     #[test]
     fn handle_key_cycles_tabs_with_tab_and_shift_tab() {
         let mut app = sample_app();
+        let (tx, _rx) = std::sync::mpsc::channel::<BackgroundMessage>();
 
         assert_eq!(app.active_tab(), AppTab::Monitor);
-        handle_key(&mut app, key(KeyCode::Tab)).unwrap();
+        handle_key(&mut app, key(KeyCode::Tab), &tx).unwrap();
         assert_eq!(app.active_tab(), AppTab::Dispatch);
 
-        handle_key(&mut app, key(KeyCode::BackTab)).unwrap();
+        handle_key(&mut app, key(KeyCode::BackTab), &tx).unwrap();
         assert_eq!(app.active_tab(), AppTab::Monitor);
     }
 
     #[test]
     fn handle_key_routes_arrows_inside_the_active_tab() {
         let mut app = sample_app();
+        let (tx, _rx) = std::sync::mpsc::channel::<BackgroundMessage>();
 
-        handle_key(&mut app, key(KeyCode::Down)).unwrap();
+        handle_key(&mut app, key(KeyCode::Down), &tx).unwrap();
         assert_eq!(app.selected, 1);
 
         app.set_active_tab(AppTab::Dispatch);
-        handle_key(&mut app, key(KeyCode::Down)).unwrap();
+        handle_key(&mut app, key(KeyCode::Down), &tx).unwrap();
         assert_eq!(app.dispatch_focus(), DispatchFocus::Agent);
 
-        handle_key(&mut app, key(KeyCode::Right)).unwrap();
-        assert_eq!(app.selected_agent(), "codex");
+        handle_key(&mut app, key(KeyCode::Right), &tx).unwrap();
+        // The agent list belongs to the launcher catalog; ← / → walk it.
+        assert_eq!(app.selected_agent(), app.agent_choices()[1].as_str());
 
         app.set_active_tab(AppTab::Controls);
-        handle_key(&mut app, key(KeyCode::Down)).unwrap();
+        handle_key(&mut app, key(KeyCode::Down), &tx).unwrap();
         assert_eq!(app.deep_selected, 1);
     }
 
     #[test]
     fn handle_key_enters_prompt_edit_from_dispatch_prompt_row() {
         let mut app = sample_app();
+        let (tx, _rx) = std::sync::mpsc::channel::<BackgroundMessage>();
         app.set_active_tab(AppTab::Dispatch);
         app.dispatch_selected = DispatchFocus::Prompt as usize;
 
-        handle_key(&mut app, key(KeyCode::Enter)).unwrap();
+        handle_key(&mut app, key(KeyCode::Enter), &tx).unwrap();
 
         assert_eq!(app.focus, LaunchFocus::EditPrompt);
     }
@@ -871,19 +1443,20 @@ mod tests {
     #[test]
     fn handle_key_shortcuts_jump_to_dispatch_controls_and_prime_selection() {
         let mut app = sample_app();
+        let (tx, _rx) = std::sync::mpsc::channel::<BackgroundMessage>();
 
-        handle_key(&mut app, key(KeyCode::Char('a'))).unwrap();
+        handle_key(&mut app, key(KeyCode::Char('a')), &tx).unwrap();
         assert_eq!(app.active_tab(), AppTab::Dispatch);
         assert_eq!(app.dispatch_focus(), DispatchFocus::Agent);
-        assert_eq!(app.selected_agent(), "codex");
+        assert_eq!(app.selected_agent(), app.agent_choices()[1].as_str());
 
-        handle_key(&mut app, key(KeyCode::Char('v'))).unwrap();
+        handle_key(&mut app, key(KeyCode::Char('v')), &tx).unwrap();
         assert_eq!(app.active_tab(), AppTab::Dispatch);
-        assert_eq!(app.dispatch_focus(), DispatchFocus::Runtime);
-        assert_eq!(app.launch_runtime, LaunchRuntime::Visible);
+        assert_eq!(app.dispatch_focus(), DispatchFocus::Presentation);
+        assert_eq!(app.launch_presentation, Presentation::Headless);
 
         app.set_active_tab(AppTab::Monitor);
-        handle_key(&mut app, key(KeyCode::Char('d'))).unwrap();
+        handle_key(&mut app, key(KeyCode::Char('d')), &tx).unwrap();
         assert_eq!(app.active_tab(), AppTab::Controls);
         assert!(app.status_line.contains("Controls ready"));
     }
@@ -891,22 +1464,126 @@ mod tests {
     #[test]
     fn handle_key_controls_can_move_across_run_list_and_prompt_edit_saves_multiline_prompt() {
         let mut app = sample_app();
+        let (tx, _rx) = std::sync::mpsc::channel::<BackgroundMessage>();
         app.set_active_tab(AppTab::Controls);
 
-        handle_key(&mut app, key(KeyCode::Right)).unwrap();
+        handle_key(&mut app, key(KeyCode::Right), &tx).unwrap();
         assert_eq!(app.selected, 1);
 
-        handle_key(&mut app, key(KeyCode::Left)).unwrap();
+        handle_key(&mut app, key(KeyCode::Left), &tx).unwrap();
         assert_eq!(app.selected, 0);
 
         app.set_active_tab(AppTab::Dispatch);
         app.focus = LaunchFocus::EditPrompt;
-        handle_key(&mut app, key(KeyCode::Enter)).unwrap();
-        handle_key(&mut app, key(KeyCode::Char('n'))).unwrap();
-        handle_key(&mut app, key(KeyCode::Esc)).unwrap();
+        handle_key(&mut app, key(KeyCode::Enter), &tx).unwrap();
+        handle_key(&mut app, key(KeyCode::Char('n')), &tx).unwrap();
+        handle_key(&mut app, key(KeyCode::Esc), &tx).unwrap();
         assert!(app.launch_prompt.contains("\nn"));
         assert_eq!(app.focus, LaunchFocus::Browse);
         assert!(app.status_line.contains("prompt updated"));
+    }
+
+    #[test]
+    fn mouse_click_selects_a_dispatch_stat_cell() {
+        let mut app = sample_app();
+        app.set_active_tab(AppTab::Dispatch);
+        let area = dispatch_area();
+        let operator =
+            crate::layout::dispatch_layout(crate::layout::root_layout(area).body).stats[1];
+        apply_mouse(
+            &mut app,
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                operator.x + 2,
+                operator.y + 1,
+            ),
+            area,
+        )
+        .unwrap();
+        assert_eq!(app.dispatch_focus(), DispatchFocus::Agent);
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_only_the_pane_under_the_cursor() {
+        let mut app = sample_app();
+        app.set_active_tab(AppTab::Dispatch);
+        app.launch_prompt = "keep the cut bounded. ".repeat(80);
+        app.launch_history = (0..40).map(|i| format!("launch-{i}")).collect();
+        // The declaration deck collapses the prompt to a single row, so a tall
+        // terminal shows it whole. Use a short one, where it really overflows.
+        let area = ratatui::layout::Rect::new(0, 0, 120, 24);
+        let layout = crate::layout::dispatch_layout(crate::layout::root_layout(area).body);
+        apply_mouse(
+            &mut app,
+            mouse(
+                MouseEventKind::ScrollDown,
+                layout.deck.x + 2,
+                layout.deck.y + 2,
+            ),
+            area,
+        )
+        .unwrap();
+        apply_mouse(
+            &mut app,
+            mouse(
+                MouseEventKind::ScrollDown,
+                layout.deck.x + 2,
+                layout.deck.y + 2,
+            ),
+            area,
+        )
+        .unwrap();
+        assert!(
+            app.interaction.scroll.deck > 0,
+            "deck under the cursor must scroll"
+        );
+        assert_eq!(
+            app.interaction.scroll.trail, 0,
+            "trail must stay put while the wheel is over the deck"
+        );
+
+        let deck_after = app.interaction.scroll.deck;
+        apply_mouse(
+            &mut app,
+            mouse(
+                MouseEventKind::ScrollDown,
+                layout.trail.x + 2,
+                layout.trail.y + 2,
+            ),
+            area,
+        )
+        .unwrap();
+        assert_eq!(
+            app.interaction.scroll.deck, deck_after,
+            "deck must stay put while the wheel is over the trail"
+        );
+        assert!(
+            app.interaction.scroll.trail > 0,
+            "trail under the cursor must scroll"
+        );
+        assert_eq!(
+            app.interaction.focused,
+            Some(crate::layout::PaneId::DispatchTrail)
+        );
+    }
+
+    #[test]
+    fn mouse_click_selects_a_monitor_run_row() {
+        let mut app = sample_app();
+        app.set_active_tab(AppTab::Monitor);
+        let area = dispatch_area();
+        let list = crate::layout::monitor_layout(crate::layout::root_layout(area).body, 0, 0).list;
+        apply_mouse(
+            &mut app,
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                list.x + 2,
+                list.y + 3,
+            ),
+            area,
+        )
+        .unwrap();
+        assert_eq!(app.selected, 1);
     }
 
     #[test]
@@ -921,39 +1598,237 @@ mod tests {
     }
 
     #[test]
-    fn launch_run_error_detail_lines_render_probe_error_when_present() {
+    fn launch_exec_failure_reaches_the_operator_with_command_and_stderr() {
+        // The readiness probe this test used to cover is gone with the rest of
+        // VOC's parallel launch runtime: the launcher's receipt, not a probe,
+        // decides whether a run started. What must survive is that a failure to
+        // even execute the launcher is reported in full.
         let error = LaunchRunError::Exec {
             message: "command exited with status: 1".to_string(),
             stderr: "boom\nstack\n".to_string(),
-            probe_error: Some(
-                "failed to run vc_frame readiness probe: No such file or directory".to_string(),
-            ),
-            probe_error_at_deadline: None,
         };
-        let lines = error.detail_lines("vc_frame --session foo".to_string());
-        assert_eq!(lines[0], "command: vc_frame --session foo");
+        let lines = error.detail_lines("vibecrafted workflow claude --json".to_string());
+        assert_eq!(lines[0], "command: vibecrafted workflow claude --json");
         assert_eq!(lines[1], "error: command exited with status: 1");
-        assert!(
-            lines.iter().any(|line| line.contains("readiness probe:")
-                && line.contains("No such file or directory")),
-            "probe_error must be surfaced in the operator error overlay: lines={lines:?}"
-        );
         assert!(lines.iter().any(|line| line == "stderr:"));
         assert!(lines.iter().any(|line| line == "boom"));
+        assert!(lines.iter().any(|line| line == "stack"));
     }
 
     #[test]
-    fn launch_run_error_detail_lines_skip_probe_section_when_none() {
+    fn launch_exec_failure_without_stderr_renders_no_empty_section() {
         let error = LaunchRunError::Exec {
             message: "command exited with status: 2".to_string(),
             stderr: String::new(),
-            probe_error: None,
-            probe_error_at_deadline: None,
         };
-        let lines = error.detail_lines("vc_frame --session foo".to_string());
+        let lines = error.detail_lines("vibecrafted workflow claude --json".to_string());
         assert!(
-            !lines.iter().any(|line| line.contains("readiness probe:")),
-            "probe_error=None must not render an empty probe section: lines={lines:?}"
+            !lines.iter().any(|line| line == "stderr:"),
+            "an empty stderr must not render a header: lines={lines:?}"
         );
+    }
+
+    #[test]
+    fn ui_ticks_do_not_schedule_expensive_projection_or_prism_discovery() {
+        let start = Instant::now();
+        let mut scheduler = RefreshScheduler::new(start, true, true);
+        let mut control_plane_refreshes = 0;
+        let mut prism_discoveries = 0;
+
+        for tick in 1..=400 {
+            let plan = scheduler.plan(start + Duration::from_millis(tick * 10));
+            control_plane_refreshes += usize::from(plan.control_plane);
+            prism_discoveries += usize::from(plan.polarize);
+        }
+
+        assert_eq!(control_plane_refreshes, 0);
+        assert_eq!(prism_discoveries, 0);
+    }
+
+    #[test]
+    fn changed_state_and_prism_are_scheduled_inside_the_documented_bound() {
+        let start = Instant::now();
+        let changed_at = start + Duration::from_secs(1);
+        let mut scheduler = RefreshScheduler::new(start, true, true);
+        scheduler.mark_state_changed(changed_at);
+        scheduler.mark_artifacts_changed(
+            ArtifactChange {
+                polarize: true,
+                mission_control: true,
+            },
+            changed_at,
+        );
+
+        let before_debounce = scheduler.plan(changed_at + CHANGE_DEBOUNCE / 2);
+        assert!(!before_debounce.control_plane);
+        assert!(!before_debounce.polarize);
+
+        let visible_at = changed_at + MAX_CHANGE_LATENCY;
+        let due = scheduler.plan(visible_at);
+        assert!(due.control_plane);
+        assert!(due.polarize);
+        assert!(due.mission_control);
+
+        let unchanged_tick = scheduler.plan(visible_at + Duration::from_millis(10));
+        assert!(!unchanged_tick.control_plane);
+        assert!(!unchanged_tick.polarize);
+        assert!(!unchanged_tick.mission_control);
+    }
+
+    #[test]
+    fn artifact_invalidation_ignores_unrelated_churn() {
+        let unrelated = classify_artifact_change(&[
+            PathBuf::from("/tmp/home/artifacts/run/transcript.log"),
+            PathBuf::from("/tmp/home/cache.json"),
+        ]);
+        assert_eq!(unrelated, ArtifactChange::default());
+
+        let relevant = classify_artifact_change(&[
+            PathBuf::from("/tmp/home/artifacts/project/polarize/run/prism.json"),
+            PathBuf::from("/tmp/home/artifacts/run/report.meta.json"),
+        ]);
+        assert!(relevant.polarize);
+        assert!(relevant.mission_control);
+    }
+
+    #[test]
+    fn transcript_churn_does_not_invalidate_the_control_plane_projection() {
+        assert!(!is_projection_path(&PathBuf::from(
+            "/tmp/control_plane/runtime_runs/impl-1/transcript.log"
+        )));
+        assert!(!is_projection_path(&PathBuf::from(
+            "/tmp/control_plane/runtime_runs/impl-1/transcript.human.log"
+        )));
+        assert!(is_projection_path(&PathBuf::from(
+            "/tmp/control_plane/events.jsonl"
+        )));
+        assert!(is_projection_path(&PathBuf::from(
+            "/tmp/control_plane/runs/impl-1.json"
+        )));
+        assert!(is_projection_path(&PathBuf::from(
+            "/tmp/control_plane/runtime_runs/impl-1"
+        )));
+    }
+
+    #[test]
+    fn projection_revision_ignores_transcript_appends() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("control_plane");
+        let run_dir = root.join("runtime_runs").join("impl-1");
+        std::fs::create_dir_all(root.join("runs")).expect("runs");
+        std::fs::create_dir_all(&run_dir).expect("runtime run");
+        std::fs::write(root.join("events.jsonl"), "{}\n").expect("events");
+        std::fs::write(
+            root.join("runs/impl-1.json"),
+            r#"{"run_id":"impl-1","state":"running"}"#,
+        )
+        .expect("snapshot");
+        std::fs::write(run_dir.join("transcript.log"), "hello\n").expect("transcript");
+        let before = projection_revision(&root);
+        std::fs::write(run_dir.join("transcript.log"), "hello\nworld\n").expect("append");
+        assert_eq!(before, projection_revision(&root));
+        std::fs::write(root.join("events.jsonl"), "{}\n{}\n").expect("events grew");
+        assert_ne!(before, projection_revision(&root));
+    }
+
+    #[test]
+    fn control_plane_and_artifact_watch_roots_are_disjoint() {
+        let home = PathBuf::from("/tmp/vc-home");
+        let state = home.join("control_plane");
+        let artifact = artifact_watch_root(&home);
+        for root in control_plane_watch_roots(&state) {
+            assert_ne!(root, artifact);
+            assert!(!artifact.starts_with(&root));
+            assert!(!root.starts_with(&artifact));
+        }
+    }
+
+    #[test]
+    fn dropping_the_state_watcher_disconnects_the_channel() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (tx, rx) = mpsc::channel();
+        let watcher = start_state_watcher(dir.path(), tx).expect("watcher");
+        drop(watcher);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+                | Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        // After drop the notify callback is gone; a later send path cannot exist.
+        assert!(rx.recv_timeout(Duration::from_millis(50)).is_err());
+    }
+
+    #[test]
+    fn observe_polling_backs_off_after_failures_and_resets_on_success() {
+        let start = Instant::now();
+        let mut scheduler = RefreshScheduler::new(start, true, true);
+        scheduler.note_observe_result(false);
+        scheduler.note_observe_result(false);
+        assert_eq!(scheduler.observe_interval(), Duration::from_secs(8));
+        let idle = scheduler.plan(start + Duration::from_secs(4));
+        assert!(!idle.observe);
+        let due = scheduler.plan(start + Duration::from_secs(8));
+        assert!(due.observe);
+        scheduler.note_observe_result(true);
+        assert_eq!(scheduler.observe_interval(), OBSERVE_REFRESH_INTERVAL);
+    }
+
+    #[test]
+    fn explicit_refresh_bypasses_debounce_and_loads_new_control_plane_truth() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state_root = dir.path().join("control_plane");
+        std::fs::create_dir_all(state_root.join("runs")).expect("runs dir");
+        let heartbeat = chrono::Utc::now().to_rfc3339();
+        std::fs::write(
+            state_root.join("runs/forced-refresh.json"),
+            format!(
+                r#"{{
+                "run_id": "forced-refresh",
+                "agent": "codex",
+                "skill": "hydrate",
+                "state": "running",
+                "updated_at": "{heartbeat}",
+                "last_heartbeat": "{heartbeat}"
+            }}"#
+            ),
+        )
+        .expect("run snapshot");
+
+        let now = Instant::now();
+        let mut scheduler = RefreshScheduler::new(now, true, true);
+        scheduler.mark_state_changed(now);
+        assert!(
+            !scheduler.plan(now).control_plane,
+            "change remains debounced"
+        );
+
+        let mut app = sample_app();
+        app.config.state_root = state_root;
+        app.refresh_control_plane();
+
+        assert!(
+            app.runs
+                .iter()
+                .any(|run| run.snapshot.run_id == "forced-refresh"),
+            "the explicit refresh path must load disk truth without waiting for the scheduler"
+        );
+    }
+
+    #[test]
+    fn render_only_refresh_preserves_selection_by_run_id() {
+        let mut app = sample_app();
+        app.selected = 1;
+        let expected = app.runs[1].snapshot.run_id.clone();
+        app.state.runs = app
+            .runs
+            .iter()
+            .rev()
+            .map(|run| run.snapshot.clone())
+            .collect();
+        app.state.retained_runs = app.state.runs.clone();
+
+        app.refresh_rendered_runs();
+
+        assert_eq!(app.selected_run().unwrap().snapshot.run_id, expected);
     }
 }

@@ -15,26 +15,52 @@ husky_lint_staged_files_by_glob() {
   git diff --cached --name-only --diff-filter=ACMR | grep -E "$pattern" || true
 }
 
+husky_lint_materialize_index() {
+  local tmp
+  tmp="$(mktemp -d -t husky-index.XXXXXX)"
+  git checkout-index --all --prefix="$tmp/" >/dev/null
+  printf '%s\n' "$tmp"
+}
+
+husky_lint_write_projected_files_to_index() {
+  local root="$1"
+  shift
+  local file entry mode oid
+  for file in "$@"; do
+    entry="$(git ls-files -s -- "$file")"
+    mode="${entry%% *}"
+    [ -n "$mode" ] || { husky_err "Cannot resolve staged mode for $file"; return 1; }
+    oid="$(git hash-object -w -- "$root/$file")" || return 1
+    git update-index --cacheinfo "$mode" "$oid" "$file" || return 1
+  done
+}
+
 # ---------------------------------------------------------------------------
 # Prettier
 # ---------------------------------------------------------------------------
 
 husky_lint_prettier_staged() {
-  local files
+  local files root rc=0
   files="$(husky_lint_staged_files_by_glob '\.(ts|tsx|js|jsx|json|css|md|yaml|yml)$')"
   if [ -z "$files" ]; then
     husky_info "No staged files for Prettier."
     return 0
   fi
-  printf '%s\n' "$files" | tr '\n' '\0' | xargs -0 npx --no-install prettier --write \
-    || { husky_err "Prettier --write failed."; return 1; }
-  printf '%s\n' "$files" | tr '\n' '\0' | xargs -0 git add
-  printf '%s\n' "$files" | tr '\n' '\0' | xargs -0 npx --no-install prettier --check \
-    || { husky_err "Prettier --check failed after auto-fix."; return 1; }
+  local paths=() projected=() file
+  while IFS= read -r file; do paths+=("$file"); done <<< "$files"
+  root="$(husky_lint_materialize_index)"
+  for file in "${paths[@]}"; do projected+=("$root/$file"); done
+  npx --no-install prettier --write -- "${projected[@]}" || rc=$?
+  [ "$rc" -eq 0 ] && husky_lint_write_projected_files_to_index "$root" "${paths[@]}" || rc=$?
+  rm -rf "$root"
+  [ "$rc" -eq 0 ] || { husky_err "Prettier staged-index format failed."; return "$rc"; }
 }
 
 husky_lint_prettier_full() {
-  npx --no-install prettier --check . \
+  local root="${HUSKY_GATE_ROOT:-.}"
+  local ignore=()
+  [ ! -f "$root/.prettierignore" ] || ignore=(--ignore-path "$root/.prettierignore")
+  npx --no-install prettier --check "${ignore[@]}" "$root" \
     || { husky_err "Prettier full-repo check failed."; return 1; }
 }
 
@@ -43,15 +69,20 @@ husky_lint_prettier_full() {
 # ---------------------------------------------------------------------------
 
 husky_lint_eslint_staged() {
-  local files
+  local files root rc=0
   files="$(husky_lint_staged_files_by_glob '\.(ts|tsx|js|jsx)$')"
   if [ -z "$files" ]; then
     husky_info "No staged files for ESLint."
     return 0
   fi
-  printf '%s\n' "$files" | tr '\n' '\0' | xargs -0 npx --no-install eslint --fix --max-warnings=0 \
-    || { husky_err "ESLint --fix failed."; return 1; }
-  printf '%s\n' "$files" | tr '\n' '\0' | xargs -0 git add
+  local paths=() projected=() file
+  while IFS= read -r file; do paths+=("$file"); done <<< "$files"
+  root="$(husky_lint_materialize_index)"
+  for file in "${paths[@]}"; do projected+=("$root/$file"); done
+  npx --no-install eslint --fix --max-warnings=0 -- "${projected[@]}" || rc=$?
+  [ "$rc" -eq 0 ] && husky_lint_write_projected_files_to_index "$root" "${paths[@]}" || rc=$?
+  rm -rf "$root"
+  [ "$rc" -eq 0 ] || { husky_err "ESLint staged-index fix failed."; return "$rc"; }
 }
 
 # ---------------------------------------------------------------------------
@@ -59,16 +90,20 @@ husky_lint_eslint_staged() {
 # ---------------------------------------------------------------------------
 
 husky_lint_stylelint_staged() {
-  local files
+  local files root rc=0
   files="$(husky_lint_staged_files_by_glob '\.(css|scss)$')"
   if [ -z "$files" ]; then
     husky_info "No staged files for Stylelint."
     return 0
   fi
-  printf '%s\n' "$files" | tr '\n' '\0' \
-    | xargs -0 npx --no-install stylelint --fix --allow-empty-input \
-    || { husky_err "Stylelint --fix failed."; return 1; }
-  printf '%s\n' "$files" | tr '\n' '\0' | xargs -0 git add
+  local paths=() projected=() file
+  while IFS= read -r file; do paths+=("$file"); done <<< "$files"
+  root="$(husky_lint_materialize_index)"
+  for file in "${paths[@]}"; do projected+=("$root/$file"); done
+  npx --no-install stylelint --fix --allow-empty-input -- "${projected[@]}" || rc=$?
+  [ "$rc" -eq 0 ] && husky_lint_write_projected_files_to_index "$root" "${paths[@]}" || rc=$?
+  rm -rf "$root"
+  [ "$rc" -eq 0 ] || { husky_err "Stylelint staged-index fix failed."; return "$rc"; }
 }
 
 # ---------------------------------------------------------------------------
@@ -111,7 +146,7 @@ husky_lint_semgrep_full() {
     husky_warn "semgrep not installed — skipping full scan."
     return 0
   fi
-  env -u PYTHONPATH -u PYTHONHOME semgrep scan --config auto --quiet --error \
+  env -u PYTHONPATH -u PYTHONHOME semgrep scan --config auto --quiet --error -- "${HUSKY_GATE_ROOT:-.}" \
     || { husky_err "Semgrep full-repo scan failed."; return 1; }
 }
 
@@ -183,7 +218,7 @@ husky_lint_loct_commands() {
 # ---------------------------------------------------------------------------
 
 husky_lint_rustfmt_staged() {
-  local files
+  local files root rc=0
   files="$(husky_lint_staged_files_by_glob '\.rs$')"
   if [ -z "$files" ]; then
     husky_info "No staged Rust files."
@@ -193,11 +228,16 @@ husky_lint_rustfmt_staged() {
     husky_warn "rustfmt not installed — skipping."
     return 0
   fi
-  printf '%s\n' "$files" | while IFS= read -r f; do
+  local paths=() f
+  while IFS= read -r f; do paths+=("$f"); done <<< "$files"
+  root="$(husky_lint_materialize_index)"
+  for f in "${paths[@]}"; do
     [ -z "$f" ] && continue
-    rustfmt --edition 2024 "$f" || rustfmt "$f" || return 1
+    rustfmt --edition 2024 "$root/$f" || rustfmt "$root/$f" || { rc=1; break; }
   done
-  printf '%s\n' "$files" | tr '\n' '\0' | xargs -0 git add
+  [ "$rc" -eq 0 ] && husky_lint_write_projected_files_to_index "$root" "${paths[@]}" || rc=$?
+  rm -rf "$root"
+  return "$rc"
 }
 
 husky_lint_cargo_check() {
@@ -232,7 +272,7 @@ husky_lint_cargo_test() {
 # ---------------------------------------------------------------------------
 
 husky_lint_py_ruff_staged() {
-  local files
+  local files root rc=0
   files="$(husky_lint_staged_files_by_glob '\.py$')"
   [ -z "$files" ] && { husky_info "No staged Python files."; return 0; }
   local ruff
@@ -240,13 +280,46 @@ husky_lint_py_ruff_staged() {
   elif command -v uvx >/dev/null 2>&1; then ruff="uvx ruff"
   else husky_warn "ruff/uvx not installed — skipping."; return 0
   fi
+  local paths=() projected=() file
+  while IFS= read -r file; do paths+=("$file"); done <<< "$files"
+  root="$(husky_lint_materialize_index)"
+  for file in "${paths[@]}"; do projected+=("$root/$file"); done
   # shellcheck disable=SC2086  # $ruff intentionally splits "uvx ruff"
-  printf '%s\n' "$files" | tr '\n' '\0' | xargs -0 $ruff check --fix \
-    || { husky_err "ruff check failed."; return 1; }
-  # shellcheck disable=SC2086  # $ruff intentionally splits "uvx ruff"
-  printf '%s\n' "$files" | tr '\n' '\0' | xargs -0 $ruff format \
-    || { husky_err "ruff format failed."; return 1; }
-  printf '%s\n' "$files" | tr '\n' '\0' | xargs -0 git add
+  $ruff check --fix -- "${projected[@]}" || rc=$?
+  # shellcheck disable=SC2086
+  [ "$rc" -ne 0 ] || $ruff format -- "${projected[@]}" || rc=$?
+  [ "$rc" -eq 0 ] && husky_lint_write_projected_files_to_index "$root" "${paths[@]}" || rc=$?
+  rm -rf "$root"
+  [ "$rc" -eq 0 ] || { husky_err "ruff staged-index format failed."; return "$rc"; }
+}
+
+husky_lint_py_ruff_full() {
+  local root="${HUSKY_GATE_ROOT:-.}"
+  local ruff
+  if command -v ruff >/dev/null 2>&1; then ruff="ruff"
+  elif command -v uvx >/dev/null 2>&1; then ruff="uvx ruff"
+  else husky_warn "ruff/uvx not installed — skipping."; return 0
+  fi
+  # shellcheck disable=SC2086
+  $ruff check -- "$root" || return 1
+  # shellcheck disable=SC2086
+  $ruff format --check -- "$root"
+}
+
+husky_lint_push_object_gates() {
+  local commit="$1" root rc=0
+  root="$(mktemp -d -t husky-push-tree.XXXXXX)"
+  git archive "$commit" | tar -xf - -C "$root" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    HUSKY_GATE_ROOT="$root"
+    export HUSKY_GATE_ROOT
+    [ "$HUSKY_PREPUSH_PRETTIER_FULL" != "1" ] || husky_lint_prettier_full || rc=$?
+    [ "$rc" -ne 0 ] || [ "$HUSKY_PREPUSH_RUFF_FULL" != "1" ] || husky_lint_py_ruff_full || rc=$?
+    [ "$rc" -ne 0 ] || [ "$HUSKY_PREPUSH_SEMGREP_FULL" != "1" ] || husky_lint_semgrep_full || rc=$?
+    unset HUSKY_GATE_ROOT
+  fi
+  rm -rf "$root"
+  return "$rc"
 }
 
 # ---------------------------------------------------------------------------
@@ -290,6 +363,6 @@ husky_lint_lint_staged() {
     husky_info "No lint-staged config in package.json — skipping."
     return 0
   fi
-  npx --no-install lint-staged --concurrent false \
-    || { husky_err "lint-staged failed."; return 1; }
+  husky_err "lint-staged is disabled on a Living Tree because arbitrary tasks mutate the working copy. Enable the individual staged-index formatters instead."
+  return 1
 }

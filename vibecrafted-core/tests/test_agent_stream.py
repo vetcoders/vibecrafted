@@ -291,3 +291,73 @@ def test_grok_tool_call_update_renders_nested_content_text() -> None:
     assert '{"type"' not in rendered
     assert "rawOutput" not in rendered
     assert "84" not in rendered
+
+
+def test_agent_stream_parser_renders_agy_stream_json_events(tmp_path) -> None:
+    """agy stream-json: init banner, streamed answer, one usage record from result."""
+    parser = AgentStreamParser("agy")
+    init = parser.feed_line(
+        b'{"event":"init","conversation_id":"conv-1","init":{"model":"gemini-3.8-flash-low","cwd":"/repo","tools":["run_command"]}}\n'
+    )
+    assert "session: conv-1" in init
+    assert "model: gemini-3.8-flash-low" in init
+    assert parser.session_id == "conv-1"
+    assert parser.model_id == "gemini-3.8-flash-low"
+    assert (
+        parser.feed_line(
+            b'{"event":"step_update","step_update":{"conversation_id":"conv-1","step_index":0,"state":"DONE","step_type":"user_input"}}\n'
+        )
+        == ""
+    )
+    assert (
+        parser.feed_line(
+            b'{"event":"step_update","step_update":{"conversation_id":"conv-1","step_index":1,"state":"ACTIVE","step_type":"agent_response","text_delta":"OK"}}\n'
+        )
+        == "OK"
+    )
+    tool = parser.feed_line(
+        b'{"event":"step_update","step_update":{"conversation_id":"conv-1","step_index":2,"state":"ACTIVE","step_type":"run_command"}}\n'
+    )
+    assert "run_command" in tool
+    result = parser.feed_line(
+        b'{"event":"result","result":{"conversation_id":"conv-1","status":"SUCCESS","response":"OK\\n","duration_seconds":1.5,"num_turns":1,"usage":{"input_tokens":31345,"output_tokens":20,"thinking_tokens":19,"cache_read_tokens":128,"total_tokens":31365}}}\n'
+    )
+    assert "tokens: 31345 in (128 cached) / 20 out" in result
+    assert "SUCCESS" in result
+    assert parser.tokens_input == 31345
+    assert parser.tokens_cached_input == 128
+    assert parser.tokens_output == 20
+    assert parser.final_response == "OK\n"
+    assert parser.resume_command("/repo") == "cd /repo && agy --conversation conv-1"
+
+    failed = AgentStreamParser("agy").feed_line(
+        b'{"event":"result","result":{"conversation_id":"conv-2","status":"ERROR","response":"","error":"stream input message is missing the \\"event\\" field","usage":{"input_tokens":0,"output_tokens":0}}}\n'
+    )
+    assert "error" in failed and "missing the" in failed and "ERROR" in failed
+
+
+def test_filter_stream_writes_agy_last_message(tmp_path) -> None:
+    import io
+
+    from vibecrafted_core.agent_stream import filter_stream
+
+    stream = io.BytesIO(
+        b'{"event":"init","conversation_id":"conv-9","init":{"model":"m"}}\n'
+        b'{"event":"step_update","step_update":{"step_type":"agent_response","state":"DONE","text_delta":"done"}}\n'
+        b'{"event":"result","result":{"status":"SUCCESS","response":"final answer","usage":{"input_tokens":1,"output_tokens":1}}}\n'
+    )
+    out = io.BytesIO()
+    last = tmp_path / "last-message.md"
+    assert filter_stream("agy", stdin=stream, stdout=out, last_message_file=last) == 0
+    assert last.read_text(encoding="utf-8") == "final answer"
+    assert b"done" in out.getvalue()
+
+    empty_out = io.BytesIO()
+    missing = tmp_path / "absent.md"
+    filter_stream(
+        "agy",
+        stdin=io.BytesIO(b'{"event":"init","conversation_id":"c"}\n'),
+        stdout=empty_out,
+        last_message_file=missing,
+    )
+    assert not missing.exists()

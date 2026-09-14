@@ -10,7 +10,7 @@ in what they give you and in how finished they are, so this page states both.
 | Signed `Vibecrafted.app` DMG | macOS 14+, arm64     | Full desktop product: terminal, frame, runtime, server              | Build path complete; publication pending |
 | Portable tarball             | Linux, WSL2, macOS   | Command deck, runtime, control plane, skills — pinned to one commit | Build path complete; publication pending |
 | Bootstrap `install.sh`       | macOS, Linux, WSL2   | Command deck, runtime, control plane, skills                        | Published; CI-gated                      |
-| Source checkout              | macOS, Linux, WSL2   | Everything above plus build, test and release targets               | Published                                |
+| Source checkout              | macOS, Linux, WSL2   | Development tree and targets — not a native Runtime Pack            | Published                                |
 | Container                    | anywhere Docker runs | Isolated operator runtime                                           | Published                                |
 | `install.ps1`                | Windows              | WSL2 detection and handoff — not a native install                   | In repo; not yet served over HTTP        |
 
@@ -79,11 +79,15 @@ does not carry one.
 
 Scope, stated plainly:
 
-- It is a **source distribution**, not a prebuilt-binary bundle. `voc`,
-  `vc-admin` and `vc-server` are compiled locally by `make install`, so the
-  Rust toolchain listed under the Linux prerequisites is still required.
-- Prebuilt per-architecture binaries are not part of this channel and are not
-  claimed to be.
+- It is a **source distribution**, not a prebuilt-binary bundle. Product
+  launchers and native `vc-terminal` / `vc-frame` hosts stay on the Runtime
+  Pack. A source checkout can install skill views with `--skills-only`; it
+  cannot pretend to be a complete native runtime.
+- Linux prebuilt packs (`linux-x64`, `linux-arm64`) are a separate carrier,
+  built natively by `scripts/build-linux-runtime-pack.sh`. They are not
+  produced by macOS `make release`. 4.3.1 does not ship a systemd unit;
+  on Linux the process pair is `vibecrafted server start` (server +
+  guardian), not `systemctl`.
 - On Windows this is what you install _inside_ WSL2. There is no native
   Windows build; see the `install.ps1` section.
 
@@ -205,10 +209,9 @@ Run it from a checkout:
 ```
 
 > **Current status.** `install.ps1` is not yet served from
-> `https://vibecrafted.io/install.ps1`, so the `iwr -useb … | iex` form in its
-> own header does not work yet. Use the checkout form above, or run the `wsl`
-> one-liner directly. Native Windows binaries are not on the near roadmap;
-> WSL2 is the supported answer.
+> `https://vibecrafted.io/install.ps1`, so do not `iwr | iex` it. Use the
+> checkout form above, or run the `wsl` one-liner directly. Native Windows
+> binaries are not shipped; WSL2 is the supported answer.
 
 ---
 
@@ -228,10 +231,12 @@ control-plane wiring.
 
 ## Build from source (power users)
 
-A source checkout is the complete surface: it installs the same runtime the
-bootstrap installs, and it additionally carries every build, test and release
-target. This is the path to take if you want to modify Vibecrafted, run the
-gates, or produce your own signed artifact.
+A source checkout is the complete development surface: it carries every
+build, test and release target. It is not a Runtime Pack. `make install`
+without a bound pack can install skill views (`--skills-only`); native
+`vc-terminal` / `vc-frame` hosts come from a verified Runtime Pack. This is
+the path to take if you want to modify Vibecrafted, run the gates, or
+produce your own signed artifact.
 
 ### Prerequisites
 
@@ -256,6 +261,36 @@ make install
 non-interactively — this is what CI uses. `make install-all` additionally builds
 the Rust binaries (`voc`, `vc-admin`, `vc-server`) as real files into
 `~/.local/bin`.
+
+### Building a Runtime Pack and installing that exact one
+
+```bash
+make runtime-pack && make install
+```
+
+The builder records which carrier it completed, and `make install` installs
+those bytes. `make runtime-pack` prints the same path it recorded.
+
+The record lives in `build/runtime-pack-selection.json`. It is build state, not
+configuration: it names one absolute path with its digest and the source,
+terminal and frame revisions the carrier is required to claim. Historical packs
+in `dist/` stay where they are — selection never ranks them by modification time
+or glob order, and never deletes one to make an answer unambiguous.
+
+The attempt is marked pending before the build starts and published only after
+the archive is packaged, verified and signed. So:
+
+- an interrupted or failed build — including a retry at the same commit —
+  refuses to install, instead of quietly reinstalling the last success;
+- a record from a different checkout, a different platform, or one whose
+  carrier no longer matches its digest fails visibly rather than falling back
+  to some other archive;
+- `RUNTIME_PACK=/path/to/pack.tar.gz` still wins outright, which is how you
+  deliberately install another signed generation.
+
+Selection chooses an artifact; it never authenticates one. The checksum,
+detached signature, archive topology and internal provenance checks are
+unchanged, and the recorded identities are fed into them.
 
 For a browser-guided install surface instead of the terminal one:
 
@@ -311,7 +346,7 @@ release script reads it from `$KEYS` (default `~/.keys`):
 | `Certificates.p12`        | signing certificate       |
 | `cert_password.txt`       | certificate password      |
 | `vibecrafted-signing.key` | detached artifact signing |
-| `.notary.env`             | notarytool credentials    |
+| Keychain profile/API key  | notarytool credentials    |
 
 ```bash
 make app             # build Vibecrafted.app only

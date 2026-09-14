@@ -1,11 +1,13 @@
-use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsString;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use tempfile::tempdir;
 use voc::polarize::{PolarizeBand, current_intents_from_home, read_intent};
-use voc::skills_catalog::{CATALOG, SkillAgent, SkillPayload, build_skill_launch_command};
+use voc::skills_catalog::CATALOG;
+
+mod support;
+use support::fixture_catalog;
 
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
@@ -138,77 +140,32 @@ fn catalog_covers_existing_vibecrafted_skill_directories() {
 }
 
 #[test]
-fn skill_launch_command_assembles_argv_for_every_skill_and_agent() {
-    let agents = [
-        SkillAgent::Claude,
-        SkillAgent::Codex,
-        SkillAgent::Gemini,
-        SkillAgent::Any,
-    ];
+fn every_skill_default_agent_is_a_live_catalog_agent() {
+    // VOC no longer carries an agent enum of its own, so a skill can only
+    // prefer an agent the canonical launcher still offers. This is what keeps a
+    // retired launcher (gemini) from re-entering through the skills deck.
+    let catalog = fixture_catalog();
     for entry in CATALOG {
-        for agent in agents {
-            let mut env = BTreeMap::<String, OsString>::new();
-            env.insert("VIBECRAFTED_ROOT".to_string(), "/tmp/repo".into());
-            let command = build_skill_launch_command(
-                "/usr/bin/vibecrafted",
-                entry.slug,
-                agent,
-                SkillAgent::Codex,
-                &SkillPayload::Prompt("ship the skill surface".to_string()),
-                env,
-            );
-            let args = command
-                .args
-                .iter()
-                .map(|value| value.to_string_lossy().into_owned())
-                .collect::<Vec<_>>();
-            assert_eq!(command.program, PathBuf::from("/usr/bin/vibecrafted"));
-            assert_eq!(args[0], entry.command_token());
-            assert_eq!(args[1], agent.resolved_cli_token(SkillAgent::Codex));
-            assert_eq!(args[2], "--prompt");
-            assert_eq!(args[3], "ship the skill surface");
-            assert_eq!(
-                command.env.get("VIBECRAFTED_ROOT"),
-                Some(&OsString::from("/tmp/repo"))
-            );
+        if entry.default_agent.is_empty() {
+            // Empty means "whatever the operator selected" — the common case.
+            continue;
         }
+        assert!(
+            catalog
+                .agents
+                .iter()
+                .any(|agent| agent == entry.default_agent),
+            "skill {} prefers {:?}, which the launcher catalog does not offer: {:?}",
+            entry.slug,
+            entry.default_agent,
+            catalog.agents
+        );
+        assert_ne!(
+            entry.default_agent, "gemini",
+            "the gemini launcher is retired and must not be reachable from {}",
+            entry.slug
+        );
     }
-}
-
-#[test]
-fn skill_launch_command_supports_file_payload_and_empty_payload() {
-    let file_command = build_skill_launch_command(
-        "vibecrafted",
-        "vc-polarize",
-        SkillAgent::Codex,
-        SkillAgent::Claude,
-        &SkillPayload::File("/tmp/prism-pack.md".into()),
-        BTreeMap::new(),
-    );
-    let file_args = file_command
-        .args
-        .iter()
-        .map(|value| value.to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        file_args,
-        vec!["polarize", "codex", "--file", "/tmp/prism-pack.md"]
-    );
-
-    let empty_command = build_skill_launch_command(
-        "vibecrafted",
-        "vc-init",
-        SkillAgent::Any,
-        SkillAgent::Gemini,
-        &SkillPayload::None,
-        BTreeMap::new(),
-    );
-    let empty_args = empty_command
-        .args
-        .iter()
-        .map(|value| value.to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
-    assert_eq!(empty_args, vec!["init", "gemini"]);
 }
 
 #[test]

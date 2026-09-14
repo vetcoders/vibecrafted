@@ -208,6 +208,8 @@ class AgentStreamParser:
         self.tokens_output = 0
         self.cost_usd: float | None = None
         self.cost_source: str | None = None
+        # Final assistant answer of a stream that reports one (agy `result.response`).
+        self.final_response: str = ""
 
     def feed_line(self, chunk: bytes) -> str:
         """Decode one line of agent output and render it to human-readable text.
@@ -247,6 +249,8 @@ class AgentStreamParser:
             return f"cd {root_text} && junie --resume --session-id {session}"
         if self.agent == "grok":
             return f"cd {root_text} && grok --resume {session}"
+        if self.agent == "cursor":
+            return f"cd {root_text} && cursor-agent --resume {session}"
         return f"cd {root_text} && vc-resume --session {session}"
 
     def _scan_text(self, text: str) -> None:
@@ -319,13 +323,19 @@ class AgentStreamParser:
         if cached_input is None:
             cached_input = usage.get("cacheReadInputTokens")
         if cached_input is None:
+            cached_input = usage.get("cacheReadTokens")
+        if cached_input is None:
             cached_input = usage.get("cacheInputTokens")
         if cached_input is None:
             cached_input = usage.get("cached_prompt_tokens")
+        if cached_input is None:
+            cached_input = usage.get("cache_read_tokens")
         self.tokens_cached_input += _as_int(cached_input)
         cache_write = usage.get("cache_creation_input_tokens")
         if cache_write is None:
             cache_write = usage.get("cacheCreateTokens")
+        if cache_write is None:
+            cache_write = usage.get("cacheWriteTokens")
         if cache_write is not None:
             self.tokens_cache_write = (self.tokens_cache_write or 0) + _as_int(
                 cache_write
@@ -401,7 +411,13 @@ class AgentStreamParser:
 
     def _format_json_event(self, event: dict[str, Any]) -> str:
         """Dispatch a decoded JSON event to the formatter for ``self.agent``."""
-        if self.agent in {"claude", "agy"}:
+        if self.agent == "agy" and "event" in event:
+            return self._format_agy_event(event)
+        if self.agent in {"claude", "agy", "cursor"}:
+            if self.agent == "cursor":
+                thinking = self._format_cursor_thinking(event)
+                if thinking is not None:
+                    return thinking
             return self._format_claude_event(event)
         if self.agent == "codex":
             return self._format_codex_event(event)
@@ -411,6 +427,15 @@ class AgentStreamParser:
             return self._format_junie_event(event)
         if self.agent == "grok":
             return self._format_grok_event(event)
+        return ""
+
+    def _format_cursor_thinking(self, event: dict[str, Any]) -> str | None:
+        """Render cursor-agent stream-json thinking deltas; None if not a thinking event."""
+        if str(event.get("type") or "") != "thinking":
+            return None
+        text = str(event.get("text") or "")
+        if str(event.get("subtype") or "") == "delta" and text:
+            return f"\x1b[2m{text}\x1b[0m"
         return ""
 
     def _format_claude_event(self, event: dict[str, Any]) -> str:
@@ -622,6 +647,73 @@ class AgentStreamParser:
             return f"{name}: {text}\n"
         return text + "\n"
 
+    def _format_agy_event(self, event: dict[str, Any]) -> str:
+        """Render one agy (Antigravity) stream-json event.
+
+        agy speaks ``{"event": ..., "<event>": {...}}``: ``init`` carries
+        ``conversation_id`` and the model, ``step_update`` streams
+        ``text_delta`` per step (``user_input`` / ``agent_response`` / tool
+        steps), ``result`` closes with ``status``, ``response`` and the
+        conversation's ``usage``. Usage is recorded once, from ``result``.
+        """
+        kind = str(event.get("event") or "")
+        conversation = event.get("conversation_id")
+        if kind == "init":
+            init = event.get("init") or {}
+            if isinstance(init, dict):
+                self._record_model(init)
+                conversation = conversation or init.get("conversation_id")
+            return self._session_banner(_stringish(conversation) or "?")
+        if kind == "step_update":
+            step = event.get("step_update") or {}
+            if not isinstance(step, dict):
+                return ""
+            step_type = str(step.get("step_type") or "")
+            text = _stringish(step.get("text_delta"))
+            if step_type in {"user_input", ""}:
+                return ""
+            if step_type == "agent_response":
+                return text
+            if step_type in {"thinking", "thought", "planning"}:
+                return f"\x1b[2m{text}\x1b[0m" if text else ""
+            out = ""
+            if str(step.get("state") or "") == "ACTIVE" and not text:
+                name = step.get("tool_name") or step.get("name") or step_type
+                out = "\n" + tool_tag(_stringish(name) or step_type)
+            if text:
+                out += _truncate_block(text)
+            return out
+        if kind == "result":
+            result = event.get("result") or {}
+            if not isinstance(result, dict):
+                return ""
+            usage = result.get("usage")
+            status = str(result.get("status") or "done")
+            response = _stringish(result.get("response"))
+            if response and response != "None":
+                self.final_response = response
+            out = ""
+            if isinstance(usage, dict):
+                self._record_usage(usage)
+                input_tokens = _as_int(usage.get("input_tokens"))
+                output_tokens = _as_int(usage.get("output_tokens"))
+                cached = _as_int(usage.get("cache_read_tokens"))
+                if input_tokens or output_tokens:
+                    cached_fragment = f" ({cached} cached)" if cached else ""
+                    out += (
+                        f"\n\x1b[2m[{stamp()}] tokens: {input_tokens} in"
+                        f"{cached_fragment} / {output_tokens} out\x1b[0m\n"
+                    )
+            error = _stringish(result.get("error"))
+            if error and error != "None":
+                out += f"\x1b[31m[{stamp()} error] {error}\x1b[0m\n"
+            color = "32" if status.upper() == "SUCCESS" else "31"
+            return out + f"\x1b[{color}m[{stamp()}] {status}\x1b[0m\n"
+        if kind == "error":
+            message = event.get("error") or event.get("message")
+            return f"\n\x1b[31m[{stamp()} error] {_stringish(message) or 'unknown'}\x1b[0m\n"
+        return ""
+
     def _format_grok_event(self, event: dict[str, Any]) -> str:
         """Render one Grok streaming-json event (thought/text/tool/diff/error/message)."""
         self._record_nested_telemetry(event)
@@ -671,11 +763,15 @@ def filter_stream(
     stdout=None,
     raw_file: str | Path | None = None,
     default_model: str = "",
+    last_message_file: str | Path | None = None,
 ) -> int:
     """Read agent streaming-json from stdin, emit human text to stdout.
 
     Optional ``raw_file`` tees the unparsed stream for await/transcript parse
-    while the pane only sees AgentStreamParser output.
+    while the pane only sees AgentStreamParser output. Optional
+    ``last_message_file`` receives the stream's final assistant answer when
+    the agent reports one (agy ``result.response``); it is left absent
+    otherwise so callers can fall back to the transcript.
     """
     import sys as _sys
 
@@ -704,6 +800,10 @@ def filter_stream(
     finally:
         if raw_handle is not None:
             raw_handle.close()
+    if last_message_file and parser.final_response.strip():
+        last_path = Path(last_message_file).expanduser()
+        last_path.parent.mkdir(parents=True, exist_ok=True)
+        last_path.write_text(parser.final_response, encoding="utf-8")
     return 0
 
 
@@ -734,6 +834,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         default="",
         help="Optional default model id for telemetry lines",
     )
+    parser.add_argument(
+        "--last-message",
+        default="",
+        help="Optional path that receives the stream's final assistant answer (agy result.response)",
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
     agent = str(args.agent or "").strip().lower()
     if not agent:
@@ -743,6 +848,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         agent,
         raw_file=args.raw_file or None,
         default_model=str(args.model or ""),
+        last_message_file=(str(args.last_message).strip() or None),
     )
 
 

@@ -2,13 +2,16 @@
 
 `vc-partner` as an interactive skill does not automatically launch runtime.
 
-Runtime begins only when the framework launches:
+Runtime begins only from a TTY face (same family as `vc-init`):
 
 ```bash
-vibecrafted partner <agent> --prompt '<intent>'
-vibecrafted partner <agent> --file /path/to/shape.md
-vc-partner <agent> --prompt '<intent>'
+vibecrafted partner <agent>
+vibecrafted partner <agent> --runtime plain
+vc-start   # then [New] with the partner ritual, then /vc-partner
 ```
+
+`vc-partner` without a TTY refuses. `--prompt` / `--file` on
+`vibecrafted partner` are extra seed context, never a headless worker.
 
 ## Runtime Responsibilities
 

@@ -7,7 +7,7 @@ source "$SCRIPT_DIR/common.sh"
 
 usage() {
   cat <<EOF_USAGE
-Usage: observe.sh [codex|claude|agy|junie] [--last|--run-id <id>|path-to-meta|path-to-transcript|path-to-report]
+Usage: observe.sh [codex|claude|agy|junie|grok|cursor] [--last|--run-id <id>|path-to-meta|path-to-transcript|path-to-report]
 
 Examples:
   observe.sh codex --last
@@ -18,7 +18,7 @@ EOF_USAGE
 }
 
 filter_observe_tail() {
-  python3 -c '
+  "$(spawn_python_bin)" -c '
 import re
 import sys
 
@@ -45,7 +45,7 @@ run_id=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    codex|claude|agy|junie)
+    codex|claude|agy|junie|grok|cursor)
       [[ -z "$agent" ]] || spawn_die "Agent already set to $agent"
       agent="$1"
       ;;
@@ -77,7 +77,7 @@ report=""
 transcript=""
 
 if [[ -n "$run_id" ]]; then
-  meta="$(python3 - "$store_root" "$run_id" <<'PY'
+  meta="$("$(spawn_python_bin)" - "$store_root" "$run_id" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -127,7 +127,7 @@ else
 fi
 
 if [[ -n "$meta" && ! -f "$meta" ]]; then
-  resolved_meta="$(python3 - "$store_root" "$meta" <<'PY'
+  resolved_meta="$("$(spawn_python_bin)" - "$store_root" "$meta" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -197,7 +197,7 @@ fi
 
 if [[ -n "$meta" ]]; then
   [[ -f "$meta" ]] || spawn_die "Metadata path is not readable and no canonical meta resolved: $meta"
-  python3 - "$meta" <<'PY'
+  "$(spawn_python_bin)" - "$meta" <<'PY'
 import json
 import sys
 with open(sys.argv[1], 'r', encoding='utf-8') as fh:
@@ -215,7 +215,7 @@ print(f"Transcript: {data.get('transcript')}")
 print(f"Launcher:   {data.get('launcher')}")
 print(f"Exit code:  {data.get('exit_code')}")
 PY
-  transcript="$(python3 - "$meta" <<'PY'
+  transcript="$("$(spawn_python_bin)" - "$meta" <<'PY'
 import json
 import sys
 with open(sys.argv[1], 'r', encoding='utf-8') as fh:
@@ -223,7 +223,7 @@ with open(sys.argv[1], 'r', encoding='utf-8') as fh:
 print(data.get('transcript') or '')
 PY
 )"
-  report="$(python3 - "$meta" <<'PY'
+  report="$("$(spawn_python_bin)" - "$meta" <<'PY'
 import json
 import sys
 with open(sys.argv[1], 'r', encoding='utf-8') as fh:

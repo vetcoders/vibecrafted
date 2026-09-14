@@ -6,7 +6,7 @@ absorbs:
   - REC-1 (7-step deterministic runner)
   - REC-2 (categorical no native subagents as fleet dispatch)
   - REC-3 (/loop primary cadence)
-  - REC-4 (journal.md append-only convention)
+  - REC-4 (repozytoryjna konwencja append-only JOURNAL.md)
   - REC-11 (vc-scaffold auto-chain on fuzzy plans)
 ---
 
@@ -39,8 +39,11 @@ Skonsumuj, po kolei, każde wejście, które dał ci operator:
   jest ucięty; zobacz `vc-implement` Layered Reading Discipline)
 - aktywny katalog artefaktów dla tego runu:
   `~/.vibecrafted/artifacts/<org>/<repo>/<YYYY_MMDD>/<plan-slug>/`
-- każdy wcześniejszy `journal.md` w tym katalogu artefaktów — ciągłość ponad
-  ponowne wyprowadzanie
+- kanoniczny Dziennik Operatora repozytorium:
+  `<repo-root>/.vibecrafted/JOURNAL.md` — ciągłość ponad ponowne wyprowadzanie
+
+Datowane raporty, trackery, transkrypty i metadane runu w katalogu artefaktów
+to projekcje runu i evidence. Nie tworzą drugiego systemu dziennika.
 
 Wywołania narzędzi:
 
@@ -177,14 +180,15 @@ lub małego bounded researchu wewnątrz sesji operatora.
 
 Przed odpaleniem przeskanuj treść każdego promptu pod kątem niebezpiecznych komend i triggerów
 hard-stop. Jeśli prompt prosi o niedozwolone działanie hard-stop, odmów
-dispatchu i zapisz rozwidlenie w `journal.md`.
+dispatchu i zapisz materialne rozwidlenie w
+`<repo-root>/.vibecrafted/JOURNAL.md`.
 
 Kształt fali per `./GUIDE.md` (A foundation / B sequential / C
 parallel / D close-out). Odpalaj po jednej fali naraz. W obrębie fali
 odpalaj wszystkie równoległe prompty w jednej paczce; sekwencyjne prompty
 czekają na wylądowanie poprzedniego commita.
 
-### 7. Wejdź w kanoniczny runtime pętli i dopisz do `journal.md`
+### 7. Wejdź w kanoniczny runtime pętli i dopisz do `JOURNAL.md`
 
 Użyj `vibecrafted loop` jako kanonicznej powierzchni interaktywnej kontynuacji,
 gdy agent operatora musi utrzymać stan między odpowiedziami:
@@ -206,16 +210,19 @@ bezpieczeństwa **fallback** — zobacz `./AWAIT.md` po tabelę opóźnień.
 
 Wywołania narzędzi per wybudzenie:
 
-- na każdym wybudzeniu `/loop` **oraz** na każdym `<task-notification>` i
-  na każdym odpaleniu heartbeatu dopisz jeden wpis do:
-  `<artifact-dir>/journal.md` (REC-4 — pojedyncza rosnąca oś czasu tylko do
-  dopisywania, nie trzy oddzielne artefakty)
 - przeczytaj raport workera przez `Read` (cały plik, nie surowy
   transkrypt output zadania)
 - zweryfikuj, że commit wylądował na `result_branch` przez
   `Bash: git log -1 <result-branch>`
 - zweryfikuj, że bramki są zielone, czytając sekcję gate-output raportu
 - przerzuć `[ ]` → `[x]` w trackerze fali per `./EMIL.md` Reguła 1
+
+Dopisz do `<repo-root>/.vibecrafted/JOURNAL.md` tylko wtedy, gdy wybudzenie
+przynosi materialne działanie, decyzję, zmianę evidence, ryzyko, odzyskiwanie,
+integrację lub wymaganą lukę akceptacji. Telemetria runtime'u już dowodzi
+rutynowych wybudzeń i niezmienionego stanu; nie powtarzaj rutynowego raportowania
+pracy niewykonanej. Dziennik jest śledzoną przez Git prawdą repozytorium i pisze
+do niego tylko Operator.
 
 Kształt wpisu do dziennika (per wybudzenie):
 
@@ -225,7 +232,9 @@ Kształt wpisu do dziennika (per wybudzenie):
 - run_id: <run-id>
 - wave: <wave>-<position>
 - agent: <agent>
-- status: <fired | notify-received | heartbeat-fire | stop-point>
+- decyzja lub działanie: <materialna zmiana>
+- evidence: <raport, bramka, SHA lub falsyfikowalny finding>
+- ryzyko lub luka akceptacji: <jeśli istnieje>
 - next move: <one-line>
 ```
 
@@ -249,7 +258,8 @@ powierzchnie zewnętrzne + zaufanie/bezpieczeństwo/billing + powierzchnia
 skill/konwencja) oraz szablon handoffu w punkcie stopu. Soft stopy
 (zmiana kształtu dispatchu, pominięcie scope, dodanie scope, rebase,
 cherry-pick) mogą przebiec bez nowego przycisku, gdy nie zmieniają
-finalnego celu; każda taka mutacja musi być zapisana w `journal.md`.
+finalnego celu; każda taka mutacja musi być zapisana w
+`<repo-root>/.vibecrafted/JOURNAL.md`.
 Mutacje zmieniające scope nadal wymagają przycisku.
 
 Gdy tracker fali jest cały `[x]`, a następny ruch jest po stronie operatora
@@ -271,7 +281,8 @@ jest już dozwolony — zrób go po swoich commitach.
 - [ ] krok 5 każdy brief wyrenderowany do `<artifact-dir>/briefs/`
 - [ ] krok 6 każde odpalenie workera poszło przez launcher `vibecrafted`
       (natywne subagenty tylko do zwiadu/researchu, nie do dispatchu floty)
-- [ ] krok 7 `journal.md` jest aktualny; tracker fali jest aktualny
+- [ ] krok 7 `<repo-root>/.vibecrafted/JOURNAL.md` zawiera każdą materialną
+      decyzję Operatora; tracker fali jest aktualny
 - [ ] handoff w punkcie stopu napisany i operator powiadomiony
 
 ---

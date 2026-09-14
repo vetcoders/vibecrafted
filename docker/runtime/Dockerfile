@@ -1,4 +1,4 @@
-# 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Runtime Container — full stack for dragon (tailnet-accessible)
+# 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Runtime Container — full stack for host-a (tailnet-accessible)
 #
 # Extends ../Dockerfile (the v1.x Linux base) by baking in:
 #   - all foundations (loctree-mcp, aicx-mcp, prview, screenscribe)
@@ -50,7 +50,7 @@ RUN apt-get update \
 
 # SSH hardening — accept tailnet-only by virtue of tailscale sidecar, but
 # still disable password auth, root login, and tunnel-by-default. Operator
-# uses `tailscale ssh runtime-dragon` (tailscale identity, not unix passwords).
+# uses `tailscale ssh runtime-host-a` (tailscale identity, not unix passwords).
 RUN sed -i \
       -e 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' \
       -e 's/^#*PermitRootLogin.*/PermitRootLogin no/' \

@@ -1,0 +1,37 @@
+# The release source gate (release.yml) runs `make test-core` on macos-15 —
+# but only on a tag push. Measured 2026-08-19 on v4.1.0 @ 27ad70e2: the
+# repaired runner reached the core suite for the first time in five weeks and
+# found 5 failures the operator host never shows (3x terminal runtime, a
+# KeyError: 'env' in the cell launcher, the resume-pack red). Nothing before
+# the tag had ever put the suite on a bare macOS image. This workflow closes
+# that loop: the same suite, the same runner, on every pull request and on
+# demand — so a tag is a confirmation, not an experiment.
+name: Core runtime tests (macOS)
+
+on:
+  pull_request:
+    paths:
+      - "vibecrafted-core/**"
+      - "Makefile"
+      - ".github/workflows/core-macos.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  core-macos:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+
+      # Exactly what release.yml's source-gate runs, so a green check here
+      # predicts the tag gate instead of the tag discovering the suite.
+      - name: Run core runtime tests
+        run: make test-core

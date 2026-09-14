@@ -150,8 +150,8 @@ _vetcoders_marbles() {
 _vetcoders_aicx_resume_fallback() {
   local agent="$1"
   local root="${2:-$(_vetcoders_repo_root)}"
-  local hours="${VIBECRAFTED_RESUME_AICX_HOURS:-48}"
-  local tmp_dir context_file meta_file aicx_bin python_spec py import_root
+  local hours="${VIBECRAFTED_RESUME_AICX_HOURS:-96}"
+  local tmp_dir context_file meta_file aicx_bin python_spec py source_dir
   aicx_bin="$(_vetcoders_aicx_bin 2>/dev/null)" || {
     echo "aicx foundation not found in the Vibecrafted runtime, ~/.local/bin, ~/.cargo/bin, or PATH." >&2
     echo "Install the AICX foundation or pass --session <session_id>." >&2
@@ -162,23 +162,19 @@ _vetcoders_aicx_resume_fallback() {
   context_file="$tmp_dir/resume-aicx-${agent}-$(date +%Y%m%d_%H%M%S).md"
   meta_file="${context_file}.meta.json"
 
-  # Prefer the module next to this shell file so a stale installed
-  # vibecrafted_core cannot hide the live assembler.
-  source_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || true)"
-  module=""
-  if [[ -n "$source_dir" && -f "$source_dir/../../../aicx_session_chain.py" ]]; then
-    module="$(cd "$source_dir/../../.." && pwd)/aicx_session_chain.py"
-  fi
-  python_spec="$(_vetcoders_core_python_spec 2>/dev/null || true)"
+  # Run the assembler as a package module: it imports its siblings
+  # (runtime_receipt), which a bare script path cannot resolve. The owned core
+  # leads PYTHONPATH so a stale installed package cannot hide the live
+  # assembler. Do not rediscover through BASH_SOURCE (empty under zsh).
+  source_dir="$(_vetcoders_owned_core_dir 2>/dev/null || true)"
+  python_spec="$(_vetcoders_core_python_spec)" || return 1
   py="${python_spec%%$'\t'*}"
-  if [[ -z "$py" ]]; then
-    py="$(command -v python3 2>/dev/null || true)"
-  fi
-  if [[ -z "$py" || -z "$module" ]]; then
+  if [[ -z "$py" || -z "$source_dir" || ! -f "$source_dir/vibecrafted_core/aicx_session_chain.py" ]]; then
     echo "Vibecrafted session-chain assembler unavailable (python or module missing)." >&2
     return 1
   fi
-  "$py" "$module" resume-pack \
+  PYTHONPATH="$source_dir${PYTHONPATH:+:$PYTHONPATH}" \
+    "$py" -m vibecrafted_core.aicx_session_chain resume-pack \
     --agent "$agent" \
     --root "$root" \
     --hours "$hours" \
@@ -187,42 +183,22 @@ _vetcoders_aicx_resume_fallback() {
     --meta-file "$meta_file"
 }
 
-# Resolve one Python >=3.11 that can import the live vibecrafted_core package.
+# Resolve one owned Python >=3.11 that can import the live vibecrafted_core
+# package. Interpreter selection is `_vetcoders_owned_python_bin` (installed
+# generation fail-closed; source checkout keeps the development fallback).
+# Import root is the captured/owned core dir — never empty zsh BASH_SOURCE.
 # Output is: <python-path><TAB><optional-PYTHONPATH-import-root>.
+# PYTHONPATH is applied only for this proof, never exported.
 _vetcoders_core_python_spec() {
-  local py="" candidate package_parent="" source_dir=""
-  for candidate in \
-    "${VIBECRAFTED_PYTHON:-}" \
-    "${XDG_DATA_HOME:-$HOME/.local/share}/uv/tools/vibecrafted-core/bin/python3" \
-    python3.13 python3.12 python3.11 python3; do
-    [[ -n "$candidate" ]] || continue
-    command -v "$candidate" >/dev/null 2>&1 || continue
-    if "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' \
-      >/dev/null 2>&1; then
-      py="$(command -v "$candidate")"
-      break
-    fi
-  done
-  [[ -n "$py" ]] || {
-    echo "Vibecrafted core requires Python >=3.11; no eligible interpreter found." >&2
-    return 1
-  }
+  local py="" package_parent=""
+  py="$(_vetcoders_owned_python_bin)" || return 1
+  package_parent="$(_vetcoders_owned_core_dir)" || return 1
   if "$py" -c 'import vibecrafted_core' >/dev/null 2>&1; then
     printf '%s\t\n' "$py"
     return 0
   fi
-  source_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || true)"
-  # Packaged layout: shell/lib → … → vibecrafted-core (parent of
-  # vibecrafted_core). Checkout layout is a hardlinked runtime twin under
-  # <repo>/runtime, so its import root is <repo>/vibecrafted-core instead.
-  if [[ -n "$source_dir" ]]; then
-    package_parent="$(cd "$source_dir/../../../.." && pwd 2>/dev/null || true)"
-    if [[ ! -d "$package_parent/vibecrafted_core" ]]; then
-      package_parent="$(cd "$source_dir/../../.." && pwd 2>/dev/null || true)/vibecrafted-core"
-    fi
-  fi
-  if [[ -n "$package_parent" && -d "$package_parent/vibecrafted_core" ]] &&
-    PYTHONPATH="$package_parent${PYTHONPATH:+:$PYTHONPATH}" \
+  if [[ -d "$package_parent/vibecrafted_core" ]] &&
+    PYTHONPATH="$package_parent" \
       "$py" -c 'import vibecrafted_core' >/dev/null 2>&1; then
     printf '%s\t%s\n' "$py" "$package_parent"
     return 0
@@ -233,27 +209,46 @@ _vetcoders_core_python_spec() {
 
 _vetcoders_run_core_cli() {
   local python_spec py import_root
-  python_spec="$(_vetcoders_core_python_spec)" || return 1
+  # The owned interpreter/import-root lookups can fail without a word; every
+  # tracked route (resume-session, workflow) must still say why it refused.
+  python_spec="$(_vetcoders_core_python_spec)" || {
+    echo "Vibecrafted core is unavailable: no owned interpreter imports vibecrafted_core." >&2
+    return 1
+  }
   py="${python_spec%%$'\t'*}"
   import_root="${python_spec#*$'\t'}"
   if [[ -n "$import_root" ]]; then
-    PYTHONPATH="$import_root${PYTHONPATH:+:$PYTHONPATH}" \
+    PYTHONPATH="$import_root" \
       "$py" -m vibecrafted_core.cli "$@"
   else
     "$py" -m vibecrafted_core.cli "$@"
   fi
 }
 
-_vetcoders_core_source_dir() {
-  local python_spec py import_root
+# Cursor --force/--trust admission uses the shared Cursor probe (commit
+# 7597d881: probe_cursor_cli_surface / require_cursor_flags). Fail closed —
+# never hardcode flags from error prose or a missing probe.
+_vetcoders_cursor_permission_flags() {
+  local python_spec py import_root timeout
   python_spec="$(_vetcoders_core_python_spec)" || return 1
   py="${python_spec%%$'\t'*}"
   import_root="${python_spec#*$'\t'}"
+  timeout="${VIBECRAFTED_CURSOR_PROBE_TIMEOUT_S:-10}"
   if [[ -n "$import_root" ]]; then
-    PYTHONPATH="$import_root${PYTHONPATH:+:$PYTHONPATH}" \
-      "$py" -c 'from vibecrafted_core.package_resources import package_root; print(package_root())'
+    PYTHONPATH="$import_root" \
+      "$py" - "$timeout" <<'PY'
+import sys
+from vibecrafted_core.cursor_admission import cursor_permission_flag_string
+
+print(cursor_permission_flag_string(timeout=float(sys.argv[1])))
+PY
   else
-    "$py" -c 'from vibecrafted_core.package_resources import package_root; print(package_root())'
+    "$py" - "$timeout" <<'PY'
+import sys
+from vibecrafted_core.cursor_admission import cursor_permission_flag_string
+
+print(cursor_permission_flag_string(timeout=float(sys.argv[1])))
+PY
   fi
 }
 
@@ -367,53 +362,25 @@ _vetcoders_fresh_session_command() {
         printf 'grok --cwd . --permission-mode bypassPermissions --no-alt-screen %s\n' "$quoted_prompt"
       fi
       ;;
+    cursor)
+      # cursor-agent: `-p` reads the prompt positionally. Bypass flags come
+      # only from the shared Cursor probe (7597d881) — no hardcoded --force/--trust.
+      local cursor_perm_flags=""
+      cursor_perm_flags="$(_vetcoders_cursor_permission_flags)" || {
+        echo "cursor-agent capability probe refused --force/--trust (Cursor 7597d881 required; no silent downgrade)." >&2
+        return 1
+      }
+      if [[ "$mode" == headless ]]; then
+        printf 'cursor-agent -p --output-format stream-json %s %s\n' "$cursor_perm_flags" "$quoted_prompt"
+      else
+        printf 'cursor-agent %s %s\n' "$cursor_perm_flags" "$quoted_prompt"
+      fi
+      ;;
     *)
       echo "Unknown agent for fresh resume session: $tool" >&2
       return 1
       ;;
   esac
-}
-
-_vetcoders_launch_tracked_resume() {
-  local tool="$1"
-  local agent_session_id="$2"
-  local prompt_text="$3"
-  local model="${4:-}"
-  local root_dir source_dir
-  local -a core_args
-  root_dir="${_vetcoders_contract_root:-$(_vetcoders_repo_root)}"
-  source_dir="$(_vetcoders_core_source_dir)" || {
-    echo "Tracked resume refused: Vibecrafted core is unavailable." >&2
-    return 1
-  }
-  [[ -n "$prompt_text" ]] || {
-    echo "Tracked resume requires explicit input or an AICX continuity pack." >&2
-    return 1
-  }
-
-  if [[ -n "$agent_session_id" ]]; then
-    core_args=(
-      resume-session "$tool"
-      --agent-session-id "$agent_session_id"
-      --prompt-stdin
-      --root "$root_dir"
-      --source-dir "$source_dir"
-    )
-    [[ -n "$model" ]] && core_args+=(--model "$model")
-    printf '%s' "$prompt_text" | _vetcoders_run_core_cli "${core_args[@]}"
-    return $?
-  fi
-
-  core_args=(
-    workflow "$tool"
-    --prompt-stdin
-    --runtime headless
-    --root "$root_dir"
-    --source-dir "$source_dir"
-    --mode resume-new-session
-  )
-  [[ -n "$model" ]] && core_args+=(--model "$model")
-  printf '%s' "$prompt_text" | _vetcoders_run_core_cli "${core_args[@]}"
 }
 
 _vetcoders_looks_like_run_id() {
@@ -427,15 +394,54 @@ _vetcoders_looks_like_run_id() {
 _vetcoders_resume_agent() {
   local tool="$1"
   shift
+  # Keep the caller's public vector for a possible no-TTY handoff. The parsed
+  # contract projection intentionally does not retain every public spelling.
+  # Bash 3.2 with `set -u` rejects an empty declared-array expansion. Keep an
+  # actually empty public vector empty; it must not become one blank argument.
+  # Assign it explicitly: bash 5 treats a declared-but-unassigned array as
+  # unbound, even for `${#array[@]}`.
+  local -a _vetcoders_resume_public_argv=()
+  if (( $# )); then
+    _vetcoders_resume_public_argv=("$@")
+  fi
+  local _vetcoders_contract_allow_model=1
+  local _vetcoders_contract_single_prompt=1
   _vetcoders_parse_contract "$@" || return 1
+  case "${_vetcoders_contract_runtime:-}" in
+    ""|headless|terminal|visible) ;;
+    *) printf 'Unsupported resume runtime; no host adapter is available.\n' >&2; return 2 ;;
+  esac
+  case "${_vetcoders_contract_execution_runtime:-}" in
+    ""|living-tree|local-worktrees) ;;
+    *) printf 'Unsupported execution runtime: no host adapter.\n' >&2; return 2 ;;
+  esac
+  if [[ -n "${_vetcoders_contract_last:-}" ]]; then
+    printf 'Use --session last; resume --last is retired.\n' >&2
+    return 2
+  fi
+  if [[ -n "${_vetcoders_contract_session:-}" && -n "${_vetcoders_contract_run_id:-}" ]]; then
+    printf 'Choose one identity: --session or --run-id.\n' >&2
+    return 2
+  fi
+  if [[ -n "${_vetcoders_contract_prompt_explicit:-}${_vetcoders_contract_file_explicit:-}" && -n "${_vetcoders_contract_runtime:-}" && "$_vetcoders_contract_runtime" != headless ]]; then
+    printf 'Task resume is noninteractive; use --runtime headless.\n' >&2
+    return 2
+  fi
+  # Normalize an explicit --root ONCE, before anything changes cwd (shared
+  # owner with the init family; see _vetcoders_normalize_declared_contract_root).
+  _vetcoders_normalize_declared_contract_root resume || return 1
   if [[ -n "${_vetcoders_contract_help:-}" ]]; then
     echo "Resume a provider session or a stopped control-plane run." >&2
     echo "  vibecrafted resume ${tool} --session <provider-uuid>" >&2
     echo "  vibecrafted resume ${tool} --run-id <work-...>" >&2
-    echo "  vibecrafted resume ${tool} --run-id <work-...> | --last" >&2
+    echo "  vibecrafted resume ${tool} --session current|last" >&2
     return 0
   fi
-  if [[ -n "${_vetcoders_contract_run_id:-}" || -n "${_vetcoders_contract_last:-}" ]]; then
+  if [[ -n "${_vetcoders_contract_execution_runtime:-}${_vetcoders_contract_worktree:-}" && -n "${_vetcoders_contract_prompt_explicit:-}${_vetcoders_contract_file_explicit:-}" ]]; then
+    printf 'Noninteractive resume preserves its checkout; execution/worktree overrides require fork.\n' >&2
+    return 2
+  fi
+  if [[ -n "${_vetcoders_contract_run_id:-}" || -n "${_vetcoders_contract_last:-}" ]] && [[ -n "${_vetcoders_contract_prompt_explicit:-}${_vetcoders_contract_file_explicit:-}" ]]; then
     if [[ -n "${_vetcoders_contract_session:-}" ]]; then
       echo "--session and --run-id/--last cannot be combined. Use one identity." >&2
       return 1
@@ -445,10 +451,16 @@ _vetcoders_resume_agent() {
     )
     [[ -n "${_vetcoders_contract_run_id:-}" ]] && core_args+=(--run-id "$_vetcoders_contract_run_id")
     [[ -n "${_vetcoders_contract_last:-}" ]] && core_args+=(--last)
-    [[ -n "${_vetcoders_contract_prompt:-}" ]] && core_args+=(--prompt "$_vetcoders_contract_prompt")
+    [[ -n "${_vetcoders_contract_prompt:-}" ]] && core_args+=(--prompt-stdin)
+    [[ -n "${_vetcoders_contract_model:-}" ]] && core_args+=(--model "$_vetcoders_contract_model")
+    [[ -n "${_vetcoders_contract_base:-}" ]] && core_args+=(--base "$_vetcoders_contract_base")
     [[ -n "${_vetcoders_contract_file:-}" ]] && core_args+=(--file "$_vetcoders_contract_file")
     [[ -n "${_vetcoders_contract_root:-}" ]] && core_args+=(--root "$_vetcoders_contract_root")
-    _vetcoders_run_core_cli "${core_args[@]}"
+    if [[ -n "${_vetcoders_contract_prompt:-}" ]]; then
+      printf '%s' "$_vetcoders_contract_prompt" | _vetcoders_run_core_cli "${core_args[@]}"
+    else
+      _vetcoders_run_core_cli "${core_args[@]}"
+    fi
     return $?
   fi
   if [[ -n "${_vetcoders_contract_session:-}" ]] && _vetcoders_looks_like_run_id "$_vetcoders_contract_session"; then
@@ -500,14 +512,82 @@ _vetcoders_resume_agent() {
     resume_explicit_input=1
   fi
 
+  if [[ -n "${_vetcoders_contract_base:-}" && -z "${_vetcoders_contract_run_id:-}" ]]; then
+    printf 'A provider session has no baseline receipt; use --run-id with --base.\n' >&2
+    return 2
+  fi
+  # Explicit native continuation is a tracked core job. Preserve the full
+  # plan (including model frontmatter); never compose a file-pointer prompt.
+  if [[ -n "$_vetcoders_contract_session" && -n "$resume_explicit_input" && -z "${_vetcoders_contract_fork_session:-}" ]]; then
+    local -a native_args=(resume-session "$tool" --agent-session-id "$_vetcoders_contract_session")
+    [[ -z "${_vetcoders_contract_root:-}" ]] || native_args+=(--repo "$_vetcoders_contract_root")
+    [[ -z "${_vetcoders_contract_model:-}" ]] || native_args+=(--model "$_vetcoders_contract_model")
+    if [[ -n "$_vetcoders_contract_file" ]]; then
+      [[ -z "$_vetcoders_contract_prompt" ]] || { printf 'Use one of --prompt or --file.\n' >&2; return 2; }
+      _vetcoders_run_core_cli "${native_args[@]}" --prompt-file "$_vetcoders_contract_file"
+    else
+      printf '%s' "$_vetcoders_contract_prompt" | _vetcoders_run_core_cli "${native_args[@]}" --prompt-stdin
+    fi
+    return $?
+  fi
+
+  if [[ -n "${_vetcoders_contract_fork_session:-}" ]]; then
+    printf 'Use vibecrafted fork with the native session identity; resume never silently becomes a fork.\n' >&2
+    return 2
+  fi
+  if [[ -n "$resume_explicit_input" ]]; then
+    local -a fresh_args=(workflow "$tool" --runtime headless)
+    [[ -z "${_vetcoders_contract_root:-}" ]] || fresh_args+=(--repo "$_vetcoders_contract_root")
+    [[ -z "${_vetcoders_contract_model:-}" ]] || fresh_args+=(--model "$_vetcoders_contract_model")
+    [[ -z "${_vetcoders_contract_base:-}" ]] || fresh_args+=(--base "$_vetcoders_contract_base")
+    [[ -z "${_vetcoders_contract_execution_runtime:-}" ]] || fresh_args+=(--execution-runtime "$_vetcoders_contract_execution_runtime")
+    [[ -z "${_vetcoders_contract_worktree:-}" ]] || fresh_args+=(--worktree "$_vetcoders_contract_worktree")
+    if [[ -n "$_vetcoders_contract_file" ]]; then
+      _vetcoders_run_core_cli "${fresh_args[@]}" --file "$_vetcoders_contract_file"
+    else
+      printf '%s' "$_vetcoders_contract_prompt" | _vetcoders_run_core_cli "${fresh_args[@]}" --prompt-stdin
+    fi
+    return $?
+  fi
+  # Admission resolves the checkout before the Frame target owner is consulted.
+  local resume_declared_root="${_vetcoders_contract_root:-}"
+
+  # Missing owned interpreter/import-root is a real refusal. Prove it before
+  # AICX continuity or provider composition so a broken/foreign owner cannot
+  # assemble a pack and then fail.
+  _vetcoders_core_python_spec >/dev/null || return 1
+
+  [[ -z "$_vetcoders_contract_count" ]] || {
+    echo "--count is only supported by vibecrafted marbles." >&2
+    return 1
+  }
+  [[ -z "$_vetcoders_contract_depth" ]] || {
+    echo "--depth is only supported by vibecrafted marbles." >&2
+    return 1
+  }
+
+  # Admission is deliberately before AICX: a public no-TTY request must hand
+  # the declaration to its visible terminal child before composing continuity
+  # or a provider command. The child re-parses this exact public argv and does
+  # each side effect exactly once.
+  local runtime="${_vetcoders_contract_runtime:-terminal}"
+  local _resume_terminal_admission=0
+  if (( ${#_vetcoders_resume_public_argv[@]} )); then
+    _vetcoders_declaration_escalate_if_needed resume "$tool" \
+      "${_vetcoders_resume_public_argv[@]}" || _resume_terminal_admission=$?
+  else
+    _vetcoders_declaration_escalate_if_needed resume "$tool" || _resume_terminal_admission=$?
+  fi
+  case "$_resume_terminal_admission" in 0) return 0 ;; 1) return 1 ;; esac
+
   local aicx_fallback_mode=""
   local aicx_context_file=""
-  if [[ -z "$_vetcoders_contract_session" && -z "$resume_explicit_input" ]]; then
-    # No session id: compose multi-agent continuity from AICX (48h default).
+  if [[ -z "$_vetcoders_contract_session" && -z "${_vetcoders_contract_run_id:-}${_vetcoders_contract_last:-}" && -z "$resume_explicit_input" ]]; then
+    # No session id: compose project intentions plus supplementary continuity.
     local root_dir fallback_lines
     root_dir="${_vetcoders_contract_root:-$(_vetcoders_repo_root)}"
     printf 'No --session: assembling AICX multi-agent continuity (last %sh)...\n' \
-      "${VIBECRAFTED_RESUME_AICX_HOURS:-48}" >&2
+      "${VIBECRAFTED_RESUME_AICX_HOURS:-96}" >&2
     fallback_lines="$(_vetcoders_aicx_resume_fallback "$tool" "$root_dir")" || return 1
     local line key val
     while IFS= read -r line; do
@@ -533,145 +613,55 @@ _vetcoders_resume_agent() {
       fi
       _vetcoders_contract_file="$aicx_context_file"
       printf '  context: %s\n' "$aicx_context_file" >&2
-      printf '  NEW session with continuity pack (no implicit native attach)\n' >&2
+      printf '  NEW session with project intentions (no implicit native attach)\n' >&2
     fi
     aicx_fallback_mode="new_session"
   fi
 
-  [[ -z "$_vetcoders_contract_count" ]] || {
-    echo "--count is only supported by vibecrafted marbles." >&2
-    return 1
-  }
-  [[ -z "$_vetcoders_contract_depth" ]] || {
-    echo "--depth is only supported by vibecrafted marbles." >&2
-    return 1
-  }
-
-  local resume_prompt
-  local runtime
   local resume_cmd
-  local resume_mode
-  resume_prompt="$(_vetcoders_compose_input_context "$_vetcoders_contract_prompt" "$_vetcoders_contract_file")" || return 1
-  # An explicit --prompt/--file means "continue the job", not "open me a TUI":
-  # the resume must run the agent's NON-INTERACTIVE invocation even when a
-  # visible operator tab hosts it, so it finishes, exits, and can be triaged.
-  # Only a bare resume (no operator input) parks an interactive session in the
-  # tab. An internal AICX file is continuity transport and does not count as
-  # operator input for any provider.
-  resume_mode="interactive"
-  [[ -z "$resume_explicit_input" ]] || resume_mode="headless"
-  if [[ "$resume_mode" == interactive && -z "$_vetcoders_contract_runtime" ]]; then
-    # Worker dispatch defaults to headless, but a bare resume is deliberately
-    # an operator TUI. Keep that path terminal-backed unless explicitly set.
-    runtime="terminal"
-  else
-    runtime="$(_vetcoders_effective_runtime)"
-  fi
-
-  if [[ -n "$_vetcoders_contract_session" ]]; then
-    resume_cmd="$(_vetcoders_resume_command "$tool" "$_vetcoders_contract_session" "$resume_prompt" "$resume_mode" "${_vetcoders_contract_fork_session:-}")" || return 1
-  else
-    # A fork needs a base session to branch from; a silent fresh session would
-    # betray the operator's "keep the original untouched" intent.
-    if [[ -n "${_vetcoders_contract_fork_session:-}" ]]; then
-      echo "--fork-session needs a base session (--session <id>); AICX will not pick one." >&2
-      return 1
-    fi
-    # NEW session: continuity pack only (explicitly not a native resume).
-    resume_cmd="$(_vetcoders_fresh_session_command "$tool" "$resume_prompt" "$resume_mode")" || return 1
-    aicx_fallback_mode="${aicx_fallback_mode:-new_session}"
-  fi
-
-  # CONTRACT (G7): non-interactive resume ALWAYS lands in the worker host
-  # (right column), never the human operator seat. Interactive bare resume
-  # stays on the operator surface. AgentStreamParser renders streaming-json
-  # for grok so the worker pane is human-readable; raw stream is teed aside.
-  local stream_raw=""
-
-  if [[ "$resume_mode" == headless ]] && [[ "$runtime" =~ ^(terminal|visible)$ ]] && {
-    _vetcoders_in_vc_frame ||
-      [[ -n "${VIBECRAFTED_OPERATOR_SESSION:-}" ]] ||
-      [[ -n "${VIBECRAFTED_WORKER_SESSION:-}" ]] ||
-      [[ -t 0 && -t 1 ]]
-  }; then
-    local worker_host
-    worker_host="$(_vetcoders_effective_worker_session 2>/dev/null || true)"
-    if [[ -n "$worker_host" ]]; then
-      stream_raw="$(_vetcoders_resume_raw_transcript_path "$tool")"
-      resume_cmd="$(
-        _vetcoders_wrap_with_agent_stream "$tool" "$resume_cmd" "$stream_raw"
-      )" || return 1
-      export VIBECRAFTED_WORKER_SESSION="${VIBECRAFTED_WORKER_SESSION:-$worker_host}"
-      _vetcoders_spawn_into_operator_session "resume-${tool}" "$resume_cmd" || return 1
-      printf 'Resume launched in worker session: %s\n' "$VIBECRAFTED_WORKER_SESSION"
-      printf '  agent:   %s\n' "$tool"
-      printf '  mode:    headless (G7 workers column)\n'
-      if [[ -n "$_vetcoders_contract_session" ]]; then
-        printf '  session: %s\n' "$_vetcoders_contract_session"
-      elif [[ -n "$resume_explicit_input" ]]; then
-        printf '  session: (new — explicit non-interactive run)\n'
-      else
-        printf '  session: (new — aicx 48h multi-agent continuity)\n'
-      fi
-      [[ -n "$aicx_fallback_mode" ]] && printf '  aicx:    %s\n' "$aicx_fallback_mode"
-      [[ -n "$aicx_context_file" ]] && printf '  pack:    %s\n' "$aicx_context_file"
-      [[ -n "$stream_raw" && "$tool" == grok ]] && printf '  raw:     %s\n' "$stream_raw"
-      return 0
-    fi
-  fi
+  local _vetcoders_interactive_skill=resume
+  resume_cmd="$(_vetcoders_init_command_text "$tool" "${_vetcoders_contract_prompt:-}" "${_vetcoders_contract_policy_runtime:-local-native}" "${_vetcoders_contract_permissions:-bypass}" "${_vetcoders_contract_token_budget:-unmetered}")" || return 1
+  local _resume_admission=0
+  _vetcoders_enter_admitted_interactive resume "$resume_cmd" || _resume_admission=$?
+  case "$_resume_admission" in 0) return 0 ;; 1) return 1 ;; esac
+  resume_declared_root="$_vetcoders_contract_root"
 
   # Interactive resume — provider-neutral policy (adapters only change argv):
   #   bare resume → interactive → explicit or detected operator target
   #   prompt/file → tracked headless worker (handled above)
   # Prepare resolves: explicit env | in-frame | attached/current | repo-bound
   # live | single live. Multi-candidate ambiguity fails closed with a list.
-  if [[ "$resume_mode" == interactive ]] && [[ "$runtime" =~ ^(terminal|visible)$ ]]; then
-    _vetcoders_prepare_operator_runtime "$runtime" || return 1
+  if [[ "$runtime" =~ ^(terminal|visible)$ ]]; then
+    # defer-attach: preparation may CREATE this project's session, but it must
+    # not hand the terminal to a foreground client yet — that client blocks
+    # until detach, so the provider tab below would only be created after the
+    # operator closed the window they were waiting for.
+    # A declared root hands preparation to the declared-workspace owner; a
+    # bare resume keeps the generic detection (explicit env | in-frame |
+    # canonical bound live | create).
+    _vetcoders_prepare_operator_runtime "$runtime" defer-attach "$resume_declared_root" resume || return 1
     if [[ -n "${VIBECRAFTED_OPERATOR_SESSION:-}" ]]; then
-      _vetcoders_spawn_into_operator_session "resume-${tool}" "$resume_cmd" || return 1
+      _vetcoders_spawn_into_operator_session "$(_vetcoders_operator_face_tab "$tool")" "$resume_cmd" || return 1
       printf 'Resume launched in operator session: %s\n' "$VIBECRAFTED_OPERATOR_SESSION"
       printf '  agent:   %s\n' "$tool"
+      [[ -z "$resume_declared_root" ]] || printf '  root:    %s\n' "$resume_declared_root"
       if [[ -n "$_vetcoders_contract_session" ]]; then
         printf '  session: %s\n' "$_vetcoders_contract_session"
       else
-        printf '  session: (new — aicx 48h multi-agent continuity)\n'
+        printf '  session: (new — aicx %sh project intentions)\n' "${VIBECRAFTED_RESUME_AICX_HOURS:-96}"
       fi
       [[ -n "$aicx_fallback_mode" ]] && printf '  mode:    %s\n' "$aicx_fallback_mode"
       [[ -n "$aicx_context_file" ]] && printf '  pack:    %s\n' "$aicx_context_file"
+      # Last act: the tab exists, so the terminal may now be handed over. This
+      # blocks until the Founder detaches, which is exactly what they asked for.
+      _vetcoders_attach_prepared_vc_frame_session || return $?
       return 0
     fi
   fi
 
-  if [[ "$resume_mode" == interactive ]]; then
-    printf 'Interactive %s resume requires an explicit or detected operator target; refusing to downgrade to a headless run.\n' "$tool" >&2
-    printf '  export VIBECRAFTED_OPERATOR_SESSION=<session>  # jawny target\n' >&2
-    printf '  # or run from an attached vc-frame tab / leave exactly one live session\n' >&2
-    local live_hint=""
-    live_hint="$(_vetcoders_list_live_vc_frame_sessions 2>/dev/null | head -20 || true)"
-    if [[ -n "$live_hint" ]]; then
-      printf '  live vc-frame sessions:\n' >&2
-      while IFS= read -r live_name; do
-        [[ -n "$live_name" ]] || continue
-        printf '    - %s\n' "$live_name" >&2
-      done <<< "$live_hint"
-    fi
-    return 1
-  fi
+  printf 'Interactive %s resume requires an admitted Frame target; no provider was downgraded to headless.\n' "$tool" >&2
+  return 1
 
-  # No vc-frame surface: core owns the detached lifetime, control-plane record,
-  # transcript, and Guardian-visible process identity. There is deliberately no
-  # raw nohup/setsid fallback when core cannot prove the launch contract.
-  if [[ -n "${_vetcoders_contract_fork_session:-}" ]]; then
-    # The tracked core path (resume-session / workflow launcher) has no fork
-    # contract yet; dropping the flag here would silently mutate the original
-    # session the operator asked to preserve.
-    echo "--fork-session is not supported on the tracked core resume path yet; run inside vc-frame or use a bare (interactive) resume." >&2
-    return 1
-  fi
-  _vetcoders_launch_tracked_resume \
-    "$tool" \
-    "$_vetcoders_contract_session" \
-    "$resume_prompt"
 }
 
 _vetcoders_resume_command() {
@@ -792,7 +782,9 @@ _vetcoders_resume_command() {
 _vetcoders_agent_for_session() {
   local session_id="$1"
   [[ -n "$session_id" ]] || return 1
-  python3 - "$session_id" "${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/artifacts" <<'PY'
+  local python_bin=""
+  python_bin="$(_vetcoders_internal_python)"
+  "$python_bin" - "$session_id" "${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/artifacts" <<'PY'
 import json
 import pathlib
 import sys
@@ -835,15 +827,15 @@ vc-resume() {
   fi
   local tool="${1:-}"
   [[ -n "$tool" ]] || {
-    echo "Usage: vc-resume <claude|codex|agy|junie|grok> [<session_id>] [prompt ...] | --session <session_id> [--prompt <text>] [--file <path>]" >&2
-    echo "  Without --session: NEW interactive session + AICX continuity pack (last ${VIBECRAFTED_RESUME_AICX_HOURS:-48}h). Never native attach." >&2
+    echo "Usage: vc-resume <claude|codex|agy|junie|grok|cursor> [<session_id>] [prompt ...] | --session <session_id> [--prompt <text>] [--file <path>]" >&2
+    echo "  Without --session: NEW interactive session + AICX project intentions (last ${VIBECRAFTED_RESUME_AICX_HOURS:-96}h). Never native attach." >&2
     return 1
   }
   if [[ "$tool" == "--session" ]]; then
     _vetcoders_parse_contract "$@" || return 1
     tool="$(_vetcoders_agent_for_session "$_vetcoders_contract_session")" || {
       echo "Could not infer agent for session: $_vetcoders_contract_session" >&2
-      echo "Usage: vc-resume <claude|codex|agy|junie|grok> --session $_vetcoders_contract_session" >&2
+      echo "Usage: vc-resume <claude|codex|agy|junie|grok|cursor> --session $_vetcoders_contract_session" >&2
       return 1
     }
   else

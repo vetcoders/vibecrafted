@@ -206,10 +206,8 @@ EOF_LAUNCH
   if [[ -n "$startup_watch_pid" ]]; then
     wait "$startup_watch_pid" 2>/dev/null || true
   fi
-  # Before triage: triage may close this tab, and survivors must not outlive us.
+  # Canonical evidence is closed before terminal-run residue is reaped.
   spawn_reap_run
-  # Last: a successful transfer closes this very tab.
-  spawn_triage_run "$meta"
 else
   exit_code=$command_status
   spawn_finish_meta "$meta" "failed" "$exit_code"
@@ -225,15 +223,14 @@ EOF_LAUNCH
   if [[ -n "$startup_watch_pid" ]]; then
     wait "$startup_watch_pid" 2>/dev/null || true
   fi
-  # Before triage: triage may close this tab, and survivors must not outlive us.
+  # Canonical evidence is closed before terminal-run residue is reaped.
   spawn_reap_run
-  # Last: a successful transfer closes this very tab.
-  spawn_triage_run "$meta"
   exit "$exit_code"
 fi
 EOF_LAUNCH
 
   if ! spawn_check_shell_syntax "$launcher" "generated launcher"; then
+    spawn_settle_early_failure "generated launcher has invalid shell syntax" || true
     if [[ -f "$meta_path" ]]; then
       spawn_finish_meta "$meta_path" "failed" "1" 2>/dev/null || true
     fi
@@ -250,10 +247,12 @@ spawn_launch_headless() {
   # that group, the "detached" run is killed before it writes a transcript.
   # macOS has no setsid(1); use Python's start_new_session (posix setsid) for a
   # portable true-detach, with stdio fully off the parent's (possibly piped) fds.
-  # Fall back to nohup+& only where python3 is unavailable.
+  # Fall back to nohup+& only where the resolved runtime python is absent.
   local launcher_pid=""
-  if command -v python3 >/dev/null 2>&1; then
-    launcher_pid="$(VC_LAUNCHER="$launcher" python3 - <<'PY'
+  local launcher_python=""
+  launcher_python="$(spawn_python_bin)"
+  if command -v "$launcher_python" >/dev/null 2>&1; then
+    launcher_pid="$(VC_LAUNCHER="$launcher" "$launcher_python" - <<'PY'
 import os, subprocess
 proc = subprocess.Popen(
     [os.environ["VC_LAUNCHER"]],
@@ -270,6 +269,18 @@ PY
   if [[ -z "$launcher_pid" ]]; then
     nohup "$launcher" >/dev/null 2>&1 &
     launcher_pid=$!
+  fi
+  if [[ -n "$launcher_pid" ]]; then
+    if [[ -n "${SPAWN_META:-}" ]]; then
+      spawn_update_meta_pid "$SPAWN_META" "$launcher_pid"
+    fi
+    if [[ -n "${SPAWN_RUN_ID:-}" ]]; then
+      local canonical_meta=""
+      canonical_meta="$(spawn_runtime_meta_path "$SPAWN_RUN_ID" 2>/dev/null || true)"
+      if [[ -n "$canonical_meta" ]]; then
+        spawn_update_meta_pid "$canonical_meta" "$launcher_pid"
+      fi
+    fi
   fi
   printf 'Spawned headless launcher (pid=%s): %s\n' "$launcher_pid" "$launcher"
 }
@@ -385,10 +396,20 @@ spawn_print_launch() {
   local _reset='\033[0m'
   local _bar="${_steel}──────────────────────────────────${_reset}"
 
+  local meta_receipt="${SPAWN_META:-—}"
+  if [[ -n "${SPAWN_RUN_ID:-}" ]]; then
+    local canonical_receipt=""
+    canonical_receipt="$(spawn_runtime_meta_path "$SPAWN_RUN_ID" 2>/dev/null || true)"
+    if [[ -n "$canonical_receipt" ]]; then
+      meta_receipt="$canonical_receipt"
+    fi
+  fi
+
   printf '\n%b ⚒  𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. · %s-%s%b\n' "$_bold$_copper" "$agent" "$mode" "$_reset"
   printf '%b\n' "$_bar"
   printf '%b  plan:    %b%s%b\n'   "$_steel" "$_reset" "${SPAWN_PLAN:-—}" "$_reset"
   printf '%b  report:  %b%s%b\n'   "$_steel" "$_reset" "${SPAWN_REPORT:-—}" "$_reset"
+  printf '%b  meta:    %b%s%b\n'   "$_steel" "$_reset" "$meta_receipt" "$_reset"
   printf '%b  trace:   %b%s%b\n'   "$_steel" "$_reset" "${SPAWN_TRANSCRIPT:-—}" "$_reset"
   printf '%b  runtime: %b%s%b\n'   "$_steel" "$_reset" "$runtime" "$_reset"
   printf '%b\n' "$_bar"

@@ -46,13 +46,8 @@ vinfo() {
 
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
 
-vibecrafted_home() {
-  if [[ -n "${VIBECRAFTED_HOME:-}" ]]; then
-    printf '%s\n' "$VIBECRAFTED_HOME"
-  else
-    printf '%s\n' "$HOME/.vibecrafted"
-  fi
-}
+# shellcheck source=scripts/lib/runtime-roots.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/runtime-roots.sh"
 
 detect_platform() {
   if [[ -n "$PLATFORM_OVERRIDE" ]]; then
@@ -80,7 +75,7 @@ workspace_root() {
     printf '%s\n' "$parent"
     return
   fi
-  default_root="$(vibecrafted_home)/vc-runtime"
+  default_root="$(default_vibecrafted_home)/vc-runtime"
   legacy_root="$HOME/Libraxis/vc-runtime"
   # Migration/fallback: honor a pre-existing legacy checkout so upgrades keep
   # resolving, but prefer the new default once it actually holds runtime
@@ -141,7 +136,7 @@ runtime_lab_docs() {
 }
 
 runtime_status_file() {
-  printf '%s/runtime/runtime.json\n' "$(vibecrafted_home)"
+  printf '%s/runtime/runtime.json\n' "$(default_vibecrafted_home)"
 }
 
 write_status() {
@@ -177,7 +172,7 @@ substrate_report() {
     mkdir -p "$lab_dir/reports"
     report="$lab_dir/reports/substrate-failure-installer.md"
   else
-    report="$(vibecrafted_home)/runtime/substrate-failure-${runtime}.md"
+    report="$(default_vibecrafted_home)/runtime/substrate-failure-${runtime}.md"
     mkdir -p "$(dirname "$report")"
   fi
   {

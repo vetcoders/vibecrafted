@@ -21,6 +21,7 @@ Schema: ``vibecrafted.delivery_receipt.v1``
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -503,6 +504,55 @@ def parse_installed_provenance(
         ),
         "installed_dirty": dirty,
         "version_line": version_line,
+    }
+
+
+def _runtime_foundation_provenance(
+    installed_path: str | None, *, foundation: str
+) -> dict[str, Any] | None:
+    """Read manifest-bound provenance for a binary inside a Runtime Pack.
+
+    Bare foundation version banners intentionally carry no Git SHA.  The
+    signed pack's ``runtime-foundations.json`` is the authority in that case;
+    the enclosing Vibecrafted generation SHA is not the foundation SHA.
+    """
+    if not installed_path:
+        return None
+    try:
+        executable = Path(installed_path).resolve(strict=True)
+    except OSError:
+        return None
+    root = executable.parent.parent
+    manifest_path = root / "runtime-foundations.json"
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if payload.get("schema") != "io.vetcoders.vibecrafted.runtime-foundations.v1":
+        return None
+    revisions = payload.get("source_revisions")
+    files = payload.get("files")
+    if not isinstance(revisions, dict) or not isinstance(files, dict):
+        return None
+    revision = revisions.get(foundation)
+    expected_hash = files.get(executable.name)
+    if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", revision):
+        return None
+    if not isinstance(expected_hash, str) or not re.fullmatch(
+        r"[0-9a-fA-F]{64}", expected_hash
+    ):
+        return None
+    try:
+        observed_hash = hashlib.sha256(executable.read_bytes()).hexdigest()
+    except OSError:
+        return None
+    if observed_hash != expected_hash.lower():
+        return None
+    return {
+        "installed_sha": revision.lower(),
+        "installed_dirty": False,
+        "sha_source": "runtime_foundations",
+        "foundation_root": str(root),
     }
 
 
@@ -1086,6 +1136,18 @@ def inspect_tool(spec: ToolSpec) -> dict[str, Any]:
             provenance = parse_installed_provenance(version_line, path_hint=hint)
             if isinstance(provenance.get("installed_sha"), str):
                 break
+        foundation_proof = (
+            _runtime_foundation_provenance(installed_path, foundation="aicx")
+            if spec.name == "aicx"
+            else None
+        )
+        if foundation_proof is not None:
+            provenance = {
+                **foundation_proof,
+                "version_line": version_line,
+            }
+    else:
+        foundation_proof = None
 
     # Source
     installed_manifest_probe = (
@@ -1094,14 +1156,38 @@ def inspect_tool(spec: ToolSpec) -> dict[str, Any]:
         else _InstalledRuntimeManifestProbe("absent")
     )
     installed_manifest = installed_manifest_probe.source
-    if installed_manifest_probe.state == "success":
+    if foundation_proof is not None:
+        source_root, source_method = None, "installed_runtime_foundation"
+    elif installed_manifest_probe.state == "success":
         source_root, source_method = None, "installed_runtime_manifest"
     elif installed_manifest_probe.state == "rejection":
         source_root, source_method = None, "installed_runtime_manifest_rejected"
     else:
         source_root, source_method = resolve_source_root(spec)
     source_block: dict[str, Any]
-    if installed_manifest is not None:
+    if foundation_proof is not None:
+        source_block = {
+            "path": foundation_proof["foundation_root"],
+            "owner_repo": "Loctree/aicx",
+            "branch": _unknown("checkout-free runtime foundation has no branch"),
+            "checkout_sha": foundation_proof["installed_sha"],
+            "resolution": source_method,
+            "dirty": False,
+        }
+        ab = {
+            "upstream": _unknown("checkout-free runtime foundation"),
+            "ahead": _unknown("checkout-free runtime foundation"),
+            "behind": _unknown("checkout-free runtime foundation"),
+        }
+        dirty = {
+            "dirty": False,
+            "source_dirty_count": 0,
+            "generated_dirty_count": 0,
+            "source_paths": [],
+            "generated_paths": [],
+        }
+        checkout_sha = source_block["checkout_sha"]
+    elif installed_manifest is not None:
         source_block = installed_manifest
         ab = {
             "upstream": _unknown("checkout-free installed generation"),

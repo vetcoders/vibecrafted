@@ -1,5 +1,6 @@
 import AppKit
 
+let application = NSApplication.shared
 let delegate = AppDelegate()
-NSApplication.shared.delegate = delegate
+application.delegate = delegate
 _ = NSApplicationMain(CommandLine.argc, CommandLine.unsafeArgv)

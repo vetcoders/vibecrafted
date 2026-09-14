@@ -77,7 +77,7 @@ Hard non-trust rules:
 - Do not say "complete" if any task was not full-read
 - Do not collapse all tasks into a general summary
 - Do not trust frontmatter status, prior agent reports, commit messages,
-  AICX entries, kronika notes, or "completed" annotations unless
+  AICX entries, chronicle notes, or "completed" annotations unless
   independently confirmed in current code/tests
 ```
 

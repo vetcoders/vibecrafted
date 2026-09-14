@@ -13,8 +13,8 @@ OUT="${1:-}"
 # Mappable: public skill-family shortcuts → vibecrafted <verb>
 # (exact name or documented 1:1 map)
 MAPPABLE=(
-  agents audit cron decorate delegate dispatch dou followup guard
-  help hydrate implement init intents justdo loop marbles operator
+  agents audit canary cron decorate delegate dispatch dou followup fork
+  guard help hydrate implement init intents justdo loop marbles operator
   ownership partner polarize prune release research resume review
   scaffold ship start trust workflow dashboard
 )

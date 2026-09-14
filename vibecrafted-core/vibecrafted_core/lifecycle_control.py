@@ -10,8 +10,10 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
+from .clock import utc_now_iso
 from .control_plane import await_run as control_plane_await_run
 from .control_plane import control_plane_home
+from .lifecycle_fleet import stage_fleet_progress
 from .lifecycle_runner import (
     LifecycleRunSpec,
     LifecycleSupervisor,
@@ -19,6 +21,7 @@ from .lifecycle_runner import (
     write_lifecycle_report,
     write_lifecycle_state,
 )
+from .stage_cast import primary_stage_agent
 
 RunLifecycle = Callable[[LifecycleRunSpec], dict[str, Any]]
 StopRun = Callable[..., dict[str, Any]]
@@ -43,11 +46,6 @@ CONTROL_VERBS = frozenset(
 def lifecycle_runs_home() -> Path:
     """Directory under the control-plane home where lifecycle run state.json files live."""
     return control_plane_home() / "lifecycle_runs"
-
-
-def _now_iso() -> str:
-    """Current local time as an ISO-8601 string with numeric UTC offset."""
-    return time.strftime("%Y-%m-%dT%H:%M:%S%z")
 
 
 def _load_state(state_path: Path) -> dict[str, Any]:
@@ -124,7 +122,7 @@ def record_operator_action(
     details: dict[str, Any],
 ) -> dict[str, Any]:
     """Persist a traced operator move: state.json, report.md, transcript line."""
-    entry = {"action": action, "at": _now_iso(), "details": details}
+    entry = {"action": action, "at": utc_now_iso(), "details": details}
     state.setdefault("operator_actions", []).append(entry)
     write_lifecycle_state(state_path, state)
     report_path = str(state.get("report_path") or "")
@@ -207,7 +205,7 @@ def _baton_agent(state: dict[str, Any], stage: str = "") -> str:
     # Operator-declared casting (mission frontmatter stage_agents) wins for a
     # stage it names; worker-requested next_agent steers only the un-cast rest.
     stage_agents = dict(spec_data.get("stage_agents") or {})
-    cast = str(stage_agents.get(str(stage or "").strip()) or "").strip()
+    cast = primary_stage_agent(stage_agents, stage)
     if cast:
         return cast
     return str(baton.get("next_agent") or spec_data.get("agent") or "codex")
@@ -228,6 +226,7 @@ def await_stage(
     get back the one truth that decides the next verb: the stage delivered
     its report, died without one, or genuinely stalled.
     """
+    started = time.monotonic()
     stages = list(state.get("stages") or [])
     if not stages:
         raise ValueError("nothing to await: no stage launched yet")
@@ -258,19 +257,48 @@ def await_stage(
     settled = bool(result.get("completed")) or bool(result.get("timed_out"))
     worker_alive = bool(result.get("worker_alive"))
     baton = dict(state.get("baton") or {})
+
+    # A WRITE stage that dispatched a fleet is not done when its stage worker
+    # exits: the cuts outlive it.  Keep waiting on the dispatcher's own ledger
+    # inside the same window the caller already granted.
+    fleet = stage_fleet_progress(state)
+    if fleet.get("present") and fleet.get("verdict") == "active":
+        deadline = started + max(float(idle_seconds), 0.0)
+        if hard_cap_seconds is not None:
+            deadline = min(deadline, started + max(hard_cap_seconds, 0.0))
+        step = max(float(interval_seconds), 0.01)
+        while time.monotonic() < deadline:
+            time.sleep(step)
+            fleet = stage_fleet_progress(state)
+            if fleet.get("verdict") != "active":
+                break
+
+    fleet_pending = bool(fleet.get("present")) and not bool(fleet.get("complete"))
+    total_timed_out = bool(
+        hard_cap_seconds is not None
+        and time.monotonic() >= started + max(hard_cap_seconds, 0.0)
+        and fleet_pending
+    )
+    reason = str(result.get("reason") or "")
+    if fleet_pending:
+        reason = f"fleet_{fleet.get('verdict')}"
     return {
         "run_id": str(state.get("run_id") or ""),
         "stage": str(last_stage.get("id") or ""),
         "stage_run_id": stage_run_id,
         "report": report_path,
         "report_written": report_written,
-        "completed": bool(result.get("completed")),
-        "timed_out": bool(result.get("timed_out")),
-        "reason": str(result.get("reason") or ""),
+        # The stage worker delivering is necessary, not sufficient: an
+        # outstanding fleet obligation is an unfinished stage.
+        "completed": bool(result.get("completed")) and not fleet_pending,
+        "stage_worker_completed": bool(result.get("completed")),
+        "timed_out": bool(result.get("timed_out")) or total_timed_out,
+        "reason": reason,
         "worker_alive": worker_alive,
         "worker_dead_without_report": settled
         and not worker_alive
         and not report_written,
+        "fleet": fleet,
         "next_stage": str(baton.get("next_stage") or ""),
         "next_agent": str(baton.get("next_agent") or ""),
     }
@@ -300,6 +328,32 @@ def approve_transition(
             + "; wait for the stage worker to finish writing, or approve "
             "--force to continue without the evidence trail"
         )
+    # A stage worker report proves the dispatcher stage reported.  It proves
+    # nothing about the cuts that stage dispatched: they are owned by the
+    # dispatcher's receipt ledger and outlive the worker.  Advancing the
+    # lifecycle over an active, failed, missing or unrecognised fleet
+    # obligation is how a run reaches "done" with work still open.
+    fleet = stage_fleet_progress(state)
+    if fleet.get("present") and not fleet.get("complete") and not force:
+        detail = ", ".join(fleet.get("blocking") or []) or str(fleet.get("verdict"))
+        message = (
+            f"fleet obligations not settled ({fleet.get('verdict')}): {detail}"
+            f"; authoritative receipts: {fleet.get('receipts_path')}"
+        )
+        if fleet.get("scheduler_error"):
+            message += f"; scheduler failed: {fleet['scheduler_error']}"
+        recovery = str(fleet.get("recovery_command") or "")
+        message += (
+            f"; recover the exact failed cut with: {recovery}"
+            if recovery
+            else (
+                "; this fleet was scheduled from a derived plan, so the "
+                "dispatcher's resume verb has no plan file to name — declare "
+                "dispatch_plan: in the mission to make it recoverable"
+            )
+        )
+        message += "; or approve --force to advance without the fleet"
+        raise ValueError(message)
     launcher = run_lifecycle_fn or run_lifecycle
     spec = _continuation_spec(
         state,
@@ -313,10 +367,17 @@ def approve_transition(
         "agent": spec.agent,
         "continuation_run_id": str(child.get("run_id") or ""),
     }
+    if fleet.get("present"):
+        details["fleet_verdict"] = str(fleet.get("verdict") or "")
+        details["fleet_dispatch_run_id"] = str(fleet.get("dispatch_run_id") or "")
     if force and missing:
         # A forced approve over missing cargo must leave a trace of what
         # evidence the continuation ran without.
         details["forced_missing_reports"] = missing
+    if force and fleet.get("present") and not fleet.get("complete"):
+        # Same rule for the fleet: a forced advance records exactly which
+        # obligations were left open behind it.
+        details["forced_open_fleet"] = list(fleet.get("blocking") or [])
     record_operator_action(state_path, state, "approve_transition", details)
     return child
 
@@ -332,28 +393,78 @@ def interrupt_workflow(
     stages = list(state.get("stages") or [])
     last_stage = stages[-1] if stages else {}
     stage_run_id = str((last_stage.get("launch") or {}).get("run_id") or "")
+    stop: StopRun
+    if stop_run_fn is None:
+        from .workflow import stop_run as _default_stop_run
+
+        stop = _default_stop_run
+    else:
+        stop = stop_run_fn
     stop_result: dict[str, Any] = {}
     if stage_run_id:
-        stop: StopRun
-        if stop_run_fn is None:
-            from .workflow import stop_run as _default_stop_run
-
-            stop = _default_stop_run
-        else:
-            stop = stop_run_fn
         stop_result = stop(stage_run_id, reason="lifecycle operator interrupt")
+
+    # Fence the scheduler BEFORE signalling its current providers.  A snapshot
+    # of active cuts is otherwise racy: queued work can launch after interrupt.
+    fleet = stage_fleet_progress(state)
+    scheduler_stop: dict[str, Any] = {}
+    if fleet.get("present"):
+        from .lifecycle_fleet import request_stage_dispatch_stop
+
+        scheduler_stop = request_stage_dispatch_stop(
+            str(fleet.get("dispatch_run_id") or "")
+        )
+
+    # Stopping the stage worker does not reach the cuts it dispatched: those
+    # are detached provider runs owned by the dispatcher's ledger.  Interrupt
+    # them by their recorded identity, so the operator's stop covers the work
+    # that is actually running.
+    fleet_stops: list[dict[str, Any]] = []
+    for cut in fleet.get("cuts") or []:
+        if cut.get("obligation") != "active":
+            continue
+        provider_run_id = str(cut.get("provider_run_id") or "")
+        if not provider_run_id:
+            # An active cut the dispatcher never gave a provider run: there is
+            # nothing to signal, and saying otherwise would be a false stop.
+            fleet_stops.append(
+                {
+                    "cut_id": cut.get("cut_id"),
+                    "provider_run_id": "",
+                    "stop_accepted": False,
+                    "stop_reason": "no provider run recorded",
+                }
+            )
+            continue
+        cut_stop = stop(provider_run_id, reason="lifecycle operator interrupt")
+        fleet_stops.append(
+            {
+                "cut_id": cut.get("cut_id"),
+                "provider_run_id": provider_run_id,
+                "stop_accepted": bool(cut_stop.get("accepted")),
+                "stop_reason": str(cut_stop.get("reason") or ""),
+            }
+        )
+
     state["status"] = "interrupted"
-    entry = record_operator_action(
-        state_path,
-        state,
-        "interrupt_workflow",
-        {
-            "stage_run_id": stage_run_id,
-            "stop_accepted": bool(stop_result.get("accepted")),
-            "stop_reason": str(stop_result.get("reason") or ""),
-        },
-    )
-    return {"status": "interrupted", "stage_run_id": stage_run_id, "action": entry}
+    details: dict[str, Any] = {
+        "stage_run_id": stage_run_id,
+        "stop_accepted": bool(stop_result.get("accepted")),
+        "stop_reason": str(stop_result.get("reason") or ""),
+    }
+    if fleet.get("present"):
+        details["fleet_dispatch_run_id"] = str(fleet.get("dispatch_run_id") or "")
+        details["scheduler_stop"] = scheduler_stop
+        details["fleet_stops"] = fleet_stops
+        details["fleet_recovery_command"] = str(fleet.get("recovery_command") or "")
+    entry = record_operator_action(state_path, state, "interrupt_workflow", details)
+    return {
+        "status": "interrupted",
+        "stage_run_id": stage_run_id,
+        "fleet_stops": fleet_stops,
+        "scheduler_stop": scheduler_stop,
+        "action": entry,
+    }
 
 
 def _manifest_stages(state: dict[str, Any]) -> list[dict[str, Any]]:
@@ -425,7 +536,7 @@ def accept_dou(state_path: Path, state: dict[str, Any], finding: str) -> dict[st
     if not text:
         raise ValueError("--finding is required to accept a DoU gap consciously")
     state.setdefault("accepted_dou_findings", []).append(
-        {"finding": text, "at": _now_iso()}
+        {"finding": text, "at": utc_now_iso()}
     )
     return record_operator_action(state_path, state, "accept_dou", {"finding": text})
 

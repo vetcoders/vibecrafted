@@ -1,6 +1,6 @@
 # VC Operator 23: Agent-Operator Dashboard
 
-- Repo: `/Users/tester/vc-workspace/vetcoders/vc-operator`
+- Repo: `~/vc-workspace/vetcoders/vc-operator`
 - Branch: `main`
 - Baseline commit: `c8bb3d2`
 - Generated: `2026-05-16`
@@ -15,7 +15,7 @@
 ## 1) Cel główny (1:1)
 
 > Agent-Operator pracuje ślepo. Wszystkie dane są na miejscu — AICX
-> extracts, `~/.vibecrafted/artifacts/`, `/tmp/claude-501/`, git logs —
+> extracts, `~/.vibecrafted/artifacts/`, `/tmp/claude-<uid>/`, git logs —
 > ale **nikt ich nie składa w jeden widok**. Operator widzi pojedyncze
 > raporty po fakcie, agent pamięta ostatnie kilka run_id, ale "ile
 > dispatch'y miało peer-tier compliance? które skille są martwe? co
@@ -38,7 +38,7 @@ dla agenta-operatora. Wszystko jest na miejscu!"_
   edition 2024). Dashboard naturally lives as a new tab inside it.
 - Authoritative single source for per-dispatch attribution:
   `~/.vibecrafted/artifacts/<org>/<repo>/<YYYY_MMDD>/<workflow>/reports/*.meta.json`.
-- Live state source: `/tmp/claude-501/<encoded-cwd>/<session-uuid>/tasks/<task-id>.output`
+- Live state source: `/tmp/claude-<uid>/<encoded-cwd>/<session-uuid>/tasks/<task-id>.output`
   (JSONL, streaming-aware reader required).
 - AICX corroboration: `aicx steer --json --agent <x>`, `aicx health --json`,
   `aicx intents --emit json --unresolved`.
@@ -84,8 +84,8 @@ responsive grid:
 │ gemini   31  ✓88% ⌀19min  peer-tier 100%  $XX                │
 └───────────────────────────────────────────────────────────────┘
 ┌─ Per-skill invocations ────┬─ Fleet health ───────────────────┐
-│ vc-ownership  ████ 42      │ disk dragon  ▓▓▓▓▓░ 78%          │
-│ vc-marbles    ███  31      │ disk div0    ▓▓▓░░░ 42%          │
+│ vc-ownership  ████ 42      │ disk host-a  ▓▓▓▓▓░ 78%          │
+│ vc-marbles    ███  31      │ disk host-b  ▓▓▓░░░ 42%          │
 │ vc-decorate   ██   18      │ aicx index   stale ⚠ (94h lag)   │
 │ vc-partner    ▏     2  ⚠   │ vc-agents up · MCP servers OK    │
 │ vc-workflow   ██   15      └──────────────────────────────────┘
@@ -122,7 +122,7 @@ vco health                  # fleet health only
 | AICX query           | `aicx serve` MCP endpoint OR `Command::new("aicx").args(["steer", "--json", …])` | Two integration paths; pick at Prompt 3                     |
 | Color / theming      | existing `tui-agent` palette (mid-light / mid-dark)                              | No new tokens                                               |
 | Git log parsing      | `git2` crate or `Command::new("git")`                                            | Per-author + `[agent/workflow]` prefix extraction           |
-| Disk health          | `Command::new("df").args(["-h"])` over Tailscale ssh                             | One impl, two hosts (dragon + div0)                         |
+| Disk health          | `Command::new("df").args(["-h"])` over Tailscale ssh                             | One impl, two hosts (host-a + host-b)                       |
 
 ---
 
@@ -169,7 +169,7 @@ vco health                  # fleet health only
 
 - [ ] **B-1** `vc-justdo claude --file 02-b-state-machine-and-watchers.md`
   - Mission: introduce `MissionControlState` struct, wire `notify`
-    watchers for `~/.vibecrafted/artifacts/` and `/tmp/claude-501/`,
+    watchers for `~/.vibecrafted/artifacts/` and `/tmp/claude-<uid>/`,
     set up the async runtime tasks that hydrate state from disk.
   - Agent: claude (Rust state machine is its sweet spot)
 - [ ] **B-2** `vc-justdo gemini --file 03-b-active-dispatches-panel.md`
@@ -244,7 +244,7 @@ it lands before Wave C-1 (Per-agent stats reads `model` field).
 ## 9) Operator handoff
 
 The plan ships as `~/vc-deliveries/PLAN_23_AGENT_OPERATOR_DASHBOARD.md`
-on dragon. Operator-agent loads via:
+on host-a. Operator-agent loads via:
 
 ```bash
 vc-operator claude --file ~/vc-deliveries/PLAN_23_AGENT_OPERATOR_DASHBOARD.md

@@ -185,7 +185,7 @@ spawn_current_tab_id() {
     vc_frame_cmd+=(--session "$session_name")
   fi
   raw="$("${vc_frame_cmd[@]}" action current-tab-info --json 2>/dev/null || true)"
-  python3 - "$raw" <<'PY'
+  "$(spawn_python_bin)" - "$raw" <<'PY'
 import json
 import sys
 
@@ -223,7 +223,7 @@ spawn_tab_id_by_name() {
     vc_frame_cmd+=(--session "$session_name")
   fi
   raw="$("${vc_frame_cmd[@]}" action list-tabs --json 2>/dev/null || true)"
-  python3 - "$tab_name" "$raw" <<'PY'
+  "$(spawn_python_bin)" - "$tab_name" "$raw" <<'PY'
 import json
 import sys
 
@@ -272,7 +272,7 @@ spawn_current_focused_pane_id() {
   local vc_frame_bin=""
   vc_frame_bin="$(spawn_vc_frame_bin)" || return 1
   raw="$("$vc_frame_bin" action list-panes --json --state 2>/dev/null || true)"
-  python3 - "$raw" <<'PY'
+  "$(spawn_python_bin)" - "$raw" <<'PY'
 import json
 import sys
 
@@ -531,7 +531,15 @@ spawn_vc_frame_create_host_session() {
   local session_name="${2:-}"
   [[ -n "$vc_frame_bin" && -n "$session_name" ]] || return 1
   local out="" status=0
-  out="$("$vc_frame_bin" attach --create-background "$session_name" 2>&1)" || status=$?
+  # Bounded create with ONLY the current client's attachment context cleared
+  # (2026-09-09). A dispatcher's targeting export or a stale pane marker can
+  # name exactly the host being resurrected; Frame mirrors VC_FRAME_SESSION_NAME
+  # into ZELLIJ_SESSION_NAME at startup and src/commands.rs:844 then panics
+  # ("trying to attach to the current session") instead of creating it. Twin
+  # of _vetcoders_vc_frame_create_host_session (shell/lib/vc_frame.sh).
+  out="$(env -u VC_FRAME -u VC_FRAME_PANE_ID -u VC_FRAME_SESSION_NAME \
+    -u ZELLIJ -u ZELLIJ_PANE_ID -u ZELLIJ_SESSION_NAME \
+    "$vc_frame_bin" attach --create-background "$session_name" 2>&1)" || status=$?
   if [[ -n "$out" ]]; then
     printf '%s\n' "$out" >&2
   fi
@@ -549,7 +557,7 @@ spawn_record_host_session_failure() {
   printf 'host session launch failed: %s\n' "$err" >&2
   local meta_path="${SPAWN_META:-}"
   [[ -n "$meta_path" && -f "$meta_path" ]] || return 0
-  python3 - "$meta_path" "$err" <<'PY' 2>/dev/null || true
+  "$(spawn_python_bin)" - "$meta_path" "$err" <<'PY' 2>/dev/null || true
 import datetime as dt
 import json
 import os

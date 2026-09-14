@@ -2,10 +2,10 @@
 # spawn_parity_test.sh — Plan 06 verification.
 #
 # Exercises scripts/lib/spawn.sh against the AGENT MODEL PARITY axiom
-# (kronika 2026-04-10). Four scenarios:
+# (doctrine 2026-04-10). Four scenarios:
 #
 #   1. Positive: Opus parent -> Opus child = OK
-#   2. Negative: Opus parent -> Sonnet child = REJECT with kronika diagnostic
+#   2. Negative: Opus parent -> Sonnet child = REJECT with doctrine diagnostic
 #   3. Override: Opus parent -> Sonnet child + VIBECRAFTED_SPAWN_ALLOW_DOWNGRADE=1
 #                = ALLOW with stderr warning
 #   4. Codex Spark exception: gpt-5.3 parent -> gpt-5.3-codex-spark child
@@ -113,10 +113,10 @@ fi
 
 out=$(expect_status 1 "spawn_require_parity opus->sonnet rejected" \
     spawn_require_parity "claude-opus-4-7" "claude-sonnet-4-7")
-if printf '%s' "$out" | grep -q "kronika 2026-04-10"; then
-    ok "rejection diagnostic cites kronika 2026-04-10"
+if printf '%s' "$out" | grep -q "doctrine 2026-04-10"; then
+    ok "rejection diagnostic cites doctrine 2026-04-10"
 else
-    bad "rejection diagnostic missing kronika citation"
+    bad "rejection diagnostic missing doctrine citation"
     printf '       got: %s\n' "$out" >&2
 fi
 if printf '%s' "$out" | grep -q "VIBECRAFTED_SPAWN_ALLOW_DOWNGRADE"; then

@@ -8,7 +8,27 @@ supports_project() {
     >/dev/null 2>&1
 }
 
-# Prefer the checkout-owned environment, then explicit supported interpreter
+# PYTHON selects one executable (a path or PATH command), never shell code or
+# interpreter flags. An explicit selection must work; do not silently replace it.
+if [[ ${PYTHON+x} ]]; then
+  resolved="$(type -P -- "$PYTHON" 2>/dev/null || true)"
+  if [[ -z "$resolved" || ! -f "$resolved" || ! -x "$resolved" ]]; then
+    printf 'vibecrafted: explicit PYTHON is not an executable: %s\n' "$PYTHON" >&2
+    exit 2
+  fi
+  # -ef compares file identity, including relative paths, symlinks and hardlinks.
+  if [[ "$resolved" -ef "${BASH_SOURCE[0]}" ]]; then
+    printf 'vibecrafted: explicit PYTHON resolves to project-python itself; refusing recursion.\n' >&2
+    exit 2
+  fi
+  if ! supports_project "$resolved"; then
+    printf 'vibecrafted: explicit PYTHON must support Python >=3.11 with stdlib tomllib: %s\n' "$PYTHON" >&2
+    exit 2
+  fi
+  exec "$resolved" "$@"
+fi
+
+# Prefer the checkout-owned environment, then supported interpreter
 # names. A generic `python3` is last because macOS/Xcode can resolve it to 3.9.
 for candidate in \
   "$repo_root/.venv/bin/python3" \

@@ -52,7 +52,7 @@ set +e
   # ---- Secret scan on pushed diff (when refs available) ------------------
   if [ "$HUSKY_PREPUSH_SECRETS" = "1" ] && [ -s "$PUSH_REFS_FILE" ]; then
     EMPTY_TREE="$(git hash-object -t tree /dev/null)"
-    while read -r local_ref local_sha remote_ref remote_sha; do
+    while read -r local_ref local_sha _remote_ref remote_sha; do
       [ -z "${local_sha:-}" ] && continue
       base="$remote_sha"
       if [ -z "$base" ] || [[ "$base" =~ ^0+$ ]]; then
@@ -68,9 +68,19 @@ set +e
     done < "$PUSH_REFS_FILE"
   fi
 
+  # Format and Semgrep gates evaluate Git objects, never the shared working
+  # copy. One projected tip per pushed ref is enough because pre-commit makes
+  # formatting a commit property for every new commit.
+  if [ ! -s "$PUSH_REFS_FILE" ]; then
+    printf 'HEAD HEAD refs/heads/HEAD 0000000000000000000000000000000000000000\n' > "$PUSH_REFS_FILE"
+  fi
+  while read -r _local_ref local_sha _remote_ref _remote_sha; do
+    [ -n "${local_sha:-}" ] || continue
+    git cat-file -e "${local_sha}^{commit}" >/dev/null 2>&1 || continue
+    husky_run_step "Commit-object gates (${local_sha:0:12})" husky_lint_push_object_gates "$local_sha"
+  done < "$PUSH_REFS_FILE"
+
   # ---- Full-repo gates (toggled via config.env) --------------------------
-  [ "$HUSKY_PREPUSH_PRETTIER_FULL" = "1" ] && husky_run_step "Prettier --check (full)" husky_lint_prettier_full
-  [ "$HUSKY_PREPUSH_SEMGREP_FULL"  = "1" ] && husky_run_step "Semgrep (full)"          husky_lint_semgrep_full
   [ "$HUSKY_PREPUSH_TSC"           = "1" ] && husky_run_step "tsc --noEmit"            husky_lint_tsc_full
   [ "$HUSKY_PREPUSH_LOCT_CYCLES"   = "1" ] && husky_run_step "Loctree cycles"          husky_lint_loct_cycles
   [ "$HUSKY_PREPUSH_LOCT_COMMANDS" = "1" ] && husky_run_advisory "Loctree FE↔BE"        husky_lint_loct_commands

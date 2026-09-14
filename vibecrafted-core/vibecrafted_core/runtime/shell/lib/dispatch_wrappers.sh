@@ -73,6 +73,18 @@ grok-implement() {
   _vetcoders_spawn_plan grok implement "$1" --runtime "$(_vetcoders_default_runtime)"
 }
 
+cursor-review() {
+  _vetcoders_spawn_plan cursor review "$1" --runtime "$(_vetcoders_default_runtime)"
+}
+
+cursor-plan() {
+  _vetcoders_spawn_plan cursor plan "$1" --runtime "$(_vetcoders_default_runtime)"
+}
+
+cursor-implement() {
+  _vetcoders_spawn_plan cursor implement "$1" --runtime "$(_vetcoders_default_runtime)"
+}
+
 codex-research() {
   _vetcoders_spawn_plan codex research "$1" --runtime "$(_vetcoders_default_runtime)"
 }
@@ -97,6 +109,10 @@ grok-research() {
   _vetcoders_spawn_plan grok research "$1" --runtime "$(_vetcoders_default_runtime)"
 }
 
+cursor-research() {
+  _vetcoders_spawn_plan cursor research "$1" --runtime "$(_vetcoders_default_runtime)"
+}
+
 codex-prompt() {
   _vetcoders_prompt codex implement "$@"
 }
@@ -119,6 +135,10 @@ junie-prompt() {
 
 grok-prompt() {
   _vetcoders_prompt grok implement "$@"
+}
+
+cursor-prompt() {
+  _vetcoders_prompt cursor implement "$@"
 }
 
 codex-observe() {
@@ -169,6 +189,14 @@ grok-await() {
   _vetcoders_await grok "$@"
 }
 
+cursor-observe() {
+  _vetcoders_observe cursor "$@"
+}
+
+cursor-await() {
+  _vetcoders_await cursor "$@"
+}
+
 _vetcoders_skill() {
   local tool="$1"
   local skill="$2"
@@ -179,7 +207,7 @@ _vetcoders_skill() {
   local inherited_run_lock
   inherited_run_id="$(_vetcoders_effective_run_id 2>/dev/null || true)"
   inherited_run_lock="$(_vetcoders_effective_run_lock 2>/dev/null || true)"
-  _vetcoders_parse_contract "$@" || return 1
+  _vetcoders_parse_skill_contract "$@" || return 1
   if [[ "$skill" == "polarize" && -n "$_vetcoders_contract_count" ]]; then
     _vetcoders_polarize_loop "$tool" "$@"
     return
@@ -194,6 +222,22 @@ _vetcoders_skill() {
   }
   [[ -z "$_vetcoders_contract_session" ]] || {
     echo "--session is only supported by vibecrafted resume." >&2
+    return 1
+  }
+  # An isolated checkout is owned by the core launcher (WorktreeManager via
+  # launch_workflow). The deck routes `--worktree` launches there before this
+  # helper is reached; if one still lands here, refuse instead of silently
+  # running in the shared checkout under a flag that promised isolation.
+  [[ "${_vetcoders_contract_worktree:-}" != "true" ]] || {
+    printf -- '--worktree true is honoured by the core launcher only: vibecrafted %s %s --worktree true ... (the shell skill helper cannot create a checkout).\n' "$skill" "$tool" >&2
+    return 1
+  }
+  # Execution controls are resolved against the installed provider CLI by the
+  # core launcher (execution_controls) and refused when unenforceable. The deck
+  # routes them there; a helper reached with one must refuse, never launch a
+  # worker under a policy it silently dropped.
+  [[ -z "${_vetcoders_contract_permissions:-}" && -z "${_vetcoders_contract_sandbox:-}" ]] || {
+    printf -- '--permissions/--sandbox are honoured by the core launcher only: vibecrafted %s %s --permissions <bypass|auto|accept-edits|read-only> --sandbox <true|false> ... (the shell skill helper cannot enforce them).\n' "$skill" "$tool" >&2
     return 1
   }
   local skill_code root run_id run_lock
@@ -252,6 +296,7 @@ _vetcoders_skill() {
   local spawn_args=(--runtime "$runtime")
   [[ -z "$_vetcoders_contract_dry_run" ]] || spawn_args+=(--dry-run)
   [[ -n "$_vetcoders_contract_root" ]] && spawn_args+=(--root "$_vetcoders_contract_root")
+  [[ -n "$_vetcoders_contract_model" ]] && spawn_args+=(--model "$_vetcoders_contract_model")
   if [[ "$skill" == "polarize" && "$prism_band" =~ ^(pass|doctrine)$ ]]; then
     local dispatch_output dispatch_status agent_log session_uuid
     agent_log="$(_vetcoders_store_dir "$root")/polarize/$run_id/${tool}.stdout.log"
@@ -353,7 +398,7 @@ _vetcoders_current_focused_vc_frame_pane_id() {
   local vc_frame_bin="$1"
   local raw=""
   raw="$("$vc_frame_bin" action list-panes --json --state 2>/dev/null || true)"
-  python3 - "$raw" <<'PY'
+  "$(_vetcoders_internal_python)" - "$raw" <<'PY'
 import json
 import sys
 
@@ -400,7 +445,7 @@ _vetcoders_current_focused_vc_frame_tab_id() {
   local vc_frame_bin="$1"
   local raw=""
   raw="$("$vc_frame_bin" action list-panes --json --state 2>/dev/null || true)"
-  python3 - "$raw" <<'PY'
+  "$(_vetcoders_internal_python)" - "$raw" <<'PY'
 import json
 import sys
 

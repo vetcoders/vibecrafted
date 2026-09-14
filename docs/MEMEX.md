@@ -7,7 +7,7 @@
 
 [`rust-memex`](https://github.com/vetcoders/rust-memex) is a small,
 namespace-aware semantic memory substrate. It indexes prior agent
-sessions, kronika fragments, and operator notes into chunks that can
+sessions, chronicle fragments, and operator notes into chunks that can
 be retrieved by free-text query across machines. The memex host
 serves its clients over your private network.
 
@@ -44,17 +44,23 @@ The fallthrough rule is documented inline in
 
 ## Configuration
 
-Two paths; the TOML file wins when both are present.
+Two paths; the `[memex]` table wins when both are present.
 
-### Option A — operator config file (recommended)
+### Option A — the `[memex]` table of the operator config (recommended)
 
-Copy the template:
+Memex settings are one table of `~/.config/vibecrafted/config.toml`, the same
+file that holds `[server]` (`XDG_CONFIG_HOME` is honoured). A token makes that
+file a secret, so keep it at mode 0600:
 
 ```bash
-mkdir -p ~/.config/vetcoders
-cp config/memex.toml.example ~/.config/vetcoders/memex.toml
-# Edit ~/.config/vetcoders/memex.toml — fill in endpoint and token.
+mkdir -p ~/.config/vibecrafted
+cat config/memex.toml.example >> ~/.config/vibecrafted/config.toml
+chmod 600 ~/.config/vibecrafted/config.toml
+# Edit the [memex] table — fill in endpoint and token.
 ```
+
+A standalone memex file from older installs is not read; the client logs one
+notice naming the `[memex]` table instead.
 
 Fields:
 
@@ -149,7 +155,7 @@ This is opt-in tooling. The agent perception layer works without
 memex — vibecrafted's v1.7 surface is unchanged for operators who
 don't configure it. When configured, memex offers cross-session
 context that would otherwise require manual escalation ("look at
-the silver session from last Thursday"). The trade-off:
+the host-d session from last Thursday"). The trade-off:
 weaker authority tier, opt-in cognitive load (token rotation,
 namespace hygiene), and dependence on a mesh service. Worth it for
 operators running multiple machines in the Vetcoders mesh; safe to

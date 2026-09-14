@@ -15,34 +15,34 @@ from typing import Any
 
 from . import control_plane
 from .events import append_event
-from .package_resources import deck_path as package_deck_path
-from .package_resources import package_root, runtime_path
+from .package_resources import deck_path, package_root, runtime_path
 from .spawn import Supervisor
 
-AGENTS = {"claude", "codex", "agy", "junie", "grok"}
+AGENTS = {"claude", "codex", "agy", "junie", "grok", "cursor"}
 SUCCESS_STATES = {"report_validated", "completed", "closed"}
 SKILL_PREFIX = {
     "agents": "agnt",
     "followup": "fwup",
     "implement": "just",
     "marbles": "marb",
+    "partner": "part",
     "prune": "prun",
     "review": "rvew",
     "scaffold": "scaf",
 }
+_JOB_INPUT_FLAGS = frozenset({"-p", "--prompt", "-f", "--file", "--prompt-stdin"})
 
 
-def repo_root() -> Path:
-    """The working directory the CLI was invoked from (the target repo root)."""
+def invocation_root() -> Path:
+    """The directory the CLI was invoked from — the target repo as the operator sees it.
+
+    Not ``loop.repo_root`` (git toplevel); the two answer different questions and
+    carried the same name until 2026-08-23."""
     return Path.cwd()
 
 
 def runtime_root() -> Path:
     return runtime_path()
-
-
-def deck_path() -> Path:
-    return package_deck_path()
 
 
 def _print_workflow_help(workflow_id: str) -> int:
@@ -56,6 +56,35 @@ def _print_workflow_help(workflow_id: str) -> int:
 def _has_flag(args: Sequence[str], name: str) -> bool:
     """True if `name` appears bare or as `name=value` among `args`."""
     return name in args or any(arg.startswith(f"{name}=") for arg in args)
+
+
+PARTNER_INTERACTIVE_ONLY = (
+    "`vc-partner` is available from interactive agent session. "
+    "Use vc-init first, and then trigger the skill from the active session"
+)
+
+
+def _stdio_is_interactive() -> bool:
+    """True when both stdin and stdout are TTYs. Closed stdio is not interactive."""
+    try:
+        return bool(sys.stdin.isatty() and sys.stdout.isatty())
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
+def argv_has_job_input(args: Sequence[str]) -> bool:
+    """True when argv carries explicit --prompt/--file/--prompt-stdin job text.
+
+    Bare init/operator/resume stay an interactive TTY face. On resume these
+    flags are the worker-dispatch payload (tracked headless run). Partner is
+    interactive-only: job flags never select a headless worker.
+    """
+    for arg in args:
+        if arg in _JOB_INPUT_FLAGS:
+            return True
+        if arg.startswith(("--prompt=", "--file=")):
+            return True
+    return False
 
 
 def _help_requested(args: Sequence[str]) -> bool:
@@ -246,7 +275,7 @@ def supervised_skill_main(skill: str, argv: Sequence[str] | None = None) -> int:
             " ".join(args),
             skill=skill,
             mode="raw",
-            root=repo_root(),
+            root=invocation_root(),
             command=args,
             env=_env_for_run(run_id, skill_code),
             run_id=run_id,
@@ -256,7 +285,7 @@ def supervised_skill_main(skill: str, argv: Sequence[str] | None = None) -> int:
         return handle.wait()
     if not args or args[0] not in AGENTS:
         print(
-            f"Usage: vc-{skill} <claude|codex|agy|junie|grok> [--prompt <text>|--file <path>]",
+            f"Usage: vc-{skill} <claude|codex|agy|junie|grok|cursor> [--prompt <text>|--file <path>]",
             file=sys.stderr,
         )
         return 2
@@ -272,7 +301,7 @@ def supervised_skill_main(skill: str, argv: Sequence[str] | None = None) -> int:
     if not _has_flag(rest, "--runtime"):
         command.extend(["--runtime", "headless"])
 
-    root = repo_root()
+    root = invocation_root()
     if sandbox:
         handle = Supervisor().spawn(
             agent,
@@ -411,8 +440,19 @@ def ownership_main(argv: Sequence[str] | None = None) -> int:
 
 
 def partner_main(argv: Sequence[str] | None = None) -> int:
-    """CLI entry for `vibecrafted partner`."""
-    return supervised_skill_main("partner", argv)
+    """CLI entry for `vc-partner`. Interactive skill; never a headless worker.
+
+    `vibecrafted partner <agent>` is the TTY launcher (init routing, seed
+    `/vc-partner`). This wrapper is the in-session skill: refuse without a TTY
+    and tell the caller to `vc-init` first, then trigger the skill there.
+    """
+    args = list(sys.argv[1:] if argv is None else argv)
+    if _help_requested(args):
+        return _print_workflow_help("partner")
+    if not _stdio_is_interactive():
+        print(PARTNER_INTERACTIVE_ONLY, file=sys.stderr)
+        return 1
+    return subprocess.call([str(deck_path()), "partner", *args])
 
 
 def release_main(argv: Sequence[str] | None = None) -> int:
@@ -446,7 +486,7 @@ def _prepare_research(args: Sequence[str], run_id: str) -> tuple[int, str]:
         command.extend(["--runtime", "headless"])
     proc = subprocess.run(
         command,
-        cwd=str(repo_root()),
+        cwd=str(invocation_root()),
         env=_env_for_run(run_id, "rsch"),
         text=True,
         stdout=subprocess.PIPE,
@@ -498,7 +538,7 @@ def research_main(argv: Sequence[str] | None = None) -> int:
         )
         return 1
 
-    root = repo_root()
+    root = invocation_root()
     if sandbox:
         supervisor = Supervisor()
         handles = [

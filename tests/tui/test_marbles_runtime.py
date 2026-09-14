@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
@@ -20,6 +21,25 @@ HELPER_SCRIPT = (
     / "vetcoders.sh"
 )
 
+_GENERATION_FIXTURE_SPEC = importlib.util.spec_from_file_location(
+    "tui_generation_fixture", Path(__file__).with_name("_generation_fixture.py")
+)
+assert _GENERATION_FIXTURE_SPEC is not None and _GENERATION_FIXTURE_SPEC.loader
+gen = importlib.util.module_from_spec(_GENERATION_FIXTURE_SPEC)
+_GENERATION_FIXTURE_SPEC.loader.exec_module(gen)
+
+# 65c7db7a binds VIBECRAFTED_ROOT to the sourced facade's own physical owner,
+# and that owner (this checkout, which carries VERSION) answers
+# `_vetcoders_spawn_home` before VIBECRAFTED_HOME/runtime is ranked. An isolated
+# VIBECRAFTED_ROOT therefore no longer selects the fake marbles_spawn.sh; the
+# tests name it through the resolver itself so the real spawn script (and the
+# real providers behind it) never runs.
+FAKE_MARBLES_SPAWN_RESOLVER = (
+    "_vetcoders_spawn_script() { "
+    '[[ "${2:-}" == marbles_spawn.sh ]] || return 1; '
+    'printf "%s" "$EXPECTED_MARBLES_SPAWN"; }'
+)
+
 
 def _write_fake_marbles_spawn(script_path: Path) -> None:
     script_path.write_text(
@@ -31,16 +51,30 @@ def _write_fake_marbles_spawn(script_path: Path) -> None:
 
 
 def _write_replaying_vc_frame(script_path: Path) -> None:
+    # Engine queries answer like the engine and are never replayed as commands:
+    # `ls`/`list-sessions` report FAKE_VC_FRAME_LIVE_SESSIONS, `action
+    # list-clients` reports one attached client, `--help` probes exit 0. An
+    # explicit operator session is honoured only while the engine reports it as
+    # a usable surface (fac246a7, vc_frame.sh `_vetcoders_vc_frame_surface_state`).
     payload = (
-        '#!/usr/bin/env python3\nimport os\nimport shutil\nimport subprocess\nimport sys\nfrom pathlib import Path\n\nargs = sys.argv[1:]\nPath(os.environ["VC_FRAME_CAPTURE_FILE"]).write_text("\\n".join(args) + "\\n", encoding="utf-8")\nif args:\n    cmd_script = Path(args[-1])\n    expected_spawn = os.environ.get("EXPECTED_MARBLES_SPAWN", "")\n    if expected_spawn and cmd_script.is_file():\n        payload = cmd_script.read_text(encoding="utf-8", errors="ignore")\n        if expected_spawn not in payload:\n            print(f"unsafe vc_frame replay target: {cmd_script}", file=sys.stderr)\n            sys.exit(97)\n    shell = shutil.which(\'zsh\') or shutil.which(\'bash\') or \'/bin/sh\'\n    subprocess.run([shell, \'-lc\', str(cmd_script)], check=True, env=os.environ.copy())'
+        "#!/usr/bin/env python3\nimport os\nimport shutil\nimport subprocess\nimport sys\nfrom pathlib import Path\n\nargs = sys.argv[1:]\n"
+        'query = args[2:] if args[:1] == ["--session"] else args\n'
+        'if query[:1] in (["ls"], ["list-sessions"]):\n'
+        '    for name in filter(None, os.environ.get("FAKE_VC_FRAME_LIVE_SESSIONS", "").split(":")):\n'
+        '        print(f"{name} [Created 1m ago]")\n'
+        "    sys.exit(0)\n"
+        'if query[:2] == ["action", "list-clients"]:\n'
+        '    print("CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND")\n'
+        '    print("1 terminal_0 zsh")\n'
+        "    sys.exit(0)\n"
+        'if "--help" in args:\n'
+        "    sys.exit(0)\n"
+        'Path(os.environ["VC_FRAME_CAPTURE_FILE"]).write_text("\\n".join(args) + "\\n", encoding="utf-8")\nif args:\n    cmd_script = Path(args[-1])\n    expected_spawn = os.environ.get("EXPECTED_MARBLES_SPAWN", "")\n    if expected_spawn and cmd_script.is_file():\n        payload = cmd_script.read_text(encoding="utf-8", errors="ignore")\n        if expected_spawn not in payload:\n            print(f"unsafe vc_frame replay target: {cmd_script}", file=sys.stderr)\n            sys.exit(97)\n    shell = shutil.which(\'zsh\') or shutil.which(\'bash\') or \'/bin/sh\'\n    subprocess.run([shell, \'-lc\', str(cmd_script)], check=True, env=os.environ.copy())'
         + "\n"
     )
+    script_path.parent.mkdir(parents=True, exist_ok=True)
     script_path.write_text(payload, encoding="utf-8")
     script_path.chmod(0o755)
-    if script_path.name == "vc-frame":
-        vc_frame = script_path.with_name("vc-frame")
-        vc_frame.write_text(payload, encoding="utf-8")
-        vc_frame.chmod(0o755)
 
 
 def _prepare_fake_marbles_bundle(tmp_path: Path) -> tuple[Path, Path]:
@@ -338,7 +372,9 @@ def _run_marbles_prompt(
     tmpdir_root.mkdir()
     spawn_script.parent.mkdir(parents=True)
     _write_fake_marbles_spawn(spawn_script)
-    _write_replaying_vc_frame(fake_bin / "vc-frame")
+    # The engine is the loaded generation's own entry (3d9da4dc), not PATH.
+    generation = gen.fake_generation(tmp_path)
+    _write_replaying_vc_frame(generation / "bin" / "vc-frame")
 
     env = os.environ.copy()
     env["HOME"] = str(home)
@@ -350,6 +386,7 @@ def _run_marbles_prompt(
     env["EXPECTED_MARBLES_SPAWN"] = str(spawn_script)
     env["TMPDIR"] = f"{tmpdir_root}/"
     env.pop("VIBECRAFTED_OPERATOR_SESSION", None)
+    env.pop("VIBECRAFTED_PREFER_REPO_VC_FRAME", None)
     env.pop("VC_FRAME", None)
     env.pop("VC_FRAME_PANE_ID", None)
     env.pop("VC_FRAME_SESSION_NAME", None)
@@ -363,6 +400,9 @@ def _run_marbles_prompt(
         env["VC_FRAME_SESSION_NAME"] = operator_session
     else:
         env["VIBECRAFTED_OPERATOR_SESSION"] = operator_session
+        # An explicit operator session is a target only while the engine
+        # reports it live with a client (fac246a7); the operator is in it.
+        env["FAKE_VC_FRAME_LIVE_SESSIONS"] = operator_session
 
     subprocess.run(
         [
@@ -370,6 +410,8 @@ def _run_marbles_prompt(
             "-lc",
             (
                 f'source "{HELPER_SCRIPT}"; '
+                f"{gen.loaded_root_prelude(generation)}; "
+                f"{FAKE_MARBLES_SPAWN_RESOLVER}; "
                 'claude-marbles --count 1 --prompt "weź i vc-justdo wszystko co marbles znajdzie"'
             ),
         ],
@@ -438,7 +480,8 @@ def test_vc_marbles_inside_vc_frame_prints_launch_receipt(tmp_path: Path) -> Non
     tmpdir_root.mkdir()
     spawn_script.parent.mkdir(parents=True)
     _write_fake_marbles_spawn(spawn_script)
-    _write_replaying_vc_frame(fake_bin / "vc-frame")
+    generation = gen.fake_generation(tmp_path)
+    _write_replaying_vc_frame(generation / "bin" / "vc-frame")
 
     env = os.environ.copy()
     env["HOME"] = str(home)
@@ -454,12 +497,18 @@ def test_vc_marbles_inside_vc_frame_prints_launch_receipt(tmp_path: Path) -> Non
     env["VC_FRAME_SESSION_NAME"] = "ambient-session"
     env["VETCODERS_SPAWN_RUNTIME"] = "terminal"
     env.pop("VIBECRAFTED_OPERATOR_SESSION", None)
+    env.pop("VIBECRAFTED_PREFER_REPO_VC_FRAME", None)
 
     result = subprocess.run(
         [
             "bash",
             "-lc",
-            f'source "{HELPER_SCRIPT}"; codex-marbles --count 1 --depth 3',
+            (
+                f'source "{HELPER_SCRIPT}"; '
+                f"{gen.loaded_root_prelude(generation)}; "
+                f"{FAKE_MARBLES_SPAWN_RESOLVER}; "
+                "codex-marbles --count 1 --depth 3"
+            ),
         ],
         check=True,
         cwd=REPO_ROOT,
@@ -487,11 +536,13 @@ def test_vc_marbles_defaults_to_headless_and_uses_no_watch(tmp_path: Path) -> No
     isolated_root.mkdir()
     spawn_script.parent.mkdir(parents=True)
     _write_fake_marbles_spawn(spawn_script)
-    (fake_bin / "vc-frame").write_text(
+    # A resolvable engine inside an attached frame, so "headless" is a choice
+    # and not a fallback: the generation's own entry (3d9da4dc) must stay unused.
+    generation = gen.fake_generation(tmp_path)
+    gen.write_executable(
+        generation / "bin" / "vc-frame",
         '#!/usr/bin/env bash\nset -euo pipefail\nprintf \'%s\\n\' "$@" > "$VC_FRAME_CAPTURE_FILE"\n',
-        encoding="utf-8",
     )
-    (fake_bin / "vc-frame").chmod(0o755)
 
     env = os.environ.copy()
     env["HOME"] = str(home)
@@ -500,17 +551,24 @@ def test_vc_marbles_defaults_to_headless_and_uses_no_watch(tmp_path: Path) -> No
     env["VIBECRAFTED_ROOT"] = str(isolated_root)
     env["CAPTURE_FILE"] = str(capture_file)
     env["VC_FRAME_CAPTURE_FILE"] = str(vc_frame_capture)
+    env["EXPECTED_MARBLES_SPAWN"] = str(spawn_script)
     env.pop("VETCODERS_SPAWN_RUNTIME", None)
     env["VC_FRAME"] = "operator"
     env["VC_FRAME_PANE_ID"] = "terminal_7"
     env["VC_FRAME_SESSION_NAME"] = "ambient-session"
     env.pop("VIBECRAFTED_OPERATOR_SESSION", None)
+    env.pop("VIBECRAFTED_PREFER_REPO_VC_FRAME", None)
 
     result = subprocess.run(
         [
             "bash",
             "-lc",
-            f'source "{HELPER_SCRIPT}"; codex-marbles --count 1 --prompt "telemetry smoke"',
+            (
+                f'source "{HELPER_SCRIPT}"; '
+                f"{gen.loaded_root_prelude(generation)}; "
+                f"{FAKE_MARBLES_SPAWN_RESOLVER}; "
+                'codex-marbles --count 1 --prompt "telemetry smoke"'
+            ),
         ],
         check=True,
         cwd=REPO_ROOT,
@@ -660,6 +718,55 @@ def test_parse_contract_fails_closed_on_unknown_flag() -> None:
     assert "Unknown flag: --bogus-flag" in result.stderr
 
 
+def test_skill_contract_accepts_model_and_dispatches_it_to_provider_spawn(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    brief = tmp_path / "audit.md"
+    brief.write_text("Audit this completed plan.\n", encoding="utf-8")
+    capture = tmp_path / "dispatch-argv"
+    lock = tmp_path / "run.lock"
+    lock.write_text("owned\n", encoding="utf-8")
+    env = os.environ.copy()
+    env.update(
+        {
+            "MODEL_ROOT": str(root),
+            "MODEL_BRIEF": str(brief),
+            "MODEL_CAPTURE": str(capture),
+            "MODEL_LOCK": str(lock),
+        }
+    )
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-lc",
+            (
+                f'source "{HELPER_SCRIPT}"; '
+                '_vetcoders_effective_run_id() { printf "audt-model-test\\n"; }; '
+                '_vetcoders_effective_run_lock() { printf "%s\\n" "$MODEL_LOCK"; }; '
+                "_vetcoders_prepare_operator_runtime() { return 0; }; "
+                "_vetcoders_vc_frame_bin() { return 1; }; "
+                "_vetcoders_print_launch_receipt() { return 0; }; "
+                "_vetcoders_maybe_spawn_await_pane() { return 0; }; "
+                '_vetcoders_dispatch_skill_prompt() { printf "%s\\n" "$@" > "$MODEL_CAPTURE"; }; '
+                "_vetcoders_skill claude audit --model claude-opus-5 "
+                '--file "$MODEL_BRIEF" --root "$MODEL_ROOT"'
+            ),
+        ],
+        check=False,
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    dispatched = capture.read_text(encoding="utf-8").splitlines()
+    assert dispatched[-4:] == ["--root", str(root), "--model", "claude-opus-5"]
+
+
 def test_parse_contract_double_dash_still_passes_literal_dash_text() -> None:
     payload = subprocess.run(
         [
@@ -772,11 +879,20 @@ def test_resume_agent_rejects_fork_session_for_non_claude() -> None:
     assert "--fork-session is only supported for claude resume" in result.stderr
 
 
-def test_resume_agent_fork_session_fails_closed_on_tracked_core_path() -> None:
-    # Tracked core resume (no vc-frame worker host) has no fork contract yet;
-    # dropping the flag would silently write into the session being preserved.
+def test_resume_agent_fork_session_fails_closed_on_tracked_core_path(
+    tmp_path: Path,
+) -> None:
+    # Tracked core resume has no fork contract; dropping the flag would silently
+    # write into the session being preserved. 36614036 routed explicit native
+    # continuation through `resume-session --repo` (shell/lib/marbles.sh, the
+    # `native_args` branch, which a fork request skips) and replaced the old
+    # "not supported on the tracked core resume path" exit 1 with a refusal
+    # that names the fork verb (exit 2, "resume never silently becomes a
+    # fork"). The refusal must happen before anything reaches the core CLI.
+    core_probe = tmp_path / "core-cli-called"
     env = os.environ.copy()
     env["VIBECRAFTED_RUNTIME"] = "headless"
+    env["CORE_PROBE"] = str(core_probe)
     env.pop("VIBECRAFTED_OPERATOR_SESSION", None)
     env.pop("VIBECRAFTED_WORKER_SESSION", None)
     result = subprocess.run(
@@ -785,6 +901,7 @@ def test_resume_agent_fork_session_fails_closed_on_tracked_core_path() -> None:
             "-lc",
             (
                 f'source "{HELPER_SCRIPT}"; '
+                '_vetcoders_run_core_cli() { printf "%s\\n" "$*" >> "$CORE_PROBE"; }; '
                 "_vetcoders_resume_agent claude --fork-session --session abc-123 "
                 '--prompt "go"'
             ),
@@ -795,8 +912,12 @@ def test_resume_agent_fork_session_fails_closed_on_tracked_core_path() -> None:
         capture_output=True,
         text=True,
     )
-    assert result.returncode == 1
-    assert "not supported on the tracked core resume path" in result.stderr
+    assert result.returncode == 2
+    assert (
+        "Use vibecrafted fork with the native session identity; "
+        "resume never silently becomes a fork."
+    ) in result.stderr
+    assert not core_probe.exists()
 
 
 def test_write_command_script_falls_back_to_bash_when_zsh_missing(

@@ -18,15 +18,32 @@ from . import doctor as doctor_module
 from .agent_stream import ANSI_PATTERN, AgentStreamParser, resolve_default_model
 from .control_plane import (
     RunNotResolved,
-    await_run,
     lookup_run,
     resolve_run,
     sync_state,
 )
+from .help_surface import CORE_SURFACE_COMMANDS
 from .package_resources import deck_path, package_root
+from .repo_selection import (
+    RepoSelectionError,
+    add_repo_arguments,
+    parse_worktree_flag,
+    select_repository,
+)
 from .runtime_paths import is_operator_home_root, resolve_operator_launch_root
+from .server_observation import (
+    ServerObservationError,
+)
+from .server_observation import (
+    await_run as await_run_from_server,
+)
+from .server_observation import (
+    observe_run as observe_run_from_server,
+)
+from .server_observation import (
+    resolve_run_id as resolve_server_run_id,
+)
 from .workflow import (
-    await_launch_truth,
     classify_resume_identity,
     find_run_for_identity_token,
     launch_workflow,
@@ -34,9 +51,13 @@ from .workflow import (
     manual_resume_session,
     normalize_launch_spec,
     operator_continue_run,
+    read_prompt_stream,
+    recover_launch_receipt,
+    resolve_fork_source,
+    resolve_session_selection,
 )
 
-AGENTS = {"claude", "codex", "agy", "junie", "grok", "swarm"}
+AGENTS = {"claude", "codex", "agy", "junie", "grok", "cursor", "swarm"}
 RESEARCH_ARITY = {"uno": 1, "duo": 2, "trio": 3}
 LAUNCHERS = (
     "audit",
@@ -72,13 +93,20 @@ LAUNCH_ALIASES: dict[str, str] = {}
 # argument as the command.
 SHELL_WRAPPER_VERBS = {
     "telemetry": "telemetry",
+    "vc-canary": "canary",
     "vc-dashboard": "dashboard",
     "vc-dispatch": "dispatch",
+    "vc-doctor": "doctor",
+    "vc-fork": "fork",
     "vc-help": "help",
     "vc-init": "init",
     "vc-justdo": "justdo",
+    "vc-operator": "operator",
+    "vc-receipt": "receipt",
     "vc-resume": "resume",
     "vc-start": "start",
+    "vc-status": "status",
+    "vc-update": "update",
 }
 SUCCESS_STATES = {"report_validated", "completed", "closed"}
 TERMINAL_STATES = {
@@ -99,8 +127,82 @@ _INSTALLER_LOCK_NAME = ".vibecrafted-install.lock"
 _EX_TEMPFAIL = 75
 
 
+def python_owned_commands() -> frozenset[str]:
+    """Commands ``cli.main`` keeps instead of delegating to the shell deck.
+
+    ``CORE_SURFACE_COMMANDS`` is the compact-help subset the deck must also
+    route. Internal verbs (fork-source, acp, …) stay here and unpublished.
+    """
+    return frozenset(
+        {
+            "acp",
+            "capabilities",
+            "config",
+            "control-plane-revalidate",
+            "dispatch",
+            "doctor",
+            "fork-source",
+            "fork-session",
+            "paste",
+            "procs",
+            "reap",
+            "receipt",
+            "session-source",
+            "settle",
+            "ship",
+            "stop",
+        }
+        | set(LAUNCHERS)
+        | set(CORE_SURFACE_COMMANDS)
+    )
+
+
+def _invoke_owned_main(main_fn: Any, argv: Sequence[str]) -> int:
+    """Run an owned argparse/main that may raise ``SystemExit`` on ``--help``."""
+    try:
+        result = main_fn(list(argv))
+    except SystemExit as exc:
+        code = exc.code
+        if code is None:
+            return 0
+        if isinstance(code, int):
+            return code
+        return 1
+    return int(result or 0)
+
+
+def _render_core_surface_help(topic: str) -> int:
+    """Render ``help <core-surface-verb>`` from the verb's owner."""
+    from .help_surface import render_message_help, render_resume_session_help
+
+    if topic == "resume-session":
+        print(render_resume_session_help(), end="")
+        return 0
+    if topic == "message":
+        print(render_message_help(), end="")
+        return 0
+    if topic == "relocate":
+        from .relocate import main as relocate_main
+
+        return _invoke_owned_main(relocate_main, ["--help"])
+    if topic == "claims":
+        from .repository_claims import claims_cli_main
+
+        return _invoke_owned_main(claims_cli_main, ["--help"])
+    if topic == "settlements":
+        parser = _build_parser()
+        return _invoke_owned_main(
+            lambda argv: parser.parse_args(argv) or 0, ["settlements", "--help"]
+        )
+    raise ValueError(f"unsupported core surface help topic: {topic}")
+
+
 def _normalize_research_arity_args(args: Sequence[str]) -> list[str]:
-    """Expand the stable uno/duo/trio contract before argparse sees agents."""
+    """Expand the stable uno/duo/trio contract before argparse sees agents.
+
+    Omitting these keywords leaves YAML ``lanes`` / ``lane_count`` in charge,
+    including four-agent rosters. The keywords only pin exact positional arity.
+    """
     normalized = list(args)
     if len(normalized) < 2 or normalized[0] != "research":
         return normalized
@@ -174,24 +276,67 @@ def _add_launch_parser(sub: argparse._SubParsersAction, name: str) -> None:
         run.add_argument("agent", nargs="?")
     if name == "paste":
         run.add_argument("--skill", default="workflow")
-        run.add_argument("--root", default="")
+        add_repo_arguments(run)
         run.add_argument("--print-prompt", action="store_true")
         run.add_argument("--dry-run", action="store_true")
         run.add_argument("--json", action="store_true")
         return
-    run.add_argument("-p", "--prompt", default="")
+    run.add_argument("-p", "--prompt", default=None)
     run.add_argument("-f", "--file", default="")
     run.add_argument(
         "--prompt-stdin",
         action="store_true",
         help="read the prompt from stdin and keep it out of argv/temp files",
     )
-    run.add_argument("--runtime", default="")
-    run.add_argument("--root", default="")
+    run.add_argument(
+        "--runtime", default="", help="presentation: headless, visible or terminal"
+    )
+    run.add_argument(
+        "--execution-runtime", choices=["living-tree", "local-worktrees"], default=""
+    )
+    run.add_argument("--base", default="")
+    add_repo_arguments(run)
+    run.add_argument(
+        "--worktree",
+        nargs="?",
+        const="true",
+        default="",
+        metavar="true|false",
+        help="run the worker in a fresh linked checkout of the selected repository",
+    )
+    run.add_argument(
+        "--permissions",
+        default="",
+        metavar="bypass|auto|accept-edits|read-only",
+        help=(
+            "permission policy enforced by the agent's own CLI "
+            "(default: bypass; junie: auto); refused before launch when the "
+            "installed CLI cannot enforce it"
+        ),
+    )
+    run.add_argument(
+        "--sandbox",
+        nargs="?",
+        const="true",
+        default="",
+        metavar="true|false",
+        help=(
+            "require (true) or refuse (false) the agent CLI's own sandbox; "
+            "refused before launch when the installed CLI cannot enforce it"
+        ),
+    )
     run.add_argument("--mode", default="")
     run.add_argument("--count", type=int)
     run.add_argument("--depth", type=int)
-    run.add_argument("--model", default="")
+    run.add_argument("--model", default=None)
+    run.add_argument(
+        "--session",
+        default="",
+        help=(
+            "continue this provider-native session (id|current|last); "
+            "never a control-plane run id"
+        ),
+    )
     if name == "research":
         run.add_argument("--synthesizer", default="")
         run.add_argument("--synthesizer-model", default="")
@@ -207,8 +352,35 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("dispatch", help="run or validate a dispatch plan")
+    ship = sub.add_parser(
+        "ship",
+        help="lifecycle launcher, DeliverySeal issuer, and roadmap projection",
+    )
+    ship.add_argument(
+        "ship_argv",
+        nargs=argparse.REMAINDER,
+        help="ship subcommand args (see vibecrafted ship --help / vc-ship)",
+    )
+    claims = sub.add_parser("claims", help="atomic local repository-mutation claims")
+    claims.add_argument(
+        "claims_argv",
+        nargs=argparse.REMAINDER,
+        help="claims subcommand args (see vibecrafted claims --help)",
+    )
+    revalidate = sub.add_parser("control-plane-revalidate", help=argparse.SUPPRESS)
+    revalidate.add_argument("--run-id", required=True)
+    revalidate.add_argument("--json", action="store_true")
     doctor = sub.add_parser("doctor", help="verify installed Vibecrafted runtime")
     doctor.add_argument("--json", action="store_true")
+    doctor.add_argument(
+        "--release",
+        action="store_true",
+        help=(
+            "probe GitHub Latest (gh release view --json tagName) and the "
+            "latest Release source gate conclusion against the local VERSION "
+            "file; mismatch is red and names the tag/publish operator button"
+        ),
+    )
     doctor.add_argument(
         "--quarantine-legacy-runs",
         action="store_true",
@@ -237,27 +409,12 @@ def _build_parser() -> argparse.ArgumentParser:
     capabilities.add_argument("--json", action="store_true")
     config = sub.add_parser(
         "config",
-        help="install/wire packaged vc-frame config into the tools store and ~/.config/vc-frame",
+        help="product configuration ownership and explicit shell onboarding",
     )
     config_sub = config.add_subparsers(dest="config_action")
-    config_install = config_sub.add_parser(
+    config_sub.add_parser(
         "install",
-        help="stage package config → tools store + wire ~/.config/vc-frame view",
-    )
-    config_install.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="print the wiring plan without mutating the filesystem",
-    )
-    config_install.add_argument(
-        "--force",
-        action="store_true",
-        help="replace healthy view links (default: leave healthy wiring alone)",
-    )
-    config_install.add_argument(
-        "--prefer-repo",
-        action="store_true",
-        help="wire view to checkout config/vc-frame (dev mode)",
+        help="retired: repair the verified Runtime Pack with make install",
     )
     config_zshrc = config_sub.add_parser(
         "ensure-zshrc",
@@ -386,17 +543,74 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="read the continuation prompt from stdin (keeps it out of argv)",
     )
-    resume.add_argument("--root", default="")
+    add_repo_arguments(resume)
     resume.add_argument("--source-dir", default="")
-    resume.add_argument("--model", default="")
+    resume.add_argument("--model", default=None)
     resume.add_argument("--json", action="store_true")
+    fork_source = sub.add_parser(
+        "fork-source",
+        help="resolve the provider session a `vibecrafted fork` branches from",
+    )
+    fork_source.add_argument(
+        "agent",
+        choices=sorted(AGENTS - {"swarm"}),
+        help="provider that owns the source session",
+    )
+    fork_source.add_argument("--run-id", default="")
+    fork_source.add_argument("--session", default="")
+    fork_source.add_argument("--json", action="store_true")
+    fork_source.add_argument("--root", default="")
+    session_source = sub.add_parser(
+        "session-source", help="resolve shared provider session selector"
+    )
+    session_source.add_argument("agent", choices=sorted(AGENTS - {"swarm"}))
+    session_source.add_argument("--session", required=True)
+    session_source.add_argument("--root", required=True)
+    session_source.add_argument("--id-only", action="store_true")
+    task_fork = sub.add_parser("fork-session", help="tracked native task fork")
+    task_fork.add_argument("agent", choices=sorted(AGENTS - {"swarm"}))
+    task_fork.add_argument("--session", required=True)
+    task_fork.add_argument("--session-selection", type=json.loads, default=None)
+    task_fork.add_argument("--parent-run-id", default="")
+    task_fork.add_argument("--root", required=True)
+    task_fork.add_argument("--model", default=None)
+    task_fork.add_argument("--base", default="")
+    task_fork.add_argument("--permissions", default="")
+    task_fork.add_argument("--worktree", default=None)
+    task_fork.add_argument("--execution-runtime", default="")
+    task_fork.add_argument("--source-dir", default="")
+    inputs = task_fork.add_mutually_exclusive_group(required=True)
+    inputs.add_argument("--file", default="")
+    inputs.add_argument("--prompt-stdin", action="store_true")
+    message = sub.add_parser(
+        "message",
+        help="persist and inspect run-addressed provider steering receipts",
+    )
+    message.add_argument("--run-id", default="")
+    message.add_argument("--file", default="", help="UTF-8 message body file")
+    message.add_argument("--idempotency-key", default="")
+    message.add_argument(
+        "--retry",
+        action="store_true",
+        help=(
+            "retry only an unresolved or failed receipt; "
+            "provider_accepted is never resubmitted"
+        ),
+    )
+    message.add_argument(
+        "--inspect",
+        metavar="MESSAGE_ID",
+        default="",
+        help="read one durable provider-message receipt",
+    )
+    message.add_argument("--json", action="store_true")
     for name in LAUNCHERS:
         _add_launch_parser(sub, name)
     return parser
 
 
 def _default_runtime(explicit_runtime: str, root: str = "") -> str:
-    """Resolve launch surface: explicit > real operator TTY > headless.
+    """Resolve launch surface: explicit presentation or headless.
 
     DELIBERATE REVERSAL of 141a19d / 3d794af (July 2026): those commits made
     dispatched workers prefer a visible ``terminal`` tab — either by
@@ -415,15 +629,35 @@ def _default_runtime(explicit_runtime: str, root: str = "") -> str:
     runtime = str(explicit_runtime or "").strip()
     if runtime:
         return runtime
-    if sys.stdin.isatty() and sys.stdout.isatty():
-        return "terminal"
     return "headless"
 
 
+def _argv_names_stopped_run(argv: Sequence[str]) -> bool:
+    """True when argv names a control-plane run (``--run-id`` / ``--last``)."""
+    return any(
+        token == "--last" or token == "--run-id" or token.startswith("--run-id=")
+        for token in argv
+    )
+
+
 def _normalize_raw_args(raw_args: list[str]) -> list[str]:
-    """Swap a leading ``<agent> <launcher>`` pair into ``<launcher> <agent>`` order."""
+    """Canonicalize leading pairs so later dispatch sees one shape.
+
+    ``<agent> <launcher>`` becomes ``<launcher> <agent>``.
+    ``resume <agent> --run-id|--last`` becomes ``<agent> resume …`` so the
+    stopped-run flag is not delegated to the deck (which historically had no
+    ``--run-id`` and swallowed it) or to ``_build_parser`` (no ``resume``
+    subcommand). ``--session`` / bare resume stay resume-first for the deck.
+    """
     if len(raw_args) >= 2 and raw_args[0] in AGENTS and raw_args[1] in LAUNCHERS:
         return [raw_args[1], raw_args[0], *raw_args[2:]]
+    if (
+        len(raw_args) >= 2
+        and raw_args[0] == "resume"
+        and raw_args[1] in AGENTS
+        and _argv_names_stopped_run(raw_args[2:])
+    ):
+        return [raw_args[1], "resume", *raw_args[2:]]
     return raw_args
 
 
@@ -518,6 +752,35 @@ def _print_launch_receipt(payload: dict[str, Any]) -> None:
     print(f"agent:      {agent}")
     print(f"skill:      {_field(payload, 'skill')}")
     print(f"root:       {_field(payload, 'root')}")
+    for key in (
+        "repo_requested",
+        "repo_kind",
+        "base_requested",
+        "resolved_ref",
+        "baseline_sha",
+        "runtime_class",
+        "presentation",
+        "model_requested",
+        "model_source",
+    ):
+        if payload.get(key):
+            print(f"{key}: {payload[key]}")
+    if payload.get("worktree"):
+        print(f"worktree:   {_field(payload, 'worktree_branch')}")
+        print(f"parent:     {_field(payload, 'parent_root')}")
+        print(f"baseline:   {_field(payload, 'worktree_baseline_sha')}")
+    controls = payload.get("execution_controls")
+    if isinstance(controls, dict):
+        requested = str(controls.get("permissions_requested") or "") or "(default)"
+        print(
+            f"permissions: {controls.get('permissions_effective', '')}"
+            f"  (requested: {requested})"
+        )
+        sandbox_requested = str(controls.get("sandbox_requested") or "") or "(default)"
+        print(
+            f"sandbox:    {controls.get('sandbox_effective', '')}"
+            f"  (requested: {sandbox_requested})"
+        )
     print(f"dispatch:   {_field(payload, 'dispatch', '0')}")
     print(f"status:     {_field(payload, 'status', 'launching')}")
     reasons = _launch_receipt_reasons(payload)
@@ -531,6 +794,56 @@ def _print_launch_receipt(payload: dict[str, Any]) -> None:
         f"await (ARM NOW, supervisor-side): vibecrafted await {agent} --run-id {run_id}"
     )
     print("=====================================================================")
+
+
+def _emit_launch_result(result: dict[str, Any], *, json_mode: bool) -> int:
+    """Write exactly one launch receipt to stdout. Never exit 0 on empty stdout.
+
+    Diagnostics go to stderr. A run that already mutated control-plane state
+    must still emit ``run_id`` so a retry can resolve it instead of guessing.
+    """
+    from .workflow import _json_plain, machine_launch_receipt
+
+    receipt = machine_launch_receipt(result)
+    run_id = str(receipt.get("run_id") or "")
+    if json_mode:
+        payload = _json_plain(result)
+        if not isinstance(payload, dict):
+            payload = {}
+        payload.update(receipt)
+        try:
+            text = json.dumps(payload, ensure_ascii=False, indent=2)
+        except (TypeError, ValueError):
+            text = json.dumps(receipt, ensure_ascii=False, indent=2)
+        if not str(text).strip():
+            print("error: launch produced an empty receipt", file=sys.stderr)
+            if run_id:
+                print(f"run_id: {run_id}", file=sys.stderr)
+            return _EX_TEMPFAIL if run_id else 1
+        try:
+            sys.stdout.write(text if text.endswith("\n") else f"{text}\n")
+            sys.stdout.flush()
+        except BrokenPipeError:
+            print(
+                f"error: stdout closed after launch; run_id={run_id or 'unknown'}",
+                file=sys.stderr,
+            )
+            return _EX_TEMPFAIL if run_id else 1
+    else:
+        try:
+            _print_launch_receipt(result)
+            sys.stdout.flush()
+        except BrokenPipeError:
+            print(
+                f"error: stdout closed after launch; run_id={run_id or 'unknown'}",
+                file=sys.stderr,
+            )
+            return _EX_TEMPFAIL if run_id else 1
+        _watch_launch_startup(result)
+    if receipt["accepted"] and not run_id:
+        print("error: accepted launch missing run_id", file=sys.stderr)
+        return 1
+    return 0 if receipt["accepted"] else 1
 
 
 # Parity contract with the shell launcher's `spawn_watch_startup`
@@ -636,6 +949,120 @@ def _print_resume_session_receipt(payload: dict[str, Any]) -> None:
     print(f"observe:            vibecrafted observe {agent} --run-id {run_id}")
     print(f"await:              vibecrafted await {agent} --run-id {run_id}")
     print("===============================================================")
+
+
+def _continue_launcher_named_session(
+    *,
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+    source_dir: str,
+    prompt: str,
+    research_agents: tuple[str, ...],
+) -> int:
+    """Route ``<skill> --session`` onto the same native resume as ``resume``."""
+
+    session = str(getattr(args, "session", "") or "").strip()
+    command = str(args.command)
+    if command == "research" or research_agents:
+        print(
+            "error: --session continues one provider session; "
+            "research is a multi-agent swarm. "
+            "Use: vibecrafted resume <agent> --session <provider-uuid>",
+            file=sys.stderr,
+        )
+        return 2
+    runtime = str(getattr(args, "runtime", "") or "").strip()
+    if runtime and runtime != "headless":
+        print(
+            "error: --session continuation is headless-only; "
+            "omit --runtime or pass --runtime headless",
+            file=sys.stderr,
+        )
+        return 2
+    if str(getattr(args, "execution_runtime", "") or "").strip() == "local-worktrees":
+        print(
+            "error: --session continues the selected checkout; "
+            "worktree overrides require vibecrafted fork",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        if parse_worktree_flag(
+            getattr(args, "worktree", ""), label=f"vibecrafted {command}"
+        ):
+            print(
+                "error: --session continues the selected checkout; "
+                "worktree overrides require vibecrafted fork",
+                file=sys.stderr,
+            )
+            return 2
+    except RepoSelectionError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    agent = str(args.agent or "").strip()
+    if not agent:
+        parser.error(f"{command} --session requires an agent")
+    kind = classify_resume_identity(session)
+    if kind in {"run_id", "vibecrafted_session"} or looks_like_control_plane_run_id(
+        session
+    ):
+        _print_identity_mixup("run_id" if kind == "run_id" else kind, session)
+        return 2
+    prompt_file = str(getattr(args, "file", "") or "").strip()
+    if prompt and prompt_file:
+        print(
+            "error: use one of --prompt or --file with --session",
+            file=sys.stderr,
+        )
+        return 2
+    source_path = ""
+    if prompt_file:
+        path = Path(prompt_file).expanduser()
+        try:
+            prompt = path.read_bytes().decode("utf-8")
+            source_path = str(path.resolve())
+        except OSError as exc:
+            print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
+            return 2
+    try:
+        resume_root = select_repository(
+            args.repo,
+            args.root,
+            fallback=resolve_operator_launch_root,
+            label=f"{command} --session",
+        ).path
+    except RepoSelectionError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if is_operator_home_root(resume_root):
+        print(
+            "error: refusing to launch against the home directory; "
+            "open a workspace in Vibecrafted or pass --repo",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        selection = resolve_session_selection(agent, session, resume_root)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    resume_result = manual_resume_session(
+        agent,
+        selection["agent_session_id"],
+        source_dir,
+        prompt=prompt,
+        root=resume_root,
+        model=args.model,
+        source_text=prompt,
+        skill=LAUNCH_ALIASES.get(command, command),
+        launch_meta={"session_selection": selection},
+        source_path=source_path,
+    )
+    if args.json:
+        print(json.dumps(resume_result, ensure_ascii=False, indent=2))
+    else:
+        _print_resume_session_receipt(resume_result)
+    return 0 if resume_result.get("accepted") else 1
 
 
 def _print_launch_input_error(*, command: str, agent: str | None, message: str) -> None:
@@ -835,18 +1262,38 @@ def _agent_resume(agent: str, argv: Sequence[str]) -> int:
     """``vibecrafted resume <agent>``: continue a stopped control-plane run."""
     parser = argparse.ArgumentParser(prog=f"vibecrafted resume {agent}")
     parser.add_argument("--run-id", default="")
-    parser.add_argument("--last", action="store_true")
+    parser.add_argument("--last", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--session", default="")
     parser.add_argument("-p", "--prompt", default="")
     parser.add_argument("-f", "--file", dest="prompt_file", default="")
-    parser.add_argument("--root", default="")
+    parser.add_argument("--prompt-stdin", action="store_true")
+    add_repo_arguments(parser)
     parser.add_argument("--source-dir", default="")
-    parser.add_argument("--model", default="")
+    parser.add_argument("--model", default=None)
+    parser.add_argument("--base", default="")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(list(argv))
+    if args.model == "":
+        parser.error("CLI --model must be non-empty")
+
+    resume_root = ""
+    if str(args.repo or "").strip() or str(args.root or "").strip():
+        # An explicit repository must exist and must not conflict; an absent one
+        # deliberately stays empty so the parent run's recorded root wins.
+        try:
+            resume_root = select_repository(
+                args.repo, args.root, label=f"resume {agent}"
+            ).path
+        except RepoSelectionError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
 
     session = str(args.session or "").strip()
     run_id = str(args.run_id or "").strip()
+    if sum((bool(session), bool(run_id), bool(args.last))) > 1:
+        parser.error("choose one identity: --session or --run-id")
+    if args.last:
+        parser.error("--last is retired for resume; use --session last")
     if session and not run_id:
         kind = classify_resume_identity(session)
         if kind in {"run_id", "vibecrafted_session"} or looks_like_control_plane_run_id(
@@ -889,7 +1336,7 @@ def _agent_resume(agent: str, argv: Sequence[str]) -> int:
         run_id = str(run.get("run_id") or "")
     else:
         print(
-            "Resume a stopped run with --run-id <work-...> or --last.",
+            "Resume a stopped run with --run-id <work-...>; use --session last for scoped native history.",
             file=sys.stderr,
         )
         print(
@@ -903,9 +1350,13 @@ def _agent_resume(agent: str, argv: Sequence[str]) -> int:
         return 2
 
     prompt = str(args.prompt or "")
+    if args.prompt_stdin:
+        if prompt or args.prompt_file:
+            parser.error("--prompt-stdin conflicts with --prompt/--file")
+        prompt = read_prompt_stream(sys.stdin)
     if args.prompt_file:
         try:
-            prompt = Path(args.prompt_file).expanduser().read_text(encoding="utf-8")
+            prompt = Path(args.prompt_file).expanduser().read_bytes().decode("utf-8")
         except OSError as exc:
             print(f"error: cannot read --file: {exc}", file=sys.stderr)
             return 2
@@ -915,8 +1366,13 @@ def _agent_resume(agent: str, argv: Sequence[str]) -> int:
         source_dir=args.source_dir or package_root(),
         prompt=prompt,
         expected_agent=agent,
-        root=args.root,
+        root=resume_root,
         model=args.model,
+        plan_text=prompt if args.prompt_file else "",
+        source_path=str(Path(args.prompt_file).expanduser().resolve())
+        if args.prompt_file
+        else "",
+        base=args.base,
     )
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
@@ -947,22 +1403,24 @@ def _agent_resume(agent: str, argv: Sequence[str]) -> int:
 
 
 def _agent_observe(agent: str, argv: Sequence[str]) -> int:
-    """``vibecrafted observe <agent>`` verb: print/emit one run's current status."""
+    """Print one vc-server-owned, on-demand run observation."""
     parser = argparse.ArgumentParser(prog=f"vibecrafted observe {agent}")
     parser.add_argument("--run-id", default="")
     parser.add_argument("--last", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(list(argv))
-    run = _run_for_agent(agent, args.run_id, last=args.last)
-    if run is None:
-        if args.run_id:
-            # Control-plane projection missed it; resolve read-follows-write
-            # against runtime_runs/ (where the runtime writes) before giving up.
-            return _observe_resolved(args.run_id, json_output=args.json)
+    try:
+        run_id = resolve_server_run_id(agent, args.run_id, last=args.last)
+        observation = observe_run_from_server(run_id) if run_id else {}
+    except ServerObservationError as exc:
+        print(f"observe: {exc}", file=sys.stderr)
+        return 2
+    run = observation.get("run") if isinstance(observation, dict) else None
+    if not isinstance(run, dict):
         print("No run found. Pass --run-id or --last.", file=sys.stderr)
         return 1
     if args.json:
-        print(json.dumps(run, ensure_ascii=False, indent=2, sort_keys=True))
+        print(json.dumps(observation, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
     _print_run_status(run)
     return 0
@@ -1012,13 +1470,7 @@ def _observe_resolved(run_id: str, *, json_output: bool) -> int:
 
 
 def _agent_await(agent: str, argv: Sequence[str]) -> int:
-    """``vibecrafted await <agent>`` verb: block on control_plane.await_run and
-    print/emit the terminal outcome. Never implement a private polling loop here."""
-    # ONE await loop lives in control_plane.await_run — this verb must never
-    # grow a private wall-clock loop again. The old inline loop here treated
-    # --timeout as an absolute deadline and abandoned demonstrably-working
-    # runs at 300s, which taught supervising agents to distrust await and
-    # hedge with manual sleep/ps monitors.
+    """Subscribe to the dispatcher UDS; vc-server is not part of wake delivery."""
     parser = argparse.ArgumentParser(prog=f"vibecrafted await {agent}")
     parser.add_argument("--run-id", default="")
     parser.add_argument("--last", action="store_true")
@@ -1036,52 +1488,48 @@ def _agent_await(agent: str, argv: Sequence[str]) -> int:
         default=600,
         help="deprecated: superseded by the liveness-aware idle window",
     )
-    parser.add_argument("--hard-cap", type=float, default=None)
+    parser.add_argument(
+        "--hard-cap",
+        type=float,
+        default=None,
+        help="optional absolute wall-clock deadline in seconds",
+    )
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(list(argv))
-    run = _run_for_agent(agent, args.run_id, last=args.last)
-    if run is None:
+    run_id = str(args.run_id or "").strip()
+    if not run_id and args.last:
+        state = sync_state()
+        candidates = list(state.get("active_runs") or []) + list(
+            state.get("recent_runs") or []
+        )
+        run_id = next(
+            (
+                str(run.get("run_id") or "")
+                for run in candidates
+                if str(run.get("agent") or "") == agent
+            ),
+            "",
+        )
+    if not run_id:
         print("No run found. Pass --run-id or --last.", file=sys.stderr)
         return 1
-    run_id = str(run.get("run_id") or "")
+    result = await_run_from_server(
+        run_id,
+        idle_timeout_seconds=args.timeout,
+        interval_seconds=args.interval,
+        hard_cap_seconds=args.hard_cap,
+    )
     if args.json:
-        result = await_launch_truth(
-            run_id,
-            timeout_seconds=args.timeout,
-            interval_seconds=args.interval,
-            hard_cap_seconds=args.hard_cap,
-        )
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        final_run = result.get("run")
         return (
             0
             if result.get("completed")
-            and result.get("artifact_ok")
-            and result.get("terminal_evidence")
+            and result.get("outcome") == "terminal"
+            and isinstance(final_run, dict)
+            and _run_succeeded(final_run)
             else 1
         )
-
-    print("await: initial status")
-    _print_run_status(run)
-
-    interval = max(float(args.interval), 0.1)
-    status_interval = max(float(args.status_interval), interval)
-    next_status = {"at": time.monotonic() + status_interval}
-
-    def _print_progress(current: dict[str, Any] | None) -> None:
-        """on_poll callback for await_run: print a status line every status_interval."""
-        now = time.monotonic()
-        if current is not None and now >= next_status["at"]:
-            print("await: still running")
-            _print_run_status(current)
-            next_status["at"] = now + status_interval
-
-    result = await_run(
-        run_id,
-        timeout_seconds=args.timeout,
-        interval_seconds=interval,
-        hard_cap_seconds=args.hard_cap,
-        on_poll=_print_progress,
-    )
     final_run = dict(result.get("run") or {})
     reason = str(result.get("reason") or "")
     if result.get("completed"):
@@ -1089,12 +1537,11 @@ def _agent_await(agent: str, argv: Sequence[str]) -> int:
         terminal_evidence = bool(
             final_run and _run_terminal(final_run) and not worker_alive
         )
-        delivered_evidence = reason == "report_delivered" and not worker_alive
         if terminal_evidence and final_run and not _run_succeeded(final_run):
             print(f"await: terminal failure ({reason})")
             _print_run_status(final_run)
             return 1
-        if not (terminal_evidence or delivered_evidence):
+        if not terminal_evidence:
             print(
                 f"await: non-terminal completion disagreement ({reason})",
                 file=sys.stderr,
@@ -1184,6 +1631,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     help_version = os.environ.get("VIBECRAFTED_HELP_VERSION", "").strip() or __version__
     from .help_surface import (
         has_workflow_help,
+        render_message_help,
         render_resume_session_help,
         render_root_help,
         render_workflow_help,
@@ -1197,9 +1645,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(render_root_help(help_version), end="")
             return 0
         topic = raw_args[1].removeprefix("vc-")
-        if topic == "resume-session":
-            print(render_resume_session_help(), end="")
-            return 0
+        if topic in CORE_SURFACE_COMMANDS:
+            return _render_core_surface_help(topic)
         if topic not in {"--all", "--full"} and has_workflow_help(topic):
             print(render_workflow_help(topic), end="")
             return 0
@@ -1207,6 +1654,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         arg in {"-h", "--help"} for arg in raw_args[1:]
     ):
         print(render_resume_session_help(), end="")
+        return 0
+    if raw_args[0] == "message" and any(
+        arg in {"-h", "--help"} for arg in raw_args[1:]
+    ):
+        print(render_message_help(), end="")
         return 0
     if raw_args[0] in LAUNCHERS:
         workflow_args = raw_args[1:]
@@ -1225,21 +1677,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"vibecrafted research: {exc}", file=sys.stderr)
         return 2
 
-    python_commands = {
-        "acp",
-        "capabilities",
-        "config",
-        "dispatch",
-        "doctor",
-        "paste",
-        "procs",
-        "reap",
-        "receipt",
-        "resume-session",
-        "settle",
-        "settlements",
-        "stop",
-    } | set(LAUNCHERS)
+    python_commands = python_owned_commands()
     agent_python_verbs = {"observe", "await", "stop", "resume"}
     is_lifecycle = shell_wrapper_verb is not None
     if raw_args and shell_wrapper_verb is None:
@@ -1251,6 +1689,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             is_lifecycle = False
         elif first not in python_commands and not first.startswith("-"):
             is_lifecycle = True
+
+    if raw_args and raw_args[0] == "partner":
+        # Partner is init-family: always the interactive TTY/frame launcher.
+        # --prompt/--file are extra seed context, never launch_workflow.
+        is_lifecycle = True
 
     if is_lifecycle:
         from .runtime_paths import vibecrafted_tools_home
@@ -1300,6 +1743,39 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .dispatch.cli import main as dispatch_main
 
         return dispatch_main(raw_args[1:])
+    if raw_args and raw_args[0] == "ship":
+        from .ship import main as ship_main
+
+        return ship_main(raw_args[1:])
+    if raw_args and raw_args[0] == "claims":
+        from .repository_claims import claims_cli_main
+
+        return _invoke_owned_main(claims_cli_main, raw_args[1:])
+    if raw_args and raw_args[0] == "control-plane-revalidate":
+        parser = _build_parser()
+        args = parser.parse_args(raw_args)
+        run = lookup_run(str(args.run_id))
+        payload = {
+            "schema": "vibecrafted.control-plane-revalidation.v1",
+            "run_id": str(args.run_id),
+            "found": run is not None,
+            "run": run,
+        }
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        elif run is not None:
+            _print_run_status(run, include_tail=False)
+        else:
+            print(f"run not found: {args.run_id}", file=sys.stderr)
+        # Exit contract: 0 means the canonical writer performed the lookup and
+        # the payload is the answer (`found` true/false). vc-server maps any
+        # non-zero exit to "writer unavailable" (HTTP 503), so a legitimately
+        # absent run must not exit 1 — that is a clean 404, not a disagreement.
+        return 0
+    if raw_args and raw_args[0] == "relocate":
+        from .relocate import main as relocate_main
+
+        return _invoke_owned_main(relocate_main, raw_args[1:])
     if raw_args and raw_args[0] == "stop":
         from .wrappers import stop_main
 
@@ -1317,31 +1793,30 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     parser = _build_parser()
     args = parser.parse_args(raw_args)
+    if getattr(args, "model", None) == "":
+        parser.error("CLI --model must be non-empty")
     if not args.command:
         parser.print_help()
         return 0
     if args.command == "config":
-        from .vc_frame_delivery import ensure_zshrc, stage_vc_frame_config
+        from .vc_frame_delivery import ensure_zshrc
 
         action = getattr(args, "config_action", None)
         if action == "ensure-zshrc":
             result = ensure_zshrc(dry_run=bool(getattr(args, "dry_run", False)))
             print(f"ensure-zshrc: {result['action']} -> {result['path']}")
             return 0
-        if action != "install":
+        if action == "install":
             print(
-                "usage: vibecrafted config install [--dry-run] [--force] [--prefer-repo]\n"
-                "       vibecrafted config ensure-zshrc [--dry-run]",
+                "config install has been retired. Product configuration is owned "
+                "by the Runtime Pack installer. Run make install from the "
+                "Vibecrafted checkout with your verified Runtime Pack. "
+                "No configuration was delivered.",
                 file=sys.stderr,
             )
             return 2
-        plan = stage_vc_frame_config(
-            dry_run=bool(getattr(args, "dry_run", False)),
-            force=bool(getattr(args, "force", False)),
-            prefer_repo=True if getattr(args, "prefer_repo", False) else None,
-        )
-        print(plan.render(), end="")
-        return 0
+        print("usage: vibecrafted config ensure-zshrc [--dry-run]", file=sys.stderr)
+        return 2
     if args.command == "receipt":
         from .runtime_receipt import receipt_main
 
@@ -1375,7 +1850,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 for err in payload["parse_errors"]:
                     print(f"  parse_error: {err}")
             return 0
-        findings = doctor_module.doctor_run()
+        findings = doctor_module.doctor_run(
+            release=bool(getattr(args, "release", False))
+        )
         summary = doctor_module.doctor_summary(findings)
         from .runtime_receipt import build_receipt, render_receipt_text
 
@@ -1528,14 +2005,68 @@ def main(argv: Sequence[str] | None = None) -> int:
             for line in render_capabilities_lines(capabilities_payload):
                 print(line)
         return 0
+    if args.command == "message":
+        from .message_control import MessageControlError, inspect_message, send_message
+
+        if args.inspect:
+            try:
+                result = inspect_message(args.inspect)
+            except MessageControlError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
+            if result is None:
+                print(f"message not found: {args.inspect}", file=sys.stderr)
+                return 1
+            print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
+        if args.run_id and args.file:
+            try:
+                raw = Path(args.file).expanduser().read_bytes()
+            except OSError as exc:
+                print(
+                    f"error: message_file_unreadable:{type(exc).__name__}",
+                    file=sys.stderr,
+                )
+                return 2
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                print("error: message_file_not_utf8", file=sys.stderr)
+                return 2
+            try:
+                result = send_message(
+                    run_id=args.run_id,
+                    text=text,
+                    idempotency_key=args.idempotency_key,
+                    retry=bool(args.retry),
+                )
+            except MessageControlError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
+            if args.json:
+                print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+            else:
+                print(
+                    f"message_id: {result['message_id']}\n"
+                    f"run_id: {result['run_id']}\n"
+                    f"provider: {result['provider']}\n"
+                    f"delivery_state: {result['delivery_state']}\n"
+                    f"agent_ack_state: {result.get('agent_ack_state', 'unobserved')}"
+                )
+            return 0 if result["delivery_state"] == "provider_accepted" else 1
+        print(
+            "usage: vibecrafted message --run-id ID --file FILE | --inspect MESSAGE_ID",
+            file=sys.stderr,
+        )
+        return 2
     if args.command == "resume-session":
         prompt = str(args.prompt or "")
         if args.prompt_stdin:
-            prompt = sys.stdin.read()
+            prompt = read_prompt_stream(sys.stdin)
         elif args.prompt_file:
             prompt_path = Path(args.prompt_file).expanduser()
             try:
-                prompt = prompt_path.read_text(encoding="utf-8")
+                prompt = prompt_path.read_bytes().decode("utf-8")
             except OSError as exc:
                 resume_result: dict[str, Any] = {
                     "schema": "vibecrafted.manual_explicit_resume.v1",
@@ -1553,30 +2084,157 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else:
                     _print_resume_session_receipt(resume_result)
                 return 2
-        resume_root = args.root or resolve_operator_launch_root()
+        try:
+            resume_root = select_repository(
+                args.repo,
+                args.root,
+                fallback=resolve_operator_launch_root,
+                label="resume-session",
+            ).path
+        except RepoSelectionError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
         if is_operator_home_root(resume_root):
             print(
                 "error: refusing to launch against the home directory; "
-                "open a workspace in Vibecrafted or pass --root",
+                "open a workspace in Vibecrafted or pass --repo",
                 file=sys.stderr,
             )
             return 2
+        from .workflow import resolve_session_selection
+
+        try:
+            selection = resolve_session_selection(
+                args.agent, args.agent_session_id, resume_root
+            )
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
         resume_result = manual_resume_session(
             args.agent,
-            args.agent_session_id,
+            selection["agent_session_id"],
             args.source_dir or package_root(),
             prompt=prompt,
             root=resume_root,
             model=args.model,
+            source_text=prompt,
+            launch_meta={"session_selection": selection},
+            source_path=str(Path(args.prompt_file).expanduser().resolve())
+            if args.prompt_file
+            else "",
         )
         if args.json:
             print(json.dumps(resume_result, ensure_ascii=False, indent=2))
         else:
             _print_resume_session_receipt(resume_result)
         return 0 if resume_result.get("accepted") else 1
+    if args.command == "fork-session":
+        from .workflow import manual_fork_session
+
+        try:
+            prompt = (
+                Path(args.file).expanduser().read_bytes().decode("utf-8")
+                if args.file
+                else read_prompt_stream(sys.stdin)
+            )
+            result = manual_fork_session(
+                args.agent,
+                args.session,
+                args.source_dir or package_root(),
+                prompt=prompt,
+                root=args.root,
+                model=args.model,
+                base=args.base,
+                worktree=args.worktree,
+                execution_runtime=args.execution_runtime,
+                source_path=args.file,
+                parent_run_id=args.parent_run_id,
+                permissions=args.permissions,
+                session_selection=args.session_selection,
+            )
+        except (ValueError, OSError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        print(json.dumps(result, ensure_ascii=False, default=str))
+        return 0 if result.get("accepted") else 2
+    if args.command == "session-source":
+        from .workflow import resolve_session_selection
+
+        try:
+            result = resolve_session_selection(args.agent, args.session, args.root)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        print(result["agent_session_id"] if args.id_only else json.dumps(result))
+        return 0
+    if args.command == "fork-source":
+        from .workflow import resolve_session_selection
+
+        fork_result = resolve_fork_source(
+            args.agent, run_id=args.run_id, session=args.session
+        )
+        if args.root and not (args.session and args.run_id):
+            try:
+                if args.session in {"current", "last", "previous"}:
+                    fork_result = resolve_session_selection(
+                        args.agent, args.session, args.root
+                    )
+                elif fork_result.get("accepted"):
+                    selected_root = args.root
+                    if selected_root == "auto":
+                        selected_root = fork_result.get("source_root") or str(
+                            Path.cwd()
+                        )
+                    original = fork_result
+                    fork_result = resolve_session_selection(
+                        args.agent, original["agent_session_id"], selected_root
+                    )
+                    if args.run_id:
+                        fork_result.update(
+                            session_selector="run-id",
+                            identity_source="run_meta",
+                            source_run_id=args.run_id,
+                        )
+                if fork_result.get("accepted"):
+                    capability = resolve_fork_source(
+                        args.agent, session=fork_result["agent_session_id"]
+                    )
+                    if not capability.get("accepted"):
+                        fork_result = capability
+            except ValueError as exc:
+                fork_result = {
+                    "accepted": False,
+                    "reason": "session_selection_failed",
+                    "detail": str(exc),
+                }
+        if args.json:
+            print(json.dumps(fork_result, ensure_ascii=False, indent=2))
+        elif fork_result.get("accepted"):
+            print(f"agent:              {fork_result.get('agent')}")
+            print(f"agent_session_id:   {fork_result.get('agent_session_id')}")
+            print(f"source_run_id:      {fork_result.get('source_run_id') or ''}")
+            print(f"identity_source:    {fork_result.get('identity_source')}")
+            print(f"native_fork:        {fork_result.get('native_fork')}")
+        else:
+            print(
+                f"error: cannot resolve fork source: {fork_result.get('reason')}",
+                file=sys.stderr,
+            )
+            for key in ("detail", "hint"):
+                value = str(fork_result.get(key) or "").strip()
+                if value:
+                    print(f"{key}: {value}", file=sys.stderr)
+        return 0 if fork_result.get("accepted") else 2
     if args.command == "paste":
         from .paste import run_namespace
 
+        try:
+            args.root = select_repository(
+                args.repo, args.root, fallback=Path.cwd, label="paste"
+            ).path
+        except RepoSelectionError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
         return run_namespace(args, source_dir=package_root())
 
     source_dir = args.source_dir or package_root()
@@ -1584,26 +2242,52 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.prompt_stdin:
         if prompt or args.file:
             parser.error("--prompt-stdin cannot be combined with --prompt or --file")
-        prompt = sys.stdin.read()
+        prompt = read_prompt_stream(sys.stdin)
     agent_arg = args.agent
     research_agents = ()
     if args.command == "research" and isinstance(agent_arg, list):
         research_agents = tuple(agent_arg) if len(agent_arg) > 1 else ()
-    launch_root = args.root or str(resolve_operator_launch_root())
+    try:
+        parse_worktree_flag(
+            getattr(args, "worktree", ""), label=f"vibecrafted {args.command}"
+        )
+        launch_root = args.repo or args.root or str(Path.cwd())
+    except RepoSelectionError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     if is_operator_home_root(launch_root):
         print(
             "error: refusing to launch against the home directory; "
-            "open a workspace in Vibecrafted or pass --root",
+            "open a workspace in Vibecrafted or pass --repo",
             file=sys.stderr,
         )
         return 2
+    session = str(getattr(args, "session", "") or "").strip()
+    if session:
+        return _continue_launcher_named_session(
+            parser=parser,
+            args=args,
+            source_dir=source_dir,
+            prompt=prompt,
+            research_agents=research_agents,
+        )
     payload = {
         "skill": LAUNCH_ALIASES.get(args.command, args.command),
         "agent": args.agent,
         "prompt": prompt,
+        "input_explicit": args.prompt is not None
+        or bool(args.file)
+        or args.prompt_stdin,
         "file": args.file,
         "runtime": _default_runtime(args.runtime, launch_root),
-        "root": launch_root,
+        "root": args.root,
+        "repo": args.repo,
+        "repo_selector": True,
+        "worktree": args.worktree,
+        "runtime_class": args.execution_runtime,
+        "base": args.base,
+        "permissions": getattr(args, "permissions", ""),
+        "sandbox": getattr(args, "sandbox", ""),
         "mode": args.mode or args.command,
         "count": args.count,
         "depth": args.depth,
@@ -1619,13 +2303,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             command=str(args.command), agent=args.agent, message=str(exc)
         )
         return 2
-    result = launch_workflow(spec, source_dir)
-    if args.json:
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-    else:
-        _print_launch_receipt(result)
-        _watch_launch_startup(result)
-    return 0 if result.get("accepted") else 1
+    try:
+        result = launch_workflow(spec, source_dir)
+    except (OSError, TypeError, ValueError, RuntimeError) as exc:
+        print(
+            f"error: launch raised {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        recovered = recover_launch_receipt(spec)
+        if recovered and recovered.get("run_id"):
+            result = recovered
+        else:
+            result = {
+                "accepted": False,
+                "run_id": "",
+                "agent": spec.agent,
+                "skill": spec.skill,
+                "root": spec.root,
+                "status": "failed",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+    return _emit_launch_result(result, json_mode=bool(args.json))
 
 
 if __name__ == "__main__":  # pragma: no cover

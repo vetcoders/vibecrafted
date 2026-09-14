@@ -31,6 +31,42 @@ def test_shell_for_path_uses_suffix_and_shebang(tmp_path: Path) -> None:
     assert check_shell.shell_for_path(suffix_only_bash) == "bash"
 
 
+POLYGLOT = (
+    '#!/bin/sh\n"""":\nexec "$(dirname -- "$0")/python3" "$0" "$@"\n":"""\n'
+    "import sys\nraise SystemExit(main())\n"
+)
+
+
+def test_polyglot_launcher_is_checked_by_its_sh_prelude_only(tmp_path: Path) -> None:
+    launcher = tmp_path / "vc-demo"
+    launcher.write_text(POLYGLOT, encoding="utf-8")
+    plain = tmp_path / "plain.sh"
+    plain.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+
+    assert check_shell.shell_prelude(launcher) == POLYGLOT.split('":"""\n', 1)[0]
+    assert check_shell.shell_prelude(plain) is None
+
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    checkable = check_shell.materialize_preludes([launcher, plain], workdir)
+    assert checkable[1] == plain
+    assert checkable[0].name == "vc-demo"
+    assert "raise SystemExit" not in checkable[0].read_text(encoding="utf-8")
+    # The Python body would be a shell syntax error; the prelude alone is clean.
+    assert check_shell.run_syntax_fallback(checkable) == 0
+
+    broken = tmp_path / "vc-broken"
+    broken.write_text(POLYGLOT.replace("exec ", "if then exec "), encoding="utf-8")
+    broken_work = tmp_path / "broken-work"
+    broken_work.mkdir()
+    assert (
+        check_shell.run_syntax_fallback(
+            check_shell.materialize_preludes([broken], broken_work)
+        )
+        == 1
+    )
+
+
 def test_build_shellcheck_command_keeps_repo_exclude_list(tmp_path: Path) -> None:
     sample = tmp_path / "sample.sh"
     sample.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")

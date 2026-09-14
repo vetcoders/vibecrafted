@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import tarfile
 from pathlib import Path
 
 import pytest
+import tomllib
 
 from scripts import distribution_manifest as distribution
 from scripts import vetcoders_install as installer
@@ -170,6 +172,70 @@ def test_release_workflow_is_read_only_and_validates_the_exact_tag_source() -> N
     assert "gh release edit" not in workflow
 
 
+def test_portable_workflow_requires_runtime_pack_bootstrap_on_mac_and_linux() -> None:
+    workflow = (REPO_ROOT / ".github/workflows/portable.yml").read_text(
+        encoding="utf-8"
+    )
+    bootstrap = workflow.split("  curl-bootstrap:", 1)[1]
+
+    assert "if: github.event_name == 'merge_group'" not in bootstrap
+    assert "runner: macos-latest" in bootstrap
+    assert "runner: ubuntu-latest" in bootstrap
+    assert "test_runtime_pack_cli.py" in bootstrap
+    assert "test_install_bootstrap.py" in bootstrap
+    assert "cargo binstall" not in bootstrap
+    assert "build-essential" not in bootstrap
+
+
+def test_ci_workflows_select_the_platforms_canonical_carrier() -> None:
+    """Product install and skill smoke must exercise their actual carriers."""
+    install_linux = (REPO_ROOT / ".github/workflows/install-linux.yml").read_text(
+        encoding="utf-8"
+    )
+    skill_loader = (REPO_ROOT / ".github/workflows/skill-loader.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "scripts/build-linux-runtime-pack.sh" in install_linux
+    assert "bash scripts/build-linux-arm64-runtime-pack.sh" not in install_linux
+    assert "Vibecrafted_RuntimePack_linux-x64.tar.gz" in install_linux
+    assert "openssl pkeyutl -sign -rawin" not in install_linux
+    assert "openssl dgst -sha256 -sign" in install_linux
+    assert "openssl dgst -sha256 -verify" in install_linux
+    assert "genpkey -algorithm RSA" in install_linux
+    assert "genpkey -algorithm ED25519" not in install_linux
+    assert "VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY" in install_linux
+    # install.sh is handed the closed exact-source tuple: the archive whose
+    # provenance it must trust and the pack it must install, in one call. A
+    # pack without its archive trips the channel-manifest refusal (W4).
+    assert (
+        'bash install.sh --archive-file "$archive" --runtime-pack-file "$pack" install'
+        in install_linux
+    )
+    assert "actions/upload-artifact@" in install_linux
+    assert "actions/download-artifact@" in install_linux
+    assert "ubuntu-22.04" in install_linux
+    assert "ubuntu-24.04" in install_linux
+    assert "vibecrafted_core/runtime/scripts/install.sh" in skill_loader
+    assert '--source "$GITHUB_WORKSPACE"' in skill_loader
+    assert "--skills-only" in skill_loader
+    assert "--with-shell --write-shell-rc" in skill_loader
+    assert "scripts/distribution_manifest.py archive" not in skill_loader
+    assert "macos-latest" in skill_loader
+    assert "ubuntu-latest" in skill_loader
+
+
+def test_portable_source_smoke_selects_explicit_source_lane() -> None:
+    portable_smoke = (REPO_ROOT / "tests/portable/run.sh").read_text(encoding="utf-8")
+
+    assert 'tar -xzf "$bootstrap_archive" --strip-components=1' in portable_smoke
+    assert (
+        'uv tool install --force --reinstall --editable "$stable_source/'
+        in portable_smoke
+    )
+    assert "install-python-tools" not in portable_smoke
+
+
 def test_core_gate_isolated_from_the_previously_installed_runtime_stamp() -> None:
     makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
     gate = makefile.split("\ntest-core:", 1)[1].split("\ndispatch-test:", 1)[0]
@@ -187,13 +253,30 @@ def test_bootstrap_help_requires_canonical_provenance_archives() -> None:
     assert "scripts/distribution_manifest.py archive" in usage
 
 
+def test_install_paths_reconcile_server_service_after_launcher_replacement() -> None:
+    """Contract: every launcher-replacing install front door ends with
+    `reconcile-server-service`, so a stale LaunchAgent identity never survives
+    an install. Post-reboot OFFLINE caused by hash drift is a product defect,
+    not an operator chore. The reconcile target itself must stay a no-op
+    unless supervision was explicitly opted into (plist present)."""
+    text = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+
+    install_block = text.split("\ninstall:\n", 1)[1].split("\n\n", 1)[0]
+    assert "$(MAKE) --no-print-directory reconcile-server-service" in install_block
+
+    assert "\ninstall-source: install\n" in text
+
+    reconcile_block = text.split("\nreconcile-server-service:\n", 1)[1].split(
+        "\n\n", 1
+    )[0]
+    assert 'if [ "$$(uname -s)" != "Darwin" ]' in reconcile_block
+    assert "io.vetcoders.vibecrafted.server.plist" in reconcile_block
+    assert "server service reconcile" in reconcile_block
+
+
 def test_makefile_keeps_install_as_terminal_first_front_door() -> None:
-    """Contract: `make install` is the terminal-native human front door — a
-    compact, log-quiet step runner that greets, walks the canonical install
-    steps through $(INSTALL_STEP), and ends by pointing at `vc-start`.
-    `make install-auto` is the unattended automation path that reuses the same
-    front door, and `make setup-dev` opens the uv meta-installer in advanced
-    mode.
+    """Contract: `make install` consumes the same immutable Runtime Pack as
+    the native App. The retained `install-source` spelling uses the same owner.
 
     Every recipe that bootstraps uv (setup-dev, install-all, tui-installer)
     must keep the uv bootstrap and the `uv run` invocation inside one shell
@@ -205,32 +288,23 @@ def test_makefile_keeps_install_as_terminal_first_front_door() -> None:
 
     # CLI_PRODUCT_SPEC §6.5: `make help` is the six-target deck; everything
     # else lives in `make help-dev`.
-    assert "make install      \\033[2mGuided install" in text
+    assert "make install      \\033[2mInstall the receipted Runtime Pack" in text
     assert "make doctor       \\033[2mHealth check" in text
     assert "dev targets: make help-dev" in text
     assert "help-dev:" in text
     assert "make skills" not in text.split("help:", 1)[1].split("\nvibecrafted:", 1)[0]
     assert "vibecrafted: install" in text
 
-    # The front door is the compact step runner: it greets, walks the canonical
-    # install steps through $(INSTALL_STEP), and ends by pointing at vc-start.
-    install_block = text.split("\ninstall:\n", 1)[1].split(
-        "\ninstall-python-tools:", 1
-    )[0]
-    assert 'printf "Installing Vibecrafted\\n"' in install_block
-    for label in (
-        "foundations",
-        "skills and launchers",
-        "runtime tools",
-        "app binaries",
-    ):
-        assert f'$(INSTALL_STEP) "{label}"' in install_block, (
-            f"front door must walk the `{label}` install step via $(INSTALL_STEP)"
-        )
-    assert "vc-start" in install_block
+    # The product front door delegates to the Runtime Pack-owned interpreter
+    # and installer. It must never compile foundations or donors itself.
+    install_block = text.split("\ninstall:\n", 1)[1].split("\n\n", 1)[0]
+    assert 'VIBECRAFTED_RUNTIME_PACK="$(RUNTIME_PACK)"' in install_block
+    assert 'bash "$(RUNTIME_PACK_INSTALLER)"' in install_block
+    assert 'if [ "$$(uname -s)" = "Darwin" ]' not in install_block
+    assert "$(MAKE) --no-print-directory install-source" not in install_block
+    assert "$(INSTALL_STEP)" not in install_block
 
-    # install-auto is the unattended path: it reuses the same front door rather
-    # than forking a second installer recipe.
+    assert "\ninstall-source: install\n" in text
     assert "install-auto: install" in text
 
     # setup-dev opens the uv meta-installer in advanced mode. Advanced is an
@@ -283,6 +357,76 @@ def test_makefile_keeps_install_as_terminal_first_front_door() -> None:
         in text
     )
     assert "INSTALLER_HOST_TAG := $(shell uname -s" in text
+
+
+def test_runtime_pack_cleanup_retries_without_overwriting_success(
+    tmp_path: Path,
+) -> None:
+    installer_text = (REPO_ROOT / "scripts/install-runtime-pack.sh").read_text(
+        encoding="utf-8"
+    )
+    # The function body ends at its own closing brace. `trap cleanup` no longer
+    # follows it directly: terminate_installer_child() sits in between (the
+    # TERM/INT/HUP owner, 5aab748f), so splitting on "\n}\ntrap cleanup" dragged
+    # top-level installer code (`$operation`) into the harness.
+    assert "\ncleanup() {\n" in installer_text
+    cleanup_body = installer_text.split("\ncleanup() {", 1)[1].split("\n}\n", 1)[0]
+    assert "terminate_installer_child" not in cleanup_body
+    assert 'rm -rf -- "$temporary"' in cleanup_body
+    # The installer still hands the real EXIT path to this very function.
+    assert "\ntrap cleanup EXIT\n" in installer_text
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    count_file = tmp_path / "rm-count"
+    fake_rm = fake_bin / "rm"
+    fake_rm.write_text(
+        """#!/usr/bin/env bash
+set -eu
+count=0
+if [[ -f "$RM_COUNT" ]]; then count="$(<"$RM_COUNT")"; fi
+count=$((count + 1))
+printf '%s\n' "$count" > "$RM_COUNT"
+if (( count == 1 )); then
+  touch "${!#}/.DS_Store"
+  exit 1
+fi
+exec /bin/rm "$@"
+""",
+        encoding="utf-8",
+    )
+    fake_rm.chmod(0o755)
+
+    residual = tmp_path / "vibecrafted-runtime-pack.fixture"
+    residual.mkdir()
+    harness = tmp_path / "cleanup-harness.sh"
+    harness.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f'temporary="{residual}"\n'
+        "cleanup() {"
+        f"{cleanup_body}\n"
+        "}\n"
+        "trap cleanup EXIT INT TERM HUP\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        ["bash", str(harness)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "RM_COUNT": str(count_file),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert count_file.read_text(encoding="utf-8").strip() == "2"
+    assert not residual.exists()
 
 
 def test_installer_environment_is_host_scoped_outside_checkout(
@@ -523,7 +667,26 @@ def test_control_plane_staging_delegates_to_distribution_manifest(
     monkeypatch.setattr(
         installer,
         "_materialize_vc_frame_generation",
-        lambda runtime_root: seen.update(materialized=runtime_root),
+        lambda runtime_root: seen.update(frame_materialized=runtime_root),
+    )
+    monkeypatch.setattr(
+        installer,
+        "_materialize_runtime_generation_entrypoint",
+        lambda runtime_root: seen.update(entrypoint_materialized=runtime_root),
+    )
+    monkeypatch.setattr(
+        installer,
+        "_materialize_runtime_generation_vc_frame_entry",
+        lambda runtime_root: seen.update(vc_frame_entry_materialized=runtime_root),
+    )
+    monkeypatch.setattr(
+        installer,
+        "_materialize_runtime_generation_vc_terminal_entry",
+        # The real symbol grew a require_native_host keyword; the double has to
+        # absorb it or the staging call raises TypeError before it asserts.
+        lambda runtime_root, **_kwargs: seen.update(
+            vc_terminal_entry_materialized=runtime_root
+        ),
     )
     monkeypatch.setattr(
         installer,
@@ -547,7 +710,10 @@ def test_control_plane_staging_delegates_to_distribution_manifest(
     assert seen["mirror"] is True
     assert seen["require_source_provenance"] is True
     assert seen["manifest_source_provenance"] == source_provenance
-    assert seen["materialized"] == seen["destination"]
+    assert seen["frame_materialized"] == seen["destination"]
+    assert seen["entrypoint_materialized"] == seen["destination"]
+    assert seen["vc_frame_entry_materialized"] == seen["destination"]
+    assert seen["vc_terminal_entry_materialized"] == seen["destination"]
     assert seen["manifested"] == seen["destination"]
     assert seen["validated"] == seen["destination"]
     assert (destination / "payload.txt").read_text(encoding="utf-8") == "validated\n"
@@ -557,60 +723,142 @@ def test_control_plane_staging_delegates_to_distribution_manifest(
     assert "_CONTROL_PLANE_EXCLUDES" not in source_text
 
 
-def test_install_manifest_post_install_uses_mirror_sync() -> None:
-    text = (REPO_ROOT / "install.toml").read_text(encoding="utf-8")
+def test_install_manifest_has_one_runtime_pack_owner_and_propagates_doctor_failure(
+    tmp_path: Path,
+) -> None:
+    manifest = tomllib.loads((REPO_ROOT / "install.toml").read_text())
+    phases = {phase["key"]: phase for phase in manifest["phase"]}
+    assert phases["installation"]["cmd"] == ["make", "--no-print-directory", "install"]
+    onboarding = phases["onboarding"]["cmd"]
+    assert onboarding[:3] == ["bash", "-e", "-c"]
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "vetcoders_install.py").write_text("raise SystemExit(37)\n")
+    (scripts / "post-install-launch.sh").write_text("touch forbidden-launch\n")
+    result = subprocess.run(
+        onboarding, cwd=tmp_path, capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 37
+    assert not (tmp_path / "forbidden-launch").exists()
+
+
+@pytest.mark.parametrize("exit_code", [0, 29])
+def test_install_source_delegates_once_and_preserves_owner_failure(
+    tmp_path: Path, exit_code: int
+) -> None:
+    probe = tmp_path / "probe.mk"
+    marker = tmp_path / "calls"
+    probe.write_text(
+        f"include {REPO_ROOT / 'Makefile'}\ninstall:\n\t@printf 'owner\\n' >> '{marker}'\n\t@exit {exit_code}\n"
+    )
+    result = subprocess.run(
+        ["make", "--no-print-directory", "-f", str(probe), "install-source"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert marker.read_text() == "owner\n"
+    assert (result.returncode == 0) == (exit_code == 0)
+    if exit_code:
+        assert f"Error {exit_code}" in result.stderr
+
+
+def test_install_tools_executes_the_shell_owned_stable_root_contract(
+    tmp_path: Path,
+) -> None:
     makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    install_tools_block = makefile.split("\ninstall-tools-held:\n", 1)[1].split(
+        "\n# install-all owns", 1
+    )[0]
 
-    assert "make --no-print-directory install-bundle-tools" in text
-    assert (
-        '$(PYTHON) $(INSTALLER) install --source "$(SOURCE)" '
-        "--compact --non-interactive --mirror"
-    ) in makefile
-    assert "make --no-print-directory install-python-tools" not in text
-    assert "make --no-print-directory install-server\n" not in text
-    assert "$(MAKE) --no-print-directory build-server-release" in makefile
-    assert "$(MAKE) --no-print-directory install-server-payload" in makefile
-    assert "make --no-print-directory install-server-service" not in text
-    assert (
-        'bash "$stable_root/vibecrafted-core/vibecrafted_core/runtime/scripts/'
-        'install-frontier-config.sh" --source "$stable_root"'
-    ) in text
-    assert text.index("make --no-print-directory install-bundle-tools") < text.index(
-        'install-frontier-config.sh" --source "$stable_root"'
+    # Execute the exact shared Make expressions in both production shell
+    # contexts. PYTHON is a guard: a regression to the deleted shim or any
+    # sys.path bootstrap trips it before the path can be accepted.
+    probe = tmp_path / "stable-root-probe.mk"
+    probe.write_text(
+        f"include {REPO_ROOT / 'Makefile'}\n"
+        "probe-install:\n"
+        "\t@bash -e -c '$(RESOLVE_STABLE_RUNTIME_ROOT); "
+        '$(REQUIRE_STAGED_RUNTIME_ROOT); printf "%s\\n" "$$stable_root"\'\n'
+        "probe-install-tools-held:\n"
+        "\t@set -eu; $(RESOLVE_STABLE_RUNTIME_ROOT); "
+        '$(REQUIRE_STAGED_RUNTIME_ROOT); printf "%s\\n" "$$stable_root"\n',
+        encoding="utf-8",
     )
-    assert "bash runtime/scripts/install-frontier-config.sh" not in text
+    guard_marker = tmp_path / "python-was-called"
+    python_guard = tmp_path / "python-guard"
+    python_guard.write_text(
+        f"#!/bin/sh\nprintf called > {guard_marker}\nexit 91\n",
+        encoding="utf-8",
+    )
+    python_guard.chmod(0o755)
 
+    home = tmp_path / "home"
+    stable_root = home / ".local/share/vibecrafted/tools/vibecrafted-current"
+    (stable_root / "vibecrafted-core").mkdir(parents=True)
+    environment = {
+        **os.environ,
+        "HOME": str(home),
+        "PATH": "/usr/bin:/bin",
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONPATH": "",
+        "VIBECRAFTED_INSTALL_NONINTERACTIVE": "1",
+    }
+    for name in (
+        "VIBECRAFTED_HOME",
+        "VIBECRAFTED_RUNTIME_HOME",
+        "VIBECRAFTED_TOOLS_HOME",
+        "XDG_DATA_HOME",
+    ):
+        environment.pop(name, None)
 
-def test_make_install_stages_vc_frame_from_published_runtime() -> None:
-    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
-    install_block = makefile.split("\ninstall:\n", 1)[1].split("\n# `make install`", 1)[
-        0
-    ]
+    for target in ("probe-install", "probe-install-tools-held"):
+        result = subprocess.run(
+            [
+                "make",
+                "--no-print-directory",
+                "-f",
+                str(probe),
+                target,
+                f"PYTHON={python_guard}",
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=environment,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == str(stable_root)
+    assert not guard_marker.exists(), "stable-root resolution must not invoke Python"
 
-    assert 'PYTHONPATH="$$stable_root/vibecrafted-core"' in install_block
-    assert '"$$tool_python" -c' in install_block
-    assert "from runtime_paths import vibecrafted_tools_home" in install_block
-    assert install_block.index('export PATH="$$HOME/.local/bin:$$PATH"') < (
-        install_block.index("uv tool dir")
-    )
-    assert 'PYTHONPATH="$(SOURCE)/vibecrafted-core"' not in install_block
-    assert install_block.index("install-bundle-tools") < install_block.index(
-        'install-frontier-config.sh" --source "$$stable_root"'
-    )
-    assert (
-        'stable_root="$${XDG_DATA_HOME:-$$HOME/.local/share}/vibecrafted/tools/'
-        'vibecrafted-current"'
-    ) in install_block
-    assert (
-        "from vibecrafted_core.vc_frame_delivery import wire_vc_frame_config"
-    ) in install_block
-    assert "wire_vc_frame_config(force_frontier=True)" in install_block
-    assert "ensure_zshrc" not in install_block
-    assert "stage_vc_frame_config" not in install_block
-    assert "vc-frame config delivery skipped" not in install_block
-    assert install_block.index("skills and launchers") < install_block.index(
-        "vc-frame config"
-    )
+    shutil.rmtree(stable_root)
+    for target in ("probe-install", "probe-install-tools-held"):
+        result = subprocess.run(
+            [
+                "make",
+                "--no-print-directory",
+                "-f",
+                str(probe),
+                target,
+                f"PYTHON={python_guard}",
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=environment,
+        )
+        assert result.returncode != 0
+        assert "✗ current tools root drift: staged runtime missing at" in result.stderr
+        assert "→ fix: vibecrafted doctor --fix-legacy-bootstrap --fix-launchers" in (
+            result.stderr
+        )
+
+    for block in (install_tools_block,):
+        assert "$(RESOLVE_STABLE_RUNTIME_ROOT)" in block
+        assert "from runtime_paths import vibecrafted_tools_home" not in block
 
 
 def test_installer_copies_skill_rules_to_fresh_skills_root(tmp_path: Path) -> None:
@@ -676,30 +924,15 @@ def test_install_all_paths_do_not_install_shell_helpers_by_default() -> None:
 
 
 def test_install_all_default_output_is_quiet_and_points_to_vc_start() -> None:
-    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
-    step_runner = (REPO_ROOT / "scripts" / "install-step.sh").read_text(
-        encoding="utf-8"
-    )
-
-    install_all_block = makefile.split("install-all:", 1)[1].split("\nskills:", 1)[0]
-    receipt_start = install_all_block.index("Vibecrafted is ready.")
-    vc_start_index = install_all_block.index("vc-start")
-    doctor_index = install_all_block.index("vibecrafted doctor")
-    log_index = install_all_block.index("~/.vibecrafted/install.log")
-
-    assert 'printf "Installing Vibecrafted\\n"' in install_all_block
-    for label in (
-        "foundations",
-        "frontier config",
-        "skills and launchers",
-        "runtime tools",
-        "app binaries",
-    ):
-        assert f'$(INSTALL_STEP) "{label}" --' in install_all_block
-
-    assert receipt_start < vc_start_index < doctor_index < log_index
-    assert "VIBECRAFTED_INSTALL_LOG" in install_all_block
-    assert ': > "$(INSTALL_LOG)"' in install_all_block
+    makefile = (REPO_ROOT / "Makefile").read_text()
+    step_runner = (REPO_ROOT / "scripts/install-step.sh").read_text()
+    block = makefile.split("install-all: init-hooks", 1)[1].split(
+        "\n# Output discipline", 1
+    )[0]
+    assert "--yes --quiet" in block
+    manifest = tomllib.loads((REPO_ROOT / "install.toml").read_text())
+    onboarding = next(p for p in manifest["phase"] if p["key"] == "onboarding")
+    assert "vc-start" in onboarding["reason"]
     assert "VERBOSE ?= 0" in makefile
     assert 'tee -a "$log_path"' in step_runner
     assert "Install failed during: %s" in step_runner
@@ -748,11 +981,11 @@ def test_install_all_user_facing_output_has_no_ghost_anxiety_copy() -> None:
         assert forbidden not in output_text
 
 
-def test_install_all_installs_python_tools_with_uv_tool_install() -> None:
-    """install-all owns Python console scripts through uv tool install.
+def test_explicit_python_tool_target_uses_stable_runtime_source() -> None:
+    """The explicit Python tool target retains its stable-source contract.
 
     De-fragile contract: the uv-tool editable source is the STABLE runtime home
-    (resolved via runtime_paths -> vibecrafted-current), NEVER the dev-workspace
+    (resolved via the shell root throne -> vibecrafted-current), NEVER the dev-workspace
     checkout ($(SOURCE)). An editable install pointed at the checkout breaks the
     `vibecrafted` CLI the moment the dev tree switches to a branch without
     vibecrafted_core/cli.py. The MCP server is installed as its own tool, with
@@ -790,26 +1023,25 @@ def test_install_all_installs_python_tools_with_uv_tool_install() -> None:
         "v._install_launcher(Path(sys.argv[1]), dry_run=False, update_rc=False)"
         in python_tools_block
     )
-    assert (
-        "$$stable_root/vibecrafted-core/vibecrafted_core/deck/vibecrafted"
-        in python_tools_block
-    )
+    assert "$$stable_root/bin/vibecrafted" in python_tools_block
     assert 'if [ "$$entrypoint" = "vibecrafted" ]' in python_tools_block
     assert "vibecrafted-mcp" in (
         REPO_ROOT / "vibecrafted-mcp" / "pyproject.toml"
     ).read_text(encoding="utf-8")
 
-    assert "make --no-print-directory install-bundle-tools" in manifest
+    phases = tomllib.loads(manifest)["phase"]
+    assert next(p["cmd"] for p in phases if p["key"] == "installation") == [
+        "make",
+        "--no-print-directory",
+        "install",
+    ]
     assert "make --no-print-directory install-python-tools" not in manifest
 
 
-def test_install_all_covers_app_binaries_as_real_files() -> None:
-    """install-all must own the shipped Rust binaries (voc, vc-admin, and
-    vc-server): built from source in release and copied into
-    ~/.local/bin as REAL files. `cargo install` is forbidden in that path because
-    it can create ~/.local/bin -> ~/.cargo/bin symlink drift. The install.toml
-    installation phase mirrors install-all line-by-line, so it must carry the
-    same steps."""
+def test_internal_binary_targets_preserve_real_files_and_are_not_manifest_writers() -> (
+    None
+):
+    """Retain internal build/copy coverage; the manifest uses one pack owner."""
     makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
     manifest = (REPO_ROOT / "install.toml").read_text(encoding="utf-8")
 
@@ -823,6 +1055,12 @@ def test_install_all_covers_app_binaries_as_real_files() -> None:
         in makefile
     )
     assert "bin/vendor/$(HOST_VENDOR_PLATFORM)" in makefile
+    vendor_block = makefile.split("\ninstall-vendored-binaries:", 1)[1].split(
+        "\n# Degrade like the vendored lane", 1
+    )[0]
+    assert 'command -v "$$bin"' in vendor_block
+    assert "preserving pre-existing" in vendor_block
+    assert "fill-gap policy; never downgrade" in vendor_block
     assert "APP_BINARIES := voc vc-admin" in makefile
     assert "SERVER_PACKAGE := vibecrafted-server-web" in makefile
     assert "SERVER_BIN  := vc-server" in makefile
@@ -842,24 +1080,33 @@ def test_install_all_covers_app_binaries_as_real_files() -> None:
         'install -m 0755 "$(APP_BUILD_TARGET)/release/$$bin" "$(BIN_DIR)/$$bin"'
         in app_block
     )
+    assert "VIBECRAFTED_RUNTIME_ROOT" in app_block
     assert "$(APP_DIR)/target" not in app_block
 
-    assert "make --no-print-directory install-vendored-binaries" in manifest
-    assert "make --no-print-directory install-app-binaries" in manifest
+    assert "make --no-print-directory install-vendored-binaries" not in manifest
+    assert "make --no-print-directory install-app-binaries" not in manifest
     assert "make --no-print-directory install-server" not in manifest
-    assert "make --no-print-directory install-bundle-tools" in manifest
+    phases = tomllib.loads(manifest)["phase"]
+    assert next(p["cmd"] for p in phases if p["key"] == "installation") == [
+        "make",
+        "--no-print-directory",
+        "install",
+    ]
     assert "build-server-release" in makefile
     server_build_block = makefile.split("\nbuild-server-release:", 1)[1].split(
         "\ninstall-server-payload:", 1
     )[0]
-    assert "cargo leptos build --release" in server_build_block
+    assert '"$$cargo_bin" leptos build --release' in server_build_block
+    assert "rustup which cargo" in server_build_block
+    assert "rustup target list --installed" in server_build_block
+    assert "FATAL: wasm32 target missing" in server_build_block
     assert "SERVER_BUILD_TARGET := $(CARGO_BUILD_ROOT)/vibecrafted-server" in makefile
     assert "SERVER_BUILD_SITE_ROOT := $(SERVER_BUILD_TARGET)/site" in makefile
     assert 'CARGO_TARGET_DIR="$(SERVER_BUILD_TARGET)"' in server_build_block
     assert 'LEPTOS_SITE_ROOT="$(SERVER_BUILD_SITE_ROOT)"' in server_build_block
     assert '--bin-cargo-args="--locked"' in server_build_block
     assert '--lib-cargo-args="--locked"' in server_build_block
-    assert "cargo tree --locked -p wasm-bindgen --depth 0 --prefix none" in (
+    assert '"$$cargo_bin" tree --locked -p wasm-bindgen --depth 0 --prefix none' in (
         server_build_block
     )
     assert "tomllib" not in server_build_block
@@ -1033,22 +1280,35 @@ def test_foundations_product_binaries_are_validation_only() -> None:
     assert "will not guess crates, npm packages, or local checkout paths" in aicx_block
 
 
-def test_foundations_builds_vc_frame_outside_the_living_tree() -> None:
-    text = (REPO_ROOT / "scripts" / "install-foundations.sh").read_text(
-        encoding="utf-8"
+@pytest.mark.parametrize("available", [True, False])
+def test_foundations_frame_check_requires_explicit_pack_repair(
+    tmp_path: Path, available: bool
+) -> None:
+    text = (REPO_ROOT / "scripts/install-foundations.sh").read_text()
+    body = (
+        "install_vcframe() {"
+        + text.split("install_vcframe() {", 1)[1].split("\n}\n", 1)[0]
+        + "\n}\n"
     )
-    block = text.split("install_vcframe() {", 1)[1].split(
-        "# ---------------------------------------------------------------------------\n# Claude Code",
-        1,
-    )[0]
-
-    assert "${XDG_CACHE_HOME:-$HOME/.cache}/vibecrafted/build/vc-frame" in block
-    assert 'CARGO_TARGET_DIR="$vcframe_target_root"' in block
-    assert 'make -C "$sibling" --no-print-directory release' in block
-    assert 'install -m 0755 "$donor_binary" "$LAUNCHER_PREFIX/vc-frame"' in block
-    assert "tools/install.sh" not in block
-    assert "VCFRAME_INSTALL_URL" not in block
-    assert "releases/latest/download/install.sh" not in block
+    script = (
+        f"verify_vcframe_cockpit() {{ return {0 if available else 1}; }}\nwarn() {{ printf '%s\\n' \"$@\"; }}\n"
+        + body
+        + "install_vcframe\n"
+    )
+    before = set(tmp_path.iterdir())
+    result = subprocess.run(
+        ["bash", "-c", script],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == (0 if available else 1)
+    if not available:
+        assert (
+            "make install" in result.stdout and "verified Runtime Pack" in result.stdout
+        )
+    assert set(tmp_path.iterdir()) == before
 
 
 def test_foundations_never_overwrite_uv_owned_python_entrypoints() -> None:
@@ -1210,6 +1470,13 @@ def test_make_install_verifies_server_supervisor_entrypoint() -> None:
     assert "vibecrafted vc-workflow vc-guardian vc-server-supervisor" in (
         install_tools_block
     )
+    # Every Python entrypoint, including the separately-owned MCP tool, must
+    # import under its own uv interpreter before the install can succeed. A
+    # valid shebang alone previously allowed a missing `vibecrafted_mcp`
+    # package to ship and surface as MCP CONNECTION_CLOSED at initialize.
+    assert 'env -u PYTHONPATH -u PYTHONHOME "$$entrypoint_path" --help' in (
+        install_tools_block
+    )
     assert "expected executable entrypoint" in install_tools_block
     assert '"$$resolved" --help' in install_tools_block
     # --color never is load-bearing: FORCE_COLOR-style env makes `uv tool dir`
@@ -1228,6 +1495,10 @@ def test_make_install_verifies_server_supervisor_entrypoint() -> None:
     )
     assert "uv tool uninstall" not in install_tools_block
     assert "run_with_tools_install_lease" in install_tools_block
+    assert "preflight_source_runtime_candidate" in install_tools_block
+    assert install_tools_block.index("preflight_source_runtime_candidate") < (
+        install_tools_block.index("run_with_tools_install_lease")
+    )
     assert "INSTALL_TOOLS_SERVICE_POLICY ?= preserve" in text
     assert 'service_policy=os.environ["VIBECRAFTED_INSTALL_SERVICE_POLICY"]' in (
         install_tools_block
@@ -1283,7 +1554,6 @@ def test_make_install_verifies_server_supervisor_entrypoint() -> None:
 
 def test_make_install_enables_service_after_server_payload() -> None:
     text = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
-    install_block = text.split("\ninstall:\n", 1)[1].split("\n# `make install`", 1)[0]
     held_block = text.split("\ninstall-tools-held:\n", 1)[1].split(
         "\n# install-all owns", 1
     )[0]
@@ -1291,8 +1561,7 @@ def test_make_install_enables_service_after_server_payload() -> None:
         "\nserver-smoke:", 1
     )[0]
 
-    assert "make --no-print-directory install-server'" not in install_block
-    assert "$(MAKE) --no-print-directory install-bundle-tools" in install_block
+    assert "\ninstall-source: install\n" in text
     assert "$(MAKE) --no-print-directory install-server-payload" in held_block
     assert held_block.index("install-server-payload") > held_block.index(
         "uv tool install --force --reinstall"
@@ -1370,7 +1639,7 @@ def test_internal_make_targets_reject_nonexistent_lease_descriptor(
     }
     for target in ("install-tools-held", "install-server-payload"):
         result = subprocess.run(
-            ["make", "--no-print-directory", target],
+            ["make", "--no-print-directory", target, f"PYTHON={sys.executable}"],
             cwd=REPO_ROOT,
             capture_output=True,
             text=True,
@@ -1424,4 +1693,171 @@ def test_launcher_does_not_pin_stale_supervisor_binary() -> None:
     resolver = launcher.split("_server_supervisor_binary() {", 1)[1].split("\n}", 1)[0]
 
     assert "command -v vc-server-supervisor" in resolver
+    assert "uv tool dir" in resolver
+    assert "XDG_BIN_HOME" in resolver
     assert "$HOME/.local/bin/vc-server-supervisor" not in resolver
+
+
+def test_launcher_service_status_returns_ex_config_when_supervisor_missing() -> None:
+    launcher = (REPO_ROOT / "scripts" / "vibecrafted").read_text(encoding="utf-8")
+    assert "return 78" in launcher.split("_server_supervisor_cli() {", 1)[1][:1800]
+    service_arm = launcher.split("\n    service)\n", 1)[1]
+    assert "return $?" in service_arm.split(";;", 1)[0]
+
+
+def test_runtime_pack_is_built_without_app_or_dmg_dependency() -> None:
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    target = makefile.split("\nruntime-pack:\n", 1)[1].split("\n\n", 1)[0]
+
+    assert "--runtime-pack-only" in target
+    assert "runtime-pack: app" not in makefile
+    assert "$(RELEASE_SCRIPT)" in target
+
+
+def test_runtime_pack_target_prints_what_the_builder_recorded() -> None:
+    """The Make recipe must not rebuild the artifact's name after the fact.
+
+    It used to reconstruct `dist/Vibecrafted_RuntimePack_<version>-<date>-<short
+    sha>-darwin-<arch>.tar.gz` from the CURRENT HEAD and date. That name drifts
+    when HEAD moves during a build, when the build crosses midnight in UTC, and
+    it is simply wrong whenever VIBECRAFTED_RELEASE_DIR moved the output. The
+    producer captured the real path; the recipe reports it.
+    """
+
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    target = makefile.split("\nruntime-pack:\n", 1)[1].split("\n\n", 1)[0]
+
+    assert "--runtime-pack-only" in target
+    assert "runtime_pack_selection_read" in target
+    assert "$(RUNTIME_PACK_SELECTION_LIB)" in target
+    for reconstruction in ("git rev-parse", "date -u +%Y%m%d", "dist/Vibecrafted_"):
+        assert reconstruction not in target, reconstruction
+
+
+def test_install_leaves_pack_selection_to_its_single_owner() -> None:
+    """`make install` passes RUNTIME_PACK through and adds no second selector."""
+
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    target = makefile.split("\ninstall:\n", 1)[1].split("\n\n", 1)[0]
+
+    assert 'VIBECRAFTED_RUNTIME_PACK="$(RUNTIME_PACK)"' in target
+    assert "$(RUNTIME_PACK_INSTALLER)" in target
+    assert "runtime_pack_selection_read" not in target
+    assert "dist/Vibecrafted_" not in target
+
+
+def test_selection_record_never_ranks_candidates_by_time_or_glob_order() -> None:
+    """Historical packs are legitimate; ranking them is what was forbidden."""
+
+    source = (REPO_ROOT / "scripts/lib/runtime-pack-selection.sh").read_text(
+        encoding="utf-8"
+    )
+    # The prose explains which heuristics are banned; the code must not use them.
+    library = "\n".join(
+        line for line in source.splitlines() if not line.lstrip().startswith("#")
+    )
+
+    for heuristic in ("-newer", "ls -t", "mtime", "sort -r", "find "):
+        assert heuristic not in library, heuristic
+    # Selection resolves a recorded absolute path, so it never enumerates dist.
+    assert "dist/" not in library
+    assert "rm -rf" not in library
+    # A record only ever names bytes it can still prove.
+    assert "runtime_pack_selection_sha256" in source
+
+
+def _mock_pack_repo(tmp_path: Path, *, body: str) -> Path:
+    """A repo whose `make runtime-pack` runs a disposable builder.
+
+    Only the packaging boundary is mocked; the Make target, the `zsh -ic` hop
+    and the selection library are the real ones the Founder's command uses.
+    """
+
+    repo = tmp_path / "repo"
+    (repo / "scripts/lib").mkdir(parents=True)
+    (repo / "out dir").mkdir(parents=True)
+    shutil.copy2(REPO_ROOT / "Makefile", repo / "Makefile")
+    shutil.copy2(
+        REPO_ROOT / "scripts/lib/runtime-pack-selection.sh",
+        repo / "scripts/lib/runtime-pack-selection.sh",
+    )
+    builder = repo / "mock-builder.sh"
+    builder.write_text(
+        "set -euo pipefail\n"
+        'REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
+        '. "$REPO_ROOT/scripts/lib/runtime-pack-selection.sh"\n'
+        # A release directory outside dist, with a space, is ordinary: this is
+        # what VIBECRAFTED_RELEASE_DIR does and what no reconstructed
+        # `dist/<name>` could ever have produced.
+        'PACK="$REPO_ROOT/out dir/'
+        'Vibecrafted_RuntimePack_4.3.1-20260909-d7d83dc5-darwin-arm64.tar.gz"\n'
+        'ATTEMPT="$(runtime_pack_selection_attempt_id)"\n'
+        "SHA=$(printf 'd%.0s' {1..40})\n"
+        'runtime_pack_selection_begin "$REPO_ROOT" "$ATTEMPT" "$SHA"\n' + body,
+        encoding="utf-8",
+    )
+    return repo
+
+
+def _make_runtime_pack(repo: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            "make",
+            "--no-print-directory",
+            "runtime-pack",
+            "RELEASE_SCRIPT=mock-builder.sh",
+        ],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_make_runtime_pack_reports_the_path_the_builder_recorded(
+    tmp_path: Path,
+) -> None:
+    """Run the real target; the printed path is the recorded one, verbatim."""
+
+    repo = _mock_pack_repo(
+        tmp_path,
+        body=(
+            "printf 'sealed carrier\\n' > \"$PACK\"\n"
+            'runtime_pack_selection_publish "$REPO_ROOT" "$ATTEMPT" "$PACK" '
+            '"4.3.1+gd7d83dc5" darwin-arm64 arm64 "$SHA" "$SHA" "$SHA"\n'
+        ),
+    )
+
+    result = _make_runtime_pack(repo)
+
+    assert result.returncode == 0, result.stderr
+    printed = result.stdout.strip().splitlines()[-1]
+    assert printed == str(
+        repo
+        / "out dir"
+        / ("Vibecrafted_RuntimePack_4.3.1-20260909-d7d83dc5-darwin-arm64.tar.gz")
+    )
+    assert Path(printed).is_file()
+    assert not (repo / "dist").exists()
+
+
+def test_make_runtime_pack_reports_a_build_that_never_completed(
+    tmp_path: Path,
+) -> None:
+    """A builder that dies after claiming the attempt prints no artifact path."""
+
+    repo = _mock_pack_repo(
+        tmp_path,
+        body='echo "[mock] dying before the carrier is sealed" >&2\nexit 1\n',
+    )
+
+    result = _make_runtime_pack(repo)
+
+    assert result.returncode != 0
+    assert "Vibecrafted_RuntimePack_" not in result.stdout
+    # The recipe stops at the failed builder, so the refusal message belongs to
+    # the next `make install` -- which is exactly what the pending record left
+    # behind here is for. That refusal is proven in
+    # test_interrupted_build_cannot_publish_the_previous_success.
+    record = repo / "build/runtime-pack-selection.json"
+    assert '"status": "pending"' in record.read_text(encoding="utf-8")

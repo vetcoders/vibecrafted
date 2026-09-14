@@ -5,12 +5,14 @@ Use this template for planning output. Strip out the comments in your actual out
 ```markdown
 ---
 run_id: <generated-unique-id>
-agent: <claude|codex|gemini>
+agent: <claude|codex|gemini|cursor>
 skill: <vc-scaffold|vc-workflow|vc-implement>
 project: <repo-name>
 status: pending
 vector: <stabilize|implement|recon|e2e> # selects the gate profile = what counts as delivery
 created: <ISO-8601 timestamp>
+founder_interview_evidence: <journal path | AICX session/extract | current-conversation answers>
+dispatch_artifact: <absolute plan root>/<plan-id>.dispatch.toml
 ---
 
 # Architecture Plan: [Project Name]
@@ -99,7 +101,23 @@ Delivery-verifier: `pnpm test auth` green — rejects invalid tokens, passes val
 Acceptance: intent (auth enforced on all routes) vs baseline (routes open); delivery proven by the verifier, not "agent said so"
 Pre-handoff baseline: branch, HEAD, git status, changed files, verifier output, known failures, next instruction
 
-```
+````
+
+## Dispatch Contract
+
+The plan root contains `<plan-id>.dispatch.toml` with `schema = "vibecrafted.dispatch.v1"`. It maps every
+task above to one `[[cuts]]` entry with its dependencies, agent/workflow, brief-backed prompt, and
+delivery-verifier. `vibecrafted dispatch <absolute-plan-root>/<plan-id>.dispatch.toml --doctor`
+must pass before handoff. Multi-cut execution belongs to `/vc-ship` A→Z.
+
+If the plan uses compile embargo, include the explicit Founder authorization, phase marker,
+deferred-gate list, temporary structural evidence, checkpoint procedure, named release attestation,
+and local worker-commit report required by `references/compile-embargo.md`. A selective
+repository-owned hook policy is preferred when available; its absence does not block the embargo
+or require a new policy system first. The worker report must state what ran and what was skipped.
+The plan must distinguish the local checkpoint, integrator structural admission (exact SHA/scope,
+Semgrep, and secret/security review; deferred compile/lint/type/test gates still skipped), and
+verified delivery after named closure and the full language-appropriate gate set.
 
 ## Test Gates (per Vector profile)
 
@@ -111,7 +129,8 @@ every cut `[~]→[x]`.
 - **stabilize** → the bleeding stops + a regression/canary gate green (busy ≠ dead)
 - **recon** → map/answer delivered with evidence refs
 - **e2e** → the full path runs end-to-end
-- **always** → no exposed secrets; security gate not skipped (`--no-verify` forbidden)
+- **always** → no exposed secrets; integrator structural admission records Semgrep and
+  secret/security review, while verified delivery after closure records the full language-appropriate gates
 
 ## Living Tree Note
 
@@ -128,12 +147,36 @@ Document the reasoning. Future engineers will thank you.
 
 ## Running This Plan
 
-1. Read this document top-to-bottom
-2. For each task, spin up an agent or assign to a human
-3. Each task produces artifacts (code, tests, docs)
-4. Validate against acceptance criteria
-5. Capture the pre-handoff baseline before assigning the next owner
-6. When all phase 1 tasks pass gates, move to phase 2
+`<plan-id>.dispatch.toml` is the only execution contract. Validate it, then hand that exact artifact
+to `/vc-ship`; do not launch cuts manually:
 
-No handwaving. Clear work. Clear criteria. That's how founders ship.
+```bash
+vibecrafted dispatch <absolute-plan-root>/<plan-id>.dispatch.toml --doctor
+vibecrafted dispatch <absolute-plan-root>/<plan-id>.dispatch.toml --dry-run --json
+````
+
+`/vc-ship` owns A→Z start, supervision, resume/recovery, verifier gates, and completion through the
+deterministic dispatcher. This section must contain no direct start/resume recipe and no per-cut
+`vibecrafted workflow ... --prompt` recipe.
+
+### Emergency manual fallback
+
+Only when `/vc-ship` or its supervisor is demonstrably unavailable, record the exact failure and
+why the fallback is necessary before giving a bounded direct-dispatch or per-cut recovery command.
+Record how control returns to `/vc-ship`; never let the fallback become a second execution path.
+
+## Closing — Emil spirit (required)
+
+=======================
+[One task-specific motivational line and a kaomoji.]
+=======================
+
+**Call to Action:** [Next authorized step → owner → expected handback. Follow the
+plan state and canonical execution route; name the blocker if execution is blocked.]
+
+**Suchar:** [A fresh, surprising, deliberately corny joke about this task. Add a
+kaomoji; do not reuse a stock punchline from another plan or brief.]
+
+```
+
 ```

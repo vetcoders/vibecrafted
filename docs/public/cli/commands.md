@@ -1,6 +1,6 @@
 ---
 title: "Management Commands"
-description: "Reference for vibecrafted management commands: init, status, doctor, receipt, settlements, update, resume, version, uninstall, help."
+description: "Reference for vibecrafted management commands: init, status, doctor, receipt, settlements, update, resume, fork, version, uninstall, help."
 section: cli
 order: 20
 ---
@@ -13,19 +13,105 @@ past runs. They launch no workflows themselves — that is the job of the
 
 ## Reference table
 
-| Command                              | Purpose                                             |
-| ------------------------------------ | --------------------------------------------------- |
-| `vibecrafted init [agent]`           | Orient an agent in this repo                        |
-| `vibecrafted status`                 | Today's agent activity                              |
-| `vibecrafted doctor`                 | Installation health — pass/fail                     |
-| `vibecrafted receipt [--json]`       | Delivery/runtime receipt (source ↔ installed)       |
-| `vibecrafted settlements <action>`   | Read-only f/x/n ledger query                        |
-| `vibecrafted update`                 | Update to the latest release                        |
-| `vibecrafted resume <agent>`         | Continue a stopped run or a provider session        |
-| `vibecrafted resume-session <agent>` | Continue an exact provider session as a tracked run |
-| `vibecrafted version`                | Print version                                       |
-| `vibecrafted uninstall`              | Reverse the install                                 |
-| `vibecrafted help [topic\|--all]`    | Command deck · full reference                       |
+| Command                              | Purpose                                                        |
+| ------------------------------------ | -------------------------------------------------------------- |
+| `vibecrafted init [agent]`           | Orient an agent in this repo                                   |
+| `vibecrafted status`                 | Today's agent activity                                         |
+| `vibecrafted doctor`                 | Installation health — pass/fail                                |
+| `vibecrafted receipt [--json]`       | Delivery/runtime receipt (source ↔ installed)                  |
+| `vibecrafted settlements <action>`   | Read-only f/x/n ledger query                                   |
+| `vibecrafted update`                 | Update to the latest release                                   |
+| `vibecrafted resume <agent>`         | Continue a stopped run or a provider session                   |
+| `vibecrafted fork <agent>`           | Branch a provider session into a new one (claude, codex, grok) |
+| `vibecrafted resume-session <agent>` | Continue an exact provider session as a tracked run            |
+| `vibecrafted version`                | Print version                                                  |
+| `vibecrafted uninstall`              | Reverse the install                                            |
+| `vibecrafted help [topic\|--all]`    | Command deck · full reference                                  |
+
+## Selecting the repository: `--repo`
+
+Every repository-aware command takes `--repo <path>` and works from **any**
+working directory, including one that is not inside Git:
+
+```bash
+cd ~/Downloads
+vibecrafted workflow claude --repo ~/Projects/app --prompt "Ship it"
+vibecrafted fork claude --run-id work-260908-194325-30219 --repo ~/Projects/app
+vibecrafted start --repo ~/Projects/app
+vibecrafted resume codex --repo ~/Projects/app --session <provider-uuid>
+```
+
+`--root <path>` is the legacy spelling with identical semantics. Passing both
+with different paths is an error (`conflicting --repo … and --root …`), never a
+silent pick; a missing path fails with the flag that carried it. Commands that
+do not need a repository (`version`, `help`, `doctor`, `receipt`,
+`settlements`, `fork-source`) never require Git to run.
+
+Skill launchers add `--worktree [true|false]`: the worker runs in a fresh
+linked checkout of `--repo` (branch `cut/<agent>-<run_id>` at the selected
+HEAD, under `~/.vibecrafted/worktrees/`). The selected repository must be a
+clean Git work-tree root; the launch receipt reports `worktree_path`,
+`worktree_branch`, `worktree_baseline_sha` and `parent_root`.
+
+```bash
+vibecrafted workflow claude --model claude-fable-5-1 --worktree true \
+  --repo ~/Projects/app --prompt "Ujednolić polecenie fork"
+```
+
+The Rust cockpit accepts the same selector: `vibecrafted tui --repo <path>`
+(`voc --repo <path>`), with `--root` as the legacy spelling and the same
+conflict rule.
+
+### Execution controls: `--permissions`, `--sandbox`
+
+Skill launchers also take `--permissions <bypass|auto|accept-edits|read-only>`
+and `--sandbox [true|false]`. Both are real execution contracts, resolved
+against the _installed_ provider CLI before any process starts: the launcher
+maps a control only where the provider can enforce it, and refuses the launch
+(exit 2, no run record) with the exact supported alternative otherwise.
+`--permissions auto` is never downgraded to `bypassPermissions`; `--sandbox
+true` is never downgraded to an unsandboxed run. Omitting both keeps the
+historical default (`bypass`; `auto` for junie; sandbox left to the provider).
+
+```bash
+vibecrafted workflow claude --model claude-fable-5-1 --worktree true \
+  --permissions auto --sandbox true --repo ~/Projects/app --prompt "Ship it"
+```
+
+`--sandbox` means the provider's _own command sandbox_: the boundary the agent
+CLI draws around the shell commands it runs. It is not whole-agent or VM
+isolation. For Claude that boundary is the Bash-tool sandbox (macOS Seatbelt,
+Linux bubblewrap) around Bash commands and their child processes; file tools,
+WebFetch and MCP servers run outside it. `sandbox_effective` reports what the
+launcher configured through the provider's supported interface; the launcher
+does not observe OS enforcement and never says it did.
+
+The launch receipt (`--json`, the human receipt, `meta.json`, the launch
+event) carries `execution_controls` with `permissions_requested` /
+`permissions_effective`, `sandbox_requested` / `sandbox_effective`, the exact
+provider flags, a `boundary` line naming what that provider's sandbox confines,
+and the evidence line. Provider mapping as probed on 2026-09-08 (read-only
+`--help`, binary settings schema and the Claude Code sandbox documentation):
+
+| Provider                   | `--permissions`                                                                                                                           | `--sandbox true`                                                                                                                                                                                        | `--sandbox false`                                                                                                                        |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| claude 2.1.263             | `--permission-mode bypassPermissions\|auto\|acceptEdits\|plan`                                                                            | `--settings '{"sandbox":{"enabled":true,"failIfUnavailable":true,"allowUnsandboxedCommands":false}}'` — the documented hard gate: a missing backend fails the run, no `dangerouslyDisableSandbox` retry | `--settings '{"sandbox":{"enabled":false}}'`                                                                                             |
+| codex 0.154 (`codex exec`) | bypass → `--dangerously-bypass-approvals-and-sandbox`; auto → `--approve-for-me`; read-only → `--sandbox read-only`; accept-edits refused | bypass → `--sandbox workspace-write` (bypass flag dropped, approvals never prompted); auto/read-only already sandboxed                                                                                  | bypass only; auto/read-only refused (their sandbox enforces the policy)                                                                  |
+| grok 1.0.21                | `--permission-mode …`                                                                                                                     | `--sandbox workspace` (`read-only` profile under read-only)                                                                                                                                             | `--sandbox off`                                                                                                                          |
+| cursor-agent 2026.09.08    | `--force --trust` / `--trust` / `--mode ask --trust`; accept-edits refused                                                                | `--sandbox enabled` (verified against `--help`)                                                                                                                                                         | `--sandbox disabled`                                                                                                                     |
+| agy 1.1.27                 | `--dangerously-skip-permissions` / default / `--mode accept-edits` / `--mode plan`                                                        | `--sandbox` (opt-in terminal restrictions)                                                                                                                                                              | refused: only an opt-in flag exists and agy keeps persistent terminal-sandbox settings, so "no flag" is not "disabled"; omit `--sandbox` |
+| junie 26.8.31              | `auto` only in headless runs                                                                                                              | refused (no sandbox surface)                                                                                                                                                                            | refused                                                                                                                                  |
+
+Claude's `--settings` document sits at the command-line level: its scalar keys
+override the same keys in user, project and local settings and keep every key
+it omits, while managed settings still outrank it. Array keys merge across
+scopes, so commands listed in an inherited `sandbox.excludedCommands` keep
+running outside the sandbox; the receipt says so.
+
+`research` and `marbles` run under a supervised runtime that does not carry
+these controls yet; passing them there is refused, not ignored. The shell
+skill helpers and the interactive `init` / `operator` / `partner` sessions
+refuse `--sandbox` for the same reason.
 
 ## init
 
@@ -49,6 +135,20 @@ The same payload is attached to the init step of **every** pipeline launch
 (`vibecrafted <skill> <agent>`), so a worker opens with unfinished work already
 in view. Full inventory on demand:
 `vibecrafted settlements list --bucket n --revalidatable`.
+
+**A declaration opens its workspace.** `init`, `operator` and `partner` owe
+you the oriented agent on a surface you can see. The repository's own
+vc-frame session (bound through the workspace catalog, `--repo <path>` to
+declare another one) is created detached when absent and reused when live;
+the agent tab is hung on it first, and only then is your terminal attached.
+When the command runs with no controlling terminal — an agent tool with pipes
+for stdio — and no attached frame that the engine confirms as watched, it
+opens the Vibecrafted terminal on that repository and re-enters there with the
+same arguments (budget, prompt, file), exactly once. Inherited
+`VC_FRAME_SESSION_NAME` / `VIBECRAFTED_OPERATOR_SESSION` values are checked
+against the engine: a session that is dead, missing or has no attached client
+is ambient context, never a target. A terminal launch the host rejects is
+reported as a failure, never as "launched".
 
 ## status
 
@@ -139,11 +239,30 @@ otherwise the original prompt is replayed as `resume-new-session`.
 `01a00…` / `VIBECRAFTED_SESSION_ID` is the Vibecrafted runtime session, not
 Claude or Codex.
 
-Bare `vibecrafted resume <agent>` (optional `--root`) opens a **new**
+Bare `vibecrafted resume <agent>` (optional `--repo`) opens a **new**
 interactive session and attaches an AICX continuity pack. It never
-native-attaches the last same-agent candidate. `--root` is an AICX project
-filter, not a session picker. The catalog in the pack is evidence, not a
-swipe list.
+native-attaches the last same-agent candidate. `--repo` (legacy `--root`)
+selects the repository from any directory and narrows AICX; it is not a
+session picker. The catalog in the pack is evidence, not a swipe list.
+
+`--repo <path>` (or `--root <path>`) on an interactive resume is a
+**workspace declaration**: the agent is resumed inside that repository's own
+vc-frame session, bound through the workspace catalog. The session is
+created when absent and reused when live — never duplicated, and never
+replaced by whatever session the calling shell happens to be attached to
+(a stale or foreign `VC_FRAME_SESSION_NAME` is ambient context, not a
+target). Entering it follows the caller: an attached client on a watched
+session is switched onto the workspace, a plain terminal attaches to it,
+and a caller with neither — no TTY, a stale or unwatched marker — has the
+Vibecrafted terminal opened on the declared repository, where the resume
+re-enters with the same native id and absolute root and attaches. It is never
+downgraded to a headless run and never left with an attach command to type.
+Other sessions are left untouched.
+
+```bash
+# From any shell, including one attached to another project's frame:
+vibecrafted resume codex --session <provider-uuid> --repo ~/Projects/other-repo
+```
 
 ```bash
 printf '%s' "continue safely" | vibecrafted resume-session codex \
@@ -152,10 +271,67 @@ printf '%s' "continue safely" | vibecrafted resume-session codex \
 
 `resume-session` continues one exact provider-owned session as a tracked,
 detached headless run. The prompt comes from `-p <text>`, `-f <path>`, or
-`--prompt-stdin` (keeps the prompt out of argv). Optional flags: `--root
-<path>`, `--model <name>`, `--json` for a machine-readable launch receipt.
-This command is always headless; it does not pretend to be an interactive
-session.
+`--prompt-stdin` (keeps the prompt out of argv). Optional flags: `--repo
+<path>` (legacy `--root`), `--model <name>`, `--json` for a machine-readable
+launch receipt. This command is always headless; it does not pretend to be
+an interactive session.
+
+## fork
+
+```bash
+vibecrafted fork claude --run-id work-260908-194325-30219 --repo ~/Projects/app
+vibecrafted fork claude --session <provider-uuid> --model claude-fable-5-1
+vibecrafted fork grok --session <provider-uuid> --placement floating
+vibecrafted fork codex --session current --runtime visible
+vibecrafted fork codex --session previous --placement floating
+```
+
+`fork` branches a provider session into a **new** session and leaves the
+source untouched. One identity per call:
+
+- `--session <provider-session-id>` names the source directly. `current` and
+  `previous` (AICX discovery for the caller's repository) stay available.
+- `--run-id <work-…>` names a control-plane run; the provider session that run
+  recorded is the source, and its recorded repository is the default `--repo`.
+  A run that recorded no provider session is refused — the prompt is never
+  replayed and presented as a fork.
+
+The two shapes are never confused: a `work-…` id in `--session` or a provider
+UUID in `--run-id` fails with the corrected command. Identity resolution and
+the provider capability verdict are owned by `vibecrafted fork-source <agent>
+(--session | --run-id) [--json]`, which the deck consults.
+
+Provider coverage (verified on the installed CLIs):
+
+| Provider | Native fork                                                                 | `vibecrafted fork`                                                                                |
+| -------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| codex    | `codex fork <id> [prompt]`                                                  | supported                                                                                         |
+| claude   | `claude --resume <id> --fork-session`                                       | supported                                                                                         |
+| grok     | `grok --resume <id> --fork-session` (never `--restore-code` / `--worktree`) | supported                                                                                         |
+| cursor   | none (`--resume [chatId]` only)                                             | refused: `vibecrafted resume cursor --session <id>` continues the original (a resume, not a fork) |
+| agy      | none (`--conversation <id>` only)                                           | refused, same hint                                                                                |
+| junie    | none (`--session-id … --resume` only)                                       | refused, same hint                                                                                |
+
+Inside a watched vc-frame pane, `--runtime visible|terminal` opens a pane in
+the current tab (break-right by default, `--placement floating` otherwise);
+in a plain TTY, `--runtime terminal` execs the provider directly. Anywhere
+else, `fork` is a **workspace declaration**: the source session is resolved
+first (`current` / `previous` read the calling process's own context), then
+the repository's own vc-frame session hosts the fork as a tab and the
+terminal is attached to it — and when there is no terminal at all (an agent
+tool with pipes for stdio, a marker whose host is gone) the Vibecrafted
+terminal is opened on that repository and the fork re-enters there with the
+exact provider id, absolute `--repo`, runtime, placement, model, permissions
+and prompt. The prompt stays interactive. `--runtime headless` is
+refused for every provider: `codex fork` is an interactive TUI, and a headless
+tracked fork for claude/grok is not wired in this release (`resume-session`
+continues the original headlessly, which is a resume, not a fork).
+`--permissions bypass|auto|accept-edits|read-only` maps onto each provider's
+own permission contract (codex has no `accept-edits` cell); `--model` passes
+through unchanged. `fork` has no `--worktree`: a fork reuses the source
+session's checkout; use a launcher with `--worktree true` for an isolated cut.
+
+The pane title is `<agent> fork @<owner>/<repo> <source-session-id>`.
 
 ## version, uninstall, help
 

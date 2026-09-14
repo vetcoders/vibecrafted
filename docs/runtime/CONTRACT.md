@@ -179,7 +179,7 @@ and read by `run_triage` for SESSIONS board f/x/n triangulation.
 ```yaml
 ---
 run_id: <generated-unique-id>
-agent: <claude|codex|agy|junie|grok|system>
+agent: <claude|codex|agy|junie|grok|cursor|system>
 skill: <vc-skill-name>
 project: <repo-name>
 status: <pending|in-progress|completed|failed|blocked|partial>
@@ -226,7 +226,8 @@ Scope:
 - Out of scope: <explicit>
 
 Constraints:
-- No --no-verify
+- No `--no-verify` outside a declared Founder-authorized compile-embargo
+  checkpoint; workers never push with it
 - Follow repo conventions
 
 Acceptance:
@@ -345,7 +346,9 @@ and the doctrine sits in [`skills/vc-release/SKILL.md`](../../skills/vc-release/
 ## Safety Rules
 
 - Do not log secrets or commit `.env` files.
-- Never use `--no-verify` for `commit` or `push`.
+- Use `--no-verify` only for a declared Founder-authorized compile-embargo
+  local checkpoint whose receipt names skipped hooks and gates. Workers never
+  push with it; a push using `--no-verify` is Founder-only.
 - Do not rewrite git history unless the user explicitly asks.
 - Treat concurrent edits as normal, but still verify before overwriting.
 - If a repo has a strict command such as `make check`, run it or explain why not.

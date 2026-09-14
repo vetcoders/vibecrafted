@@ -22,6 +22,7 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from .clock import utc_now
 from .delivery.model import (
     ContractError,
     DeliveryProofContract,
@@ -37,8 +38,10 @@ from .report_contract import (
     CLAIM_FAILED,
     CLAIM_PARTIAL,
     validate_report_file,
+    worker_authored_report,
 )
 from .run_mutation import run_mutation_locks
+from .run_signal import wait_for_run_signal
 from .runtime_paths import vibecrafted_home
 from .settlement import (
     SETTLEMENT_EVENT_KIND,
@@ -69,6 +72,10 @@ ACTIVE_STATES = {
     "stalled",
 }
 FINAL_STATES = {
+    # Guardian settlement is a durable outcome, never worker liveness.  Treating
+    # it as an unknown lifecycle state lets the heartbeat projector age it into
+    # the stalled bucket and resurrect closed history as a live operator alert.
+    "settled",
     "report_validated",
     "completed",
     "closed",
@@ -81,6 +88,7 @@ FINAL_STATES = {
     "contract_failed",
     "recovery_required",
     "timed_out",
+    "quota_exhausted",
     "gc",
     "ghost",
 }
@@ -138,7 +146,10 @@ RUN_SNAPSHOT_RETENTION_SECONDS_ENV = "VIBECRAFTED_RUN_SNAPSHOT_RETENTION_SECONDS
 RUN_SNAPSHOT_RETENTION_COUNT = 2000
 RUN_SNAPSHOT_RETENTION_COUNT_ENV = "VIBECRAFTED_RUN_SNAPSHOT_RETENTION_COUNT"
 EVENT_TAIL_LIMIT = 16
-EVENTS_ROTATE_BYTES = 32 * 1024 * 1024
+# Keep the automatic writer threshold aligned with the caretaker warning.  A
+# warning below this threshold claimed rotation was overdue even though the
+# only owner allowed to rotate would deliberately leave the stream untouched.
+EVENTS_ROTATE_BYTES = 16 * 1024 * 1024
 EVENTS_ROTATE_BYTES_ENV = "VIBECRAFTED_EVENTS_ROTATE_BYTES"
 EVENTS_ARCHIVE_MAX_FILES = 64
 EVENTS_ARCHIVE_MAX_FILES_ENV = "VIBECRAFTED_EVENTS_ARCHIVE_MAX_FILES"
@@ -152,6 +163,10 @@ RUNTIME_TRANSCRIPT_COLD_TAIL_BYTES_ENV = (
 )
 RUNTIME_TMP_MAX_AGE_SECONDS = 60 * 60
 CONTROL_PLANE_WRITE_RESERVE_BYTES = 1024 * 1024
+# Per-write reserve keeps one snapshot atomic. Launch preflight uses a larger
+# floor so a cargo-heavy fleet is refused before ENOSPC kills in-flight runs.
+LAUNCH_MIN_FREE_BYTES = 512 * 1024 * 1024
+LAUNCH_MIN_FREE_BYTES_ENV = "VIBECRAFTED_LAUNCH_MIN_FREE_BYTES"
 EVENT_SEGMENT_SCHEMA = "vibecrafted.event-stream-segment.v1"
 EVENT_MAX_LINE_BYTES = 256 * 1024
 RECENT_RUN_LIMIT = 12
@@ -619,8 +634,8 @@ def ensure_session_id(session_id: Any = "") -> str:
 
 
 def _now() -> dt.datetime:
-    """Current UTC time (single point of truth for control-plane "now")."""
-    return dt.datetime.now(dt.timezone.utc)
+    """Control-plane "now" — read from :mod:`vibecrafted_core.clock`."""
+    return utc_now()
 
 
 def _configured_stale_heartbeat_seconds() -> int:
@@ -790,6 +805,31 @@ def _configured_nonnegative_int(env_name: str, default: int) -> int:
         return max(int(raw), 0)
     except ValueError:
         return default
+
+
+def ensure_launch_storage(path: Path | None = None) -> None:
+    """Refuse a new launch when the control-plane volume is already too full.
+
+    The 1 MiB atomic-write reserve is enough to fail one snapshot cleanly; it
+    is not enough to stop a cargo-heavy wave before the disk is gone. Launch
+    preflight uses a larger floor so dispatch fails closed with a degraded
+    error instead of workers dying mid-run on ENOSPC.
+    """
+    target = path or control_plane_home()
+    target.mkdir(parents=True, exist_ok=True)
+    required = _configured_nonnegative_int(
+        LAUNCH_MIN_FREE_BYTES_ENV, LAUNCH_MIN_FREE_BYTES
+    )
+    try:
+        free = _storage_free_bytes(target)
+    except OSError:
+        return
+    if required > 0 and free < required:
+        raise ControlPlaneStorageError(
+            "control-plane degraded: insufficient disk space to launch "
+            f"(need {required} free bytes including launch floor, {free} free). "
+            "Free disk space, then retry."
+        )
 
 
 def _state_health(state: str, updated_at: str) -> str:
@@ -1072,6 +1112,43 @@ def _reconcile_dead_launcher(run: dict[str, Any]) -> dict[str, Any]:
     liveness = str(result.get("liveness") or "")
     if state in FINAL_STATES:
         return result
+    owner_pid = _coerce_int(result.get("owner_pid"))
+    if owner_pid is not None:
+        if liveness == "terminal":
+            # The interactive owner terminalizes its receipt atomically
+            # (status + liveness + exit_code + completed_at) before the pair
+            # is torn down. `cancelled` is not a FINAL_STATES member, so
+            # without this guard an owner-signalled (Ctrl-C / SIGTERM) or
+            # provider-signalled exit was relabelled failed/pid_gone with a
+            # recovery demand — closed history resurrected as an alert.
+            return result
+        owner_alive = _pid_is_alive(owner_pid)
+        provider_alive = any(
+            _pid_is_alive(pid)
+            for pid in (
+                _coerce_int(result.get("worker_pid")),
+                _coerce_int(result.get("worker_pgid")),
+            )
+            if pid is not None
+        )
+        if owner_alive and provider_alive:
+            return result
+        now = _now().isoformat()
+        result["state"] = "failed"
+        result["health"] = "final"
+        result["liveness"] = "pid_gone"
+        result["completed_at"] = str(result.get("completed_at") or now)
+        result["updated_at"] = now
+        result["exit_code"] = _coerce_int(result.get("exit_code")) or 1
+        result["terminal_reason"] = (
+            "owner_pid_gone" if not owner_alive else "provider_pid_gone"
+        )
+        result["recovery_required"] = True
+        result["last_error"] = _append_last_error(
+            str(result.get("last_error") or ""),
+            "interactive lifecycle owner/provider identity is no longer live",
+        )
+        return result
     # P0: a dead/absent launcher pid is NOT proof the run died. The launcher is an
     # ephemeral spawn-shell that exits right after forking the detached dispatcher;
     # for headless/detached dispatch it is gone within seconds while the dispatcher
@@ -1079,7 +1156,8 @@ def _reconcile_dead_launcher(run: dict[str, Any]) -> dict[str, Any]:
     # still alive, the run is live regardless of the launcher pid, exit_code, or
     # stale terminal-looking metadata — reconciling it to success/stalled/recovery
     # here makes await capable of rc=0 on a live worker.
-    if _worker_is_alive(result):
+    worker_alive, process_reason = _worker_process_truth(result)
+    if worker_alive:
         return result
     if _has_success_evidence(result):
         return _reconcile_successful_terminal(result)
@@ -1113,6 +1191,40 @@ def _reconcile_dead_launcher(run: dict[str, Any]) -> dict[str, Any]:
     if state not in ACTIVE_STATES - {"paused"}:
         return result
     if liveness == "pid_alive":
+        has_worker_target = any(
+            _coerce_int(result.get(key)) is not None
+            for key in ("worker_pid", "worker_pgid")
+        )
+        if has_worker_target:
+            # An unqualified receipt is authority to refuse a signal, not proof
+            # that a still-existing process has exited.  The launcher may be
+            # between worker exit and its atomic terminal-meta write, and a
+            # caller such as ``stop_run`` must still get the precise identity
+            # mismatch rather than a synthetic ``run_terminal``.  Only settle
+            # identity loss once both the recorded worker PID and the launcher
+            # are gone; qualified same-PGID descendants already returned above.
+            worker_pid = _coerce_int(result.get("worker_pid"))
+            if (worker_pid is not None and _pid_is_alive(worker_pid)) or (
+                launcher_pid is not None and _pid_is_alive(launcher_pid)
+            ):
+                return result
+            now = _now().isoformat()
+            result["state"] = "failed"
+            result["health"] = "final"
+            result["liveness"] = "pid_gone"
+            result["process_truth"] = "ghost"
+            result["process_truth_reason"] = process_reason
+            result["completed_at"] = str(result.get("completed_at") or now)
+            result["updated_at"] = now
+            result["exit_code"] = _coerce_int(result.get("exit_code")) or 1
+            result["terminal_reason"] = "qualified_process_identity_lost"
+            result["recovery_required"] = True
+            result["last_error"] = _append_last_error(
+                str(result.get("last_error") or ""),
+                "active run lost qualified PID/PGID/start-token/run-id ownership "
+                f"({process_reason}); receipted active→failed",
+            )
+            return result
         if launcher_pid is None or _pid_is_alive(launcher_pid):
             return result
     else:
@@ -1224,6 +1336,26 @@ def _report_attests_completion(run: dict[str, Any]) -> bool:
     return str(verdict.fields.get("status") or "").strip().lower() in CLAIM_COMPLETED
 
 
+def _delivered_report_claims_completion(run: dict[str, Any]) -> bool:
+    """True when a non-template delivered report carries a success claim.
+
+    A claim alone never seals execution.  This helper is used only after
+    qualified worker evidence is gone, so process exit plus a worker-written
+    report are the independent signals.  It preserves legacy reports that
+    predate ``finalized``/``claim`` without accepting the launcher's untouched
+    frontmatter shell or a blocked/failed/partial claim as success.
+    """
+    report = str(run.get("latest_report") or "").strip()
+    if not report:
+        return False
+    verdict = validate_report_file(report, require_frontmatter=False)
+    if "report_missing" in verdict.errors:
+        return False
+    if not worker_authored_report(verdict.fields, verdict.body):
+        return False
+    return verdict.claim_status in CLAIM_COMPLETED
+
+
 def _has_success_evidence(run: dict[str, Any]) -> bool:
     """True when any independent signal (state, exit 0, completed_at, terminal
     liveness, or a self-attesting report) proves the run finished successfully."""
@@ -1241,7 +1373,7 @@ def _has_success_evidence(run: dict[str, Any]) -> bool:
         return True
     if str(run.get("liveness") or "") == "terminal":
         return True
-    return _report_attests_completion(run)
+    return _report_attests_completion(run) or _delivered_report_claims_completion(run)
 
 
 def _reconcile_successful_terminal(run: dict[str, Any]) -> dict[str, Any]:
@@ -1262,6 +1394,9 @@ def _reconcile_successful_terminal(run: dict[str, Any]) -> dict[str, Any]:
     result["completed_at"] = completed_at
     result["updated_at"] = completed_at
     result.pop("recovery_required", None)
+    if result.get("artifact_ok") is True and not result.get("artifact_errors"):
+        result["artifact_gate"] = "validated"
+    result["operator_state"] = "completed"
     # Empty string matches _reconcile_repaired_report_terminal; consumers treat
     # blank last_error as absent.
     result["last_error"] = ""
@@ -1350,18 +1485,82 @@ def _has_signal_target(run: dict[str, Any]) -> bool:
 
 
 def _worker_is_alive(run: dict[str, Any]) -> bool:
-    """True when the run's worker process (or its group leader) is still alive.
+    """Return current qualified worker ownership, never PID existence alone."""
+    return _worker_process_truth(run)[0]
 
-    Distinct from ``_has_signal_target`` (which only checks that a pid VALUE is
-    present): this checks actual OS liveness. The liveness reconciler uses it so
-    a run is never marked recovery_required merely because the ephemeral launcher
-    pid died while the worker keeps running and delivering.
+
+def _worker_process_truth(run: dict[str, Any]) -> tuple[bool, str]:
+    """Validate persisted PID/PGID/start-token/run-id ownership.
+
+    A wrapper may exit while its implementation child remains in the canonical
+    process group.  That child counts only when the kernel environment still
+    binds it to this run; an arbitrary process sharing a recycled PGID does not.
     """
-    for key in ("worker_pid", "worker_pgid"):
-        pid = _coerce_int(run.get(key))
-        if pid is not None and _pid_is_alive(pid):
-            return True
-    return False
+    from .process_control import (
+        build_env_index,
+        build_process_table,
+        validate_process_identity,
+    )
+
+    run_id = str(run.get("run_id") or "").strip()
+    worker_pid = _coerce_int(run.get("worker_pid"))
+    worker_pgid = _coerce_int(run.get("worker_pgid"))
+    receipt = run.get("worker_identity")
+    if worker_pgid is None and isinstance(receipt, dict):
+        # An interactive Agent Workspace never publishes ``worker_pgid``: its
+        # provider inherits the terminal pane's process group, and that key is
+        # also the first stop-signal target (``killpg``). The qualified identity
+        # receipt still names the group the provider was captured in, which is
+        # enough to prove the same process is alive here — observation only,
+        # the pane group never becomes a signal target through this path.
+        worker_pgid = _coerce_int(receipt.get("pgid"))
+    if not run_id or worker_pid is None or worker_pgid is None:
+        return False, "qualified_identity_unavailable"
+    valid, reason, _identity = validate_process_identity(
+        receipt if isinstance(receipt, dict) else None,
+        expected_pid=worker_pid,
+        expected_pgid=worker_pgid,
+        expected_run_id=run_id,
+        # This is observational reconciliation, not a signal boundary. The
+        # persisted PID/PGID/start-token/command receipt is sufficient to prove
+        # the same process is still alive; a missing environment is explicitly
+        # non-dispositive. Avoid reopening a fleet-wide ``ps axeww`` scan for
+        # every scoped run projection.
+        env_index={},
+    )
+    if valid:
+        owner_pid = _coerce_int(run.get("owner_pid"))
+        if owner_pid is None:
+            return True, reason
+        owner_valid, owner_reason, _owner = validate_process_identity(
+            run.get("owner_identity")
+            if isinstance(run.get("owner_identity"), dict)
+            else None,
+            expected_pid=owner_pid,
+            expected_pgid=_coerce_int(
+                (run.get("owner_identity") or {}).get("pgid")
+                if isinstance(run.get("owner_identity"), dict)
+                else None
+            ),
+            expected_run_id=run_id,
+            env_index={},
+        )
+        return owner_valid, owner_reason
+
+    # The canonical worker can be a short-lived wrapper around the real native
+    # provider.  Preserve ownership only for a same-PGID child whose environment
+    # independently names this run.
+    try:
+        table = build_process_table()
+        env_index = build_env_index()
+    except OSError:
+        return False, reason
+    if any(
+        entry.pgid == worker_pgid and env_index.get(entry.pid) == run_id
+        for entry in table
+    ):
+        return True, "canonical_pgid_descendant"
+    return False, reason
 
 
 def _await_process_is_alive(run: dict[str, Any]) -> bool:
@@ -1799,11 +1998,21 @@ def _normalize_agent_meta(path: Path) -> RunStatus | None:
         "attempt",
         "native_resume",
         "resume_idempotency_key",
+        "dispatch_run_id",
+        "dispatch_cut_id",
+        "dispatch_branch",
+        "dispatch_baseline_sha",
+        "dispatch_attempt",
+        "dispatch_idempotency_key",
         "worker_command",
+        "owner_pid",
+        "owner_identity",
         "worker_pid",
         "worker_pgid",
         "worker_identity",
         "launcher_identity",
+        "terminal_reason",
+        "exit_signal",
         "heartbeat_at",
         "meta",
         "artifact_ok",
@@ -1823,6 +2032,21 @@ def _normalize_agent_meta(path: Path) -> RunStatus | None:
         "workspace_display_label",
         "worker_host_session",
         "worker_host_display",
+        # H2b2c — typed Operator Agent -> child Agent relationship truth.
+        "role",
+        "prompt_role",
+        "provider_session_id",
+        "provider_session_requested",
+        "native_identity_status",
+        "native_identity_evidence",
+        "native_fork",
+        "fork_source_session_id",
+        "session_selection",
+        "operator_policy",
+        "supervision",
+        "stop_actor_run_id",
+        # H2b2d — bounded typed continuity receipt (never prompt bodies).
+        "continuity",
     ):
         if key in payload and payload.get(key) not in (None, ""):
             extra[key] = payload[key]
@@ -1985,6 +2209,14 @@ def _merge_event_stream(
         # would resurrect an archived run as active/unknown on the next sync.
         if kind == SETTLEMENT_EVENT_KIND:
             continue
+        # ``state`` events emitted by _record_transition are projection
+        # notifications, not new lifecycle authority. A sync can read through
+        # PROCESS_SPAWNED while the dispatcher appends ACTIVE, then publish its
+        # older projection afterward; folding that later notification on the
+        # next pass would regress the durable lifecycle forever. Legacy state
+        # events remain readable when they do not carry this explicit marker.
+        if kind == "state" and payload.get("projection_event") is True:
+            continue
         message = str(event.get("message") or "")
         ts = _safe_iso(str(event.get("ts") or ""))
         existing = merged.get(run_id)
@@ -2006,7 +2238,14 @@ def _merge_event_stream(
             if identity_required
             else str(raw_root or "")
         )
-        agent = str(payload.get("agent") or (existing.agent if existing else "unknown"))
+        # A lifecycle event's author is not a provider reassignment. Once a
+        # launch/meta record establishes identity, later Guardian notifications
+        # cannot change the executor of that run.
+        agent = str(
+            existing.agent
+            if existing and existing.agent not in {"", "unknown", "guardian"}
+            else payload.get("agent") or "unknown"
+        )
         skill = str(payload.get("skill") or (existing.skill if existing else "unknown"))
         mode = str(payload.get("mode") or (existing.mode if existing else "unknown"))
         report = str(
@@ -2057,13 +2296,28 @@ def _merge_event_stream(
             "resume_root",
             "attempt",
             "native_resume",
+            "native_fork",
+            "fork_source_session_id",
+            "session_selection",
+            "provider_session_id",
+            "provider_session_requested",
+            "native_identity_status",
+            "native_identity_evidence",
             "resume_idempotency_key",
+            "dispatch_run_id",
+            "dispatch_cut_id",
+            "dispatch_branch",
+            "dispatch_baseline_sha",
+            "dispatch_attempt",
+            "dispatch_idempotency_key",
             "resume_mode",
             "automatic_attempt_budget",
             "automatic_attempt_number",
             "resume_settlement_revision",
             "resume_trust_receipt_id",
             "worker_command",
+            "owner_pid",
+            "owner_identity",
             "worker_pid",
             "worker_pgid",
             "worker_identity",
@@ -2085,6 +2339,8 @@ def _merge_event_stream(
             "stop_already_dead",
             "stop_alive_after_grace",
             "stop_grace_seconds",
+            "terminal_reason",
+            "exit_signal",
             # Durable workspace identity must survive event-stream refreshes;
             # otherwise a later generic `state` event erases the identity
             # carried by lifecycle:created/active.
@@ -2095,7 +2351,35 @@ def _merge_event_stream(
             "workspace_display_label",
             "worker_host_session",
             "worker_host_display",
+            "model_requested",
+            "model_effective",
+            "model_source",
+            "repo_requested",
+            "repo_kind",
+            "repo_identity",
+            "repo_remote",
+            "base_requested",
+            "base_ref",
+            "baseline_sha",
+            "runtime_class",
+            "presentation",
+            "requires_pty",
+            "execution_host",
+            "parent_root",
+            "effective_worker_root",
+            "parent_run_id",
+            "source_path",
+            "source_snapshot",
+            "source_origin",
+            "source_digest",
+            "source_ref",
         ):
+            if (
+                key in {"model_requested", "model_effective", "model_source"}
+                and payload.get("agent")
+                and str(payload["agent"]) != agent
+            ):
+                continue
             if key in payload and payload.get(key) not in (None, ""):
                 extra[key] = payload[key]
 
@@ -2575,6 +2859,83 @@ def _select_run(snapshot: dict[str, Any], run_id: str) -> dict[str, Any] | None:
     return None
 
 
+_BARE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def bare_run_id(run_id: str) -> str:
+    """Return ``run_id`` only when it is a bare, filesystem-safe token, else ''.
+
+    Run ids reach the bounded lookups below from registry records the control
+    plane does not own end to end. A single-segment token keeps ``<dir>/<id>``
+    joins inside their directory: no separators, no drive letters, no leading
+    dot, so ``..`` and absolute paths can never be composed.
+    """
+    target = str(run_id or "").strip()
+    if not _BARE_RUN_ID_RE.match(target):
+        return ""
+    separators = {os.sep, os.altsep, "/", "\\"} - {None, ""}
+    if any(separator in target for separator in separators):
+        return ""
+    return target
+
+
+def lookup_run_snapshot(run_id: str) -> dict[str, Any] | None:
+    """Read one already-projected run snapshot without rebuilding the board.
+
+    This is intentionally narrower than :func:`lookup_run`: callers that only
+    need durable, already-known run facts must not turn a registry-maintenance
+    pass into an artifact discovery walk. A missing snapshot is unknown, not
+    evidence that a legacy run is terminal.
+
+    A projection is also not the last word on liveness: it can lag behind the
+    canonical runtime record (see :func:`lookup_runtime_run_meta`), so callers
+    deciding to *delete* a claim must corroborate a terminal projection instead
+    of trusting it alone.
+    """
+    target = bare_run_id(run_id)
+    if not target:
+        return None
+    snapshot_path = _snapshot_path(target)
+    # `_read_json` deliberately remains a permissive general-purpose reader:
+    # json.loads() can yield any JSON value.  Here, however, an existing
+    # malformed or mismatched current projection is uncertainty about this
+    # run, not a reason to let an older archive make a destructive decision.
+    if snapshot_path.exists():
+        payload = _read_json(snapshot_path)
+        if not isinstance(payload, dict):
+            return None
+        if str(payload.get("run_id") or "") == target:
+            return payload
+        return None
+    archived = _read_json(_snapshot_archive_dir() / f"{target}.json")
+    if isinstance(archived, dict) and str(archived.get("run_id") or "") == target:
+        return archived
+    return None
+
+
+def lookup_runtime_run_meta(run_id: str) -> dict[str, Any] | None:
+    """Read one run's canonical runtime meta directly; no sync, no discovery.
+
+    ``runtime_runs/<run_id>/meta.json`` is what the dispatcher and the worker
+    supervisor actually write, so it leads the ``runs/<run_id>.json``
+    projection. Three distinguishable answers, because callers must be able to
+    tell absence from doubt:
+
+    * ``None`` — no canonical runtime record exists for this id (nothing to
+      contradict a projection).
+    * ``{}`` — the record exists but could not be read as an object (doubt).
+    * payload — the canonical facts.
+    """
+    target = bare_run_id(run_id)
+    if not target:
+        return None
+    run_dir = _runtime_runs_dir() / target
+    if not run_dir.is_dir():
+        return None
+    payload = _read_json(run_dir / "meta.json")
+    return payload if isinstance(payload, dict) else {}
+
+
 # Fields that drift between consecutive sync_state() passes without
 # representing a meaningful lifecycle change (timestamps re-derived from the
 # event stream, provenance of the winning source, transcript delta counters).
@@ -2623,6 +2984,7 @@ def _record_transition(
             "kind": "state",
             "message": message,
             "payload": {
+                "projection_event": True,
                 "previous_state": previous_state,
                 "state": current_state,
                 "agent": current.get("agent"),
@@ -3184,6 +3546,43 @@ def subscribe_events(
         time.sleep(1.0)
 
 
+def event_resume_cursor() -> str:
+    """Return an opaque cursor at the durable end of the active event stream."""
+
+    return _active_event_resume_cursor()
+
+
+def accepted_operator_stop_since(
+    run_id: str, since_cursor: str | int | None
+) -> dict[str, Any] | None:
+    """Read one run's accepted stop authority without rebuilding live state.
+
+    Dispatch completion already owns terminal worker truth. Its only remaining
+    control-plane question is whether an operator stop won while that worker was
+    alive, so replay the append-only audit stream from the run's creation cursor
+    instead of invoking ``lookup_run`` and its process-inventory reconciliation.
+    """
+
+    target = str(run_id or "").strip()
+    if not target:
+        return None
+    # stop_run owns this same key from identity qualification through signal,
+    # grace observation, and the fsynced audit receipt. Waiting on that owner is
+    # the deterministic handoff: a terminal worker cannot race its supervisor
+    # into writing FAILED meta just before the stop receipt becomes visible.
+    with run_mutation_locks(control_plane_home(), run_id=target):
+        for event in subscribe_events(since_cursor, kinds={"audit:stop"}):
+            payload = event.payload
+            if (
+                event.run_id == target
+                and payload.get("accepted") is True
+                and str(payload.get("state") or "") == "stopped"
+                and payload.get("operator_stop_accepted") is True
+            ):
+                return dict(payload)
+    return None
+
+
 def _project_run_payload(
     run_id: str, status: RunStatus, previous: dict[str, Any] | None
 ) -> dict[str, Any]:
@@ -3271,6 +3670,13 @@ def _project_run_payload(
     # launch window is covered independently by a fresh heartbeat.
     has_live_process = _worker_is_alive(payload)
     payload["worker_alive"] = has_live_process
+    payload["process_truth"] = (
+        "terminal"
+        if _run_is_terminal(payload)
+        else "live"
+        if has_live_process
+        else str(payload.get("process_truth") or "unknown")
+    )
     if _run_is_terminal(payload):
         payload["health"] = "final"
     elif state == "stalled":
@@ -3757,6 +4163,101 @@ def _await_progress_fingerprint(run: dict[str, Any] | None) -> tuple[Any, ...]:
     )
 
 
+_LOOP_LOCK_TERMINAL_STATUSES = {
+    "failed",
+    "cancelled",
+    "canceled",
+    "completed",
+    "stopped",
+    "closed",
+    "settled",
+}
+_LOOP_LOCK_ACTIVE_STATUSES = {"running", "active", "paused"}
+
+
+def _loop_lock_owner_is_alive(payload: dict[str, str], run_id: str) -> bool:
+    """True when the lock's recorded owner still matches a live process.
+
+    A stale pid on disk is not liveness. Identity fields, when present, have
+    to match the current process; otherwise pid+pgid must still be the same
+    live group. A lock with no owner pid cannot prove anything.
+    """
+    pid = _coerce_int(
+        payload.get("pid") or payload.get("owner_pid") or payload.get("worker_pid")
+    )
+    if pid is None or not _pid_is_alive(pid):
+        return False
+    pgid = _coerce_int(
+        payload.get("pgid") or payload.get("owner_pgid") or payload.get("worker_pgid")
+    )
+    start_token = str(payload.get("start_token") or "").strip()
+    command_sha256 = str(payload.get("command_sha256") or "").strip()
+    if start_token and command_sha256 and pgid is not None:
+        ppid = _coerce_int(payload.get("ppid"))
+        return _worker_is_alive(
+            {
+                "run_id": run_id,
+                "worker_pid": pid,
+                "worker_pgid": pgid,
+                "worker_identity": {
+                    "pid": pid,
+                    "ppid": ppid if ppid is not None else 0,
+                    "pgid": pgid,
+                    "start_token": start_token,
+                    "command_sha256": command_sha256,
+                    "run_id": run_id,
+                },
+            }
+        )
+    if pgid is not None:
+        try:
+            return os.getpgid(pid) == pgid
+        except OSError:
+            return False
+    return True
+
+
+def _loop_lock_children_are_alive(run_id: str) -> bool:
+    """True when a current child of this loop parent still owns a live process."""
+    children = _await_child_runs({"active_runs": [], "recent_runs": []}, run_id)
+    return any(_await_process_is_alive(child) for child in children)
+
+
+def _loop_lock_is_running(run_id: str) -> bool:
+    """True when a marbles/polarize lock still names this run as live work.
+
+    Guardian settlement can stamp the parent ``settled`` while a *live* lock
+    still carries ``status=running`` and ``current < total``. Await must keep
+    waiting in that case. A terminal failed/cancelled lock overrides leftover
+    counters, and a stale lock with a dead owner cannot prove liveness on its
+    own — only current owner identity or a live child can.
+    """
+    target = str(run_id or "").strip()
+    if not target:
+        return False
+    for path in _iter_lock_files():
+        payload = _parse_kv_file(path)
+        if str(payload.get("run_id") or "").strip() != target:
+            continue
+        status = (
+            str(payload.get("status") or payload.get("state") or "").strip().lower()
+        )
+        if status in _LOOP_LOCK_TERMINAL_STATUSES:
+            continue
+        current = _coerce_int(payload.get("current"))
+        total = _coerce_int(payload.get("total") or payload.get("loops"))
+        claimed_in_progress = status in _LOOP_LOCK_ACTIVE_STATUSES or (
+            current is not None and total is not None and 0 <= current < total
+        )
+        if not claimed_in_progress:
+            continue
+        if _loop_lock_owner_is_alive(payload, target) or _loop_lock_children_are_alive(
+            target
+        ):
+            return True
+    return False
+
+
 def _await_child_runs(snapshot: dict[str, Any], target: str) -> list[dict[str, Any]]:
     """Child runs of a loop parent (marbles/polarize ``<parent>-<kind>-L<n>``).
 
@@ -3768,12 +4269,33 @@ def _await_child_runs(snapshot: dict[str, Any], target: str) -> list[dict[str, A
     """
     prefix = f"{target}-"
     children: list[dict[str, Any]] = []
+    seen: set[str] = set()
     for key in ("active_runs", "recent_runs"):
         for run in snapshot.get(key) or []:
             if not isinstance(run, dict):
                 continue
-            if str(run.get("run_id") or "").startswith(prefix):
+            child_id = str(run.get("run_id") or "")
+            if child_id.startswith(prefix) and child_id not in seen:
+                seen.add(child_id)
                 children.append(run)
+    root = _runtime_runs_dir()
+    if root.is_dir():
+        try:
+            entries = list(root.iterdir())
+        except OSError:
+            entries = []
+        for child_dir in entries:
+            if not child_dir.is_dir() or not child_dir.name.startswith(prefix):
+                continue
+            if child_dir.name in seen:
+                continue
+            meta = _read_json(child_dir / "meta.json")
+            if not meta:
+                continue
+            seen.add(child_dir.name)
+            payload = dict(meta)
+            payload["run_id"] = child_dir.name
+            children.append(payload)
     return children
 
 
@@ -3895,7 +4417,22 @@ def _finalize_await_result(
                     snapshot,
                 )
                 if committed:
-                    last_run = committed
+                    # The board snapshot can lag a just-written terminal meta
+                    # (the documented meta-stuck-after-completion skew); the
+                    # truth the caller reconciled from live runtime meta must
+                    # not be degraded by the persistence hop. Await/settlement
+                    # verdict fields we just persisted keep the committed
+                    # values; everything else prefers the fresher read.
+                    merged = dict(committed)
+                    for key, value in (last_run or {}).items():
+                        if key == "settlement" or key in await_fields:
+                            continue
+                        if value in (None, ""):
+                            continue
+                        if key == "state" and str(value) == "unknown":
+                            continue
+                        merged[key] = value
+                    last_run = merged
         except OSError:
             pass
 
@@ -3923,113 +4460,123 @@ def await_run(
     report_path: str | None = None,
     on_poll: Callable[[dict[str, Any] | None], None] | None = None,
 ) -> dict[str, Any]:
-    """Liveness-aware bounded wait for a run using control-plane state only.
+    """Block on the dispatcher UDS, then reconcile durable file verdicts.
 
-    ``timeout_seconds`` is an IDLE deadline, not a blind wall clock: it RESETS
-    whenever the run shows movement (transcript growth, state/heartbeat/token
-    advance) or the worker process is demonstrably alive (``_worker_is_alive``).
-    A run is only abandoned (``timed_out``) on a genuine stall — the idle window
-    elapsing with zero movement AND no live worker — or, when configured, the
-    optional ``hard_cap_seconds`` absolute ceiling. This stops the orchestrator
-    from killing a marbles loop that is still doing real work (~13 min single
-    marble) just because a fixed wall-clock budget expired.
+    The socket is notification only. A terminal line or EOF wakes this call;
+    meta/snapshot/report files decide the returned state. When the socket is
+    absent (or closed early) while the launcher/worker is DEMONSTRABLY ALIVE,
+    the await re-arms itself — signal wait, then one triad read — until the
+    process dies or the re-arm budget (``hard_cap_seconds``, else
+    ``timeout_seconds``) lapses. Returning early with a live process would
+    force every supervisor into ad-hoc hedge polling, which AGENT_OPS names a
+    Class 3 violation with the fix pointed at this function. An await that
+    outruns the dispatcher's own boot (no socket, no durable trace yet) gets
+    one bounded launch-grace slice before the run is declared missing.
 
-    Two more truths keep this the ONE await nobody has to second-guess:
-
-    - A non-empty report file (``report_path`` argument, else the run's own
-      ``latest_report``) from a worker that is GONE is the handoff itself —
-      return ``completed`` with ``reason: report_delivered`` immediately
-      instead of idling out a full window on the corpse. While the worker is
-      alive the report alone never completes the wait: it may be mid-write,
-      or a stale leftover from a previous attempt on the same announced path.
-    - Movement and liveness aggregate the run's CHILD runs (marbles/polarize
-      loop rounds live in separate ``<parent>-…-L<n>`` records), so a working
-      child keeps the parent's await open even while the parent record is
-      frozen between rounds.
-
-    ``on_poll`` (when given) is called once per poll with the latest run
-    projection — for callers that print progress while blocking.
+    ``on_poll`` remains accepted for API compatibility; ``interval_seconds``
+    only paces liveness re-checks while no socket exists.
     """
     target = str(run_id or "").strip()
     if not target:
         raise ValueError("run_id is required")
-
-    idle_window = max(float(timeout_seconds), 0.0)
-    interval_seconds = max(float(interval_seconds), 0.1)
     hard_cap = _resolve_await_hard_cap(hard_cap_seconds)
-
-    start = time.monotonic()
-    idle_deadline = start + idle_window
-    hard_deadline = start + hard_cap if hard_cap is not None else None
-    previous_fingerprint: tuple[Any, ...] | None = None
-    attempts = 0
-    last_run: dict[str, Any] | None = None
+    try:
+        rearm_interval = max(float(interval_seconds), 0.01)
+    except (TypeError, ValueError):
+        rearm_interval = 5.0
+    rearm_budget = hard_cap
+    if rearm_budget is None:
+        try:
+            rearm_budget = max(float(timeout_seconds), 0.0)
+        except (TypeError, ValueError):
+            rearm_budget = 300.0
+    rearm_deadline = time.monotonic() + rearm_budget if rearm_budget > 0 else None
+    # Launch lag: an await can outrun the dispatcher's own boot — socket not
+    # bound, meta not seeded. While no durable trace exists at all, re-arm
+    # inside one interval slice instead of declaring the run missing.
+    launch_grace_deadline = (
+        time.monotonic() + min(rearm_interval, rearm_budget)
+        if rearm_budget > 0
+        else None
+    )
 
     while True:
-        attempts += 1
-        # Scoped to the awaited run (+ its child rounds): a 5s await poll must
-        # not rebuild the whole board under the shared lock every tick.
-        snapshot = sync_state(only_run_id=target)
-        last_run = _select_run(snapshot, target)
+        signal = wait_for_run_signal(target, timeout=hard_cap)
+        kind = str(signal.get("kind") or "missing")
+
+        runtime_meta_path = _runtime_run_dir(target) / "meta.json"
+        runtime_meta = _read_json(runtime_meta_path)
+        snapshot = _read_json(_snapshot_path(target))
+        last_run: dict[str, Any] | None = None
+        child_runs: list[dict[str, Any]] = []
+        if snapshot:
+            last_run = dict(snapshot)
+        if runtime_meta:
+            if last_run is None:
+                last_run = {}
+            # A null in the runtime meta must not erase knowledge the board
+            # projection already holds (the launcher writes meta with
+            # launcher_pid: null while the spawn event carries the real pid;
+            # losing it here blinds the live-launcher grace below).
+            last_run.update({k: v for k, v in runtime_meta.items() if v is not None})
+            last_run["run_id"] = target
+            last_run["meta"] = str(runtime_meta_path)
+            last_run["state"] = str(
+                runtime_meta.get("state") or runtime_meta.get("status") or "unknown"
+            )
+            last_run["latest_report"] = str(
+                runtime_meta.get("report") or runtime_meta.get("latest_report") or ""
+            )
+            last_run["latest_transcript"] = str(
+                runtime_meta.get("transcript")
+                or runtime_meta.get("latest_transcript")
+                or ""
+            )
+        if last_run is None and kind != "missing":
+            # Legacy/non-dispatcher records get one reconciliation pass per wake.
+            try:
+                projected = sync_state(only_run_id=target)
+            except OSError:
+                projected = {}
+            last_run = _select_run(projected, target) if projected else None
+
+        projected: dict[str, Any] = {}
+        if kind == "missing":
+            # One scoped reconciliation materializes legacy artifact meta and
+            # its settlement event — a single triad read per wake, not a poller.
+            try:
+                projected = sync_state(only_run_id=target)
+            except OSError:
+                projected = {}
+            projected_run = _select_run(projected, target) if projected else None
+            if projected_run is not None:
+                last_run = projected_run
+
+        child_source = projected or {
+            "active_runs": [last_run] if last_run else [],
+            "recent_runs": [],
+        }
+        child_runs = _await_child_runs(child_source, target)
+        lock_running = _loop_lock_is_running(target)
+
         if on_poll is not None:
             on_poll(last_run)
-        children = _await_child_runs(snapshot, target)
-        worker_alive = bool(
-            (last_run is not None and _await_process_is_alive(last_run))
-            or any(_await_process_is_alive(child) for child in children)
-        )
-        if last_run is not None and _run_is_terminal(last_run) and not worker_alive:
-            return _finalize_await_result(
-                target,
-                last_run,
-                completed=True,
-                timed_out=False,
-                reason="terminal",
-                worker_alive=False,
-                attempts=attempts,
-            )
 
-        delivered_report = str(
-            report_path or (last_run.get("latest_report") if last_run else "") or ""
-        ).strip()
-        # Worker death is the handoff seal: a LIVE worker may still be
-        # mid-write, and the announced path can hold a stale report from a
-        # previous attempt (stage retries reuse artifact paths) — returning
-        # `completed` on it reported exit 0 for a still-working run.
         if (
-            delivered_report
-            and _report_file_written(delivered_report)
-            and not worker_alive
+            kind == "missing"
+            and last_run is None
+            and launch_grace_deadline is not None
+            and time.monotonic() < launch_grace_deadline
         ):
-            return _finalize_await_result(
-                target,
-                last_run,
-                completed=True,
-                timed_out=False,
-                reason="report_delivered",
-                worker_alive=False,
-                attempts=attempts,
+            time.sleep(min(0.1, launch_grace_deadline - time.monotonic()))
+            continue
+
+        if kind == "timeout":
+            worker_alive = bool(
+                lock_running
+                or (last_run and _await_process_is_alive(last_run))
+                or any(_await_process_is_alive(child) for child in child_runs)
             )
-
-        now = time.monotonic()
-        fingerprint = (
-            _await_progress_fingerprint(last_run),
-            tuple(
-                sorted(
-                    (str(child.get("run_id") or ""),)
-                    + _await_progress_fingerprint(child)
-                    for child in children
-                )
-            ),
-        )
-        moved = fingerprint != previous_fingerprint
-        previous_fingerprint = fingerprint
-        # Real activity or a live worker keeps the idle window open: never
-        # abandon a run that is demonstrably making progress or alive.
-        if moved or worker_alive:
-            idle_deadline = now + idle_window
-
-        if hard_deadline is not None and now >= hard_deadline:
             return _finalize_await_result(
                 target,
                 last_run,
@@ -4037,25 +4584,101 @@ def await_run(
                 timed_out=True,
                 reason="hard_cap",
                 worker_alive=worker_alive,
-                attempts=attempts,
-            )
-        if now >= idle_deadline and not worker_alive:
-            return _finalize_await_result(
-                target,
-                last_run,
-                completed=False,
-                timed_out=True,
-                reason="idle_stall",
-                worker_alive=worker_alive,
-                attempts=attempts,
+                attempts=1,
             )
 
-        sleep_for = interval_seconds
-        if hard_deadline is not None:
-            sleep_for = min(sleep_for, max(hard_deadline - now, 0.0))
-        if not worker_alive:
-            sleep_for = min(sleep_for, max(idle_deadline - now, 0.0))
-        time.sleep(max(sleep_for, 0.0))
+        signal_woke = kind in {"terminal", "eof", "identity_changed"}
+        terminal = bool(last_run and _run_is_terminal(last_run) and not lock_running)
+        child_alive = any(_await_process_is_alive(child) for child in child_runs)
+        worker_alive = bool(
+            lock_running
+            or child_alive
+            or (
+                not (terminal and kind == "terminal")
+                and last_run is not None
+                and _await_process_is_alive(last_run)
+            )
+        )
+        delivered_report = str(
+            report_path
+            or (last_run or {}).get("latest_report")
+            or signal.get("report")
+            or ""
+        ).strip()
+        report_written = bool(
+            delivered_report and _report_file_written(delivered_report)
+        )
+        completed = bool(
+            not worker_alive
+            and not lock_running
+            and last_run is not None
+            and (terminal or report_written)
+        )
+        if completed:
+            reason = "terminal" if terminal else kind
+            if reason == "missing" and delivered_report:
+                reason = "report_delivered"
+            result = _finalize_await_result(
+                target,
+                last_run,
+                completed=True,
+                timed_out=False,
+                reason=reason,
+                worker_alive=False,
+                attempts=1,
+            )
+            result["outcome"] = "terminal"
+            result["signal_kind"] = kind
+            result["signal_ts"] = str(signal.get("ts") or "")
+            return result
+
+        loop_live = lock_running or child_alive
+        if kind in {"missing", "eof"} and worker_alive:
+            # No socket to block on, but the launcher/worker/loop is
+            # demonstrably alive. Loop parents (polarize/marbles) stay open
+            # until the lock/children die or an explicit hard cap fires —
+            # timeout_seconds is not a "run disappeared" signal. A stale
+            # lock never reaches here because it cannot set worker_alive.
+            if loop_live and hard_cap is None:
+                time.sleep(rearm_interval)
+                continue
+            if (
+                rearm_deadline is not None
+                and time.monotonic() + rearm_interval <= rearm_deadline
+            ):
+                time.sleep(rearm_interval)
+                continue
+            if loop_live and rearm_deadline is not None:
+                return _finalize_await_result(
+                    target,
+                    last_run,
+                    completed=False,
+                    timed_out=True,
+                    reason="hard_cap",
+                    worker_alive=True,
+                    attempts=1,
+                )
+
+        result = _finalize_await_result(
+            target,
+            last_run,
+            completed=False,
+            timed_out=not worker_alive,
+            reason=(
+                "signal_invalidated_live"
+                if worker_alive and signal_woke
+                else "signal_missing_live"
+                if worker_alive
+                else "signal_invalidated"
+                if signal_woke
+                else "signal_missing"
+            ),
+            worker_alive=worker_alive,
+            attempts=1,
+        )
+        result["outcome"] = "live" if worker_alive else "missing"
+        result["signal_kind"] = kind
+        return result
 
 
 def run_liveness(run_id: str) -> dict[str, Any]:

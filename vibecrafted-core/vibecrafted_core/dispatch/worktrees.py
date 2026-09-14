@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import os
 import re
 import subprocess
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from ..runtime_paths import vibecrafted_home
 
 
 class WorktreeContractError(RuntimeError):
@@ -34,24 +35,27 @@ class WorktreeGeometry:
         return asdict(self)
 
 
-def vibecrafted_home() -> Path:
-    """Return the single global Vibecrafted state root."""
-    return Path(os.environ.get("VIBECRAFTED_HOME", "~/.vibecrafted")).expanduser()
+def _same_filesystem_location(left: str | Path, right: str | Path) -> bool:
+    """Compare existing paths by identity, including case aliases on macOS."""
+    if not str(left).strip() or not str(right).strip():
+        return False
+    try:
+        return Path(left).samefile(right)
+    except OSError:
+        return Path(left).resolve() == Path(right).resolve()
 
 
 def repo_identity(repo: str | Path) -> tuple[str, str]:
     """Resolve a stable ``(org, repo)`` from origin, with local fallbacks."""
     root = Path(repo).expanduser().resolve()
-    remote = _git(root, "remote", "get-url", "origin")
-    tail = remote.strip().removesuffix(".git")
-    if ":" in tail and "://" not in tail:
-        tail = tail.split(":", 1)[1]
-    elif "://" in tail:
-        tail = tail.split("://", 1)[1]
-        tail = tail.split("/", 1)[1] if "/" in tail else ""
-    parts = [part for part in tail.strip("/").split("/") if part]
-    org = parts[-2] if len(parts) >= 2 else "local"
-    name = parts[-1] if parts else root.name
+    from ..repository_claims import ClaimContractError, canonical_repo_identity
+
+    try:
+        identity = canonical_repo_identity(root)["repo_identity"]
+    except ClaimContractError:
+        # Artifact paths may be requested before a repository is initialized.
+        identity = f"local/{root.name}"
+    org, name = identity.rsplit("/", 1)
     return _safe_component(org, "local"), _safe_component(name, "repo")
 
 
@@ -110,6 +114,14 @@ class WorktreeManager:
         allow_reuse: bool = False,
     ) -> WorktreeGeometry:
         """Resolve and materialize a cut root, refusing ambiguous reuse."""
+        # This boundary consumes a resolved commit, never a moving ref. The
+        # declaration resolver owns branch/tag/short-SHA interpretation.
+        if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", baseline_sha):
+            raise WorktreeContractError("baseline must be a full pinned commit SHA")
+        if _git(self.main_repo, "cat-file", "-t", baseline_sha) != "commit":
+            raise WorktreeContractError(
+                "baseline commit is unavailable in selected repository"
+            )
         geometry = self.geometry(cut_id, baseline_sha, integrator=integrator)
         root = Path(geometry.worktree_path)
         if integrator:
@@ -136,13 +148,34 @@ class WorktreeManager:
             )
             command = ["git", "worktree", "add", "--quiet"]
             if branch_exists:
-                command.extend([str(root), geometry.branch])
-            else:
-                command.extend(["-b", geometry.branch, str(root), baseline_sha])
+                raise WorktreeContractError(
+                    f"refusing existing branch {geometry.branch}; resume requires its owning run receipt"
+                )
+            # Git's ref lock arbitrates concurrent attempts. Never attach an
+            # existing branch after losing that race, even at the same SHA.
+            command.extend(["-b", geometry.branch, str(root), baseline_sha])
             _run(self.main_repo, command, "create linked checkout")
+            if _git(root, "rev-parse", "HEAD") != baseline_sha:
+                raise WorktreeContractError(
+                    "new worker baseline differs from pinned commit"
+                )
             self._validate_reuse(geometry)
         self._validate_target(root)
         return geometry
+
+    def prepare_agent_launch(
+        self, provider: str, launch_id: str, baseline_sha: str
+    ) -> WorktreeGeometry:
+        """Create one clean per-Agent interactive checkout through this owner."""
+        observed_root = _git(self.main_repo, "rev-parse", "--show-toplevel")
+        if not _same_filesystem_location(observed_root, self.main_repo):
+            raise WorktreeContractError(
+                f"selected workspace is not a git repository root: {self.main_repo}"
+            )
+        # The parent may move or contain staged, unstaged and untracked work.
+        # Materialize Git objects at the pinned SHA without reading its index
+        # or copying, stashing, committing or cleaning its working files.
+        return self.prepare(f"{provider}-{launch_id}", baseline_sha)
 
     def validate(self, geometry: WorktreeGeometry) -> None:
         """Revalidate a receipt's geometry before launch or resume."""
@@ -153,19 +186,58 @@ class WorktreeManager:
             self._validate_target(Path(geometry.worktree_path))
 
     def recover_active(self, geometry: WorktreeGeometry) -> None:
-        """Validate an already-live legacy checkout without relocating or dirt checks."""
+        """Validate an already-live checkout without relocating or dirt checks.
+
+        A resume receipt is allowed to preserve a dirty worker root, but it may
+        not turn an arbitrary directory with a matching branch name into that
+        worker.  In particular, the original baseline remains part of the
+        identity even when the worker committed (or staged) progress after it.
+        """
         root = Path(geometry.worktree_path)
         if not root.is_dir():
             raise WorktreeContractError(f"active recovery worktree is missing: {root}")
         observed_root = _git(root, "rev-parse", "--show-toplevel")
         observed_branch = _git(root, "branch", "--show-current")
-        if not observed_root or Path(observed_root).resolve() != root.resolve():
+        if not _same_filesystem_location(observed_root, root):
             raise WorktreeContractError(
                 f"active recovery root is not a registered worktree: {root}"
             )
         if observed_branch != geometry.branch:
             raise WorktreeContractError(
                 f"active recovery branch mismatch: expected {geometry.branch}, observed {observed_branch or '<detached>'}"
+            )
+        main_common_dir = _git(
+            self.main_repo, "rev-parse", "--path-format=absolute", "--git-common-dir"
+        )
+        worker_common_dir = _git(
+            root, "rev-parse", "--path-format=absolute", "--git-common-dir"
+        )
+        if not _same_filesystem_location(main_common_dir, worker_common_dir):
+            raise WorktreeContractError(
+                f"active recovery worktree is not owned by selected repository: {root}"
+            )
+        registered_roots = [
+            line.removeprefix("worktree ")
+            for line in _git(
+                self.main_repo, "worktree", "list", "--porcelain"
+            ).splitlines()
+            if line.startswith("worktree ")
+        ]
+        if not any(
+            _same_filesystem_location(candidate, root) for candidate in registered_roots
+        ):
+            raise WorktreeContractError(
+                f"active recovery root is not registered by selected repository: {root}"
+            )
+        baseline = _git(
+            root, "rev-parse", "--verify", f"{geometry.baseline_sha}^{{commit}}"
+        )
+        head = _git(root, "rev-parse", "HEAD")
+        ancestor = _git(root, "merge-base", baseline, head) if baseline and head else ""
+        if not baseline or not head or ancestor != baseline:
+            raise WorktreeContractError(
+                "active recovery baseline mismatch: receipt baseline is not an ancestor "
+                f"of {root} HEAD"
             )
         target = Path(geometry.target_path)
         if target != root / "target":
@@ -212,12 +284,16 @@ class WorktreeManager:
             )
 
     def _validate_reuse(self, geometry: WorktreeGeometry) -> None:
+        # Authenticate common Git directory, registration, branch and baseline
+        # ancestry using the same owner as active recovery. A matching branch
+        # name in an unrelated checkout is not a resume receipt.
+        self.recover_active(geometry)
         root = Path(geometry.worktree_path)
         if not root.is_dir():
             raise WorktreeContractError(f"worker worktree is missing: {root}")
         observed_root = _git(root, "rev-parse", "--show-toplevel")
         observed_branch = _git(root, "branch", "--show-current")
-        if Path(observed_root).resolve() != root.resolve():
+        if not _same_filesystem_location(observed_root, root):
             raise WorktreeContractError(
                 f"worker root is not the registered worktree: {root}"
             )

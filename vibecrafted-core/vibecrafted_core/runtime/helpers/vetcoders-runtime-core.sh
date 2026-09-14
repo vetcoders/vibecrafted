@@ -73,6 +73,155 @@ _vetcoders_repo_root() {
   git rev-parse --show-toplevel 2>/dev/null || pwd
 }
 
+# Absolute physical path, resolved BEFORE any cwd change. A relative --root is
+# meaningless once a caller has chdir'd into the project it names, so every
+# public entry normalizes once, at the boundary, and passes the result on.
+_vetcoders_absolute_physical_path() {
+  local path="${1:-}"
+  [[ -n "$path" ]] || return 1
+  if [[ -d "$path" ]]; then
+    (cd -P -- "$path" 2>/dev/null && pwd -P) && return 0
+  fi
+  case "$path" in
+    /*) printf '%s\n' "$path" ;;
+    *) printf '%s/%s\n' "$(pwd -P)" "$path" ;;
+  esac
+}
+
+# One repository selector for every deck and shell verb — the twin of
+# vibecrafted_core.repo_selection.select_repository, same rules, same words:
+#   _vetcoders_select_repo <label> <--repo value> <--root value>
+# Prints the normalized absolute path when either flag carried one, prints
+# nothing when neither did (the caller keeps its own fallback), and exits 2
+# with a stderr reason on a conflicting pair or a missing/non-directory path.
+# It never demands Git: the selected directory is the answer, and only verbs
+# that truly need a work tree check for one themselves. Parse-time
+# `--base` / `--worktree` / `--execution-runtime` are recorded by the
+# contract parser; they must not enter the launch resolver or create a
+# checkout as a parse side effect. The core launcher materializes worktrees.
+_vetcoders_select_repo() {
+  local label="${1:-vibecrafted}" repo_raw="${2:-}" root_raw="${3:-}"
+  local python_spec py import_root
+  python_spec="$(_vetcoders_core_python_spec)" || return 1
+  py="${python_spec%%$'\t'*}"
+  import_root="${python_spec#*$'\t'}"
+  local -a argv=(
+    "$py" -m vibecrafted_core.repo_selection
+    --label "$label"
+    --repo "$repo_raw"
+    --root "$root_raw"
+  )
+  if [[ -n "$import_root" ]]; then
+    PYTHONPATH="$import_root${PYTHONPATH:+:$PYTHONPATH}" "${argv[@]}"
+  else
+    "${argv[@]}"
+  fi
+}
+
+# `--worktree` takes an optional boolean word. These two helpers keep the
+# shell parser and the core launcher's parse_worktree_flag in step.
+_vetcoders_is_worktree_word() {
+  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on|0|false|no|off) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_vetcoders_worktree_word_value() {
+  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on) printf 'true\n' ;;
+    *) printf 'false\n' ;;
+  esac
+}
+
+# Process-lifetime exclusive lock. The owner is scripts/lib/runtime-pack-selection.sh
+# (`runtime_pack_selection_flock`): flock(2) on an open file description, lock
+# FILE created once and never unlinked, release = close this process's fd.
+# The kernel drops the lock when the last descriptor dies, including SIGKILL.
+# A leftover mkdir(2) directory is an older adapter lock; refusing it is the
+# only recovery. Removing it would reintroduce the stale-takeover race.
+_vetcoders_os_fd_lock() {
+  local fd="$1" timeout="$2"
+  if command -v flock >/dev/null 2>&1; then
+    flock -w "$timeout" "$fd"
+    return
+  fi
+  if command -v perl >/dev/null 2>&1; then
+    perl -e '
+      use Fcntl qw(:flock);
+      open(my $handle, ">&=", $ARGV[0]) or exit 3;
+      my $deadline = time + $ARGV[1];
+      while (1) {
+        exit 0 if flock($handle, LOCK_EX | LOCK_NB);
+        exit 1 if time >= $deadline;
+        select(undef, undef, undef, 0.1);
+      }
+    ' "$fd" "$timeout"
+    return
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c '
+import fcntl
+import sys
+import time
+
+descriptor = int(sys.argv[1])
+deadline = time.monotonic() + float(sys.argv[2])
+while True:
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        if time.monotonic() >= deadline:
+            sys.exit(1)
+        time.sleep(0.1)
+    else:
+        sys.exit(0)
+' "$fd" "$timeout"
+    return
+  fi
+  return 2
+}
+
+# The runtime generation is NOT a project. Every product front door exports
+# VIBECRAFTED_ROOT and VIBECRAFTED_RUNTIME_ROOT to the same generation path
+# (vc_start.rs run(), scripts/vc-terminal-product-entry.sh,
+# scripts/vc-frame-product-entry.sh, shell/lib/core.sh, shell/lib/dashboard.sh).
+# Reading VIBECRAFTED_ROOT as "the project" behind those doors names sessions
+# and workspaces after the release instead of the operator's repository.
+_vetcoders_ambient_project_root() {
+  local root="${SPAWN_ROOT:-}"
+  if [[ -n "$root" ]]; then
+    printf '%s\n' "$root"
+    return 0
+  fi
+  root="${VIBECRAFTED_ROOT:-}"
+  if [[ -n "$root" && -n "${VIBECRAFTED_RUNTIME_ROOT:-}" \
+    && "$root" == "${VIBECRAFTED_RUNTIME_ROOT}" ]]; then
+    return 0
+  fi
+  # Source-checkout owner (core.sh unsets RUNTIME_ROOT): the facade binds
+  # VIBECRAFTED_ROOT to the loaded shell, not to the operator's project.
+  # Treating that path as the project names sessions after the worktree
+  # instead of cwd / --root.
+  if [[ -n "$root" && -z "${VIBECRAFTED_RUNTIME_ROOT:-}" \
+    && -e "$root/.git" && ! -f "$root/runtime-manifest.json" ]]; then
+    return 0
+  fi
+  printf '%s\n' "$root"
+}
+
+# One project identity for the whole public entry: explicit --root first, then
+# an ambient project root, then the caller's repository. Session naming, the
+# terminal cwd, AICX and the provider cwd all read THIS, so they cannot drift
+# apart mid-flight.
+# shellcheck disable=SC2120 # Optional explicit root; most callers use ambient ownership.
+_vetcoders_effective_project_root() {
+  local root="${1:-${_vetcoders_contract_root:-}}"
+  [[ -n "$root" ]] || root="$(_vetcoders_ambient_project_root)"
+  [[ -n "$root" ]] || root="$(_vetcoders_repo_root 2>/dev/null || pwd -P)"
+  _vetcoders_absolute_physical_path "$root"
+}
+
 _vetcoders_org_repo() {
   local root="${1:-$(_vetcoders_repo_root)}"
   local org_repo=""
@@ -340,6 +489,87 @@ _vetcoders_operator_session_name_for_run_id() {
   else
     _vetcoders_compact_session_name "$base"
   fi
+}
+
+# Interactive rail is a place (repo/display label), never a run-id or
+# catalog-fallback workspace-{8hex} token. Run-bound names stay available
+# via _vetcoders_operator_session_name_for_run_id for leak detection only.
+_vetcoders_operator_place_session_name() {
+  if [[ "$(_vetcoders_vc_frame_session_scope)" == folder ]]; then
+    _vetcoders_session_base_name
+    return 0
+  fi
+  local root_dir="" resolved="" python_spec py import_root
+  # shellcheck disable=SC2119 # Intentionally request the ambient-owner fallback.
+  root_dir="$(_vetcoders_effective_project_root)"
+
+  # Physical owner first: the selected generation's CLI is the same catalogue
+  # reader vc-start's workspace preparation uses, with the interpreter and
+  # PYTHONPATH that can actually import vibecrafted_core.
+  if command -v _vetcoders_product_core_cli >/dev/null 2>&1; then
+    resolved="$(
+      _vetcoders_product_core_cli workspace resolve --root "$root_dir" --env 2>/dev/null \
+        | sed -n 's/^VIBECRAFTED_OPERATOR_SESSION=//p'
+    )" || resolved=""
+    if [[ -n "$resolved" ]]; then
+      printf '%s\n' "$resolved"
+      return 0
+    fi
+  fi
+
+  # Same owned interpreter/import-root as the public entries. A bare PATH
+  # `python3` is the login host, not the catalogue owner — under `zsh -lic`
+  # that is Homebrew, and it cannot import vibecrafted_core. Import failure
+  # stays a failure; do not degrade to the repository basename.
+  if command -v _vetcoders_core_python_spec >/dev/null 2>&1; then
+    python_spec="$(_vetcoders_core_python_spec 2>/dev/null)" || python_spec=""
+    py="${python_spec%%$'\t'*}"
+    import_root="${python_spec#*$'\t'}"
+    if [[ -n "$py" ]]; then
+      if [[ -n "$import_root" ]]; then
+        resolved="$(
+          SPAWN_ROOT="$root_dir" VIBECRAFTED_ROOT="$root_dir" \
+            PYTHONPATH="$import_root" "$py" - <<'PY' 2>/dev/null
+import os
+from vibecrafted_core.workspace_catalog import resolve_operator_place_session
+root = os.environ.get("SPAWN_ROOT") or os.environ.get("VIBECRAFTED_ROOT") or os.getcwd()
+print(resolve_operator_place_session(root=root, env=os.environ), end="")
+PY
+        )" || resolved=""
+      else
+        resolved="$(
+          SPAWN_ROOT="$root_dir" VIBECRAFTED_ROOT="$root_dir" "$py" - <<'PY' 2>/dev/null
+import os
+from vibecrafted_core.workspace_catalog import resolve_operator_place_session
+root = os.environ.get("SPAWN_ROOT") or os.environ.get("VIBECRAFTED_ROOT") or os.getcwd()
+print(resolve_operator_place_session(root=root, env=os.environ), end="")
+PY
+        )" || resolved=""
+      fi
+    fi
+  fi
+  if [[ -n "$resolved" ]]; then
+    printf '%s\n' "$resolved"
+    return 0
+  fi
+  _vetcoders_session_base_name
+}
+
+_vetcoders_is_legacy_operator_session_name() {
+  local name="${1:-}"
+  case "$name" in
+    workspace-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+_vetcoders_operator_face_tab() {
+  local tool="${1:-}"
+  tool="${tool##*/}"
+  [[ -n "$tool" ]] || return 1
+  printf '%s\n' "$tool"
 }
 
 _vetcoders_expected_run_lock_path() {

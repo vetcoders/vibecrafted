@@ -1,0 +1,15 @@
+{
+  "name": "Vibecrafted (Debian 13)",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "user": "ubuntu",
+  "install": "bash .cursor/install.sh",
+  "terminals": [
+    {
+      "name": "vc-server",
+      "command": "export PATH=\"/usr/local/cargo/bin:/usr/local/bin:$HOME/.local/bin:$PATH\"; mkdir -p \"$HOME/.vibecrafted/control_plane\"; make server"
+    }
+  ],
+  "ports": [{ "name": "vc-server", "port": 3024 }]
+}

@@ -28,8 +28,9 @@ REQUIRED_FILES = (
     "src/index.js",
     "src/observer.js",
     "src/runtime-env.js",
-    "console/package.json",
-    "console/server.mjs",
+    # console/ merged into portal/ (vc-slack fbefeaa: "one front door");
+    # the portal is a Vite workspace member, so there is no server.mjs twin.
+    "portal/package.json",
     "scripts/doctor-bridge.sh",
     "scripts/install-launchagent.sh",
     "scripts/resolve-server-url.mjs",
@@ -44,7 +45,7 @@ COPY_PATHS = (
     "src",
     "scripts",
     "deploy",
-    "console",
+    "portal",
 )
 
 
@@ -105,7 +106,7 @@ def discover_source(
     return None
 
 
-def _tree_digest(source: Path, *, include_console_dist: bool) -> str:
+def _tree_digest(source: Path, *, include_portal_dist: bool) -> str:
     """Hash runtime files while excluding dependencies and checkout build residue."""
     digest = hashlib.sha256()
     for relative_root in COPY_PATHS:
@@ -117,7 +118,7 @@ def _tree_digest(source: Path, *, include_console_dist: bool) -> str:
             relative = path.relative_to(source)
             if "node_modules" in relative.parts:
                 continue
-            if not include_console_dist and relative.parts[:2] == ("console", "dist"):
+            if not include_portal_dist and relative.parts[:2] == ("portal", "dist"):
                 continue
             if relative.name == "com.vetcoders.vibecrafted-slack-bridge.plist":
                 continue
@@ -133,14 +134,14 @@ def _source_digest(source: Path) -> str:
 
     Excludes symlinks and the local, machine-specific rendered plist so the
     digest only reflects files that participate in the reproducible build.
-    Existing console build output is excluded because staging rebuilds it.
+    Existing portal build output is excluded because staging rebuilds it.
     """
-    return _tree_digest(source, include_console_dist=False)
+    return _tree_digest(source, include_portal_dist=False)
 
 
 def _content_digest(generation: Path) -> str:
-    """Hash the published runtime payload, including built console assets."""
-    return _tree_digest(generation, include_console_dist=True)
+    """Hash the published runtime payload, including built portal assets."""
+    return _tree_digest(generation, include_portal_dist=True)
 
 
 def _copy_runtime(source: Path, destination: Path) -> None:
@@ -236,7 +237,7 @@ def install(
 
     Content-addressed by ``_source_digest``: an existing generation for the
     same digest is reused rather than rebuilt. Runs a frozen pnpm workspace
-    install and builds the operator console inside staging, writes a provider
+    install and builds the operator portal inside staging, writes a provider
     manifest, publishes the `current` pointer and the public `vc-slack`
     launcher symlink, and migrates any legacy `.env`.
     Returns the generation directory.
@@ -271,13 +272,13 @@ def install(
                 check=True,
             )
             subprocess.run(
-                [pnpm_bin, "--dir", "console", "run", "build"],
+                [pnpm_bin, "--dir", "portal", "run", "build"],
                 cwd=staging,
                 check=True,
             )
-            if not (staging / "console" / "dist" / "index.html").is_file():
+            if not (staging / "portal" / "dist" / "index.html").is_file():
                 raise ProviderError(
-                    "Slack console build did not produce dist/index.html"
+                    "Slack portal build did not produce dist/index.html"
                 )
             manifest = {
                 "schema": "vibecrafted.slack-provider.v1",

@@ -50,7 +50,11 @@ def render_launchers(pyproject: Path, bin_dir: Path) -> list[str]:
                 "set -euo pipefail",
                 'bin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',
                 f"target={shlex.quote(target)}",
-                f"launcher={shlex.quote(name)}",
+                # The launcher value rides into the process argv, and the deck's
+                # identity guard matches the DECLARED absolute path against that
+                # argv. A bare name here made every python-entrypoint sidecar
+                # (vc-guardian) fail capture-identity through any wrapper chain.
+                f'launcher="${{VIBECRAFTED_DECLARED_LAUNCHER:-$bin_dir/{name}}}"',
                 dispatch_command,
                 "",
             )

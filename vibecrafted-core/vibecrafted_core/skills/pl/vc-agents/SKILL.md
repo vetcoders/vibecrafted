@@ -178,7 +178,7 @@ Nie może na nią działać.
 ```markdown
 ---
 run_id: <generated-unique-id>
-agent: <claude|codex|gemini|agy|junie|grok>
+agent: <claude|codex|gemini|agy|junie|grok|cursor>
 skill: vc-agents
 project: <repo-name>
 status: <pending|in-progress|completed|failed>
@@ -198,7 +198,8 @@ Scope:
 
 Constraints:
 
-- No --no-verify
+- Bez `--no-verify` poza lokalnym checkpointem compile embargo jawnie
+  autoryzowanym przez Foundera; worker nigdy z nim nie pushuje
 - Follow repo conventions
 
 Acceptance:
@@ -322,7 +323,10 @@ Trzymaj standardowy poziom jakości 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍
 ## Reguły bezpieczeństwa
 
 - Nie loguj sekretów ani nie commituj plików `.env`.
-- Nigdy nie używaj `--no-verify` przy `commit` ani `push`.
+- Używaj `--no-verify` wyłącznie dla lokalnego checkpointu w jawnie
+  autoryzowanym przez Foundera compile embargo, z receiptem pominiętych hooków
+  i bramek. Worker nigdy z nim nie pushuje; push z `--no-verify` jest wyłącznie
+  prawem Foundera.
 - Nie przepisuj historii gita, chyba że użytkownik wprost o to poprosi.
 - Traktuj równoległe edycje jako normalne, ale i tak weryfikuj przed nadpisaniem.
 - Jeśli repo ma ścisłą komendę w stylu `make check`, uruchom ją albo wyjaśnij, dlaczego nie.

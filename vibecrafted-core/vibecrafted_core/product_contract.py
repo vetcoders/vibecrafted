@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import plistlib
@@ -21,6 +22,7 @@ import stat
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -30,6 +32,17 @@ from itertools import pairwise
 from pathlib import Path, PurePosixPath
 from typing import Any, NoReturn
 from xml.parsers.expat import ExpatError
+
+try:
+    from . import runtime_pack_contract
+except ImportError:  # Direct execution from a sealed runtime verifier snapshot.
+    _runtime_pack_spec = importlib.util.spec_from_file_location(
+        "runtime_pack_contract", Path(__file__).with_name("runtime_pack_contract.py")
+    )
+    if _runtime_pack_spec is None or _runtime_pack_spec.loader is None:
+        raise
+    runtime_pack_contract = importlib.util.module_from_spec(_runtime_pack_spec)
+    _runtime_pack_spec.loader.exec_module(runtime_pack_contract)
 
 MODULE_SCHEMA = "io.vetcoders.vibecrafted.module.v1"
 ASSEMBLY_SCHEMA = "io.vetcoders.vibecrafted.module-assembly.v1"
@@ -99,7 +112,7 @@ RUNTIME_GENERATION_MANIFEST_NAME = "runtime-manifest.json"
 SOURCE_PROVENANCE_NAME = "source-provenance.json"
 SOURCE_PROVENANCE_SCHEMA = "vibecrafted.source-provenance.v2"
 SOURCE_PAYLOAD_SCHEMA = "vibecrafted.distribution-tree.v1"
-RUNTIME_GENERATION_ENTRYPOINT = "vibecrafted-core/vibecrafted_core/deck/vibecrafted"
+RUNTIME_GENERATION_ENTRYPOINT = "bin/vibecrafted"
 RUNTIME_GENERATION_PROJECTED_CONFIG = "runtime/generated/vc-frame/config.kdl"
 RUNTIME_GENERATION_CANONICAL_CONFIG = (
     "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame/config.kdl"
@@ -107,10 +120,14 @@ RUNTIME_GENERATION_CANONICAL_CONFIG = (
 RUNTIME_GENERATION_REQUIRED_HASHES = frozenset(
     {
         "VERSION",
+        "scripts/distribution_manifest.py",
+        "scripts/installer_brand.py",
         "scripts/vibecrafted",
+        "scripts/vetcoders_install.py",
         RUNTIME_GENERATION_CANONICAL_CONFIG,
         RUNTIME_GENERATION_ENTRYPOINT,
         "vibecrafted-core/vibecrafted_core/product_contract.py",
+        "vibecrafted-core/vibecrafted_core/runtime_pack_contract.py",
         "vibecrafted-core/vibecrafted_core/walkaround_runner.py",
         "vibecrafted-core/vibecrafted_core/schemas/unified_product.schema.v1.json",
         "vibecrafted-core/vibecrafted_core/trust/release-policy.v1.json",
@@ -150,15 +167,34 @@ _MACOS_RE = re.compile(r"([0-9]+)\.([0-9]+)")
 _BUILD_HOST_PATH_RE = re.compile(
     rb"(?:^|[\s\"'=:(])(?<![A-Za-z]:)(?P<path>/(?:Volumes|Users|opt/homebrew|usr/local)/[^\s\"'\x00]{0,512})"
 )
+_LIBPYTHON_DYLIB_RELATIVE = re.compile(
+    r"^Contents/Resources/runtime/python/lib/libpython3\.\d+\.dylib$"
+)
+# python-build-standalone 3.14 links the interpreter into the executable as
+# well, so site.py's documentation examples also appear in python/bin/*.
+_PORTABLE_PYTHON_EXECUTABLE_RELATIVE = re.compile(
+    r"^Contents/Resources/runtime/python/bin/python(?:3(?:\.\d+)?)?$"
+)
+_LIBPYTHON_DOCUMENTATION_PATHS = frozenset(
+    {
+        "/usr/local/lib/python2.5/site-packages",
+        "/usr/local/lib/python2.5/site-packages/bar",
+        "/usr/local/lib/python2.5/site-packages/foo",
+    }
+)
 _EMBEDDED_DOCUMENTATION_PATHS = {
-    "Contents/Resources/runtime/python/lib/libpython3.12.dylib": frozenset(
-        {
-            "/usr/local/lib/python2.5/site-packages",
-            "/usr/local/lib/python2.5/site-packages/bar",
-            "/usr/local/lib/python2.5/site-packages/foo",
-        }
-    ),
+    "Contents/Resources/runtime/python/lib/libpython3.12.dylib": _LIBPYTHON_DOCUMENTATION_PATHS,
+    "Contents/Resources/runtime/python/lib/libpython3.14.dylib": _LIBPYTHON_DOCUMENTATION_PATHS,
 }
+_VENDORED_OPENSSL_RELATIVE_SUFFIXES = (
+    "/lib/libssl.3.dylib",
+    "/lib/libcrypto.3.dylib",
+)
+_VENDORED_OPENSSL_HOST_PREFIXES = (
+    "/opt/homebrew/Cellar/openssl@3/",
+    "/opt/homebrew/etc/openssl@3",
+    "/opt/homebrew/opt/openssl@3/",
+)
 _FILE_KINDS = frozenset({"executable", "dylib", "resource", "config"})
 _APP_ENTRYPOINTS = frozenset({"app", "terminal", "frame"})
 _WALKAROUND_CHECKS = frozenset(
@@ -202,8 +238,30 @@ _LAUNCH_PRIMARY_SHELL = (
     "Contents/Resources/runtime/config/alacritty/launch-primary-shell.zsh"
 )
 _TERMINAL_HELPER_APP = "Contents/Helpers/vc-terminal.app"
-_TERMINAL_HELPER_BUNDLE_ID = "io.vetcoders.vc-terminal"
-_TERMINAL_HELPER_ICON = "alacritty.icns"
+# The Runtime Pack is independently launchable, so it materializes its own
+# branded terminal bundle beside its flat native host; the App then copies that
+# whole payload into Contents/Resources/runtime. Two .app directories therefore
+# reach the customer inside one Vibecrafted.app, and they are the same product
+# identity assembled by one builder function. Name both here: a bundle absent
+# from this tuple is an unknown nested customer app and still fails closed.
+_TERMINAL_RUNTIME_APP = "Contents/Resources/runtime/libexec/vc-terminal.app"
+TERMINAL_APP_BUNDLES = (_TERMINAL_HELPER_APP, _TERMINAL_RUNTIME_APP)
+_TERMINAL_BUNDLE_ID = "io.vetcoders.vc-terminal"
+_TERMINAL_BUNDLE_EXECUTABLE = "alacritty"
+_TERMINAL_BUNDLE_ICON = "alacritty.icns"
+_TERMINAL_BUNDLE_DISPLAY_NAME = "VC Terminal"
+# Signature artefacts, not payload. `codesign` writes a bundle's
+# Contents/_CodeSignature when it seals that bundle; the release builder seals
+# every nested bundle BEFORE it writes the product inventory and seals the
+# outer bundle AFTER. So each declared nested bundle already carries a seal the
+# inventory must not claim, and the outer seal does not exist yet. The writer
+# (scripts/unified_product_manifest.py) and this reader share exactly this list
+# so neither can quietly exempt a path the other still counts.
+_SIGNATURE_INVENTORY_EXCLUSIONS = (
+    Path("Contents/_CodeSignature"),
+    Path("Contents/CodeResources"),
+    *(Path(bundle) / "Contents/_CodeSignature" for bundle in TERMINAL_APP_BUNDLES),
+)
 PRODUCT_MANIFEST_REFERENT = "manifests/product-manifest.json"
 RUNTIME_MANIFEST_REFERENT = "manifests/runtime-manifest.json"
 _MAX_SIGNED_PAYLOAD_BYTES = 64 * 1024 * 1024
@@ -502,6 +560,19 @@ def _payload_files(root: Path, *, exclusions: Sequence[Path]) -> set[str]:
         if path.is_file():
             files.add(relative.as_posix())
     return files
+
+
+def is_signature_inventory_artifact(relative: str) -> bool:
+    """True when `codesign`, not the assembler, owns this path.
+
+    Public because the producer of the inventory has to answer the identical
+    question the verifier will ask. A producer-side blanket rule — "skip
+    anything named _CodeSignature" — would silently absolve an undeclared
+    nested bundle of ever being inventoried at all.
+    """
+    return _is_excluded(
+        Path(*PurePosixPath(relative).parts), _SIGNATURE_INVENTORY_EXCLUSIONS
+    )
 
 
 def _required_tool(name: str, *, failure_code: int) -> str:
@@ -1152,6 +1223,18 @@ def _verify_macho_closure(
         _fail(E_DEPENDENCY, f"unreachable declared dylibs: {', '.join(unreachable)}")
 
 
+def _vendored_openssl_host_path(relative: str, host_path: str) -> bool:
+    """True for compiled-in OPENSSLDIR/ENGINESDIR of the pinned OpenSSL dylibs.
+
+    After install_name_tool the load commands are @loader_path. Remaining
+    /opt/homebrew strings are OpenSSL's default config/cert directories, not
+    this build's first-party payload. /Users paths are never accepted here.
+    """
+    if not relative.endswith(_VENDORED_OPENSSL_RELATIVE_SUFFIXES):
+        return False
+    return host_path.startswith(_VENDORED_OPENSSL_HOST_PREFIXES)
+
+
 def _reject_host_bound_paths(path: Path, *, relative: str, kind: str) -> None:
     """Reject payload bytes that silently bind a module to the build host."""
     if kind == "resource":
@@ -1161,9 +1244,16 @@ def _reject_host_bound_paths(path: Path, *, relative: str, kind: str) -> None:
     except OSError:
         return
     documentation_paths = _EMBEDDED_DOCUMENTATION_PATHS.get(relative, frozenset())
+    if not documentation_paths and (
+        _LIBPYTHON_DYLIB_RELATIVE.fullmatch(relative)
+        or _PORTABLE_PYTHON_EXECUTABLE_RELATIVE.fullmatch(relative)
+    ):
+        documentation_paths = _LIBPYTHON_DOCUMENTATION_PATHS
     for match in _BUILD_HOST_PATH_RE.finditer(content):
         host_path = match.group("path").decode("utf-8", errors="replace")
         if host_path in documentation_paths:
+            continue
+        if _vendored_openssl_host_path(relative, host_path):
             continue
         _fail(
             E_PATH,
@@ -1939,6 +2029,59 @@ def _verify_product_module_receipts(
             _fail(E_ENTRYPOINT, f"product entrypoint is not bound to {name} receipt")
 
 
+def _verify_terminal_app_bundle(
+    app: Path,
+    relative: str,
+    *,
+    files: Mapping[str, Mapping[str, Any]],
+) -> None:
+    """One identity, one proof, for every vc-terminal.app the product carries.
+
+    The App helper and the Runtime Pack's own bundle come out of a single
+    builder function, so a per-payload allowance here would let them drift back
+    apart without the gate noticing. A bundle whose Info.plist cannot be parsed
+    — or parses to something that is not a dictionary — is a contract failure
+    with a code, never an AttributeError from the verifier.
+    """
+    bundle = app / relative
+    plist_path = bundle / "Contents/Info.plist"
+    try:
+        with plist_path.open("rb") as handle:
+            plist = plistlib.load(handle)
+    except (OSError, ValueError, ExpatError) as exc:
+        _fail(E_BUNDLE, f"terminal bundle Info.plist is invalid: {relative}: {exc}")
+    if not isinstance(plist, dict):
+        _fail(
+            E_BUNDLE,
+            f"terminal bundle Info.plist top level must be a dictionary: {relative}",
+        )
+    canonical = {
+        "CFBundleIdentifier": _TERMINAL_BUNDLE_ID,
+        "CFBundleExecutable": _TERMINAL_BUNDLE_EXECUTABLE,
+        "CFBundleIconFile": _TERMINAL_BUNDLE_ICON,
+        "CFBundleDisplayName": _TERMINAL_BUNDLE_DISPLAY_NAME,
+        "CFBundleName": _TERMINAL_BUNDLE_DISPLAY_NAME,
+    }
+    for key, expected in canonical.items():
+        if plist.get(key) != expected:
+            _fail(E_BUNDLE, f"terminal bundle {key} is not canonical: {relative}")
+    for name, declared in (
+        ("executable", f"{relative}/Contents/MacOS/{_TERMINAL_BUNDLE_EXECUTABLE}"),
+        ("icon", f"{relative}/Contents/Resources/{_TERMINAL_BUNDLE_ICON}"),
+    ):
+        if declared not in files:
+            _fail(
+                E_INVENTORY,
+                f"terminal bundle {name} is absent from signed inventory: {declared}",
+            )
+    _verify_assembler_signed_macho(bundle, relative=relative)
+    if _codesign_identifier(bundle) != _TERMINAL_BUNDLE_ID:
+        _fail(
+            E_PROOF,
+            f"terminal bundle signature Identifier is not canonical: {relative}",
+        )
+
+
 def verify_app(app_path: str | Path, *, require_clean: bool = False) -> dict[str, Any]:
     """Verify one explicit assembled Vibecrafted.app and its product manifest."""
     app = Path(app_path)
@@ -1995,12 +2138,7 @@ def verify_app(app_path: str | Path, *, require_clean: bool = False) -> dict[str
         manifest_relative=manifest_relative,
         architecture=architecture,
         minimum_macos=minimum_macos,
-        exclusions=(
-            Path("Contents/_CodeSignature"),
-            Path("Contents/CodeResources"),
-            Path("Contents/Helpers/vc-terminal.app/Contents/_CodeSignature"),
-            Path(outer_relative),
-        ),
+        exclusions=(*_SIGNATURE_INVENTORY_EXCLUSIONS, Path(outer_relative)),
     )
     validated = _ValidatedFiles(
         entries={**validated.entries, outer_relative: outer_entry},
@@ -2053,32 +2191,17 @@ def verify_app(app_path: str | Path, *, require_clean: bool = False) -> dict[str
         _fail(E_BUNDLE, "Info.plist marketing version does not match product manifest")
     if plist.get("CFBundleVersion") != build:
         _fail(E_BUNDLE, "Info.plist build version does not match product manifest")
+    # Bundle suffixes are case-insensitive to LaunchServices on the default
+    # APFS volume; `Stranger.APP` is still an application bundle.
     nested_apps = sorted(
-        path.relative_to(app).as_posix() for path in app.rglob("*.app") if path.is_dir()
+        path.relative_to(app).as_posix()
+        for path in app.rglob("*")
+        if path.is_dir() and path.suffix.lower() == ".app"
     )
-    if nested_apps != [_TERMINAL_HELPER_APP]:
+    if nested_apps != sorted(TERMINAL_APP_BUNDLES):
         _fail(E_BUNDLE, f"nested customer app bundles are forbidden: {nested_apps}")
-    terminal_helper = app / _TERMINAL_HELPER_APP
-    helper_plist_path = terminal_helper / "Contents/Info.plist"
-    try:
-        with helper_plist_path.open("rb") as handle:
-            helper_plist = plistlib.load(handle)
-    except (OSError, plistlib.InvalidFileException) as exc:
-        _fail(E_BUNDLE, f"terminal helper Info.plist is invalid: {exc}")
-    if helper_plist.get("CFBundleIdentifier") != _TERMINAL_HELPER_BUNDLE_ID:
-        _fail(E_BUNDLE, "terminal helper bundle identifier is not canonical")
-    if helper_plist.get("CFBundleExecutable") != "alacritty":
-        _fail(E_BUNDLE, "terminal helper executable is not canonical")
-    if helper_plist.get("CFBundleIconFile") != _TERMINAL_HELPER_ICON:
-        _fail(E_BUNDLE, "terminal helper icon is not canonical")
-    helper_icon_relative = (
-        f"{_TERMINAL_HELPER_APP}/Contents/Resources/{_TERMINAL_HELPER_ICON}"
-    )
-    if helper_icon_relative not in validated.entries:
-        _fail(E_INVENTORY, "terminal helper icon is absent from signed inventory")
-    _verify_assembler_signed_macho(terminal_helper, relative=_TERMINAL_HELPER_APP)
-    if _codesign_identifier(terminal_helper) != _TERMINAL_HELPER_BUNDLE_ID:
-        _fail(E_PROOF, "terminal helper signature Identifier is not canonical")
+    for terminal_bundle in TERMINAL_APP_BUNDLES:
+        _verify_terminal_app_bundle(app, terminal_bundle, files=validated.entries)
     _verify_product_module_receipts(
         app,
         modules,
@@ -2294,6 +2417,47 @@ def _mounted_release_dmg(dmg: Path):
             )
 
 
+@contextmanager
+def _extracted_runtime_pack(carrier: Path):
+    """Extract a verified Runtime Pack without accepting archive aliases or links."""
+
+    with tempfile.TemporaryDirectory(prefix="vibecrafted-runtime-pack-proof-") as raw:
+        destination = Path(raw)
+        with tarfile.open(carrier, "r:gz") as archive:
+            members = archive.getmembers()
+            roots: set[str] = set()
+            for member in members:
+                pure = PurePosixPath(member.name)
+                if (
+                    pure.is_absolute()
+                    or ".." in pure.parts
+                    or not pure.parts
+                    or member.issym()
+                    or member.islnk()
+                    or not (member.isdir() or member.isfile())
+                ):
+                    _fail(E_PROOF, "Runtime Pack archive contains an unsafe member")
+                roots.add(pure.parts[0])
+            if roots != {"VibecraftedRuntime"}:
+                _fail(E_PROOF, "Runtime Pack archive must contain one canonical root")
+            for member in members:
+                target = destination.joinpath(*PurePosixPath(member.name).parts)
+                if member.isdir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                source = archive.extractfile(member)
+                if source is None:
+                    _fail(E_PROOF, "Runtime Pack member cannot be read")
+                with target.open("xb") as handle:
+                    shutil.copyfileobj(source, handle)
+                target.chmod(member.mode & 0o777)
+        root = destination / "VibecraftedRuntime"
+        if any(path.is_symlink() for path in root.rglob("*")):
+            _fail(E_PROOF, "Runtime Pack extraction produced a symlink")
+        yield root
+
+
 def _verify_release_artifacts(
     payload: Mapping[str, Any],
     *,
@@ -2381,6 +2545,66 @@ def _verify_release_artifacts(
     }
     if payload["source_revisions"] != expected_revisions:
         _fail(E_PROOF, "release output source revisions do not match the product")
+
+    runtime_pack = payload["runtime_pack"]
+    pack_name = runtime_pack["path"]
+    expected_pack_prefix = f"Vibecrafted_RuntimePack_{product['version']}-"
+    expected_pack_suffix = (
+        f"-{product['git_sha'][:8]}-darwin-{product['architecture']}.tar.gz"
+    )
+    if (
+        Path(pack_name).name != pack_name
+        or not pack_name.startswith(expected_pack_prefix)
+        or not pack_name.endswith(expected_pack_suffix)
+    ):
+        _fail(E_PROOF, "Runtime Pack basename does not bind the release source")
+    carrier = _release_relative_path(receipt_root, pack_name, field="runtime_pack.path")
+    if not carrier.is_file() or carrier.is_symlink():
+        _fail(E_MISSING, "standalone Runtime Pack is missing")
+    if runtime_pack["size"] != carrier.stat().st_size or runtime_pack[
+        "sha256"
+    ] != _sha256(carrier):
+        _fail(E_HASH, "standalone Runtime Pack bytes disagree with release output")
+    embedded_relative = _relative_path(
+        runtime_pack["embedded_path"], field="runtime_pack.embedded_path"
+    ).as_posix()
+    if embedded_relative != f"Contents/Resources/runtime-pack/{pack_name}":
+        _fail(E_PROOF, "App-embedded Runtime Pack path is not canonical")
+    embedded = app / embedded_relative
+    if (
+        not embedded.is_file()
+        or embedded.is_symlink()
+        or embedded.stat().st_size != carrier.stat().st_size
+        or _sha256(embedded) != runtime_pack["sha256"]
+    ):
+        _fail(E_HASH, "App-embedded Runtime Pack differs from the standalone carrier")
+    provenance_receipt = runtime_pack["provenance"]
+    if provenance_receipt["source_revisions"] != expected_revisions:
+        _fail(E_PROOF, "Runtime Pack receipt donor tuple disagrees with the product")
+    with _extracted_runtime_pack(carrier) as pack_root:
+        try:
+            provenance = runtime_pack_contract.verify_provenance(
+                pack_root,
+                carrier_basename=pack_name,
+                expected_source_revision=expected_revisions["vibecrafted"],
+                expected_terminal_revision=expected_revisions["vc-terminal"],
+                expected_frame_revision=expected_revisions["vc-frame"],
+            )
+        except runtime_pack_contract.RuntimePackContractError as exc:
+            _fail(E_PROOF, str(exc))
+        provenance_path = pack_root / runtime_pack_contract.PROVENANCE_NAME
+        if provenance_receipt != {
+            "path": runtime_pack_contract.PROVENANCE_NAME,
+            "sha256": _sha256(provenance_path),
+            "version": provenance["version"],
+            "platform": provenance["platform"],
+            "architecture": provenance["architecture"],
+            "source_revisions": provenance["source_revisions"],
+        }:
+            _fail(
+                E_PROOF,
+                "Runtime Pack internal provenance disagrees with release output",
+            )
     if require_walkaround:
         return _run_walkaround_probes(app, dmg)
     return _run_live_release_checks(app, dmg)
@@ -3379,7 +3603,9 @@ def _scenario_start_here(
     help_output = _scenario_command(
         scenario, [scenario.launchers / "vc-start", "--help"]
     ).stdout
-    if b"Start the operator vc-frame session" not in help_output:
+    # The onboarding help `vibecrafted start --help` prints today (5b25a6cd
+    # retired "Start the operator vc-frame session").
+    if b"Create a vc-frame workspace for a repository" not in help_output:
         raise RuntimeError("installed vc-start onboarding help is unavailable")
     return {"onboarding_reachable": hashlib.sha256(payload + help_output).hexdigest()}
 
@@ -3798,25 +4024,49 @@ def _self_test() -> int:
         primary_shell.parent.mkdir(parents=True, exist_ok=True)
         primary_shell.write_text('#!/bin/zsh\nexec vc-start "$@"\n', encoding="utf-8")
         primary_shell.chmod(0o755)
-        terminal_app = app / "Contents/Helpers/vc-terminal.app"
-        terminal_icon = terminal_app / "Contents/Resources/alacritty.icns"
-        terminal_icon.parent.mkdir(parents=True, exist_ok=True)
-        terminal_icon.write_bytes(b"terminal-icns-fixture")
-        with (terminal_app / "Contents/Info.plist").open("wb") as handle:
-            plistlib.dump(
-                {
-                    "CFBundleIdentifier": "io.vetcoders.vc-terminal",
-                    "CFBundleExecutable": "alacritty",
-                    "CFBundleIconFile": "alacritty.icns",
-                    "CFBundlePackageType": "APPL",
-                },
-                handle,
+        terminal_bundle_files: list[dict[str, Any]] = []
+        for bundle_relative in TERMINAL_APP_BUNDLES:
+            terminal_app = app / bundle_relative
+            bundle_executable = terminal_app / "Contents/MacOS/alacritty"
+            bundle_executable.parent.mkdir(parents=True, exist_ok=True)
+            if not bundle_executable.exists():
+                shutil.copy2(executable, bundle_executable)
+                _run_tool(
+                    [codesign, "--force", "--sign", "-", str(bundle_executable)],
+                    failure_code=E_PROOF,
+                    context="self-test could not sign terminal bundle executable",
+                )
+            terminal_icon = terminal_app / "Contents/Resources/alacritty.icns"
+            terminal_icon.parent.mkdir(parents=True, exist_ok=True)
+            terminal_icon.write_bytes(b"terminal-icns-fixture")
+            with (terminal_app / "Contents/Info.plist").open("wb") as handle:
+                plistlib.dump(
+                    {
+                        "CFBundleIdentifier": "io.vetcoders.vc-terminal",
+                        "CFBundleExecutable": "alacritty",
+                        "CFBundleIconFile": "alacritty.icns",
+                        "CFBundleName": "VC Terminal",
+                        "CFBundleDisplayName": "VC Terminal",
+                        "CFBundlePackageType": "APPL",
+                    },
+                    handle,
+                )
+            _run_tool(
+                [codesign, "--force", "--sign", "-", str(terminal_app)],
+                failure_code=E_PROOF,
+                context=f"self-test could not sign terminal bundle {bundle_relative}",
             )
-        _run_tool(
-            [codesign, "--force", "--sign", "-", str(terminal_app)],
-            failure_code=E_PROOF,
-            context="self-test could not sign terminal helper app",
-        )
+            terminal_bundle_files.extend(
+                _fixture_entry(app, relative, kind=kind)
+                for relative, kind in (
+                    (f"{bundle_relative}/Contents/MacOS/alacritty", "executable"),
+                    (f"{bundle_relative}/Contents/Info.plist", "config"),
+                    (
+                        f"{bundle_relative}/Contents/Resources/alacritty.icns",
+                        "resource",
+                    ),
+                )
+            )
         terminal_config = app / _LAUNCH_CONFIG
         terminal_config.parent.mkdir(parents=True, exist_ok=True)
         terminal_config.write_text("[shell]\nprogram = 'vc-start'\n", encoding="utf-8")
@@ -3836,8 +4086,10 @@ def _self_test() -> int:
                 },
                 handle,
             )
-        terminal_product_entry = _fixture_entry(
-            app, _LAUNCH_TERMINAL, kind="executable"
+        terminal_product_entry = next(
+            entry
+            for entry in terminal_bundle_files
+            if entry["path"] == _LAUNCH_TERMINAL
         )
         frame_product_entry = _fixture_entry(
             app, "Contents/Helpers/vc-frame", kind="executable"
@@ -3945,18 +4197,8 @@ def _self_test() -> int:
                     f"Contents/Resources/{PRODUCT_ICON_FILE}",
                     kind="resource",
                 ),
-                terminal_product_entry,
+                *terminal_bundle_files,
                 frame_product_entry,
-                _fixture_entry(
-                    app,
-                    "Contents/Helpers/vc-terminal.app/Contents/Info.plist",
-                    kind="config",
-                ),
-                _fixture_entry(
-                    app,
-                    "Contents/Helpers/vc-terminal.app/Contents/Resources/alacritty.icns",
-                    kind="resource",
-                ),
                 _fixture_entry(app, terminal_binding["manifest_path"], kind="config"),
                 _fixture_entry(app, frame_binding["manifest_path"], kind="config"),
                 _fixture_entry(
@@ -4003,7 +4245,7 @@ def _self_test() -> int:
                     "tree_sha256": "f" * 64,
                     "entry_count": 42,
                 },
-                "entrypoint": "vibecrafted-core/vibecrafted_core/deck/vibecrafted",
+                "entrypoint": RUNTIME_GENERATION_ENTRYPOINT,
                 "hashes": {
                     relative: f"{index:x}" * 64
                     for index, relative in enumerate(

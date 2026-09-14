@@ -1,0 +1,17 @@
+{
+  "schema": "io.vetcoders.vibecrafted.runtime-provider-lock.v1",
+  "packages": {
+    "@anthropic-ai/claude-code": {
+      "integrity": "sha512-+7baJddJXZukgd6AgC7xStHGsMTVHDPlRcAoqTSPx2NQ+QwKGtvCZQLgbnKuhjkwq9v9vKvYwIhLOwGiE77mVQ==",
+      "version": "2.1.245"
+    },
+    "@google/gemini-cli": {
+      "integrity": "sha512-q4oBfb/Oh/HNLMYBOJMp88/QQ8hLffnB0ykoVThi6A5isbGHJ/ylWLMosMGqukKY0Q1Jv/XRDpb46Q1BV+zQqw==",
+      "version": "0.56.0"
+    },
+    "@openai/codex": {
+      "integrity": "sha512-6q5pbcpFbJbqOpkubSDBwXmktQ55aD8eUzGzBF1zASob2DjwhBKDSNGtdZKalfrNJUdTDTPDMmzCXEXs5tMBYA==",
+      "version": "0.149.1"
+    }
+  }
+}

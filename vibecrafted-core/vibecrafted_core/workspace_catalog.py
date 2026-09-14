@@ -32,6 +32,7 @@ import re
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -41,7 +42,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .control_plane import control_plane_home
+from .control_plane import _is_pytest_temp_path, control_plane_home
+from .repo_selection import RepoSelectionError, add_repo_arguments, select_repository
 from .runtime_paths import read_version_file
 
 CATALOG_SCHEMA = "vibecrafted.workspace-catalog.v1"
@@ -51,6 +53,9 @@ BUILD_ID_SCHEMA = "vibecrafted.build-id.v1"
 SESSION_RECORD_SCHEMA = "vibecrafted.workspace-session.v1"
 SNAPSHOT_MANIFEST_SCHEMA = "vibecrafted.workspace-snapshot-manifest.v1"
 MIGRATION_REPORT_SCHEMA = "vibecrafted.workspace-migration-report.v1"
+EPHEMERAL_QUARANTINE_RECEIPT_SCHEMA = (
+    "vibecrafted.workspace-ephemeral-quarantine-receipt.v1"
+)
 
 WORKSPACE_STATUS_ACTIVE = "active"
 WORKSPACE_STATUS_BURIED = "buried"
@@ -193,6 +198,10 @@ def migration_report_path() -> Path:
 
 def snapshot_manifests_dir() -> Path:
     return workspaces_dir() / "snapshot_manifests"
+
+
+def ephemeral_quarantine_receipts_dir() -> Path:
+    return workspaces_dir() / "ephemeral_quarantine_receipts"
 
 
 # ---------------------------------------------------------------------------
@@ -804,7 +813,10 @@ def short_workspace_token(workspace_id: str) -> str:
 
 WORKER_HOST_SUFFIX = "-w"
 LEGACY_WORKER_HOST_SUFFIX = " workers"
+LEGACY_OPERATOR_SESSION_PREFIX = "workspace-"
 _MAX_WORKER_HOST_LABEL = 24
+_MAX_PLACE_SESSION_LEN = 24
+_LEGACY_OPERATOR_SESSION_RE = re.compile(r"^workspace-[0-9a-f]{8}$")
 
 
 def _sanitize_worker_host_label(
@@ -857,10 +869,108 @@ def worker_host_display_label(
     return f"{label} [{short_workspace_token(workspace_id)}]"
 
 
-def operator_session_name(workspace_id: str) -> str:
-    """Stable vc-frame product session bound to one durable workspace."""
+def legacy_operator_session_name(workspace_id: str) -> str:
+    """Pre-2026-08-19 catalog fallback rendered as a rail label."""
 
-    return f"workspace-{short_workspace_token(workspace_id)}"
+    return f"{LEGACY_OPERATOR_SESSION_PREFIX}{short_workspace_token(workspace_id)}"
+
+
+def is_legacy_operator_session_name(name: str) -> bool:
+    """True when ``name`` is the old ``workspace-{8hex}`` catalog fallback."""
+
+    return bool(_LEGACY_OPERATOR_SESSION_RE.fullmatch((name or "").strip()))
+
+
+_MKTEMP_LABEL_RE = re.compile(r"(?i)^tmp\.[A-Za-z0-9._-]*$")
+
+
+def _place_label_for_workspace(
+    *,
+    display_label: str = "",
+    canonical_root: str = "",
+    max_len: int = _MAX_PLACE_SESSION_LEN,
+) -> str:
+    raw = (
+        (display_label or "").strip() or Path(canonical_root or "").name or "workspace"
+    )
+    # A workspace catalogued from a mktemp scratch dir must not surface the
+    # tmp basename ("Tmp.VzTJxd4S0l") as the human rail label — that name is
+    # noise, not a place (Founder, 2026-09-01). Fall back to the product name.
+    if _MKTEMP_LABEL_RE.fullmatch(raw):
+        raw = "vibecrafted"
+    return _sanitize_worker_host_label(raw, max_len=max_len)
+
+
+def operator_session_name(
+    workspace_id: str,
+    *,
+    display_label: str = "",
+    catalog: WorkspaceCatalog | None = None,
+) -> str:
+    """Interactive place-session for the human rail.
+
+    Uses the workspace display label (or checkout basename). A short
+    workspace token is appended only when another *active* workspace
+    would collide on the same sanitized label. Never includes a run_id.
+    """
+
+    wid = require_uuid(workspace_id, field_name="workspace_id")
+    loaded = catalog
+    record: WorkspaceRecord | None = None
+    if loaded is None:
+        try:
+            loaded = read_catalog()
+        except WorkspaceCatalogError:
+            loaded = None
+    if loaded is not None:
+        record = loaded.workspaces.get(wid)
+
+    label = _place_label_for_workspace(
+        display_label=display_label or (record.display_label if record else ""),
+        canonical_root=record.canonical_root if record else "",
+    )
+    collide = False
+    if loaded is not None:
+        for other in loaded.workspaces.values():
+            if other.workspace_id == wid:
+                continue
+            if other.status != WORKSPACE_STATUS_ACTIVE:
+                continue
+            other_label = _place_label_for_workspace(
+                display_label=other.display_label,
+                canonical_root=other.canonical_root,
+            )
+            if other_label == label:
+                collide = True
+                break
+    if not collide:
+        return label
+    token = short_workspace_token(wid)
+    max_label = max(1, _MAX_PLACE_SESSION_LEN - 1 - len(token))
+    short_label = _sanitize_worker_host_label(label, max_len=max_label)
+    return f"{short_label}-{token}"
+
+
+def resolve_operator_place_session(
+    *,
+    root: str | Path,
+    env: Mapping[str, str] | None = None,
+) -> str:
+    """Human place-session for this checkout. Does not create workspaces."""
+
+    environ = dict(env) if env is not None else dict(os.environ)
+    try:
+        identity = resolve_run_workspace_identity(
+            root=root, env=environ, create_if_missing=False
+        )
+        return operator_session_name(
+            identity.workspace_id, display_label=identity.display_label
+        )
+    except (WorkspaceCatalogError, WorkspaceNotFound):
+        return _sanitize_worker_host_label(
+            Path(root or ".").name or "vibecrafted",
+            max_len=_MAX_PLACE_SESSION_LEN,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -891,6 +1001,37 @@ def read_catalog() -> WorkspaceCatalog:
         return _load_catalog_unlocked()
 
 
+def _ephemeral_test_root_reason(root: str | Path) -> str | None:
+    """Classify only roots carrying strong pytest/temp-generator provenance."""
+
+    resolved = Path(root).expanduser().resolve()
+    if _is_pytest_temp_path(resolved):
+        return "pytest_tmp_path"
+
+    temp_root = Path(tempfile.gettempdir()).expanduser().resolve()
+    if resolved.parent == temp_root and re.fullmatch(
+        r"tmp(?:[._-])?[A-Za-z0-9]{6,}", resolved.name
+    ):
+        return "generated_temp_directory"
+    return None
+
+
+def _refuse_operator_catalog_test_root(root: Path) -> None:
+    reason = _ephemeral_test_root_reason(root)
+    catalog_home = control_plane_home().expanduser().resolve()
+    catalog_is_isolated = (
+        _is_pytest_temp_path(catalog_home)
+        or "isolated-vibecrafted-home" in catalog_home.parts
+    )
+    if reason is None or catalog_is_isolated:
+        return
+    raise WorkspaceCatalogError(
+        "refusing to persist an ephemeral test workspace root in the operator "
+        f"catalog ({reason}: {root}); tests must set VIBECRAFTED_HOME to a "
+        "temporary isolated home"
+    )
+
+
 def create_workspace(
     *,
     root: str | Path,
@@ -902,6 +1043,7 @@ def create_workspace(
     """Create a durable workspace. workspace_id is never derived from root."""
 
     resolved = Path(root).expanduser().resolve()
+    _refuse_operator_catalog_test_root(resolved)
     label = (display_label or resolved.name or "workspace").strip()
     wid = (
         require_uuid(workspace_id, field_name="workspace_id")
@@ -941,6 +1083,82 @@ def list_workspaces(*, include_buried: bool = False) -> list[WorkspaceRecord]:
     if not include_buried:
         records = [r for r in records if r.status == WORKSPACE_STATUS_ACTIVE]
     return sorted(records, key=lambda r: r.created_at)
+
+
+def quarantine_ephemeral_workspaces(*, apply: bool = False) -> dict[str, Any]:
+    """Explicitly remove test-only roots from projection, preserving a receipt.
+
+    Instance, session, and snapshot files are deliberately retained. On apply,
+    the receipt containing every removed catalog record is durably written
+    before the catalog is replaced.
+    """
+
+    with _catalog_lock(exclusive=apply):
+        catalog = _load_catalog_unlocked()
+        matches = [
+            (record, reason)
+            for record in catalog.workspaces.values()
+            if (reason := _ephemeral_test_root_reason(record.canonical_root))
+            is not None
+        ]
+        matches.sort(key=lambda item: item[0].created_at)
+        receipt_path: Path | None = None
+        if apply and matches:
+            now = _now_iso()
+            receipt_id = new_uuid7()
+            receipt_path = ephemeral_quarantine_receipts_dir() / f"{receipt_id}.json"
+            _atomic_write_json(
+                receipt_path,
+                {
+                    "schema": EPHEMERAL_QUARANTINE_RECEIPT_SCHEMA,
+                    "receipt_id": receipt_id,
+                    "created_at": now,
+                    "catalog_path": str(catalog_path()),
+                    "selected_workspace_id_before": catalog.selected_workspace_id,
+                    "preserved_runtime_history": True,
+                    "records": [
+                        {
+                            "reason": reason,
+                            "workspace": record.to_payload(),
+                        }
+                        for record, reason in matches
+                    ],
+                },
+            )
+            removed_ids = {record.workspace_id for record, _reason in matches}
+            _save_catalog_unlocked(
+                WorkspaceCatalog(
+                    workspaces={
+                        wid: record
+                        for wid, record in catalog.workspaces.items()
+                        if wid not in removed_ids
+                    },
+                    selected_workspace_id=(
+                        None
+                        if catalog.selected_workspace_id in removed_ids
+                        else catalog.selected_workspace_id
+                    ),
+                    updated_at=now,
+                )
+            )
+
+    return {
+        "schema": EPHEMERAL_QUARANTINE_RECEIPT_SCHEMA,
+        "applied": bool(apply and matches),
+        "match_count": len(matches),
+        "workspace_ids": [record.workspace_id for record, _reason in matches],
+        "matches": [
+            {
+                "workspace_id": record.workspace_id,
+                "display_label": record.display_label,
+                "canonical_root": record.canonical_root,
+                "reason": reason,
+            }
+            for record, reason in matches
+        ],
+        "receipt_path": str(receipt_path) if receipt_path is not None else "",
+        "preserved_runtime_history": True,
+    }
 
 
 def show_workspace(workspace_id: str) -> WorkspaceRecord:
@@ -1380,10 +1598,9 @@ def resolve_run_workspace_identity(
 ) -> RunWorkspaceIdentity:
     """Resolve the workspace identity for a new run.
 
-    Preference order for workspace_id:
-    1. ``VIBECRAFTED_WORKSPACE_ID`` env
-    2. catalog selected workspace
-    3. create a new explicit workspace for this root (when allowed)
+    An inherited workspace/session pair is reused only when its catalog record
+    belongs to ``root``. A foreign inherited pair is child-process context, not
+    authority over an explicit launch root.
     """
 
     environ = dict(env) if env is not None else dict(os.environ)
@@ -1396,16 +1613,18 @@ def resolve_run_workspace_identity(
     root_key = _canonical_root_key(str(resolved_root))
     if env_wid:
         wid = require_uuid(env_wid, field_name=ENV_WORKSPACE_ID)
-        record = catalog.workspaces.get(wid)
-        if record is None:
+        env_record = catalog.workspaces.get(wid)
+        if env_record is None:
             raise WorkspaceNotFound(
                 f"{ENV_WORKSPACE_ID}={wid} is not present in the catalog"
             )
-        if record.status != WORKSPACE_STATUS_ACTIVE:
+        if env_record.status != WORKSPACE_STATUS_ACTIVE:
             raise WorkspaceCatalogError(
                 f"workspace {wid} is buried; recover it before launching runs"
             )
-    else:
+        if _canonical_root_key(env_record.canonical_root) == root_key:
+            record = env_record
+    if record is None:
         # Prefer the unique active workspace whose canonical_root matches this
         # root. Selected workspace only wins when it is rooted here — never
         # leak a selected workspace from a different checkout into this host.
@@ -1449,7 +1668,16 @@ def resolve_run_workspace_identity(
             select=True,
         )
 
-    env_session = str(environ.get(ENV_VIBECRAFTED_SESSION_ID) or "").strip()
+    inherited_same_root = (
+        record is not None
+        and bool(env_wid)
+        and record.workspace_id == str(uuid.UUID(env_wid))
+    )
+    env_session = (
+        str(environ.get(ENV_VIBECRAFTED_SESSION_ID) or "").strip()
+        if inherited_same_root
+        else ""
+    )
     session_id = (
         require_uuid(env_session, field_name=ENV_VIBECRAFTED_SESSION_ID)
         if env_session
@@ -1942,7 +2170,7 @@ def workspace_cli_main(argv: Sequence[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="action", required=True)
 
     create_p = sub.add_parser("create", help="create a durable workspace")
-    create_p.add_argument("--root", default=os.getcwd())
+    add_repo_arguments(create_p)
     create_p.add_argument("--label", default="")
     create_p.add_argument("--workspace-id", default="")
     create_p.add_argument("--notes", default="")
@@ -1974,17 +2202,24 @@ def workspace_cli_main(argv: Sequence[str] | None = None) -> int:
     migrate_p.add_argument("--dry-run", action="store_true")
     migrate_p.add_argument("--json", action="store_true")
 
+    quarantine_p = sub.add_parser(
+        "quarantine-ephemeral",
+        help="find test-only workspace roots; --apply removes them from projection",
+    )
+    quarantine_p.add_argument("--apply", action="store_true")
+    quarantine_p.add_argument("--json", action="store_true")
+
     materialize_p = sub.add_parser(
         "materialize", help="bind a live workspace_instance to current build_id"
     )
     materialize_p.add_argument("workspace_id")
-    materialize_p.add_argument("--root", default=os.getcwd())
+    add_repo_arguments(materialize_p)
     materialize_p.add_argument("--json", action="store_true")
 
     resolve_p = sub.add_parser(
         "resolve", help="resolve or create the workspace used by vc-start"
     )
-    resolve_p.add_argument("--root", default="")
+    add_repo_arguments(resolve_p)
     resolve_p.add_argument("--env", action="store_true")
     resolve_p.add_argument("--json", action="store_true")
 
@@ -2010,6 +2245,21 @@ def workspace_cli_main(argv: Sequence[str] | None = None) -> int:
     counts_p.add_argument("--json", action="store_true")
 
     args = parser.parse_args(list(argv) if argv is not None else None)
+    if hasattr(args, "repo"):
+        # ``resolve`` keeps an empty root so its own catalogue fallback decides;
+        # ``create``/``materialize`` operate on the caller's directory by default.
+        explicit = bool(str(args.repo or "").strip() or str(args.root or "").strip())
+        if explicit or args.action != "resolve":
+            try:
+                args.root = select_repository(
+                    args.repo,
+                    args.root,
+                    fallback=os.getcwd,
+                    label=f"workspace {args.action}",
+                ).path
+            except RepoSelectionError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
 
     def _emit(payload: Mapping[str, Any], *, as_json: bool) -> int:
         if as_json:
@@ -2072,6 +2322,11 @@ def workspace_cli_main(argv: Sequence[str] | None = None) -> int:
             return _emit(
                 migrate_legacy_workspaces(dry_run=args.dry_run), as_json=args.json
             )
+        if args.action == "quarantine-ephemeral":
+            return _emit(
+                quarantine_ephemeral_workspaces(apply=args.apply),
+                as_json=args.json,
+            )
         if args.action == "materialize":
             instance = materialize_instance(
                 workspace_id=args.workspace_id, root=args.root
@@ -2089,7 +2344,8 @@ def workspace_cli_main(argv: Sequence[str] | None = None) -> int:
             payload = {
                 **identity.to_env(),
                 "VIBECRAFTED_OPERATOR_SESSION": operator_session_name(
-                    identity.workspace_id
+                    identity.workspace_id,
+                    display_label=identity.display_label,
                 ),
                 "VIBECRAFTED_WORKSPACE_ROOT": str(Path(root).expanduser().resolve()),
             }
@@ -2129,6 +2385,7 @@ __all__ = [
     "ENV_VIBECRAFTED_SESSION_ID",
     "ENV_WORKSPACE_ID",
     "ENV_WORKSPACE_INSTANCE_ID",
+    "EPHEMERAL_QUARANTINE_RECEIPT_SCHEMA",
     "INSTANCE_SCHEMA",
     "RUNTIME_SESSION_STATES",
     "SESSION_RECORD_SCHEMA",
@@ -2151,6 +2408,8 @@ __all__ = [
     "claim_live_instance",
     "compute_build_id",
     "create_workspace",
+    "is_legacy_operator_session_name",
+    "legacy_operator_session_name",
     "legacy_worker_host_session_name",
     "list_instances",
     "list_workspaces",
@@ -2158,11 +2417,13 @@ __all__ = [
     "migrate_legacy_workspaces",
     "new_uuid7",
     "operator_session_name",
+    "quarantine_ephemeral_workspaces",
     "read_catalog",
     "read_snapshot_manifest",
     "read_workspace_session",
     "record_runtime_session_attachment",
     "recover_workspace",
+    "resolve_operator_place_session",
     "resolve_run_workspace_identity",
     "resolve_worker_host_session",
     "select_workspace",

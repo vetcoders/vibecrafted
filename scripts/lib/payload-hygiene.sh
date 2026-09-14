@@ -8,10 +8,10 @@
 # release must never contain, so both release channels ask the same question.
 #
 # The literal set is exactly "every absolute path that exists only on the build
-# host": the operator's home, the checkout, both donors, and — under
-# --snapshot-donors — the ephemeral snapshot roots. If one of these appears in
-# a shipped byte, a customer can read the founder's account name and directory
-# layout out of a signed, notarized artifact.
+# host": the operator's home, the checkout, both donors, the main-source
+# snapshot, and — under --snapshot-donors — the ephemeral donor snapshot roots.
+# If one of these appears in a shipped byte, a customer can read the founder's
+# account name and directory layout out of a signed, notarized artifact.
 #
 # Measured 2026-08-18 on Vibecrafted_4.1.0-20260817-237d2814.dmg: 8 of 2955
 # files offended, across five unrelated producers. See payload_hygiene.py for
@@ -22,7 +22,7 @@
 # Directories every macOS or Linux box has. An ancestor walk must stop here: a
 # payload that mentions `/Users` or `/Volumes` says nothing about who built it,
 # and forbidding one would flag every legitimate path reference in the tree.
-_PAYLOAD_HYGIENE_GENERIC_ROOTS=$'/\n/Applications\n/Library\n/System\n/Users\n/Volumes\n/home\n/media\n/mnt\n/opt\n/private\n/private/var\n/srv\n/tmp\n/usr\n/var'
+_PAYLOAD_HYGIENE_GENERIC_ROOTS=$'/\n/Applications\n/Library\n/System\n/Users\n/Volumes\n/home\n/media\n/mnt\n/opt\n/private\n/private/tmp\n/private/var\n/srv\n/tmp\n/usr\n/var'
 
 # payload_hygiene_topmost_host_root <absolute-path>
 #
@@ -61,12 +61,31 @@ payload_hygiene_topmost_host_root() {
 # Emits the workshop above each root as well: the topmost still-host-specific
 # ancestor subsumes every longer path under it, so one literal closes the whole
 # blind spot without drowning the report in near-duplicate matches.
+# PAYLOAD_HYGIENE_EPHEMERAL_ROOTS — newline-separated absolute paths that
+# identify nobody: the standard home and workspace roots of a hosted CI runner.
+# Those roots are identical across the hosted macOS fleet, so naming them says
+# nothing about who built the payload.
+# This is NOT an allowlist of payload strings: the scanner still refuses every
+# literal that survives, and a root is only ephemeral when the caller declares
+# it so. Unset (the operator boundary) changes nothing.
+payload_hygiene_is_ephemeral() {
+  local path="${1%/}" root
+  [[ -n "${PAYLOAD_HYGIENE_EPHEMERAL_ROOTS:-}" ]] || return 1
+  while IFS= read -r root; do
+    root="${root%/}"
+    [[ -n "$root" && "$root" != "/" ]] || continue
+    [[ "$path" == "$root" || "$path" == "$root"/* ]] && return 0
+  done <<< "$PAYLOAD_HYGIENE_EPHEMERAL_ROOTS"
+  return 1
+}
+
 payload_hygiene_literals() {
   local root
   local -a ancestors=()
   for root in \
     "${HOME:-}" \
     "${PAYLOAD_HYGIENE_REPO_ROOT:-${REPO_ROOT:-}}" \
+    "${SOURCE_ROOT:-}" \
     "${TERMINAL_DONOR:-}" \
     "${FRAME_DONOR:-}" \
     "${TERMINAL_REPO:-}" \
@@ -79,20 +98,36 @@ payload_hygiene_literals() {
     done < <(payload_hygiene_topmost_host_root "$root")
   done
 
+  # PAYLOAD_HYGIENE_EXTRA_LITERALS — newline-separated literals a caller adds on
+  # top of the build-host set. A hosted runner declares its own roots ephemeral
+  # and then has nothing of its own to forbid; what it must still prove is that
+  # the payload does not name the OPERATOR whose keys sign it. The operator's
+  # home and workshop are those literals.
+  local -a extra=()
+  if [[ -n "${PAYLOAD_HYGIENE_EXTRA_LITERALS:-}" ]]; then
+    local line
+    while IFS= read -r line; do
+      [[ -n "$line" ]] && extra+=("$line")
+    done <<< "$PAYLOAD_HYGIENE_EXTRA_LITERALS"
+  fi
+
   local candidate
   for candidate in \
     "${HOME:-}" \
     "${PAYLOAD_HYGIENE_REPO_ROOT:-${REPO_ROOT:-}}" \
+    "${SOURCE_ROOT:-}" \
     "${TERMINAL_DONOR:-}" \
     "${FRAME_DONOR:-}" \
     "${TERMINAL_REPO:-}" \
     "${FRAME_REPO:-}" \
     "${ancestors[@]+"${ancestors[@]}"}" \
+    "${extra[@]+"${extra[@]}"}" \
     "$@"
   do
     # `/` and the empty string would match the entire payload; the scanner
     # refuses them too, but not emitting them keeps the failure honest.
     [[ -n "$candidate" && "$candidate" != "/" ]] || continue
+    payload_hygiene_is_ephemeral "$candidate" && continue
     printf '%s\n' "${candidate%/}"
   done | sort -u
 }
@@ -112,6 +147,27 @@ assert_payload_is_anonymous() {
     [[ -n "$literal" ]] || continue
     arguments+=(--forbid "$literal")
   done < <(payload_hygiene_literals "$@")
+
+  local pins="$script_dir/lib/published-foundation-digests.json"
+  if [[ -f "$pins" ]]; then
+    local digest
+    while IFS= read -r digest; do
+      [[ -n "$digest" ]] || continue
+      arguments+=(--accept-digest "$digest")
+    done < <(
+      python3 - "$pins" <<'PY'
+import json
+import pathlib
+import sys
+
+payload = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+for item in payload.get("artifacts", []):
+    digest = item.get("sha256", "")
+    if digest:
+        print(digest)
+PY
+    )
+  fi
 
   python3 "$script_dir/payload_hygiene.py" "${arguments[@]}" \
     || die "$label leaks build-host paths; refusing to ship it"

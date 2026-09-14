@@ -9,6 +9,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from .repo_selection import RepoSelectionError, add_repo_arguments, select_repository
 from .workflow import WorkflowLaunchSpec, launch_workflow, normalize_launch_spec
 
 BOOTSTRAP_PASTE_PROMPT = """BOOTSTRAP — CLIPBOARD RUN
@@ -55,7 +56,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("agent", nargs="?")
     parser.add_argument("--skill", default="workflow")
-    parser.add_argument("--root", default="")
+    add_repo_arguments(parser)
     parser.add_argument("--print-prompt", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--json", action="store_true")
@@ -118,4 +119,11 @@ def paste_main(argv: Sequence[str] | None = None) -> int:
     """Entry point for the ``vc-paste`` console script."""
     parser = _build_parser()
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    try:
+        args.root = select_repository(
+            args.repo, args.root, fallback=Path.cwd, label="vc-paste"
+        ).path
+    except RepoSelectionError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     return run_namespace(args)

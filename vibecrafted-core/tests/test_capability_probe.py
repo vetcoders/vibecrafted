@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -12,9 +13,10 @@ from vibecrafted_core.runtime_paths import (
     agent_tool_search_path,
     is_operator_home_root,
     resolve_operator_launch_root,
+    selected_runtime_environment,
 )
 
-ALL_AGENTS = ("claude", "codex", "gemini", "agy", "junie", "grok")
+ALL_AGENTS = ("claude", "codex", "gemini", "agy", "junie", "grok", "cursor")
 VERDICTS = {
     continuity.SUPPORTED,
     continuity.UNSUPPORTED,
@@ -69,13 +71,18 @@ def test_grok_forbids_checkout_mutating_recovery_flags() -> None:
 
 
 def test_unverified_never_upgraded_optimistically() -> None:
-    # AICX/host evidence shows a resume *surface* for agy and junie, but the
-    # headless contract is unproven (F06) — the table must say so.
+    # AICX/host evidence shows a resume *surface* for junie and cursor, but the
+    # headless contract is unproven (F06) — the table must say so. agy 1.2.1
+    # stream-json `--conversation` was probed 2026-09-11 and is SUPPORTED.
     assert (
-        continuity.capability_for("agy").noninteractive_resume == continuity.UNVERIFIED
+        continuity.capability_for("agy").noninteractive_resume == continuity.SUPPORTED
     )
     assert (
         continuity.capability_for("junie").noninteractive_resume
+        == continuity.UNVERIFIED
+    )
+    assert (
+        continuity.capability_for("cursor").noninteractive_resume
         == continuity.UNVERIFIED
     )
 
@@ -125,28 +132,247 @@ def _write_fake_cli(directory: Path, name: str, version: str, help_text: str) ->
     return script
 
 
-def test_agent_tool_search_path_matches_detached_allowlist(tmp_path: Path) -> None:
+REPO = Path(__file__).resolve().parents[2]
+COMMON_SH = REPO / "vibecrafted-core/vibecrafted_core/runtime/scripts/lib/util.sh"
+SHELL_FACADE = REPO / "vibecrafted-core/vibecrafted_core/runtime/shell/vetcoders.sh"
+
+
+def test_agent_tool_search_path_keeps_founder_entries_and_strips_owned_generation(
+    tmp_path: Path,
+) -> None:
+    """Inherited order is authoritative; only owned generation bins are cut.
+
+    The previous contract was a closed allowlist that discarded the inherited
+    PATH and put the runtime bin first, so a detached provider process resolved
+    a bundled — possibly stale — ``aicx``/``loct`` instead of the Founder's own.
+    """
+
     home = tmp_path / "home"
-    runtime_bin = tmp_path / "runtime-bin"
-    rogue_bin = tmp_path / "rogue-bin"
-    for directory in (home / ".local/bin", home / ".cargo/bin", runtime_bin, rogue_bin):
+    public_bin = home / ".local/bin"
+    custom_bin = tmp_path / "custom-bin"
+    stale_generation = home / ".local/share/vibecrafted/releases/4.3.0+gSTALE/bin"
+    # Merely looks like a generation bin; owned by the operator, not by us.
+    lookalike = home / "dev/vibecrafted/releases/1.0/bin"
+    for directory in (public_bin, custom_bin, stale_generation, lookalike):
         directory.mkdir(parents=True)
 
     entries = agent_tool_search_path(
         {
             "HOME": str(home),
-            "PATH": str(rogue_bin),
-            "VIBECRAFTED_RUNTIME_BIN": str(runtime_bin),
+            "XDG_DATA_HOME": str(home / ".local/share"),
+            "PATH": os.pathsep.join(
+                (
+                    str(stale_generation),
+                    str(custom_bin),
+                    str(lookalike),
+                    str(public_bin),
+                    "/usr/bin",
+                )
+            ),
         }
     ).split(os.pathsep)
 
-    assert entries[:3] == [
-        str(runtime_bin),
-        str(home / ".local/bin"),
-        str(home / ".cargo/bin"),
+    assert entries[:4] == [
+        str(custom_bin),
+        str(lookalike),
+        str(public_bin),
+        "/usr/bin",
     ]
-    assert str(rogue_bin) not in entries
+    assert str(stale_generation) not in entries
     assert len(entries) == len(set(entries))
+    # Minimal launchd environments still reach the host CLIs, as a suffix.
+    assert "/bin" in entries
+
+
+def test_agent_tool_search_path_anchors_on_custom_runtime_home(
+    tmp_path: Path,
+) -> None:
+    """A custom runtime home has no ``vibecrafted`` component to match on."""
+
+    home = tmp_path / "home"
+    runtime_home = tmp_path / "opt" / "vcrt"
+    stale_generation = runtime_home / "releases/4.3.0+gSTALE/bin"
+    public_bin = home / ".local/bin"
+    for directory in (stale_generation, public_bin):
+        directory.mkdir(parents=True)
+
+    entries = agent_tool_search_path(
+        {
+            "HOME": str(home),
+            "XDG_DATA_HOME": str(home / ".local/share"),
+            "VIBECRAFTED_RUNTIME_HOME": str(runtime_home),
+            "PATH": os.pathsep.join(
+                (str(stale_generation), str(public_bin), "/usr/bin")
+            ),
+        }
+    ).split(os.pathsep)
+
+    assert str(stale_generation) not in entries
+    assert entries[:2] == [str(public_bin), "/usr/bin"]
+
+
+def _shell_search_path(
+    shell: str, source: Path, invocation: str, env: dict[str, str]
+) -> str:
+    script = f'source "{source}" >/dev/null 2>&1\n{invocation}\n'
+    proc = subprocess.run(
+        [shell, "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=REPO,
+    )
+    return proc.stdout.strip().splitlines()[-1]
+
+
+@pytest.mark.parametrize(
+    "case",
+    ("canonical_runtime_home", "custom_runtime_home", "selected_generation_root"),
+)
+def test_owned_generation_sanitation_agrees_across_bash_zsh_and_python(
+    tmp_path: Path, case: str
+) -> None:
+    """One contract, three owners: core.sh, util.sh and runtime_paths.py.
+
+    These three implement the same grammar in different runtimes (the shell
+    facade is sourced under ``zsh -lic``), so a divergence would let a stale
+    generation reach one execution lane while the others are clean.
+    """
+
+    home = tmp_path / "home"
+    public_bin = home / ".local/bin"
+    custom_bin = tmp_path / "custom-bin"
+    lookalike = home / "dev/vibecrafted/releases/1.0/bin"
+    canonical_home = home / ".local/share/vibecrafted"
+    custom_home = tmp_path / "opt" / "vcrt"
+
+    if case == "custom_runtime_home":
+        runtime_home = custom_home
+    else:
+        runtime_home = canonical_home
+    stale_generation = runtime_home / "releases/4.3.0+gSTALE/bin"
+    selected_root = runtime_home / "releases/4.3.0+gSELECTED"
+
+    for directory in (
+        public_bin,
+        custom_bin,
+        lookalike,
+        stale_generation,
+        selected_root / "bin",
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    env = {
+        "HOME": str(home),
+        "XDG_DATA_HOME": str(home / ".local/share"),
+        "PATH": os.pathsep.join(
+            (
+                str(stale_generation),
+                str(selected_root / "bin"),
+                str(custom_bin),
+                str(lookalike),
+                str(public_bin),
+                "/usr/bin",
+                "/bin",
+            )
+        ),
+    }
+    if case == "custom_runtime_home":
+        env["VIBECRAFTED_RUNTIME_HOME"] = str(custom_home)
+    if case == "selected_generation_root":
+        env["VIBECRAFTED_RUNTIME_ROOT"] = str(selected_root)
+
+    # ``selected_runtime_environment`` validates a selected root as a stamped
+    # immutable generation, which a fixture directory is not; the sanitation
+    # grammar is what is under test, so exercise it directly for that case.
+    if case == "selected_generation_root":
+        from vibecrafted_core.runtime_paths import _is_owned_generation_bin
+
+        assert _is_owned_generation_bin(str(selected_root / "bin"), env) is True
+        python_result = os.pathsep.join(
+            entry
+            for entry in env["PATH"].split(os.pathsep)
+            if not _is_owned_generation_bin(entry, env)
+        )
+    else:
+        python_result = agent_tool_search_path(env)
+
+    bash_util = _shell_search_path(
+        "bash",
+        COMMON_SH,
+        'spawn_prepend_agent_tool_paths; printf "%s\\n" "$PATH"',
+        dict(env),
+    )
+    bash_core = _shell_search_path(
+        "bash",
+        SHELL_FACADE,
+        f'_vetcoders_path_with_bundled_bin_priority "{env["PATH"]}"',
+        dict(env),
+    )
+    zsh_core = _shell_search_path(
+        "zsh",
+        SHELL_FACADE,
+        f'_vetcoders_path_with_bundled_bin_priority "{env["PATH"]}"',
+        dict(env),
+    )
+
+    assert bash_util == bash_core
+    assert bash_core == zsh_core
+    assert str(stale_generation) not in zsh_core.split(os.pathsep)
+
+    if case == "selected_generation_root":
+        # Direct-grammar comparison: the shells append their discovery suffix.
+        assert zsh_core.split(os.pathsep)[: len(python_result.split(os.pathsep))] == (
+            python_result.split(os.pathsep)
+        )
+        assert str(selected_root / "bin") not in zsh_core.split(os.pathsep)
+    else:
+        assert python_result == zsh_core
+
+
+def test_selected_generation_rebinds_stale_runtime_bin_and_python(
+    tmp_path: Path,
+) -> None:
+    selected = tmp_path / "releases" / "new"
+    stale = tmp_path / "releases" / "old"
+    selected_bin = selected / "bin"
+    stale_bin = stale / "bin"
+    for directory in (selected_bin, stale_bin):
+        directory.mkdir(parents=True)
+    (selected / "VERSION").write_text("4.3.0+g16425e69\n", encoding="utf-8")
+    python = selected_bin / "python3"
+    python.write_text("#!/bin/sh\n", encoding="utf-8")
+    python.chmod(0o755)
+
+    environment = selected_runtime_environment(
+        {
+            "VIBECRAFTED_RUNTIME_ROOT": str(selected),
+            "VIBECRAFTED_RUNTIME_BIN": str(stale_bin),
+            "VIBECRAFTED_PYTHON": str(stale_bin / "python3"),
+            "VIBECRAFTED_ROOT": str(stale),
+        }
+    )
+
+    assert environment["VIBECRAFTED_RUNTIME_ROOT"] == str(selected)
+    assert environment["VIBECRAFTED_RUNTIME_BIN"] == str(selected_bin)
+    assert environment["VIBECRAFTED_PYTHON"] == str(python)
+    assert environment["VIBECRAFTED_ROOT"] == str(selected)
+
+
+def test_selected_generation_fails_closed_when_identity_is_incomplete(
+    tmp_path: Path,
+) -> None:
+    selected = tmp_path / "releases" / "incomplete"
+    selected.mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="immutable stamped generation"):
+        selected_runtime_environment(
+            {
+                "VIBECRAFTED_RUNTIME_ROOT": str(selected),
+                "VIBECRAFTED_RUNTIME_BIN": str(tmp_path / "stale-bin"),
+            }
+        )
 
 
 def test_resolve_operator_launch_root_uses_workspace_from_home(
@@ -189,6 +415,20 @@ def test_is_operator_home_root_matches_only_home(tmp_path: Path) -> None:
     assert not is_operator_home_root(other, env=env)
 
 
+def _pin_fake_cli_dir(monkeypatch: pytest.MonkeyPatch, directory: Path) -> None:
+    """Make ``directory`` win provider discovery.
+
+    Provider CLIs are host tools resolved from the Founder's own PATH; the
+    generation bin is a private carrier that no longer participates in
+    ambient lookup.  A fake CLI is therefore pinned by leading the inherited
+    PATH rather than by pointing ``VIBECRAFTED_RUNTIME_BIN`` at it.
+    """
+
+    monkeypatch.setenv(
+        "PATH", os.pathsep.join((str(directory), os.environ.get("PATH", "")))
+    )
+
+
 def test_probe_confirms_fake_agy_contract(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -198,7 +438,7 @@ def test_probe_confirms_fake_agy_contract(
         "1.1.3",
         "--continue Continue\n--conversation Resume by ID\n--print Run once",
     )
-    monkeypatch.setenv("VIBECRAFTED_RUNTIME_BIN", str(tmp_path))
+    _pin_fake_cli_dir(monkeypatch, tmp_path)
 
     result = continuity.probe("agy")
 
@@ -217,7 +457,7 @@ def test_probe_confirms_fake_junie_contract(
         "Junie version: 26.7.13 (2285.4)",
         "--resume Resume the last session\n--session-id=<text> Session id",
     )
-    monkeypatch.setenv("VIBECRAFTED_RUNTIME_BIN", str(tmp_path))
+    _pin_fake_cli_dir(monkeypatch, tmp_path)
 
     result = continuity.probe("junie")
 
@@ -231,7 +471,7 @@ def test_probe_reports_unsupported_when_markers_missing(
 ) -> None:
     # An older junie without the resume surface: runs fine, contract absent.
     _write_fake_cli(tmp_path, "junie", "Junie version: 25.1.0", "--task only")
-    monkeypatch.setenv("VIBECRAFTED_RUNTIME_BIN", str(tmp_path))
+    _pin_fake_cli_dir(monkeypatch, tmp_path)
 
     result = continuity.probe("junie")
 
@@ -243,7 +483,7 @@ def test_probe_reports_unsupported_when_markers_missing(
 def test_probe_failed_is_not_unsupported_when_cli_absent(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("VIBECRAFTED_RUNTIME_BIN", str(tmp_path))
+    _pin_fake_cli_dir(monkeypatch, tmp_path)
     monkeypatch.setattr(continuity, "agent_tool_search_path", lambda: str(tmp_path))
 
     result = continuity.probe("agy")
@@ -259,7 +499,7 @@ def test_probe_failed_when_cli_breaks(
     broken = tmp_path / "grok"
     broken.write_text("#!/bin/sh\necho boom >&2\nexit 1\n", encoding="utf-8")
     broken.chmod(0o755)
-    monkeypatch.setenv("VIBECRAFTED_RUNTIME_BIN", str(tmp_path))
+    _pin_fake_cli_dir(monkeypatch, tmp_path)
 
     result = continuity.probe("grok")
 
@@ -271,7 +511,7 @@ def test_probe_failed_when_cli_breaks(
 def test_probe_gemini_is_evidence_only_and_executes_nothing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("VIBECRAFTED_RUNTIME_BIN", str(tmp_path))
+    _pin_fake_cli_dir(monkeypatch, tmp_path)
 
     def _never(cmd: Sequence[str]) -> CliProbe:  # pragma: no cover - guard
         pytest.fail(f"gemini probe must never execute, got {cmd}")
@@ -291,7 +531,7 @@ def test_probe_caches_until_refresh(
         "1.1.3",
         "--continue x\n--conversation y\n--print z",
     )
-    monkeypatch.setenv("VIBECRAFTED_RUNTIME_BIN", str(tmp_path))
+    _pin_fake_cli_dir(monkeypatch, tmp_path)
     calls: list[Sequence[str]] = []
     real_runner = continuity._default_runner(5.0)
 

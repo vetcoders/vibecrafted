@@ -46,7 +46,7 @@ Never emit:
 
 - Absolute private paths: `/Users/<anyone>`, `/Volumes/<workspace>`, `~/Libraxis`.
   Use `~/.vibecrafted`, `~/.local/share/vibecrafted`, `~/projects/my-app`.
-- Hostnames/IPs of private infra: `dragon`, Tailscale `100.x.x.x`, `localhost:3025`
+- Hostnames/IPs of private infra: `host-a`, Tailscale `100.x.x.x`, `localhost:3025`
   (the canonical local server example is `http://127.0.0.1:3024`).
 - Personal names, GitHub handles, or emails of operators/founders/agent personas.
 - Real run ids, session ids, lifecycle ids from internal transcripts. Use
@@ -61,7 +61,7 @@ Allowed product vocabulary (these are public concepts, keep them): Living Tree,
 Read–Write cadence, control plane, omni-observer, baton, marbles, polarize,
 Definition of Undone (DoU), delivery receipt, runtime generation/capsule,
 settlement ledger (f/x/n), vc-frame, vc-start, agents: claude · codex · agy ·
-junie · grok.
+junie · grok · cursor.
 
 ## Truth discipline
 

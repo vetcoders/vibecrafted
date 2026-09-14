@@ -1,7 +1,7 @@
 # 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Runtime Container
 
 Full-stack vibecrafted runtime in a container, joined to your tailnet via the
-official Tailscale sidecar. Designed to run on **dragon** (or any tailnet host
+official Tailscale sidecar. Designed to run on **host-a** (or any tailnet host
 with Docker), accessible from any other tailnet device via `tailscale ssh`.
 
 ## What is baked in
@@ -19,13 +19,13 @@ with Docker), accessible from any other tailnet device via `tailscale ssh`.
 
 ```text
        ┌──────────────────────────────────────────────┐
-       │  dragon (Docker host, on the tailnet)        │
+       │  host-a (Docker host, on the tailnet)        │
        │                                              │
        │  ┌─────────────────┐  ┌──────────────────┐  │
        │  │  tailscale      │  │  vibecrafted-    │  │
        │  │  sidecar        │◀─┤  runtime         │  │
        │  │  hostname:      │  │  network_mode:   │  │
-       │  │  runtime-dragon │  │  service:tailscale  │
+       │  │  runtime-host-a │  │  service:tailscale  │
        │  │  --ssh enabled  │  │  sshd on :22     │  │
        │  └────────┬────────┘  └──────────────────┘  │
        │           │ tailnet0                        │
@@ -35,27 +35,27 @@ with Docker), accessible from any other tailnet device via `tailscale ssh`.
          ╔════════════════════════════╗
          ║  tailnet (private mesh)    ║
          ║                            ║
-         ║  div0 ──► tailscale ssh ──► runtime-dragon
+         ║  host-b ──► tailscale ssh ──► runtime-host-a
          ║                            ║
          ╚════════════════════════════╝
 ```
 
-Operator on `div0` (or any tailnet device) runs:
+Operator on `host-b` (or any tailnet device) runs:
 
 ```bash
-tailscale ssh runtime-dragon
+tailscale ssh runtime-host-a
 # now inside the container — full vibecrafted stack on PATH
 vibecrafted doctor
 loctree --version
 aicx intents -p some-project
 ```
 
-## One-time setup on dragon
+## One-time setup on host-a
 
 Prerequisites: Docker Engine + Docker Compose v2, Tailscale auth key.
 
 ```bash
-# 1. Clone vibecrafted on dragon (or use existing checkout)
+# 1. Clone vibecrafted on host-a (or use existing checkout)
 git clone https://github.com/vetcoders/vibecrafted.git
 cd vibecrafted
 git checkout release/v2.0.1   # or whatever's current
@@ -78,7 +78,7 @@ docker compose up -d --build
 # 5. Check it joined the tailnet
 docker compose logs tailscale | tail -20
 docker compose ps
-tailscale status | grep runtime-dragon
+tailscale status | grep runtime-host-a
 ```
 
 ## Daily ops
@@ -106,7 +106,7 @@ docker build -t vibecrafted-base:local \
 docker compose -f docker/runtime/docker-compose.yml up -d --build
 ```
 
-## Accessing from div0 (or any tailnet device)
+## Accessing from host-b (or any tailnet device)
 
 The tailscale sidecar runs with `TS_EXTRA_ARGS=--ssh`, which enables Tailscale
 SSH. Authentication uses your tailnet identity — no unix passwords, no manual
@@ -114,13 +114,13 @@ key distribution. Tailnet ACLs gate access (configure in the Tailscale admin
 console).
 
 ```bash
-# From div0:
-tailscale ssh runtime-dragon
+# From host-b:
+tailscale ssh runtime-host-a
 
 # One-off command (no interactive shell):
-tailscale ssh runtime-dragon vibecrafted doctor
-tailscale ssh runtime-dragon loctree slice scripts/runtime_paths.py
-tailscale ssh runtime-dragon aicx intents -p vibecrafted
+tailscale ssh runtime-host-a vibecrafted doctor
+tailscale ssh runtime-host-a loctree slice vibecrafted-core/vibecrafted_core/runtime_paths.py
+tailscale ssh runtime-host-a aicx intents -p vibecrafted
 ```
 
 To restrict who can SSH in, set a tailnet ACL similar to:
@@ -157,7 +157,7 @@ loctree --version
 aicx --version
 which claude codex gemini agy
 
-# From dragon host:
+# From the Docker host:
 docker compose -f docker/runtime/docker-compose.yml exec vibecrafted-runtime vibecrafted doctor
 
 # Health endpoint via compose:
@@ -165,7 +165,7 @@ docker compose -f docker/runtime/docker-compose.yml ps
 # STATUS should show "healthy" after start_period elapses
 ```
 
-## Bootstrap on a fresh dragon (one-liner)
+## Bootstrap on a fresh host-a (one-liner)
 
 The `bootstrap-modal.sh` script at `scripts/bootstrap-modal.sh` is the source-of-truth
 for the public one-liner installer published at
@@ -194,7 +194,7 @@ git push
 | Symptom                                    | Likely cause                                                    | Fix                                                                            |
 | ------------------------------------------ | --------------------------------------------------------------- | ------------------------------------------------------------------------------ |
 | `tailscale` healthcheck never goes ready   | bad / expired TS_AUTHKEY                                        | regenerate in tailscale admin → update `.env` → `up -d`                        |
-| `runtime-dragon` not in `tailscale status` | sidecar didn't join                                             | `docker compose logs tailscale` — usually auth / DNS issues                    |
+| `runtime-host-a` not in `tailscale status` | sidecar didn't join                                             | `docker compose logs tailscale` — usually auth / DNS issues                    |
 | `tailscale ssh` denied                     | tailnet ACL doesn't permit your identity                        | check Tailscale admin → SSH policy → add your user/tag                         |
 | `vibecrafted doctor` fails on foundations  | `install-foundations.sh --all` had partial failure during build | Rebuild base with verbose: `docker build --progress=plain ...`                 |
 | `sshd` not starting                        | host keys missing on first boot                                 | entrypoint should auto-generate; check `/workspace/.vibecrafted/logs/sshd.log` |

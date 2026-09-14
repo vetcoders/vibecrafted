@@ -186,3 +186,43 @@ def test_nested_lock_keeps_a_second_process_serialized(tmp_path: Path) -> None:
             process.terminate()
             process.join(timeout=5)
         receiver.close()
+
+
+def test_mutation_accepts_symlinked_ancestor_root(tmp_path: Path) -> None:
+    """A `$HOME` behind a symlink (`/tmp` → `/private/tmp`) is a valid root."""
+    real_root = tmp_path / "real" / "control_plane"
+    meta = real_root / "runtime_runs" / "run-1" / "meta.json"
+    _write_meta(meta)
+    alias_home = tmp_path / "alias-home"
+    alias_home.symlink_to(tmp_path / "real", target_is_directory=True)
+    alias_root = alias_home / "control_plane"
+    alias_meta = alias_root / "runtime_runs" / "run-1" / "meta.json"
+
+    changed = mutate_run_meta(
+        alias_root,
+        meta_path=alias_meta,
+        run_id="run-1",
+        mutator=lambda payload: {**payload, "marker": "via-alias"},
+    )
+
+    assert changed is True
+    assert read_run_meta(meta, expected_run_id="run-1")["marker"] == "via-alias"
+    assert read_run_meta(alias_meta, expected_run_id="run-1")["marker"] == "via-alias"
+
+
+def test_mutation_locks_are_reentrant_across_symlinked_root_spellings(
+    tmp_path: Path,
+) -> None:
+    real_root = tmp_path / "real" / "control_plane"
+    real_root.mkdir(parents=True)
+    alias_home = tmp_path / "alias-home"
+    alias_home.symlink_to(tmp_path / "real", target_is_directory=True)
+    alias_root = alias_home / "control_plane"
+
+    # Outer lock through the alias, inner lock through the resolved root:
+    # both must hit one key, or the inner flock blocks forever.
+    with (
+        run_mutation_locks(alias_root, run_id="run-1"),
+        run_mutation_locks(real_root, run_id="run-1"),
+    ):
+        pass

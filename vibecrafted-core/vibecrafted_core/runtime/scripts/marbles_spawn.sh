@@ -65,7 +65,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$agent" ]] || spawn_die "Missing --agent"
-[[ "$agent" =~ ^(claude|codex|agy|junie|grok)$ ]] || spawn_die "Invalid agent: $agent"
+[[ "$agent" =~ ^(claude|codex|agy|junie|grok|cursor)$ ]] || spawn_die "Invalid agent: $agent"
 spawn_validate_runtime "$runtime"
 spawn_require_positive_int "$count" "--count"
 spawn_rotation_validate_mode "$rotation"
@@ -126,7 +126,7 @@ if [[ -n "$marbles_run_id" ]]; then
     elif [[ -f "$candidate_state_dir/god.md" && ! -w "$candidate_state_dir/god.md" ]]; then
       refuse_reason="god.md is read-only (prior dispatch finalized the seed)"
     elif [[ -f "$candidate_state_dir/state.json" ]]; then
-      terminal_status="$(python3 -c 'import json,sys
+      terminal_status="$("$(spawn_python_bin)" -c 'import json,sys
 try:
   with open(sys.argv[1]) as fh:
     print(json.load(fh).get("status",""))

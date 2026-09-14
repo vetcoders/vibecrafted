@@ -9,10 +9,11 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Self
 
 import pytest
 from vibecrafted_core import control_plane, process_control, spawn, trust, workflow
@@ -54,6 +55,44 @@ with run_mutation_locks(
     time.sleep(float(os.environ.get("NATIVE_RESUME_TEST_HOLD", "0")))
 """
 
+_LAUNCH_RETRY_CHILD_SCRIPT = r"""
+import json
+import os
+import sys
+
+from vibecrafted_core import workflow
+
+real_popen = workflow.subprocess.Popen
+workflow._sweep_stale_runs = lambda: None
+workflow._stdin_command = lambda _agent: [sys.executable, "-c", "pass"]
+workflow._resolve_agent_command = lambda _agent, command, _env: list(command)
+
+if os.environ["LAUNCH_RETRY_MODE"] == "spawn":
+    def fake_popen(*args, **kwargs):
+        if kwargs.get("start_new_session"):
+            return real_popen(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                cwd=kwargs.get("cwd"),
+                env=kwargs.get("env"),
+                stdout=kwargs.get("stdout"),
+                stderr=kwargs.get("stderr"),
+                start_new_session=True,
+                text=True,
+            )
+        return real_popen(*args, **kwargs)
+    workflow.subprocess.Popen = fake_popen
+
+root = os.environ["LAUNCH_RETRY_ROOT"]
+spec = workflow.normalize_launch_spec(
+    {"skill": "workflow", "agent": "claude", "prompt": "cross process"},
+    root,
+)
+result = workflow.launch_workflow(spec, root)
+receipt = workflow.machine_launch_receipt(result)
+receipt["launcher_pid"] = result.get("pid")
+print(json.dumps(receipt), flush=True)
+"""
+
 
 def _source_dir(tmp_path: Path) -> Path:
     root = tmp_path / "src"
@@ -86,10 +125,7 @@ def test_normalize_launch_spec_prune_without_input_uses_discovery_prompt(
     assert spec.agent == "claude"
     assert spec.file == ""
     assert "Repository health / prune ACTION run." in spec.prompt
-    assert (
-        "Never `--no-verify`. Never `git push` — push is an operator button."
-        in spec.prompt
-    )
+    assert "`--no-verify` only for a declared Founder-authorized" in spec.prompt
     assert "Mode: DISCOVER -> PROVE -> CUT -> COMMIT." in spec.prompt
 
 
@@ -222,7 +258,8 @@ def test_launch_workflow_returns_pid_and_logs_spawn(
     assert ".vibecrafted/artifacts/local/src/" in payload["report"]
     assert "/reports/workflow/" in payload["report"]
     report_name = Path(payload["report"]).name
-    assert "_go_" in report_name
+    assert "_go_" not in report_name
+    assert "_workflow_" in report_name
     assert payload["run_id"].replace(".", "-") in report_name
     assert report_name.endswith("_report.md")
     assert ".vibecrafted/control_plane/runtime_runs/" in payload["transcript"]
@@ -243,6 +280,1204 @@ def test_launch_workflow_returns_pid_and_logs_spawn(
         "sync": "deferred",
         "run_id": payload["run_id"],
     }
+
+
+class _AliveProc:
+    pid = 4242
+
+    def wait(self) -> int:
+        return 0
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+
+def _patch_launch_popen(
+    monkeypatch: pytest.MonkeyPatch,
+    pops: list[object],
+    *,
+    boom: bool = False,
+) -> None:
+    real_popen = subprocess.Popen
+
+    def fake_popen(*args: Any, **kwargs: Any) -> Any:
+        if kwargs.get("start_new_session"):
+            pops.append(1)
+            if boom:
+                raise OSError("dispatcher vanished after reservation")
+            return _AliveProc()
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(workflow.subprocess, "Popen", fake_popen)
+
+
+def _write_reserved_launch_record(
+    spec: workflow.WorkflowLaunchSpec,
+    *,
+    run_id: str,
+    owner_identity: dict[str, Any],
+) -> tuple[str, Path]:
+    key = workflow.launch_idempotency_key(spec)
+    workflow._write_launch_idempotency_record(
+        key,
+        {
+            "run_id": run_id,
+            "agent": spec.agent,
+            "skill": spec.skill,
+            "root": spec.root,
+            "state": "reserved",
+            "accepted": False,
+            "owner_pid": owner_identity.get("pid"),
+            "owner_identity": owner_identity,
+            "spec_digest": workflow._launch_spec_digest(spec),
+            "receipt": {
+                "run_id": run_id,
+                "agent": spec.agent,
+                "skill": spec.skill,
+                "root": spec.root,
+                "accepted": False,
+                "status": "reserved",
+            },
+        },
+    )
+    return key, workflow._launch_idempotency_path(key)
+
+
+def test_independent_identical_launches_create_distinct_runs_by_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    source = _source_dir(tmp_path)
+    spec = workflow.normalize_launch_spec(
+        {"skill": "workflow", "agent": "claude", "prompt": "same brief"},
+        source,
+    )
+    pops: list[object] = []
+    _patch_launch_popen(monkeypatch, pops)
+    monkeypatch.setattr(
+        workflow,
+        "_stdin_command",
+        lambda _agent: [sys.executable, "-c", "pass"],
+    )
+
+    first = workflow.launch_workflow(spec, source)
+    second = workflow.launch_workflow(spec, source)
+
+    assert first["accepted"] is True
+    assert first["run_id"]
+    assert len(pops) == 2
+    assert second["run_id"] != first["run_id"]
+    assert second.get("replayed") is not True
+    assert second["accepted"] is True
+    assert not second.get("idempotency_key")
+
+
+def test_explicit_run_ids_never_collapse_identical_launches(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    source = _source_dir(tmp_path)
+    base = {
+        "skill": "workflow",
+        "agent": "claude",
+        "prompt": "same brief",
+    }
+    first_spec = workflow.normalize_launch_spec(
+        {**base, "run_id": "job-alpha-001"}, source
+    )
+    second_spec = workflow.normalize_launch_spec(
+        {**base, "run_id": "job-beta-002"}, source
+    )
+    pops: list[object] = []
+    _patch_launch_popen(monkeypatch, pops)
+    monkeypatch.setattr(
+        workflow,
+        "_stdin_command",
+        lambda _agent: [sys.executable, "-c", "pass"],
+    )
+
+    first = workflow.launch_workflow(first_spec, source)
+    second = workflow.launch_workflow(second_spec, source)
+
+    assert first["run_id"] == "job-alpha-001"
+    assert second["run_id"] == "job-beta-002"
+    assert len(pops) == 2
+
+
+def test_same_explicit_run_id_retries_once_and_conflicting_spec_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    monkeypatch.setattr(_AliveProc, "pid", os.getpid())
+    monkeypatch.setattr(
+        workflow,
+        "validate_process_identity",
+        lambda *_args, **_kwargs: (True, "process_identity_current", None),
+    )
+    source = _source_dir(tmp_path)
+    spec = workflow.normalize_launch_spec(
+        {
+            "skill": "workflow",
+            "agent": "claude",
+            "prompt": "same brief",
+            "run_id": "job-stable-001",
+        },
+        source,
+    )
+    conflict = workflow.normalize_launch_spec(
+        {
+            "skill": "workflow",
+            "agent": "claude",
+            "prompt": "different brief",
+            "run_id": "job-stable-001",
+        },
+        source,
+    )
+    pops: list[object] = []
+    _patch_launch_popen(monkeypatch, pops)
+    monkeypatch.setattr(
+        workflow,
+        "_stdin_command",
+        lambda _agent: [sys.executable, "-c", "pass"],
+    )
+
+    first = workflow.launch_workflow(spec, source)
+    retry = workflow.launch_workflow(spec, source)
+
+    assert first["accepted"] is True
+    assert retry["accepted"] is True, retry
+    assert retry["run_id"] == first["run_id"] == "job-stable-001"
+    assert retry["replayed"] is True
+    assert len(pops) == 1
+    with pytest.raises(ValueError, match="idempotency identity conflicts"):
+        workflow.launch_workflow(conflict, source)
+
+
+@pytest.mark.parametrize("terminal_state", ["failed", "settled", "stopped"])
+def test_terminal_dead_dispatch_claim_archives_changed_spec_and_relaunches(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, terminal_state: str
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    monkeypatch.setenv(
+        workflow.LAUNCH_IDEMPOTENCY_KEY_ENV,
+        "dispatch:disp-260827-192011-21650:cut:W1-T4:attempt:initial",
+    )
+    source = _source_dir(tmp_path)
+    old_spec = workflow.normalize_launch_spec(
+        {
+            "skill": "workflow",
+            "agent": "claude",
+            "prompt": "old baseline bee134f3",
+        },
+        source,
+    )
+    new_spec = workflow.normalize_launch_spec(
+        {
+            "skill": "workflow",
+            "agent": "claude",
+            "prompt": "recovered baseline 6822f3af",
+        },
+        source,
+    )
+    key = workflow.launch_idempotency_key(old_spec)
+    old_digest = workflow._launch_spec_digest(old_spec)
+    workflow._write_launch_idempotency_record(
+        key,
+        {
+            "run_id": "failed-cut-attempt-initial",
+            "agent": old_spec.agent,
+            "skill": old_spec.skill,
+            "root": old_spec.root,
+            "state": "dispatched",
+            "accepted": True,
+            "owner_pid": 424242,
+            "owner_identity": {
+                "pid": 424242,
+                "pgid": 424242,
+                "start_token": "dead-dispatch-owner",
+                "command_sha256": "a" * 64,
+                "run_id": "failed-cut-attempt-initial",
+            },
+            "spec_digest": old_digest,
+            "receipt": {
+                "run_id": "failed-cut-attempt-initial",
+                "agent": old_spec.agent,
+                "skill": old_spec.skill,
+                "root": old_spec.root,
+                "accepted": True,
+                "status": "launching",
+            },
+        },
+    )
+    monkeypatch.setattr(workflow, "_sweep_stale_runs", lambda: None)
+    monkeypatch.setattr(
+        workflow,
+        "lookup_run",
+        lambda run_id: (
+            {
+                "run_id": run_id,
+                "state": terminal_state,
+                "liveness": "terminal",
+                "exit_code": 1,
+            }
+            if run_id == "failed-cut-attempt-initial"
+            else None
+        ),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "validate_process_identity",
+        lambda *_args, **_kwargs: (False, "process_identity_gone", None),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "_stdin_command",
+        lambda _agent: [sys.executable, "-c", "pass"],
+    )
+    pops: list[object] = []
+    _patch_launch_popen(monkeypatch, pops)
+
+    result = workflow.launch_workflow(new_spec, source)
+
+    assert result["accepted"] is True
+    assert result["run_id"] != "failed-cut-attempt-initial"
+    assert len(pops) == 1
+    current = workflow._read_launch_idempotency_record(key)
+    assert current["run_id"] == result["run_id"]
+    assert current["spec_digest"] == workflow._launch_spec_digest(new_spec)
+    archives = list(
+        (workflow._launch_idempotency_registry() / "archive").glob("*.json")
+    )
+    assert len(archives) == 1
+    archived = json.loads(archives[0].read_text(encoding="utf-8"))
+    assert archived["run_id"] == "failed-cut-attempt-initial"
+    assert archived["spec_digest"] == old_digest
+    assert archived["archive_reason"] == "terminal_stale_spec_replaced"
+    assert archived["replacement_spec_digest"] == current["spec_digest"]
+
+
+def test_transport_env_argument_supplies_canonical_retry_identity(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    monkeypatch.delenv(workflow.LAUNCH_IDEMPOTENCY_KEY_ENV, raising=False)
+    monkeypatch.setattr(_AliveProc, "pid", os.getpid())
+    monkeypatch.setattr(
+        workflow,
+        "validate_process_identity",
+        lambda *_args, **_kwargs: (True, "process_identity_current", None),
+    )
+    source = _source_dir(tmp_path)
+    spec = workflow.normalize_launch_spec(
+        {"skill": "workflow", "agent": "claude", "prompt": "same brief"}, source
+    )
+    transport_env = {workflow.LAUNCH_IDEMPOTENCY_KEY_ENV: "supervisor-attempt-1"}
+    pops: list[object] = []
+    _patch_launch_popen(monkeypatch, pops)
+    monkeypatch.setattr(
+        workflow,
+        "_stdin_command",
+        lambda _agent: [sys.executable, "-c", "pass"],
+    )
+
+    first = workflow.launch_workflow(spec, source, env=transport_env)
+    retry = workflow.launch_workflow(spec, source, env=transport_env)
+
+    assert first["accepted"] is True
+    assert retry["accepted"] is True
+    assert retry["run_id"] == first["run_id"]
+    assert retry["replayed"] is True
+    assert len(pops) == 1
+
+
+@pytest.mark.parametrize(
+    "stale_reason",
+    [
+        "process_identity_gone",
+        "process_identity_mismatch",
+        "process_run_id_mismatch",
+    ],
+)
+def test_reserved_record_reclaims_only_proven_stale_owner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stale_reason: str
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    monkeypatch.setenv(workflow.LAUNCH_IDEMPOTENCY_KEY_ENV, "transport-attempt-1")
+    source = _source_dir(tmp_path)
+    spec = workflow.normalize_launch_spec(
+        {"skill": "workflow", "agent": "claude", "prompt": "same brief"}, source
+    )
+    key = workflow.launch_idempotency_key(spec)
+    workflow._write_launch_idempotency_record(
+        key,
+        {
+            "run_id": "reserved-run-1",
+            "agent": spec.agent,
+            "skill": spec.skill,
+            "root": spec.root,
+            "state": "reserved",
+            "accepted": False,
+            "owner_pid": 424242,
+            "owner_identity": {
+                "pid": 424242,
+                "pgid": 424242,
+                "start_token": "original-owner",
+                "command_sha256": "a" * 64,
+                "run_id": "reserved-run-1",
+            },
+            "spec_digest": workflow._launch_spec_digest(spec),
+            "receipt": {"accepted": False, "status": "reserved"},
+        },
+    )
+    monkeypatch.setattr(
+        workflow,
+        "validate_process_identity",
+        lambda *_args, **_kwargs: (False, stale_reason, None),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "_stdin_command",
+        lambda _agent: [sys.executable, "-c", "pass"],
+    )
+    pops: list[object] = []
+    _patch_launch_popen(monkeypatch, pops)
+
+    result = workflow.launch_workflow(spec, source)
+
+    assert result["accepted"] is True
+    assert result["run_id"] == "reserved-run-1"
+    assert len(pops) == 1
+
+
+@pytest.mark.parametrize(
+    "ambiguous_reason",
+    [
+        "process_identity_permission_ambiguous",
+        "process_identity_unavailable",
+        "process_identity_unreadable",
+        "process_identity_unknown",
+    ],
+)
+def test_ambiguous_reservation_owner_refuses_without_spawn_or_receipt_success(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    ambiguous_reason: str,
+) -> None:
+    from vibecrafted_core.cli import _emit_launch_result
+
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    monkeypatch.setenv(workflow.LAUNCH_IDEMPOTENCY_KEY_ENV, "ambiguous-owner")
+    source = _source_dir(tmp_path)
+    spec = workflow.normalize_launch_spec(
+        {"skill": "workflow", "agent": "claude", "prompt": "same brief"}, source
+    )
+    key = workflow.launch_idempotency_key(spec)
+    workflow._write_launch_idempotency_record(
+        key,
+        {
+            "run_id": "ambiguous-reserved-run",
+            "agent": spec.agent,
+            "skill": spec.skill,
+            "root": spec.root,
+            "state": "reserved",
+            "accepted": False,
+            "owner_pid": 424242,
+            "owner_identity": {
+                "pid": 424242,
+                "pgid": 424242,
+                "start_token": "unreadable-owner",
+                "command_sha256": "a" * 64,
+                "run_id": "ambiguous-reserved-run",
+            },
+            "spec_digest": workflow._launch_spec_digest(spec),
+            "receipt": {
+                "run_id": "ambiguous-reserved-run",
+                "agent": spec.agent,
+                "skill": spec.skill,
+                "root": spec.root,
+                "accepted": False,
+                "status": "reserved",
+            },
+        },
+    )
+    record_path = workflow._launch_idempotency_path(key)
+    reservation_before = record_path.read_bytes()
+    monkeypatch.setattr(workflow, "_sweep_stale_runs", lambda: None)
+    monkeypatch.setattr(workflow, "lookup_run", lambda _run_id: None)
+    monkeypatch.setattr(
+        workflow,
+        "validate_process_identity",
+        lambda *_args, **_kwargs: (False, ambiguous_reason, None),
+    )
+    pops: list[object] = []
+    _patch_launch_popen(monkeypatch, pops)
+
+    result = workflow.launch_workflow(spec, source)
+
+    assert result["accepted"] is False
+    assert result["status"] == "retryable_reservation_owner_ambiguous"
+    assert result["reason"] == ambiguous_reason
+    assert result["retryable"] is True
+    assert result["run_id"] == "ambiguous-reserved-run"
+    assert pops == []
+    assert record_path.read_bytes() == reservation_before
+    assert workflow.machine_launch_receipt(result)["accepted"] is False
+    assert _emit_launch_result(result, json_mode=True) == 1
+    emitted = json.loads(capsys.readouterr().out)
+    assert emitted["accepted"] is False
+    assert emitted["status"] == "retryable_reservation_owner_ambiguous"
+
+
+@pytest.mark.parametrize(
+    "malform",
+    [
+        lambda receipt: receipt.pop("start_token"),
+        lambda receipt: receipt.pop("run_id"),
+        lambda receipt: receipt.__setitem__("command_sha256", "g" * 64),
+    ],
+    ids=["missing-start-token", "missing-run-id", "invalid-command-hash"],
+)
+def test_malformed_reservation_owner_receipt_fails_closed_on_real_launch_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    malform: Any,
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    monkeypatch.setenv(workflow.LAUNCH_IDEMPOTENCY_KEY_ENV, "malformed-owner")
+    source = _source_dir(tmp_path)
+    spec = workflow.normalize_launch_spec(
+        {"skill": "workflow", "agent": "claude", "prompt": "same brief"}, source
+    )
+    run_id = "malformed-reserved-run"
+    owner_identity = process_control.process_identity_receipt(
+        os.getpid(), run_id=run_id
+    )
+    assert owner_identity is not None
+    malform(owner_identity)
+    _key, record_path = _write_reserved_launch_record(
+        spec,
+        run_id=run_id,
+        owner_identity=owner_identity,
+    )
+    reservation_before = record_path.read_bytes()
+    monkeypatch.setattr(workflow, "_sweep_stale_runs", lambda: None)
+    monkeypatch.setattr(workflow, "lookup_run", lambda _run_id: None)
+    pops: list[object] = []
+    _patch_launch_popen(monkeypatch, pops)
+
+    result = workflow.launch_workflow(spec, source)
+
+    assert result["accepted"] is False
+    assert result["status"] == "retryable_reservation_owner_ambiguous"
+    assert result["reason"] == "process_identity_receipt_invalid"
+    assert result["retryable"] is True
+    assert result["run_id"] == run_id
+    assert pops == []
+    assert record_path.read_bytes() == reservation_before
+
+
+def test_complete_reservation_owner_receipt_with_recaptured_mismatch_is_reclaimed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    monkeypatch.setenv(workflow.LAUNCH_IDEMPOTENCY_KEY_ENV, "reused-owner-pid")
+    source = _source_dir(tmp_path)
+    spec = workflow.normalize_launch_spec(
+        {"skill": "workflow", "agent": "claude", "prompt": "same brief"}, source
+    )
+    run_id = "reused-owner-run"
+    owner_identity = process_control.process_identity_receipt(
+        os.getpid(), run_id=run_id
+    )
+    assert owner_identity is not None
+    owner_identity["command_sha256"] = "0" * 64
+    _write_reserved_launch_record(
+        spec,
+        run_id=run_id,
+        owner_identity=owner_identity,
+    )
+    monkeypatch.setattr(workflow, "_sweep_stale_runs", lambda: None)
+    monkeypatch.setattr(workflow, "lookup_run", lambda _run_id: None)
+    monkeypatch.setattr(
+        workflow,
+        "_stdin_command",
+        lambda _agent: [sys.executable, "-c", "pass"],
+    )
+    pops: list[object] = []
+    _patch_launch_popen(monkeypatch, pops)
+
+    result = workflow.launch_workflow(spec, source)
+
+    assert result["accepted"] is True
+    assert result["run_id"] == run_id
+    assert pops == [1]
+
+
+def test_phantom_dispatched_record_returns_retryable_fail_closed_receipt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    monkeypatch.setenv(workflow.LAUNCH_IDEMPOTENCY_KEY_ENV, "transport-attempt-2")
+    source = _source_dir(tmp_path)
+    spec = workflow.normalize_launch_spec(
+        {"skill": "workflow", "agent": "claude", "prompt": "same brief"}, source
+    )
+    key = workflow.launch_idempotency_key(spec)
+    workflow._write_launch_idempotency_record(
+        key,
+        {
+            "run_id": "phantom-run-1",
+            "agent": spec.agent,
+            "skill": spec.skill,
+            "root": spec.root,
+            "state": "dispatched",
+            "accepted": True,
+            "spec_digest": workflow._launch_spec_digest(spec),
+            "receipt": {"accepted": True, "status": "launching"},
+        },
+    )
+    monkeypatch.setattr(workflow, "lookup_run", lambda _run_id: None)
+    pops: list[object] = []
+    _patch_launch_popen(monkeypatch, pops)
+
+    result = workflow.launch_workflow(spec, source)
+
+    assert result["accepted"] is False
+    assert result["status"] == "retryable_unknown_run"
+    assert result["retryable"] is True
+    assert len(pops) == 0
+
+
+def test_live_reservation_contention_is_retryable_but_never_accepted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    monkeypatch.setenv(workflow.LAUNCH_IDEMPOTENCY_KEY_ENV, "transport-contention")
+    source = _source_dir(tmp_path)
+    spec = workflow.normalize_launch_spec(
+        {"skill": "workflow", "agent": "claude", "prompt": "same brief"}, source
+    )
+    key = workflow.launch_idempotency_key(spec)
+    workflow._write_launch_idempotency_record(
+        key,
+        {
+            "run_id": "reserved-live-1",
+            "agent": spec.agent,
+            "skill": spec.skill,
+            "root": spec.root,
+            "state": "reserved",
+            "accepted": False,
+            "owner_pid": os.getpid(),
+            "owner_identity": {"pid": os.getpid(), "pgid": os.getpgrp()},
+            "spec_digest": workflow._launch_spec_digest(spec),
+            "receipt": {"accepted": False, "status": "reserved"},
+        },
+    )
+    monkeypatch.setattr(
+        workflow,
+        "validate_process_identity",
+        lambda *_args, **_kwargs: (True, "process_identity_current", None),
+    )
+
+    result = workflow.launch_workflow(spec, source)
+
+    assert result["accepted"] is False
+    assert result["status"] == "reservation_in_progress"
+    assert result["retryable"] is True
+
+
+def test_crash_after_reservation_recovers_only_a_nonaccepted_receipt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    monkeypatch.setenv(workflow.LAUNCH_IDEMPOTENCY_KEY_ENV, "transport-crash")
+    source = _source_dir(tmp_path)
+    spec = workflow.normalize_launch_spec(
+        {"skill": "workflow", "agent": "claude", "prompt": "same brief"}, source
+    )
+    monkeypatch.setattr(
+        workflow,
+        "validate_process_identity",
+        lambda *_args, **_kwargs: (True, "process_identity_current", None),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "build_launch_command",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("pre-spawn crash")),
+    )
+
+    with pytest.raises(OSError, match="pre-spawn crash"):
+        workflow.launch_workflow(spec, source)
+    recovered = workflow.recover_launch_receipt(spec)
+
+    assert recovered is not None
+    assert recovered["accepted"] is False
+    assert recovered["status"] == "reservation_in_progress"
+    assert recovered["run_id"]
+
+
+def test_stale_reservation_recovers_canonical_live_run_without_respawn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    monkeypatch.setenv(workflow.LAUNCH_IDEMPOTENCY_KEY_ENV, "post-spawn-crash")
+    source = _source_dir(tmp_path)
+    spec = workflow.normalize_launch_spec(
+        {"skill": "workflow", "agent": "claude", "prompt": "same brief"}, source
+    )
+    key = workflow.launch_idempotency_key(spec)
+    workflow._write_launch_idempotency_record(
+        key,
+        {
+            "run_id": "canonical-after-crash",
+            "agent": spec.agent,
+            "skill": spec.skill,
+            "root": spec.root,
+            "state": "reserved",
+            "accepted": False,
+            "owner_pid": 1,
+            "owner_identity": {"pid": 1, "pgid": 1},
+            "spec_digest": workflow._launch_spec_digest(spec),
+            "receipt": {"accepted": False, "status": "reserved"},
+        },
+    )
+    monkeypatch.setattr(
+        workflow,
+        "lookup_run",
+        lambda _run_id: {
+            "run_id": "canonical-after-crash",
+            "state": "running",
+            "agent": spec.agent,
+            "skill": spec.skill,
+            "root": spec.root,
+            "launcher_pid": os.getpid(),
+            "launcher_identity": {"pid": os.getpid(), "pgid": os.getpgrp()},
+        },
+    )
+    identity_checks = iter(
+        [
+            (False, "process_identity_gone", None),
+            (True, "process_identity_current", None),
+        ]
+    )
+    monkeypatch.setattr(
+        workflow,
+        "validate_process_identity",
+        lambda *_args, **_kwargs: next(identity_checks),
+    )
+    pops: list[object] = []
+    _patch_launch_popen(monkeypatch, pops)
+
+    result = workflow.launch_workflow(spec, source)
+
+    assert result["accepted"] is True
+    assert result["run_id"] == "canonical-after-crash"
+    assert result["replayed"] is True
+    assert result["recovered"] is True
+    assert pops == []
+    assert workflow._read_launch_idempotency_record(key)["state"] == "dispatched"
+
+
+def test_legacy_unbound_idempotency_record_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    monkeypatch.setenv(workflow.LAUNCH_IDEMPOTENCY_KEY_ENV, "legacy-unbound")
+    source = _source_dir(tmp_path)
+    spec = workflow.normalize_launch_spec(
+        {"skill": "workflow", "agent": "claude", "prompt": "same brief"}, source
+    )
+    workflow._write_launch_idempotency_record(
+        workflow.launch_idempotency_key(spec),
+        {
+            "run_id": "legacy-unbound-run",
+            "state": "dispatched",
+            "accepted": True,
+            "receipt": {"accepted": True, "status": "launching"},
+        },
+    )
+
+    with pytest.raises(ValueError, match="idempotency identity conflicts"):
+        workflow.launch_workflow(spec, source)
+
+
+def test_explicit_transport_retry_replays_across_processes(
+    tmp_path: Path,
+) -> None:
+    source = _source_dir(tmp_path)
+    env = os.environ.copy()
+    env.update(
+        {
+            "VIBECRAFTED_HOME": str(tmp_path / ".vibecrafted"),
+            "VIBECRAFTED_GUARD": "0",
+            workflow.LAUNCH_IDEMPOTENCY_KEY_ENV: "cross-process-attempt-1",
+            "LAUNCH_RETRY_ROOT": str(source),
+            "LAUNCH_RETRY_MODE": "spawn",
+        }
+    )
+
+    launcher_pid = 0
+    try:
+        first = subprocess.run(
+            [sys.executable, "-c", _LAUNCH_RETRY_CHILD_SCRIPT],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        first_receipt = json.loads(first.stdout)
+        launcher_pid = int(first_receipt.get("launcher_pid") or 0)
+        env["LAUNCH_RETRY_MODE"] = "retry"
+        second = subprocess.run(
+            [sys.executable, "-c", _LAUNCH_RETRY_CHILD_SCRIPT],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        second_receipt = json.loads(second.stdout)
+
+        assert first.stdout.count("\n") == 1
+        assert second.stdout.count("\n") == 1
+        assert first_receipt["accepted"] is True
+        assert second_receipt["accepted"] is True
+        assert second_receipt["run_id"] == first_receipt["run_id"]
+        assert second_receipt["replayed"] is True
+    finally:
+        if launcher_pid > 0:
+            try:
+                os.kill(launcher_pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+
+
+def test_launch_registry_prunes_only_bounded_failed_or_terminal_history(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    monkeypatch.setattr(workflow, "LAUNCH_IDEMPOTENCY_MAX_TERMINAL_RECORDS", 1)
+    monkeypatch.setattr(workflow, "LAUNCH_IDEMPOTENCY_TERMINAL_TTL_SECONDS", 10_000)
+    for key, state in (("failed-old", "failed"), ("failed-new", "failed")):
+        workflow._write_launch_idempotency_record(
+            key,
+            {
+                "run_id": key,
+                "state": state,
+                "accepted": False,
+                "receipt": {"accepted": False, "status": state},
+            },
+        )
+    workflow._write_launch_idempotency_record(
+        "reserved-live-or-ambiguous",
+        {
+            "run_id": "reserved-run",
+            "state": "reserved",
+            "accepted": False,
+            "receipt": {"accepted": False, "status": "reserved"},
+        },
+    )
+    now = time.time()
+    os.utime(workflow._launch_idempotency_path("failed-old"), (now - 20, now - 20))
+    os.utime(workflow._launch_idempotency_path("failed-new"), (now - 10, now - 10))
+    os.utime(
+        workflow._launch_idempotency_path("reserved-live-or-ambiguous"),
+        (now - 30, now - 30),
+    )
+
+    removed = workflow._prune_launch_idempotency_registry(now=now)
+
+    assert removed == 1
+    assert not workflow._launch_idempotency_path("failed-old").exists()
+    assert workflow._launch_idempotency_path("failed-new").exists()
+    assert workflow._launch_idempotency_path("reserved-live-or-ambiguous").exists()
+
+
+def test_launch_registry_prune_uses_only_direct_snapshots_for_dispatched_history(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A launch receipt must not trigger legacy artifact discovery per record."""
+    home = tmp_path / ".vibecrafted"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    monkeypatch.setattr(workflow, "LAUNCH_IDEMPOTENCY_MAX_TERMINAL_RECORDS", 1)
+    monkeypatch.setattr(workflow, "LAUNCH_IDEMPOTENCY_TERMINAL_TTL_SECONDS", 10)
+    for index in range(64):
+        workflow._write_launch_idempotency_record(
+            f"missing-legacy-{index}",
+            {
+                "run_id": f"missing-legacy-{index}",
+                "state": "dispatched",
+                "accepted": True,
+                "receipt": {"accepted": True, "status": "launching"},
+            },
+        )
+    workflow._write_launch_idempotency_record(
+        "terminal-snapshot",
+        {
+            "run_id": "terminal-snapshot-run",
+            "state": "dispatched",
+            "accepted": True,
+            "receipt": {"accepted": True, "status": "launching"},
+        },
+    )
+    snapshot = control_plane.run_snapshot_dir() / "terminal-snapshot-run.json"
+    snapshot.parent.mkdir(parents=True, exist_ok=True)
+    snapshot.write_text(
+        json.dumps({"run_id": "terminal-snapshot-run", "state": "completed"}),
+        encoding="utf-8",
+    )
+    now = time.time()
+    for path in workflow._launch_idempotency_registry().glob("*.json"):
+        os.utime(path, (now - 20, now - 20))
+
+    monkeypatch.setattr(
+        workflow,
+        "lookup_run",
+        lambda _run_id: pytest.fail("registry prune must not sync/discover runs"),
+    )
+    monkeypatch.setattr(
+        control_plane,
+        "_resolve_run_in_artifacts",
+        lambda _run_id: pytest.fail(
+            "registry prune must not recursively scan artifacts"
+        ),
+    )
+
+    removed = workflow._prune_launch_idempotency_registry(now=now)
+
+    assert removed == 1
+    assert not workflow._launch_idempotency_path("terminal-snapshot").exists()
+    assert workflow._launch_idempotency_path("missing-legacy-0").exists()
+
+
+def _write_dispatched_launch_record(key: str, run_id: str) -> None:
+    """Persist one accepted dispatched claim in the launch-idempotency registry."""
+    workflow._write_launch_idempotency_record(
+        key,
+        {
+            "run_id": run_id,
+            "state": "dispatched",
+            "accepted": True,
+            "receipt": {"accepted": True, "status": "launching"},
+        },
+    )
+
+
+def _write_run_projection(
+    run_id: str, payload: dict[str, Any], *, archived: bool = False
+) -> Path:
+    """Write one control-plane run snapshot (live or archived)."""
+    directory = control_plane.run_snapshot_dir()
+    if archived:
+        directory = directory / "archive"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{run_id}.json"
+    path.write_text(json.dumps({"run_id": run_id, **payload}), encoding="utf-8")
+    return path
+
+
+def _write_runtime_run_meta(run_id: str, payload: dict[str, Any]) -> Path:
+    """Write one canonical runtime meta.json for ``run_id``."""
+    run_dir = control_plane._runtime_runs_dir() / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    path = run_dir / "meta.json"
+    path.write_text(json.dumps({"run_id": run_id, **payload}), encoding="utf-8")
+    return path
+
+
+def _expire_launch_registry(now: float) -> None:
+    """Age every registry record past the terminal TTL."""
+    for path in workflow._launch_idempotency_registry().glob("*.json"):
+        os.utime(path, (now - 3_600, now - 3_600))
+
+
+def _forbid_legacy_run_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail the test if registry maintenance reaches for the expensive lookups."""
+    monkeypatch.setattr(
+        workflow,
+        "lookup_run",
+        lambda _run_id: pytest.fail("registry prune must not sync/discover runs"),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "sync_state",
+        lambda *args, **kwargs: pytest.fail("registry prune must not sync state"),
+    )
+    monkeypatch.setattr(
+        control_plane,
+        "_resolve_run_in_artifacts",
+        lambda _run_id: pytest.fail(
+            "registry prune must not recursively scan artifacts"
+        ),
+    )
+
+
+def _prepare_prune_home(monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
+    """Point the prune at an isolated home with zero terminal retention budget."""
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    monkeypatch.setattr(workflow, "LAUNCH_IDEMPOTENCY_MAX_TERMINAL_RECORDS", 0)
+    monkeypatch.setattr(workflow, "LAUNCH_IDEMPOTENCY_TERMINAL_TTL_SECONDS", 10)
+
+
+def test_launch_registry_prune_retains_live_claim_contradicting_stale_snapshot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A lagging `completed` projection must not delete a running launch claim.
+
+    Root counterexample (`launch-prune-stale-snapshot-probe`): the projection
+    says completed/exit 0 while the canonical runtime meta still says running
+    with a live worker pid. Snapshot-only pruning loses the live claim.
+    """
+    _prepare_prune_home(monkeypatch, tmp_path / ".vibecrafted")
+    run_id = "live-after-stale-projection"
+    _write_dispatched_launch_record(run_id, run_id)
+    _write_run_projection(run_id, {"state": "completed", "exit_code": 0})
+    _write_runtime_run_meta(
+        run_id,
+        {"status": "running", "worker_pid": os.getpid(), "exit_code": None},
+    )
+    now = time.time()
+    _expire_launch_registry(now)
+    _forbid_legacy_run_discovery(monkeypatch)
+
+    removed = workflow._prune_launch_idempotency_registry(now=now)
+
+    assert removed == 0
+    assert workflow._launch_idempotency_path(run_id).exists()
+
+
+def test_launch_registry_prune_retains_claim_when_archived_snapshot_is_contradicted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An archived terminal snapshot loses to a live canonical runtime record."""
+    _prepare_prune_home(monkeypatch, tmp_path / ".vibecrafted")
+    run_id = "archived-completed-still-running"
+    _write_dispatched_launch_record(run_id, run_id)
+    _write_run_projection(run_id, {"state": "completed", "exit_code": 0}, archived=True)
+    _write_runtime_run_meta(run_id, {"status": "running", "worker_pid": os.getpid()})
+    now = time.time()
+    _expire_launch_registry(now)
+    _forbid_legacy_run_discovery(monkeypatch)
+
+    removed = workflow._prune_launch_idempotency_registry(now=now)
+
+    assert removed == 0
+    assert workflow._launch_idempotency_path(run_id).exists()
+
+
+@pytest.mark.parametrize("malformed_snapshot", [None, [], "invalid", 0, False])
+def test_launch_registry_prune_retains_claim_when_primary_snapshot_is_not_object(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, malformed_snapshot: Any
+) -> None:
+    """An invalid current projection is uncertainty, even with old terminal archive."""
+    _prepare_prune_home(monkeypatch, tmp_path / ".vibecrafted")
+    run_id = "malformed-primary-with-terminal-archive"
+    _write_dispatched_launch_record(run_id, run_id)
+    current = control_plane.run_snapshot_dir() / f"{run_id}.json"
+    current.parent.mkdir(parents=True, exist_ok=True)
+    current.write_text(json.dumps(malformed_snapshot), encoding="utf-8")
+    _write_run_projection(run_id, {"state": "completed", "exit_code": 0}, archived=True)
+    now = time.time()
+    _expire_launch_registry(now)
+    _forbid_legacy_run_discovery(monkeypatch)
+
+    removed = workflow._prune_launch_idempotency_registry(now=now)
+
+    assert removed == 0
+    assert workflow._launch_idempotency_path(run_id).exists()
+
+
+@pytest.mark.parametrize("malformed_snapshot", [None, [], "invalid", 0, False])
+def test_launch_registry_prune_retains_claim_when_archived_snapshot_is_not_object(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, malformed_snapshot: Any
+) -> None:
+    """An invalid archived projection must be treated as unknown, never crash."""
+    _prepare_prune_home(monkeypatch, tmp_path / ".vibecrafted")
+    run_id = "malformed-archived-snapshot"
+    _write_dispatched_launch_record(run_id, run_id)
+    archive = control_plane.run_snapshot_dir() / "archive" / f"{run_id}.json"
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    archive.write_text(json.dumps(malformed_snapshot), encoding="utf-8")
+    now = time.time()
+    _expire_launch_registry(now)
+    _forbid_legacy_run_discovery(monkeypatch)
+
+    removed = workflow._prune_launch_idempotency_registry(now=now)
+
+    assert removed == 0
+    assert workflow._launch_idempotency_path(run_id).exists()
+
+
+def test_launch_registry_prune_retains_claim_when_runtime_meta_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Doubt is not terminality: a corrupt canonical record retains the claim."""
+    _prepare_prune_home(monkeypatch, tmp_path / ".vibecrafted")
+    run_id = "runtime-meta-corrupt"
+    _write_dispatched_launch_record(run_id, run_id)
+    _write_run_projection(run_id, {"state": "completed", "exit_code": 0})
+    meta_path = _write_runtime_run_meta(run_id, {"state": "completed"})
+    meta_path.write_text("{ truncated", encoding="utf-8")
+    now = time.time()
+    _expire_launch_registry(now)
+    _forbid_legacy_run_discovery(monkeypatch)
+
+    removed = workflow._prune_launch_idempotency_registry(now=now)
+
+    assert removed == 0
+    assert workflow._launch_idempotency_path(run_id).exists()
+
+
+def test_launch_registry_prune_rejects_traversing_run_ids(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A registry run id must never compose a read outside the snapshot dir."""
+    _prepare_prune_home(monkeypatch, tmp_path / ".vibecrafted")
+    run_id = "../../outside"
+    _write_dispatched_launch_record("traversal-claim", run_id)
+    outside = tmp_path / ".vibecrafted" / "outside.json"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_text(
+        json.dumps({"run_id": run_id, "state": "completed", "exit_code": 0}),
+        encoding="utf-8",
+    )
+    assert (
+        control_plane.run_snapshot_dir() / f"{run_id}.json"
+    ).resolve() == outside.resolve()
+    now = time.time()
+    _expire_launch_registry(now)
+    _forbid_legacy_run_discovery(monkeypatch)
+
+    removed = workflow._prune_launch_idempotency_registry(now=now)
+
+    assert removed == 0
+    assert workflow._launch_idempotency_path("traversal-claim").exists()
+    assert control_plane.lookup_run_snapshot(run_id) is None
+    assert control_plane.lookup_runtime_run_meta(run_id) is None
+    assert outside.exists()
+
+
+def test_launch_registry_prune_removes_terminal_record_when_pid_is_a_new_generation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A live pid that provably belongs to another generation blocks nothing."""
+    _prepare_prune_home(monkeypatch, tmp_path / ".vibecrafted")
+    run_id = "terminal-with-recycled-pid"
+    receipt = process_control.process_identity_receipt(os.getpid(), run_id=run_id)
+    assert receipt is not None
+    foreign_receipt = {**receipt, "start_token": "1990-01-01T00:00:00Z"}
+    _write_dispatched_launch_record(run_id, run_id)
+    _write_run_projection(run_id, {"state": "completed", "exit_code": 0})
+    _write_runtime_run_meta(
+        run_id,
+        {
+            "state": "completed",
+            "exit_code": 0,
+            "worker_pid": os.getpid(),
+            "worker_identity": foreign_receipt,
+        },
+    )
+    now = time.time()
+    _expire_launch_registry(now)
+    _forbid_legacy_run_discovery(monkeypatch)
+
+    assert (
+        workflow._process_liveness_evidence(
+            run_id, {"worker_pid": os.getpid(), "worker_identity": foreign_receipt}
+        )
+        == "stale"
+    )
+    removed = workflow._prune_launch_idempotency_registry(now=now)
+
+    assert removed == 1
+    assert not workflow._launch_idempotency_path(run_id).exists()
+
+
+def test_launch_registry_prune_removes_truly_finished_expired_record(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Projection and canonical runtime record agree terminal: history is bounded."""
+    _prepare_prune_home(monkeypatch, tmp_path / ".vibecrafted")
+    run_id = "truly-finished"
+    child = subprocess.Popen([sys.executable, "-c", ""])
+    child.wait()
+    _write_dispatched_launch_record(run_id, run_id)
+    _write_run_projection(run_id, {"state": "completed", "exit_code": 0})
+    _write_runtime_run_meta(
+        run_id,
+        {"state": "completed", "exit_code": 0, "worker_pid": child.pid},
+    )
+    now = time.time()
+    _expire_launch_registry(now)
+    _forbid_legacy_run_discovery(monkeypatch)
+
+    removed = workflow._prune_launch_idempotency_registry(now=now)
+
+    assert removed == 1
+    assert not workflow._launch_idempotency_path(run_id).exists()
+
+
+def test_launch_registry_never_persists_prompt_text(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    monkeypatch.setenv(workflow.LAUNCH_IDEMPOTENCY_KEY_ENV, "prompt-hygiene-attempt")
+    source = _source_dir(tmp_path)
+    secret_prompt = "do not persist this prompt marker 8a889795"
+    spec = workflow.normalize_launch_spec(
+        {"skill": "workflow", "agent": "claude", "prompt": secret_prompt}, source
+    )
+    pops: list[object] = []
+    _patch_launch_popen(monkeypatch, pops)
+    monkeypatch.setattr(
+        workflow,
+        "_stdin_command",
+        lambda _agent: [sys.executable, "-c", "pass"],
+    )
+
+    result = workflow.launch_workflow(spec, source)
+
+    assert result["accepted"] is True
+    registry_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in workflow._launch_idempotency_registry().glob("*.json")
+    )
+    assert secret_prompt not in registry_text
+
+
+def test_spawn_exception_after_run_id_does_not_mint_sibling_while_live(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    source = _source_dir(tmp_path)
+    spec = workflow.normalize_launch_spec(
+        {"skill": "workflow", "agent": "claude", "prompt": "same brief"},
+        source,
+    )
+    monkeypatch.setattr(
+        workflow,
+        "_stdin_command",
+        lambda _agent: [sys.executable, "-c", "pass"],
+    )
+    pops: list[object] = []
+    _patch_launch_popen(monkeypatch, pops, boom=True)
+
+    first = workflow.launch_workflow(spec, source)
+    assert first["accepted"] is False
+    assert first["run_id"]
+    assert len(pops) == 1
+
+    _patch_launch_popen(monkeypatch, pops, boom=False)
+    second = workflow.launch_workflow(spec, source)
+
+    # Failed launches are retryable; a later successful retry may mint a new
+    # run. The incident class is empty success of a *live* launch.
+    assert second["accepted"] is True
+    assert len(pops) == 2
+    assert second["run_id"] != first["run_id"]
 
 
 def test_launch_workflow_preseeds_machine_owned_claim_digest(
@@ -324,9 +1559,12 @@ def test_launch_workflow_never_runs_global_sync_after_spawn(
     assert payload["control_plane"]["sync"] == "deferred"
 
 
-def test_launch_workflow_records_skipped_model_override_for_unknown_flag(
+def test_launch_workflow_admits_agy_through_the_private_stdin_transport(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """agy is no longer refused up front: its adapter feeds the prompt to
+    ``agy --input-format stream-json`` on stdin, so launch admission reaches
+    the same pre-flight as every other agent."""
     monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
     source = _source_dir(tmp_path)
     spec = workflow.WorkflowLaunchSpec(
@@ -339,29 +1577,16 @@ def test_launch_workflow_records_skipped_model_override_for_unknown_flag(
         root=str(source),
         model="gemini-pro",
     )
-    monkeypatch.setattr(
-        workflow,
-        "_stdin_command",
-        lambda _agent: [
-            sys.executable,
-            "-c",
-            (
-                "from pathlib import Path; import os; "
-                "Path(os.environ['VIBECRAFTED_REPORT_PATH']).write_text('ok\\n')"
-            ),
-        ],
-    )
 
-    payload = workflow.launch_workflow(spec, source)
+    class ReachedPreflight(RuntimeError):
+        pass
 
-    assert payload["accepted"] is True
-    assert (
-        payload["model_requested"] == "gemini-pro"
-    )  # Google family label preserved for agy telemetry
-    assert payload["model_override_supported"] is False
-    assert payload["model_override_skipped"] is True
-    assert payload["model_override_skip_reason"] == "unsupported_agent_model_flag"
-    assert "gemini-pro" not in payload["worker_command"]
+    def _sentinel() -> None:
+        raise ReachedPreflight
+
+    monkeypatch.setattr(workflow, "_sweep_stale_runs", _sentinel)
+    with pytest.raises(ReachedPreflight):
+        workflow.launch_workflow(spec, source)
 
 
 def test_launch_workflow_records_failure_event_when_spawn_errors(
@@ -597,8 +1822,8 @@ def test_build_launch_command_applies_stage_model_flags_by_runner(
         tmp_path,
         prompt_file=tmp_path / "p.md",
     )
-    assert "gemini-pro" not in agy
-    assert "--model" not in agy
+    # agy is a direct argv now (no bash shim), so the pin is visible at the head.
+    assert agy[:3] == ["agy", "--model", "gemini-pro"]
     assert "-m" not in agy
 
     marbles = workflow.build_launch_command(
@@ -712,21 +1937,11 @@ def test_terminal_runtime_launches_worker_in_vc_frame_tab(
     assert payload["control"].endswith(f"{payload['run_id']}.json")
 
 
-def test_headless_launch_opens_live_bucket_viewer_and_stamps_origin(
+def test_headless_launch_never_creates_a_synthetic_viewer(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Cut C axis (a): the viewer lands in ``Live runs`` and stamps the origin.
-
-    The worker itself must stay detached headless — the LIVE tab is a viewer,
-    so it carries the run's transcript, never the dispatcher.
-    """
     monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
-    monkeypatch.setenv("VIBECRAFTED_LIVE_VIEWER", "1")
     source = _source_dir(tmp_path)
-    vc_frame = tmp_path / "bin" / "vc-frame"
-    vc_frame.parent.mkdir()
-    vc_frame.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
-
     spec = workflow.WorkflowLaunchSpec(
         agent="codex",
         mode="implement",
@@ -739,136 +1954,20 @@ def test_headless_launch_opens_live_bucket_viewer_and_stamps_origin(
     monkeypatch.setattr(
         workflow, "_stdin_command", lambda _agent: [sys.executable, "-c", "pass"]
     )
-    monkeypatch.setattr(
-        workflow.shutil,
-        "which",
-        lambda name, path=None: str(vc_frame) if name == "vc-frame" else None,
-    )
-
-    captured: dict[str, Any] = {}
-
-    def fake_host_action(
-        command: list[str], *, operator_session: str, timeout: float = 45.0
-    ) -> workflow._HostActionResult:
-        captured["command"] = command
-        captured["operator_session"] = operator_session
-        return workflow._HostActionResult(True, 909, "", "", False)
-
-    monkeypatch.setattr(workflow, "_vc_frame_run_host_action", fake_host_action)
-
-    payload = workflow.launch_workflow(spec, source)
-    run_id = payload["run_id"]
-
-    # The worker never bought a tab: headless transport, no worker host.
-    assert payload["accepted"] is True
-    assert payload["transport"] == "headless"
-    assert payload["operator_session"] == ""
-
-    # The viewer did, and it went to the LIVE bucket under the run's own name.
-    assert captured["operator_session"] == "Live runs"
-    assert captured["command"][:6] == [
-        str(vc_frame),
-        "--session",
-        "Live runs",
-        "action",
-        "new-tab",
-        "--name",
-    ]
-    assert captured["command"][6] == run_id
-    viewer_script = Path(captured["command"][-1])
-    assert viewer_script.is_file()
-    body = viewer_script.read_text(encoding="utf-8")
-    assert 'exec tail -n +1 -F "$human_transcript"' in body
-    assert 'exec tail -n +1 -F "$transcript"' not in body
-    assert "transcript.human.log" in body
-    assert payload["transcript"] not in body
-    assert f"vibecrafted observe codex --run-id {run_id}" in body
-    assert f"vibecrafted codex observe --run-id {run_id}" not in body
-    # A viewer tails; it must never carry the dispatcher itself.
-    assert "vibecrafted_core.dispatcher" not in body
-
-    assert payload["live_viewer"]["status"] == "opened"
-    assert payload["live_viewer"]["session"] == "Live runs"
-    assert payload["live_viewer"]["tab"] == run_id
-
-    # The stamp is what lets the existing triage hook empty this bucket later.
-    meta = json.loads(Path(payload["meta"]).read_text(encoding="utf-8"))
-    assert meta["origin_session"] == "Live runs"
-    assert meta["origin_tab"] == run_id
-    assert meta["live_viewer"]["status"] == "opened"
-
-
-def test_test_mode_never_opens_live_viewer() -> None:
-    """Hermetic tests must not mutate the operator's real vc-frame surface."""
-    assert (
-        workflow._live_viewer_enabled(
-            {
-                "VIBECRAFTED_TEST_MODE": "1",
-                "VIBECRAFTED_LIVE_VIEWER": "1",
-            }
-        )
-        is False
-    )
-
-
-def test_headless_launch_fails_open_when_vc_frame_binary_is_absent(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Cut C axis (b): no binary → receipt, headless run continues, no origin.
-
-    Fail-open mirrors triage: the viewer is a convenience on top of a launch
-    that already succeeded, so it degrades to a recorded receipt and never an
-    exception. Crucially it must not stamp an origin it did not create —
-    triage would then try to capture and close a tab that never existed.
-    """
-    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
-    monkeypatch.setenv("VIBECRAFTED_LIVE_VIEWER", "1")
-    source = _source_dir(tmp_path)
-
-    spec = workflow.WorkflowLaunchSpec(
-        agent="codex",
-        mode="implement",
-        skill="implement",
-        prompt="go",
-        file="",
-        runtime="headless",
-        root=str(tmp_path),
-    )
-    monkeypatch.setattr(
-        workflow, "_stdin_command", lambda _agent: [sys.executable, "-c", "pass"]
-    )
-    monkeypatch.setattr(workflow.shutil, "which", lambda name, path=None: None)
 
     def refuse_host_action(*args: Any, **kwargs: Any) -> workflow._HostActionResult:
-        raise AssertionError("no binary must never reach a vc-frame host action")
+        raise AssertionError("headless launch must not mutate vc-frame presentation")
 
     monkeypatch.setattr(workflow, "_vc_frame_run_host_action", refuse_host_action)
-
     payload = workflow.launch_workflow(spec, source)
 
     assert payload["accepted"] is True
-    assert isinstance(payload["pid"], int)
-    assert payload["live_viewer"] == {
-        "schema": workflow.LIVE_VIEWER_SCHEMA,
-        "status": "skipped",
-        "reason": "no_binary",
-        "session": "Live runs",
-        "tab": payload["run_id"],
-        "command": [],
-    }
-
+    assert payload["transport"] == "headless"
+    assert "live_viewer" not in payload
     meta = json.loads(Path(payload["meta"]).read_text(encoding="utf-8"))
-    assert meta["live_viewer"]["reason"] == "no_binary"
+    assert "live_viewer" not in meta
     assert not str(meta.get("origin_session") or "").strip()
     assert not str(meta.get("origin_tab") or "").strip()
-
-    log_lines = Path(payload["launch_log"]).read_text(encoding="utf-8").splitlines()
-    receipts = [
-        json.loads(line)
-        for line in log_lines
-        if json.loads(line).get("event") == "live_viewer"
-    ]
-    assert receipts and receipts[0]["status"] == "skipped"
 
 
 def test_terminal_runtime_resurrects_missing_host_session(
@@ -1156,7 +2255,7 @@ def test_research_terminal_runtime_uses_vc_frame_research_layout(
         source,
     )
     digest = "9e0d59e1dc48bc42"
-    spec = workflow.WorkflowLaunchSpec(**{**spec.to_payload(), "claim_digest": digest})
+    spec = replace(spec, claim_digest=digest)
     monkeypatch.setattr(
         workflow.shutil,
         "which",
@@ -1227,7 +2326,8 @@ def test_research_terminal_runtime_uses_vc_frame_research_layout(
     assert "export VIBECRAFTED_PROMPT_PATH=" in lane_bodies
     assert f"export VIBECRAFTED_CLAIM_DIGEST={digest}" in lane_bodies
     assert "export VIBECRAFTED_CANONICAL_REPORT_DIR=" in lane_bodies
-    assert "export VIBECRAFTED_ARTIFACT_SLUG=map-it" in lane_bodies
+    assert "export VIBECRAFTED_ARTIFACT_SLUG=map-it" not in lane_bodies
+    assert "export VIBECRAFTED_ARTIFACT_SLUG=research" in lane_bodies
     assert (
         f"export VIBECRAFTED_WORKER_SESSION={shlex.quote(worker_host)}" in lane_bodies
     )
@@ -1260,13 +2360,13 @@ def test_claude_terminal_command_streams_visible_json(tmp_path: Path) -> None:
 
     assert command[:4] == ["claude", "-p", "--output-format", "stream-json"]
     assert "--verbose" in command
-    assert "--dangerously-skip-permissions" in command
+    assert command[-2:] == ["--permission-mode", "bypassPermissions"]
 
 
 def test_stream_capable_agents_use_native_stream_commands(tmp_path: Path) -> None:
     expected = {
         "codex": ("--json",),
-        "agy": ("bash", "-c"),  # agy uses bash -c shim containing agy
+        "agy": ("--output-format", "stream-json"),  # private stream-json stdin lane
         "junie": ("--output-format", "json-stream"),
         "grok": ("--output-format", "streaming-json"),
     }
@@ -2022,6 +3122,23 @@ def _native_resume_claim_env(
 def test_manual_explicit_resume_launches_own_tracked_headless_run(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "baseline",
+        ],
+        check=True,
+    )
     monkeypatch.setattr(workflow, "reserve_run_id", lambda _skill: "rsme-manual-1")
     monkeypatch.setattr(
         workflow, "ensure_session_id", lambda _value=None: "runtime-manual-1"
@@ -2114,11 +3231,118 @@ def test_manual_explicit_resume_launches_own_tracked_headless_run(
     assert forbidden_parent_claims.isdisjoint(launch["launch_meta"])
 
 
-@pytest.mark.parametrize("agent", ["agy", "junie"])
+def test_manual_explicit_resume_agy_uses_conversation_and_stream_json(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "baseline",
+        ],
+        check=True,
+    )
+    monkeypatch.setattr(workflow, "reserve_run_id", lambda _skill: "rsme-agy-1")
+    monkeypatch.setattr(
+        workflow, "ensure_session_id", lambda _value=None: "runtime-agy-1"
+    )
+    monkeypatch.setattr(
+        workflow,
+        "probe_provider",
+        lambda agent: SimpleNamespace(
+            agent=agent,
+            state="confirmed",
+            executable="/verified/bin/agy",
+            version="agy 1.2.1",
+            detail="confirmed",
+        ),
+    )
+    launches: list[dict[str, Any]] = []
+
+    def fake_launch(
+        spec: workflow.WorkflowLaunchSpec,
+        source_dir: str | Path,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        launches.append({"spec": spec, "source_dir": source_dir, **kwargs})
+        return {
+            "accepted": True,
+            "run_id": spec.run_id,
+            "agent": spec.agent,
+            "skill": spec.skill,
+            "root": spec.root,
+            "status": "launching",
+        }
+
+    monkeypatch.setattr(workflow, "launch_workflow", fake_launch)
+
+    result = workflow.manual_resume_session(
+        "agy",
+        "839007be-60a5-43f9-842b-cfa0f8a0dc02",
+        tmp_path,
+        prompt="continue from the verified session",
+        root=tmp_path,
+        model="gemini-3.8-flash-high",
+        skill="workflow",
+    )
+
+    assert result["accepted"] is True
+    assert result["run_id"] == "rsme-agy-1"
+    assert result["resume_mode"] == "manual_explicit"
+    assert result["agent_session_id"] == "839007be-60a5-43f9-842b-cfa0f8a0dc02"
+    assert result["runtime_session_id"] == "runtime-agy-1"
+    launch = launches[0]
+    assert launch["worker_command_override"] == [
+        "/verified/bin/agy",
+        "--model",
+        "gemini-3.8-flash-high",
+        "--conversation",
+        "839007be-60a5-43f9-842b-cfa0f8a0dc02",
+        "--dangerously-skip-permissions",
+        "--add-dir",
+        ".",
+        "--print-timeout",
+        "30m",
+        "--print=",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+    ]
+    assert launch["spec"].mode == "manual_explicit"
+    assert launch["spec"].runtime == "headless"
+    assert launch["spec"].skill == "workflow"
+    assert launch["spec"].model == "gemini-3.8-flash-high"
+    assert launch["env"]["VIBECRAFTED_AGENT_SESSION_ID"] == (
+        "839007be-60a5-43f9-842b-cfa0f8a0dc02"
+    )
+    assert "bash" not in launch["worker_command_override"]
+    assert "-c" not in launch["worker_command_override"]
+
+
+def test_agy_native_fork_stays_unsupported_and_names_resume() -> None:
+    result = workflow.resolve_fork_source(
+        "agy", session="839007be-60a5-43f9-842b-cfa0f8a0dc02"
+    )
+
+    assert result["accepted"] is False
+    assert result["reason"] == "native_fork_unsupported"
+    assert "no native fork flag on agy 1.2.1 help" in str(result.get("detail") or "")
+    assert "vibecrafted resume agy --session" in str(result.get("hint") or "")
+
+
 def test_manual_explicit_resume_fails_closed_for_unverified_providers(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    agent: str,
 ) -> None:
     monkeypatch.setattr(
         workflow,
@@ -2136,8 +3360,8 @@ def test_manual_explicit_resume_fails_closed_for_unverified_providers(
     )
 
     result = workflow.manual_resume_session(
-        agent,
-        f"{agent}-session",
+        "junie",
+        "junie-session",
         tmp_path,
         prompt="continue",
         root=tmp_path,
@@ -3440,7 +4664,6 @@ def test_native_resume_refuses_operator_and_trust_terminals(
     ("agent", "reason"),
     [
         ("gemini", "native_resume_unsupported"),
-        ("agy", "native_resume_unverified"),
         ("junie", "native_resume_unverified"),
     ],
 )

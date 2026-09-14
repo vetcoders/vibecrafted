@@ -28,7 +28,7 @@ The current system already has real mechanisms:
 - `runtime/scripts/lib/*.sh` provide shared spawn, meta, lock, prompt,
   session, vc_frame, and terminal helpers.
 - `*.meta.json`, reports, transcripts, and locks are already produced.
-- `scripts/control_plane_state.py` already normalizes artifacts into a
+- `vibecrafted_core.control_plane` already normalizes artifacts into a
   control-plane read model.
 - `await.sh`, `observe.sh`, `marbles_ctl.sh`, `marbles_watcher.sh`, and
   `marbles_next.sh` already provide operational surfaces.
@@ -180,7 +180,7 @@ $VIBECRAFTED_HOME/control_plane/
   events.jsonl
 ```
 
-`scripts/control_plane_state.py sync` is the v1.5.0 default normalizer unless
+`python -m vibecrafted_core.control_plane sync` is the v1.5.0 default normalizer unless
 and until it is replaced by an explicitly equivalent implementation.
 
 Required normalized run fields:
@@ -539,7 +539,7 @@ is the ship WRITE stage. They are not aliases of each other (ADR-0001 Accepted).
 The first concrete slice should be small and testable:
 
 1. Document current write-truth and read-model fields.
-2. Add or adjust tests around `control_plane_state.py` so sample meta, lock,
+2. Add or adjust tests around `vibecrafted_core.control_plane` so sample meta, lock,
    transcript, report, and marbles state normalize into one expected run JSON.
 3. Add failure-kind normalization for dead pid, orphan lock, missing report, and
    nonzero exit.

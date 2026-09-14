@@ -8,7 +8,7 @@ import os
 import signal
 import sys
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,15 +20,17 @@ from .agent_stream import (
 )
 from .artifacts import ArtifactValidation, validate_artifacts
 from .control_plane import (
+    accepted_operator_stop_since,
     control_plane_home,
     ensure_session_id,
-    lookup_run,
+    event_resume_cursor,
     normalize_run_root,
 )
 from .events import append_event
 from .lifecycle import EventKind, RunState
 from .model_overrides import _model_override_receipt
 from .process_control import process_identity_receipt
+from .prompt_transport import materialize_stdin_file, stdin_transport
 from .report_contract import CLAIM_DIGEST_ENV
 from .run_mutation import RunMetaMutationError, mutate_run_meta
 
@@ -102,7 +104,11 @@ def _infer_agent(command: Sequence[str]) -> str:
     if not command:
         return "agent"
     name = Path(str(command[0])).name
-    if name in {"claude", "codex", "agy", "junie", "grok"}:
+    # Fleet key is `cursor` but the spawned binary is `cursor-agent`
+    # (spawn.AGENT_BINARY_NAMES); fold the binary back onto the fleet key.
+    if name == "cursor-agent":
+        return "cursor"
+    if name in {"claude", "codex", "agy", "junie", "grok", "cursor"}:
         return name
     if name in {"python", "python3"}:
         return "python"
@@ -238,20 +244,14 @@ def _origin_fields_from_env(env: Mapping[str, str] | None = None) -> dict[str, s
     return fields
 
 
-def _accepted_operator_stop(run_id: str) -> dict[str, object] | None:
+def _accepted_operator_stop(run_id: str, since_cursor: str) -> dict[str, object] | None:
     """Read the durable operator-stop authority after the worker exits."""
 
     try:
-        run = lookup_run(run_id)
+        run = accepted_operator_stop_since(run_id, since_cursor)
     except (OSError, RuntimeError, TypeError, ValueError):
         return None
-    if (
-        isinstance(run, dict)
-        and str(run.get("state") or "") == "stopped"
-        and run.get("operator_stop_accepted") is True
-    ):
-        return run
-    return None
+    return run
 
 
 def _cache_write_line(prefix: str, value: int | None) -> str:
@@ -410,6 +410,7 @@ class AsyncRunHandle:
     heartbeat_monotonic: float = 0.0
     worker_identity: dict[str, object] | None = None
     workspace_fields: dict[str, object] = field(default_factory=dict)
+    operator_stop_cursor: str = "0"
     operator_stopped: bool = False
     operator_stop_reason: str = ""
 
@@ -422,9 +423,14 @@ class AsyncRunHandle:
 class AsyncSupervisor:
     """Async orchestrator: spawns one agent process per run, streams and settles it."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        signal_sink: Callable[[str, str], None] | None = None,
+    ) -> None:
         """Initialize an empty run-id -> AsyncRunHandle registry."""
         self._runs: dict[str, AsyncRunHandle] = {}
+        self._signal_sink = signal_sink
 
     def get(self, run_id: str) -> AsyncRunHandle | None:
         """Look up a tracked run handle by id, or None if unknown to this instance."""
@@ -497,11 +503,20 @@ class AsyncSupervisor:
             or "unknown"
         )
         claim_digest = str(merged_env.get(CLAIM_DIGEST_ENV) or "").strip()
+        # The prompt file stays the human-readable truth (VIBECRAFTED_PROMPT_PATH);
+        # what the worker reads on stdin is the provider's private transport —
+        # verbatim text for most, one stream-json user turn for agy.
+        stdin_source = (
+            materialize_stdin_file(agent, prompt_file)
+            if prompt_file is not None
+            else None
+        )
         agent_model = resolve_default_model(agent, command=command, env=merged_env)
         model_receipt = _model_override_receipt(
             agent, str(merged_env.get("VIBECRAFTED_MODEL_REQUESTED") or "")
         )
         started_at = _utc_now()
+        operator_stop_cursor = event_resume_cursor()
         if report_path is not None:
             from .report_contract import materialize_launcher_report_template
 
@@ -524,6 +539,8 @@ class AsyncSupervisor:
                 "report": str(report_path or ""),
                 "transcript": str(transcript_path or ""),
                 "prompt_file": str(prompt_file or ""),
+                "stdin_transport": stdin_transport(agent),
+                "stdin_source": str(stdin_source or ""),
                 "started_at": started_at.isoformat(),
                 "session_id": session_id,
                 "identity_required": True,
@@ -546,8 +563,8 @@ class AsyncSupervisor:
 
         stdin_handle = None
         try:
-            if prompt_file is not None:
-                stdin_handle = prompt_file.open("rb")
+            if stdin_source is not None:
+                stdin_handle = stdin_source.open("rb")
             process = await asyncio.create_subprocess_exec(
                 *command,
                 cwd=str(cwd),
@@ -585,6 +602,7 @@ class AsyncSupervisor:
                 model_receipt.get("model_override_skip_reason") or ""
             ),
             workspace_fields=dict(workspace_fields),
+            operator_stop_cursor=operator_stop_cursor,
         )
         try:
             handle.pgid = os.getpgid(process.pid)
@@ -650,6 +668,27 @@ class AsyncSupervisor:
                         latest.setdefault("runtime_session_id", session_id)
                     if claim_digest:
                         latest["claim_digest"] = claim_digest
+                    # Persist the operator pin as soon as the worker exists.
+                    # Completion summary also writes it, but callers (and
+                    # tests) read meta at PROCESS_SPAWNED — before finish.
+                    requested = str(model_receipt.get("model_requested") or "").strip()
+                    if requested:
+                        latest.setdefault("model_requested", requested)
+                        if "model_override_supported" in model_receipt:
+                            latest.setdefault(
+                                "model_override_supported",
+                                model_receipt["model_override_supported"],
+                            )
+                        if "model_override_skipped" in model_receipt:
+                            latest.setdefault(
+                                "model_override_skipped",
+                                model_receipt["model_override_skipped"],
+                            )
+                        skip_reason = str(
+                            model_receipt.get("model_override_skip_reason") or ""
+                        ).strip()
+                        if skip_reason:
+                            latest.setdefault("model_override_skip_reason", skip_reason)
                     return latest
 
                 mutate_run_meta(
@@ -752,10 +791,21 @@ class AsyncSupervisor:
             return handle
 
         handle.exit_code = handle.process.returncode
+        if handle.meta_path is not None:
+            try:
+                fork_meta = json.loads(handle.meta_path.read_text())
+            except (OSError, ValueError):
+                fork_meta = {}
+            if fork_meta.get("native_fork") and (
+                not handle.agent_session_id
+                or handle.agent_session_id == fork_meta.get("fork_source_session_id")
+            ):
+                handle.exit_code = 1
         handle.completed_at = _utc_now()
         operator_stop = await asyncio.to_thread(
             _accepted_operator_stop,
             handle.run_id,
+            handle.operator_stop_cursor,
         )
         if operator_stop is not None:
             handle.operator_stopped = True
@@ -944,6 +994,14 @@ class AsyncSupervisor:
                 if tee_output and display_text:
                     sys.stdout.buffer.write(display_text.encode("utf-8"))
                     sys.stdout.buffer.flush()
+                # Socket heartbeats are ephemeral flow-control signals, not
+                # durable lifecycle events. Pulse on every output line so a
+                # busy worker proves movement without inflating events.jsonl.
+                if self._signal_sink is not None:
+                    try:
+                        self._signal_sink(handle.run_id, handle.state.value)
+                    except (OSError, RuntimeError):
+                        pass
                 if not handle.first_output_seen:
                     handle.first_output_seen = True
                     handle.heartbeat_monotonic = time.monotonic()
@@ -1256,3 +1314,10 @@ class AsyncSupervisor:
             message=message,
             payload=event_payload,
         )
+        if self._signal_sink is not None:
+            try:
+                self._signal_sink(run_id, state.value)
+            except (OSError, RuntimeError):
+                # Durable files own truth. A broken wake transport must never
+                # corrupt or abort the supervised lifecycle.
+                pass

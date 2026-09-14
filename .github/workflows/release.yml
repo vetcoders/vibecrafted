@@ -70,7 +70,7 @@ jobs:
       # later. It arrived in ef700e52 (3.7.1) and every tag since died
       # earlier, so it has never once executed. These are literal presence
       # assertions over enumerated files, which is what grep is for.
-      - name: Confirm publication boundary for both channels
+      - name: Confirm publication boundary for all carriers
         run: |
           set -euo pipefail
           test -x scripts/publish-vibecrafted-release.sh
@@ -81,5 +81,11 @@ jobs:
             docs/RELEASE_KICKOFF.md
           grep -nE 'PORTABLE_NAME|portable\.tar\.gz|portable-output\.json' \
             scripts/build-portable-release.sh \
+            scripts/publish-vibecrafted-release.sh \
+            docs/RELEASE_KICKOFF.md
+          grep -nE 'RUNTIME_PACK_NAME|RuntimePack_.*tar\.gz|install-runtime-pack\.sh' \
+            scripts/build-vibecrafted-release.sh \
+            scripts/package-runtime-pack.sh \
+            scripts/install-runtime-pack.sh \
             scripts/publish-vibecrafted-release.sh \
             docs/RELEASE_KICKOFF.md

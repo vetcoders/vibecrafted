@@ -13,7 +13,8 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ from .artifacts import validate_artifacts
 from .continuity.capabilities import (
     PROBE_CONFIRMED,
     SUPPORTED,
+    UNSUPPORTED,
     UNVERIFIED,
     capability_for,
     probe_provider,
@@ -32,6 +34,8 @@ from .control_plane import (
     control_plane_home,
     ensure_session_id,
     lookup_run,
+    lookup_run_snapshot,
+    lookup_runtime_run_meta,
     normalize_run_root,
     record_stop_transition,
     resolve_run,
@@ -41,22 +45,36 @@ from .control_plane import (
 from .cron import parse_frontmatter
 from .delivery.store import atomic_write_json
 from .events import append_event
+from .execution_controls import (
+    SUPERVISED_RUNTIME_KINDS,
+    ExecutionControls,
+    ExecutionControlsError,
+    parse_permissions_word,
+    parse_sandbox_word,
+    resolve_execution_controls,
+)
 from .init_resume import init_resume_block
 from .model_overrides import _model_override_receipt, _with_model_override
 from .package_resources import deck_path as package_deck_path
 from .process_control import process_identity_receipt, validate_process_identity
+from .repo_selection import (
+    git_toplevel,
+    parse_worktree_flag,
+    resolve_repository_base,
+    resolve_repository_identity,
+    select_repository,
+)
 from .report_contract import CLAIM_DIGEST_ENV, reserve_launcher_report_template
 from .research_config import ResearchAgentSelection, resolve_research_runtime_config
 from .run_mutation import mutate_run_meta, run_mutation_locks
-from .run_triage import BUCKET_LIVE
-from .runtime_paths import agent_tool_search_path
+from .runtime_paths import agent_tool_search_path, selected_runtime_environment
 from .spawn import _resolve_agent_command, _stdin_command
 from .workflow_runtime import WORKER_SIGNAL_DISCIPLINE, native_resume_argv
 from .workflows import registry as workflow_registry
 
 SUPPORTED_WORKFLOWS = workflow_registry.SUPPORTED_WORKFLOWS
 WORKFLOW_ALIASES = workflow_registry.WORKFLOW_ALIASES
-SUPPORTED_AGENTS = {"claude", "codex", "agy", "junie", "grok", "swarm"}
+SUPPORTED_AGENTS = {"claude", "codex", "agy", "junie", "grok", "cursor", "swarm"}
 SUPPORTED_RUNTIMES = {"headless", "terminal", "visible"}
 _TERMINAL_ORIGIN_ENV = {
     "VIBECRAFTED_WORKER_SESSION",
@@ -75,10 +93,25 @@ TERMINAL_STATES = {
     "report_invalid",
     "contract_failed",
     "closed",
+    "settled",
     "stopped",
     "timed_out",
     "ghost",
 }
+# Identity-validation reasons that positively prove the recorded process is not
+# the one we are asking about — it is gone, or the pid now carries another
+# generation. Every other failure reason (receipt invalid, receipt mismatch,
+# capture unavailable) is doubt, and doubt never settles a claim as stale.
+FOREIGN_PROCESS_IDENTITY_REASONS = {
+    "process_identity_gone",
+    "process_identity_mismatch",
+    "process_run_id_mismatch",
+}
+LAUNCH_IDEMPOTENCY_SCHEMA = "vibecrafted.launch-idempotency.v1"
+LAUNCH_IDEMPOTENCY_KEY_ENV = "VIBECRAFTED_LAUNCH_IDEMPOTENCY_KEY"
+LAUNCH_IDEMPOTENCY_MAX_TERMINAL_RECORDS = 2048
+LAUNCH_IDEMPOTENCY_TERMINAL_TTL_SECONDS = 30 * 24 * 60 * 60
+LAUNCH_RECEIPT_SCHEMA = "vibecrafted.launch_receipt.v1"
 
 
 @dataclass(frozen=True)
@@ -95,6 +128,17 @@ class WorkflowLaunchSpec:
     count: int | None = None
     depth: int | None = None
     model: str = ""
+    repo_requested: str = ""
+    repo_kind: str = "path"
+    base: str = "HEAD"
+    baseline_sha: str = ""
+    resolved_ref: str = ""
+    runtime_class: str = "living-tree"
+    source_digest: str = ""
+    plan_source: str | None = None
+    source_path: str = ""
+    research_model_agent: str = ""
+    model_source: str = "provider_default"
     research_agents: tuple[str, ...] = ()
     research_synthesizer: str = ""
     research_synthesizer_model: str = ""
@@ -109,10 +153,22 @@ class WorkflowLaunchSpec:
     # session/new) may reserve one through reserve_run_id(). Empty keeps the
     # historical launch-time allocation path.
     run_id: str = ""
+    # ``--worktree true``: the worker runs in a fresh linked checkout prepared
+    # by the canonical WorktreeManager (dispatch/worktrees.py). ``root`` then
+    # names that checkout and ``parent_root`` keeps the selected repository.
+    worktree: bool = False
+    parent_root: str = ""
+    # Public execution controls (``--permissions`` / ``--sandbox``). Empty /
+    # ``None`` keeps the historical provider default (bypass; auto for junie;
+    # sandbox left to the provider). Both are resolved through
+    # execution_controls.resolve_execution_controls, which refuses anything the
+    # installed provider CLI cannot enforce before any process is launched.
+    permissions: str = ""
+    sandbox: bool | None = None
 
     def to_payload(self) -> dict[str, Any]:
         """Serialize the spec to a plain dict for launch logs and events."""
-        return asdict(self)
+        return {**asdict(self), "prompt": "", "plan_source": None}
 
 
 def vibecrafted_launcher(source_dir: str | Path) -> Path:
@@ -644,7 +700,7 @@ def _vc_frame_subprocess_env() -> dict[str, str]:
     a workspace-bound session name is appended.
     """
 
-    env = dict(os.environ)
+    env = selected_runtime_environment()
     if (
         sys.platform == "darwin"
         and not str(env.get("VC_FRAME_SOCKET_DIR") or "").strip()
@@ -1007,204 +1063,6 @@ def _effective_operator_session(*, root: str, run_id: str, env: dict[str, str]) 
     return resolve_worker_host_session(root=root or ".", env=env)
 
 
-# --------------------------------------------------------------------------
-# LIVE bucket viewer (Cut C, 2026-08-09)
-#
-# A dispatched worker stays a detached headless process — that is the canon
-# (TRIAGE_AND_SESSIONS §1). Visibility used to be bought by giving the worker
-# a terminal tab, which is what put worker PTYs in the operator's rail. Here
-# it is bought by a *viewer* instead: a read-only tab in the ``Live runs``
-# bucket that tails the run's transcript and owns nothing.
-#
-# Three properties, all deliberate:
-#
-# **The viewer has no authority.** Closing it loses the view, never the run.
-# It holds no pipe the worker writes to and no pid the worker depends on.
-#
-# **Fail-open, exactly like triage.** No binary, a dead session, a refused
-# action — each becomes a receipt in meta and the run continues headless.
-# Nothing in this section may raise into an already-accepted launch.
-#
-# **The stamp is the whole point.** ``origin_session`` / ``origin_tab`` are
-# written the moment the viewer lands, because they are precisely the fields
-# ``plan_triage`` demands. That is what lets the existing finish hook move
-# this viewer out of ``Live runs`` and into Finalized/Failed/Needs attention
-# with no new code in triage at all.
-# --------------------------------------------------------------------------
-
-LIVE_VIEWER_SCHEMA = "vibecrafted.live-viewer.v1"
-
-#: Opt-out switch. Default on; the values mirror ``VIBECRAFTED_TRIAGE_RUN``.
-LIVE_VIEWER_ENV = "VIBECRAFTED_LIVE_VIEWER"
-_LIVE_VIEWER_OFF = {"0", "false", "no", "off"}
-
-
-def _live_viewer_enabled(env: dict[str, str]) -> bool:
-    """Whether the LIVE viewer is switched on for this launch."""
-    if str(env.get("VIBECRAFTED_TEST_MODE", "") or "").strip() == "1":
-        return False
-    raw = str(env.get(LIVE_VIEWER_ENV, "") or "").strip().lower()
-    return raw not in _LIVE_VIEWER_OFF
-
-
-def _live_viewer_receipt(
-    status: str,
-    *,
-    reason: str = "",
-    run_id: str = "",
-    command: list[str] | None = None,
-) -> dict[str, Any]:
-    """One durable receipt describing what the viewer attempt actually did."""
-    return {
-        "schema": LIVE_VIEWER_SCHEMA,
-        "status": status,
-        "reason": reason,
-        "session": BUCKET_LIVE,
-        "tab": run_id,
-        "command": list(command or []),
-    }
-
-
-def _write_live_viewer_script(
-    path: Path, *, run_id: str, agent: str, transcript_path: Path
-) -> Path:
-    """Write the read-only viewer command for one run's LIVE tab.
-
-    ``vibecrafted observe <agent>`` is a one-shot status print, so it renders
-    the header and the follow is ``tail -F`` over the supervisor's humanized
-    transcript. The raw transcript remains a byte-exact machine contract and
-    must never be projected directly into a terminal. ``set -e`` is deliberately
-    absent: a failing status print must not kill the tail.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    quoted_run = shlex.quote(run_id)
-    quoted_agent = shlex.quote(agent)
-    human_transcript_path = transcript_path.with_name(
-        transcript_path.stem + ".human" + transcript_path.suffix
-    )
-    quoted_human_transcript = shlex.quote(str(human_transcript_path))
-    path.write_text(
-        "#!/usr/bin/env bash\n"
-        f"# LIVE viewer for {run_id} — read-only.\n"
-        "# This tab observes a detached headless worker. Closing it loses the\n"
-        "# view, never the run.\n"
-        "set -uo pipefail\n"
-        f"human_transcript={quoted_human_transcript}\n"
-        "if command -v vibecrafted >/dev/null 2>&1; then\n"
-        f"  vibecrafted observe {quoted_agent} --run-id {quoted_run} || true\n"
-        "fi\n"
-        'mkdir -p "$(dirname "$human_transcript")" 2>/dev/null || true\n'
-        'touch "$human_transcript" 2>/dev/null || true\n'
-        'exec tail -n +1 -F "$human_transcript"\n',
-        encoding="utf-8",
-    )
-    path.chmod(0o755)
-    return path
-
-
-def _stamp_live_viewer_origin(
-    meta_path: Path, *, run_id: str, receipt: dict[str, Any]
-) -> None:
-    """Merge the viewer receipt — and, when it landed, its origin — into meta.
-
-    The origin pair is written only for an opened viewer, and only when meta
-    does not already name an origin: the launch path must not overwrite a
-    truthful terminal origin stamped by a `--runtime terminal` worker. Both
-    later writers (``supervisor_async``) use the same "only if unset" rule, so
-    a stamp made here survives to triage time.
-    """
-    opened = receipt.get("status") == "opened"
-
-    def _merge(latest: dict[str, Any]) -> dict[str, Any]:
-        """Attach the receipt, then the origin pair when this viewer owns it."""
-        latest["run_id"] = run_id
-        latest["live_viewer"] = receipt
-        if opened and not str(latest.get("origin_session") or "").strip():
-            latest["origin_session"] = BUCKET_LIVE
-            latest["origin_tab"] = run_id
-        return latest
-
-    mutate_run_meta(
-        control_plane_home(),
-        meta_path=meta_path,
-        mutation_root=meta_path.parent,
-        run_id=run_id,
-        mutator=_merge,
-        create=True,
-    )
-
-
-def open_live_viewer(
-    *,
-    run_id: str,
-    agent: str,
-    root: str,
-    launch_dir: Path,
-    transcript_path: Path,
-    meta_path: Path,
-    env: dict[str, str],
-) -> dict[str, Any]:
-    """Open the run's read-only viewer tab in the ``Live runs`` bucket.
-
-    Returns the receipt in every case and raises in none of them — a viewer is
-    a convenience layered on a launch that already succeeded. A missing
-    ``Live runs`` session is resurrected by G3 inside
-    :func:`_vc_frame_run_host_action`, exactly like a worker host.
-    """
-    if not _live_viewer_enabled(env):
-        return _live_viewer_receipt("skipped", reason="disabled", run_id=run_id)
-
-    receipt: dict[str, Any]
-    try:
-        explicit = str(env.get("VIBECRAFTED_VC_FRAME_BIN", "") or "").strip()
-        if explicit:
-            vc_frame = explicit if Path(explicit).exists() else ""
-        else:
-            vc_frame = shutil.which("vc-frame", path=env.get("PATH")) or ""
-        if not vc_frame:
-            receipt = _live_viewer_receipt("skipped", reason="no_binary", run_id=run_id)
-        else:
-            script = _write_live_viewer_script(
-                launch_dir / f"{run_id}-live-viewer.sh",
-                run_id=run_id,
-                agent=agent,
-                transcript_path=transcript_path,
-            )
-            command = [
-                vc_frame,
-                "--session",
-                BUCKET_LIVE,
-                "action",
-                "new-tab",
-                "--name",
-                run_id,
-                "--cwd",
-                root,
-                "--",
-                str(script),
-            ]
-            host = _vc_frame_run_host_action(command, operator_session=BUCKET_LIVE)
-            receipt = _live_viewer_receipt(
-                "opened" if host.ok else "error",
-                reason="" if host.ok else (host.error or "vc-frame action failed"),
-                run_id=run_id,
-                command=command,
-            )
-            if host.resurrected:
-                receipt["resurrected"] = True
-    except Exception as exc:  # noqa: BLE001 — a viewer never fails a live run.
-        receipt = _live_viewer_receipt(
-            "error", reason=f"{type(exc).__name__}: {exc}", run_id=run_id
-        )
-
-    try:
-        _stamp_live_viewer_origin(meta_path, run_id=run_id, receipt=receipt)
-    except Exception as exc:  # noqa: BLE001 — same rule for the receipt write.
-        receipt = dict(receipt)
-        receipt["stamp_error"] = f"{type(exc).__name__}: {exc}"
-    return receipt
-
-
 def _run_is_terminal(run: dict[str, Any]) -> bool:
     """True when a run's projected state/liveness/exit_code marks it terminal."""
     if str(run.get("state") or "") in TERMINAL_STATES:
@@ -1393,8 +1251,15 @@ def await_launch_truth(
         launch_payload.get("transcript") or run.get("latest_transcript") or ""
     )
     meta_path = str(launch_payload.get("meta") or run.get("meta") or "")
+    # The await verdict outranks the returned projection: finalize snapshots
+    # can lag a just-written terminal meta (the documented "meta stuck
+    # active/stalled after real completion" skew), so an await that settled on
+    # reason == "terminal" is terminal even when the projection has not
+    # caught up yet.
     terminal = (
-        bool(awaited.get("completed")) and _run_is_terminal(run) and not worker_alive
+        bool(awaited.get("completed"))
+        and not worker_alive
+        and (await_reason == "terminal" or _run_is_terminal(run))
     )
     terminal_evidence = terminal or (
         bool(awaited.get("completed"))
@@ -1404,6 +1269,18 @@ def await_launch_truth(
 
     meta_payload: dict[str, Any] = {}
     if terminal:
+        if str(run.get("liveness") or "") != "terminal":
+            # The event-stream projection lags the launcher-written runtime
+            # meta (it only saw process_spawned/heartbeat), so once the await
+            # verdict is terminal, close the run through the canonical
+            # success reconciler before persisting terminal meta.
+            from .control_plane import (
+                _has_success_evidence,
+                _reconcile_successful_terminal,
+            )
+
+            if _has_success_evidence(run):
+                run = _reconcile_successful_terminal(run)
         meta_payload = _write_terminal_meta(
             run_id=run_id,
             run=run,
@@ -1610,7 +1487,9 @@ def _qualify_stop_signal(
 
 def _normalized_runtime(raw: str) -> str:
     """Coerce a raw runtime string to a supported runtime, default "headless"."""
-    return raw if raw in SUPPORTED_RUNTIMES else "headless"
+    if raw not in SUPPORTED_RUNTIMES:
+        raise ValueError(f"Unsupported runtime: {raw}; no host adapter is available")
+    return raw
 
 
 def _coerce_positive_int(value: Any, default: int | None = None) -> int | None:
@@ -1639,6 +1518,40 @@ def _workflow_metadata(skill: str) -> dict[str, Any]:
     }
 
 
+def read_prompt_stream(stream: Any) -> str:
+    """Read UTF-8 bytes without universal-newline translation (16 MiB maximum)."""
+    source = getattr(stream, "buffer", stream)
+    data = source.read(16 * 1024 * 1024 + 1)
+    raw = data.encode("utf-8") if isinstance(data, str) else data
+    if len(raw) > 16 * 1024 * 1024:
+        raise ValueError("prompt exceeds the 16 MiB input limit")
+    return raw.decode("utf-8")
+
+
+def select_plan_model(
+    agent: str, text: str, *, model: str = "", previous: str = ""
+) -> tuple[str, str]:
+    """Select an exact provider identifier without altering the source document."""
+    fields = parse_frontmatter(text=text, strict=True)
+    if fields.get("agent") and fields["agent"] != agent:
+        raise ValueError("frontmatter agent conflicts with selected provider")
+    if model:
+        if (
+            not isinstance(model, str)
+            or not model.strip()
+            or model != model.strip()
+            or model.startswith("-")
+            or any(ord(c) < 32 for c in model)
+        ):
+            raise ValueError("CLI model must be a non-empty provider identifier")
+        return model, "cli"
+    if "model" in fields:
+        return fields["model"], "plan_frontmatter"
+    if previous:
+        return previous, "resume_previous"
+    return "", "provider_default"
+
+
 def normalize_launch_spec(
     payload: dict[str, Any], source_dir: str | Path
 ) -> WorkflowLaunchSpec:
@@ -1664,7 +1577,10 @@ def normalize_launch_spec(
     else:
         positional_agents = ()
         agent = str(raw_agent or definition.default_agent).strip()
+    model_agent = agent
     if definition.runtime_kind == "supervised_research":
+        if isinstance(raw_agent, str) and raw_agent and raw_agent != "swarm":
+            positional_agents = (raw_agent,)
         if not positional_agents and raw_research_agents:
             positional_agents = tuple(
                 str(item).strip() for item in raw_research_agents if str(item).strip()
@@ -1674,13 +1590,14 @@ def normalize_launch_spec(
         ]
         if unsupported:
             raise ValueError(f"Unsupported research agent: {unsupported[0]}")
+        model_agent = positional_agents[0] if positional_agents else ""
         agent = "swarm"
     if agent not in SUPPORTED_AGENTS:
         raise ValueError(f"Unsupported agent: {agent}")
 
-    prompt = str(payload.get("prompt") or "").strip()
+    prompt = str(payload.get("prompt") or "")
     file_path = str(payload.get("file") or "").strip()
-    if not prompt and not file_path:
+    if not prompt and not file_path and not payload.get("input_explicit"):
         prompt = workflow_registry.workflow_default_prompt(skill)
     root = normalize_run_root(payload.get("root"), source_dir)
     runtime = _normalized_runtime(str(payload.get("runtime") or "headless").strip())
@@ -1691,11 +1608,22 @@ def normalize_launch_spec(
     depth = _coerce_positive_int(
         payload.get("depth"), 3 if definition.supports_depth else None
     )
-    model = str(payload.get("model") or payload.get("model_requested") or "").strip()
-    if not model and file_path:
-        # Brief frontmatter is the plan's voice: `model: <id>` pins the worker
-        # tier without an explicit --model flag. Flag always wins over brief.
-        model = parse_frontmatter(Path(file_path).expanduser()).get("model", "").strip()
+    if file_path and not Path(file_path).expanduser().is_file():
+        raise ValueError(f"Prompt file does not exist or is not a file: {file_path}")
+    plan_text = (
+        Path(file_path).expanduser().read_bytes().decode("utf-8")
+        if file_path
+        else prompt
+    )
+    if (file_path or payload.get("input_explicit")) and not plan_text.strip():
+        raise ValueError("explicit prompt input must not be empty")
+    model, model_source = select_plan_model(
+        model_agent,
+        plan_text,
+        model=payload.get("model") or payload.get("model_requested") or "",
+    )
+    if model and definition.runtime_kind == "supervised_research" and not model_agent:
+        raise ValueError("research --model requires an explicit provider role")
     research_agents: tuple[str, ...] = ()
     research_synthesizer = ""
     research_synthesizer_model = str(
@@ -1723,6 +1651,121 @@ def normalize_launch_spec(
         raise ValueError("Launch requires either --prompt text or --file path.")
     if file_path and not Path(file_path).expanduser().is_file():
         raise ValueError(f"Prompt file does not exist or is not a file: {file_path}")
+    permissions = parse_permissions_word(payload.get("permissions"))
+    sandbox = parse_sandbox_word(payload.get("sandbox"))
+    if permissions or sandbox is not None:
+        if definition.runtime_kind in SUPERVISED_RUNTIME_KINDS:
+            raise ValueError(
+                f"--permissions/--sandbox are not carried into the {skill} "
+                "supervised runtime yet; omit them or launch a direct agent skill."
+            )
+        # Refuse before any control-plane write: the resolver raises with the
+        # provider's exact supported alternative (never a silent downgrade).
+        resolve_execution_controls(agent, permissions=permissions, sandbox=sandbox)
+
+    execution = str(payload.get("runtime_class") or "")
+    if execution and execution not in {"living-tree", "local-worktrees"}:
+        raise ValueError(f"Unsupported execution runtime: {execution}; no host adapter")
+    worktree = parse_worktree_flag(payload.get("worktree"))
+    if execution:
+        if payload.get("worktree") not in (None, "") and worktree != (
+            execution == "local-worktrees"
+        ):
+            raise ValueError("--worktree conflicts with execution runtime")
+        worktree = execution == "local-worktrees"
+    requested_repo = str(payload.get("repo") or payload.get("root") or "")
+    repo_kind = "path"
+    identity_default = ""
+    if payload.get("repo_selector"):
+        raw_repo, raw_root = (
+            str(payload.get("repo") or ""),
+            str(payload.get("root") or ""),
+        )
+        if (
+            raw_repo
+            and raw_root
+            and raw_repo != raw_root
+            and Path(raw_repo).expanduser().resolve()
+            != Path(raw_root).expanduser().resolve()
+        ):
+            raise ValueError("conflicting --repo and --root")
+        chosen = raw_repo or raw_root
+        if (
+            chosen
+            and not Path(chosen).expanduser().exists()
+            and re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*", chosen
+            )
+        ):
+            repo_kind = "identity"
+            root, identity_default = resolve_repository_identity(chosen)
+        else:
+            selected = select_repository(
+                raw_repo, raw_root, fallback=Path.cwd, require_git=True
+            )
+            root = selected.git_toplevel
+    top = git_toplevel(Path(root))
+    if top and root:
+        root = top
+    base = str(payload.get("base") or "HEAD")
+    effective_base = base
+    if repo_kind == "identity":
+        if base == "HEAD":
+            effective_base = identity_default
+        elif base.startswith("refs/heads/"):
+            effective_base = base.replace("refs/heads/", "refs/remotes/origin/", 1)
+        elif base.startswith("refs/tags/"):
+            effective_base = base.replace("refs/tags/", "refs/vibecrafted/tags/", 1)
+        elif not base.startswith("refs/"):
+            candidates = []
+            for candidate in (
+                f"refs/remotes/origin/{base}",
+                f"refs/vibecrafted/tags/{base}",
+            ):
+                try:
+                    resolve_repository_base(root, candidate)
+                    candidates.append(candidate)
+                except ValueError:
+                    pass
+            if len(candidates) > 1 or (
+                not candidates and not re.fullmatch(r"[0-9a-fA-F]{4,40}", base)
+            ):
+                raise ValueError(
+                    "remote --base missing or ambiguous; use refs/heads/ or refs/tags/"
+                )
+            effective_base = candidates[0] if candidates else base
+    resolved_ref, baseline_sha = (
+        resolve_repository_base(root, effective_base) if top else ("", "")
+    )
+    if repo_kind == "identity" and baseline_sha:
+        advertised = subprocess.run(
+            [
+                "git",
+                "-C",
+                root,
+                "for-each-ref",
+                f"--contains={baseline_sha}",
+                "--format=%(refname)",
+                "refs/remotes/origin/",
+                "refs/vibecrafted/tags/",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        if advertised.returncode or not advertised.stdout.strip():
+            raise ValueError(
+                "remote --base commit is not reachable from the refreshed source branches or tags; cached local objects are not a source baseline"
+            )
+    if payload.get("base") and not top:
+        raise ValueError("--base requires a Git repository")
+    if baseline_sha and not worktree and baseline_sha != _git_head(Path(root)):
+        raise ValueError(
+            "Living Tree --base differs from HEAD; select --execution-runtime local-worktrees"
+        )
+    if worktree and not root:
+        raise ValueError("--worktree requires a selected repository (--repo <path>).")
 
     return WorkflowLaunchSpec(
         agent=agent,
@@ -1735,27 +1778,145 @@ def normalize_launch_spec(
         count=count,
         depth=depth,
         model=model,
+        model_source=model_source,
+        source_digest=hashlib.sha256(plan_text.encode("utf-8")).hexdigest(),
+        repo_requested=requested_repo,
+        repo_kind=repo_kind,
+        base=base,
+        baseline_sha=baseline_sha,
+        resolved_ref=resolved_ref,
+        runtime_class="local-worktrees" if worktree else "living-tree",
+        research_model_agent=model_agent
+        if definition.runtime_kind == "supervised_research"
+        else "",
         research_agents=research_agents,
         research_synthesizer=research_synthesizer,
         research_synthesizer_model=research_synthesizer_model,
         run_id=str(payload.get("run_id") or "").strip(),
+        worktree=worktree,
+        permissions=permissions,
+        sandbox=sandbox,
+    )
+
+
+def launch_execution_controls(spec: WorkflowLaunchSpec) -> ExecutionControls | None:
+    """Resolved controls for a direct-agent launch; ``None`` for supervised kinds.
+
+    Always computed (also when both flags were omitted) so every launch receipt
+    states the effective permission policy and sandbox state next to what was
+    requested. Raises :class:`ExecutionControlsError` for a refused request.
+    """
+    runtime_kind = workflow_registry.workflow_runtime_kind(spec.skill)
+    if runtime_kind in SUPERVISED_RUNTIME_KINDS or spec.agent == "swarm":
+        if spec.permissions or spec.sandbox is not None:
+            raise ExecutionControlsError(
+                f"--permissions/--sandbox are not carried into the {spec.skill} "
+                "supervised runtime yet; omit them or launch a direct agent skill."
+            )
+        return None
+    return resolve_execution_controls(
+        spec.agent, permissions=spec.permissions, sandbox=spec.sandbox
+    )
+
+
+def _execution_controls_receipt(
+    controls: ExecutionControls | None,
+) -> dict[str, Any]:
+    """Launch-event / meta / receipt projection of the resolved controls."""
+    if controls is None:
+        return {}
+    return {"execution_controls": controls.receipt()}
+
+
+def _git_head(repo: Path) -> str:
+    """Current HEAD of ``repo`` or ``""`` when Git cannot answer."""
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return ""
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def _prepare_launch_worktree(
+    spec: WorkflowLaunchSpec, run_id: str
+) -> tuple[WorkflowLaunchSpec, dict[str, Any]]:
+    """Materialize the ``--worktree`` checkout through the canonical manager.
+
+    Reuses the same substrate as dispatch plans and interactive Agent
+    Workspaces (``WorktreeManager.prepare_agent_launch``): a clean selected
+    repository, a linked checkout under ``~/.vibecrafted/worktrees``, branch
+    ``cut/<agent>-<run_id>`` at the selected HEAD. The receipt names both the
+    checkout and the repository it was cut from. Raises ``ValueError`` with an
+    operator-readable reason; the caller turns that into a refused launch.
+    """
+    from .dispatch.worktrees import WorktreeContractError, WorktreeManager
+
+    parent = Path(spec.root or "").expanduser().resolve()
+    toplevel = git_toplevel(parent)
+    if not toplevel:
+        raise ValueError(
+            f"--worktree requires a Git repository; {parent} is not inside one"
+        )
+    if Path(toplevel) != parent:
+        raise ValueError(
+            "--worktree requires the selected repository root, not a "
+            f"subdirectory: pass --repo {toplevel}"
+        )
+    baseline = spec.baseline_sha or _git_head(parent)
+    if not baseline:
+        raise ValueError(f"--worktree needs at least one commit in {parent}")
+    manager = WorktreeManager(parent)
+    try:
+        geometry = manager.prepare_agent_launch(spec.agent, run_id, baseline)
+    except WorktreeContractError as exc:
+        raise ValueError(f"--worktree: {exc}") from exc
+    worktree_path = str(Path(geometry.worktree_path).resolve())
+    receipt: dict[str, Any] = {
+        "worktree": True,
+        "worktree_path": worktree_path,
+        "worktree_branch": geometry.branch,
+        "worktree_baseline_sha": geometry.baseline_sha,
+        "parent_root": str(parent),
+    }
+    return (
+        replace(spec, root=worktree_path, parent_root=str(parent)),
+        receipt,
     )
 
 
 def _source_prompt(spec: WorkflowLaunchSpec) -> str:
-    """Resolve the operator's raw prompt text from ``spec.file`` or ``spec.prompt``."""
-    if spec.file:
-        return (
-            Path(spec.file).expanduser().read_text(encoding="utf-8", errors="replace")
+    """Read exact input, refusing a file changed since model admission."""
+    text = (
+        spec.plan_source
+        if spec.plan_source is not None
+        else (
+            Path(spec.file).expanduser().read_bytes().decode("utf-8")
+            if spec.file
+            else spec.prompt
         )
-    return spec.prompt
+    )
+    if (
+        spec.source_digest
+        and hashlib.sha256(text.encode("utf-8")).hexdigest() != spec.source_digest
+    ):
+        raise ValueError("plan source changed after admission; submit a new launch")
+    return text
 
 
-def _runtime_prompt(spec: WorkflowLaunchSpec) -> str:
+def _runtime_prompt(
+    spec: WorkflowLaunchSpec, *, source_prompt: str | None = None
+) -> str:
     """Wrap the source prompt in the runtime contract instructions given to the worker."""
     report_hint = "${VIBECRAFTED_REPORT_PATH}"
     transcript_hint = "${VIBECRAFTED_TRANSCRIPT_PATH}"
-    source_prompt = _source_prompt(spec)
+    if source_prompt is None:
+        source_prompt = _source_prompt(spec)
     # Resume is a payload of the init pass, not a verb someone has to remember.
     # The block is empty on a clean checkout, so it costs nothing when there is
     # no unfinished work; `init_resume_block` never raises.
@@ -1805,7 +1966,9 @@ Operator prompt:
 def _write_prompt_file(path: Path, body: str) -> Path:
     """Write the assembled prompt body to disk and return its path."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body, encoding="utf-8")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(body.encode("utf-8"))
     return path
 
 
@@ -1867,7 +2030,14 @@ def build_launch_command(
         return launch_command
 
     worker_agent = spec.agent
-    return _with_model_override(worker_agent, _stdin_command(worker_agent), spec.model)
+    controls = launch_execution_controls(spec)
+    # The default shape stays byte-identical to the historical command; the
+    # resolved argv is injected only when the caller asked for a control.
+    if controls is not None and controls.requested:
+        worker_command = _stdin_command(worker_agent, controls=controls)
+    else:
+        worker_command = _stdin_command(worker_agent)
+    return _with_model_override(worker_agent, worker_command, spec.model)
 
 
 def _sweep_stale_runs() -> None:
@@ -1897,10 +2067,955 @@ def _launch_tracking_payload(
             "resume_root",
             "attempt",
             "native_resume",
+            "native_fork",
+            "fork_source_session_id",
+            "session_selection",
+            "parent_run_id",
             "resume_idempotency_key",
+            "dispatch_run_id",
+            "dispatch_cut_id",
+            "dispatch_branch",
+            "dispatch_baseline_sha",
+            "dispatch_attempt",
+            "dispatch_idempotency_key",
         )
         if launch_meta.get(key) not in (None, "")
     }
+
+
+def _json_plain(value: Any) -> Any:
+    """Reduce a launch payload to JSON-serializable builtins."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _json_plain(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_plain(item) for item in value]
+    return str(value)
+
+
+def machine_launch_receipt(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return the one stdout-safe launch receipt operators and agents parse."""
+    accepted = bool(payload.get("accepted"))
+    status = str(
+        payload.get("status")
+        or ("launching" if accepted else payload.get("reason") or "rejected")
+    )
+    agent = str(payload.get("agent") or "")
+    receipt: dict[str, Any] = {
+        "schema": LAUNCH_RECEIPT_SCHEMA,
+        "run_id": str(payload.get("run_id") or ""),
+        "agent": agent,
+        "skill": str(payload.get("skill") or ""),
+        "root": str(payload.get("root") or ""),
+        "accepted": accepted,
+        "status": status,
+        "replayed": bool(payload.get("replayed")),
+        "idempotency_key": str(payload.get("idempotency_key") or ""),
+    }
+    if payload.get("worktree"):
+        receipt["worktree"] = True
+        for key in (
+            "worktree_path",
+            "worktree_branch",
+            "worktree_baseline_sha",
+            "parent_root",
+        ):
+            receipt[key] = str(payload.get(key) or "")
+    if isinstance(payload.get("execution_controls"), dict):
+        receipt["execution_controls"] = dict(payload["execution_controls"])
+    for key in (
+        "model_requested",
+        "model_effective",
+        "model_source",
+        "repo_requested",
+        "repo_kind",
+        "base_requested",
+        "resolved_ref",
+        "baseline_sha",
+        "runtime_class",
+        "presentation",
+        "source_path",
+        "source_origin",
+        "source_snapshot",
+        "source_digest",
+    ):
+        receipt[key] = payload.get(key, "")
+    for key in (
+        "report",
+        "transcript",
+        "meta",
+        "parent_root",
+        "effective_worker_root",
+        "parent_run_id",
+        "agent_session_id",
+        "requires_pty",
+        "execution_host",
+        "repository_identity",
+        "remote",
+        "source_ref",
+        "reason",
+        "error",
+        "launch_phase",
+    ):
+        if key in payload:
+            receipt[key] = _json_plain(payload[key])
+    return receipt
+
+
+def _launch_idempotency_enabled() -> bool:
+    """Whether one logical launch may reuse a live run instead of minting a sibling."""
+    raw = str(os.environ.get("VIBECRAFTED_LAUNCH_IDEMPOTENCY", "1")).strip().lower()
+    return raw not in {"0", "false", "off", "no"}
+
+
+def launch_idempotency_key(
+    spec: WorkflowLaunchSpec, *, env: dict[str, str] | None = None
+) -> str:
+    """Return caller-supplied launch identity, or ``""`` for a fresh invocation.
+
+    Byte-identical content is never operator-intention identity. Transports may
+    supply the existing ``VIBECRAFTED_LAUNCH_IDEMPOTENCY_KEY`` across retries;
+    an explicit ``spec.run_id`` is also a stable caller-owned identity.
+    """
+    source = os.environ if env is None else env
+    override = str(source.get(LAUNCH_IDEMPOTENCY_KEY_ENV) or "").strip()
+    if override:
+        return override
+    run_id = str(spec.run_id or "").strip()
+    return f"run-id:{run_id}" if run_id else ""
+
+
+def _launch_spec_digest(spec: WorkflowLaunchSpec) -> str:
+    """Bind one explicit invocation identity to secret-safe launch semantics."""
+    prompt = _source_prompt(spec)
+    material = {
+        **spec.to_payload(),
+        "prompt": "",
+        "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+        "root": str(Path(spec.root or "").expanduser().resolve(strict=False)),
+    }
+    encoded = json.dumps(material, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _legacy_preassembly_spec(
+    stored_spec: WorkflowLaunchSpec, *, expected_digest: str
+) -> WorkflowLaunchSpec | None:
+    """Recover a prompt-origin spec from an old redacted launch receipt.
+
+    Pre-dispatch runtimes calculated the idempotency digest before wrapping the
+    caller's prompt, but persisted only ``safe_spec`` afterwards.  That shape
+    has an empty ``prompt`` and a generated ``prompt.md`` in ``file``.  The
+    generated wrapper retains the original prompt after its unambiguous final
+    ``Operator prompt:`` delimiter.  Rebuild the old material only when its
+    digest still exactly matches the immutable stored digest.  File-origin
+    launches cannot safely recover their original file path and remain denied.
+    """
+    if stored_spec.prompt or not stored_spec.file:
+        return None
+    try:
+        rendered = (
+            Path(stored_spec.file)
+            .expanduser()
+            .read_text(encoding="utf-8", errors="replace")
+        )
+    except OSError:
+        return None
+    marker = "Operator prompt:\n"
+    if not rendered.startswith("You are running under Vibecrafted core runtime.\n"):
+        return None
+    _wrapper, separator, source_with_newline = rendered.partition(marker)
+    # _runtime_prompt always appends precisely one newline after the source.
+    # Do not normalize whitespace: it is part of the authenticated source.
+    if not separator or not source_with_newline.endswith("\n"):
+        return None
+    recovered = replace(
+        stored_spec,
+        prompt=source_with_newline[:-1],
+        file="",
+    )
+    return recovered if _launch_spec_digest(recovered) == expected_digest else None
+
+
+def _launch_idempotency_registry() -> Path:
+    """Directory for launch-idempotency records under the control-plane home."""
+    registry = control_plane_home() / "launch_idempotency"
+    registry.mkdir(parents=True, exist_ok=True)
+    return registry
+
+
+def _launch_idempotency_path(key: str) -> Path:
+    """Content-addressed path for one launch fingerprint."""
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    return _launch_idempotency_registry() / f"{digest}.json"
+
+
+def _archive_launch_idempotency_record(
+    key: str,
+    record: dict[str, Any],
+    *,
+    replacement_spec_digest: str,
+) -> Path:
+    """Preserve a terminal stale claim before reserving its identity again."""
+    key_digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    record_digest = hashlib.sha256(
+        json.dumps(_json_plain(record), sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    archived_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    target = (
+        _launch_idempotency_registry()
+        / "archive"
+        / f"{key_digest}-{time.time_ns()}-{record_digest[:16]}.json"
+    )
+    atomic_write_json(
+        target,
+        {
+            **_json_plain(record),
+            "archived_at": archived_at,
+            "archive_reason": "terminal_stale_spec_replaced",
+            "replacement_spec_digest": replacement_spec_digest,
+        },
+    )
+    return target
+
+
+def _read_launch_idempotency_record(key: str) -> dict[str, Any]:
+    """Read one launch-idempotency record, or ``{}`` when absent/invalid."""
+    if not key:
+        return {}
+    path = _launch_idempotency_path(key)
+    payload = _read_json_object(path)
+    if not payload:
+        return {}
+    if payload.get("schema") != LAUNCH_IDEMPOTENCY_SCHEMA:
+        return {}
+    if str(payload.get("idempotency_key") or "") != key:
+        return {}
+    return payload
+
+
+def _write_launch_idempotency_record(key: str, payload: dict[str, Any]) -> None:
+    """Atomically persist a launch-idempotency record for ``key``."""
+    if not key:
+        return
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    record = {
+        "schema": LAUNCH_IDEMPOTENCY_SCHEMA,
+        "idempotency_key": key,
+        "run_id": str(payload.get("run_id") or ""),
+        "agent": str(payload.get("agent") or ""),
+        "skill": str(payload.get("skill") or ""),
+        "root": str(payload.get("root") or ""),
+        "state": str(payload.get("state") or "reserved"),
+        "accepted": bool(payload.get("accepted")),
+        "owner_pid": int(payload.get("owner_pid") or os.getpid()),
+        "owner_identity": _json_plain(payload.get("owner_identity")),
+        "spec_digest": str(payload.get("spec_digest") or ""),
+        "receipt": _json_plain(payload.get("receipt") or {}),
+        "updated_at": now,
+    }
+    with run_mutation_locks(control_plane_home(), run_id="launch-idempotency-registry"):
+        if payload.get("created_at"):
+            record["created_at"] = str(payload["created_at"])
+        else:
+            existing = _read_launch_idempotency_record(key)
+            record["created_at"] = str(existing.get("created_at") or now)
+        atomic_write_json(_launch_idempotency_path(key), record)
+
+
+def _process_liveness_evidence(run_id: str, payload: dict[str, Any]) -> str:
+    """Classify the worker/launcher process evidence carried by ``payload``.
+
+    Four answers, deliberately not collapsed into a boolean:
+
+    * ``current`` — a recorded process is alive *and* its canonical identity
+      receipt still qualifies for ``run_id``.
+    * ``unknown`` — a recorded process is alive but we cannot prove whose it
+      is (no receipt, or a receipt that never reached a decisive capture).
+    * ``stale`` — every recorded process is gone, or the pid was positively
+      identified as another generation.
+    * ``none`` — the payload records no process at all.
+
+    A dead pid ends the question before identity validation: there is no live
+    claim left to protect, so an unreadable receipt over a corpse is ``stale``
+    rather than permanent doubt.
+    """
+    seen = False
+    for prefix in ("worker", "launcher"):
+        receipt = payload.get(f"{prefix}_identity")
+        pid = _coerce_positive_int(payload.get(f"{prefix}_pid"))
+        if pid is None and isinstance(receipt, dict):
+            pid = _coerce_positive_int(receipt.get("pid"))
+        if pid is None:
+            continue
+        seen = True
+        if not _pid_is_alive(pid):
+            continue
+        if not isinstance(receipt, dict):
+            return "unknown"
+        current, reason, _identity = _validate_recorded_identity(run_id, receipt, pid)
+        if current:
+            return "current"
+        if reason in FOREIGN_PROCESS_IDENTITY_REASONS:
+            continue
+        return "unknown"
+    return "stale" if seen else "none"
+
+
+def _validate_recorded_identity(
+    run_id: str, receipt: dict[str, Any], pid: int
+) -> tuple[bool, str, Any]:
+    """Run the canonical identity check for one recorded process receipt."""
+    pgid = _coerce_positive_int(receipt.get("pgid"))
+    return validate_process_identity(
+        receipt,
+        expected_pid=pid,
+        expected_pgid=pgid,
+        expected_run_id=run_id,
+    )
+
+
+def _terminal_projection_veto(run_id: str, run: dict[str, Any]) -> str:
+    """Reason a terminal projection must not be believed, or '' when it may be.
+
+    The ``runs/<id>.json`` projection is a lagging view: it can still read
+    ``completed`` while the canonical runtime record and the process table say
+    the worker is running. Deleting a claim is irreversible, so the two
+    canonical sources outrank the projection here and may veto it. Missing
+    canonical evidence is not a veto (there is nothing contradicting the
+    projection), but evidence that is unreadable, non-terminal, or attached to
+    an unidentifiable live process is — unknown liveness retains.
+    """
+    evidence = _process_liveness_evidence(run_id, run)
+    if evidence in {"current", "unknown"}:
+        return f"snapshot_process_liveness_{evidence}"
+    meta = lookup_runtime_run_meta(run_id)
+    if meta is None:
+        return ""
+    if not meta:
+        return "runtime_meta_unreadable"
+    evidence = _process_liveness_evidence(run_id, meta)
+    if evidence in {"current", "unknown"}:
+        return f"runtime_meta_process_liveness_{evidence}"
+    state = str(meta.get("state") or meta.get("status") or "")
+    if state in TERMINAL_STATES or meta.get("exit_code") is not None:
+        return ""
+    return f"runtime_meta_state_{state or 'unknown'}"
+
+
+def _prune_launch_idempotency_registry(*, now: float | None = None) -> int:
+    """Bound failed/proven-terminal history without discovering legacy runs.
+
+    Registry maintenance runs on the launch receipt path. It may use an
+    already-projected canonical snapshot, but must not call ``lookup_run()``:
+    that synchronizes state and can recursively walk legacy artifacts while
+    the registry mutation lock is held. No snapshot means unknown, so retain
+    the record until a normal control-plane projection proves it terminal.
+
+    A terminal projection is necessary but not sufficient: it is corroborated
+    against the canonical runtime meta and the process table
+    (:func:`_terminal_projection_veto`) with two bounded direct reads, so a
+    stale ``completed`` snapshot can no longer delete a live launch claim.
+    """
+    with run_mutation_locks(control_plane_home(), run_id="launch-idempotency-registry"):
+        registry = _launch_idempotency_registry()
+        current_time = time.time() if now is None else now
+        eligible: list[tuple[float, Path]] = []
+        for path in registry.glob("*.json"):
+            payload = _read_json_object(path)
+            state = str(payload.get("state") or "")
+            if state == "failed":
+                pass
+            elif state == "dispatched":
+                run_id = str(payload.get("run_id") or "")
+                run = lookup_run_snapshot(run_id) if run_id else None
+                if run is None or not _run_is_terminal(run):
+                    continue
+                if _terminal_projection_veto(run_id, run):
+                    continue
+            else:
+                continue
+            try:
+                modified_at = path.stat().st_mtime
+            except OSError:
+                continue
+            eligible.append((modified_at, path))
+
+        eligible.sort(key=lambda item: item[0], reverse=True)
+        removed = 0
+        for index, (modified_at, path) in enumerate(eligible):
+            expired = (
+                current_time - modified_at > LAUNCH_IDEMPOTENCY_TERMINAL_TTL_SECONDS
+            )
+            over_limit = index >= LAUNCH_IDEMPOTENCY_MAX_TERMINAL_RECORDS
+            if not expired and not over_limit:
+                continue
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                continue
+            removed += 1
+        return removed
+
+
+def _replay_launch_payload(record: dict[str, Any], *, status: str) -> dict[str, Any]:
+    """Rebuild a launch receipt from a stored idempotency record."""
+    stored = dict(record.get("receipt") or {})
+    run_id = str(stored.get("run_id") or record.get("run_id") or "")
+    payload = {
+        **stored,
+        "run_id": run_id,
+        "agent": str(stored.get("agent") or record.get("agent") or ""),
+        "skill": str(stored.get("skill") or record.get("skill") or ""),
+        "root": str(stored.get("root") or record.get("root") or ""),
+        "accepted": bool(stored.get("accepted", record.get("accepted"))),
+        "status": str(stored.get("status") or status),
+        "replayed": True,
+        "idempotency_key": str(record.get("idempotency_key") or ""),
+        "message": str(
+            stored.get("message") or f"Replayed launch for {run_id or 'existing run'}"
+        ),
+    }
+    return payload
+
+
+def _retryable_launch_payload(
+    record: dict[str, Any], *, status: str, reason: str
+) -> dict[str, Any]:
+    """Return a structured refusal for an identity that lacks launch proof."""
+    stored = dict(record.get("receipt") or {})
+    return {
+        **stored,
+        "run_id": str(stored.get("run_id") or record.get("run_id") or ""),
+        "agent": str(stored.get("agent") or record.get("agent") or ""),
+        "skill": str(stored.get("skill") or record.get("skill") or ""),
+        "root": str(stored.get("root") or record.get("root") or ""),
+        "accepted": False,
+        "status": status,
+        "retryable": True,
+        "replayed": False,
+        "idempotency_key": str(record.get("idempotency_key") or ""),
+        "reason": reason,
+        "message": reason,
+    }
+
+
+def _canonical_run_launch_payload(
+    record: dict[str, Any], run: dict[str, Any]
+) -> dict[str, Any]:
+    """Recover acceptance only from a canonical run with qualified liveness."""
+    stored = dict(record.get("receipt") or {})
+    run_id = str(run.get("run_id") or record.get("run_id") or "")
+    payload = {
+        **stored,
+        "run_id": run_id,
+        "agent": str(run.get("agent") or record.get("agent") or ""),
+        "skill": str(run.get("skill") or record.get("skill") or ""),
+        "root": str(run.get("root") or record.get("root") or ""),
+        "accepted": True,
+        "status": str(run.get("state") or "launching"),
+        "replayed": True,
+        "recovered": True,
+        "idempotency_key": str(record.get("idempotency_key") or ""),
+        "message": f"Recovered canonical launch for {run_id}",
+    }
+    for field in (
+        "report",
+        "transcript",
+        "meta",
+        "launcher_pid",
+        "launcher_identity",
+        "worker_pid",
+        "worker_identity",
+    ):
+        if run.get(field) is not None:
+            payload[field] = _json_plain(run[field])
+    return payload
+
+
+def _classify_record_owner(record: dict[str, Any]) -> tuple[str, str]:
+    """Classify reservation ownership without turning ambiguity into staleness."""
+    run_id = str(record.get("run_id") or "")
+    try:
+        owner_pid = int(record.get("owner_pid") or 0)
+    except (TypeError, ValueError):
+        return "ambiguous", "process_identity_invalid"
+    receipt = record.get("owner_identity")
+    if owner_pid <= 0 or not isinstance(receipt, dict):
+        return "ambiguous", "process_identity_unavailable"
+    expected_pgid = receipt.get("pgid")
+    try:
+        pgid = int(expected_pgid) if expected_pgid is not None else None
+    except (TypeError, ValueError):
+        return "ambiguous", "process_identity_invalid"
+    current, reason, _identity = validate_process_identity(
+        receipt,
+        expected_pid=owner_pid,
+        expected_pgid=pgid,
+        expected_run_id=run_id,
+    )
+    if current:
+        return "current", reason or "process_identity_current"
+    if reason in FOREIGN_PROCESS_IDENTITY_REASONS:
+        return "stale", reason
+    return "ambiguous", reason or "process_identity_unknown"
+
+
+def _run_has_current_process_proof(run_id: str, run: dict[str, Any]) -> bool:
+    """Require a current canonical worker/launcher identity for active replay."""
+    for prefix in ("worker", "launcher"):
+        receipt = run.get(f"{prefix}_identity")
+        if not isinstance(receipt, dict):
+            continue
+        raw_pid = run.get(f"{prefix}_pid") or receipt.get("pid")
+        try:
+            pid = int(raw_pid or 0)
+            pgid = int(receipt.get("pgid") or 0)
+        except (TypeError, ValueError):
+            continue
+        current, _reason, _identity = validate_process_identity(
+            receipt,
+            expected_pid=pid,
+            expected_pgid=pgid or None,
+            expected_run_id=run_id,
+        )
+        if current:
+            return True
+    return False
+
+
+def _replay_launch_if_current(record: dict[str, Any]) -> dict[str, Any] | None:
+    """Return a replay receipt when retrying would mint a sibling of a live launch."""
+    if not record:
+        return None
+    run_id = str(record.get("run_id") or "")
+    if not run_id:
+        return None
+    state = str(record.get("state") or "")
+    if state == "reserved":
+        owner_state, owner_reason = _classify_record_owner(record)
+        if owner_state == "current":
+            return _retryable_launch_payload(
+                record,
+                status="reservation_in_progress",
+                reason="launch reservation is owned by another live invocation",
+            )
+        run = lookup_run(run_id)
+        if run is not None and (
+            _run_is_terminal(run) or _run_has_current_process_proof(run_id, run)
+        ):
+            return _canonical_run_launch_payload(record, run)
+        if owner_state == "ambiguous":
+            return _retryable_launch_payload(
+                record,
+                status="retryable_reservation_owner_ambiguous",
+                reason=owner_reason,
+            )
+        if run is None:
+            return None
+        return _retryable_launch_payload(
+            record,
+            status="retryable_unproven_liveness",
+            reason="reserved run exists but has no current canonical process proof",
+        )
+    if state != "dispatched":
+        return None
+    run = lookup_run(run_id)
+    if run is None:
+        return _retryable_launch_payload(
+            record,
+            status="retryable_unknown_run",
+            reason="idempotent run is unknown to control_plane",
+        )
+    if _run_is_terminal(run):
+        return _replay_launch_payload(
+            record, status=str(run.get("state") or "completed")
+        )
+    stored_receipt = dict(record.get("receipt") or {})
+    if not (
+        _run_has_current_process_proof(run_id, run)
+        or _run_has_current_process_proof(run_id, stored_receipt)
+    ):
+        return _retryable_launch_payload(
+            record,
+            status="retryable_unproven_liveness",
+            reason="idempotent run has no current canonical process proof",
+        )
+    return _replay_launch_payload(record, status=str(run.get("state") or "launching"))
+
+
+def _claim_launch_idempotency(
+    spec: WorkflowLaunchSpec, key: str, *, spec_digest: str
+) -> tuple[dict[str, Any] | None, str]:
+    """Under the caller lock: replay a live launch or reserve one run id."""
+    existing = _read_launch_idempotency_record(key)
+    existing_digest = str(existing.get("spec_digest") or "")
+    if existing and not existing_digest:
+        raise ValueError("idempotency identity conflicts with a different launch spec")
+    if existing and existing_digest != spec_digest:
+        run_id = str(existing.get("run_id") or "")
+        run = lookup_run(run_id) if run_id else None
+        owner_state, owner_reason = _classify_record_owner(existing)
+        run_is_current = bool(
+            run is not None and _run_has_current_process_proof(run_id, run)
+        )
+        if owner_state == "current" or run_is_current:
+            raise ValueError(
+                "idempotency identity conflicts with a different launch spec"
+            )
+        if run is not None and _run_is_terminal(run) and owner_state == "stale":
+            _archive_launch_idempotency_record(
+                key,
+                existing,
+                replacement_spec_digest=spec_digest,
+            )
+            existing = {}
+        else:
+            return (
+                _retryable_launch_payload(
+                    existing,
+                    status="retryable_idempotency_spec_conflict_unproven",
+                    reason=(
+                        "idempotency spec changed without terminal stale ownership proof: "
+                        f"{owner_reason}"
+                    ),
+                ),
+                run_id,
+            )
+    replay = _replay_launch_if_current(existing)
+    if replay is not None:
+        if replay.get("accepted") and str(existing.get("state") or "") == "reserved":
+            replay = _finish_launch_idempotency(key, replay, spec_digest=spec_digest)
+        return replay, str(existing.get("run_id") or "")
+    reuse = ""
+    if str(existing.get("state") or "") == "reserved":
+        reuse = str(existing.get("run_id") or "")
+    run_id = str(spec.run_id or reuse or "") or reserve_run_id(spec.skill)
+    _write_launch_idempotency_record(
+        key,
+        {
+            "run_id": run_id,
+            "agent": spec.agent,
+            "skill": spec.skill,
+            "root": spec.root,
+            "state": "reserved",
+            "accepted": False,
+            "owner_pid": os.getpid(),
+            "owner_identity": process_identity_receipt(os.getpid(), run_id=run_id),
+            "spec_digest": spec_digest,
+            "receipt": {
+                "run_id": run_id,
+                "agent": spec.agent,
+                "skill": spec.skill,
+                "root": spec.root,
+                "accepted": False,
+                "status": "reserved",
+            },
+        },
+    )
+    return None, run_id
+
+
+def _finish_launch_idempotency(
+    key: str, payload: dict[str, Any], *, spec_digest: str = ""
+) -> dict[str, Any]:
+    """Persist the launch receipt onto the fingerprint, then return it."""
+    if not key:
+        return payload
+    accepted = bool(payload.get("accepted"))
+    result = {**payload, "idempotency_key": key}
+    _write_launch_idempotency_record(
+        key,
+        {
+            "run_id": str(result.get("run_id") or ""),
+            "agent": str(result.get("agent") or ""),
+            "skill": str(result.get("skill") or ""),
+            "root": str(result.get("root") or ""),
+            "state": "dispatched" if accepted else "failed",
+            "accepted": accepted,
+            "owner_pid": os.getpid(),
+            "owner_identity": process_identity_receipt(
+                os.getpid(), run_id=str(result.get("run_id") or "")
+            ),
+            "spec_digest": spec_digest,
+            "receipt": _json_plain(result),
+        },
+    )
+    _prune_launch_idempotency_registry()
+    return result
+
+
+def recover_launch_receipt(
+    spec: WorkflowLaunchSpec, *, env: dict[str, str] | None = None
+) -> dict[str, Any] | None:
+    """Return a stored receipt for ``spec`` when a prior launch already reserved a run."""
+    if not _launch_idempotency_enabled():
+        return None
+    key = launch_idempotency_key(spec, env=env)
+    if not key:
+        return None
+    record = _read_launch_idempotency_record(key)
+    expected_digest = _launch_spec_digest(spec)
+    if record and str(record.get("spec_digest") or "") != expected_digest:
+        return _retryable_launch_payload(
+            record,
+            status="idempotency_conflict",
+            reason="idempotency identity conflicts with a different launch spec",
+        )
+    if not record.get("run_id"):
+        return None
+    replay = _replay_launch_if_current(record)
+    if replay is not None:
+        return replay
+    stored = dict(record.get("receipt") or {})
+    run_id = str(stored.get("run_id") or record.get("run_id") or "")
+    if not run_id:
+        return None
+    stored["run_id"] = run_id
+    stored["replayed"] = True
+    stored["idempotency_key"] = key
+    dispatched = str(record.get("state") or "") == "dispatched"
+    stored["accepted"] = bool(record.get("accepted")) and dispatched
+    stored.setdefault("status", "launching" if stored["accepted"] else "failed")
+    return stored
+
+
+def _legacy_dispatch_receipt_matches(
+    *,
+    key: str,
+    provider_run_id: str,
+    cut_id: str,
+    root: str,
+    branch: str,
+    baseline_sha: str,
+) -> bool:
+    """Verify legacy dispatch identity from its exact durable scheduler receipt.
+
+    Old run projections can lack the dispatch fields, but their launch key is
+    still namespaced by the parent dispatch.  Never search receipts by a loose
+    provider id: derive one path from that authenticated key and require every
+    topology field to agree before using it as the missing projection.
+    """
+    suffix = f":cut:{cut_id}:attempt:initial"
+    if not key.startswith("dispatch:") or not key.endswith(suffix):
+        return False
+    dispatch_run_id = key[len("dispatch:") : -len(suffix)]
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", dispatch_run_id):
+        return False
+    ledger = _read_json_object(
+        control_plane_home() / "dispatches" / dispatch_run_id / "receipts.json"
+    )
+    cuts = ledger.get("cuts")
+    receipt = cuts.get(cut_id) if isinstance(cuts, dict) else None
+    if not isinstance(receipt, dict):
+        return False
+    if not (
+        ledger.get("schema") == "vibecrafted.dispatch-receipts.v1"
+        and str(ledger.get("run_id") or "") == dispatch_run_id
+        and str(receipt.get("cut_id") or "") == cut_id
+        and str(receipt.get("provider_run_id") or "") == provider_run_id
+        and str(receipt.get("branch") or "") == branch
+        and str(receipt.get("baseline_sha") or "") == baseline_sha
+    ):
+        return False
+    try:
+        return Path(str(receipt.get("worktree_path") or "")).resolve(
+            strict=False
+        ) == Path(root).resolve(strict=False)
+    except OSError:
+        return False
+
+
+def _legacy_worktree_matches(*, root: str, branch: str, baseline_sha: str) -> bool:
+    """Confirm a recovered receipt still names the original linked checkout.
+
+    A worker can legitimately commit its owned work after the dispatch baseline.
+    The baseline is therefore an ancestry floor, not an exact ``HEAD`` value;
+    staged and unstaged progress must remain untouched by recovery as well.
+    """
+    try:
+        top = subprocess.run(
+            ["git", "-C", root, "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        ).stdout.strip()
+        observed_branch = subprocess.run(
+            ["git", "-C", root, "symbolic-ref", "--quiet", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        ).stdout.strip()
+        baseline_is_ancestor = (
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    root,
+                    "merge-base",
+                    "--is-ancestor",
+                    baseline_sha,
+                    "HEAD",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            ).returncode
+            == 0
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return (
+        Path(top).resolve(strict=False) == Path(root).resolve(strict=False)
+        and observed_branch == branch
+        and baseline_is_ancestor
+    )
+
+
+def recover_legacy_dispatch_identity(
+    spec: WorkflowLaunchSpec,
+    *,
+    env: dict[str, str],
+    provider_run_id: str,
+    cut_id: str,
+    branch: str,
+    baseline_sha: str,
+) -> tuple[dict[str, Any] | None, str]:
+    """Authenticate a pre-dispatch-metadata launch from its durable record.
+
+    Older core runtimes persisted the launch idempotency record before they
+    projected ``dispatch_*`` fields into ``meta.json``.  Those fields must not
+    be guessed on resume: this recovery path accepts the old shape only when
+    the exact caller-owned key, immutable stored spec digest, stored receipt,
+    and current canonical run projection all describe the same launch.
+    """
+    key = launch_idempotency_key(spec, env=env)
+    if not key:
+        return None, "legacy dispatch recovery has no idempotency key"
+    record = _read_launch_idempotency_record(key)
+    if not record:
+        return None, "legacy dispatch idempotency record is absent"
+    receipt = record.get("receipt")
+    if not isinstance(receipt, dict):
+        return None, "legacy dispatch idempotency receipt is invalid"
+    stored_spec = receipt.get("spec")
+    if not isinstance(stored_spec, dict):
+        return None, "legacy dispatch idempotency spec is invalid"
+    try:
+        historical = WorkflowLaunchSpec(
+            agent=str(stored_spec["agent"]),
+            mode=str(stored_spec["mode"]),
+            skill=str(stored_spec["skill"]),
+            prompt=str(stored_spec.get("prompt") or ""),
+            file=str(stored_spec.get("file") or ""),
+            runtime=str(stored_spec["runtime"]),
+            root=str(stored_spec["root"]),
+            count=stored_spec.get("count"),
+            depth=stored_spec.get("depth"),
+            model=str(stored_spec.get("model") or ""),
+            research_agents=tuple(stored_spec.get("research_agents") or ()),
+            research_synthesizer=str(stored_spec.get("research_synthesizer") or ""),
+            research_synthesizer_model=str(
+                stored_spec.get("research_synthesizer_model") or ""
+            ),
+            lifecycle_state_path=str(stored_spec.get("lifecycle_state_path") or ""),
+            claim_digest=str(stored_spec.get("claim_digest") or ""),
+            run_id=str(stored_spec.get("run_id") or ""),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None, "legacy dispatch idempotency spec is incomplete"
+    stored_digest = str(record.get("spec_digest") or "")
+    bound_spec = historical
+    if _launch_spec_digest(bound_spec) != stored_digest:
+        recovered_spec = _legacy_preassembly_spec(
+            historical, expected_digest=stored_digest
+        )
+        if recovered_spec is None:
+            return None, "legacy dispatch idempotency record does not bind its launch"
+        bound_spec = recovered_spec
+    if (
+        record.get("schema") != LAUNCH_IDEMPOTENCY_SCHEMA
+        or str(record.get("idempotency_key") or "") != key
+        or str(record.get("state") or "") != "dispatched"
+        or record.get("accepted") is not True
+        or not stored_digest
+        or _launch_spec_digest(bound_spec) != stored_digest
+    ):
+        return None, "legacy dispatch idempotency record does not bind its launch"
+    root = str(Path(spec.root).expanduser().resolve(strict=False))
+    historical_root = str(Path(historical.root).expanduser().resolve(strict=False))
+    if not (
+        str(record.get("run_id") or "") == provider_run_id
+        and str(receipt.get("run_id") or "") == provider_run_id
+        and str(receipt.get("idempotency_key") or "") == key
+        and str(record.get("agent") or "").lower() == spec.agent.lower()
+        and str(record.get("skill") or "") == spec.skill
+        and str(record.get("root") or "") == root
+        and historical.agent.lower() == spec.agent.lower()
+        and historical.skill == spec.skill
+        and historical_root == root
+    ):
+        return None, "legacy dispatch record conflicts with the requested cut"
+    if not _legacy_dispatch_receipt_matches(
+        key=key,
+        provider_run_id=provider_run_id,
+        cut_id=cut_id,
+        root=root,
+        branch=branch,
+        baseline_sha=baseline_sha,
+    ):
+        return None, "legacy dispatch receipt identity is incomplete or conflicts"
+    if not _legacy_worktree_matches(
+        root=root, branch=branch, baseline_sha=baseline_sha
+    ):
+        return None, "legacy dispatch worktree identity is incomplete or conflicts"
+    canonical = lookup_run(provider_run_id)
+    observed_root = str(
+        (canonical or {}).get("resolved_worktree_path")
+        or (canonical or {}).get("root")
+        or ""
+    )
+    worker_identity = (canonical or {}).get("worker_identity")
+    worker_pid = (canonical or {}).get("worker_pid")
+    if not (
+        isinstance(canonical, dict)
+        and str(canonical.get("run_id") or "") == provider_run_id
+        and observed_root
+        and Path(observed_root).resolve(strict=False)
+        == Path(root).resolve(strict=False)
+        and (not canonical.get("branch") or str(canonical["branch"]) == branch)
+        and (
+            not canonical.get("baseline_sha")
+            or str(canonical["baseline_sha"]) == baseline_sha
+        )
+        and (not canonical.get("cut_id") or str(canonical["cut_id"]) == cut_id)
+        and str(canonical.get("agent") or "").lower() == spec.agent.lower()
+        and str(canonical.get("skill") or "") == spec.skill
+        and canonical.get("worker_alive") is False
+        and isinstance(worker_pid, int)
+        and isinstance(worker_identity, dict)
+        and worker_identity.get("run_id") == provider_run_id
+        and worker_identity.get("pid") == worker_pid
+        and worker_identity.get("pgid")
+        and worker_identity.get("start_token")
+        and worker_identity.get("command_sha256")
+    ):
+        return None, "legacy dispatch canonical identity is incomplete or conflicts"
+    return {
+        "provider_run_id": provider_run_id,
+        "idempotency_key": key,
+        "spec_digest": str(record["spec_digest"]),
+    }, ""
 
 
 def launch_workflow(
@@ -1920,6 +3035,10 @@ def launch_workflow(
     lifecycle events. Never blocks on the spawned run reaching a terminal state
     — control-plane reconciliation is deliberately deferred to observe/await.
     """
+    _normalized_runtime(spec.runtime)
+    if spec.runtime_class not in {"living-tree", "local-worktrees"}:
+        raise ValueError("unsupported execution runtime; no host adapter")
+    _source_prompt(spec)  # refuse source drift before any mutation
     # Opportunistic pre-flight: before adding a run to the machine, take the dead
     # ones' survivors off it. Every spawn is the natural sweep point — it needs no
     # daemon, and it is exactly when the residue starts costing the new run cores.
@@ -1960,9 +3079,54 @@ def launch_workflow(
                 raise
             # not a git repository / stubbed subprocess / unreadable context → allow
 
-    run_id = spec.run_id or reserve_run_id(spec.skill)
+    idem_key = ""
+    idem_spec_digest = ""
+    claimed_run_id = ""
+    if _launch_idempotency_enabled():
+        effective_identity_env = dict(os.environ)
+        if env:
+            effective_identity_env.update(env)
+        idem_key = launch_idempotency_key(spec, env=effective_identity_env)
+    if idem_key:
+        idem_spec_digest = _launch_spec_digest(spec)
+        digest = hashlib.sha256(idem_key.encode("utf-8")).hexdigest()
+        with run_mutation_locks(
+            control_plane_home(),
+            run_id=f"lidem-{digest[:24]}",
+            idempotency_key=idem_key,
+        ):
+            replay, claimed_run_id = _claim_launch_idempotency(
+                spec, idem_key, spec_digest=idem_spec_digest
+            )
+            if replay is not None:
+                return replay
+
+    run_id = spec.run_id or claimed_run_id or reserve_run_id(spec.skill)
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id):
         raise ValueError("run_id must be a safe 1-128 character identifier")
+    worktree_receipt: dict[str, Any] = {}
+    if spec.worktree:
+        try:
+            spec, worktree_receipt = _prepare_launch_worktree(spec, run_id)
+        except ValueError as exc:
+            return _finish_launch_idempotency(
+                idem_key,
+                {
+                    "accepted": False,
+                    "message": f"Failed to launch {spec.skill}: {exc}",
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "reason": "worktree_rejected",
+                    "run_id": run_id,
+                    "agent": spec.agent,
+                    "skill": spec.skill,
+                    "root": spec.root,
+                    "parent_root": spec.root,
+                    "worktree": True,
+                    "status": "failed",
+                    "control_plane": {"sync": "deferred", "run_id": run_id},
+                },
+                spec_digest=idem_spec_digest,
+            )
     artifacts = _run_artifact_paths(run_id)
     runtime_kind = workflow_registry.workflow_runtime_kind(spec.skill)
     research_selection = (
@@ -1974,15 +3138,20 @@ def launch_workflow(
         if runtime_kind == "supervised_research"
         else None
     )
+    if research_selection is not None:
+        research_selection = replace(
+            research_selection, model_agent=spec.research_model_agent
+        )
     source_prompt = _source_prompt(spec)
+    runtime_source = spec.prompt if spec.plan_source is not None else source_prompt
     prompt_body = (
-        source_prompt
+        runtime_source
         if runtime_kind in {"supervised_research", "supervised_marbles"}
-        else _runtime_prompt(spec)
+        else _runtime_prompt(spec, source_prompt=runtime_source)
     )
     canonical_report_dir = _canonical_report_dir(spec.root, spec.skill)
     artifact_ts = time.strftime("%Y-%m-%d")
-    artifact_slug = _artifact_slug(source_prompt, run_id)
+    artifact_slug = spec.skill  # filenames/receipts must not disclose prompt text
     report_path = _canonical_report_path(
         canonical_report_dir=canonical_report_dir,
         artifact_ts=artifact_ts,
@@ -1997,11 +3166,66 @@ def launch_workflow(
         skill=spec.skill,
         claim_digest=str(spec.claim_digest or "").strip(),
     )
+    source_snapshot = _write_prompt_file(
+        artifacts["prompt"].with_name("plan-source.md"), source_prompt
+    )
+    source_receipt = {
+        "source_path": spec.source_path
+        or (str(Path(spec.file).expanduser().resolve()) if spec.file else ""),
+        "source_origin": "file" if spec.file or spec.source_path else "inline",
+        "source_snapshot": str(source_snapshot),
+        "source_digest": hashlib.sha256(source_prompt.encode("utf-8")).hexdigest(),
+        "model_source": spec.model_source,
+    }
     prompt_path = _write_prompt_file(artifacts["prompt"], prompt_body)
     claim_digest = str(spec.claim_digest or "").strip()
+    try:
+        controls_receipt = _execution_controls_receipt(launch_execution_controls(spec))
+    except ExecutionControlsError as exc:
+        return _finish_launch_idempotency(
+            idem_key,
+            {
+                "accepted": False,
+                "message": f"Failed to launch {spec.skill}: {exc}",
+                "error": f"{type(exc).__name__}: {exc}",
+                "reason": "execution_controls_rejected",
+                "run_id": run_id,
+                "agent": spec.agent,
+                "skill": spec.skill,
+                "root": spec.root,
+                "permissions_requested": spec.permissions,
+                "sandbox_requested": ""
+                if spec.sandbox is None
+                else str(spec.sandbox).lower(),
+                "status": "failed",
+                "control_plane": {"sync": "deferred", "run_id": run_id},
+            },
+            spec_digest=idem_spec_digest,
+        )
     initial_meta: dict[str, Any] = dict(launch_meta or {})
     initial_meta["run_id"] = run_id
     initial_meta["runtime"] = spec.runtime
+    initial_meta.update(
+        {
+            "repo_requested": spec.repo_requested,
+            "repo_kind": spec.repo_kind,
+            "base_requested": spec.base,
+            "resolved_ref": spec.resolved_ref,
+            "baseline_sha": spec.baseline_sha,
+            "runtime_class": spec.runtime_class,
+            "presentation": "headless" if spec.runtime == "headless" else "visible",
+        }
+    )
+    if worktree_receipt:
+        initial_meta["root"] = spec.root
+        initial_meta.update(worktree_receipt)
+    initial_meta.update(controls_receipt)
+    initial_meta.update(source_receipt)
+    # Operator model pin is launch truth, not a dispatcher afterthought.
+    # Callers (and tests) read meta.json as soon as the worker exists.
+    initial_meta.update(_model_override_receipt(spec.agent, spec.model))
+    if spec.model:
+        initial_meta["model_effective"] = spec.model
     if claim_digest:
         initial_meta["claim_digest"] = claim_digest
     if len(initial_meta) > 1:
@@ -2015,32 +3239,54 @@ def launch_workflow(
         if worker_command_override is not None
         else build_launch_command(spec, source_dir, prompt_file=prompt_path)
     )
-    merged_env = dict(os.environ)
-    if env:
-        merged_env.update(env)
-    merged_env["PATH"] = agent_tool_search_path(merged_env)
     try:
+        merged_env = selected_runtime_environment()
+        if env:
+            merged_env.update(env)
+        merged_env = selected_runtime_environment(merged_env)
+        merged_env["PATH"] = agent_tool_search_path(merged_env)
         worker_command = _resolve_agent_command(spec.agent, worker_command, merged_env)
-    except FileNotFoundError as exc:
-        return {
-            "accepted": False,
-            "message": f"Failed to launch {spec.skill}: {exc}",
-            "error": f"{type(exc).__name__}: {exc}",
-            "worker_command": worker_command,
-            "run_id": run_id,
-            "agent": spec.agent,
-            "skill": spec.skill,
-            "root": spec.root,
-            "report": str(report_path),
-            "transcript": str(artifacts["transcript"]),
-            "meta": str(artifacts["meta"]),
-            "prompt_file": str(prompt_path),
-            "control_plane": {"sync": "deferred", "run_id": run_id},
-        }
+    except (FileNotFoundError, ValueError) as exc:
+        return _finish_launch_idempotency(
+            idem_key,
+            {
+                "accepted": False,
+                "message": f"Failed to launch {spec.skill}: {exc}",
+                "error": f"{type(exc).__name__}: {exc}",
+                "worker_command": worker_command,
+                "run_id": run_id,
+                "agent": spec.agent,
+                "skill": spec.skill,
+                "root": spec.root,
+                "status": "failed",
+                "report": str(report_path),
+                "transcript": str(artifacts["transcript"]),
+                "meta": str(artifacts["meta"]),
+                "prompt_file": str(prompt_path),
+                "control_plane": {"sync": "deferred", "run_id": run_id},
+            },
+            spec_digest=idem_spec_digest,
+        )
     launch_tracking = _launch_tracking_payload(launch_meta)
     model_receipt = _model_override_receipt(spec.agent, spec.model)
     if spec.model and runtime_kind == "supervised_research":
         model_receipt = {"model_requested": spec.model}
+    # Execution controls ride the same receipt channel as the model pin: every
+    # accepted/refused payload that spreads model_receipt carries them too.
+    model_receipt = {
+        **model_receipt,
+        **controls_receipt,
+        **source_receipt,
+        "model_requested": spec.model,
+        "model_effective": spec.model,
+        "repo_requested": spec.repo_requested,
+        "repo_kind": spec.repo_kind,
+        "base_requested": spec.base,
+        "resolved_ref": spec.resolved_ref,
+        "baseline_sha": spec.baseline_sha,
+        "runtime_class": spec.runtime_class,
+        "presentation": "headless" if spec.runtime == "headless" else "visible",
+    }
     dispatch_command = _dispatcher_command(
         run_id=run_id,
         root=spec.root,
@@ -2053,7 +3299,10 @@ def launch_workflow(
         emit_json=spec.runtime not in {"terminal", "visible"},
         quiet=spec.runtime in {"terminal", "visible"},
         lifecycle_state_path=spec.lifecycle_state_path,
-        salvage_report_from_stream=bool((launch_meta or {}).get("native_resume")),
+        salvage_report_from_stream=bool(
+            (launch_meta or {}).get("native_resume")
+            or (launch_meta or {}).get("native_fork")
+        ),
     )
     launch_dir = control_plane_home() / "launches"
     launch_dir.mkdir(parents=True, exist_ok=True)
@@ -2077,6 +3326,7 @@ def launch_workflow(
     if spec.model:
         merged_env["VIBECRAFTED_MODEL_REQUESTED"] = spec.model
     if research_selection is not None:
+        merged_env["VIBECRAFTED_RESEARCH_MODEL_AGENT"] = spec.research_model_agent
         if spec.research_agents:
             merged_env["VIBECRAFTED_RESEARCH_AGENTS"] = ",".join(
                 research_selection.agents
@@ -2149,6 +3399,7 @@ def launch_workflow(
             "mode": spec.mode,
             "runtime": spec.runtime,
             "root": spec.root,
+            **worktree_receipt,
             "operator_session": operator_session,
             "session_id": session_id,
             "identity_required": True,
@@ -2250,25 +3501,33 @@ def launch_workflow(
                             **model_receipt,
                         },
                     )
-                    return {
-                        "accepted": False,
-                        "message": f"Failed to launch {spec.skill}: {host.error}",
-                        "command": command,
-                        "worker_command": worker_command,
-                        "dispatch_command": dispatch_command,
-                        "transport": transport,
-                        "command_script": str(command_script or ""),
-                        "launch_log": str(launch_log),
-                        "spec": safe_spec,
-                        "error": host.error,
-                        "last_error": host.error,
-                        "run_id": run_id,
-                        "operator_session": operator_session,
-                        **launch_tracking,
-                        "retry_of": retry_of,
-                        **model_receipt,
-                        "control_plane": sync_state(),
-                    }
+                    return _finish_launch_idempotency(
+                        idem_key,
+                        {
+                            "accepted": False,
+                            "message": f"Failed to launch {spec.skill}: {host.error}",
+                            "command": command,
+                            "worker_command": worker_command,
+                            "dispatch_command": dispatch_command,
+                            "transport": transport,
+                            "command_script": str(command_script or ""),
+                            "launch_log": str(launch_log),
+                            "spec": safe_spec,
+                            "error": host.error,
+                            "last_error": host.error,
+                            "run_id": run_id,
+                            "agent": spec.agent,
+                            "skill": spec.skill,
+                            "root": spec.root,
+                            "status": "failed",
+                            "operator_session": operator_session,
+                            **launch_tracking,
+                            "retry_of": retry_of,
+                            **model_receipt,
+                            "control_plane": sync_state(),
+                        },
+                        spec_digest=idem_spec_digest,
+                    )
                 launcher_pid = host.pid
             else:
                 proc = subprocess.Popen(
@@ -2332,23 +3591,31 @@ def launch_workflow(
                     **model_receipt,
                 },
             )
-            return {
-                "accepted": False,
-                "message": f"Failed to launch {spec.skill}: {exc}",
-                "command": command,
-                "worker_command": worker_command,
-                "dispatch_command": dispatch_command,
-                "transport": transport,
-                "command_script": str(command_script or ""),
-                "launch_log": str(launch_log),
-                "spec": safe_spec,
-                "error": f"{type(exc).__name__}: {exc}",
-                "run_id": run_id,
-                **launch_tracking,
-                "retry_of": retry_of,
-                **model_receipt,
-                "control_plane": sync_state(),
-            }
+            return _finish_launch_idempotency(
+                idem_key,
+                {
+                    "accepted": False,
+                    "message": f"Failed to launch {spec.skill}: {exc}",
+                    "command": command,
+                    "worker_command": worker_command,
+                    "dispatch_command": dispatch_command,
+                    "transport": transport,
+                    "command_script": str(command_script or ""),
+                    "launch_log": str(launch_log),
+                    "spec": safe_spec,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "run_id": run_id,
+                    "agent": spec.agent,
+                    "skill": spec.skill,
+                    "root": spec.root,
+                    "status": "failed",
+                    **launch_tracking,
+                    "retry_of": retry_of,
+                    **model_receipt,
+                    "control_plane": sync_state(),
+                },
+                spec_digest=idem_spec_digest,
+            )
         append_event(
             kind="launch",
             run_id=run_id,
@@ -2390,69 +3657,53 @@ def launch_workflow(
         handle.write(
             json.dumps({"ts": stamp, "event": "spawned", "pid": launcher_pid}) + "\n"
         )
-        # Cut C: the worker stays headless; visibility is a viewer in the LIVE
-        # bucket, not a worker tab. A vc-frame transport already owns a tab of
-        # its own, so only the detached path gets one.
-        if transport == "headless":
-            live_viewer = open_live_viewer(
-                run_id=run_id,
-                agent=spec.agent,
-                root=spec.root,
-                launch_dir=launch_dir,
-                transcript_path=artifacts["transcript"],
-                meta_path=artifacts["meta"],
-                env=merged_env,
-            )
-            handle.write(
-                json.dumps({"ts": stamp, "event": "live_viewer", **live_viewer}) + "\n"
-            )
-        else:
-            live_viewer = _live_viewer_receipt(
-                "skipped", reason=f"transport_{transport}", run_id=run_id
-            )
 
-    return {
-        "live_viewer": live_viewer,
-        "accepted": True,
-        "message": f"Launched {spec.skill} via Vibecrafted core runtime.",
-        "command": command,
-        "dispatch_command": dispatch_command,
-        "worker_command": worker_command,
-        "transport": transport,
-        "command_script": str(command_script or ""),
-        "pid": launcher_pid,
-        "launcher_identity": launcher_identity,
-        "run_id": run_id,
-        "agent": spec.agent,
-        "skill": spec.skill,
-        "root": spec.root,
-        "dispatch": 0,
-        "status": "launching",
-        "control": str(run_snapshot_dir() / f"{run_id}.json"),
-        "report": str(report_path),
-        "transcript": str(artifacts["transcript"]),
-        "meta": str(artifacts["meta"]),
-        "prompt_file": str(prompt_path),
-        "session_id": session_id,
-        "operator_session": operator_session,
-        "control_plane_identity": {
+    return _finish_launch_idempotency(
+        idem_key,
+        {
+            "accepted": True,
+            "message": f"Launched {spec.skill} via Vibecrafted core runtime.",
+            "command": command,
+            "dispatch_command": dispatch_command,
+            "worker_command": worker_command,
+            "transport": transport,
+            "command_script": str(command_script or ""),
+            "pid": launcher_pid,
+            "launcher_identity": launcher_identity,
             "run_id": run_id,
+            "agent": spec.agent,
+            "skill": spec.skill,
+            "root": spec.root,
+            **worktree_receipt,
+            "dispatch": 0,
+            "status": "launching",
+            "control": str(run_snapshot_dir() / f"{run_id}.json"),
+            "report": str(report_path),
+            "transcript": str(artifacts["transcript"]),
+            "meta": str(artifacts["meta"]),
+            "prompt_file": str(prompt_path),
             "session_id": session_id,
             "operator_session": operator_session,
+            "control_plane_identity": {
+                "run_id": run_id,
+                "session_id": session_id,
+                "operator_session": operator_session,
+            },
+            "workflow": _workflow_metadata(spec.skill),
+            **model_receipt,
+            **launch_tracking,
+            "retry_of": retry_of,
+            "launch_log": str(launch_log),
+            "spec": safe_spec,
+            # Launch acceptance is already durable in the event stream, run meta,
+            # and dispatcher process. A global board reconciliation here can block
+            # on an unrelated run and turn a successful launch into a traceback.
+            # Reconciliation belongs to observe/await/board readers, never the
+            # launch acknowledgement path.
+            "control_plane": {"sync": "deferred", "run_id": run_id},
         },
-        "workflow": _workflow_metadata(spec.skill),
-        **model_receipt,
-        **launch_tracking,
-        "retry_of": retry_of,
-        "launch_log": str(launch_log),
-        "spec": safe_spec,
-        # Launch acceptance is already durable in the event stream, run meta,
-        # and dispatcher process. A global board reconciliation here can block
-        # on an unrelated run and turn a successful launch into a traceback.
-        # Reconciliation belongs to observe/await/board readers, never the
-        # launch acknowledgement path.
-        "control_plane": {"sync": "deferred", "run_id": run_id},
-    }
+        spec_digest=idem_spec_digest,
+    )
 
 
 def stop_run(
@@ -3677,6 +4928,11 @@ def manual_resume_session(
     prompt: str,
     root: str | Path = "",
     model: str = "",
+    model_source: str = "",
+    source_text: str | None = None,
+    source_path: str = "",
+    skill: str = "workflow",
+    launch_meta: dict[str, Any] | None = None,
     env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Launch an explicit provider-session continuation as its own tracked run.
@@ -3710,6 +4966,17 @@ def manual_resume_session(
             reason="missing_prompt",
         )
     try:
+        model_requested, selected_source = select_plan_model(
+            normalized_agent, prompt_body, model=model
+        )
+    except ValueError as exc:
+        return _manual_explicit_resume_rejection(
+            agent=normalized_agent,
+            agent_session_id=native_id,
+            reason="launch_spec_invalid",
+            detail=str(exc),
+        )
+    try:
         command, _probe_state, _probe_version = _verified_native_resume_command(
             normalized_agent,
             native_id,
@@ -3722,7 +4989,6 @@ def manual_resume_session(
             detail=exc.detail,
             retryable=exc.retryable,
         )
-    model_requested = str(model or "").strip()
     command = _with_model_override(
         normalized_agent,
         command,
@@ -3737,6 +5003,7 @@ def manual_resume_session(
     child_env["VIBECRAFTED_SESSION_ID"] = child_runtime_session_id
     child_env["VIBECRAFTED_AGENT_SESSION_ID"] = native_id
     launch_meta = {
+        **(launch_meta or {}),
         "run_id": child_run_id,
         "agent": normalized_agent,
         "agent_session_id": native_id,
@@ -3745,16 +5012,43 @@ def manual_resume_session(
         "resume_mode": "manual_explicit",
         "manual_explicit": True,
     }
-    spec = WorkflowLaunchSpec(
-        agent=normalized_agent,
+    try:
+        admitted = normalize_launch_spec(
+            {
+                "agent": normalized_agent,
+                "skill": str(skill or "workflow").strip() or "workflow",
+                "prompt": source_text if source_text is not None else prompt_body,
+                "root": resolved_root,
+                "repo_selector": True,
+                "runtime": "headless",
+                "model": model_requested,
+            },
+            resolved_source_dir,
+        )
+    except ValueError as exc:
+        return _manual_explicit_resume_rejection(
+            agent=normalized_agent,
+            agent_session_id=native_id,
+            reason="launch_spec_invalid",
+            detail=str(exc),
+        )
+    spec = replace(
+        admitted,
         mode="manual_explicit",
-        skill="workflow",
         prompt=prompt_body,
-        file="",
-        runtime="headless",
-        root=resolved_root,
-        model=model_requested,
+        model_source=model_source or selected_source,
+        runtime_class=str(launch_meta.get("runtime_class") or admitted.runtime_class),
+        baseline_sha=str(
+            launch_meta.get("baseline_sha")
+            or launch_meta.get("worktree_baseline_sha")
+            or admitted.baseline_sha
+        ),
         run_id=child_run_id,
+        plan_source=source_text,
+        source_path=source_path,
+        source_digest=hashlib.sha256(
+            (source_text if source_text is not None else prompt_body).encode("utf-8")
+        ).hexdigest(),
     )
     try:
         launched = launch_workflow(
@@ -3783,12 +5077,117 @@ def manual_resume_session(
     }
 
 
+def manual_fork_session(
+    agent: str,
+    session: str,
+    source_dir: str | Path,
+    *,
+    prompt: str,
+    root: str | Path,
+    model: str | None = None,
+    base: str = "",
+    worktree: str | bool | None = None,
+    execution_runtime: str = "",
+    source_path: str = "",
+    parent_run_id: str = "",
+    permissions: str = "",
+    session_selection: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Admit a native task fork using the existing private tracked launcher."""
+    source = resolve_session_selection(
+        agent, session, root, selection=session_selection
+    )
+    session = source["agent_session_id"]
+    if not source.get("accepted"):
+        return source
+    try:
+        command, probe_state, version = _verified_native_resume_command(agent, session)
+        if agent == "codex":
+            # The resume probe alone is insufficient evidence of exec fork.
+            probe = subprocess.run(
+                [command[0], "exec", "fork", "--help"],
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+            if (
+                probe.returncode
+                or b"<SESSION_ID>" not in probe.stdout
+                or b"stdin" not in probe.stdout
+            ):
+                raise ValueError(
+                    "installed Codex does not confirm exec fork stdin contract"
+                )
+        elif agent not in {"claude", "grok"}:
+            raise ValueError("native task fork is unverified for this provider")
+        spec = normalize_launch_spec(
+            {
+                "agent": agent,
+                "skill": "workflow",
+                "prompt": prompt,
+                "root": str(root),
+                "repo_selector": True,
+                "runtime": "headless",
+                "model": model,
+                "base": base,
+                "worktree": worktree,
+                "execution_runtime": execution_runtime,
+                "permissions": permissions,
+            },
+            source_dir,
+        )
+        # Reuse the normal permission owner; only native continuation differs.
+        executable = command[0]
+        command = _stdin_command(agent, controls=launch_execution_controls(spec))
+        if agent == "codex":
+            command = [*command[:-1], "fork", session, "-"]
+        else:
+            command.extend(["--resume", session, "--fork-session"])
+        command[0] = executable
+        command = _with_model_override(agent, command, spec.model)
+        spec = replace(
+            spec,
+            run_id=reserve_run_id("fork"),
+            mode="native_fork",
+            source_path=source_path,
+            plan_source=prompt,
+        )
+        runtime_session = ensure_session_id()
+        return launch_workflow(
+            spec,
+            source_dir,
+            env={
+                "VIBECRAFTED_SESSION_ID": runtime_session,
+                "VIBECRAFTED_AGENT_SESSION_ID": "",
+                "VIBECRAFTED_FORK_SOURCE_SESSION_ID": session,
+            },
+            worker_command_override=command,
+            launch_meta={
+                "native_fork": True,
+                "session_selection": source,
+                "fork_source_session_id": session,
+                "parent_run_id": parent_run_id or source.get("source_run_id", ""),
+                "runtime_session_id": runtime_session,
+                "provider_probe_state": probe_state,
+                "provider_version": version,
+            },
+        )
+    except (ValueError, OSError, subprocess.TimeoutExpired) as exc:
+        return {
+            "accepted": False,
+            "reason": "native_fork_admission_failed",
+            "detail": str(exc),
+            "agent": agent,
+        }
+
+
 CONTROL_PLANE_RUN_PREFIXES = frozenset(
     {
         "work",
         "impl",
         "wflw",
         "rsme",
+        "fork",
         "marb",
         "just",
         "scaf",
@@ -3908,6 +5307,328 @@ def find_run_for_identity_token(token: str) -> dict[str, Any] | None:
     return None
 
 
+FORK_SOURCE_SCHEMA = "vibecrafted.fork_source.v1"
+
+
+def _fork_source_rejection(
+    agent: str,
+    reason: str,
+    *,
+    detail: str = "",
+    hint: str = "",
+    run_id: str = "",
+    session: str = "",
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "schema": FORK_SOURCE_SCHEMA,
+        "accepted": False,
+        "agent": agent,
+        "reason": reason,
+        "agent_session_id": "",
+        "source_run_id": run_id,
+        "requested_session": session,
+    }
+    if detail:
+        payload["detail"] = detail
+    if hint:
+        payload["hint"] = hint
+    return payload
+
+
+def resolve_session_selection(
+    agent: str,
+    selector: str,
+    root: str | Path,
+    *,
+    environment: dict[str, str] | None = None,
+    selection: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Resolve public current/last without global recency or implicit cloning.
+
+    Last is the newest recorded native session in this exact checkout/provider;
+    equal timestamps for different sessions are ambiguous, never arbitrary.
+    Current requires explicit process context and agrees with recorded ownership.
+    """
+    provider = agent.strip().lower()
+    selected_root = str(Path(root).expanduser().resolve())
+    token = selector.strip()
+    if selection is not None:
+        # Transport the original resolution, never reinterpret current/last
+        # after handoff. Revalidate the exact target against current ownership.
+        if (
+            not isinstance(selection, dict)
+            or selection.get("agent") != provider
+            or selection.get("agent_session_id") != token
+            or selection.get("selection_root") != selected_root
+            or not selection.get("session_selector")
+            or not selection.get("identity_source")
+        ):
+            raise ValueError("session selection receipt does not match admission")
+        resolve_session_selection(provider, token, selected_root)
+        return dict(selection)
+    if token == "previous":
+        raise ValueError(
+            "--session previous is retired; use current, last or an exact ID"
+        )
+    provenance = "explicit_session"
+    if token == "current":
+        context = os.environ if environment is None else environment
+        identities: set[str] = set()
+        keys = {
+            "codex": ("CODEX_THREAD_ID", "CODEX_SESSION_ID"),
+            "claude": ("CLAUDE_CODE_SESSION_ID",),
+            "grok": ("GROK_SESSION_ID",),
+        }.get(provider, ())
+        for key in keys:
+            if context.get(key):
+                identities.add(context[key])
+        if context.get("VIBECRAFTED_AGENT") == provider and context.get(
+            "VIBECRAFTED_AGENT_SESSION_ID"
+        ):
+            identities.add(context["VIBECRAFTED_AGENT_SESSION_ID"])
+        parent_id = context.get("VIBECRAFTED_RUN_ID", "")
+        parent = lookup_run(parent_id) if parent_id else None
+        if parent and parent.get("agent") == provider:
+            native = _provider_session_for_continue(parent)
+            if native:
+                identities.add(native)
+        if len(identities) != 1:
+            raise ValueError(
+                "current requires one explicit provider session in parent context"
+            )
+        token = identities.pop()
+        provenance = "explicit_parent_context"
+        if (
+            not find_run_for_identity_token(token)
+            and str(Path.cwd().resolve()) != selected_root
+        ):
+            raise ValueError(
+                "unrecorded current session belongs to caller checkout; explicit repo differs"
+            )
+    elif token == "last":
+        candidates: dict[str, tuple[float, dict[str, Any]]] = {}
+        for path in (control_plane_home() / "runtime_runs").glob("*/meta.json"):
+            row = _read_json_object(path)
+            if row.get("agent") != provider or not row.get("root"):
+                continue
+            if str(Path(row["root"]).resolve()) != selected_root:
+                continue
+            native = _provider_session_for_continue(row)
+            stamp = str(row.get("started_at") or row.get("created_at") or "")
+            try:
+                instant = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+                if instant.tzinfo is None:
+                    continue
+                timestamp = instant.astimezone(timezone.utc).timestamp()
+            except ValueError:
+                continue
+            if native and timestamp > candidates.get(native, (float("-inf"), {}))[0]:
+                candidates[native] = (timestamp, row)
+        if not candidates:
+            raise ValueError(
+                "no recorded native session for selected repository/provider"
+            )
+        newest = max(value[0] for value in candidates.values())
+        winners = [native for native, value in candidates.items() if value[0] == newest]
+        if len(winners) != 1:
+            raise ValueError(
+                "last is ambiguous: equal timestamps for different native sessions"
+            )
+        token = winners[0]
+        provenance = "repository_provider_latest_started"
+    result = resolve_fork_source(provider, session=token, require_native_fork=False)
+    if not result.get("accepted"):
+        raise ValueError(str(result.get("detail") or result.get("reason")))
+    recorded_root = result.get("source_root")
+    if recorded_root and str(Path(recorded_root).resolve()) != selected_root:
+        raise ValueError("selected session belongs to a different repository checkout")
+    return {
+        **result,
+        "session_selector": selector,
+        "identity_source": provenance,
+        "selection_root": selected_root,
+    }
+
+
+def resolve_fork_source(
+    agent: str,
+    *,
+    run_id: str = "",
+    session: str = "",
+    require_native_fork: bool = True,
+) -> dict[str, Any]:
+    """Resolve the stable provider identity a ``vibecrafted fork`` branches from.
+
+    One identity per call: ``--session <provider-session-id>`` names it
+    directly, ``--run-id <control-plane-run>`` reads the provider session the
+    run recorded. The source is only ever read; forking happens in the
+    provider and must leave that session untouched. Providers without a native
+    fork surface are refused here, with the capability table as evidence, so
+    no caller can present a plain resume as a fork.
+    """
+    normalized_agent = str(agent or "").strip().lower()
+    target_run = str(run_id or "").strip()
+    target_session = str(session or "").strip()
+    if not normalized_agent:
+        return _fork_source_rejection("", "missing_agent")
+    try:
+        capability = capability_for(normalized_agent)
+    except ValueError as exc:
+        return _fork_source_rejection(
+            normalized_agent, "unknown_agent", detail=str(exc)
+        )
+    if require_native_fork and capability.native_fork == UNSUPPORTED:
+        return _fork_source_rejection(
+            normalized_agent,
+            "native_fork_unsupported",
+            detail=capability.fork_runtime_restrictions,
+            hint=(
+                f"vibecrafted resume {normalized_agent} --session <id> continues the "
+                "original session (that is a resume, not a fork)"
+            ),
+        )
+    if target_run and target_session:
+        return _fork_source_rejection(
+            normalized_agent,
+            "conflicting_identity",
+            detail="--session and --run-id cannot be combined; use one identity",
+            run_id=target_run,
+            session=target_session,
+        )
+    if not target_run and not target_session:
+        return _fork_source_rejection(
+            normalized_agent,
+            "missing_identity",
+            hint=(
+                f"vibecrafted fork {normalized_agent} --session <provider-session-id> | "
+                "--run-id <work-...>"
+            ),
+        )
+
+    if target_session:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", target_session):
+            return _fork_source_rejection(
+                normalized_agent,
+                "invalid_session_id",
+                detail="use a native session ID, not flags, paths or a title",
+            )
+        kind = classify_resume_identity(target_session)
+        if kind == "run_id" or looks_like_control_plane_run_id(target_session):
+            return _fork_source_rejection(
+                normalized_agent,
+                "run_id_not_session",
+                detail="that token is a control-plane run id, not a provider session",
+                hint=f"vibecrafted fork {normalized_agent} --run-id {target_session}",
+                session=target_session,
+            )
+        if kind == "vibecrafted_session":
+            found = find_run_for_identity_token(target_session) or {}
+            provider = _provider_session_for_continue(found)
+            return _fork_source_rejection(
+                normalized_agent,
+                "vibecrafted_session_not_provider_session",
+                detail=(
+                    "that token is VIBECRAFTED_SESSION_ID / runtime_session_id, "
+                    "not a provider session"
+                ),
+                hint=(
+                    f"vibecrafted fork {normalized_agent} --session {provider}"
+                    if provider
+                    else ""
+                ),
+                session=target_session,
+            )
+        found = find_run_for_identity_token(target_session) or {}
+        recorded_agent = str(found.get("agent") or "").strip().lower()
+        if recorded_agent and recorded_agent != normalized_agent:
+            return _fork_source_rejection(
+                normalized_agent,
+                "agent_mismatch",
+                detail=f"recorded={recorded_agent} requested={normalized_agent}",
+                session=target_session,
+            )
+        return {
+            "schema": FORK_SOURCE_SCHEMA,
+            "accepted": True,
+            "agent": normalized_agent,
+            "agent_session_id": target_session,
+            "source_run_id": str(found.get("run_id") or ""),
+            "source_root": str(found.get("root") or ""),
+            "identity_source": "recorded_session" if found else "explicit_session",
+            "native_fork": capability.native_fork,
+            "fork_runtime_restrictions": capability.fork_runtime_restrictions,
+        }
+
+    kind = classify_resume_identity(target_run)
+    if kind == "provider_session":
+        return _fork_source_rejection(
+            normalized_agent,
+            "provider_session_not_run_id",
+            detail="that token is a provider session, not a control-plane run id",
+            hint=f"vibecrafted fork {normalized_agent} --session {target_run}",
+            run_id=target_run,
+        )
+    if kind == "vibecrafted_session":
+        found = find_run_for_identity_token(target_run) or {}
+        found_id = str(found.get("run_id") or "")
+        return _fork_source_rejection(
+            normalized_agent,
+            "vibecrafted_session_not_run_id",
+            detail=(
+                "that token is VIBECRAFTED_SESSION_ID / runtime_session_id, "
+                "not a control-plane run and not a provider session"
+            ),
+            hint=f"vibecrafted fork {normalized_agent} --run-id {found_id}"
+            if found_id
+            else "",
+            run_id=target_run,
+        )
+    if kind == "unknown" and not looks_like_control_plane_run_id(target_run):
+        return _fork_source_rejection(
+            normalized_agent,
+            "not_a_run_id",
+            detail="pass a control-plane run id such as work-YYMMDD-HHMMSS-xxxxx",
+            run_id=target_run,
+        )
+    run = lookup_run(target_run)
+    if run is None:
+        return _fork_source_rejection(
+            normalized_agent, "run_not_found", run_id=target_run
+        )
+    parent = _merge_run_and_meta(run, _native_resume_meta(target_run, run))
+    recorded_agent = str(parent.get("agent") or "").strip().lower()
+    if recorded_agent and recorded_agent != normalized_agent:
+        return _fork_source_rejection(
+            normalized_agent,
+            "agent_mismatch",
+            detail=f"recorded={recorded_agent} requested={normalized_agent}",
+            run_id=target_run,
+        )
+    native_session = _provider_session_for_continue(parent)
+    if not native_session:
+        return _fork_source_rejection(
+            normalized_agent,
+            "no_provider_session",
+            detail=(
+                "the run recorded no provider session id; a fork needs a native "
+                "session to branch from and never replays the prompt as a fork"
+            ),
+            hint=f"vibecrafted resume {normalized_agent} --run-id {target_run}",
+            run_id=target_run,
+        )
+    return {
+        "schema": FORK_SOURCE_SCHEMA,
+        "accepted": True,
+        "agent": normalized_agent,
+        "agent_session_id": native_session,
+        "source_run_id": target_run,
+        "source_root": str(parent.get("root") or ""),
+        "identity_source": "run_meta",
+        "native_fork": capability.native_fork,
+        "fork_runtime_restrictions": capability.fork_runtime_restrictions,
+    }
+
+
 def _operator_continue_rejection(
     run_id: str,
     reason: str,
@@ -3939,6 +5660,11 @@ def _merge_run_and_meta(run: dict[str, Any], meta: dict[str, Any]) -> dict[str, 
     for key, value in run.items():
         if value not in (None, ""):
             merged[key] = value
+    if (
+        str(meta.get("agent") or "") in SUPPORTED_AGENTS
+        and str(run.get("agent") or "") not in SUPPORTED_AGENTS
+    ):
+        merged["agent"] = meta["agent"]
     return merged
 
 
@@ -3972,6 +5698,8 @@ def _worker_process_alive(run: dict[str, Any]) -> bool:
 
 def _provider_session_for_continue(run: dict[str, Any]) -> str:
     """Return a provider session id that is not just the Vibecrafted runtime id."""
+    if run.get("native_identity_status") == "pending":
+        return ""
     agent_session = _explicit_native_identity(
         run.get("agent_session_id") or run.get("session_id") or ""
     )
@@ -3993,7 +5721,7 @@ def _operator_continue_prompt(
     native_session: str,
 ) -> str:
     """Build the continuation prompt for a stopped/failed parent run."""
-    extra = str(extra_prompt or "").strip()
+    extra = str(extra_prompt or "")
     original = ""
     try:
         resolved = resolve_run(run_id)
@@ -4042,6 +5770,9 @@ def operator_continue_run(
     expected_agent: str = "",
     root: str | Path = "",
     model: str = "",
+    plan_text: str = "",
+    source_path: str = "",
+    base: str = "",
     env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Continue a stopped/failed control-plane run as a new tracked job.
@@ -4151,7 +5882,68 @@ def operator_continue_run(
         root or parent.get("root") or "",
         resolved_source_dir,
     )
-    model_requested = str(model or parent.get("model_requested") or "").strip()
+    if (
+        root
+        and parent.get("root")
+        and Path(root).resolve() != Path(str(parent["root"])).resolve()
+    ):
+        return _operator_continue_rejection(
+            target,
+            "repository_conflict",
+            detail="resume preserves the original checkout; use fork",
+            run=parent,
+        )
+    if base:
+        try:
+            _ref, requested_sha = resolve_repository_base(resolved_root, base)
+        except ValueError as exc:
+            return _operator_continue_rejection(
+                target, "base_conflict", detail=str(exc), run=parent
+            )
+        recorded_sha = (
+            parent.get("baseline_sha")
+            or parent.get("worktree_baseline_sha")
+            or parent.get("dispatch_baseline_sha")
+        )
+        if not recorded_sha or requested_sha != recorded_sha:
+            return _operator_continue_rejection(
+                target,
+                "base_conflict",
+                detail="resume preserves recorded baseline; use a new run or fork",
+                run=parent,
+            )
+    try:
+        model_requested, model_source = select_plan_model(
+            agent,
+            plan_text,
+            model=model,
+            previous=str(
+                parent.get("model_effective")
+                or parent.get("agent_model")
+                or parent.get("model_requested")
+                or ""
+            ),
+        )
+    except ValueError as exc:
+        return _operator_continue_rejection(
+            target, "launch_spec_invalid", detail=str(exc), run=parent
+        )
+    continuation_meta = {
+        "parent_run_id": target,
+        "resume_of": target,
+        "model_source": model_source,
+        **{
+            key: parent[key]
+            for key in (
+                "runtime_class",
+                "baseline_sha",
+                "worktree_baseline_sha",
+                "worktree_branch",
+                "parent_root",
+            )
+            if key in parent
+        },
+    }
 
     if native_session:
         launched = manual_resume_session(
@@ -4161,6 +5953,10 @@ def operator_continue_run(
             prompt=prompt_body,
             root=resolved_root,
             model=model_requested,
+            model_source=model_source,
+            source_text=plan_text or prompt or None,
+            source_path=source_path,
+            launch_meta=continuation_meta,
             env=env,
         )
         return {
@@ -4194,12 +5990,22 @@ def operator_continue_run(
             detail=str(exc),
             run=parent,
         )
+    spec = replace(
+        spec,
+        model_source=model_source,
+        plan_source=plan_text or prompt or None,
+        source_path=source_path,
+        source_digest=hashlib.sha256(
+            (plan_text or prompt or prompt_body).encode("utf-8")
+        ).hexdigest(),
+    )
     try:
         launched = launch_workflow(
             spec,
             resolved_source_dir,
             env=env,
             launch_meta={
+                **continuation_meta,
                 "resume_of": target,
                 "resume_root": target,
                 "resume_mode": "operator_continue",

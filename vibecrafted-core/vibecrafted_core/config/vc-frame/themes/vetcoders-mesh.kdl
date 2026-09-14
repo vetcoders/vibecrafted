@@ -1,15 +1,18 @@
 // Vetcoders mesh-aware vc_frame themes
 // Plan 12 (META_22) — Wave 4 agent-native runtime cut.
 //
-// Kronika 2026-05-05 — Vetcoders mesh topology. Each workstation gets a
-// canonical accent so the operator instantly knows which machine they are
-// looking at when peering through screen-share, mirrored displays, or a
-// browser-shared tmux/vc_frame session.
+// Four accent variants so an operator can tell workstations apart when
+// peering through screen-share, mirrored displays, or a browser-shared
+// tmux/vc_frame session:
 //
-//   dragon   — red    — LibraxisAI server, central hub
-//   sztudio  — purple — desktop
-//   silver   — cyan   — laptop
-//   div0     — green  — laptop (primary dev)
+//   mesh-red     — red accent
+//   mesh-purple  — purple accent
+//   mesh-cyan    — cyan accent
+//   mesh-green   — green accent
+//
+// Which host gets which accent is operator configuration (mesh.conf or
+// VIBECRAFTED_MESH_MAP) — see auto-theme.sh. Nothing here is tied to a
+// specific machine.
 //
 // The base palette is the canonical "vibecrafted" theme (config.kdl). Each
 // mesh variant overrides ONLY the accent (yellow + magenta + cyan are
@@ -21,60 +24,60 @@
 //
 // Vibecrafted with AI Agents (c)2024-2026 LibraxisAI
 themes {
-    // ── vetcoders-dragon — red — LibraxisAI server, central hub ──────────
-    vetcoders-dragon {
+    // ── mesh-red — red accent ────────────────────────────────────────────
+    mesh-red {
         fg 220 215 186
         bg 30 24 24
         black 20 20 24
         white 235 230 210
         red 204 36 29           // base alerts
         green 142 192 124
-        yellow 224 92 80        // accent: dragon scarlet
+        yellow 224 92 80        // accent: scarlet
         blue 69 133 136
         magenta 204 36 60       // identity glow
         orange 214 93 14
         cyan 224 92 80          // mirror accent
     }
 
-    // ── vetcoders-sztudio — purple — desktop ────────────────────
-    vetcoders-sztudio {
+    // ── mesh-purple — purple accent ──────────────────────────────────────
+    mesh-purple {
         fg 220 215 186
         bg 28 24 36
         black 20 20 24
         white 235 230 210
         red 204 36 29
         green 142 192 124
-        yellow 175 122 197      // accent: sztudio violet
+        yellow 175 122 197      // accent: violet
         blue 69 133 136
         magenta 175 122 197     // identity glow
         orange 214 93 14
         cyan 175 122 197        // mirror accent
     }
 
-    // ── vetcoders-silver — cyan — laptop ────────────────────────
-    vetcoders-silver {
+    // ── mesh-cyan — cyan accent ──────────────────────────────────────────
+    mesh-cyan {
         fg 220 215 186
         bg 24 30 34
         black 20 20 24
         white 235 230 210
         red 204 36 29
         green 142 192 124
-        yellow 104 192 192      // accent: silver cyan
+        yellow 104 192 192      // accent: cyan
         blue 69 133 136
         magenta 104 192 192     // identity glow
         orange 214 93 14
         cyan 104 192 192        // mirror accent
     }
 
-    // ── vetcoders-div0 — green — laptop (primary dev) ────────────
-    vetcoders-div0 {
+    // ── mesh-green — green accent ────────────────────────────────────────
+    mesh-green {
         fg 220 215 186
         bg 24 32 28
         black 20 20 24
         white 235 230 210
         red 204 36 29
         green 142 192 124
-        yellow 142 192 124      // accent: div0 sage
+        yellow 142 192 124      // accent: sage
         blue 69 133 136
         magenta 142 192 124     // identity glow
         orange 214 93 14

@@ -162,7 +162,7 @@ to evidence by inspecting code + tests.
 You MUST NOT trust PR description bullets, commit messages naming the
 fix, `// done` / `# implemented` inline comments, prior `vc-followup`
 or `vc-review` reports, frontmatter status on linked task files,
-AICX / kronika / memory slices, or "fixes #123" / "closes #456"
+AICX / chronicle / memory slices, or "fixes #123" / "closes #456"
 annotations — unless **independently confirmed in current code/tests**.
 
 ### Evidence Taxonomy

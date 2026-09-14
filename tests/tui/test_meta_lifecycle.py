@@ -28,10 +28,14 @@ unset SPAWN_MODEL SPAWN_PROMPT_ID
 """
 
 
-def _bash(script: str) -> subprocess.CompletedProcess[str]:
+def _bash(
+    script: str, *, vibecrafted_home: Path | None = None
+) -> subprocess.CompletedProcess[str]:
     with tempfile.TemporaryDirectory(prefix="vibecrafted-meta-test-") as state_root:
         env = os.environ.copy()
-        env["VIBECRAFTED_HOME"] = str(Path(state_root) / ".vibecrafted")
+        env["VIBECRAFTED_HOME"] = str(
+            vibecrafted_home or Path(state_root) / ".vibecrafted"
+        )
         return subprocess.run(
             ["bash", "-lc", _ENV_SANITIZE + script],
             check=True,
@@ -55,38 +59,6 @@ def _write_meta(meta: Path, status: str) -> None:
 
 def _load(meta: Path) -> dict:
     return json.loads(meta.read_text(encoding="utf-8"))
-
-
-def test_control_plane_script_prefers_explicit_root_then_checkout(
-    tmp_path: Path,
-) -> None:
-    explicit_root = tmp_path / "explicit"
-    tools_home = tmp_path / "tools"
-    installed_root = tools_home / "vibecrafted-current"
-    for root in (explicit_root, installed_root):
-        script = root / "scripts" / "control_plane_state.py"
-        script.parent.mkdir(parents=True)
-        script.write_text("# test helper\n", encoding="utf-8")
-
-    result = _bash(
-        f'''
-        set -euo pipefail
-        source "{COMMON_SH}"
-        export VIBECRAFTED_ROOT="{explicit_root}"
-        export VIBECRAFTED_TOOLS_HOME="{tools_home}"
-        spawn_control_plane_script
-        unset VIBECRAFTED_ROOT
-        spawn_control_plane_script
-        cd "{tmp_path}"
-        spawn_control_plane_script
-        '''
-    )
-
-    assert result.stdout.splitlines() == [
-        str(explicit_root / "scripts" / "control_plane_state.py"),
-        str(REPO_ROOT / "scripts" / "control_plane_state.py"),
-        str(installed_root / "scripts" / "control_plane_state.py"),
-    ]
 
 
 def test_mark_meta_running_flips_launching_to_running(tmp_path: Path) -> None:
@@ -175,8 +147,8 @@ PY
     assert final["session_id"] == "telemetry-session-001"
 
 
-def test_finalize_handoff_returns_regular_meta_for_triage(tmp_path: Path) -> None:
-    """The shell handoff carries the canonical meta, never its compat symlink."""
+def test_finalize_handoff_returns_regular_canonical_meta(tmp_path: Path) -> None:
+    """Artifact closure returns canonical meta without presentation side effects."""
 
     home = tmp_path / "home" / ".vibecrafted"
     reports = home / "artifacts" / "Vetcoders" / "demo" / "2026_0726" / "reports"
@@ -199,7 +171,6 @@ def test_finalize_handoff_returns_regular_meta_for_triage(tmp_path: Path) -> Non
         spawn_finish_meta "{meta}" completed 0
         final_meta="$(spawn_finalize_artifacts "{meta}" "{report}" "{transcript}")"
         [[ -f "$final_meta" && ! -L "$final_meta" ]]
-        spawn_triage_run "$final_meta"
         printf 'FINAL_META=%s\\n' "$final_meta"
         '''
     )
@@ -213,8 +184,8 @@ def test_finalize_handoff_returns_regular_meta_for_triage(tmp_path: Path) -> Non
     assert final_meta.is_file()
     assert not final_meta.is_symlink()
     payload = json.loads(final_meta.read_text(encoding="utf-8"))
-    assert payload["triage"] == "skipped"
-    assert payload["triage_reason"] == "no_session"
+    assert "triage" not in payload
+    assert "triage_reason" not in payload
 
 
 def test_generated_launcher_walks_full_lifecycle(tmp_path: Path) -> None:
@@ -276,6 +247,12 @@ def test_generated_launcher_walks_full_lifecycle(tmp_path: Path) -> None:
 
 def test_spawn_write_meta_schema_contract_pin(tmp_path: Path) -> None:
     meta = tmp_path / "run.meta.json"
+    # The workspace identity stamp (spawn.write_meta) is best-effort, and the
+    # catalog refuses to persist a pytest tmp_path root unless the catalog home
+    # is itself isolated (workspace_catalog._refuse_operator_catalog_test_root).
+    # A home outside tmp_path made the stamp vanish exactly where the root is a
+    # `pytest-of-*` path (CI: KeyError workspace_id) and appear elsewhere. An
+    # isolated home makes the full schema -- identity included -- deterministic.
     _bash(
         f'''
         set -euo pipefail
@@ -285,7 +262,8 @@ def test_spawn_write_meta_schema_contract_pin(tmp_path: Path) -> None:
         export SPAWN_LOOP_NR=4
         export SPAWN_SKILL_CODE=just
         spawn_write_meta "{meta}" "launching" "claude" "implement" "{tmp_path}" "plan.md" "report.md" "t.log" "l.sh" "gpt-4"
-        '''
+        ''',
+        vibecrafted_home=tmp_path / "isolated-vibecrafted-home" / ".vibecrafted",
     )
 
     data = _load(meta)
@@ -308,6 +286,9 @@ def test_spawn_write_meta_schema_contract_pin(tmp_path: Path) -> None:
     assert data["launcher_pid"] is None
     assert data["liveness"] == "pid_pending"
     assert data["model"] == "gpt-4"
+    # d4e71502: write_meta records the requested model beside the resolved one
+    # (`model_requested or model`), so a plain --model launch carries both.
+    assert data["model_requested"] == "gpt-4"
     assert isinstance(data["created_at"], str)
     assert isinstance(data["updated_at"], str)
     for identity_key in (
@@ -345,6 +326,7 @@ def test_spawn_write_meta_schema_contract_pin(tmp_path: Path) -> None:
         "launcher_pid",
         "liveness",
         "model",
+        "model_requested",
         "workspace_id",
         "workspace_instance_id",
         "workspace_display_label",
@@ -419,14 +401,8 @@ def test_write_meta_python_direct(tmp_path: Path, monkeypatch) -> None:
     assert os.environ["VIBECRAFTED_HOME"] == str(vibecrafted_home)
 
 
-def test_triage_run_is_the_last_step_of_a_generated_launcher() -> None:
-    """Triage closes the tab the launcher is running in, so it must run last.
-
-    Anything sequenced after `spawn_triage_run` in a successful transfer may
-    simply never execute — the pane is gone. Pinning the order here keeps a
-    later edit from quietly moving artifact closure behind it and losing the
-    report on exactly the runs that finished cleanly.
-    """
+def test_generated_launcher_has_no_terminal_triage_side_effect() -> None:
+    """Supervised lifecycle closes artifacts without creating or moving sessions."""
     launcher_src = (
         REPO_ROOT
         / "vibecrafted-core"
@@ -443,30 +419,11 @@ def test_triage_run_is_the_last_step_of_a_generated_launcher() -> None:
         == 2
     )
 
-    for branch, tail in (
-        ("success", 'spawn_triage_run "$meta"\nelse'),
-        ("failure", 'spawn_triage_run "$meta"\n  exit "$exit_code"'),
-    ):
-        assert tail in launcher_src, f"{branch} branch does not end with triage"
-
-    # ...and in both branches artifact closure precedes it.
-    first_triage = launcher_src.index('spawn_triage_run "$meta"')
-    first_finalize = launcher_src.index('spawn_finalize_artifacts "$meta"')
-    assert first_finalize < first_triage
-
-    last_triage = launcher_src.rindex('spawn_triage_run "$meta"')
-    last_finalize = launcher_src.rindex('spawn_finalize_artifacts "$meta"')
-    assert last_finalize < last_triage
+    assert "spawn_triage_run" not in launcher_src
 
 
-def test_reap_runs_after_artifact_closure_and_before_triage() -> None:
-    """The reaper sits between artifact closure and triage, in both branches.
-
-    Before triage, because a successful transfer closes this tab: sequenced after
-    it, the sweep may never run and the survivors keep burning cores until reboot.
-    After artifact closure, because the reap is only correct once the run's
-    terminal state is on disk — that is what makes it a *terminal* run's residue.
-    """
+def test_reap_runs_after_artifact_closure() -> None:
+    """The reaper runs only after terminal state is durably on disk."""
     launcher_src = (
         REPO_ROOT
         / "vibecrafted-core"
@@ -482,8 +439,7 @@ def test_reap_runs_after_artifact_closure_and_before_triage() -> None:
     for finder in ("index", "rindex"):
         finalize = getattr(launcher_src, finder)('spawn_finalize_artifacts "$meta"')
         reap = getattr(launcher_src, finder)("spawn_reap_run")
-        triage = getattr(launcher_src, finder)('spawn_triage_run "$meta"')
-        assert finalize < reap < triage
+        assert finalize < reap
 
 
 def test_reap_run_never_fails_a_finished_run(tmp_path: Path) -> None:
@@ -498,46 +454,6 @@ def test_reap_run_never_fails_a_finished_run(tmp_path: Path) -> None:
     )
     assert proc.returncode == 0
     assert "survived" in proc.stdout
-
-
-def test_triage_run_never_fails_a_finished_run(tmp_path: Path) -> None:
-    """The shell wrapper is fail-open: no meta, no session, no vc-frame — exit 0."""
-    meta = tmp_path / "agent.meta.json"
-    meta.write_text(
-        json.dumps({"run_id": "r1", "exit_code": 0}) + "\n", encoding="utf-8"
-    )
-
-    # _ENV_SANITIZE clears VC_FRAME_* but not the legacy ZELLIJ_* aliases that
-    # vc-frame still dual-emits, and this suite may itself be running inside a
-    # live session. Clear both so the assertion is about the code, not the host.
-    result = _bash(
-        f'''
-        set -euo pipefail
-        export HOME="{tmp_path / "home"}"
-        mkdir -p "$HOME"
-        unset VIBECRAFTED_HOME VIBECRAFTED_CONTROL_PLANE
-        unset ZELLIJ ZELLIJ_PANE_ID ZELLIJ_SESSION_NAME
-        source "{COMMON_SH}"
-        spawn_triage_run "{meta}"
-        echo "survived=$?"
-        '''
-    )
-
-    assert "survived=0" in result.stdout
-    # Headless test env has no vc-frame pane: the receipt says so plainly.
-    data = json.loads(meta.read_text(encoding="utf-8"))
-    assert data["triage"] == "skipped"
-    assert data["triage_reason"] == "no_session"
-
-
-def test_triage_run_tolerates_a_missing_meta(tmp_path: Path) -> None:
-    _bash(
-        f'''
-        set -euo pipefail
-        source "{COMMON_SH}"
-        spawn_triage_run "{tmp_path / "absent.meta.json"}"
-        '''
-    )
 
 
 def test_meta_writers_replace_never_truncate_in_place() -> None:
