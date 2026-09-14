@@ -384,7 +384,10 @@ if (( ${#_VC_TERMINAL_WARNINGS} )); then
   print -u2 -r -- "Vibecrafted: ${#_VC_TERMINAL_WARNINGS} shell setup notices. See ${HISTFILE:h}/startup.log"
 fi
 
-if [[ -t 1 && -z "${VIBECRAFTED_QUIET_START:-}" ]]; then
+# The command deck is the door of a plain VC Terminal. A Frame pane already has
+# its own chrome (Start here, the tab row, the Shell tab guide), so repeating
+# the deck in every new pane is noise.
+if [[ -t 1 && -z "${VIBECRAFTED_QUIET_START:-}" && -z "${VC_FRAME_PANE_ID:-}" ]]; then
   print -P '%F{cyan}Vibecrafted%f · Your terminal is ready.'
   print '  vc-start --repo <path>    Create a workspace for your project'
   print '  vc-frame list-sessions   Find an existing workspace'

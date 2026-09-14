@@ -80,6 +80,74 @@ def test_product_profile_skips_help_banner_when_quiet_start_is_set(
     assert "vc-start --repo" not in result.stdout
 
 
+def _profile_on_pty(tmp_path: Path, extra_env: dict[str, str]) -> str:
+    """Source the product profile on a real pty; the deck only prints to a tty."""
+    import os
+    import pty
+    import select
+
+    product = tmp_path / ".config/vibecrafted/vc-terminal"
+    product.mkdir(parents=True, exist_ok=True)
+    (product / "interactive.zsh").write_text(
+        PROFILE.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    env = {
+        "HOME": str(tmp_path),
+        "PATH": "/usr/bin:/bin",
+        "TERM": "xterm",
+        "VIBECRAFTED_HOME": str(tmp_path / ".vibecrafted"),
+        **extra_env,
+    }
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.chdir(tmp_path)
+        os.execve(
+            "/bin/zsh",
+            [
+                "/bin/zsh",
+                "-dfic",
+                (
+                    'source "$HOME/.config/vibecrafted/vc-terminal/interactive.zsh"; '
+                    "print PROFILE_READY"
+                ),
+            ],
+            env,
+        )
+    output = bytearray()
+    while True:
+        ready, _, _ = select.select([fd], [], [], 15)
+        if not ready:
+            break
+        try:
+            chunk = os.read(fd, 65536)
+        except OSError:
+            break
+        if not chunk:
+            break
+        output += chunk
+    os.waitpid(pid, 0)
+    return output.decode("utf-8", "replace")
+
+
+def test_product_profile_prints_the_deck_on_a_plain_terminal_tty(
+    tmp_path: Path,
+) -> None:
+    text = _profile_on_pty(tmp_path, {})
+    assert "PROFILE_READY" in text
+    assert "Your terminal is ready" in text
+
+
+def test_product_profile_skips_the_deck_inside_a_frame_pane(tmp_path: Path) -> None:
+    """A new Frame pane already shows the product chrome; the deck is noise."""
+    text = _profile_on_pty(
+        tmp_path,
+        {"VC_FRAME_PANE_ID": "2", "VC_FRAME_SESSION_NAME": "workspace"},
+    )
+    assert "PROFILE_READY" in text
+    assert "Your terminal is ready" not in text
+    assert "vc-start --repo" not in text
+
+
 def test_product_profile_keeps_on_request_help_behind_quiet_gate() -> None:
     text = PROFILE.read_text(encoding="utf-8")
     assert "VIBECRAFTED_QUIET_START" in text
