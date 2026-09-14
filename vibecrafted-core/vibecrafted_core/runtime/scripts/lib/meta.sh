@@ -116,7 +116,6 @@ PY
 spawn_settle_early_failure() {
   [[ -z "${SPAWN_SETTLING_EARLY_FAILURE:-}" ]] || return 0
   SPAWN_SETTLING_EARLY_FAILURE=1
-  local reason="${1:-early failure}"
   local meta_path="${SPAWN_META:-}"
   local run_id="${SPAWN_RUN_ID:-}"
   local canonical=""

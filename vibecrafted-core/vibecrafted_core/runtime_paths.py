@@ -368,6 +368,7 @@ def _host_agent_bin_dirs(environment: Mapping[str, str]) -> list[Path]:
     return [
         home / ".local/bin",
         home / ".cargo/bin",
+        home / ".kimi-code/bin",
         home / "tools/scripts",
         Path("/opt/homebrew/bin"),
         Path("/opt/homebrew/sbin"),

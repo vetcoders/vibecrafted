@@ -26,6 +26,20 @@ def test_only_agy_uses_the_stream_json_transport() -> None:
         assert stdin_transport(agent) == "text"
 
 
+def test_kimi_uses_the_argv_transport() -> None:
+    """kimi 0.42.0 has no stdin prompt lane: -p is argv-only, no --prompt-file."""
+    assert stdin_transport("kimi") == "argv"
+
+
+def test_materialize_hands_kimi_the_prompt_file_itself(tmp_path: Path) -> None:
+    """The argv transport reads the 0600 prompt file at exec time; no sibling."""
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text(PROMPT, encoding="utf-8")
+
+    assert materialize_stdin_file("kimi", prompt) == prompt
+    assert not (tmp_path / "prompt.ndjson").exists()
+
+
 def test_user_turn_is_one_ndjson_line_that_round_trips_the_prompt() -> None:
     encoded = encode_stream_json_user_turn(PROMPT)
 
@@ -134,3 +148,66 @@ def test_async_supervisor_feeds_agy_one_stream_json_turn_and_reads_its_result(
     )
     assert handle.resume_command == f"cd {tmp_path} && agy --conversation conv-42"
     assert '"event": "result"' in transcript.read_text(encoding="utf-8")
+
+
+def test_async_supervisor_launches_kimi_with_prompt_on_argv(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """End to end through the supervisor: kimi takes the prompt as the -p argv
+    value (never stdin — the supervisor still pipes the prompt file, which kimi
+    ignores) and the parser lifts the session id from the closing
+    session.resume_hint meta line into the run.
+    """
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "home"))
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text(PROMPT, encoding="utf-8")
+    report = tmp_path / "report.md"
+    transcript = tmp_path / "transcript.log"
+    stdin_capture = tmp_path / "stdin.captured"
+    argv_capture = tmp_path / "argv.captured"
+    fake_kimi = tmp_path / "fake_kimi.py"
+    fake_kimi.write_text(
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        f"Path({str(argv_capture)!r}).write_text(json.dumps(sys.argv[1:]))\n"
+        f"Path({str(stdin_capture)!r}).write_bytes(sys.stdin.buffer.read())\n"
+        'print(json.dumps({"role": "meta", "type": "system.version",'
+        ' "version": "0.42.0"}))\n'
+        'print(json.dumps({"role": "assistant", "content": "pong"}))\n'
+        'print(json.dumps({"role": "meta", "type": "session.resume_hint",'
+        ' "session_id": "kimi-sess-7", "command": "kimi -r kimi-sess-7"}))\n'
+        f"Path({str(report)!r}).write_text('---\\nrun_id: kimi-turn\\nagent: kimi\\n"
+        "skill: test\\nstatus: completed\\nclaim_status: completed\\n---\\npong\\n')\n",
+        encoding="utf-8",
+    )
+
+    handle = asyncio.run(
+        AsyncSupervisor().run(
+            run_id="kimi-turn",
+            command=[
+                sys.executable,
+                str(fake_kimi),
+                "-p",
+                PROMPT,
+                "--output-format",
+                "stream-json",
+            ],
+            root=tmp_path,
+            env={"VIBECRAFTED_AGENT": "kimi"},
+            report_path=report,
+            transcript_path=transcript,
+            prompt_file_path=prompt,
+        )
+    )
+
+    assert handle.exit_code == 0
+    argv = json.loads(argv_capture.read_text(encoding="utf-8"))
+    assert argv[0] == "-p"
+    assert argv[1] == PROMPT
+    # No NDJSON sibling is materialized for the argv transport; the supervisor
+    # still pipes the private prompt file on stdin, which kimi ignores.
+    assert stdin_capture.read_bytes() == PROMPT.encode("utf-8")
+    assert not (tmp_path / "prompt.ndjson").exists()
+    assert handle.agent_session_id == "kimi-sess-7"
+    assert handle.resume_command == f"cd {tmp_path} && kimi -S kimi-sess-7"
+    assert '"role": "assistant"' in transcript.read_text(encoding="utf-8")

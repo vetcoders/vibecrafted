@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import socket
 import subprocess
+import tempfile
+from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -9,10 +15,15 @@ from vibecrafted_core.settlement_board import (
     SETTLEMENT_BOARD_SCOPE,
     SETTLEMENT_COUNTS_PIPE,
     SETTLEMENT_REPLAY_INTERVAL_SECONDS,
+    DeliveryReport,
     ServerSettlementBoard,
     SettlementBoardError,
     SettlementBoardPublisher,
     _read_server_state,
+)
+
+needs_posix_sockets = pytest.mark.skipif(
+    os.name != "posix", reason="vc-frame session sockets are AF_UNIX files"
 )
 
 
@@ -43,6 +54,80 @@ def ledger_state(f: int = 118, x: int = 435, n: int = 2247) -> dict[str, object]
             }
         }
     }
+
+
+@pytest.fixture
+def socket_root() -> Iterator[Path]:
+    # AF_UNIX paths stop near 104 bytes; pytest's tmp_path is too deep on macOS.
+    root = Path(tempfile.mkdtemp(prefix="vcsb-", dir="/tmp"))
+    try:
+        yield root
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def bind_session_socket(
+    root: Path, name: str, contract: str = "contract_version_2"
+) -> Path:
+    """Leave a session socket file exactly where a vc-frame server binds one."""
+
+    directory = root / contract
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / name
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        listener.bind(str(path))
+    finally:
+        listener.close()
+    return path
+
+
+def session_listing(names: list[str]) -> str:
+    return "".join(f"{name} [Created 0s ago] \n" for name in names)
+
+
+@dataclass
+class DiscoveryProbe:
+    discoveries: int
+    board_reads: int
+    reports: list[DeliveryReport]
+
+
+def probe_discovery(
+    tmp_path: Path, socket_env: dict[str, str], *, refreshes: int = 2
+) -> DiscoveryProbe:
+    """Run production refreshes and count the vc-frame discoveries they spawn."""
+
+    binary = tmp_path / "vc-frame"
+    binary.touch()
+    discoveries = 0
+    board_reads = 0
+
+    def runner(argv: list[str], *, timeout: float) -> subprocess.CompletedProcess[str]:
+        nonlocal discoveries
+        del timeout
+        if "list-sessions" in argv:
+            discoveries += 1
+            return subprocess.CompletedProcess(
+                argv, 1, stdout="", stderr="No active vc-frame sessions found.\n"
+            )
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    def read_board(_url: str, _timeout: float) -> dict[str, object]:
+        nonlocal board_reads
+        board_reads += 1
+        return server_state()
+
+    publisher = SettlementBoardPublisher(
+        server_url="http://server.example:3025",
+        control_plane_root=tmp_path / "control_plane",
+        board_reader=read_board,
+        ledger_reader=lambda _path: ledger_state(),
+        runner=runner,
+        env={"VIBECRAFTED_VC_FRAME_BIN": str(binary), **socket_env},
+    )
+    reports = [publisher.refresh_and_flush() for _ in range(refreshes)]
+    return DiscoveryProbe(discoveries, board_reads, reports)
 
 
 def test_server_board_requires_canonical_scope_and_consistent_totals() -> None:
@@ -146,9 +231,13 @@ def test_transport_carrier_stays_monotonic_across_guardian_restart(
     assert restarted_payload["latest_by_run"]["f"] == 157
 
 
-def test_refresh_pipes_canonical_board_only_to_plugin_sessions(tmp_path: Path) -> None:
+@needs_posix_sockets
+def test_refresh_pipes_canonical_board_only_to_plugin_sessions(
+    tmp_path: Path, socket_root: Path
+) -> None:
     binary = tmp_path / "vc-frame"
     binary.touch()
+    bind_session_socket(socket_root, "live-one")
     calls: list[list[str]] = []
 
     def runner(argv: list[str], *, timeout: float) -> subprocess.CompletedProcess[str]:
@@ -173,7 +262,10 @@ def test_refresh_pipes_canonical_board_only_to_plugin_sessions(tmp_path: Path) -
         board_reader=lambda _url, _timeout: server_state(),
         ledger_reader=lambda _path: ledger_state(),
         runner=runner,
-        env={"VIBECRAFTED_VC_FRAME_BIN": str(binary)},
+        env={
+            "VIBECRAFTED_VC_FRAME_BIN": str(binary),
+            "VC_FRAME_SOCKET_DIR": str(socket_root),
+        },
         timeout=2.0,
     )
 
@@ -198,11 +290,13 @@ def test_refresh_pipes_canonical_board_only_to_plugin_sessions(tmp_path: Path) -
     }
 
 
+@needs_posix_sockets
 def test_delivery_failure_is_backed_off_without_blocking_new_snapshot(
-    tmp_path: Path,
+    tmp_path: Path, socket_root: Path
 ) -> None:
     binary = tmp_path / "vc-frame"
     binary.touch()
+    bind_session_socket(socket_root, "live")
     now = [10.0]
     pipe_attempts = 0
 
@@ -222,7 +316,10 @@ def test_delivery_failure_is_backed_off_without_blocking_new_snapshot(
         board_reader=lambda _url, _timeout: server_state(),
         ledger_reader=lambda _path: ledger_state(),
         runner=runner,
-        env={"VIBECRAFTED_VC_FRAME_BIN": str(binary)},
+        env={
+            "VIBECRAFTED_VC_FRAME_BIN": str(binary),
+            "VC_FRAME_SOCKET_DIR": str(socket_root),
+        },
         retry_backoff=300.0,
         clock=lambda: now[0],
     )
@@ -232,11 +329,13 @@ def test_delivery_failure_is_backed_off_without_blocking_new_snapshot(
     assert pipe_attempts == 1
 
 
+@needs_posix_sockets
 def test_default_delivery_backoff_retries_on_next_periodic_replay(
-    tmp_path: Path,
+    tmp_path: Path, socket_root: Path
 ) -> None:
     binary = tmp_path / "vc-frame"
     binary.touch()
+    bind_session_socket(socket_root, "live")
     now = [10.0]
     pipe_attempts = 0
 
@@ -261,7 +360,10 @@ def test_default_delivery_backoff_retries_on_next_periodic_replay(
         board_reader=lambda _url, _timeout: server_state(),
         ledger_reader=lambda _path: ledger_state(),
         runner=runner,
-        env={"VIBECRAFTED_VC_FRAME_BIN": str(binary)},
+        env={
+            "VIBECRAFTED_VC_FRAME_BIN": str(binary),
+            "VC_FRAME_SOCKET_DIR": str(socket_root),
+        },
         clock=lambda: now[0],
     )
 

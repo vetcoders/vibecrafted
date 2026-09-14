@@ -13,7 +13,9 @@ import logging
 import os
 import re
 import shutil
+import stat
 import subprocess
+import sys
 import threading
 import time
 import urllib.parse
@@ -45,6 +47,9 @@ SETTLEMENT_BOARD_TRANSPORT_SCHEMA = "vibecrafted.settlement-board-transport.v1"
 _NON_PLUGIN_SESSION_NAMES = frozenset(
     {"Failed runs", "Finalized runs", "Needs attention"}
 )
+# vc-frame reads the primary name first, then its legacy alias, verbatim.
+_SOCKET_DIR_ENV_KEYS = ("VC_FRAME_SOCKET_DIR", "ZELLIJ_SOCKET_DIR")
+_SOCKET_CONTRACT_DIR_PREFIX = "contract_version_"
 LOGGER = logging.getLogger(__name__)
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
@@ -214,6 +219,76 @@ def _running_sessions(output: str) -> tuple[tuple[str, int | None], ...]:
     return tuple(sessions.items())
 
 
+@dataclass(frozen=True)
+class SessionSocketNamespace:
+    """Filesystem preflight of the socket namespace ``list-sessions`` reads.
+
+    It can only say that no session can exist.  ``candidate`` means a socket
+    file is present, which is not proof of a live server; ``unknown`` means the
+    namespace cannot be read the way vc-frame reads it.  Either way the
+    canonical CLI still decides membership and liveness.
+    """
+
+    state: str
+    root: Path | None = None
+    detail: str = ""
+
+    @property
+    def provably_empty(self) -> bool:
+        return self.state == "empty"
+
+
+def _session_socket_root(env: Mapping[str, str], platform: str) -> Path | None:
+    for key in _SOCKET_DIR_ENV_KEYS:
+        if key in env:
+            # A set value is taken as-is; empty or relative resolves against
+            # the CLI's working directory, which this preflight will not guess.
+            value = env[key]
+            return Path(value) if value and Path(value).is_absolute() else None
+    if platform == "darwin":
+        return Path(f"/tmp/vc-frame-{os.getuid()}")
+    # Other defaults follow XDG runtime and temp-dir rules owned by vc-frame.
+    return None
+
+
+def _probe_session_socket_namespace(
+    env: Mapping[str, str], *, platform: str = sys.platform
+) -> SessionSocketNamespace:
+    if os.name != "posix":
+        return SessionSocketNamespace("unknown", detail="non-POSIX IPC namespace")
+    root = _session_socket_root(env, platform)
+    if root is None:
+        return SessionSocketNamespace("unknown", detail="socket root not resolvable")
+    try:
+        with os.scandir(root) as entries:
+            contract_dirs = [
+                entry.path
+                for entry in entries
+                if entry.name.startswith(_SOCKET_CONTRACT_DIR_PREFIX)
+            ]
+    except FileNotFoundError:
+        return SessionSocketNamespace("empty", root, "socket root absent")
+    except OSError as exc:
+        return SessionSocketNamespace("unknown", root, type(exc).__name__)
+    # Every client/server contract version is scanned, so a vc-frame upgrade
+    # that binds under a new contract directory is still seen.
+    for contract_dir in contract_dirs:
+        try:
+            with os.scandir(contract_dir) as entries:
+                for entry in entries:
+                    try:
+                        mode = entry.stat(follow_symlinks=False).st_mode
+                    except FileNotFoundError:
+                        continue
+                    if stat.S_ISSOCK(mode):
+                        return SessionSocketNamespace("candidate", root, entry.name)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            return SessionSocketNamespace("unknown", root, type(exc).__name__)
+    return SessionSocketNamespace("empty", root, "no session sockets")
+
+
 class SettlementBoardPublisher:
     """Fetch and replay the canonical server board without blocking Guardian."""
 
@@ -341,6 +416,12 @@ class SettlementBoardPublisher:
     def refresh_and_flush(self) -> DeliveryReport:
         """Fetch one canonical snapshot and deliver it to running plugins."""
 
+        # Every vc-frame CLI run opens a new client log directory before it
+        # does anything else, so an idle replay must not ask for sessions that
+        # cannot exist.  The namespace is looked at again on every refresh.
+        if _probe_session_socket_namespace(self.env).provably_empty:
+            self._session_retry_after.clear()
+            return DeliveryReport(pending=True, reason="no vc-frame session sockets")
         return self._deliver(self._compatibility_payload())
 
     def _deliver(self, payload: str) -> DeliveryReport:

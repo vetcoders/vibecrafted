@@ -2,8 +2,8 @@
 """Agent Workspaces dashboard and interactive Agent launcher.
 
 This is deliberately a terminal surface, not a second control plane.  vc-frame
-owns the panes, Vibecrafted owns the launch command, and the User chooses which
-interactive Agent is born in the current workspace.
+owns the panes and tabs, Vibecrafted owns the launch command, and the User
+chooses which project's live Frame session receives a new Agent tab.
 """
 
 from __future__ import annotations
@@ -363,6 +363,16 @@ def public_reason(reason: str) -> str:
         return "Separate working copies are not available here"
     if "no canonical vm" in low or "docker/colima" in low:
         return "Not available yet"
+    if "no live frame session" in low:
+        return (
+            text
+            if len(text) <= 96
+            else ("No live Frame session for that project. Open it first.")
+        )
+    if "could not resolve a frame session" in low:
+        return "Could not resolve a Frame session for that project"
+    if "destination frame session is missing" in low:
+        return "Could not resolve a Frame session for that project"
     if len(text) > 72:
         return "Not available"
     return text

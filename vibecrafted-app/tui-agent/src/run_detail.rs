@@ -198,31 +198,76 @@ fn read_tail_bytes(path: &Path, cap: u64) -> Option<Vec<u8>> {
 /// Project a raw control-plane transcript (JSONL, escaped shell, ANSI) into
 /// wrapped operator-readable lines. Empty input stays empty so callers can
 /// render an honest empty state.
+///
+/// Event shapes are mapped from `vibecrafted_core.agent_stream.AgentStreamParser`
+/// (`_format_agy_event` and the shared message/text/content keys). This is
+/// a display projection, not a second parser and not transcript execution.
 pub fn humanize_transcript(text: &str) -> String {
     let mut lines = Vec::new();
+    let mut pending = String::new();
     for raw in text.lines() {
         let cleaned = strip_ansi(raw).trim().to_string();
-        if cleaned.is_empty() {
+        if cleaned.is_empty() && pending.is_empty() {
             continue;
         }
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&cleaned)
-            && let Some(human) = json_line_human(&value)
-        {
-            lines.extend(wrap_human_line(&human, 88));
+        let candidate = if pending.is_empty() {
+            cleaned.clone()
+        } else if cleaned.is_empty() {
+            pending.clone()
+        } else {
+            format!("{pending}\n{cleaned}")
+        };
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&candidate) {
+            pending.clear();
+            if let Some(human) = json_line_human(&value)
+                && !human.is_empty()
+            {
+                lines.extend(wrap_human_line(&human, 88));
+            }
             continue;
         }
+        if looks_like_json_prefix(&candidate) {
+            pending = candidate;
+            if pending.len() > 64 * 1024 {
+                lines.push(format!("[truncated event] {}", truncate_event(&pending)));
+                pending.clear();
+            }
+            continue;
+        }
+        pending.clear();
         if let Some(unescaped) = unescape_json_string(&cleaned) {
             lines.extend(wrap_human_line(&unescaped, 88));
             continue;
         }
         lines.extend(wrap_human_line(&cleaned, 88));
     }
+    if !pending.is_empty() {
+        lines.push(format!("[truncated event] {}", truncate_event(&pending)));
+    }
     lines.join("\n")
 }
 
+fn looks_like_json_prefix(value: &str) -> bool {
+    let trimmed = value.trim_start();
+    trimmed.starts_with('{') || trimmed.starts_with('[')
+}
+
+fn truncate_event(value: &str) -> String {
+    let mut chars = value.chars();
+    let prefix: String = chars.by_ref().take(240).collect();
+    if chars.next().is_some() {
+        format!("{prefix}…")
+    } else {
+        prefix
+    }
+}
+
 fn json_line_human(value: &serde_json::Value) -> Option<String> {
+    if let Some(human) = format_agy_event(value) {
+        return Some(human);
+    }
     for key in ["message", "text", "content", "delta", "body"] {
-        if let Some(text) = value.get(key).and_then(serde_json::Value::as_str) {
+        if let Some(text) = value.get(key).and_then(json_text) {
             let trimmed = text.trim();
             if !trimmed.is_empty() {
                 return Some(trimmed.to_string());
@@ -237,9 +282,180 @@ fn json_line_human(value: &serde_json::Value) -> Option<String> {
         if let Some(message) = value.get("event").and_then(serde_json::Value::as_str) {
             return Some(format!("{kind}: {message}"));
         }
+        if matches!(kind, "init" | "tools" | "step_update" | "result" | "error") {
+            return format_agy_event_by_kind(kind, value);
+        }
         return Some(kind.to_string());
     }
     None
+}
+
+/// Map `AgentStreamParser._format_agy_event`: `{"event": ..., "<event>": {...}}`
+/// plus older `type` discriminators. Empty means "recognized noise", not raw JSON.
+fn format_agy_event(value: &serde_json::Value) -> Option<String> {
+    let kind = value
+        .get("event")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| value.get("type").and_then(serde_json::Value::as_str))?;
+    if !matches!(
+        kind,
+        "init" | "tools" | "step_update" | "result" | "error" | "tool" | "tool_use"
+    ) {
+        return None;
+    }
+    format_agy_event_by_kind(kind, value)
+}
+
+fn format_agy_event_by_kind(kind: &str, value: &serde_json::Value) -> Option<String> {
+    match kind {
+        "init" => {
+            let init = value.get("init").and_then(serde_json::Value::as_object);
+            let session = init
+                .and_then(|obj| obj.get("conversation_id"))
+                .or_else(|| value.get("conversation_id"))
+                .or_else(|| value.get("session_id"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("?");
+            let model = init
+                .and_then(|obj| obj.get("model"))
+                .or_else(|| value.get("model"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty());
+            Some(match model {
+                Some(model) => format!("session: {session} model: {model}"),
+                None => format!("session: {session}"),
+            })
+        }
+        "tools" | "tool" | "tool_use" => Some(format_tools_event(value)),
+        "step_update" => Some(format_step_update(value)),
+        "result" => {
+            let result = value.get("result").unwrap_or(value);
+            let status = value_text(result, "status").unwrap_or_else(|| "done".to_string());
+            if let Some(error) = value_text(result, "error").filter(|text| text != "None") {
+                return Some(format!("error: {error}"));
+            }
+            if let Some(response) = value_text(result, "response").filter(|text| text != "None") {
+                return Some(response);
+            }
+            Some(status)
+        }
+        "error" => {
+            let message = json_text(value.get("error").unwrap_or(&serde_json::Value::Null))
+                .or_else(|| json_text(value.get("message").unwrap_or(&serde_json::Value::Null)))
+                .unwrap_or_else(|| "unknown".to_string());
+            Some(format!("error: {message}"))
+        }
+        _ => None,
+    }
+}
+
+fn format_tools_event(value: &serde_json::Value) -> String {
+    let mut names = Vec::new();
+    collect_tool_names(value.get("tools"), &mut names);
+    collect_tool_names(value.get("tool_calls"), &mut names);
+    if let Some(name) = value_text(value, "name").or_else(|| value_text(value, "tool_name")) {
+        names.push(name);
+    }
+    names.retain(|name| !name.is_empty());
+    names.dedup();
+    if names.is_empty() {
+        "[tool]".to_string()
+    } else {
+        format!("[tool] {}", names.join(", "))
+    }
+}
+
+fn collect_tool_names(value: Option<&serde_json::Value>, names: &mut Vec<String>) {
+    let Some(value) = value else { return };
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                if let Some(name) = value_text(item, "name")
+                    .or_else(|| value_text(item, "tool_name"))
+                    .or_else(|| {
+                        item.get("function")
+                            .and_then(|function| value_text(function, "name"))
+                    })
+                {
+                    names.push(name);
+                } else if let Some(text) = item.as_str() {
+                    names.push(text.to_string());
+                }
+            }
+        }
+        serde_json::Value::Object(_) => {
+            if let Some(name) = value_text(value, "name").or_else(|| value_text(value, "tool_name"))
+            {
+                names.push(name);
+            }
+        }
+        serde_json::Value::String(name) => names.push(name.clone()),
+        _ => {}
+    }
+}
+
+fn format_step_update(value: &serde_json::Value) -> String {
+    let step = value.get("step_update").unwrap_or(value);
+    let step_type = value_text(step, "step_type").unwrap_or_default();
+    let text = value_text(step, "text_delta")
+        .or_else(|| value_text(step, "text"))
+        .or_else(|| value_text(step, "content"))
+        .unwrap_or_default();
+    if step_type == "user_input" {
+        return if text.is_empty() {
+            String::new()
+        } else {
+            format!("user: {text}")
+        };
+    }
+    if step_type == "agent_response" {
+        return if text.is_empty() {
+            String::new()
+        } else {
+            format!("assistant: {text}")
+        };
+    }
+    if matches!(step_type.as_str(), "thinking" | "thought" | "planning") {
+        return if text.is_empty() {
+            String::new()
+        } else {
+            format!("thinking: {text}")
+        };
+    }
+    let state = value_text(step, "state").unwrap_or_default();
+    if state == "ACTIVE" && text.is_empty() {
+        let name = value_text(step, "tool_name")
+            .or_else(|| value_text(step, "name"))
+            .unwrap_or(step_type);
+        return format!("[tool] {name}");
+    }
+    text
+}
+
+fn value_text(value: &serde_json::Value, key: &str) -> Option<String> {
+    json_text(value.get(key)?)
+}
+
+fn json_text(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Number(number) => Some(number.to_string()),
+        serde_json::Value::Bool(flag) => Some(flag.to_string()),
+        serde_json::Value::Object(map) => {
+            for key in ["message", "error", "detail", "text", "content"] {
+                if let Some(inner) = map.get(key)
+                    && let Some(text) = json_text(inner)
+                    && !text.is_empty()
+                {
+                    return Some(text);
+                }
+            }
+            None
+        }
+        serde_json::Value::Array(_) => None,
+    }
 }
 
 fn unescape_json_string(raw: &str) -> Option<String> {
@@ -384,6 +600,45 @@ mod tests {
         assert!(human.contains("ok"));
         assert!(!human.contains("{\"kind\""));
         assert!(human.lines().any(|line| line.chars().count() <= 88));
+    }
+
+    #[test]
+    fn humanize_transcript_maps_agy_events_and_keeps_unicode() {
+        let raw = concat!(
+            r#"{"event":"init","init":{"conversation_id":"conv-1","model":"gemini-pro"}}"#,
+            "\n",
+            r#"{"event":"tools","tools":[{"name":"read_file"}]}"#,
+            "\n",
+            r#"{"event":"step_update","step_update":{"step_type":"user_input","text_delta":"cześć"}}"#,
+            "\n",
+            r#"{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"żółć"}}"#,
+            "\n",
+            r#"{"type":"init","session_id":"old-format"}"#,
+            "\n"
+        );
+        let human = humanize_transcript(raw);
+        assert!(human.contains("session: conv-1 model: gemini-pro"));
+        assert!(human.contains("[tool] read_file"));
+        assert!(human.contains("user: cześć"));
+        assert!(human.contains("assistant: żółć"));
+        assert!(human.contains("session: old-format"));
+        assert!(!human.contains("\"event\":\"init\""));
+        assert!(!human.contains("step_update"));
+    }
+
+    #[test]
+    fn humanize_transcript_keeps_malformed_and_truncated_events_honest() {
+        let raw = "{\n  \"event\": \"init\",\n  \"init\": {\"conversation_id\": \"open\"\n";
+        let human = humanize_transcript(raw);
+        assert!(human.contains("[truncated event]"));
+        assert!(human.contains("\"event\": \"init\""));
+        let complete = "not json at all\n{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ok\"}}\n";
+        let human = humanize_transcript(raw);
+        let done = humanize_transcript(complete);
+        assert!(done.contains("ok"));
+        assert!(done.contains("not json at all"));
+        assert!(!done.contains("\"event\":\"result\""));
+        let _ = human;
     }
 
     #[test]

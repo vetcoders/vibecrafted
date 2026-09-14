@@ -176,7 +176,10 @@ fn draw_observe(frame: &mut Frame, area: Rect, app: &App) {
         .iter()
         .filter(|run| run.kind_label() == "stalled")
         .count();
-    let title = format!(" Observe · {active} active · {stalled} stalled ");
+    let title = format!(
+        " Observe · {} · {active} active · {stalled} stalled ",
+        app.observe.sort.label()
+    );
     frame.render_widget(
         List::new(items).block(Block::default().borders(Borders::ALL).title(Span::styled(
             title,
@@ -233,7 +236,7 @@ fn draw_observe(frame: &mut Frame, area: Rect, app: &App) {
             .wrap(Wrap { trim: false })
             .scroll((app.interaction.scroll.observe_transcript, 0))
             .block(Block::default().borders(Borders::ALL).title(Span::styled(
-                " Transcript ",
+                format!(" Transcript · {} ", app.observe.transcript_view.label()),
                 Style::default().add_modifier(Modifier::BOLD),
             ))),
         columns.transcript,
@@ -667,7 +670,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     );
 
     let shortcuts = if app.config.view == ConsoleView::Observe {
-        "Observe: j/k select  m memory  w aicx wizard  r refresh  q quit"
+        "Observe: j/k select  o latest/oldest  t human/raw  m memory  w aicx wizard  r refresh  q quit"
     } else {
         "Global: q quit  r refresh  a cycle agent  v cycle runtime  y copy  Ctrl+L clear search  ? help"
     };
@@ -1916,6 +1919,107 @@ mod tests {
         assert!(app.observe.transcript_run_id.is_none());
         assert!(app.observe_switch_command().is_none());
         assert!(render_to_string(&app).contains("no history runs in canonical control plane"));
+    }
+
+    #[test]
+    fn observe_sort_preserves_selection_and_renders_control() {
+        use crate::state::ControlPlaneState;
+        use std::collections::HashSet;
+        use std::fs;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let older = dir.path().join("older.log");
+        let newer = dir.path().join("newer.log");
+        fs::write(&older, "older body").unwrap();
+        fs::write(&newer, "newer body").unwrap();
+
+        let mut old_run = sample_run("work-old", "agy", "old-session");
+        old_run.snapshot.started_at = Some("2026-09-13T00:00:00Z".to_string());
+        old_run.snapshot.updated_at = old_run.snapshot.started_at.clone();
+        old_run.snapshot.latest_transcript = Some(older.display().to_string());
+        old_run.age_label = "17h".to_string();
+        let mut new_run = sample_run("work-new", "agy", "new-session");
+        new_run.snapshot.started_at = Some("2026-09-13T02:00:00Z".to_string());
+        new_run.snapshot.updated_at = new_run.snapshot.started_at.clone();
+        new_run.snapshot.latest_transcript = Some(newer.display().to_string());
+        new_run.age_label = "15h".to_string();
+
+        let mut app = sample_app();
+        app.config.view = crate::observe::ConsoleView::Observe;
+        app.queue_scope = QueueScope::All;
+        app.state = ControlPlaneState {
+            root: dir.path().to_path_buf(),
+            retained_runs: vec![old_run.snapshot.clone(), new_run.snapshot.clone()],
+            runs: vec![old_run.snapshot, new_run.snapshot],
+            events: Vec::new(),
+            archived_run_ids: HashSet::new(),
+        };
+        app.refresh_rendered_runs();
+        app.refresh_observe();
+        assert_eq!(app.observe.sort.label(), "latest");
+        assert_eq!(app.observe.runs[0].run_id, "work-new");
+        app.observe.selected = 0;
+        app.toggle_observe_sort();
+        assert_eq!(app.observe.sort.label(), "oldest");
+        assert_eq!(app.observe.runs[app.observe.selected].run_id, "work-new");
+        assert_eq!(app.observe.runs[0].run_id, "work-old");
+        let rendered = render_to_string(&app);
+        assert!(rendered.contains("oldest"));
+        assert!(rendered.contains("Transcript · human"));
+    }
+
+    #[test]
+    fn observe_transcript_defaults_to_human_and_raw_is_selectable() {
+        use crate::state::ControlPlaneState;
+        use std::collections::HashSet;
+        use std::fs;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let transcript = dir.path().join("agy.log");
+        fs::write(
+            &transcript,
+            concat!(
+                r#"{"event":"init","init":{"conversation_id":"c1"}}"#,
+                "\n",
+                r#"{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"hello"}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let mut run = sample_run("agy-run", "agy", "sess");
+        let now = chrono::Utc::now().to_rfc3339();
+        run.snapshot.started_at = Some(now.clone());
+        run.snapshot.updated_at = Some(now.clone());
+        run.snapshot.last_heartbeat = Some(now);
+        run.snapshot.latest_transcript = Some(transcript.display().to_string());
+        let mut app = sample_app();
+        app.config.view = crate::observe::ConsoleView::Observe;
+        app.queue_scope = QueueScope::All;
+        app.state = ControlPlaneState {
+            root: dir.path().to_path_buf(),
+            retained_runs: vec![run.snapshot.clone()],
+            runs: vec![run.snapshot],
+            events: Vec::new(),
+            archived_run_ids: HashSet::new(),
+        };
+        app.refresh_rendered_runs();
+        app.refresh_observe();
+        assert_eq!(
+            app.observe.transcript_view,
+            crate::observe::TranscriptView::Human
+        );
+        assert!(app.observe.transcript.contains("assistant: hello"));
+        assert!(!app.observe.transcript.contains("\"event\":\"init\""));
+        app.toggle_observe_transcript_view();
+        assert_eq!(
+            app.observe.transcript_view,
+            crate::observe::TranscriptView::Raw
+        );
+        assert!(app.observe.transcript.contains("\"event\":\"init\""));
+        let rendered = render_to_string(&app);
+        assert!(rendered.contains("Transcript · raw"));
     }
 
     #[test]

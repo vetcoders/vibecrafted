@@ -246,7 +246,6 @@ def test_successful_launch_opens_tiled_pane_and_keeps_workshop(
     launched.permissions = workshop.PERMISSION_POLICIES.index("bypass")
     launched.continuity = workshop.CONTINUITY_MODES.index("fresh")
     calls: list[object] = []
-
     monkeypatch.setattr(
         workshop,
         "runtime_policy_capabilities",

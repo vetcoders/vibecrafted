@@ -471,3 +471,55 @@ def test_machine_launch_receipt_projects_execution_controls() -> None:
     assert "execution_controls" not in workflow.machine_launch_receipt(
         {k: v for k, v in payload.items() if k != "execution_controls"}
     )
+
+
+def test_kimi_defaults_are_never_ask_print_mode_with_provider_default_sandbox() -> None:
+    """kimi -p is never-ask by construction; no flags are needed or possible.
+
+    All three interactive permission flags (--yolo/--auto/--plan) conflict with
+    --prompt (OptionConflictError), so the headless bypass cell is the bare
+    print invocation and interactive-only policies are refused, not silently
+    downgraded.
+    """
+    controls = resolve_execution_controls("kimi")
+    assert not controls.requested
+    assert controls.permissions_effective == "bypass"
+    assert controls.sandbox_effective == "provider-default"
+    assert controls.provider_flags == ()
+    assert controls.boundary == SANDBOX_BOUNDARY["kimi"]
+    assert "OptionConflictError" in controls.evidence
+
+    bypass = resolve_execution_controls("kimi", permissions="bypass")
+    assert bypass.provider_flags == ()
+    assert bypass.sandbox_effective == "provider-default"
+
+
+@pytest.mark.parametrize("permissions", ["auto", "read-only"])
+def test_kimi_interactive_only_permissions_are_refused(permissions: str) -> None:
+    with pytest.raises(ExecutionControlsError) as excinfo:
+        resolve_execution_controls("kimi", permissions=permissions)
+    message = str(excinfo.value)
+    assert message.startswith("kimi:")
+    assert "interactive-only" in message
+    assert "--prompt rejects the flag" in message
+    assert "supported: bypass" in message
+
+
+def test_kimi_accept_edits_is_refused_without_a_native_policy() -> None:
+    with pytest.raises(ExecutionControlsError) as excinfo:
+        resolve_execution_controls("kimi", permissions="accept-edits")
+    message = str(excinfo.value)
+    assert message.startswith("kimi:")
+    assert "no native accept-edits policy" in message
+
+
+@pytest.mark.parametrize("sandbox", [True, False])
+def test_kimi_sandbox_words_are_refused_without_a_control(sandbox: bool) -> None:
+    """kimi 0.42.0 exposes no sandbox surface at all (probed --help + binary)."""
+    word = "true" if sandbox else "false"
+    with pytest.raises(ExecutionControlsError) as excinfo:
+        resolve_execution_controls("kimi", sandbox=sandbox)
+    message = str(excinfo.value)
+    assert message.startswith("kimi: kimi 0.42.0 exposes no sandbox control")
+    assert f"--sandbox {word} cannot be enforced" in message
+    assert "Omit --sandbox" in message

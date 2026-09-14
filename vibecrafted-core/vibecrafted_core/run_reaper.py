@@ -356,7 +356,7 @@ def build_process_table(
         # validation then refuses a legitimate stop with
         # process_identity_mismatch.
         proc = runner(["ps", "-A", "-ww", "-o", "pid=,ppid=,pgid=,command="])
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 - no process table means nothing to reap, never a crash
         return ()
     if getattr(proc, "returncode", 1) != 0:
         return ()
@@ -392,7 +392,7 @@ def build_env_index(runner: Callable[..., Any] | None = None) -> dict[int, str]:
     runner = _default_runner if runner is None else runner
     try:
         proc = runner(["ps", "axeww"])
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 - no ps output means no environment evidence, never a crash
         return {}
     if getattr(proc, "returncode", 1) != 0:
         return {}
@@ -738,7 +738,7 @@ def quarantine_legacy_runs(
     if runs is None:
         try:
             run_list: list[dict[str, Any]] = _terminal_run_snapshots()
-        except Exception as exc:  # pragma: no cover - defensive  # noqa: BLE001
+        except Exception as exc:  # pragma: no cover - defensive  # noqa: BLE001 - a corrupt snapshot store is reported, not raised
             result.parse_errors.append(f"load_snapshots:{exc}")
             return result
     else:
@@ -746,7 +746,7 @@ def quarantine_legacy_runs(
         for raw in runs:
             try:
                 run_list.append(dict(raw))
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001 - one malformed row is recorded; the rest still coerce
                 result.parse_errors.append(f"coerce:{exc}")
 
     proc_table = () if table is None else table

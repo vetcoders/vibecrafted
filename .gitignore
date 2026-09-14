@@ -65,3 +65,6 @@ vibecrafted-io-link
 **/.venv/
 /.prview
 /.agents/
+
+# Host-local Codex CLI project config (per-machine MCP endpoints).
+/.codex/
