@@ -1029,7 +1029,7 @@ def test_the_embedded_interpreter_forgets_where_it_was_seeded() -> None:
 
     Measured on the 4.1.0 payload: 27 mentions of the ephemeral
     `build/unified-release/python-seed.XXXXXX/` directory inside
-    `runtime/python/lib/python3.12/_sysconfigdata__darwin_darwin.py`, and a pip
+    `runtime/python/lib/python3.N/_sysconfigdata__darwin_darwin.py`, and a pip
     console script at `runtime/python-site/bin/jsonschema` whose shebang points
     at that same directory — a path no customer has, so the script could never
     have run. python-site is on PYTHONPATH and never on PATH, so nothing

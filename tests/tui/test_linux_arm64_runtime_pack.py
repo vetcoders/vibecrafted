@@ -118,8 +118,11 @@ def test_linux_builder_uses_pinned_public_inputs_for_arm64_and_x64() -> None:
     assert '"$payload/bin/scaffold-doctor"' in assembler
     assert '"$payload/vibecrafted-mcp/"' in assembler
     assert "install_portable_python" in assembler
+    assert "portable_python_load_pin" in assembler
     assert "scripts/lib/portable-python.sh" in assembler
     assert "uv python install 3.12.3" not in assembler
+    assert "PORTABLE_PYTHON_BIN" in assembler
+    assert "python3.12" not in assembler
 
     foundations = (REPO_ROOT / "scripts/stage-runtime-foundations.sh").read_text(
         encoding="utf-8"

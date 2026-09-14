@@ -295,7 +295,7 @@ _vetcoders_owned_python_bin() {
   done
   for candidate in \
     "${VIBECRAFTED_RUNTIME_BIN:+$VIBECRAFTED_RUNTIME_BIN/python3}" \
-    python3.13 python3.12 python3.11 python3
+    python3.14 python3.13 python3.12 python3.11 python3
   do
     [[ -n "$candidate" ]] || continue
     command -v "$candidate" >/dev/null 2>&1 || continue
