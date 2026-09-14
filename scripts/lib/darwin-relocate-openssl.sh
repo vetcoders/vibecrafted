@@ -15,9 +15,9 @@ if ! declare -F die >/dev/null 2>&1; then
   die() { printf 'FATAL: %s\n' "$*" >&2; exit 1; }
 fi
 
-OPENSSL_LIBSSL_SHA256="ffd8ac6981000def0928367924b6cb1e7a98712efbc06e2a2f3f750138bd89ca"
-OPENSSL_LIBCRYPTO_SHA256="a12805a18cd5e4f733fa8727b91afa08b587f9da5a760517cd79cb508a3a3f71"
-OPENSSL_REDIS_VERSION="3.6.3"
+OPENSSL_LIBSSL_SHA256="ebee4a51513f22f6efc6d3b9ff9d638015d2d924c0e443b31df2735798cb8dcb"
+OPENSSL_LIBCRYPTO_SHA256="380d32d4d229136f9ded004906634491c8d416779d031abadc3d6463b1ef8e3d"
+OPENSSL_REDIS_VERSION="3.6.4"
 # The published PRView v0.7.0 Darwin asset names these exact install names.
 OPENSSL_LIBSSL_ID="/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib"
 OPENSSL_LIBCRYPTO_ID="/opt/homebrew/opt/openssl@3/lib/libcrypto.3.dylib"
