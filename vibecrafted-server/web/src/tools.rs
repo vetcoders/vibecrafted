@@ -98,10 +98,18 @@ pub mod api {
     }
 
     fn json_error(status: StatusCode, error: &str) -> Response {
+        let kind = match status {
+            StatusCode::BAD_REQUEST => "validation",
+            StatusCode::FORBIDDEN => "forbidden",
+            StatusCode::BAD_GATEWAY
+            | StatusCode::SERVICE_UNAVAILABLE
+            | StatusCode::GATEWAY_TIMEOUT => "unavailable",
+            _ => "error",
+        };
         (
             status,
             [(header::CACHE_CONTROL, "no-store")],
-            Json(json!({ "error": error })),
+            Json(json!({ "error": error, "kind": kind })),
         )
             .into_response()
     }
