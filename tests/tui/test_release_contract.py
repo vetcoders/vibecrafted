@@ -1109,6 +1109,112 @@ def test_embedded_interpreter_forgets_the_python_build_standalone_runner_home(
         assert str(seed) not in text, path.name
 
 
+def _embedded_python_fixture(root: Path) -> Path:
+    python = root / "python"
+    stdlib = python / "lib/python3.14"
+    for relative in (
+        "bin/pip3",
+        "bin/idle3",
+        "bin/idle3.14",
+        "lib/libpython3.14.dylib",
+        "lib/libtcl9.0.dylib",
+        "lib/libtcl9tk9.0.dylib",
+        "lib/tcl9.0/init.tcl",
+        "lib/tcl9/9.0/msgcat.tm",
+        "lib/tk9.0/tk.tcl",
+        "lib/thread3.0.6/libthread3.0.6.dylib",
+        "lib/itcl4.3.8/libitcl4.3.8.dylib",
+        "lib/pkgconfig/python3-embed.pc",
+        "lib/python3.14/json/__init__.py",
+        "lib/python3.14/tkinter/__init__.py",
+        "lib/python3.14/idlelib/idle.py",
+        "lib/python3.14/turtledemo/__main__.py",
+        "lib/python3.14/lib-dynload/_ssl.cpython-314-darwin.so",
+        "lib/python3.14/lib-dynload/_tkinter.cpython-314-darwin.so",
+    ):
+        (python / relative).parent.mkdir(parents=True, exist_ok=True)
+        (python / relative).write_bytes(b"fixture\n")
+    assert stdlib.is_dir()
+    interpreter = python / "bin/python3.14"
+    # copyfile, not copy2: /usr/bin/true carries a system-restricted file flag
+    # that chflags may not copy onto a user file.
+    shutil.copyfile("/usr/bin/true", interpreter)
+    interpreter.chmod(0o755)
+    return python
+
+
+def _run_python_prune(tmp_path: Path, python: Path, *, path: str) -> None:
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+    start = builder.index("prune_embedded_python_unreachable() {")
+    end = builder.index("\n}\n", start) + len("\n}\n")
+    script = tmp_path / "prune.sh"
+    script.write_text(
+        builder[start:end]
+        + '\nprune_embedded_python_unreachable "$1" python3.14 libpython3.14.dylib\n',
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        ["/bin/bash", str(script), str(python)],
+        capture_output=True,
+        text=True,
+        env={"PATH": path},
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="otool reads Mach-O load commands")
+def test_embedded_python_drops_native_code_no_declared_executable_reaches(
+    tmp_path: Path,
+) -> None:
+    """Release #7 (c71487bf, CPython 3.14.7) died at VCPC027: the bundled
+    verifier found libpython, the Tcl/Tk stack and its thread/itcl packages
+    reachable from no declared executable. Run the real prune function on a
+    python-build-standalone shaped tree whose interpreter links no libpython.
+    """
+    python = _embedded_python_fixture(tmp_path / "static")
+    _run_python_prune(tmp_path, python, path="/usr/bin:/bin")
+
+    remaining = sorted(
+        str(path.relative_to(python)) for path in python.rglob("*") if path.is_file()
+    )
+    assert remaining == [
+        "bin/pip3",
+        "bin/python3.14",
+        "lib/pkgconfig/python3-embed.pc",
+        "lib/python3.14/json/__init__.py",
+        "lib/python3.14/lib-dynload/_ssl.cpython-314-darwin.so",
+    ]
+
+
+def test_embedded_python_keeps_libpython_the_interpreter_links(tmp_path: Path) -> None:
+    python = _embedded_python_fixture(tmp_path / "shared")
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    otool = shim / "otool"
+    otool.write_text(
+        "#!/bin/sh\n"
+        'printf "%s:\\n\\t@executable_path/../lib/libpython3.14.dylib\\n" "$2"\n',
+        encoding="utf-8",
+    )
+    otool.chmod(0o755)
+    _run_python_prune(tmp_path, python, path=f"{shim}:/usr/bin:/bin")
+
+    assert (python / "lib/libpython3.14.dylib").is_file()
+    assert not (python / "lib/libtcl9.0.dylib").exists()
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+    call = builder.index('prune_embedded_python_unreachable "$runtime/python"')
+    assert call < builder.index(
+        'install_name_tool -id "@loader_path/${PORTABLE_PYTHON_DYLIB}"'
+    )
+    assert 'if [[ -f "$runtime/python/lib/${PORTABLE_PYTHON_DYLIB}" ]]; then' in builder
+
+
 def test_release_binaries_never_probe_the_machine_that_compiled_them() -> None:
     """`env!("CARGO_MANIFEST_DIR")` is opaque to --remap-path-prefix.
 
