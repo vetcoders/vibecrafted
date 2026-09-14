@@ -334,20 +334,26 @@
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#39;");
   }
-  function put(html) {
+  function span(cls, text) {
+    const s = document.createElement("span");
+    if (cls) s.className = cls;
+    s.append(String(text));
+    return s;
+  }
+  function put(...parts) {
     const d = document.createElement("div");
-    d.innerHTML = html;
+    d.append(...parts);
     term.appendChild(d);
     term.scrollTop = term.scrollHeight;
   }
   function line(t, cls) {
-    put(cls ? `<span class="${cls}">${esc(t)}</span>` : esc(t));
+    put(cls ? span(cls, t) : String(t));
   }
-  function raw(h) {
-    put(h);
+  function raw(...parts) {
+    put(...parts);
   }
   function prompt_(cmdtext) {
-    put(`<span class="c bold">❯</span> ${esc(cmdtext)}`);
+    put(span("c bold", "❯"), " " + cmdtext);
   }
 
   function rail() {
@@ -419,7 +425,10 @@
     runs.push(run);
     rail();
     raw(
-      `<span class="d">==================== VIBECRAFTED LAUNCH RECEIPT ====================</span>`,
+      span(
+        "d",
+        "==================== VIBECRAFTED LAUNCH RECEIPT ====================",
+      ),
     );
     line(`run_id:     ${id}`);
     line(`agent:      ${agent}`);
@@ -428,13 +437,18 @@
     line(`status:     launching`);
     line(`report:     ~/.vibecrafted/artifacts/…/${run.report}`);
     raw(
-      `observe:    <span class="b">vibecrafted ${agent} observe --run-id ${id}</span>`,
+      "observe:    ",
+      span("b", `vibecrafted ${agent} observe --run-id ${id}`),
     );
     raw(
-      `await (ARM NOW, supervisor-side): <span class="b">vibecrafted ${agent} await --run-id ${id}</span>`,
+      "await (ARM NOW, supervisor-side): ",
+      span("b", `vibecrafted ${agent} await --run-id ${id}`),
     );
     raw(
-      `<span class="d">=====================================================================</span>`,
+      span(
+        "d",
+        "=====================================================================",
+      ),
     );
     const chat = CHATTER[skill] || CHATTER.generic;
     let step = 0;
@@ -449,7 +463,12 @@
         run.settle = Math.random() < 0.85 ? "f" : "x";
         clearInterval(run.timer);
         raw(
-          `<span class="d">[${run.id}]</span> <span class="g">report_validated</span> — settlement <span class="${run.settle === "f" ? "g" : "y"}">${run.settle}</span> · raport: ${run.report}`,
+          span("d", `[${run.id}]`),
+          " ",
+          span("g", "report_validated"),
+          " — settlement ",
+          span(run.settle === "f" ? "g" : "y", run.settle),
+          ` · raport: ${run.report}`,
         );
       }
       rail();
@@ -458,43 +477,95 @@
     if (promptTxt) run.lines.push(`prompt: ${promptTxt}`);
   }
 
-  const HELP = `<span class="c bold">⚒  𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. 4.1.0+g237d2814</span> — release engine for AI-developed software
-<span class="d">─────────────────────────────────────────</span>
+  const HELP = [
+    span("c bold", "⚒  𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. 4.1.0+g237d2814"),
+    " — release engine for AI-developed software\n",
+    span("d", "─────────────────────────────────────────"),
+    `
 Usage:
-  vibecrafted &lt;command&gt; [args]
-  vibecrafted &lt;skill&gt; &lt;agent&gt; [-p &lt;prompt&gt; | -f &lt;file&gt;]
+  vibecrafted <command> [args]
+  vibecrafted <skill> <agent> [-p <prompt> | -f <file>]
 
 Commands:
-  <span class="b">init [agent]</span>         Orient an agent in this repo
-  <span class="b">&lt;skill&gt; &lt;agent&gt;</span>      Run a workflow with an agent
-  <span class="b">resume &lt;agent&gt;</span>       Continue a stopped run or provider session
-  <span class="b">status</span> · <span class="b">doctor</span> · <span class="b">receipt</span> · <span class="b">update</span> · <span class="b">uninstall</span>
-  <span class="b">dashboard</span> · <span class="b">loop</span> · <span class="b">cron</span> · <span class="b">dispatch</span> · <span class="b">server</span> · <span class="b">gui</span> · <span class="b">tui</span>
+  `,
+    span("b", "init [agent]"),
+    "         Orient an agent in this repo\n  ",
+    span("b", "<skill> <agent>"),
+    "      Run a workflow with an agent\n  ",
+    span("b", "resume <agent>"),
+    "       Continue a stopped run or provider session\n  ",
+    span("b", "status"),
+    " · ",
+    span("b", "doctor"),
+    " · ",
+    span("b", "receipt"),
+    " · ",
+    span("b", "update"),
+    " · ",
+    span("b", "uninstall"),
+    "\n  ",
+    span("b", "dashboard"),
+    " · ",
+    span("b", "loop"),
+    " · ",
+    span("b", "cron"),
+    " · ",
+    span("b", "dispatch"),
+    " · ",
+    span("b", "server"),
+    " · ",
+    span("b", "gui"),
+    " · ",
+    span("b", "tui"),
+    `
 
 Ship cycle:
-  <span class="c">scaffold → implement → review → workflow → followup → marbles → audit → polarize → dou → hydrate → release</span>
+  `,
+    span(
+      "c",
+      "scaffold → implement → review → workflow → followup → marbles → audit → polarize → dou → hydrate → release",
+    ),
+    `
 
 Agents:  ${AGENTS.join(" · ")}
-Daily family: <span class="b">vc-doctor · vc-status · vc-update · vc-receipt</span> (dwie warstwy, jeden świat)
-Spróbuj: <span class="b">workflow codex -p "Ship dark mode"</span> · <span class="b">marbles claude -p "loop until clean"</span> · <span class="b">help marbles</span>`;
+Daily family: `,
+    span("b", "vc-doctor · vc-status · vc-update · vc-receipt"),
+    ` (dwie warstwy, jeden świat)
+Spróbuj: `,
+    span("b", 'workflow codex -p "Ship dark mode"'),
+    " · ",
+    span("b", 'marbles claude -p "loop until clean"'),
+    " · ",
+    span("b", "help marbles"),
+  ];
 
   function helpTopic(t) {
     if (SKILLS[t]) {
       const [rw, v] = SKILLS[t];
       raw(
-        `<span class="c bold">⚒  ${t}</span>\n<span class="d">─────────────────────────────</span>\n  version ${v} · <span class="${rw === "READ" ? "g" : "c"}">${rw}</span>\nUsage:\n  vibecrafted ${t} &lt;${AGENTS.join("|")}&gt; [flags]\n  vc-${t} &lt;agent&gt; [flags]${FLOWS[t] ? `\nFlow:\n  ${FLOWS[t]}` : ""}\nFlags: -p/--prompt · -f/--file · --prompt-stdin · --runtime · --root · --model · --json${t === "marbles" ? " · --count · --depth\nControls: pause stop resume session inspect delete gc" : ""}`,
+        span("c bold", `⚒  ${t}`),
+        "\n",
+        span("d", "─────────────────────────────"),
+        `\n  version ${v} · `,
+        span(rw === "READ" ? "g" : "c", rw),
+        `\nUsage:\n  vibecrafted ${t} <${AGENTS.join("|")}> [flags]\n  vc-${t} <agent> [flags]`,
+        FLOWS[t] ? `\nFlow:\n  ${FLOWS[t]}` : "",
+        `\nFlags: -p/--prompt · -f/--file · --prompt-stdin · --runtime · --root · --model · --json`,
+        t === "marbles"
+          ? " · --count · --depth\nControls: pause stop resume session inspect delete gc"
+          : "",
       );
       return;
     }
     const T = {
-      resume: `Usage:\n  vibecrafted resume &lt;agent&gt; --run-id work-… | --session &lt;uuid&gt; | (AICX 48h pack)\nNigdy work-* do --session. --fork-session tylko claude.`,
+      resume: `Usage:\n  vibecrafted resume <agent> --run-id work-… | --session <uuid> | (AICX 48h pack)\nNigdy work-* do --session. --fork-session tylko claude.`,
       uninstall: `Usage:\n  vibecrafted uninstall [--dry-run]\nInwentarz → restore kit → cięcie. Od 82dbce90 dry-run znaczy suchy. Serio.`,
       server: `Usage:\n  vibecrafted server [start|stop|status|open|doctor] [--port 3024]\n  vibecrafted server service [install|start|stop|status|uninstall]`,
-      dispatch: `Usage:\n  vibecrafted dispatch &lt;plan.dispatch.toml&gt; [--doctor|--dry-run|--json|--resume]\n  vibecrafted dispatch run --run-id … -- &lt;cmd&gt;`,
+      dispatch: `Usage:\n  vibecrafted dispatch <plan.dispatch.toml> [--doctor|--dry-run|--json|--resume]\n  vibecrafted dispatch run --run-id … -- <cmd>`,
       loop: `Usage:\n  vibecrafted loop start --prompt "…" [--completion-promise READY]\n  vibecrafted loop next | status | complete | await-run --run-id … --then-cmd '…'`,
     };
     if (T[t]) {
-      raw(`<span class="c bold">⚒  ${t}</span>\n${T[t]}`);
+      raw(span("c bold", `⚒  ${t}`), "\n" + T[t]);
       return;
     }
     line(
@@ -511,12 +582,16 @@ Spróbuj: <span class="b">workflow codex -p "Ship dark mode"</span> · <span cla
     runs.forEach((r) => {
       const st =
         r.state === "report_validated"
-          ? `<span class="g">${r.state}</span>`
+          ? span("g", r.state)
           : r.state === "active"
-            ? `<span class="c">active</span>`
-            : `<span class="d">${r.state}</span>`;
+            ? span("c", "active")
+            : span("d", r.state);
       raw(
-        `  ${r.id}  ${r.agent.padEnd(6)}  ${r.skill.padEnd(10)}  ${st}${r.settle ? `  <span class="${r.settle === "f" ? "g" : "y"}">${r.settle}</span>` : ""}`,
+        `  ${r.id}  ${r.agent.padEnd(6)}  ${r.skill.padEnd(10)}  `,
+        st,
+        ...(r.settle
+          ? ["  ", span(r.settle === "f" ? "g" : "y", r.settle)]
+          : []),
       );
     });
   }
@@ -553,7 +628,7 @@ Spróbuj: <span class="b">workflow codex -p "Ship dark mode"</span> · <span cla
       return;
     }
     if (c === "help") {
-      a[1] && a[1] !== "--all" ? helpTopic(a[1]) : raw(HELP);
+      a[1] && a[1] !== "--all" ? helpTopic(a[1]) : raw(...HELP);
       return;
     }
     if (c === "version") {
@@ -566,43 +641,68 @@ Spróbuj: <span class="b">workflow codex -p "Ship dark mode"</span> · <span cla
     }
     if (c === "doctor" || c === "check") {
       raw(
-        `<span class="g">✓</span> deck alive · <span class="g">✓</span> tools/vibecrafted-current → 4.1.0+ga7f262d9 · <span class="g">✓</span> 32 projekcje skilli\n<span class="g">✓</span> server plane: identity guard zgodny (prawdziwa binarka, nie wrapper)\nsummary: symulacja — na żywej maszynie: <span class="b">vc-doctor</span>`,
+        span("g", "✓"),
+        " deck alive · ",
+        span("g", "✓"),
+        " tools/vibecrafted-current → 4.1.0+ga7f262d9 · ",
+        span("g", "✓"),
+        " 32 projekcje skilli\n",
+        span("g", "✓"),
+        " server plane: identity guard zgodny (prawdziwa binarka, nie wrapper)\nsummary: symulacja — na żywej maszynie: ",
+        span("b", "vc-doctor"),
       );
       return;
     }
     if (c === "receipt") {
       raw(
-        `vetcoders/vibecrafted → fix/framework-fail-points-0819 @ <span class="c">16c44f8c</span> · dirty=no · installed=g237d2814 <span class="y">SOURCE_AHEAD_OF_INSTALLED</span>`,
+        "vetcoders/vibecrafted → fix/framework-fail-points-0819 @ ",
+        span("c", "16c44f8c"),
+        " · dirty=no · installed=g237d2814 ",
+        span("y", "SOURCE_AHEAD_OF_INSTALLED"),
       );
       return;
     }
     if (c === "settlements" || c === "resume-session") {
       raw(
-        `<span class="c">⚒</span>  "${c}" is not in the command deck.\n<span class="d">  (Duch z helpa — reklamowany, niewpięty. Rozjazd #1 w katalogu.)</span>`,
+        span("c", "⚒"),
+        `  "${c}" is not in the command deck.\n`,
+        span(
+          "d",
+          "  (Duch z helpa — reklamowany, niewpięty. Rozjazd #1 w katalogu.)",
+        ),
       );
       return;
     }
     if (c === "uninstall" || c === "remove") {
       if (a.includes("--dry-run")) {
         raw(
-          `<span class="bold">𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Uninstall</span>\n\nManaged teardown inventory:\n  remove   shared-skill: …/skills/vc-agents  <span class="d">(+31 dalszych)</span>\n  remove   runtime-data: releases · providers · server · active.json\n  preserve operator-data: artifacts · control_plane · logs\n  preserve uv-tool: vibecrafted · vibecrafted-mcp · vibecrafted-iterm2\n\n<span class="g">Dry run — nic nie usunięto, zero backupu.</span> <span class="d">Od 82dbce90 „dry" znaczy suchy. Sprawdzone rano, boleśnie.</span>`,
+          span("bold", "𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Uninstall"),
+          `\n\nManaged teardown inventory:\n  remove   shared-skill: …/skills/vc-agents  `,
+          span("d", "(+31 dalszych)"),
+          `\n  remove   runtime-data: releases · providers · server · active.json\n  preserve operator-data: artifacts · control_plane · logs\n  preserve uv-tool: vibecrafted · vibecrafted-mcp · vibecrafted-iterm2\n\n`,
+          span("g", "Dry run — nic nie usunięto, zero backupu."),
+          " ",
+          span(
+            "d",
+            'Od 82dbce90 „dry" znaczy suchy. Sprawdzone rano, boleśnie.',
+          ),
         );
         return;
       }
       raw(
-        `<span class="r">✗</span> Playground odmawia mokrego uninstalla. Do tego jest maszyna testowa. 😌`,
+        span("r", "✗"),
+        " Playground odmawia mokrego uninstalla. Do tego jest maszyna testowa. 😌",
       );
       return;
     }
     if (c === "dashboard" || c === "start") {
       a[1] === "ls"
         ? raw(
-            sessions
-              .map(
-                (s, i) =>
-                  `  0${i + 1} ${s.name}  <span class="d">${s.faces.length} faces</span>`,
-              )
-              .join("\n"),
+            ...sessions.flatMap((s, i) => [
+              i ? "\n" : "",
+              `  0${i + 1} ${s.name}  `,
+              span("d", `${s.faces.length} faces`),
+            ]),
           )
         : line(
             `[symulacja] otwieram layout: ${a[1] || "dashboard"} — w realu: vc-frame przejmuje ekran`,
@@ -612,7 +712,9 @@ Spróbuj: <span class="b">workflow codex -p "Ship dark mode"</span> · <span cla
     }
     if (c === "init" && (!a[1] || AGENTS.includes(a[1]))) {
       raw(
-        `<span class="c">⚒</span> init ${a[1] || "claude"}: perception (loct context — czytaj DO KOŃCA) → intentions (aicx intents) → ground truth (repo-full)\n<span class="d">Orientacja, nie pipeline. Ślepy start = process failure.</span>`,
+        span("c", "⚒"),
+        ` init ${a[1] || "claude"}: perception (loct context — czytaj DO KOŃCA) → intentions (aicx intents) → ground truth (repo-full)\n`,
+        span("d", "Orientacja, nie pipeline. Ślepy start = process failure."),
       );
       return;
     }
@@ -626,10 +728,11 @@ Spróbuj: <span class="b">workflow codex -p "Ship dark mode"</span> · <span cla
         const r = findRun(a);
         r
           ? raw(
-              `<span class="d">[${r.id}] tail:</span>\n` +
+              span("d", `[${r.id}] tail:`),
+              "\n" +
                 r.lines
                   .slice(-4)
-                  .map((l) => "  " + esc(l))
+                  .map((l) => "  " + l)
                   .join("\n"),
             )
           : line("Brak runów.", "d");
@@ -649,7 +752,9 @@ Spróbuj: <span class="b">workflow codex -p "Ship dark mode"</span> · <span cla
           if (r.state === "report_validated") {
             clearInterval(iv);
             raw(
-              `<span class="g">await:</span> ${r.id} → report_validated · settlement <span class="${r.settle === "f" ? "g" : "y"}">${r.settle}</span>`,
+              span("g", "await:"),
+              ` ${r.id} → report_validated · settlement `,
+              span(r.settle === "f" ? "g" : "y", r.settle),
             );
           }
         }, 600);
@@ -662,7 +767,9 @@ Spróbuj: <span class="b">workflow codex -p "Ship dark mode"</span> · <span cla
           r.state = "stopped";
           rail();
           raw(
-            `<span class="y">TERM</span> → ${r.id} stopped. Restart tylko jako NOWY tracked job: <span class="b">${c} resume --run-id ${r.id}</span>`,
+            span("y", "TERM"),
+            ` → ${r.id} stopped. Restart tylko jako NOWY tracked job: `,
+            span("b", `${c} resume --run-id ${r.id}`),
           );
         } else line("Nie ma czego stopować.", "d");
         return;
@@ -680,7 +787,7 @@ Spróbuj: <span class="b">workflow codex -p "Ship dark mode"</span> · <span cla
     if (SKILLS[c]) {
       const ag = AGENTS.includes(a[1]) ? a[1] : null;
       if (!ag) {
-        raw(`Usage: vibecrafted ${c} &lt;${AGENTS.join("|")}&gt; [-p "…"]`);
+        raw(`Usage: vibecrafted ${c} <${AGENTS.join("|")}> [-p "…"]`);
         return;
       }
       if (
@@ -706,7 +813,10 @@ Spróbuj: <span class="b">workflow codex -p "Ship dark mode"</span> · <span cla
     }
     if (c === "server") {
       raw(
-        `server ${a[1] || "status"}: <span class="g">●</span> io.vetcoders.vibecrafted.server enabled · port 3024 <span class="d">(symulacja)</span>`,
+        `server ${a[1] || "status"}: `,
+        span("g", "●"),
+        " io.vetcoders.vibecrafted.server enabled · port 3024 ",
+        span("d", "(symulacja)"),
       );
       return;
     }
@@ -728,7 +838,10 @@ Spróbuj: <span class="b">workflow codex -p "Ship dark mode"</span> · <span cla
       return;
     }
     raw(
-      `<span class="c">⚒</span>  "${esc(c)}" is not in the command deck.\n  Try <span class="b">help</span> for the current surface.`,
+      span("c", "⚒"),
+      `  "${c}" is not in the command deck.\n  Try `,
+      span("b", "help"),
+      " for the current surface.",
     );
   }
 
@@ -771,10 +884,21 @@ Spróbuj: <span class="b">workflow codex -p "Ship dark mode"</span> · <span cla
     if (!window.getSelection().toString()) input.focus();
   });
 
-  raw(`<span class="c bold">⚒  𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Playground</span> — symulator decka i runtime'u. Nic tu nie jest prawdziwym procesem;
+  raw(
+    span("c bold", "⚒  𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Playground"),
+    ` — symulator decka i runtime'u. Nic tu nie jest prawdziwym procesem;
 wszystko zachowuje się jak prawdziwe: receipty, cykl runa, settlement f/x/n, rail sesji.
-<span class="d">Zacznij od</span> <span class="b">help</span><span class="d">, potem odpal fleet:</span> <span class="b">workflow codex -p "Ship dark mode"</span> <span class="d">i patrz na rail.</span>
-`);
+`,
+    span("d", "Zacznij od"),
+    " ",
+    span("b", "help"),
+    span("d", ", potem odpal fleet:"),
+    " ",
+    span("b", 'workflow codex -p "Ship dark mode"'),
+    " ",
+    span("d", "i patrz na rail."),
+    "\n",
+  );
   rail();
   input.focus();
 </script>
