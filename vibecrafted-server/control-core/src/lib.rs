@@ -74,6 +74,7 @@ pub use scaffold::{
 };
 pub use scaffold_verifiers::{execute_brief_verifiers, extract_brief_verifier_commands};
 pub use workspace::{
+    FrameSessionInventory, FrameSessionOwner, LiveFrameSession, RuntimeSessionAttachment,
     WorkspaceCatalogProjection, WorkspaceProjection, WorkspaceProjectionError, WorkspaceRecord,
     WorkspaceSession,
 };
