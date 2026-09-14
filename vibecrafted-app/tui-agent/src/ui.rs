@@ -36,6 +36,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         LaunchFocus::Help => draw_help_overlay(frame, app),
         LaunchFocus::EditPrompt => draw_prompt_overlay(frame, app),
         LaunchFocus::EditModel => draw_model_overlay(frame, app),
+        LaunchFocus::EditRepo => draw_repo_overlay(frame, app),
         LaunchFocus::Confirmation => draw_confirmation_overlay(frame, app),
         LaunchFocus::Search => draw_search_overlay(frame, app),
         LaunchFocus::Error => draw_error_overlay(frame, app),
@@ -651,6 +652,9 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         }
         (AppTab::Dispatch, LaunchFocus::EditPrompt) => {
             "Dispatch edit: type prompt  Enter newline  Ctrl+S/Esc save"
+        }
+        (AppTab::Dispatch, LaunchFocus::EditRepo) => {
+            "Dispatch edit: type repository path  Enter/Ctrl+S apply  Ctrl+U clear  Esc keep current"
         }
         (_, LaunchFocus::Error) => "Error: Enter/Esc closes the failure details",
         (_, LaunchFocus::Artifact) => "Artifact viewer: Enter/Esc closes the native viewer",
@@ -1605,6 +1609,30 @@ fn draw_model_overlay(frame: &mut Frame, app: &App) {
     frame.render_widget(model, area);
 }
 
+fn draw_repo_overlay(frame: &mut Frame, app: &App) {
+    let area = centered_rect(72, 44, frame.area());
+    frame.render_widget(Clear, area);
+    let border = if app.repo_edit.error.is_some() {
+        Color::Red
+    } else {
+        Color::Cyan
+    };
+    let lines = app
+        .repo_edit_lines()
+        .into_iter()
+        .map(Line::from)
+        .collect::<Vec<_>>();
+    let repo = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Destination repository")
+                .border_style(Style::default().fg(border)),
+        )
+        .wrap(Wrap { trim: false });
+    frame.render_widget(repo, area);
+}
+
 fn draw_confirmation_overlay(frame: &mut Frame, app: &App) {
     let area = centered_rect(78, 68, frame.area());
     frame.render_widget(Clear, area);
@@ -1850,6 +1878,8 @@ mod tests {
             observe: Default::default(),
             memory: Default::default(),
             interaction: Default::default(),
+            repo_edit: Default::default(),
+            refresh: Default::default(),
         }
     }
 
