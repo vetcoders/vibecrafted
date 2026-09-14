@@ -317,13 +317,33 @@ async fn tool_surfaces_keep_their_boundaries() {
         "/api/aicx/search?q=x&project=../etc",
         "/api/aicx/search?q=x&project=vibecrafted",
     ] {
-        let (status, _, _) = call(&app, bad, Some("127.0.0.1:5000")).await;
+        let (status, _, body) = call(&app, bad, Some("127.0.0.1:5000")).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+        let payload: Value = serde_json::from_slice(&body).unwrap_or_else(|_| json!({}));
+        assert_eq!(
+            payload["kind"],
+            "validation",
+            "{bad}: {}",
+            String::from_utf8_lossy(&body)
+        );
     }
     assert!(
         !fixture.aicx_argv.exists(),
         "invalid input must not spawn aicx"
     );
+
+    // Empty project is omitted, not treated as service-unavailable.
+    fixture.aicx("ok", json!([]));
+    let (status, _, body) = call(
+        &app,
+        "/api/aicx/search?q=native&project=",
+        Some("127.0.0.1:5000"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let payload: Value = serde_json::from_slice(&body).expect("empty project json");
+    assert_eq!(payload["kind"], Value::Null);
+    assert_eq!(payload["project"], Value::Null);
 
     // Success: bounded argv, projected items, references only inside extracts.
     fixture.aicx(
@@ -402,6 +422,8 @@ async fn tool_surfaces_keep_their_boundaries() {
     fixture.aicx("fail", json!([]));
     let (status, _, body) = call(&app, "/api/aicx/search?q=native", Some("127.0.0.1:5000")).await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
+    let fail: Value = serde_json::from_slice(&body).expect("fail json");
+    assert_eq!(fail["kind"], "unavailable");
     assert!(String::from_utf8_lossy(&body).contains("index unavailable"));
     fixture.aicx("hang", json!([]));
     let (status, _, _) = call(&app, "/api/aicx/search?q=native", Some("127.0.0.1:5000")).await;

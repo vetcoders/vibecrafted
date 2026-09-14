@@ -867,15 +867,26 @@ fn aicx_page_script() -> &'static str {
     event.preventDefault();
     const query = q.value.trim();
     if (!query) return;
+    const scope = project ? project.value.trim() : '';
+    if (scope && !/^[\w][\w.-]{0,63}\/[\w][\w.-]{0,63}$/.test(scope)) {
+      status.textContent = 'Project must be an owner/repo slug (for example vetcoders/vibecrafted).';
+      return;
+    }
     status.textContent = 'Searching AICX…';
     results.replaceChildren();
     const params = new URLSearchParams({ q: query });
-    const scope = project ? project.value.trim() : '';
     if (scope) params.set('project', scope);
     try {
       const response = await fetch('/api/aicx/search?' + params.toString(), { credentials: 'same-origin' });
       const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || ('AICX search failed (HTTP ' + response.status + ')'));
+      if (!response.ok) {
+        const message = payload.error || ('AICX search failed (HTTP ' + response.status + ')');
+        if (payload.kind === 'validation' || response.status === 400) {
+          status.textContent = message;
+          return;
+        }
+        throw new Error(message);
+      }
       const items = payload.items || [];
       status.textContent = items.length ? items.length + ' result(s)' : 'No AICX results.';
       for (const item of items) {
@@ -1521,7 +1532,7 @@ mod tests {
     use super::{
         ActivityPage, ConsolePage, DashboardData, DashboardRun, DashboardSession,
         DashboardSessionRun, LifecyclePage, RunsPage, SessionsPage, StructurePage, WorkspacesPage,
-        console_dashboard, decode_dashboard_embed, encode_dashboard_embed,
+        aicx_page_script, console_dashboard, decode_dashboard_embed, encode_dashboard_embed,
         load_dashboard_data_from, operator_active_runs, run_cards, runs_dashboard, session_cards,
         unique_runtime_labels, workspaces_dashboard,
     };
@@ -2221,5 +2232,21 @@ mod tests {
             std::env::remove_var("VIBECRAFTED_HOME");
         }
         fs::remove_dir_all(home).ok();
+    }
+
+    #[test]
+    fn aicx_client_maps_validation_without_service_unavailable_label() {
+        let script = aicx_page_script();
+        assert!(script.contains("payload.kind === 'validation' || response.status === 400"));
+        assert!(script.contains("Project must be an owner/repo slug"));
+        let validation = script
+            .split("payload.kind === 'validation'")
+            .nth(1)
+            .expect("validation branch");
+        let before_catch = validation.split("catch (error)").next().expect("pre-catch");
+        assert!(before_catch.contains("status.textContent = message"));
+        assert!(!before_catch.contains("AICX unavailable:"));
+        let catch = script.split("catch (error)").nth(1).expect("catch");
+        assert!(catch.contains("AICX unavailable:"));
     }
 }
