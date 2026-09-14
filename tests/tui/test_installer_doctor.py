@@ -231,7 +231,7 @@ def test_run_doctor_smokes_helper_and_launcher_runtime(
     crafted_home = home / ".vibecrafted"
     store_path = crafted_home / "skills"
     launcher_bin = home / ".local" / "bin"
-    helper_dir = config_home / "vetcoders"
+    helper_dir = config_home / "vibecrafted" / "shell"
 
     store_path.mkdir(parents=True)
     launcher_bin.mkdir(parents=True)
@@ -385,7 +385,7 @@ def test_run_doctor_includes_dashboard_smoke(tmp_path: Path, monkeypatch) -> Non
     crafted_home = home / ".vibecrafted"
     store_path = crafted_home / "skills"
     launcher_bin = home / ".local" / "bin"
-    helper_dir = config_home / "vetcoders"
+    helper_dir = config_home / "vibecrafted" / "shell"
 
     store_path.mkdir(parents=True)
     launcher_bin.mkdir(parents=True)
@@ -504,7 +504,7 @@ def test_run_doctor_finds_launchers_outside_local_bin(
     crafted_home = home / ".vibecrafted"
     store_path = crafted_home / "skills"
     launcher_bin = home / ".local" / "bin"
-    helper_dir = config_home / "vetcoders"
+    helper_dir = config_home / "vibecrafted" / "shell"
 
     store_path.mkdir(parents=True)
     launcher_bin.mkdir(parents=True)
@@ -1498,7 +1498,7 @@ def test_run_doctor_spawn_e2e_supplies_full_meta_arguments(
     crafted_home = home / ".vibecrafted"
     runtime_tools = home / ".local" / "share" / "vibecrafted" / "tools"
     store_path = crafted_home / "skills"
-    helper_dir = config_home / "vetcoders"
+    helper_dir = config_home / "vibecrafted" / "shell"
     source_root = runtime_tools / "vibecrafted-main"
     current_link = runtime_tools / "vibecrafted-current"
     scripts_dir = (
@@ -1555,23 +1555,18 @@ def test_cmd_doctor_fix_rc_repairs_compat_shell_lines(
     crafted_home = home / ".vibecrafted"
     store_path = crafted_home / "skills"
     launcher_bin = home / ".local" / "bin"
-    helper_dir = config_home / "vetcoders"
-    compat_helper_dir = config_home / "zsh"
+    helper_dir = config_home / "vibecrafted" / "shell"
     zshrc = home / ".zshrc"
 
     store_path.mkdir(parents=True)
     launcher_bin.mkdir(parents=True)
     helper_dir.mkdir(parents=True)
-    compat_helper_dir.mkdir(parents=True)
 
     helper_file = helper_dir / "vc-skills.sh"
     helper_file.write_text(
         f"# shellcheck shell=bash\n{installer.HELPER_SHIM_MARKER}\nvc-help() {{ :; }}"
         + "\n",
         encoding="utf-8",
-    )
-    (compat_helper_dir / "vc-skills.zsh").write_text(
-        "# compat helper\n", encoding="utf-8"
     )
     _write_executable(
         launcher_bin / "vibecrafted",

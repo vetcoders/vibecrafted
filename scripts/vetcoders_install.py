@@ -1724,9 +1724,7 @@ def create_backup(
 
     # Back up helper files from either provided manifest or current helper files.
     if helper_entries is None:
-        helper_paths = [
-            p for p in (_helper_target_path(), _helper_legacy_path()) if p.exists()
-        ]
+        helper_paths = [p for p in (_helper_target_path(),) if p.exists()]
     else:
         helper_paths = []
         for raw_helper in helper_entries:
@@ -1782,19 +1780,16 @@ def create_backup(
 
 
 def _helper_target_path() -> Path:
-    """Canonical shell-helper shim path under XDG config (vetcoders/vc-skills.sh)."""
-    config_dir = xdg_config_home() / "vetcoders"
-    return config_dir / "vc-skills.sh"
+    """Opt-in shell-helper shim in the product shell tree (vibecrafted/shell/vc-skills.sh).
 
-
-def _helper_legacy_path() -> Path:
-    """Legacy compat shell-helper path under XDG config (zsh/vc-skills.zsh)."""
-    config_dir = xdg_config_home() / "zsh"
-    return config_dir / "vc-skills.zsh"
+    Product configuration lives only under ``~/.config/vibecrafted``; no other
+    config directory is a helper location or a fallback.
+    """
+    return xdg_config_home() / "vibecrafted" / "shell" / "vc-skills.sh"
 
 
 def _shell_source_line() -> str:
-    """Source line works in both bash and zsh."""
+    """Retired host-shell source line, kept only so rc cleanup can recognise and strip it."""
     return '[[ -r "${XDG_CONFIG_HOME:-$HOME/.config}/vetcoders/vc-skills.sh" ]] && source "${XDG_CONFIG_HOME:-$HOME/.config}/vetcoders/vc-skills.sh"'
 
 
@@ -1806,14 +1801,11 @@ def _old_zshrc_source_line() -> str:
 def _helper_surface_label(*, zsh_available: bool | None = None) -> str:
     """Human label describing which shell-helper surface (if any) is currently installed."""
     helper_file = _helper_target_path()
-    legacy_file = _helper_legacy_path()
     if zsh_available is None:
         zsh_available = shutil.which("zsh") is not None
 
     if helper_file.exists():
         return "bash + zsh" if zsh_available else "bash only"
-    if legacy_file.exists():
-        return "compat zsh"
     return "not installed"
 
 
@@ -2396,34 +2388,13 @@ def _snapshot_helper_file(path: Path) -> bool:
     return HELPER_SHIM_MARKER in text
 
 
-def _snapshot_legacy_helper_link(path: Path) -> bool:
-    """True if `path` is a symlink pointing at the canonical helper shim target."""
-    if not path.is_symlink():
-        return False
-    try:
-        target = Path(os.readlink(path))
-    except OSError:
-        return False
-    if not target.is_absolute():
-        target = path.parent / target
-    return target == _helper_target_path()
-
-
 def _snapshot_helper_files() -> list[str]:
-    """Snapshot the helper file paths (canonical and/or legacy) currently installed."""
+    """Snapshot the helper shim path when it is currently installed."""
     helper_files: list[str] = []
     helper_file = _helper_target_path()
-    legacy_file = _helper_legacy_path()
 
     if _snapshot_helper_file(helper_file) or helper_file.exists():
         helper_files.append(str(helper_file))
-
-    if (
-        _snapshot_legacy_helper_link(legacy_file)
-        or legacy_file.exists()
-        and _snapshot_helper_file(legacy_file)
-    ):
-        helper_files.append(str(legacy_file))
 
     return helper_files
 
@@ -2863,17 +2834,9 @@ def scan_helper_conflicts() -> dict[Path, list[HelperConflict]]:
     default = _helper_target_path()
     conflicts: dict[Path, list[HelperConflict]] = {}
 
-    search_dirs = []
-    config_base = xdg_config_home()
-    for subdir in ("vetcoders", "zsh"):
-        candidate = config_base / subdir
-        if candidate.is_dir():
-            search_dirs.append(candidate)
-
+    # Only shell startup files are scanned: no other config directory, retired
+    # sibling or private, is read.
     files_to_scan: list[Path] = []
-    for d in search_dirs:
-        files_to_scan.extend(d.glob("*.sh"))
-        files_to_scan.extend(d.glob("*.zsh"))
     for rcfile in (".zshrc", ".bashrc"):
         rc = Path.home() / rcfile
         if rc.exists():
@@ -12420,7 +12383,6 @@ def run_doctor(store_path: Path, state: InstallState) -> list[DoctorFinding]:
 
     # 6. Shell helpers
     helper_file = _helper_target_path()
-    legacy_file = _helper_legacy_path()
     if helper_file.exists():
         try:
             helper_content = helper_file.read_text(encoding="utf-8")
@@ -12437,14 +12399,6 @@ def run_doctor(store_path: Path, state: InstallState) -> list[DoctorFinding]:
                     f"{helper_file} is a copied helper — reinstall to remove stale drift risk",
                 )
             )
-    elif legacy_file.exists():
-        findings.append(
-            DoctorFinding(
-                "warn",
-                "shell-helpers",
-                f"compat location only: {legacy_file} — re-run install",
-            )
-        )
     elif state.shell_helpers:
         findings.append(
             DoctorFinding(
@@ -15211,7 +15165,6 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
             return runtime_exit
     bundle = set(_known_bundle_names())
     helper_file = _helper_target_path()
-    legacy_file = _helper_legacy_path()
     has_state = state_file.exists()
 
     # Default to manifest-tracked files for restore-safe uninstall;
@@ -15221,7 +15174,7 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
     elif has_state and not (state.skills or state.runtimes or state.launcher_entries):
         helper_paths = []
     else:
-        helper_paths = [hf for hf in (helper_file, legacy_file) if hf.exists()]
+        helper_paths = [hf for hf in (helper_file,) if hf.exists()]
 
     if state.launcher_entries:
         launchers = _parse_manifest_launchers(state.launcher_entries)
