@@ -36,14 +36,6 @@ COMMON_SCRIPT = (
     / "scripts"
     / "common.sh"
 )
-INSTALL_FRONTIER_SCRIPT = (
-    REPO_ROOT
-    / "vibecrafted-core"
-    / "vibecrafted_core"
-    / "runtime"
-    / "scripts"
-    / "install-frontier-config.sh"
-)
 
 
 def _write_fake_binary(bin_dir: Path, name: str) -> None:
@@ -573,10 +565,15 @@ def test_sourcing_helper_exports_frontier_sidecars_per_asset(
     assert str(vc_frame_config.parent) not in result.stdout
 
 
-def test_frontier_install_dry_run_stages_host_sidecars_without_global_takeover(
+def test_frontier_install_verb_is_retired_and_nothing_lands_in_sibling_config(
     tmp_path: Path,
 ) -> None:
-    """Host terminal assets land under frontier/, never under ~/.config/alacritty."""
+    """Configuration lives only under ~/.config/vibecrafted (Founder, 2026-09-14).
+
+    The sidecar installer that staged prompt/history links into a vetcoders/
+    frontier tree is gone. Sourcing the helper and resolving the frontier paths
+    creates nothing in any sibling config directory.
+    """
     home = tmp_path / "home"
     xdg_config_home = tmp_path / "xdg"
     home.mkdir()
@@ -585,9 +582,20 @@ def test_frontier_install_dry_run_stages_host_sidecars_without_global_takeover(
     env = os.environ.copy()
     env["HOME"] = str(home)
     env["XDG_CONFIG_HOME"] = str(xdg_config_home)
+    env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
+    env.pop("STARSHIP_CONFIG", None)
+    env.pop("ATUIN_CONFIG", None)
 
     result = subprocess.run(
-        ["bash", str(INSTALL_FRONTIER_SCRIPT), "--source", str(REPO_ROOT), "--dry-run"],
+        [
+            "bash",
+            "-lc",
+            (
+                f'source "{HELPER_SCRIPT}"; '
+                "if declare -F vc-frontier-install >/dev/null; then echo DEFINED; fi; "
+                "vc-frontier-paths"
+            ),
+        ],
         check=True,
         cwd=REPO_ROOT,
         env=env,
@@ -595,52 +603,53 @@ def test_frontier_install_dry_run_stages_host_sidecars_without_global_takeover(
         text=True,
     )
 
-    sidecar_root = xdg_config_home / "vetcoders" / "frontier"
-    assert "config/vc-frame/config.kdl" not in result.stdout
-    assert str(sidecar_root / "vc-frame" / "config.kdl") not in result.stdout
-    assert str(sidecar_root / "starship.toml") in result.stdout
-    # Optional host sidecars (present in current repo generations).
-    if (REPO_ROOT / "config" / "alacritty" / "vc-frame.toml").is_file():
-        assert "config/alacritty/vc-frame.toml" in result.stdout
-        assert str(sidecar_root / "alacritty" / "vc-frame.toml") in result.stdout
-    if (REPO_ROOT / "config" / "shell" / "atuin-up.zsh").is_file():
-        assert "config/shell/atuin-up.zsh" in result.stdout
-        assert str(sidecar_root / "shell" / "atuin-up.zsh") in result.stdout
-    # No global takeover of the operator's live Alacritty identity.
-    assert str(xdg_config_home / "alacritty") not in result.stdout
-    assert str(xdg_config_home / "vc-frame" / "config.kdl") not in result.stdout
-    assert "Done." in result.stdout
+    assert "DEFINED" not in result.stdout
+    assert f"STARSHIP_CONFIG={REPO_ROOT / 'config' / 'starship.toml'}" in result.stdout
+    for config_home in (xdg_config_home, home / ".config"):
+        for sibling in ("vetcoders", "vc-frame", "vc-terminal", "zellij"):
+            assert not (config_home / sibling).exists(), config_home / sibling
 
 
-def test_frontier_install_uses_sidecar_root_without_claiming_vc_frame_config(
+def test_frontier_presets_prefer_product_config_over_retired_sidecar(
     tmp_path: Path,
 ) -> None:
+    """The installer-owned ~/.config/vibecrafted presets are the first answer;
+    a leftover vetcoders/frontier tree is not a candidate at all."""
     home = tmp_path / "home"
     xdg_config_home = tmp_path / "xdg"
-    home.mkdir()
-    xdg_config_home.mkdir()
+    product = home / ".config" / "vibecrafted"
+    retired = xdg_config_home / "vetcoders" / "frontier"
+    for root, marker in ((product, "# product\n"), (retired, "# retired\n")):
+        (root / "atuin").mkdir(parents=True)
+        (root / "starship.toml").write_text(marker, encoding="utf-8")
+        (root / "atuin" / "config.toml").write_text(marker, encoding="utf-8")
 
     env = os.environ.copy()
     env["HOME"] = str(home)
     env["XDG_CONFIG_HOME"] = str(xdg_config_home)
+    env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
+    env.pop("STARSHIP_CONFIG", None)
+    env.pop("ATUIN_CONFIG", None)
 
-    subprocess.run(
-        ["bash", str(INSTALL_FRONTIER_SCRIPT), "--source", str(REPO_ROOT)],
+    result = subprocess.run(
+        ["bash", "-lc", f'source "{HELPER_SCRIPT}"; vc-frontier-paths'],
         check=True,
         cwd=REPO_ROOT,
         env=env,
+        capture_output=True,
+        text=True,
     )
 
-    sidecar_root = xdg_config_home / "vetcoders" / "frontier"
-    assert not (sidecar_root / "vc-frame").exists()
-    assert (sidecar_root / "starship.toml").is_symlink()
-    assert not (xdg_config_home / "vc-frame" / "config.kdl").exists()
-    assert not (xdg_config_home / "starship.toml").exists()
+    assert f"STARSHIP_CONFIG={product / 'starship.toml'}\n" in result.stdout
+    assert f"ATUIN_CONFIG={product / 'atuin' / 'config.toml'}\n" in result.stdout
+    assert str(retired) not in result.stdout
 
 
-def test_spawn_export_frontier_sidecars_mix_repo_prompt_with_companion_vc_frame(
+def test_spawn_export_frontier_sidecars_ignore_retired_companion_vc_frame(
     tmp_path: Path,
 ) -> None:
+    """Spawn sessions resolve Frame config from the product home, then the
+    shipped default; a leftover vetcoders/frontier vc-frame/ is never a source."""
     home = tmp_path / "home"
     xdg_config_home = tmp_path / "xdg"
     fake_bin = tmp_path / "bin"
@@ -691,4 +700,27 @@ def test_spawn_export_frontier_sidecars_mix_repo_prompt_with_companion_vc_frame(
         f"ATUIN_CONFIG={REPO_ROOT / 'config' / 'atuin' / 'config.toml'}"
         in result.stdout
     )
-    assert f"VC_FRAME_CONFIG_DIR={vc_frame_config.parent}" in result.stdout
+    # Without an installed product home the shipped default answers.
+    assert f"VC_FRAME_CONFIG_DIR={REPO_VC_FRAME_CONFIG}\n" in result.stdout
+    assert str(vc_frame_config.parent) not in result.stdout
+
+    # Once the installer-owned product config exists, it is the answer.
+    product_config = gen.install_product_vc_frame_config(home)
+    installed = subprocess.run(
+        [
+            "bash",
+            "-lc",
+            (
+                f'source "{COMMON_SCRIPT}"; '
+                "spawn_export_frontier_sidecars; "
+                'printf "VC_FRAME_CONFIG_DIR=%s\\n" "$VC_FRAME_CONFIG_DIR"'
+            ),
+        ],
+        check=True,
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert f"VC_FRAME_CONFIG_DIR={product_config}\n" in installed.stdout
+    assert str(vc_frame_config.parent) not in installed.stdout
