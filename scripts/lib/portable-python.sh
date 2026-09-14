@@ -82,7 +82,7 @@ install_portable_python() {
   local dest="$1"
   [[ -n "$dest" ]] || die "install_portable_python requires a destination directory"
   mkdir -p "$dest"
-  portable_python_load_pin
+  portable_python_load_pin ""
   local tarball="$dest/$PORTABLE_PYTHON_ARCHIVE"
   local digest=""
   if [[ -f "$tarball" ]]; then
