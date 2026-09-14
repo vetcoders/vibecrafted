@@ -73,9 +73,27 @@ RECEIPT_STALE_SECONDS = 120.0
 #: How long a published caretaker envelope stays worth rendering unqualified.
 SNAPSHOT_STALE_SECONDS = 300.0
 
-#: Bounded liveness probe. The caretaker is called from menus and status lines;
-#: it may never inherit the supervisor's 60s command budget.
-HEALTH_PROBE_TIMEOUT_SECONDS = 1.5
+#: Per-attempt bound of the liveness probe. The caretaker is called from menus
+#: and status lines; it may never inherit the supervisor's 60s command budget.
+#: One second is the deck's own ``health``/``health-wait`` per-probe bound, and a
+#: healthy server answers ``/api/health`` in well under a millisecond.
+HEALTH_PROBE_TIMEOUT_SECONDS = 1.0
+
+#: GETs before a silent endpoint counts as a missed probe. One timed-out read is
+#: not proof of death: a stalled read during a concurrent runtime install once
+#: rendered UNREACHABLE while supervisor, server and guardian were all alive.
+HEALTH_PROBE_ATTEMPTS = 3
+
+#: Wall-clock ceiling for every attempt together, pauses included. The App re-runs
+#: ``server caretaker --json`` every 5 s; three seconds of probing leaves the rest
+#: of the envelope (interpreter start, plane scan, resume backlog) inside a tick.
+HEALTH_PROBE_BUDGET_SECONDS = 3.0
+
+#: Pause between attempts — the deck's ``health-wait`` retry cadence.
+HEALTH_PROBE_RETRY_PAUSE_SECONDS = 0.2
+
+#: A retry with less budget left than this cannot tell a stall from an answer.
+_HEALTH_PROBE_MIN_ATTEMPT_SECONDS = 0.1
 
 #: Event stream size past which retention deserves an operator decision.
 EVENT_STREAM_PRESSURE_BYTES = 16 * 1024 * 1024
@@ -229,23 +247,10 @@ def server_log_projection(*, home: Path | None = None) -> dict[str, Any]:
 # --------------------------------------------------------------------------
 
 
-def probe_health(
-    origin: str, *, timeout: float = HEALTH_PROBE_TIMEOUT_SECONDS
-) -> dict[str, Any]:
-    """Bounded ``GET /api/health`` probe against a declared origin.
-
-    This is the one authoritative liveness fact available on every platform: a
-    launchd label can be loaded while the process behind it is wedged, and a
-    receipt can claim ``running`` long after its writer died. An HTTP answer
-    cannot be faked by a stale file.
-    """
-    target = f"{str(origin or '').rstrip('/')}/api/health"
-    probe: dict[str, Any] = {
-        "origin": origin,
-        "reachable": False,
-        "reason": "",
-        "version": "",
-    }
+def _probe_health_once(
+    target: str, *, timeout: float
+) -> tuple[dict[str, Any] | None, str]:
+    """One bounded ``GET``: ``(health payload, "")`` or ``(None, reason)``."""
     request = urllib.request.Request(  # nosemgrep: dynamic-urllib-use-detected
         target,
         headers={"Accept": "application/json"},
@@ -257,20 +262,74 @@ def probe_health(
         ) as response:
             payload = json.load(response)
     except urllib.error.HTTPError as exc:
-        probe["reason"] = f"HTTP {exc.code}"
-        return probe
+        return None, f"HTTP {exc.code}"
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        probe["reason"] = f"{type(exc).__name__}: {exc}"
-        return probe
+        return None, f"{type(exc).__name__}: {exc}"
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        probe["reason"] = f"non-JSON health body: {exc}"
-        return probe
+        return None, f"non-JSON health body: {exc}"
     if not isinstance(payload, dict) or payload.get("status") != "ok":
-        probe["reason"] = "health endpoint did not report status=ok"
-        return probe
-    probe["reachable"] = True
-    probe["version"] = str(payload.get("version") or "")
-    probe["schema"] = str(payload.get("schema") or "")
+        return None, "health endpoint did not report status=ok"
+    return payload, ""
+
+
+def probe_health(
+    origin: str,
+    *,
+    timeout: float | None = None,
+    attempts: int | None = None,
+    budget: float | None = None,
+) -> dict[str, Any]:
+    """Bounded, retried ``GET /api/health`` probe against a declared origin.
+
+    This is the one authoritative liveness fact available on every platform: a
+    launchd label can be loaded while the process behind it is wedged, and a
+    receipt can claim ``running`` long after its writer died. An HTTP answer
+    cannot be faked by a stale file.
+
+    One silent read is not that answer, though. The probe makes up to
+    ``attempts`` GETs inside ``budget`` seconds of wall clock, and any attempt
+    that answers makes the endpoint reachable. The result's ``attempts`` says
+    how many GETs this reading took; a miss names the count in its reason, so a
+    menu row says the silence repeated rather than blinked. Defaults resolve at
+    call time from the ``HEALTH_PROBE_*`` constants.
+    """
+    per_attempt = HEALTH_PROBE_TIMEOUT_SECONDS if timeout is None else float(timeout)
+    limit = max(1, int(HEALTH_PROBE_ATTEMPTS if attempts is None else attempts))
+    ceiling = HEALTH_PROBE_BUDGET_SECONDS if budget is None else float(budget)
+    target = f"{str(origin or '').rstrip('/')}/api/health"
+    probe: dict[str, Any] = {
+        "origin": origin,
+        "reachable": False,
+        "reason": "",
+        "version": "",
+        "attempts": 0,
+    }
+    started = time.monotonic()
+    deadline = started + max(0.0, ceiling)
+    reason = ""
+    while probe["attempts"] < limit:
+        remaining = deadline - time.monotonic()
+        if probe["attempts"] and remaining < _HEALTH_PROBE_MIN_ATTEMPT_SECONDS:
+            break
+        probe["attempts"] += 1
+        bound = min(per_attempt, remaining) if remaining > 0 else per_attempt
+        payload, reason = _probe_health_once(target, timeout=bound)
+        if payload is not None:
+            probe["reachable"] = True
+            probe["version"] = str(payload.get("version") or "")
+            probe["schema"] = str(payload.get("schema") or "")
+            return probe
+        if probe["attempts"] >= limit:
+            break
+        pause = min(
+            HEALTH_PROBE_RETRY_PAUSE_SECONDS, max(0.0, deadline - time.monotonic())
+        )
+        if pause > 0:
+            time.sleep(pause)
+    count = probe["attempts"]
+    elapsed = time.monotonic() - started
+    plural = "" if count == 1 else "s"
+    probe["reason"] = f"{reason} (after {count} attempt{plural} in {elapsed:.1f}s)"
     return probe
 
 
@@ -667,6 +726,26 @@ def build_maintenance_section(*, control_plane: Path | None = None) -> dict[str,
 # --------------------------------------------------------------------------
 
 
+def _supervisor_vouches_for_server(server: Mapping[str, Any]) -> bool:
+    """True when a fresh supervisor receipt reports the managed pair healthy.
+
+    The supervisor writes ``healthy`` only after its own pair-health proof and
+    rewrites the receipt on every pass; ``receipt.stale`` is this module's one
+    freshness rule for that file (:data:`RECEIPT_STALE_SECONDS`). A fresh
+    ``healthy`` receipt with no counted failures is independent, recent evidence
+    that the server is up — enough to read a missed probe as this reader's
+    hiccup rather than the server's death. It never lifts a verdict to HEALTHY:
+    only an answering endpoint does that.
+    """
+    receipt = server.get("receipt")
+    receipt = receipt if isinstance(receipt, Mapping) else {}
+    if not receipt.get("present") or receipt.get("stale", True):
+        return False
+    if str(server.get("state") or "") != "healthy":
+        return False
+    return not server.get("consecutive_failures")
+
+
 def derive_verdict(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     """The single health call, rendered ready for a menu to print verbatim.
 
@@ -743,6 +822,25 @@ def derive_verdict(snapshot: Mapping[str, Any]) -> dict[str, Any]:
         server_state = "stopped"
         header = f"VC Server: STOPPED{suffix}"
         detail = "Service is intentionally stopped"
+    elif _supervisor_vouches_for_server(server):
+        # Two readers disagree: every bounded probe attempt missed, but the
+        # supervisor proved the pair healthy moments ago. Calling that "down"
+        # offered Start for a running server; calling it "healthy" would claim
+        # an answer nobody got. It is degraded, and says which reader missed.
+        health = DEGRADED
+        server_state = "running"
+        header = f"VC Server: SUPERVISED, PROBE MISSED{suffix}"
+        detail = "Supervisor reports healthy; /api/health missed this probe"
+        probe_reason = _concise(liveness.get("reason"))
+        findings.append(
+            _finding(
+                "health_probe_missed",
+                WARN,
+                "the health probe missed while the supervisor reports healthy"
+                + (f" ({probe_reason})" if probe_reason else ""),
+                age_seconds=receipt.get("age_seconds"),
+            )
+        )
     else:
         health = UNAVAILABLE
         server_state = "down"
@@ -822,6 +920,15 @@ def build_actions_section(server: Mapping[str, Any]) -> dict[str, Any]:
     stopped = not reachable and (
         loaded is False or (receipt_present and receipt_state == "stopped")
     )
+    # The verdict's own hysteresis rule, not a second opinion: a missed probe
+    # under a fresh healthy receipt reads as a running, degraded server.
+    vouched = (
+        probed
+        and not reachable
+        and not not_installed
+        and not stopped
+        and _supervisor_vouches_for_server(server)
+    )
 
     def _verb(enabled: bool, reason: str = "", **extra: Any) -> dict[str, Any]:
         row: dict[str, Any] = {"enabled": enabled, "reason": reason}
@@ -834,12 +941,18 @@ def build_actions_section(server: Mapping[str, Any]) -> dict[str, Any]:
         start = _verb(False, "the server is already answering")
     elif not probed:
         start = _verb(False, "liveness was not probed for this snapshot")
+    elif vouched:
+        start = _verb(
+            False,
+            "the supervisor reports the server healthy; restart it if the "
+            "health probe keeps missing",
+        )
     elif loaded is True:
         start = _verb(False, "the service is loaded but not answering; restart it")
     else:
         start = _verb(True)
 
-    if reachable:
+    if reachable or vouched:
         stop = _verb(True)
     elif stopped:
         stop = _verb(False, "the service is already stopped")
@@ -865,7 +978,7 @@ def build_actions_section(server: Mapping[str, Any]) -> dict[str, Any]:
 
     if not endpoint_url:
         open_console = _verb(False, "no endpoint is configured")
-    elif reachable or not probed:
+    elif reachable or not probed or vouched:
         open_console = _verb(True, url=endpoint_url)
     else:
         open_console = _verb(
