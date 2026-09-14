@@ -1,0 +1,40 @@
+{
+  "schema": "io.vetcoders.vibecrafted.portable-python-artifact.v1",
+  "publisher": "astral-sh/python-build-standalone",
+  "publisher_url": "https://github.com/astral-sh/python-build-standalone",
+  "cpython": "3.12.14",
+  "tag": "20260901",
+  "flavor": "install_only",
+  "macos_minimum": "14.0",
+  "notes": "Stay on CPython 3.12 because the Runtime Pack launcher execs python/bin/python3.12 and relocates libpython3.12.dylib. 3.12.3 (9 Apr 2024) is not current; 3.12.14 is the latest 3.12 security release (12 Aug 2026). Published prebuilt install_only archives only — never compile CPython.",
+  "artifacts": [
+    {
+      "platform": "darwin-arm64",
+      "triple": "aarch64-apple-darwin",
+      "archive": "cpython-3.12.14+20260901-aarch64-apple-darwin-install_only.tar.gz",
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.12.14%2B20260901-aarch64-apple-darwin-install_only.tar.gz",
+      "sha256": "3ee3ee547cedfeb7c2b16b2b7156039f7b470bb8f857e226fd3d2eb11db83c76"
+    },
+    {
+      "platform": "darwin-x86_64",
+      "triple": "x86_64-apple-darwin",
+      "archive": "cpython-3.12.14+20260901-x86_64-apple-darwin-install_only.tar.gz",
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.12.14%2B20260901-x86_64-apple-darwin-install_only.tar.gz",
+      "sha256": "2e31b23f3f1319f707d0e620b48847a0046577541d357276821f9f1b5492e0ba"
+    },
+    {
+      "platform": "linux-arm64",
+      "triple": "aarch64-unknown-linux-gnu",
+      "archive": "cpython-3.12.14+20260901-aarch64-unknown-linux-gnu-install_only.tar.gz",
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.12.14%2B20260901-aarch64-unknown-linux-gnu-install_only.tar.gz",
+      "sha256": "b61b856c3e1a4fc65b8f6e6b0495ef975dd0924f90c59f3ea61b38a079173b84"
+    },
+    {
+      "platform": "linux-x64",
+      "triple": "x86_64-unknown-linux-gnu",
+      "archive": "cpython-3.12.14+20260901-x86_64-unknown-linux-gnu-install_only.tar.gz",
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.12.14%2B20260901-x86_64-unknown-linux-gnu-install_only.tar.gz",
+      "sha256": "936c246dfdbbfa7cb22dd01814a21f582a892689fae96b06071a5e433baffa22"
+    }
+  ]
+}

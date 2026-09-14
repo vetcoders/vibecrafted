@@ -3943,7 +3943,9 @@ def test_unified_release_has_one_top_level_owner() -> None:
     assert "build-server-release" in builder
     assert '"$runtime/bin/vc-server"' in builder
     assert '"$runtime/server/site/"' in builder
-    assert "uv python install 3.12.3" in builder
+    assert "install_portable_python" in builder
+    assert "scripts/lib/portable-python.sh" in builder
+    assert "uv python install 3.12.3" not in builder
     assert "install_name_tool -id '@loader_path/libpython3.12.dylib'" in builder
     # The remaps are built from PATH_REMAPS rather than written as one literal
     # string, because the snapshot pair is conditional and because rustc applies
