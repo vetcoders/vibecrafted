@@ -1537,7 +1537,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       terminalRevision: signedCarrierRevisions?.terminal,
       frameRevision: signedCarrierRevisions?.frame,
       runtimeHome: install.runtimeHome.path,
-      configHome: install.configHome.path)
+      xdgConfigHome: install.configHome.path)
     NSPasteboard.general.clearContents()
     NSPasteboard.general.setString(blob, forType: .string)
   }

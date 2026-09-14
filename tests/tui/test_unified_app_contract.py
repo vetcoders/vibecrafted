@@ -1306,6 +1306,8 @@ def test_tray_menu_supervises_runtime_pack_carrier_drift() -> None:
     )
     assert "func deriveRuntimePackMenuState(" in policy
     assert "func runtimeIdentityBlob(" in policy
+    # The tray passes its XDG base; the policy derives the product config home.
+    assert "xdgConfigHome: install.configHome.path" in delegate
     assert 'generation.range(of: "+g", options: .backwards)' in policy
     assert "signedSourceRevision.lowercased().hasPrefix(token)" in policy
     assert "Matches this App's signed carrier" in policy
@@ -1391,13 +1393,15 @@ let blob = runtimeIdentityBlob(
   generation: "4.4.0+g0a5eaaea", sourceRevision: fullSha,
   terminalRevision: "78d62bb9", frameRevision: "c29b899c",
   runtimeHome: "/Users/o/.local/share/vibecrafted",
-  configHome: "/Users/o/.config/vibecrafted")
+  xdgConfigHome: "/Users/o/.config")
 expect(blob.contains("vibecrafted-runtime: 4.4.0+g0a5eaaea"), "blob generation")
 expect(blob.contains("carrier-source: \\(fullSha)"), "blob source")
 expect(blob.contains("carrier-vc-terminal: 78d62bb9"), "blob terminal")
 expect(blob.contains("carrier-vc-frame: c29b899c"), "blob frame")
 expect(blob.contains("runtime-home: /Users/o/.local/share/vibecrafted"), "blob home")
-expect(blob.contains("config-home: /Users/o/.config/vibecrafted"), "blob config")
+// The App hands over its XDG base; the blob must name the product directory.
+let configLines = blob.split(separator: "\\n").filter { $0.hasPrefix("config-home: ") }
+expect(configLines == ["config-home: /Users/o/.config/vibecrafted"], "blob config")
 print("runtime-pack-policy-ok")
 """,
         encoding="utf-8",
