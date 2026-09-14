@@ -7476,6 +7476,27 @@ def test_sync_skill_root_rules_skips_same_inode_store(tmp_path: Path) -> None:
         assert (store / filename).read_text(encoding="utf-8") == f"{filename}\n"
 
 
+def test_sync_skill_root_rules_projects_delegation_matrix_and_runtime_feedback(
+    tmp_path: Path,
+) -> None:
+    """Regression: vc-agents links ../DELEGATION_MATRIX.md and RUNTIME_FEEDBACK.md
+    ships in the same skills root, yet the projection allowlist named only
+    VERIFICATION_RULE/LIVING_TREE_RULE — installed skill trees kept dead links."""
+    source = tmp_path / "skills"
+    source.mkdir()
+    (source / "DELEGATION_MATRIX.md").write_text("matrix\n", encoding="utf-8")
+    (source / "RUNTIME_FEEDBACK.md").write_text("feedback\n", encoding="utf-8")
+    store = tmp_path / "store"
+    store.mkdir()
+
+    copied = installer.sync_skill_root_rules(source, store, dry_run=False)
+
+    assert (store / "DELEGATION_MATRIX.md").read_text(encoding="utf-8") == "matrix\n"
+    assert (store / "RUNTIME_FEEDBACK.md").read_text(encoding="utf-8") == "feedback\n"
+    assert Path("DELEGATION_MATRIX.md") in copied
+    assert Path("RUNTIME_FEEDBACK.md") in copied
+
+
 def test_rsync_skill_skips_same_inode_dir(tmp_path: Path, monkeypatch) -> None:
     """Regression: the shutil fallback copied a skill dir onto itself (and under
     --mirror rmtree'd the source) when the store symlinked back to the source."""
