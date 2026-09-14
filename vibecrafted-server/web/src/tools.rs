@@ -39,13 +39,13 @@ pub mod api {
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
-    use axum::Json;
     use axum::extract::{ConnectInfo, Query, Request, State};
-    use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+    use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
     use axum::response::{IntoResponse, Response};
+    use axum::Json;
     use control_core::ControlPlane;
     use leptos::config::LeptosOptions;
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
 
     /// Query size the AICX CLI is asked to search. Long free text is a paste,
     /// not a query.
@@ -98,10 +98,18 @@ pub mod api {
     }
 
     fn json_error(status: StatusCode, error: &str) -> Response {
+        let kind = match status {
+            StatusCode::BAD_REQUEST => "validation",
+            StatusCode::FORBIDDEN => "forbidden",
+            StatusCode::BAD_GATEWAY
+            | StatusCode::SERVICE_UNAVAILABLE
+            | StatusCode::GATEWAY_TIMEOUT => "unavailable",
+            _ => "error",
+        };
         (
             status,
             [(header::CACHE_CONTROL, "no-store")],
-            Json(json!({ "error": error })),
+            Json(json!({ "error": error, "kind": kind })),
         )
             .into_response()
     }

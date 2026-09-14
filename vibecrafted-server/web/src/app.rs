@@ -38,6 +38,10 @@ struct DashboardWorkspace {
     title: String,
     root: String,
     status: String,
+    /// `current` is live session/run truth. `catalog` is durable history.
+    /// Catalog `status=active` is not current inventory.
+    #[serde(default)]
+    inventory: String,
     selected: bool,
     active_runs: usize,
     recent_runs: usize,
@@ -271,7 +275,7 @@ fn load_dashboard_data_from(
                         });
                     }
                 }
-                let sessions = projection
+                let sessions: Vec<DashboardSession> = projection
                     .sessions
                     .into_iter()
                     .map(|session| {
@@ -319,6 +323,11 @@ fn load_dashboard_data_from(
                     .collect();
                 match projection.catalog {
                     Some(catalog) => {
+                        let live_from_attachments = sessions
+                            .iter()
+                            .filter(|session| session.state == "live")
+                            .map(|session| session.workspace_id.clone())
+                            .collect::<std::collections::HashSet<_>>();
                         let workspaces = catalog
                             .workspaces
                             .into_iter()
@@ -333,6 +342,8 @@ fn load_dashboard_data_from(
                                     .iter()
                                     .filter(|run| run.root == workspace.canonical_root)
                                     .count();
+                                let current = active_runs > 0
+                                    || live_from_attachments.contains(&workspace.workspace_id);
                                 DashboardWorkspace {
                                     selected: catalog.selected_workspace_id.as_deref()
                                         == Some(workspace.workspace_id.as_str()),
@@ -340,6 +351,11 @@ fn load_dashboard_data_from(
                                     title: workspace.display_label,
                                     root: workspace.canonical_root,
                                     status: workspace.status,
+                                    inventory: if current {
+                                        "current".into()
+                                    } else {
+                                        "catalog".into()
+                                    },
                                     active_runs,
                                     recent_runs,
                                     updated_at: workspace.updated_at,
@@ -623,13 +639,16 @@ fn is_quarantined_run(run: &DashboardRun) -> bool {
         || (run.skill.eq_ignore_ascii_case("marbles") && run.health != "active")
 }
 
-fn operator_active_runs(runs: Vec<DashboardRun>) -> Vec<DashboardRun> {
+fn current_live_runs(runs: Vec<DashboardRun>) -> Vec<DashboardRun> {
     runs.into_iter()
         .filter(|run| {
             run.health == "active" && !is_terminal_state(&run.state) && !is_quarantined_run(run)
         })
-        .take(8)
         .collect()
+}
+
+fn operator_active_runs(runs: Vec<DashboardRun>) -> Vec<DashboardRun> {
+    current_live_runs(runs)
 }
 
 fn operator_action_runs(runs: Vec<DashboardLifecycleRun>) -> Vec<DashboardLifecycleRun> {
@@ -710,6 +729,9 @@ fn warning_rows(warnings: Vec<String>) -> impl IntoView {
         .collect_view()
 }
 
+/// Retained-snapshot settlement strip. Must not render on the normal overview:
+/// `active` here is historical snapshot count, not current live runs.
+#[allow(dead_code)]
 fn settlement_board(settlement: DashboardSettlement) -> impl IntoView {
     view! {
         <section
@@ -760,7 +782,7 @@ pub fn shell(_options: leptos::config::LeptosOptions) -> impl IntoView {
     use leptos_meta::MetaTags;
 
     use crate::chrome::{
-        STYLE_FONTS, STYLE_MAIN, STYLE_TOKENS, theme_control_script, theme_head_script,
+        theme_control_script, theme_head_script, STYLE_FONTS, STYLE_MAIN, STYLE_TOKENS,
     };
 
     view! {
@@ -823,15 +845,26 @@ fn aicx_page_script() -> &'static str {
     event.preventDefault();
     const query = q.value.trim();
     if (!query) return;
+    const scope = project ? project.value.trim() : '';
+    if (scope && !/^[\w][\w.-]{0,63}\/[\w][\w.-]{0,63}$/.test(scope)) {
+      status.textContent = 'Project must be an owner/repo slug (for example vetcoders/vibecrafted).';
+      return;
+    }
     status.textContent = 'Searching AICX…';
     results.replaceChildren();
     const params = new URLSearchParams({ q: query });
-    const scope = project ? project.value.trim() : '';
     if (scope) params.set('project', scope);
     try {
       const response = await fetch('/api/aicx/search?' + params.toString(), { credentials: 'same-origin' });
       const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || ('AICX search failed (HTTP ' + response.status + ')'));
+      if (!response.ok) {
+        const message = payload.error || ('AICX search failed (HTTP ' + response.status + ')');
+        if (payload.kind === 'validation' || response.status === 400) {
+          status.textContent = message;
+          return;
+        }
+        throw new Error(message);
+      }
       const items = payload.items || [];
       status.textContent = items.length ? items.length + ' result(s)' : 'No AICX results.';
       for (const item of items) {
@@ -906,11 +939,19 @@ fn console_dashboard(dashboard: DashboardData) -> impl IntoView {
     let recent_count = dashboard.recent_runs.len();
     let warning_count = dashboard.warnings.len();
     let action_count = action_runs.len();
-    let workspace_count = dashboard.workspaces.len();
-    let workspace_status = dashboard.workspace_status;
+    let workspace_status = dashboard.workspace_status.clone();
+    let current_workspace_count = dashboard
+        .workspaces
+        .iter()
+        .filter(|workspace| workspace.inventory == "current")
+        .count();
+    let workspace_count_label = match workspace_status.as_str() {
+        "unavailable" => "—".to_string(),
+        "not_initialized" => "0".to_string(),
+        _ => current_workspace_count.to_string(),
+    };
     let server_status = dashboard.server_status;
 
-    let settlement = dashboard.settlement;
     let has_loctree_report = !loctree_report.is_empty();
 
     view! {
@@ -960,7 +1001,11 @@ fn console_dashboard(dashboard: DashboardData) -> impl IntoView {
                                 <span class="server-console-panel-state">"live projection"</span>
                             </div>
                             <dl class="operator-now-cells">
-                                <a class="operator-summary-cell" href="/runs">
+                                <a
+                                    class="operator-summary-cell"
+                                    href="/runs"
+                                    data-scope="current_control_plane_merge"
+                                >
                                     <dt>"alive"</dt>
                                     <dd>{active_count}</dd>
                                 </a>
@@ -980,21 +1025,22 @@ fn console_dashboard(dashboard: DashboardData) -> impl IntoView {
                                     <dt>"recent"</dt>
                                     <dd>{recent_count}</dd>
                                 </a>
-                                <a class="operator-summary-cell" href="/workspaces">
+                                <a
+                                    class="operator-summary-cell"
+                                    href="/workspaces"
+                                    data-scope="current_session_run_inventory"
+                                    data-source-status=workspace_status.clone()
+                                >
                                     <dt>"workspaces"</dt>
-                                    <dd>{workspace_count}</dd>
+                                    <dd>{workspace_count_label}</dd>
                                 </a>
                             </dl>
                             <p class="control-plane-meta">
-                                <span>"workspace data"</span><span>{workspace_status}</span>
+                                <span>"workspace inventory"</span><span>{workspace_status}</span>
                             </p>
                         </aside>
                     </div>
                 </section>
-
-                <div class="settlement-board-wrap">
-                    {settlement_board(settlement)}
-                </div>
 
                 <section class="control-panel control-panel-wide overview-structure" aria-label="Structure">
                     <div class="control-panel-head">
@@ -1048,6 +1094,7 @@ fn workspace_cards(workspaces: Vec<DashboardWorkspace>) -> impl IntoView {
                         <code class="control-run-root">{workspace.root}</code>
                     </div>
                     <div class="control-run-tags">
+                        <span class="control-badge">{workspace.inventory.clone()}</span>
                         <span class="control-badge">{workspace.status}</span>
                         {selection.map(|label| view! { <span class="control-badge">{label}</span> })}
                         <span class="control-badge">{format!("{} live", workspace.active_runs)}</span>
@@ -1116,15 +1163,26 @@ fn workspaces_dashboard(dashboard: DashboardData) -> impl IntoView {
     let status = dashboard.workspace_status;
     let error = dashboard.workspace_error;
     let workspaces = dashboard.workspaces;
-    let count = workspaces.len();
+    let catalog_count = workspaces.len();
+    let current_count = workspaces
+        .iter()
+        .filter(|workspace| workspace.inventory == "current")
+        .count();
     let not_initialized = status == "not_initialized";
     let unavailable = status == "unavailable";
+    let frame_status = if unavailable {
+        "unavailable".to_string()
+    } else if not_initialized {
+        "not initialized".to_string()
+    } else {
+        format!("{current_count} current · {catalog_count} catalog")
+    };
     view! {
-        <ServerFrame active=ServerSection::Workspaces status=format!("{count} workspaces")>
+        <ServerFrame active=ServerSection::Workspaces status=frame_status>
             <div class="server-console-shell route-page-shell">
-                {route_header("Workspace", "Workspaces", "Durable identities from the canonical workspace catalog, with human labels, repository roots, and current run activity.")}
-                <section class="control-panel control-panel-wide" aria-label="Canonical workspaces" data-source-status=status.clone()>
-                    <div class="control-panel-head"><h2>"Workspace catalog"</h2><span>{status.clone()}</span></div>
+                {route_header("Workspace", "Workspaces", "Current inventory is derived from live sessions, attachments, and current runs. The catalog keeps durable history and is not the live count.")}
+                <section class="control-panel control-panel-wide" aria-label="Canonical workspaces" data-source-status=status.clone() data-current=current_count.to_string() data-catalog=catalog_count.to_string()>
+                    <div class="control-panel-head"><h2>"Current inventory"</h2><span>{current_count}</span></div>
                     {not_initialized.then(|| view! {
                         <p class="control-empty">
                             "No workspace catalog exists yet. Create or select a workspace with the Vibecrafted workspace command; the server will project it here without inventing defaults."
@@ -1135,7 +1193,13 @@ fn workspaces_dashboard(dashboard: DashboardData) -> impl IntoView {
                             {format!("Workspace data is unavailable: {error}")}
                         </p>
                     })}
-                    {(count == 0 && !not_initialized && !unavailable).then(|| view! {
+                    {(current_count == 0 && !not_initialized && !unavailable).then(|| view! {
+                        <p class="control-empty">
+                            "No current workspaces. The catalog may still retain historical identities."
+                        </p>
+                    })}
+                    <div class="control-panel-head"><h2>"Workspace catalog"</h2><span>{format!("{catalog_count} retained")}</span></div>
+                    {(catalog_count == 0 && !not_initialized && !unavailable).then(|| view! {
                         <p class="control-empty">
                             "The canonical catalog is healthy and contains no workspaces."
                         </p>
@@ -1161,13 +1225,23 @@ fn sessions_dashboard(dashboard: DashboardData) -> impl IntoView {
     let error = dashboard.workspace_error;
     let sessions = dashboard.sessions;
     let count = sessions.len();
+    let live_count = sessions
+        .iter()
+        .filter(|session| session.state == "live")
+        .count();
     let unavailable = source_status == "unavailable";
+    let frame_status = if unavailable {
+        "unavailable".to_string()
+    } else {
+        format!("{live_count} live · {count} recorded")
+    };
     view! {
-        <ServerFrame active=ServerSection::Sessions status=format!("{count} sessions")>
+        <ServerFrame active=ServerSection::Sessions status=frame_status>
             <div class="server-console-shell route-page-shell">
-                {route_header("Workspace", "Sessions", "Logical workspace sessions and their real runtime attachments from canonical session records.")}
-                <section class="control-panel control-panel-wide" aria-label="Canonical sessions" data-source-status=source_status>
-                    <div class="control-panel-head"><h2>"Session attachments"</h2><span>{count}</span></div>
+                {route_header("Workspace", "Sessions", "Live means a current attachment or current run. Recorded sessions stay as history.")}
+                <section class="control-panel control-panel-wide" aria-label="Canonical sessions" data-source-status=source_status.clone() data-live=live_count.to_string() data-recorded=count.to_string()>
+                    <div class="control-panel-head"><h2>"Live attachments"</h2><span>{live_count}</span></div>
+                    <div class="control-panel-head"><h2>"Session attachments"</h2><span>{format!("{count} recorded")}</span></div>
                     <p class="control-empty control-error" hidden={!unavailable}>
                         {format!("Session data is unavailable: {error}")}
                     </p>
@@ -1399,21 +1473,21 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use axum::body::{Body, to_bytes};
+    use axum::body::{to_bytes, Body};
     use axum::http::{Request, StatusCode};
     use chrono::Utc;
     use control_core::ControlPlane;
     use leptos::config::{Env, LeptosOptions};
     use leptos::prelude::*;
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
     use tower::ServiceExt;
 
     use super::{
-        ActivityPage, ConsolePage, DashboardData, DashboardRun, DashboardSession,
-        DashboardSessionRun, LifecyclePage, RunsPage, SessionsPage, StructurePage, WorkspacesPage,
-        console_dashboard, decode_dashboard_embed, encode_dashboard_embed,
+        aicx_page_script, console_dashboard, decode_dashboard_embed, encode_dashboard_embed,
         load_dashboard_data_from, operator_active_runs, run_cards, session_cards,
-        unique_runtime_labels, workspaces_dashboard,
+        sessions_dashboard, unique_runtime_labels, workspaces_dashboard, ActivityPage, ConsolePage,
+        DashboardData, DashboardRun, DashboardSession, DashboardSessionRun, LifecyclePage,
+        RunsPage, SessionsPage, StructurePage, WorkspacesPage,
     };
     use crate::control::api::{control_routes, state_payload};
     use crate::theme::provide_theme_context;
@@ -1554,12 +1628,10 @@ mod tests {
         let dashboard = load_dashboard_data_from(&plane, now);
         assert_eq!(dashboard.workspace_status, "unavailable");
         assert!(dashboard.workspaces.is_empty());
-        assert!(
-            dashboard
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("Workspace data unavailable"))
-        );
+        assert!(dashboard
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Workspace data unavailable")));
         let owner = Owner::new();
         let html = owner.with(|| {
             provide_theme_context();
@@ -1569,6 +1641,157 @@ mod tests {
         assert!(html.contains("unsupported workspace catalog schema"));
         assert!(!html.contains("canonical catalog is healthy"));
         fs::remove_dir_all(home).ok();
+    }
+
+    fn inventory_id(prefix: &str, index: usize) -> String {
+        format!("{prefix}{index:012x}")
+    }
+
+    #[test]
+    fn overview_workspace_count_is_current_inventory_not_retained_catalog() {
+        let home = temp_home();
+        let root = home.join("control_plane/workspaces");
+        let sessions_dir = root.join("sessions");
+        fs::create_dir_all(&sessions_dir).expect("workspace dirs");
+        let mut workspaces = serde_json::Map::new();
+        for index in 0..527 {
+            let workspace_id = inventory_id("0198f84e-0000-7abc-8def-", index);
+            workspaces.insert(
+                workspace_id.clone(),
+                json!({
+                    "schema": "vibecrafted.workspace.v1",
+                    "workspace_id": workspace_id,
+                    "display_label": format!("Catalog {index}"),
+                    "canonical_root": format!("/work/catalog-{index}"),
+                    "status": "active",
+                    "updated_at": "2026-09-14T00:00:00Z"
+                }),
+            );
+        }
+        fs::write(
+            root.join("catalog.json"),
+            serde_json::to_vec(&json!({
+                "schema": "vibecrafted.workspace-catalog.v1",
+                "updated_at": "2026-09-14T00:00:00Z",
+                "selected_workspace_id": inventory_id("0198f84e-0000-7abc-8def-", 0),
+                "workspaces": workspaces
+            }))
+            .expect("catalog json"),
+        )
+        .expect("catalog");
+        for index in 0..4 {
+            fs::write(
+                sessions_dir.join(format!(
+                    "{}.json",
+                    inventory_id("0198f84e-1111-7abc-8def-", index)
+                )),
+                serde_json::to_vec(&json!({
+                    "schema": "vibecrafted.workspace-session.v1",
+                    "session_id": inventory_id("0198f84e-1111-7abc-8def-", index),
+                    "workspace_id": inventory_id("0198f84e-0000-7abc-8def-", index),
+                    "workspace_instance_id": inventory_id("0198f84e-2222-7abc-8def-", index),
+                    "updated_at": "2026-09-14T00:01:00Z",
+                    "attachments": [{
+                        "runtime": "vc-frame",
+                        "runtime_session_id": format!("frame-{index}"),
+                        "state": "live"
+                    }]
+                }))
+                .expect("live session"),
+            )
+            .expect("live session file");
+        }
+        fs::write(
+            sessions_dir.join(format!(
+                "{}.json",
+                inventory_id("0198f84e-1111-7abc-8def-", 20)
+            )),
+            serde_json::to_vec(&json!({
+                "schema": "vibecrafted.workspace-session.v1",
+                "session_id": inventory_id("0198f84e-1111-7abc-8def-", 20),
+                "workspace_id": inventory_id("0198f84e-0000-7abc-8def-", 20),
+                "workspace_instance_id": inventory_id("0198f84e-2222-7abc-8def-", 20),
+                "updated_at": "2026-09-13T00:00:00Z",
+                "attachments": [{
+                    "runtime": "vc-frame",
+                    "runtime_session_id": "stale-frame",
+                    "state": "dead"
+                }]
+            }))
+            .expect("dead session"),
+        )
+        .expect("dead session file");
+
+        let plane = ControlPlane::new(&home);
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-14T10:00:00Z")
+            .expect("fixed now")
+            .with_timezone(&Utc);
+        let dashboard = load_dashboard_data_from(&plane, now);
+        assert_eq!(dashboard.workspaces.len(), 527);
+        assert_eq!(
+            dashboard
+                .workspaces
+                .iter()
+                .filter(|workspace| workspace.inventory == "current")
+                .count(),
+            4
+        );
+        assert_eq!(
+            dashboard
+                .workspaces
+                .iter()
+                .filter(|workspace| workspace.inventory == "catalog")
+                .count(),
+            523
+        );
+        let owner = Owner::new();
+        let overview = owner.with(|| {
+            provide_theme_context();
+            console_dashboard(dashboard.clone()).to_html()
+        });
+        assert!(
+            overview.contains("data-scope=\"current_session_run_inventory\""),
+            "{overview}"
+        );
+        assert!(overview.contains(">4</dd>"), "{overview}");
+        assert!(!overview.contains(">527</dd>"), "{overview}");
+        assert!(!overview.contains("aria-label=\"Operator summary\""));
+        let page = owner.with(|| {
+            provide_theme_context();
+            workspaces_dashboard(dashboard.clone()).to_html()
+        });
+        assert!(page.contains("data-current=\"4\""), "{page}");
+        assert!(page.contains("data-catalog=\"527\""), "{page}");
+        assert!(
+            page.contains("523") || page.contains("527 retained"),
+            "{page}"
+        );
+        let sessions_page = owner.with(|| {
+            provide_theme_context();
+            sessions_dashboard(dashboard).to_html()
+        });
+        assert!(sessions_page.contains("data-live=\"4\""), "{sessions_page}");
+        assert!(
+            sessions_page.contains("data-recorded=\"5\""),
+            "{sessions_page}"
+        );
+        fs::remove_dir_all(home).ok();
+    }
+
+    #[test]
+    fn aicx_client_maps_validation_without_service_unavailable_label() {
+        let script = aicx_page_script();
+        assert!(script.contains("payload.kind === 'validation' || response.status === 400"));
+        assert!(script.contains("Project must be an owner/repo slug"));
+        let validation = script
+            .split("payload.kind === 'validation'")
+            .nth(1)
+            .expect("validation branch");
+        let before_catch = validation.split("catch (error)").next().expect("pre-catch");
+        assert!(before_catch.contains("status.textContent = message"));
+        assert!(!before_catch.contains("AICX unavailable:"));
+        let catch = script.split("catch (error)").nth(1).expect("catch");
+        assert!(catch.contains("AICX unavailable:"));
     }
 
     #[test]
@@ -1609,27 +1832,21 @@ mod tests {
             "the HTTP/SSR projection must use Python-owned snapshots, not rescan raw locks"
         );
 
-        for key in [
-            "active",
-            "f",
-            "x",
-            "n",
-            "invalid",
-            "unclassified",
-            "total_settled",
-        ] {
-            let expected = board[key].as_u64().expect("numeric settlement field");
-            let attribute = key.replace('_', "-");
-            assert!(
-                html.contains(&format!("data-{attribute}=\"{expected}\"")),
-                "SSR {key} must equal API value {expected}: {html}"
-            );
-        }
-        let scope = board["scope"].as_str().expect("scope string");
-        assert!(html.contains(&format!("data-scope=\"{scope}\"")));
-        assert!(html.contains("final"));
-        assert!(html.contains("failed"));
-        assert!(html.contains("attention"));
+        assert!(
+            !html.contains("aria-label=\"Operator summary\""),
+            "retained settlement strip must not appear on overview: {html}"
+        );
+        assert!(
+            !html.contains("data-scope=\"retained_control_plane_snapshots\""),
+            "overview must not alias retained snapshot alive as current: {html}"
+        );
+        assert!(html.contains("data-scope=\"current_control_plane_merge\""));
+        assert!(html.contains("data-scope=\"current_session_run_inventory\""));
+        assert_eq!(board["scope"], "retained_control_plane_snapshots");
+        assert_eq!(board["f"], 1);
+        assert_eq!(board["x"], 2);
+        assert_eq!(board["invalid"], 1);
+        assert_eq!(board["n"], 1);
         assert!(html.contains("aria-label=\"Switch to light theme\""));
         assert!(html.contains("http://127.0.0.1:8033/"));
         assert!(html.contains("Vibecrafted server navigation"));
@@ -1640,20 +1857,11 @@ mod tests {
         assert!(html.contains("href=\"/structure\""));
         assert!(html.contains("href=\"/scaffold\""));
         assert!(!html.contains("href=\"#fleet\""));
-        let board_position = html
-            .find("aria-label=\"Operator summary\"")
-            .expect("summary");
-        let structure_position = html.find("aria-label=\"Structure\"").expect("structure");
-        assert!(board_position < structure_position);
         assert!(!html.contains("aria-label=\"Active runs\""));
         assert!(!html.contains("aria-label=\"Warnings\""));
         assert!(!html.contains("aria-label=\"Action plan\""));
         assert!(!html.contains("aria-label=\"Recent state view\""));
         assert!(!html.contains("aria-label=\"Event tail\""));
-        assert_eq!(board["f"], 1);
-        assert_eq!(board["x"], 2);
-        assert_eq!(board["invalid"], 1);
-        assert_eq!(board["n"], 1);
 
         fs::remove_dir_all(home).ok();
     }

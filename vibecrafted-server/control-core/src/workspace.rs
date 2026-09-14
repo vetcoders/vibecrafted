@@ -4,7 +4,7 @@
 //! `control_plane/workspaces/catalog.json` and `sessions/*.json` contracts; it
 //! does not discover repositories or infer workspace identity from paths.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::path::Path;
@@ -198,6 +198,27 @@ impl ControlPlane {
     }
 }
 
+impl WorkspaceSession {
+    /// Live runtime attachment recorded on the canonical session, not catalog status.
+    pub fn has_live_attachment(&self) -> bool {
+        self.attachments
+            .iter()
+            .any(|attachment| attachment.state == "live")
+    }
+}
+
+/// Workspace ids that currently have a live session attachment.
+///
+/// Catalog `status=active` is durable history. Current inventory is derived
+/// from canonical session attachments (and, at the dashboard, current runs).
+pub fn current_workspace_ids(sessions: &[WorkspaceSession]) -> BTreeSet<&str> {
+    sessions
+        .iter()
+        .filter(|session| session.has_live_attachment())
+        .map(|session| session.workspace_id.as_str())
+        .collect()
+}
+
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, WorkspaceProjectionError> {
     let bytes = fs::read(path).map_err(|source| WorkspaceProjectionError::Read {
         path: path.display().to_string(),
@@ -330,6 +351,105 @@ mod tests {
                 .to_string()
                 .contains("unsupported workspace catalog schema")
         );
+        fs::remove_dir_all(home).ok();
+    }
+
+    fn hex_id(prefix: &str, index: usize) -> String {
+        format!("{prefix}{index:012x}")
+    }
+
+    #[test]
+    fn current_inventory_is_live_attachments_not_catalog_active_status() {
+        let home = temp_home();
+        let root = home.join("control_plane/workspaces");
+        let sessions_dir = root.join("sessions");
+        fs::create_dir_all(&sessions_dir).expect("workspace dirs");
+
+        let mut workspaces = serde_json::Map::new();
+        for index in 0..527 {
+            let workspace_id = hex_id("0198f84e-0000-7abc-8def-", index);
+            workspaces.insert(
+                workspace_id.clone(),
+                serde_json::json!({
+                    "schema": "vibecrafted.workspace.v1",
+                    "workspace_id": workspace_id,
+                    "display_label": format!("Catalog {index}"),
+                    "canonical_root": format!("/work/catalog-{index}"),
+                    "status": "active",
+                    "updated_at": "2026-09-14T00:00:00Z"
+                }),
+            );
+        }
+        fs::write(
+            root.join("catalog.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema": "vibecrafted.workspace-catalog.v1",
+                "updated_at": "2026-09-14T00:00:00Z",
+                "selected_workspace_id": hex_id("0198f84e-0000-7abc-8def-", 0),
+                "workspaces": workspaces
+            }))
+            .expect("catalog json"),
+        )
+        .expect("catalog");
+
+        for index in 0..4 {
+            let workspace_id = hex_id("0198f84e-0000-7abc-8def-", index);
+            fs::write(
+                sessions_dir.join(format!(
+                    "{}.json",
+                    hex_id("0198f84e-1111-7abc-8def-", index)
+                )),
+                serde_json::to_vec(&serde_json::json!({
+                    "schema": "vibecrafted.workspace-session.v1",
+                    "session_id": hex_id("0198f84e-1111-7abc-8def-", index),
+                    "workspace_id": workspace_id,
+                    "workspace_instance_id": hex_id("0198f84e-2222-7abc-8def-", index),
+                    "updated_at": "2026-09-14T00:01:00Z",
+                    "attachments": [{
+                        "runtime": "vc-frame",
+                        "runtime_session_id": format!("frame-{index}"),
+                        "state": "live"
+                    }]
+                }))
+                .expect("live session"),
+            )
+            .expect("live session file");
+        }
+        fs::write(
+            sessions_dir.join(format!("{}.json", hex_id("0198f84e-1111-7abc-8def-", 20))),
+            serde_json::to_vec(&serde_json::json!({
+                "schema": "vibecrafted.workspace-session.v1",
+                "session_id": hex_id("0198f84e-1111-7abc-8def-", 20),
+                "workspace_id": hex_id("0198f84e-0000-7abc-8def-", 20),
+                "workspace_instance_id": hex_id("0198f84e-2222-7abc-8def-", 20),
+                "updated_at": "2026-09-13T00:00:00Z",
+                "attachments": [{
+                    "runtime": "vc-frame",
+                    "runtime_session_id": "stale-frame",
+                    "state": "dead"
+                }]
+            }))
+            .expect("dead session"),
+        )
+        .expect("dead session file");
+
+        let projection = ControlPlane::new(&home)
+            .load_workspace_projection()
+            .expect("projection");
+        let catalog = projection.catalog.expect("catalog");
+        assert_eq!(catalog.workspaces.len(), 527);
+        assert!(
+            catalog
+                .workspaces
+                .iter()
+                .all(|workspace| workspace.status == "active")
+        );
+        let current = current_workspace_ids(&projection.sessions);
+        assert_eq!(current.len(), 4, "dead attachments are catalog history");
+        for index in 0..4 {
+            assert!(current.contains(hex_id("0198f84e-0000-7abc-8def-", index).as_str()));
+        }
+        assert!(!current.contains(hex_id("0198f84e-0000-7abc-8def-", 20).as_str()));
         fs::remove_dir_all(home).ok();
     }
 }

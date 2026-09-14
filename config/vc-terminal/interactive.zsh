@@ -226,7 +226,7 @@ if (( ${#_VC_TERMINAL_WARNINGS} )); then
   print -u2 -r -- "Vibecrafted: ${#_VC_TERMINAL_WARNINGS} shell setup notices. See ${HISTFILE:h}/startup.log"
 fi
 
-if [[ -t 1 ]]; then
+if [[ -t 1 && -z "${VIBECRAFTED_QUIET_START:-}" ]]; then
   print -P '%F{cyan}Vibecrafted%f · Your terminal is ready.'
   print '  vc-start --repo <path>    Create a workspace for your project'
   print '  vc-frame list-sessions   Find an existing workspace'
