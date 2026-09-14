@@ -1618,61 +1618,6 @@ button:hover > .icon-box {
   gap: var(--space-6);
 }
 
-.operator-summary-strip {
-  display: grid;
-  grid-template-columns: minmax(180px, 1fr) minmax(360px, 2fr) auto;
-  gap: var(--space-5);
-  align-items: center;
-  padding: var(--space-4) var(--space-5);
-  background: color-mix(in srgb, var(--surface-card) 96%, transparent);
-  border: var(--stroke-width) solid var(--border-active);
-  border-radius: var(--radius-surface);
-  box-shadow: var(--shadow-rest);
-}
-
-.operator-summary-title,
-.operator-summary-detail {
-  display: grid;
-  gap: var(--space-1);
-  min-width: 0;
-  color: var(--text-muted);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-}
-
-.operator-summary-title strong {
-  overflow-wrap: anywhere;
-  color: var(--text-secondary);
-}
-
-.operator-summary-cells {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(70px, 1fr));
-  gap: var(--space-2);
-  margin: 0;
-}
-
-.operator-summary-cells div {
-  padding: var(--space-3);
-  background: var(--surface-elevated);
-  border: var(--stroke-width) solid var(--border-subtle);
-  border-radius: var(--radius-surface);
-}
-
-.operator-summary-cells dt {
-  color: var(--text-muted);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  text-transform: uppercase;
-}
-
-.operator-summary-cells dd {
-  margin: var(--space-1) 0 0;
-  color: var(--text-primary);
-  font-family: var(--font-mono);
-  font-size: 1.25rem;
-}
-
 .settlement-board {
   display: grid;
   gap: var(--space-5);
@@ -1681,12 +1626,6 @@ button:hover > .icon-box {
   border: var(--stroke-width) solid var(--border-active);
   border-radius: var(--radius-surface);
   box-shadow: var(--shadow-rest);
-}
-
-.settlement-board-wrap {
-  width: min(100%, var(--max-w-page));
-  margin: 0 auto;
-  padding: var(--space-8) var(--container-gutter) 0;
 }
 
 .settlement-board-head,
@@ -1941,14 +1880,6 @@ button:hover > .icon-box {
 }
 
 @media (max-width: 820px) {
-  .operator-summary-strip {
-    grid-template-columns: 1fr;
-  }
-
-  .operator-summary-cells {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
   .settlement-board-head,
   .settlement-board-foot {
     align-items: flex-start;
@@ -2334,7 +2265,6 @@ a.control-run-id:focus-visible {
 }
 
 .server-console-hero,
-.settlement-board-wrap,
 .control-plane-band,
 .server-console-footer,
 .run-detail-header,
@@ -2499,38 +2429,6 @@ a.control-run-id:focus-visible {
   font: 650 22px/1 var(--font-mono);
 }
 
-.settlement-board-wrap {
-  padding: 14px 0 0;
-}
-
-.operator-summary-strip {
-  grid-template-columns: minmax(180px, 1.25fr) minmax(420px, 2.5fr) minmax(130px, auto);
-  gap: 12px;
-  padding: 14px;
-  border-color: var(--border-subtle);
-  border-radius: var(--radius-surface);
-  background: var(--surface-card);
-  box-shadow: var(--shadow-rest);
-}
-
-.operator-summary-cells {
-  gap: 8px;
-}
-
-.operator-summary-cells .operator-summary-cell {
-  padding: 10px;
-}
-
-.operator-summary-title strong {
-  color: var(--text-primary);
-  font-weight: 550;
-}
-
-.operator-summary-detail {
-  line-height: 1.6;
-  text-align: right;
-}
-
 .control-plane-band {
   padding: 14px 0 0;
   gap: 14px;
@@ -2580,6 +2478,17 @@ a.control-run-id:focus-visible {
 .workspace-card-list {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
+}
+
+.workspace-history > summary {
+  margin-bottom: 10px;
+  color: var(--text-muted);
+  font: 550 11px/1.4 var(--font-mono);
+  cursor: pointer;
+}
+
+.workspace-history[open] > summary {
+  color: var(--text-secondary);
 }
 
 .control-run-row,
@@ -2838,16 +2747,8 @@ a.control-run-id:focus-visible {
     grid-template-columns: 184px minmax(0, 1fr);
   }
 
-  .server-console-grid,
-  .operator-summary-strip {
+  .server-console-grid {
     grid-template-columns: 1fr;
-  }
-
-  .operator-summary-detail {
-    grid-template-columns: repeat(3, auto);
-    justify-content: start;
-    gap: 12px;
-    text-align: left;
   }
 
   .run-detail-header {
@@ -2944,14 +2845,8 @@ a.control-run-id:focus-visible {
   }
 
   .operator-now-cells,
-  .operator-summary-cells,
   .control-dashboard-grid {
     grid-template-columns: 1fr;
-  }
-
-  .operator-summary-detail {
-    grid-template-columns: 1fr;
-    gap: 2px;
   }
 
   .control-plane-meta,
