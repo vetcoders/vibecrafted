@@ -363,7 +363,6 @@ _helper_candidates() {
   # freshly updated launcher cannot be shadowed by older installed helpers.
   printf '%s\n' \
     "$crafted_tools/vibecrafted-core/vibecrafted_core/runtime/shell/vetcoders.sh" \
-    "${XDG_CONFIG_HOME:-$HOME/.config}/vetcoders/vc-skills.sh" \
     "$crafted_skills/runtime/shell/vetcoders.sh" \
     "$repo_helper"
 }

@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF_USAGE'
-Usage: skills_sync.sh <host> [--source <repo-root>] [--tool <codex|claude|agy|cursor>]... [--dry-run] [--mirror] [--with-shell] [--no-zshrc] [--no-bashrc] [--no-verify]
+Usage: skills_sync.sh <host> [--source <repo-root>] [--tool <codex|claude|agy|cursor>]... [--dry-run] [--mirror] [--no-verify]
 
 Sync canonical skill directories from this repo to the staged tools store:
   $HOME/.local/share/vibecrafted/tools/vibecrafted-current/vibecrafted-core/vibecrafted_core/skills
@@ -14,12 +14,14 @@ Then create symlink views inside the remote tool homes:
   $HOME/.agy/skills
   $HOME/.cursor/skills
 
+Skills sync never writes configuration or shell startup files on the target.
+The shell helper is installed on the target host by its own install.
+
 Examples:
   bash runtime/scripts/skills_sync.sh host-b
   bash runtime/scripts/skills_sync.sh host-b --tool codex --tool claude
   bash runtime/scripts/skills_sync.sh host-b --dry-run
   bash runtime/scripts/skills_sync.sh host-b --mirror
-  bash runtime/scripts/skills_sync.sh host-b --with-shell
 EOF_USAGE
 }
 
@@ -58,9 +60,6 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 verify=1
 dry_run=0
 mirror=0
-with_shell=0
-shell_no_zshrc=0
-shell_no_bashrc=0
 host=""
 declare -a tools=()
 
@@ -85,14 +84,11 @@ while [[ $# -gt 0 ]]; do
     --mirror)
       mirror=1
       ;;
-    --with-shell)
-      with_shell=1
-      ;;
-    --no-zshrc)
-      shell_no_zshrc=1
-      ;;
-    --no-bashrc)
-      shell_no_bashrc=1
+    --with-shell|--no-zshrc|--no-bashrc)
+      # Host-shell helper sourcing is retired and configuration lives only in
+      # ~/.config/vibecrafted on each host: nothing pushes a helper into a
+      # remote config directory or appends source lines to remote rc files.
+      die "$1 is retired: install the shell helper on the target host with its own install; skills-sync does not write configuration or rc files"
       ;;
     --no-verify)
       verify=0
@@ -117,9 +113,6 @@ done
   exit 1
 }
 [[ -d "$repo_root" ]] || die "Repo root not found: $repo_root"
-
-# shellcheck disable=SC2016
-source_line='[[ -r "${XDG_CONFIG_HOME:-$HOME/.config}/vetcoders/vc-skills.sh" ]] && source "${XDG_CONFIG_HOME:-$HOME/.config}/vetcoders/vc-skills.sh"'
 
 skills=()
 skills_root="$repo_root/vibecrafted-core/vibecrafted_core/skills"
@@ -245,64 +238,6 @@ for tool in "${tools[@]}"; do
   printf '\n'
 done
 
-if (( with_shell )); then
-  shell_source="$repo_root/vibecrafted-core/vibecrafted_core/runtime/shell/vetcoders.sh"
-  [[ -f "$shell_source" ]] || die "Shell helper file not found: $shell_source"
-
-  # shellcheck disable=SC2016
-  remote_config_root='${XDG_CONFIG_HOME:-$HOME/.config}'
-  remote_helper_dir="$remote_config_root/vetcoders"
-  remote_shell_target="$remote_helper_dir/vc-skills.sh"
-  remote_legacy_dir="$remote_config_root/zsh"
-  remote_legacy_target="$remote_legacy_dir/vc-skills.zsh"
-
-  printf 'Syncing optional shell helper layer to %s\n' "$host"
-  if (( dry_run )); then
-    printf '  ssh %s mkdir -p %s %s\n' "$host" "$remote_helper_dir" "$remote_legacy_dir"
-  else
-    ssh -n "$host" "mkdir -p $remote_helper_dir $remote_legacy_dir" || die "Could not prepare helper dirs on $host"
-  fi
-  if (( dry_run )); then
-    printf '  rsync %s %s %s:%s\n' "${rsync_args[*]}" "$shell_source" "$host" "$remote_shell_target"
-  else
-    rsync "${rsync_args[@]}" "$shell_source" "$host:$remote_shell_target"
-  fi
-  if (( dry_run )); then
-    printf '  ssh %s ln -sfn %s %s\n' "$host" "$remote_shell_target" "$remote_legacy_target"
-  else
-    ssh -n "$host" "ln -sfn $remote_shell_target $remote_legacy_target" \
-      || die "Could not link compat helper path $remote_legacy_target on $host"
-  fi
-
-  if (( shell_no_zshrc )); then
-    # shellcheck disable=SC2016
-    printf 'Skipping remote $HOME/.zshrc update (--no-zshrc).\n'
-  else
-    remote_zshrc="\$HOME/.zshrc"
-    if (( dry_run )); then
-      printf '  ssh %s touch %s && if ! grep -Fqx '"'"'%s'"'"' %s; then printf ... >> %s; fi\n' "$host" "$remote_zshrc" "$source_line" "$remote_zshrc" "$remote_zshrc"
-    else
-      ssh -n "$host" "touch ${remote_zshrc} && if ! grep -Fqx '$source_line' ${remote_zshrc}; then printf '\n# Vetcoders shell helpers\n%s\n' '$source_line' >> ${remote_zshrc}; fi" \
-        || die "Could not update $HOME/.zshrc on $host"
-    fi
-  fi
-
-  if (( shell_no_bashrc )); then
-    # shellcheck disable=SC2016
-    printf 'Skipping remote $HOME/.bashrc update (--no-bashrc).\n'
-  else
-    remote_bashrc="\$HOME/.bashrc"
-    if (( dry_run )); then
-      printf '  ssh %s touch %s && if ! grep -Fqx '"'"'%s'"'"' %s; then printf ... >> %s; fi\n' "$host" "$remote_bashrc" "$source_line" "$remote_bashrc" "$remote_bashrc"
-    else
-      ssh -n "$host" "touch ${remote_bashrc} && if ! grep -Fqx '$source_line' ${remote_bashrc}; then printf '\n# Vetcoders shell helpers\n%s\n' '$source_line' >> ${remote_bashrc}; fi" \
-        || die "Could not update $HOME/.bashrc on $host"
-    fi
-  fi
-
-  printf '\n'
-fi
-
 if (( ! verify )); then
   printf 'Sync complete. Verification skipped.\n'
   exit 0
@@ -326,14 +261,6 @@ for tool in "${tools[@]}"; do
   remote_tool_skills="\$HOME/.${tool}/skills/vc-agents"
   ssh -n "$host" "if [ -L ${remote_tool_skills} ]; then echo OK_LINK ${remote_tool_skills}; else echo MISSING_LINK ${remote_tool_skills}; fi"
 done
-
-if (( with_shell )); then
-  ssh -n "$host" 'if [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/vetcoders/vc-skills.sh" ]; then
-  echo "OK ${XDG_CONFIG_HOME:-$HOME/.config}/vetcoders/vc-skills.sh"
-else
-  echo "MISSING ${XDG_CONFIG_HOME:-$HOME/.config}/vetcoders/vc-skills.sh"
-fi'
-fi
 
 remote_foundation_check "$host"
 

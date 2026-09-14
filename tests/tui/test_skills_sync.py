@@ -4,6 +4,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SKILLS_SYNC = (
     REPO_ROOT
@@ -32,7 +34,7 @@ def _write_stub_command(bin_dir: Path, name: str, body: str) -> None:
     path.chmod(0o755)
 
 
-def test_skills_sync_with_shell_targets_canonical_helper_and_both_shells(
+def test_skills_sync_dry_run_targets_staged_store_and_touches_no_config(
     tmp_path: Path,
 ) -> None:
     fake_bin = tmp_path / "bin"
@@ -52,7 +54,6 @@ def test_skills_sync_with_shell_targets_canonical_helper_and_both_shells(
             "fakehost",
             "--source",
             str(REPO_ROOT),
-            "--with-shell",
             "--dry-run",
             "--no-verify",
         ],
@@ -64,35 +65,30 @@ def test_skills_sync_with_shell_targets_canonical_helper_and_both_shells(
     )
 
     stdout = result.stdout
-
-    assert "Syncing optional shell helper layer to fakehost" in stdout
     assert (
         "$HOME/.local/share/vibecrafted/tools/vibecrafted-current/"
         "vibecrafted-core/vibecrafted_core/skills" in stdout
     )
-    assert "$HOME/.vibecrafted/skills" not in stdout
-    assert "_template" not in stdout
-    assert "${XDG_CONFIG_HOME:-$HOME/.config}/vetcoders/vc-skills.sh" in stdout
-    assert "ssh fakehost ln -sfn" in stdout
-    assert "Skipping remote $HOME/.bashrc update" not in stdout
-    assert "Skipping remote $HOME/.zshrc update" not in stdout
     assert (
         "$HOME/.local/share/vibecrafted/tools/vibecrafted-local/"
         "vibecrafted-core/vibecrafted_core/skills" in stdout
     )
-    assert "rsync" in stdout
-    assert ".bashrc" in stdout
-    assert ".zshrc" in stdout
+    assert "$HOME/.vibecrafted/skills" not in stdout
+    assert "_template" not in stdout
+    # Skills sync never writes configuration or shell startup files.
+    assert ".config" not in stdout
+    assert ".zshrc" not in stdout
+    assert ".bashrc" not in stdout
     assert not log_file.exists(), "dry-run must not execute ssh or rsync"
 
 
-def test_skills_sync_with_shell_real_run_targets_canonical_helper_and_both_shells(
-    tmp_path: Path,
+@pytest.mark.parametrize("flag", ["--with-shell", "--no-zshrc", "--no-bashrc"])
+def test_skills_sync_refuses_retired_shell_helper_flags(
+    tmp_path: Path, flag: str
 ) -> None:
-    # Real run (no --dry-run) actually invokes the ssh/rsync shims; the shim log
-    # captures the exact commands, proving canonical targeting and that both
-    # shells are hit. Complements the dry-run test above, which only inspects
-    # the printed plan and asserts zero execution.
+    """Host-shell helper sourcing is retired, and configuration lives only in
+    ~/.config/vibecrafted: skills-sync neither pushes a helper into a remote
+    config directory nor appends source lines to remote rc files."""
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     log_file = tmp_path / "sync.log"
@@ -103,34 +99,26 @@ def test_skills_sync_with_shell_real_run_targets_canonical_helper_and_both_shell
     env = os.environ.copy()
     env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
 
-    subprocess.run(
+    result = subprocess.run(
         [
             "bash",
             str(SKILLS_SYNC),
             "fakehost",
             "--source",
             str(REPO_ROOT),
-            "--with-shell",
+            flag,
             "--no-verify",
         ],
-        check=True,
+        check=False,
         cwd=REPO_ROOT,
         env=env,
         capture_output=True,
         text=True,
     )
 
-    log = log_file.read_text(encoding="utf-8")
-
-    assert (
-        "$HOME/.local/share/vibecrafted/tools/vibecrafted-local/"
-        "vibecrafted-core/vibecrafted_core/skills" in log
-    )
-    assert "$HOME/.vibecrafted/skills" not in log
-    assert "_template" not in log
-    assert "${XDG_CONFIG_HOME:-$HOME/.config}/vetcoders/vc-skills.sh" in log
-    assert ".bashrc" in log
-    assert ".zshrc" in log
+    assert result.returncode != 0
+    assert f"{flag} is retired" in result.stderr
+    assert not log_file.exists(), "a refused flag must not reach ssh or rsync"
 
 
 def test_install_shell_shim_prefers_current_control_plane_before_home_store(
@@ -160,7 +148,9 @@ def test_install_shell_shim_prefers_current_control_plane_before_home_store(
         text=True,
     )
 
-    shim = (config / "vetcoders" / "vc-skills.sh").read_text(encoding="utf-8")
+    shim = (config / "vibecrafted" / "shell" / "vc-skills.sh").read_text(
+        encoding="utf-8"
+    )
     tools_path = (
         '"$crafted_tools_home/vibecrafted-current/vibecrafted-core/'
         'vibecrafted_core/runtime/shell/vetcoders.sh"'
@@ -195,7 +185,9 @@ def test_install_shell_does_not_write_rc_files_without_consent(tmp_path: Path) -
         text=True,
     )
 
-    assert (config / "vetcoders" / "vc-skills.sh").exists()
+    assert (config / "vibecrafted" / "shell" / "vc-skills.sh").exists()
+    # The shim has one home: no sibling or private config directory is created.
+    assert sorted(child.name for child in config.iterdir()) == ["vibecrafted"]
     assert zshrc.read_text(encoding="utf-8") == "# zsh user config\n"
     assert bashrc.read_text(encoding="utf-8") == "# bash user config\n"
     assert "Shell rc files were not changed automatically." in result.stdout
