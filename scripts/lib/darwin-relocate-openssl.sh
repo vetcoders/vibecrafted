@@ -2,7 +2,7 @@
 # Relocate Homebrew-linked OpenSSL 3 onto @loader_path for a Darwin payload.
 #
 # This is the same install_name_tool pattern the release builder already uses
-# for libpython3.12.dylib. It copies pinned redistributable dylibs (Homebrew
+# for libpython3.N.dylib. It copies pinned redistributable dylibs (Homebrew
 # bottle bytes, Apache-2.0) and rewrites load commands. It never compiles
 # OpenSSL, AICX, Loctree, ScreenScribe or PRView.
 #

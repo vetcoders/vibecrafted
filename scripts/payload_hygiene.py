@@ -20,7 +20,7 @@ rustc can reach:
 3. `Contents/MacOS/Vibecrafted` — 51 hits of the checkout root, from
    xcodebuild's `DerivedData` intermediates and Swift source locations. Swift
    has its own `-debug-prefix-map`; `RUSTFLAGS` never reaches it.
-4. `Contents/Resources/runtime/python/lib/python3.12/_sysconfigdata__darwin_darwin.py`
+4. `Contents/Resources/runtime/python/lib/python3.N/_sysconfigdata__darwin_darwin.py`
    — 27 hits of the ephemeral `build/unified-release/python-seed.XXXXXX/` dir
    uv installed CPython into. A plain text file; no compiler involved at all.
 5. `Contents/Resources/runtime/python-site/bin/jsonschema` — a console-script

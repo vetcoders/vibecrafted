@@ -779,6 +779,7 @@ materialize_runtime_payload() {
   # scripts/lib/portable-python-artifact.json. Retry transient curl; never compile.
   # shellcheck source=/dev/null
   . "$SOURCE_ROOT/scripts/lib/portable-python.sh"
+  portable_python_load_pin
   seed_python="$(install_portable_python "$python_seed")"
   python_home="$(cd "$(dirname "$seed_python")/.." && pwd)"
   mkdir -p "$runtime/python" "$runtime/python-site"
@@ -786,15 +787,15 @@ materialize_runtime_payload() {
   uv pip install --python "$seed_python" --target "$runtime/python-site" \
     'jsonschema>=4.23,<5' 'PyYAML>=6.0,<7' 'screenscribe==0.1.19' \
     'fastmcp>=2.0,<3'
-  install_name_tool -id '@loader_path/libpython3.12.dylib' \
-    "$runtime/python/lib/libpython3.12.dylib"
+  install_name_tool -id "@loader_path/${PORTABLE_PYTHON_DYLIB}" \
+    "$runtime/python/lib/${PORTABLE_PYTHON_DYLIB}"
   rm -rf "$runtime/python-site/bin"
   normalize_embedded_python_paths "$runtime" "$python_seed"
 
   find "$runtime" -type f -name '*.pyc' -delete
   find "$runtime" -depth -type d -name __pycache__ -empty -delete
   find "$runtime" -type f -name '.DS_Store' -delete
-  # shellcheck disable=SC2016  # writes a launcher; expansions belong to the generated script
+  # shellcheck disable=SC2016  # writes a launcher; runtime_root expands in the generated script
   printf '%s\n' \
     '#!/bin/bash' \
     'set -euo pipefail' \
@@ -802,7 +803,7 @@ materialize_runtime_payload() {
     'export PYTHONNOUSERSITE=1' \
     'export PYTHONDONTWRITEBYTECODE=1' \
     'export PYTHONPATH="$runtime_root/vibecrafted-core:$runtime_root/vibecrafted-mcp:$runtime_root/python-site"' \
-    'exec "$runtime_root/python/bin/python3.12" "$@"' \
+    "exec \"\$runtime_root/python/bin/${PORTABLE_PYTHON_BIN}\" \"\$@\"" \
     > "$runtime/bin/python3"
   chmod 0755 "$runtime/bin/python3"
   "$SOURCE_ROOT/scripts/project-python" \

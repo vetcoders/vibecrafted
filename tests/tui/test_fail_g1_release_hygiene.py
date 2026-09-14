@@ -286,8 +286,8 @@ def test_fail_g1_python_seed_retries_transient_uv_install() -> None:
     pin = (REPO_ROOT / "scripts/lib/portable-python-artifact.json").read_text(
         encoding="utf-8"
     )
-    assert '"cpython": "3.12.14"' in pin
-    assert "3ee3ee547cedfeb7c2b16b2b7156039f7b470bb8f857e226fd3d2eb11db83c76" in pin
+    assert '"cpython": "3.14.7"' in pin
+    assert "30daa970c7d223530120f1693cd3c6fa4c0c0d31ef158710b0dd77f286a5b23e" in pin
 
 
 def test_fail_g1_release_prefers_rustup_cargo_before_cargo_runs() -> None:
