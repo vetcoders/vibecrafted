@@ -167,14 +167,19 @@ _MACOS_RE = re.compile(r"([0-9]+)\.([0-9]+)")
 _BUILD_HOST_PATH_RE = re.compile(
     rb"(?:^|[\s\"'=:(])(?<![A-Za-z]:)(?P<path>/(?:Volumes|Users|opt/homebrew|usr/local)/[^\s\"'\x00]{0,512})"
 )
+_LIBPYTHON_DYLIB_RELATIVE = re.compile(
+    r"^Contents/Resources/runtime/python/lib/libpython3\.\d+\.dylib$"
+)
+_LIBPYTHON_DOCUMENTATION_PATHS = frozenset(
+    {
+        "/usr/local/lib/python2.5/site-packages",
+        "/usr/local/lib/python2.5/site-packages/bar",
+        "/usr/local/lib/python2.5/site-packages/foo",
+    }
+)
 _EMBEDDED_DOCUMENTATION_PATHS = {
-    "Contents/Resources/runtime/python/lib/libpython3.12.dylib": frozenset(
-        {
-            "/usr/local/lib/python2.5/site-packages",
-            "/usr/local/lib/python2.5/site-packages/bar",
-            "/usr/local/lib/python2.5/site-packages/foo",
-        }
-    ),
+    "Contents/Resources/runtime/python/lib/libpython3.12.dylib": _LIBPYTHON_DOCUMENTATION_PATHS,
+    "Contents/Resources/runtime/python/lib/libpython3.14.dylib": _LIBPYTHON_DOCUMENTATION_PATHS,
 }
 _VENDORED_OPENSSL_RELATIVE_SUFFIXES = (
     "/lib/libssl.3.dylib",
@@ -1234,6 +1239,8 @@ def _reject_host_bound_paths(path: Path, *, relative: str, kind: str) -> None:
     except OSError:
         return
     documentation_paths = _EMBEDDED_DOCUMENTATION_PATHS.get(relative, frozenset())
+    if not documentation_paths and _LIBPYTHON_DYLIB_RELATIVE.fullmatch(relative):
+        documentation_paths = _LIBPYTHON_DOCUMENTATION_PATHS
     for match in _BUILD_HOST_PATH_RE.finditer(content):
         host_path = match.group("path").decode("utf-8", errors="replace")
         if host_path in documentation_paths:

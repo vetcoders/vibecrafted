@@ -1081,7 +1081,7 @@ def interactive_launch_interpreter(
     server's fresh login shell: no ``PYTHONPATH``, nothing exported by the
     process that composed it. In a Runtime Pack that composer itself runs under
     the generation's ``bin/python3`` -- the bootstrap wrapper that exports the
-    generation-private ``PYTHONPATH`` and execs the raw ``python/bin/python3.12``
+    generation-private ``PYTHONPATH`` and execs the raw ``python/bin/python3.N``
     -- so ``sys.executable`` is the raw interpreter, and raw is exactly what
     the 8177a33d candidate wrote into the pane (``ModuleNotFoundError: No module
     named 'vibecrafted_core'`` before any provider ran).
