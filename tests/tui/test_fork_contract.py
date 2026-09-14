@@ -30,6 +30,28 @@ def _write_exec(path: Path, body: str) -> None:
     path.chmod(0o755)
 
 
+def _provider_stub(name: str) -> str:
+    """Installed-CLI probe reads --version/--help; spawn never executes these."""
+    help_markers = {
+        "claude": "--resume --fork-session --print",
+        "codex": "exec resume fork",
+        "grok": "--resume --fork-session --prompt-file",
+        "cursor-agent": "--resume --print --output-format",
+        "agy": "--continue --conversation --print",
+        "junie": "--resume --session-id",
+    }
+    markers = help_markers.get(name, "")
+    return (
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'case "${1:-}" in\n'
+        f"  --version|-V) printf '%s\\n' '{name} 0.0.0-test'; exit 0 ;;\n"
+        f"  --help|-h) printf 'Usage: {name} {markers}\\n'; exit 0 ;;\n"
+        "esac\n"
+        "exit 0\n"
+    )
+
+
 def _git_repo(path: Path) -> Path:
     path.mkdir(parents=True)
     subprocess.run(["git", "init", "-q"], cwd=path, check=True)
@@ -65,7 +87,7 @@ class _World:
             '{ printf "%s\\n" "$@"; } > "$CAPTURE_FILE"\n',
         )
         for provider in ("claude", "codex", "grok", "cursor-agent", "agy", "junie"):
-            _write_exec(self.bin / provider, "#!/usr/bin/env bash\nexit 0\n")
+            _write_exec(self.bin / provider, _provider_stub(provider))
 
     def seed_run(
         self, *, agent: str = "claude", session: str | None = PROVIDER_SESSION
@@ -134,6 +156,19 @@ class _World:
         script = Path(pane[pane.index("--") + 1])
         return script.read_text(encoding="utf-8")
 
+    def launch_tokens(self) -> list[str]:
+        import shlex
+
+        return shlex.split(shlex.split(self.command(), comments=True)[-1])
+
+    def admission(self) -> dict:
+        tokens = self.launch_tokens()
+        return json.loads(
+            Path(tokens[tokens.index("--admission-file") + 1]).read_text(
+                encoding="utf-8"
+            )
+        )
+
 
 @pytest.fixture
 def world(tmp_path: Path) -> _World:
@@ -151,26 +186,29 @@ def test_claude_fork_by_session_from_outside_git_with_repo(world: _World) -> Non
         "claude-fable-5-1",
         "--permissions",
         "accept-edits",
-        "-p",
-        "try the other approach",
     )
 
     assert result.returncode == 0, result.stderr
-    command = world.command()
-    assert f"claude --resume {OTHER_SESSION} --fork-session" in command
-    assert "--model claude-fable-5-1" in command
-    assert "--permission-mode acceptEdits" in command
-    assert "try the other approach" in command
-    # Source preservation: never a plain resume, never a renamed session.
-    assert "--session-id" not in command
     pane = world.pane()
+    assert "new-pane" in pane
+    assert "new-tab" not in pane
     assert pane[pane.index("--cwd") + 1] == str(world.repo.resolve())
     assert (
         pane[pane.index("--name") + 1]
         == f"claude fork @{world.tmp_path.name}/repo with space {OTHER_SESSION}"
     )
+    tokens = world.launch_tokens()
+    assert "interactive-launch" in tokens
+    assert tokens[tokens.index("--continuity") + 1] == "bare-fork"
+    assert tokens[tokens.index("--parent-session") + 1] == OTHER_SESSION
+    assert "--session-id" not in tokens
+    admission = world.admission()
+    assert admission["agent"] == "claude"
+    assert admission["skill"] == "fork"
+    assert admission["model_requested"] == "claude-fable-5-1"
+    assert admission["root"] == str(world.repo.resolve())
     assert f"repo:      {world.repo.resolve()}" in result.stdout
-    assert f"session:   {OTHER_SESSION}" in result.stdout
+    assert f"source-session: {OTHER_SESSION}" in result.stdout
 
 
 def test_grok_fork_never_restores_code_or_moves_to_a_worktree(world: _World) -> None:
@@ -187,15 +225,92 @@ def test_grok_fork_never_restores_code_or_moves_to_a_worktree(world: _World) -> 
     )
 
     assert result.returncode == 0, result.stderr
-    command = world.command()
-    assert f"grok --resume {OTHER_SESSION} --fork-session --cwd" in command
-    assert "--no-alt-screen" in command
-    assert "--permission-mode plan" in command
-    assert "--restore-code" not in command
-    assert "--worktree" not in command
     pane = world.pane()
+    assert "new-pane" in pane
     assert "--floating" in pane
     assert "--direction" not in pane
+    assert "--near-current-pane" in pane
+    tokens = world.launch_tokens()
+    assert "interactive-launch" in tokens
+    assert tokens[tokens.index("--continuity") + 1] == "bare-fork"
+    assert tokens[tokens.index("--parent-session") + 1] == OTHER_SESSION
+    joined = " ".join(tokens)
+    assert "--restore-code" not in joined
+    assert "--worktree" not in joined
+    admission = world.admission()
+    assert admission["agent"] == "grok"
+    assert admission["skill"] == "fork"
+
+
+def test_claude_fork_right_placement_uses_direction_right(world: _World) -> None:
+    result = world.fork(
+        "claude",
+        "--session",
+        OTHER_SESSION,
+        "--repo",
+        str(world.repo),
+        "--placement",
+        "right",
+    )
+
+    assert result.returncode == 0, result.stderr
+    pane = world.pane()
+    assert "new-pane" in pane
+    assert "--near-current-pane" in pane
+    assert "--direction" in pane
+    assert pane[pane.index("--direction") + 1] == "right"
+    assert "--floating" not in pane
+    assert "pane:      right" in result.stdout
+
+
+def test_unknown_fork_placement_is_refused_before_spawn(world: _World) -> None:
+    result = world.fork(
+        "claude",
+        "--session",
+        OTHER_SESSION,
+        "--repo",
+        str(world.repo),
+        "--placement",
+        "bottom",
+    )
+    assert result.returncode == 2
+    assert "Unknown fork placement" in result.stderr
+    assert not world.capture.exists()
+
+
+def test_frame_pane_refusal_does_not_replace_the_source_session(
+    world: _World,
+) -> None:
+    _write_exec(
+        world.bin / "vc-frame",
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'if [[ "${1:-}" == "ls" || "${1:-}" == "list-sessions" ]]; then\n'
+        '  printf "operator-test (attached)\\n"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [[ " $* " == *" new-pane "* ]]; then\n'
+        "  printf 'no current pane in this guest context\\n' >&2\n"
+        "  exit 1\n"
+        "fi\n"
+        '{ printf "%s\\n" "$@"; } > "$CAPTURE_FILE"\n',
+    )
+    result = world.fork(
+        "claude",
+        "--session",
+        OTHER_SESSION,
+        "--repo",
+        str(world.repo),
+        "--placement",
+        "right",
+    )
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "no replacement session or tab was created" in result.stderr
+    assert "new-tab" not in result.stdout + result.stderr
+    if world.capture.exists():
+        captured = " ".join(world.pane())
+        assert "new-tab" not in captured
+        assert "new-pane" not in captured
 
 
 def test_codex_fork_uses_native_fork_subcommand_with_inline_repo(world: _World) -> None:
@@ -211,13 +326,20 @@ def test_codex_fork_uses_native_fork_subcommand_with_inline_repo(world: _World) 
     )
 
     assert result.returncode == 0, result.stderr
-    command = world.command()
-    assert "codex fork --cd" in command
-    assert "repo with space" in command
-    assert "--model gpt-test" in command
-    assert "--ask-for-approval on-request --sandbox workspace-write" in command
-    assert command.rstrip().endswith(f"{OTHER_SESSION}'")
-    assert "codex resume" not in command
+    pane = world.pane()
+    assert "new-pane" in pane
+    assert "new-tab" not in pane
+    tokens = world.launch_tokens()
+    assert "interactive-launch" in tokens
+    assert tokens[tokens.index("interactive-launch") + 1] == "codex"
+    assert tokens[tokens.index("--continuity") + 1] == "bare-fork"
+    assert tokens[tokens.index("--parent-session") + 1] == OTHER_SESSION
+    assert "codex resume" not in " ".join(tokens)
+    admission = world.admission()
+    assert admission["agent"] == "codex"
+    assert admission["skill"] == "fork"
+    assert admission["model_requested"] == "gpt-test"
+    assert "repo with space" in admission["root"]
 
 
 def test_run_id_resolves_the_recorded_provider_session_and_its_repository(
@@ -228,25 +350,25 @@ def test_run_id_resolves_the_recorded_provider_session_and_its_repository(
     result = world.fork("claude", "--run-id", RUN_ID)
 
     assert result.returncode == 0, result.stderr
-    command = world.command()
-    assert f"claude --resume {PROVIDER_SESSION} --fork-session" in command
-    assert f"session:   {PROVIDER_SESSION}" in result.stdout
+    tokens = world.launch_tokens()
+    assert tokens[tokens.index("--parent-session") + 1] == PROVIDER_SESSION
+    assert tokens[tokens.index("--continuity") + 1] == "bare-fork"
+    assert f"source-session: {PROVIDER_SESSION}" in result.stdout
     assert f"source:    {RUN_ID}" in result.stdout
-    # No explicit --repo: the run's recorded repository, not the caller's cwd.
     pane = world.pane()
     assert pane[pane.index("--cwd") + 1] == str(world.repo.resolve())
     assert str(world.outside.resolve()) not in pane
 
 
-def test_explicit_repo_outranks_the_recorded_run_root(world: _World) -> None:
+def test_explicit_root_of_a_different_checkout_is_refused(world: _World) -> None:
     world.seed_run()
     other = _git_repo(world.tmp_path / "other repo")
 
     result = world.fork("claude", "--run-id", RUN_ID, "--root", str(other))
 
-    assert result.returncode == 0, result.stderr
-    pane = world.pane()
-    assert pane[pane.index("--cwd") + 1] == str(other.resolve())
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "different repository checkout" in result.stderr
+    assert not world.capture.exists()
 
 
 def test_session_and_run_id_shapes_are_not_confused(world: _World) -> None:
@@ -306,7 +428,9 @@ def test_providers_without_a_fork_surface_are_refused_with_evidence(
 
     assert result.returncode == 2
     assert "native_fork_unsupported" in result.stderr
-    assert "no fork surface" in result.stderr
+    assert "no verified native fork adapter" in result.stderr or (
+        "no native fork flag" in result.stderr
+    )
     assert f"vibecrafted resume {agent} --session <id>" in result.stderr
     assert "a resume, not a fork" in result.stderr
     assert not world.capture.exists()
@@ -315,15 +439,15 @@ def test_providers_without_a_fork_surface_are_refused_with_evidence(
 def test_headless_is_refused_per_provider_without_pretending(world: _World) -> None:
     codex = world.fork("codex", "--session", PROVIDER_SESSION, "--runtime", "headless")
     assert codex.returncode == 2
-    assert "codex fork is an interactive TUI" in codex.stderr
+    assert "Bare fork requires visible or terminal runtime." in codex.stderr
+    assert not world.capture.exists()
 
     claude = world.fork(
         "claude", "--session", PROVIDER_SESSION, "--runtime", "headless"
     )
     assert claude.returncode == 2
-    assert "headless tracked fork is not wired" in claude.stderr
-    assert "resume-session claude" in claude.stderr
-    assert "a resume, not a fork" in claude.stderr
+    assert "Bare fork requires visible or terminal runtime." in claude.stderr
+    assert not world.capture.exists()
 
 
 def test_repo_root_conflict_invalid_path_and_worktree_flag(world: _World) -> None:
@@ -351,9 +475,17 @@ def test_repo_root_conflict_invalid_path_and_worktree_flag(world: _World) -> Non
     assert legacy_invalid.returncode == 2
     assert "--root is not an existing directory" in legacy_invalid.stderr
 
-    worktree = world.fork("claude", "--session", PROVIDER_SESSION, "--worktree", "true")
-    assert worktree.returncode == 2
-    assert "fork has no --worktree" in worktree.stderr
+    worktree = world.fork(
+        "claude",
+        "--session",
+        PROVIDER_SESSION,
+        "--repo",
+        str(world.repo),
+        "--worktree",
+        "true",
+    )
+    assert "Unknown fork argument: --worktree" not in worktree.stderr
+    assert "fork has no --worktree" not in worktree.stderr
 
     codex_edits = world.fork(
         "codex", "--session", PROVIDER_SESSION, "--permissions", "accept-edits"
@@ -367,9 +499,10 @@ def test_help_documents_the_real_contract(world: _World) -> None:
 
     assert result.returncode == 0
     assert "--run-id <work-...>" in result.stdout
-    assert "--repo <path>" in result.stdout
+    assert "--repo <path|org/name>" in result.stdout
+    assert "--placement right|floating" in result.stdout
     assert "claude|codex|grok" in result.stdout
-    assert "cursor, agy and junie expose no fork surface" in result.stdout
+    assert "cursor, agy and junie have no verified native fork adapter" in result.stdout
     assert (
         "vibecrafted fork claude --run-id work-260908-194325-30219 --repo ~/Projects/app"
         in result.stdout
