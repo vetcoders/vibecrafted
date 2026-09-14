@@ -157,7 +157,7 @@ MuxConfig::new(socket, cmd)
 | `health`        | Verify socket reachability for a service                               |
 | `daemon-status` | Query running multi-service daemon status via Unix socket              |
 | `dashboard`     | Tray dashboard for multi-service status (feature: tray)                |
-| `proxy`         | STDIO↔socket proxy (also exposed as the `rmcp-mux-proxy` binary)       |
+| `proxy`         | STDIO↔socket proxy (also exposed as the `rmcp-mux-proxy` binary)      |
 
 ## Config (JSON / YAML / TOML)
 
@@ -294,7 +294,7 @@ CI (`.github/workflows/ci.yml`) runs with `--no-default-features` (tray off) so 
 | `server_manager`                                             | `runtime/server.rs`                   | Child process lifecycle + restart backoff                                                          |
 | `handle_client`                                              | `runtime/client.rs`                   | Per-client connection handler                                                                      |
 | `heartbeat_loop`                                             | `runtime/heartbeat.rs`                | Child health probe                                                                                 |
-| `run_proxy`                                                  | `runtime/proxy.rs`                    | STDIO↔socket bridge (also `rmcp-mux-proxy` binary)                                                 |
+| `run_proxy`                                                  | `runtime/proxy.rs`                    | STDIO↔socket bridge (also `rmcp-mux-proxy` binary)                                                |
 | `run_wizard`                                                 | `wizard/mod.rs`                       | TUI entry point (feature: cli)                                                                     |
 | `WizardStep`                                                 | `wizard/types.rs`                     | Five-step enum (DiscoverySources / ServerReview / StrategyChoice / SummaryConfirm / ResultAndTray) |
 | `discover_hosts`                                             | `scan.rs`                             | Find host config files (feature: cli)                                                              |
@@ -308,11 +308,13 @@ CI (`.github/workflows/ci.yml`) runs with `--no-default-features` (tray off) so 
 2. **Library-first architecture.** Use `MuxConfig` + `spawn_mux_server` for embedding. CLI is feature-gated.
 
 3. **Feature gating:**
+
    - `cli` → wizard, scan, binaries (`clap`, `ratatui`, `crossterm`, `tracing-subscriber`).
    - `tray` → system tray icon (`tray-icon`, `image`).
    - For library-only consumers, depend with `default-features = false`.
 
 4. **Naming convention:**
+
    - Package name: `rmcp-mux` (crates.io, `Cargo.toml`).
    - Library name: `rmcp_mux` (Rust identifier, `use rmcp_mux::*`).
    - Binary names: `rmcp-mux`, `rmcp-mux-proxy`.

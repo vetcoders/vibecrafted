@@ -18,7 +18,7 @@ past runs. They launch no workflows themselves — that is the job of the
 | `vibecrafted init [agent]`           | Orient an agent in this repo                                   |
 | `vibecrafted status`                 | Today's agent activity                                         |
 | `vibecrafted doctor`                 | Installation health — pass/fail                                |
-| `vibecrafted receipt [--json]`       | Delivery/runtime receipt (source ↔ installed)                  |
+| `vibecrafted receipt [--json]`       | Delivery/runtime receipt (source ↔ installed)                 |
 | `vibecrafted settlements <action>`   | Read-only f/x/n ledger query                                   |
 | `vibecrafted update`                 | Update to the latest release                                   |
 | `vibecrafted resume <agent>`         | Continue a stopped run or a provider session                   |
