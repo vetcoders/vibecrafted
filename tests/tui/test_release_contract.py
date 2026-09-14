@@ -1150,9 +1150,13 @@ def _run_python_prune(tmp_path: Path, python: Path, *, path: str) -> None:
     start = builder.index("prune_embedded_python_unreachable() {")
     end = builder.index("\n}\n", start) + len("\n}\n")
     script = tmp_path / "prune.sh"
+    # The builder runs under `set -euo pipefail`; release #8 died silently
+    # inside this function on a status that only errexit turns fatal.
     script.write_text(
-        builder[start:end]
-        + '\nprune_embedded_python_unreachable "$1" python3.14 libpython3.14.dylib\n',
+        "set -euo pipefail\n"
+        + builder[start:end]
+        + '\nprune_embedded_python_unreachable "$1" python3.14 libpython3.14.dylib\n'
+        + "printf 'PRUNE_DONE\\n'\n",
         encoding="utf-8",
     )
     result = subprocess.run(
@@ -1164,6 +1168,7 @@ def _run_python_prune(tmp_path: Path, python: Path, *, path: str) -> None:
         check=False,
     )
     assert result.returncode == 0, result.stderr
+    assert "PRUNE_DONE" in result.stdout
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="otool reads Mach-O load commands")

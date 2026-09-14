@@ -520,7 +520,9 @@ PY
 prune_embedded_python_unreachable() {
   local python="$1" interpreter="$2" libpython="$3"
   local path restore_nullglob
-  restore_nullglob="$(shopt -p nullglob)"
+  # `shopt -p` exits 1 for an option that is off; under `set -e` that silently
+  # ended release #8 right after the interpreter download.
+  restore_nullglob="$(shopt -p nullglob || true)"
   shopt -s nullglob
   for path in \
     "$python"/lib/tcl[0-9]* "$python"/lib/tk[0-9]* \
