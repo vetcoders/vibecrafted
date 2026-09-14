@@ -939,7 +939,7 @@ materialize_runtime_payload() {
   # scripts/lib/portable-python-artifact.json. Retry transient curl; never compile.
   # shellcheck source=/dev/null
   . "$SOURCE_ROOT/scripts/lib/portable-python.sh"
-  portable_python_load_pin
+  portable_python_load_pin ""
   seed_python="$(install_portable_python "$python_seed")"
   python_home="$(cd "$(dirname "$seed_python")/.." && pwd)"
   mkdir -p "$runtime/python" "$runtime/python-site"

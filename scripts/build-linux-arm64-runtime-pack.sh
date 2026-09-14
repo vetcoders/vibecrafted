@@ -140,7 +140,7 @@ python3 "$repo_root/scripts/distribution_manifest.py" carrier \
 # shellcheck source=/dev/null
 . "$repo_root/scripts/lib/portable-python.sh"
 mkdir -p "$work/python-seed"
-portable_python_load_pin
+portable_python_load_pin ""
 seed_python="$(install_portable_python "$work/python-seed")"
 python_home="$(cd "$(dirname "$seed_python")/.." && pwd -P)"
 mkdir -p "$payload/python" "$payload/python-site"
