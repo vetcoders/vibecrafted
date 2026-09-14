@@ -163,10 +163,20 @@ class WorkflowLaunchSpec:
     # installed provider CLI cannot enforce before any process is launched.
     permissions: str = ""
     sandbox: bool | None = None
+    # Founder-authorized continuation on a recorded trust BLOCK. Empty /
+    # false keeps ordinary launches refused. Never rewrites the journal.
+    remediate_trust_block: bool = False
+    remediation_reason: str = ""
+    remediation_task: str = ""
 
     def to_payload(self) -> dict[str, Any]:
         """Serialize the spec to a plain dict for launch logs and events."""
-        return {**asdict(self), "prompt": "", "plan_source": None}
+        payload = {**asdict(self), "prompt": "", "plan_source": None}
+        if not self.remediate_trust_block:
+            payload.pop("remediate_trust_block", None)
+            payload.pop("remediation_reason", None)
+            payload.pop("remediation_task", None)
+        return payload
 
 
 def vibecrafted_launcher(source_dir: str | Path) -> Path:
@@ -1651,6 +1661,13 @@ def normalize_launch_spec(
         raise ValueError(f"Prompt file does not exist or is not a file: {file_path}")
     permissions = parse_permissions_word(payload.get("permissions"))
     sandbox = parse_sandbox_word(payload.get("sandbox"))
+    remediating, remediation_reason, remediation_task = (
+        guard_mod.parse_remediation_flags(
+            remediating=payload.get("remediate_trust_block"),
+            reason=payload.get("remediation_reason"),
+            task=payload.get("remediation_task"),
+        )
+    )
     if permissions or sandbox is not None:
         if definition.runtime_kind in SUPERVISED_RUNTIME_KINDS:
             raise ValueError(
@@ -1794,6 +1811,9 @@ def normalize_launch_spec(
         worktree=worktree,
         permissions=permissions,
         sandbox=sandbox,
+        remediate_trust_block=remediating,
+        remediation_reason=remediation_reason,
+        remediation_task=remediation_task,
     )
 
 
@@ -2179,6 +2199,8 @@ def machine_launch_receipt(payload: dict[str, Any]) -> dict[str, Any]:
     ):
         if key in payload:
             receipt[key] = _json_plain(payload[key])
+    if isinstance(payload.get("guard"), dict):
+        receipt["guard"] = dict(payload["guard"])
     return receipt
 
 
@@ -2975,6 +2997,7 @@ def launch_workflow(
     # vc-guard proof path: refuse continuation when trust has block on HEAD.
     # Guard never invents settlement; only consumes trust journal. Opt-out via
     # VIBECRAFTED_GUARD=0 for hermetic tests that are not about enforcement.
+    guard_receipt: dict[str, Any] = {}
     if str(os.environ.get("VIBECRAFTED_GUARD", "1")).strip() not in {
         "0",
         "false",
@@ -2988,9 +3011,13 @@ def launch_workflow(
             decision = guard_mod.enforce_continuation(
                 repo=root,
                 skill=str(spec.skill or ""),
+                remediating=spec.remediate_trust_block,
+                remediation_reason=spec.remediation_reason,
+                remediation_task=spec.remediation_task,
             )
+            guard_receipt = guard_mod.launch_disclosure(decision)
             if not decision.allowed:
-                raise ValueError(decision.remedium or "vc-guard refused continuation")
+                raise guard_mod.GuardRefusal(decision)
         except ImportError:
             pass
         except (ValueError, OSError) as exc:
@@ -2999,7 +3026,8 @@ def launch_workflow(
             # explicit guard refusal (remedium text).
             message = str(exc)
             if (
-                "vc-guard" in message
+                isinstance(exc, guard_mod.GuardRefusal)
+                or "vc-guard" in message
                 or "Remedium" in message
                 or "trust recorded block" in message
             ):
@@ -3050,6 +3078,7 @@ def launch_workflow(
                     "parent_root": spec.root,
                     "worktree": True,
                     "status": "failed",
+                    **({"guard": dict(guard_receipt)} if guard_receipt else {}),
                     "control_plane": {"sync": "deferred", "run_id": run_id},
                 },
                 spec_digest=idem_spec_digest,
@@ -3125,6 +3154,7 @@ def launch_workflow(
                 if spec.sandbox is None
                 else str(spec.sandbox).lower(),
                 "status": "failed",
+                **({"guard": dict(guard_receipt)} if guard_receipt else {}),
                 "control_plane": {"sync": "deferred", "run_id": run_id},
             },
             spec_digest=idem_spec_digest,
@@ -3185,6 +3215,7 @@ def launch_workflow(
                 "transcript": str(artifacts["transcript"]),
                 "meta": str(artifacts["meta"]),
                 "prompt_file": str(prompt_path),
+                **({"guard": dict(guard_receipt)} if guard_receipt else {}),
                 "control_plane": {"sync": "deferred", "run_id": run_id},
             },
             spec_digest=idem_spec_digest,
@@ -3209,6 +3240,8 @@ def launch_workflow(
         "runtime_class": spec.runtime_class,
         "presentation": "headless" if spec.runtime == "headless" else "visible",
     }
+    if guard_receipt:
+        model_receipt["guard"] = dict(guard_receipt)
     dispatch_command = _dispatcher_command(
         run_id=run_id,
         root=spec.root,
