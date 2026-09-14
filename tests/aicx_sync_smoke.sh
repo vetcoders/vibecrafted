@@ -296,29 +296,61 @@ section "Scenario 8: CLI wrapper config-file fallback (toml_get)"
 
 CFG="$SANDBOX/cfg.toml"
 cat > "$CFG" <<'TOML'
-[default]
+[server]
+port = 3024
+
+[aicx_sync]
 local_store = "/tmp/from-toml"
 remote_host = "host-c"
 namespace = "vetcoders/vibecrafted"
 TOML
 
 set +e
-WRAPPER_OUT=$(bash "$REPO_ROOT/scripts/aicx-sync.sh" dry-run --config "$CFG" 2>&1)
+WRAPPER_OUT=$(XDG_CONFIG_HOME="$SANDBOX/xdg-empty" bash "$REPO_ROOT/scripts/aicx-sync.sh" dry-run --config "$CFG" 2>&1)
 rc=$?
 set -e
 
 # Wrapper will try to read /tmp/from-toml (non-existent on most boxes); we
-# care that it picked the value from the toml. The header prefix lines are
-# emitted before the engine call, so a grep on the announcement is enough.
+# care that it picked the value from the [aicx_sync] table. The header prefix
+# lines are emitted before the engine call, so a grep on the announcement is
+# enough.
 if grep -q "local:  /tmp/from-toml" <<< "$WRAPPER_OUT"; then
-    ok "toml local_store loaded into wrapper"
+    ok "[aicx_sync] local_store loaded into wrapper"
 else
-    fail "wrapper did not honour toml local_store" "$WRAPPER_OUT"
+    fail "wrapper did not honour [aicx_sync] local_store" "$WRAPPER_OUT"
 fi
 if grep -q "host-c" <<< "$WRAPPER_OUT"; then
-    ok "toml remote_host loaded into wrapper"
+    ok "[aicx_sync] remote_host loaded into wrapper"
 else
-    fail "wrapper did not honour toml remote_host" "$WRAPPER_OUT"
+    fail "wrapper did not honour [aicx_sync] remote_host" "$WRAPPER_OUT"
+fi
+
+section "Scenario 9: retired standalone config is named, never read"
+
+# Configuration lives only in ${XDG_CONFIG_HOME}/vibecrafted/config.toml. A
+# leftover standalone file from older installs earns one notice and is not a
+# source of values.
+RETIRED_XDG="$SANDBOX/xdg-retired"
+mkdir -p "$RETIRED_XDG/vetcoders"
+cat > "$RETIRED_XDG/vetcoders/aicx-sync.toml" <<'TOML'
+[default]
+remote_host = "retired-host"
+TOML
+
+set +e
+WRAPPER_OUT=$(XDG_CONFIG_HOME="$RETIRED_XDG" bash "$REPO_ROOT/scripts/aicx-sync.sh" dry-run --local "$SANDBOX/empty-store" 2>&1)
+set -e
+
+if grep -q "is no longer read" <<< "$WRAPPER_OUT" \
+    && grep -qF "[aicx_sync] table of $RETIRED_XDG/vibecrafted/config.toml" <<< "$WRAPPER_OUT"; then
+    ok "retired standalone config named with its replacement table"
+else
+    fail "wrapper did not name the retired standalone config" "$WRAPPER_OUT"
+fi
+if grep -q "retired-host" <<< "$WRAPPER_OUT"; then
+    fail "wrapper read a value from the retired standalone config" "$WRAPPER_OUT"
+else
+    ok "retired standalone config contributed no values"
 fi
 
 # -----------------------------------------------------------------------------

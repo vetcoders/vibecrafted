@@ -1,8 +1,10 @@
-# aicx-sync.toml — Plan 08 (META_22) operator config template.
+# aicx-sync.toml.example — Plan 08 (META_22) operator config template.
 #
-# Copy to ~/.config/vetcoders/aicx-sync.toml and edit. The bash wrapper
-# (scripts/aicx-sync.sh) reads from this path by default; pass
-# --config <other-path> to override.
+# The [aicx_sync] table of the one operator config,
+# ${XDG_CONFIG_HOME:-~/.config}/vibecrafted/config.toml (the same file that
+# holds [server]). Paste the table below into that file and edit. The bash
+# wrapper (scripts/aicx-sync.sh) reads this table by default; pass
+# --config <other-file> to read the [aicx_sync] table of another file.
 #
 # All fields are optional. Missing fields fall back to safe defaults:
 #   local_store    -> $HOME/.aicx/store
@@ -10,9 +12,11 @@
 #   namespace      -> (all namespaces under local_store)
 #   dry_run_default -> true (always preview before apply)
 #
+# If you put a real auth_token in that file, keep it at mode 0600.
+#
 # Vibecrafted with AI Agents (c)2024-2026 LibraxisAI
 
-[default]
+[aicx_sync]
 
 # Local AICX corpus root. Override only if you keep AICX outside the
 # standard XDG layout.
