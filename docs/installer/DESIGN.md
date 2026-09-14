@@ -188,7 +188,7 @@ Remove orphaned skills? [Y/n] y
 Installing shell helper...
 Installing Vetcoders shell helpers
   source: ~/hosted/vetcoders/vetcoders-skills/runtime/shell/vetcoders.sh
-  target: ~/.config/vetcoders/vc-skills.sh
+  target: ~/.config/vibecrafted/shell/vc-skills.sh
   ~/.zshrc: already sourced
 
 

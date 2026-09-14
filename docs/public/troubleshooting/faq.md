@@ -23,7 +23,7 @@ onto that store, never a second truth.
 
 **Can I install without editing my shell config?**
 Yes. Opt out of shell-helper installation and source
-`${XDG_CONFIG_HOME:-$HOME/.config}/vetcoders/vc-skills.sh` manually in the
+`${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/shell/vc-skills.sh` manually in the
 sessions where you want the helpers.
 
 **Is there a guided install path?**

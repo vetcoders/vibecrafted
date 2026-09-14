@@ -64,7 +64,7 @@ Every row is load-bearing: delete it and the named flow stops working.
 | Skill projections | `~/.<runtime>/skills/<skill>` symlinks into the store, per installed runtime                                            | agents seeing the skills at all                                                                           |
 | Install state     | `~/.vibecrafted/.vc-install.json` (legacy installs: the same file next to the store)                                    | update/uninstall knowing what this install registered                                                     |
 | Required tools    | `loct`, `loctree-mcp`, `aicx`, `prview`, `screenscribe` plus the `vc-*` projections                                     | complete agent product; every named tool belongs to the product payload, with no optional-product fiction |
-| Frame config      | `~/.config/vibecrafted/vc-frame/`, `~/.config/vetcoders/frontier/`                                                      | `vc-frame` / `vc-start` cockpit; no private top-level `~/.config/vc-frame`                                |
+| Frame config      | `~/.config/vibecrafted/vc-frame/`                                                                                       | `vc-frame` / `vc-start` cockpit; no configuration outside `~/.config/vibecrafted`                         |
 | App bundle        | `/Applications/Vibecrafted.app` when the DMG channel is used                                                            | optional native transport/onboarding shell; CLI runtime must remain first-class without it                |
 
 Anything not in this table is disposable. In particular: **there is no separate

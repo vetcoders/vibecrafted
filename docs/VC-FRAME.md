@@ -27,7 +27,7 @@ config/vc-frame/
 ```
 
 Once installed (`vibecrafted install` or `make install`), the framework symlinks
-this directory under `~/.config/vetcoders/frontier/vc-frame/` and the layouts
+this directory under `~/.config/vibecrafted/vc-frame/` and the layouts
 become reachable through the `vibecrafted dashboard <layout>` family of CLIs.
 
 ## Mesh-aware host theming
@@ -189,13 +189,13 @@ instead, wire one of the following in your shell init or in a host-local
 
 ```bash
 # Shell init — print the matching theme name for diagnostics.
-~/.config/vetcoders/frontier/vc-frame/auto-theme.sh
+~/.config/vibecrafted/vc-frame/auto-theme.sh
 ```
 
 or pin via env:
 
 ```bash
-export VIBECRAFTED_THEME="$(~/.config/vetcoders/frontier/vc-frame/auto-theme.sh)"
+export VIBECRAFTED_THEME="$(~/.config/vibecrafted/vc-frame/auto-theme.sh)"
 ```
 
 When the operator-facing launcher in a future plan rewrites the theme line on

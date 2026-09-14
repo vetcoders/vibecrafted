@@ -67,11 +67,19 @@ Prints all logged decisions from `~/.frontier-vault/conflict-log.jsonl`. Each re
 
 ### Config-file defaults
 
+The wrapper reads the `[aicx_sync]` table of `~/.config/vibecrafted/config.toml`
+(`XDG_CONFIG_HOME` is honoured; `--config <file>` reads that file's
+`[aicx_sync]` table instead):
+
 ```bash
-mkdir -p ~/.config/vetcoders
-cp config/aicx-sync.toml.example ~/.config/vetcoders/aicx-sync.toml
-$EDITOR ~/.config/vetcoders/aicx-sync.toml
+mkdir -p ~/.config/vibecrafted
+cat config/aicx-sync.toml.example >> ~/.config/vibecrafted/config.toml
+$EDITOR ~/.config/vibecrafted/config.toml
 ```
+
+A standalone sync config from older installs is not read; the wrapper prints one
+notice naming the `[aicx_sync]` table instead. If you put a real `auth_token` in
+the file, keep it at mode 0600.
 
 Fields:
 
