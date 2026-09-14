@@ -233,151 +233,149 @@ fn load_dashboard_data_from(
     if control_status == "unavailable" {
         warnings.push(format!("Control-plane data unavailable: {control_error}"));
     }
-    let (workspace_status, workspace_error, workspaces, sessions) =
-        match plane.load_workspace_projection() {
-            Ok(projection) => {
-                let titles = projection
-                    .catalog
-                    .as_ref()
-                    .map(|catalog| {
-                        catalog
-                            .workspaces
-                            .iter()
-                            .map(|workspace| {
-                                (
-                                    workspace.workspace_id.clone(),
-                                    workspace.display_label.clone(),
-                                )
-                            })
-                            .collect::<std::collections::HashMap<_, _>>()
-                    })
-                    .unwrap_or_default();
-                let active_run_ids = state
-                    .active_runs
-                    .iter()
-                    .map(|run| run.run_id.as_str())
-                    .collect::<std::collections::HashSet<_>>();
-                let mut runs_by_logical_session =
-                    std::collections::HashMap::<String, Vec<DashboardSessionRun>>::new();
-                for run in state.active_runs.iter().chain(state.recent_runs.iter()) {
-                    let session_id = run.logical_session_id.trim();
-                    if session_id.is_empty() {
-                        continue;
-                    }
-                    let entries = runs_by_logical_session
-                        .entry(session_id.to_string())
-                        .or_default();
-                    if !entries.iter().any(|entry| entry.run_id == run.run_id) {
-                        entries.push(DashboardSessionRun {
-                            run_id: run.run_id.clone(),
-                            state: run.state.clone(),
-                            health: run.health.clone(),
-                        });
-                    }
-                }
-                let sessions: Vec<DashboardSession> = projection
-                    .sessions
+    let (workspace_status, workspace_error, workspaces, sessions) = match plane
+        .load_workspace_projection()
+    {
+        Ok(projection) => {
+            let titles = projection
+                .catalog
+                .as_ref()
+                .map(|catalog| {
+                    catalog
+                        .workspaces
+                        .iter()
+                        .map(|workspace| {
+                            (
+                                workspace.workspace_id.clone(),
+                                workspace.display_label.clone(),
+                            )
+                        })
+                        .collect::<std::collections::HashMap<_, _>>()
+                })
+                .unwrap_or_default();
+            let confirmed_session_ids = state
+                .active_runs
+                .iter()
+                .map(|run| run.logical_session_id.as_str())
+                .filter(|session_id| !session_id.is_empty())
+                .collect::<std::collections::BTreeSet<_>>();
+            let current_from_sessions =
+                control_core::current_workspace_ids(&projection.sessions, &confirmed_session_ids)
                     .into_iter()
-                    .map(|session| {
-                        let runtime = unique_runtime_labels(
-                            session
-                                .attachments
-                                .iter()
-                                .map(|attachment| attachment.runtime.as_str()),
-                        );
-                        let runs = runs_by_logical_session
-                            .remove(&session.session_id)
-                            .unwrap_or_default();
-                        // A live attachment is live truth about the session
-                        // (an interactive frame needs no agent run to be real);
-                        // a current canonical run is live truth on its own.
-                        let has_current_run = runs
-                            .iter()
-                            .any(|run| active_run_ids.contains(run.run_id.as_str()));
-                        let state = if has_current_run
-                            || session
-                                .attachments
-                                .iter()
-                                .any(|attachment| attachment.state == "live")
-                        {
-                            "live"
-                        } else if session.attachments.is_empty() {
-                            "detached"
-                        } else {
-                            "inactive"
-                        };
-                        DashboardSession {
-                            workspace_title: titles
-                                .get(&session.workspace_id)
-                                .cloned()
-                                .unwrap_or_else(|| "Unknown workspace".into()),
-                            session_id: session.session_id,
-                            workspace_id: session.workspace_id,
-                            workspace_instance_id: session.workspace_instance_id,
-                            runtime,
-                            state: state.into(),
-                            updated_at: session.updated_at,
-                            runs,
-                        }
-                    })
-                    .collect();
-                match projection.catalog {
-                    Some(catalog) => {
-                        let live_from_attachments = sessions
-                            .iter()
-                            .filter(|session| session.state == "live")
-                            .map(|session| session.workspace_id.clone())
-                            .collect::<std::collections::HashSet<_>>();
-                        let workspaces = catalog
-                            .workspaces
-                            .into_iter()
-                            .map(|workspace| {
-                                let active_runs = state
-                                    .active_runs
-                                    .iter()
-                                    .filter(|run| run.root == workspace.canonical_root)
-                                    .count();
-                                let recent_runs = state
-                                    .recent_runs
-                                    .iter()
-                                    .filter(|run| run.root == workspace.canonical_root)
-                                    .count();
-                                let current = active_runs > 0
-                                    || live_from_attachments.contains(&workspace.workspace_id);
-                                DashboardWorkspace {
-                                    selected: catalog.selected_workspace_id.as_deref()
-                                        == Some(workspace.workspace_id.as_str()),
-                                    workspace_id: workspace.workspace_id,
-                                    title: workspace.display_label,
-                                    root: workspace.canonical_root,
-                                    status: workspace.status,
-                                    inventory: if current {
-                                        "current".into()
-                                    } else {
-                                        "catalog".into()
-                                    },
-                                    active_runs,
-                                    recent_runs,
-                                    updated_at: workspace.updated_at,
-                                }
-                            })
-                            .collect();
-                        ("available".into(), String::new(), workspaces, sessions)
-                    }
-                    None => (
-                        "not_initialized".into(),
-                        String::new(),
-                        Vec::new(),
-                        sessions,
-                    ),
+                    .map(str::to_owned)
+                    .collect::<std::collections::BTreeSet<_>>();
+            let mut runs_by_logical_session =
+                std::collections::HashMap::<String, Vec<DashboardSessionRun>>::new();
+            for run in state.active_runs.iter().chain(state.recent_runs.iter()) {
+                let session_id = run.logical_session_id.trim();
+                if session_id.is_empty() {
+                    continue;
+                }
+                let entries = runs_by_logical_session
+                    .entry(session_id.to_string())
+                    .or_default();
+                if !entries.iter().any(|entry| entry.run_id == run.run_id) {
+                    entries.push(DashboardSessionRun {
+                        run_id: run.run_id.clone(),
+                        state: run.state.clone(),
+                        health: run.health.clone(),
+                    });
                 }
             }
-            Err(error) => {
-                let message = error.to_string();
-                warnings.push(format!("Workspace data unavailable: {message}"));
-                ("unavailable".into(), message, Vec::new(), Vec::new())
+            let sessions: Vec<DashboardSession> = projection
+                .sessions
+                .into_iter()
+                .map(|session| {
+                    let runtime = unique_runtime_labels(
+                        session
+                            .attachments
+                            .iter()
+                            .map(|attachment| attachment.runtime.as_str()),
+                    );
+                    let runs = runs_by_logical_session
+                        .remove(&session.session_id)
+                        .unwrap_or_default();
+                    // Current is writer-projected run identity bound to
+                    // this logical session. A durable attachment
+                    // `state=live` is a receipt, not live truth.
+                    let state = match session.currency(&confirmed_session_ids) {
+                        control_core::SessionCurrency::Current => "live",
+                        control_core::SessionCurrency::Stale => "stale",
+                        control_core::SessionCurrency::Unknown => "unknown",
+                        control_core::SessionCurrency::Inactive
+                            if session.attachments.is_empty() =>
+                        {
+                            "detached"
+                        }
+                        control_core::SessionCurrency::Inactive => "inactive",
+                    };
+                    DashboardSession {
+                        workspace_title: titles
+                            .get(&session.workspace_id)
+                            .cloned()
+                            .unwrap_or_else(|| "Unknown workspace".into()),
+                        session_id: session.session_id,
+                        workspace_id: session.workspace_id,
+                        workspace_instance_id: session.workspace_instance_id,
+                        runtime,
+                        state: state.into(),
+                        updated_at: session.updated_at,
+                        runs,
+                    }
+                })
+                .collect();
+            match projection.catalog {
+                Some(catalog) => {
+                    let workspaces = catalog
+                        .workspaces
+                        .into_iter()
+                        .map(|workspace| {
+                            let active_runs = state
+                                .active_runs
+                                .iter()
+                                .filter(|run| run.root == workspace.canonical_root)
+                                .count();
+                            let recent_runs = state
+                                .recent_runs
+                                .iter()
+                                .filter(|run| run.root == workspace.canonical_root)
+                                .count();
+                            let current = active_runs > 0
+                                || current_from_sessions.contains(workspace.workspace_id.as_str());
+                            DashboardWorkspace {
+                                selected: catalog.selected_workspace_id.as_deref()
+                                    == Some(workspace.workspace_id.as_str()),
+                                workspace_id: workspace.workspace_id,
+                                title: workspace.display_label,
+                                root: workspace.canonical_root,
+                                status: workspace.status,
+                                inventory: if current {
+                                    "current".into()
+                                } else {
+                                    "catalog".into()
+                                },
+                                active_runs,
+                                recent_runs,
+                                updated_at: workspace.updated_at,
+                            }
+                        })
+                        .collect();
+                    ("available".into(), String::new(), workspaces, sessions)
+                }
+                None => (
+                    "not_initialized".into(),
+                    String::new(),
+                    Vec::new(),
+                    sessions,
+                ),
             }
-        };
+        }
+        Err(error) => {
+            let message = error.to_string();
+            warnings.push(format!("Workspace data unavailable: {message}"));
+            ("unavailable".into(), message, Vec::new(), Vec::new())
+        }
+    };
 
     DashboardData {
         server_status: "healthy".into(),
@@ -729,60 +727,12 @@ fn warning_rows(warnings: Vec<String>) -> impl IntoView {
         .collect_view()
 }
 
-/// Retained-snapshot settlement strip. Must not render on the normal overview:
-/// `active` here is historical snapshot count, not current live runs.
-#[allow(dead_code)]
-fn settlement_board(settlement: DashboardSettlement) -> impl IntoView {
-    view! {
-        <section
-            class="operator-summary-strip"
-            aria-label="Operator summary"
-            data-scope=settlement.scope.clone()
-            data-active=settlement.active
-            data-f=settlement.f
-            data-x=settlement.x
-            data-n=settlement.n
-            data-invalid=settlement.invalid
-            data-unclassified=settlement.unclassified
-            data-total-settled=settlement.total_settled
-        >
-            <div class="operator-summary-title">
-                <span class="mono-cap">"runtime truth"</span>
-                <strong>{settlement.scope.clone()}</strong>
-            </div>
-            <dl class="operator-summary-cells">
-                <a class="operator-summary-cell" href="/runs">
-                    <dt>"alive"</dt>
-                    <dd>{settlement.active}</dd>
-                </a>
-                <a class="operator-summary-cell" href="/runs">
-                    <dt>"final"</dt>
-                    <dd>{settlement.f}</dd>
-                </a>
-                <a class="operator-summary-cell" href="/runs">
-                    <dt>"failed"</dt>
-                    <dd>{settlement.x}</dd>
-                </a>
-                <a class="operator-summary-cell" href="/runs">
-                    <dt>"attention"</dt>
-                    <dd>{settlement.n}</dd>
-                </a>
-            </dl>
-            <div class="operator-summary-detail">
-                <span>{format!("{} invalid", settlement.invalid)}</span>
-                <span>{format!("{} unclassified", settlement.unclassified)}</span>
-                <span>{format!("{} settled", settlement.total_settled)}</span>
-            </div>
-        </section>
-    }
-}
-
 #[cfg(feature = "ssr")]
 pub fn shell(_options: leptos::config::LeptosOptions) -> impl IntoView {
     use leptos_meta::MetaTags;
 
     use crate::chrome::{
-        theme_control_script, theme_head_script, STYLE_FONTS, STYLE_MAIN, STYLE_TOKENS,
+        STYLE_FONTS, STYLE_MAIN, STYLE_TOKENS, theme_control_script, theme_head_script,
     };
 
     view! {
@@ -838,22 +788,46 @@ fn aicx_page_script() -> &'static str {
   const form = document.getElementById('aicx-search-form');
   const q = document.getElementById('aicx-search-query');
   const project = document.getElementById('aicx-search-project');
+  const globalToggle = document.getElementById('aicx-search-global');
+  const scopeLabel = document.getElementById('aicx-search-scope');
   const status = document.getElementById('aicx-search-status');
   const results = document.getElementById('aicx-search-results');
   if (!form || !q || !status || !results) return;
+  const setScope = (kind, projectSlug) => {
+    if (!scopeLabel) return;
+    scopeLabel.dataset.scope = kind;
+    scopeLabel.textContent = kind === 'global'
+      ? 'Scope: all projects.'
+      : ('Scope: this project' + (projectSlug ? ' (' + projectSlug + ')' : ' (owner/repo required)') + '.');
+  };
+  setScope('project', '');
+  if (globalToggle) {
+    globalToggle.addEventListener('change', () => {
+      setScope(globalToggle.checked ? 'global' : 'project', project ? project.value.trim() : '');
+    });
+  }
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     const query = q.value.trim();
     if (!query) return;
+    const global = !!(globalToggle && globalToggle.checked);
     const scope = project ? project.value.trim() : '';
-    if (scope && !/^[\w][\w.-]{0,63}\/[\w][\w.-]{0,63}$/.test(scope)) {
-      status.textContent = 'Project must be an owner/repo slug (for example vetcoders/vibecrafted).';
-      return;
+    if (!global) {
+      if (!scope) {
+        status.textContent = 'Enter an owner/repo project (for example vetcoders/vibecrafted).';
+        setScope('project', '');
+        return;
+      }
+      if (!/^[\w][\w.-]{0,63}\/[\w][\w.-]{0,63}$/.test(scope)) {
+        status.textContent = 'Project must be an owner/repo slug (for example vetcoders/vibecrafted).';
+        return;
+      }
     }
-    status.textContent = 'Searching AICX…';
+    setScope(global ? 'global' : 'project', global ? '' : scope);
+    status.textContent = global ? 'Searching AICX across all projects…' : ('Searching AICX in ' + scope + '…');
     results.replaceChildren();
     const params = new URLSearchParams({ q: query });
-    if (scope) params.set('project', scope);
+    if (!global) params.set('project', scope);
     try {
       const response = await fetch('/api/aicx/search?' + params.toString(), { credentials: 'same-origin' });
       const payload = await response.json();
@@ -866,7 +840,10 @@ fn aicx_page_script() -> &'static str {
         throw new Error(message);
       }
       const items = payload.items || [];
-      status.textContent = items.length ? items.length + ' result(s)' : 'No AICX results.';
+      const visibleScope = payload.scope === 'global' ? 'all projects' : (payload.project || scope || 'this project');
+      status.textContent = items.length
+        ? (items.length + ' result(s) · ' + visibleScope)
+        : ('No AICX results · ' + visibleScope);
       for (const item of items) {
         const li = document.createElement('li');
         const label = [item.agent, item.date, item.session_id].filter(Boolean).join(' · ') || 'session';
@@ -898,14 +875,19 @@ pub fn AicxPage() -> impl IntoView {
         <Meta name="description" content="Search the local AICX intent corpus through the installed CLI." />
         <ServerFrame active=ServerSection::Structure status="intent search".to_string()>
             <div class="server-console-shell route-page-shell">
-                {route_header("Intent", "AICX search", "Search runs the installed AICX CLI on this host. The corpus is private: results are served to local peers only, and every hit opens through a server-owned reference route.")}
+                {route_header("Intent", "AICX search", "This page is project-scoped: enter owner/repo before searching. All-projects search is a separate, explicit scope. Missing project is form validation, not service-unavailable.")}
                 <section class="control-panel control-panel-wide" aria-label="AICX search">
                     <form id="aicx-search-form" class="server-console-links">
                         <input id="aicx-search-query" name="q" type="search" required=true maxlength="512" placeholder="Search intent (query)" />
-                        <input id="aicx-search-project" name="project" type="text" maxlength="129" placeholder="owner/repo (optional)" />
+                        <input id="aicx-search-project" name="project" type="text" maxlength="129" placeholder="owner/repo" />
+                        <label class="control-badge">
+                            <input id="aicx-search-global" type="checkbox" />
+                            "All projects"
+                        </label>
                         <button class="server-console-link server-console-link-primary" type="submit">"Search AICX"</button>
                     </form>
-                    <p id="aicx-search-status" class="control-empty">"Enter a query to search the local AICX corpus."</p>
+                    <p id="aicx-search-scope" class="control-empty" data-scope="project">"Scope: this project (owner/repo required)."</p>
+                    <p id="aicx-search-status" class="control-empty">"Enter a query and owner/repo to search the local AICX corpus."</p>
                     <ul id="aicx-search-results" class="control-warning-list"></ul>
                     <script inner_html=aicx_page_script()></script>
                 </section>
@@ -1180,7 +1162,7 @@ fn workspaces_dashboard(dashboard: DashboardData) -> impl IntoView {
     view! {
         <ServerFrame active=ServerSection::Workspaces status=frame_status>
             <div class="server-console-shell route-page-shell">
-                {route_header("Workspace", "Workspaces", "Current inventory is derived from live sessions, attachments, and current runs. The catalog keeps durable history and is not the live count.")}
+                {route_header("Workspace", "Workspaces", "Current inventory is independently confirmed current sessions and current runs. A durable live receipt is not current. The catalog keeps history and is not the live count.")}
                 <section class="control-panel control-panel-wide" aria-label="Canonical workspaces" data-source-status=status.clone() data-current=current_count.to_string() data-catalog=catalog_count.to_string()>
                     <div class="control-panel-head"><h2>"Current inventory"</h2><span>{current_count}</span></div>
                     {not_initialized.then(|| view! {
@@ -1238,7 +1220,7 @@ fn sessions_dashboard(dashboard: DashboardData) -> impl IntoView {
     view! {
         <ServerFrame active=ServerSection::Sessions status=frame_status>
             <div class="server-console-shell route-page-shell">
-                {route_header("Workspace", "Sessions", "Live means a current attachment or current run. Recorded sessions stay as history.")}
+                {route_header("Workspace", "Sessions", "Live means an independently confirmed current session. Forged or identity-less live receipts are stale or unknown. Recorded sessions stay as history.")}
                 <section class="control-panel control-panel-wide" aria-label="Canonical sessions" data-source-status=source_status.clone() data-live=live_count.to_string() data-recorded=count.to_string()>
                     <div class="control-panel-head"><h2>"Live attachments"</h2><span>{live_count}</span></div>
                     <div class="control-panel-head"><h2>"Session attachments"</h2><span>{format!("{count} recorded")}</span></div>
@@ -1473,21 +1455,21 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use axum::body::{to_bytes, Body};
+    use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
     use chrono::Utc;
     use control_core::ControlPlane;
     use leptos::config::{Env, LeptosOptions};
     use leptos::prelude::*;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use tower::ServiceExt;
 
     use super::{
+        ActivityPage, AicxPage, ConsolePage, DashboardData, DashboardRun, DashboardSession,
+        DashboardSessionRun, LifecyclePage, RunsPage, SessionsPage, StructurePage, WorkspacesPage,
         aicx_page_script, console_dashboard, decode_dashboard_embed, encode_dashboard_embed,
         load_dashboard_data_from, operator_active_runs, run_cards, session_cards,
-        sessions_dashboard, unique_runtime_labels, workspaces_dashboard, ActivityPage, ConsolePage,
-        DashboardData, DashboardRun, DashboardSession, DashboardSessionRun, LifecyclePage,
-        RunsPage, SessionsPage, StructurePage, WorkspacesPage,
+        sessions_dashboard, unique_runtime_labels, workspaces_dashboard,
     };
     use crate::control::api::{control_routes, state_payload};
     use crate::theme::provide_theme_context;
@@ -1553,6 +1535,34 @@ mod tests {
             serde_json::to_vec_pretty(&payload).expect("snapshot JSON"),
         )
         .expect("write snapshot");
+    }
+
+    fn write_current_run(runs_dir: &Path, run_id: &str, session_id: &str, root: &str, now: &str) {
+        fs::write(
+            runs_dir.join(format!("{run_id}.json")),
+            serde_json::to_vec(&json!({
+                "run_id": run_id,
+                "state": "active",
+                "agent": "grok",
+                "skill": "workflow",
+                "mode": "workflow",
+                "root": root,
+                "operator_session": format!("host-{run_id}"),
+                "latest_report": "",
+                "latest_transcript": "",
+                "last_error": "",
+                "updated_at": now,
+                "started_at": now,
+                "health": "active",
+                "source": "agent-meta",
+                "lock_present": false,
+                "liveness": "pid_alive",
+                "session_id": "",
+                "logical_session_id": session_id
+            }))
+            .expect("current run json"),
+        )
+        .expect("current run file");
     }
 
     fn write_workspace_catalog(home: &Path, schema: &str) {
@@ -1628,10 +1638,12 @@ mod tests {
         let dashboard = load_dashboard_data_from(&plane, now);
         assert_eq!(dashboard.workspace_status, "unavailable");
         assert!(dashboard.workspaces.is_empty());
-        assert!(dashboard
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("Workspace data unavailable")));
+        assert!(
+            dashboard
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("Workspace data unavailable"))
+        );
         let owner = Owner::new();
         let html = owner.with(|| {
             provide_theme_context();
@@ -1679,15 +1691,18 @@ mod tests {
             .expect("catalog json"),
         )
         .expect("catalog");
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-14T10:00:00Z")
+            .expect("fixed now")
+            .with_timezone(&Utc);
+        let runs_dir = home.join("control_plane/runs");
+        fs::create_dir_all(&runs_dir).expect("runs dir");
         for index in 0..4 {
+            let session_id = inventory_id("0198f84e-1111-7abc-8def-", index);
             fs::write(
-                sessions_dir.join(format!(
-                    "{}.json",
-                    inventory_id("0198f84e-1111-7abc-8def-", index)
-                )),
+                sessions_dir.join(format!("{session_id}.json")),
                 serde_json::to_vec(&json!({
                     "schema": "vibecrafted.workspace-session.v1",
-                    "session_id": inventory_id("0198f84e-1111-7abc-8def-", index),
+                    "session_id": session_id,
                     "workspace_id": inventory_id("0198f84e-0000-7abc-8def-", index),
                     "workspace_instance_id": inventory_id("0198f84e-2222-7abc-8def-", index),
                     "updated_at": "2026-09-14T00:01:00Z",
@@ -1697,9 +1712,16 @@ mod tests {
                         "state": "live"
                     }]
                 }))
-                .expect("live session"),
+                .expect("confirmed session"),
             )
-            .expect("live session file");
+            .expect("confirmed session file");
+            write_current_run(
+                &runs_dir,
+                &format!("work-current-{index}"),
+                &session_id,
+                &format!("/work/catalog-{index}"),
+                &now.to_rfc3339(),
+            );
         }
         fs::write(
             sessions_dir.join(format!(
@@ -1714,18 +1736,61 @@ mod tests {
                 "updated_at": "2026-09-13T00:00:00Z",
                 "attachments": [{
                     "runtime": "vc-frame",
-                    "runtime_session_id": "stale-frame",
+                    "runtime_session_id": "dead-frame",
                     "state": "dead"
                 }]
             }))
             .expect("dead session"),
         )
         .expect("dead session file");
+        fs::write(
+            sessions_dir.join(format!(
+                "{}.json",
+                inventory_id("0198f84e-1111-7abc-8def-", 21)
+            )),
+            serde_json::to_vec(&json!({
+                "schema": "vibecrafted.workspace-session.v1",
+                "session_id": inventory_id("0198f84e-1111-7abc-8def-", 21),
+                "workspace_id": inventory_id("0198f84e-0000-7abc-8def-", 21),
+                "workspace_instance_id": inventory_id("0198f84e-2222-7abc-8def-", 21),
+                "updated_at": "2026-09-14T00:02:00Z",
+                "attachments": [{
+                    "runtime": "vc-frame",
+                    "runtime_session_id": "forged-frame",
+                    "state": "live",
+                    "owner_pid": 999_001,
+                    "start_token": "start:forged-not-current",
+                    "worker_identity": {
+                        "pid": 999_001,
+                        "start_token": "start:forged-not-current"
+                    }
+                }]
+            }))
+            .expect("forged session"),
+        )
+        .expect("forged session file");
+        fs::write(
+            sessions_dir.join(format!(
+                "{}.json",
+                inventory_id("0198f84e-1111-7abc-8def-", 22)
+            )),
+            serde_json::to_vec(&json!({
+                "schema": "vibecrafted.workspace-session.v1",
+                "session_id": inventory_id("0198f84e-1111-7abc-8def-", 22),
+                "workspace_id": inventory_id("0198f84e-0000-7abc-8def-", 22),
+                "workspace_instance_id": inventory_id("0198f84e-2222-7abc-8def-", 22),
+                "updated_at": "2026-09-14T00:03:00Z",
+                "attachments": [{
+                    "runtime": "vc-frame",
+                    "runtime_session_id": "missing-identity-frame",
+                    "state": "live"
+                }]
+            }))
+            .expect("missing identity session"),
+        )
+        .expect("missing identity session file");
 
         let plane = ControlPlane::new(&home);
-        let now = chrono::DateTime::parse_from_rfc3339("2026-09-14T10:00:00Z")
-            .expect("fixed now")
-            .with_timezone(&Utc);
         let dashboard = load_dashboard_data_from(&plane, now);
         assert_eq!(dashboard.workspaces.len(), 527);
         assert_eq!(
@@ -1743,6 +1808,30 @@ mod tests {
                 .filter(|workspace| workspace.inventory == "catalog")
                 .count(),
             523
+        );
+        assert_eq!(
+            dashboard
+                .sessions
+                .iter()
+                .filter(|session| session.state == "live")
+                .count(),
+            4
+        );
+        assert_eq!(
+            dashboard
+                .sessions
+                .iter()
+                .filter(|session| session.state == "stale")
+                .count(),
+            1
+        );
+        assert_eq!(
+            dashboard
+                .sessions
+                .iter()
+                .filter(|session| session.state == "unknown")
+                .count(),
+            1
         );
         let owner = Owner::new();
         let overview = owner.with(|| {
@@ -1772,7 +1861,7 @@ mod tests {
         });
         assert!(sessions_page.contains("data-live=\"4\""), "{sessions_page}");
         assert!(
-            sessions_page.contains("data-recorded=\"5\""),
+            sessions_page.contains("data-recorded=\"7\""),
             "{sessions_page}"
         );
         fs::remove_dir_all(home).ok();
@@ -1782,7 +1871,15 @@ mod tests {
     fn aicx_client_maps_validation_without_service_unavailable_label() {
         let script = aicx_page_script();
         assert!(script.contains("payload.kind === 'validation' || response.status === 400"));
+        assert!(script.contains("Enter an owner/repo project"));
         assert!(script.contains("Project must be an owner/repo slug"));
+        assert!(script.contains("aicx-search-global"));
+        assert!(script.contains("Scope: all projects"));
+        let empty = script.split("if (!scope)").nth(1).expect("empty project");
+        let empty_return = empty.split("return;").next().expect("empty return");
+        assert!(empty_return.contains("Enter an owner/repo project"));
+        assert!(!empty_return.contains("fetch("));
+        assert!(!empty_return.contains("AICX unavailable:"));
         let validation = script
             .split("payload.kind === 'validation'")
             .nth(1)
@@ -1792,6 +1889,17 @@ mod tests {
         assert!(!before_catch.contains("AICX unavailable:"));
         let catch = script.split("catch (error)").nth(1).expect("catch");
         assert!(catch.contains("AICX unavailable:"));
+        let owner = Owner::new();
+        let html = owner.with(|| {
+            leptos_meta::provide_meta_context();
+            provide_theme_context();
+            AicxPage().to_html()
+        });
+        assert!(html.contains("id=\"aicx-search-project\""), "{html}");
+        assert!(!html.contains("owner/repo (optional)"), "{html}");
+        assert!(html.contains("id=\"aicx-search-global\""), "{html}");
+        assert!(html.contains("data-scope=\"project\""), "{html}");
+        assert!(html.contains("All projects"), "{html}");
     }
 
     #[test]
