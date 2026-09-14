@@ -518,6 +518,136 @@ def test_dashboard_displays_open_pane_count_without_provider_liveness_claim(
     assert "• codex · init · vibecrafted" in writes
 
 
+class _StopDashboard(Exception):
+    """Ends the scripted home loop once the input script is exhausted."""
+
+
+_IDLE_TICK = (-1, 0.5)  # window.timeout(500): no key within half a second
+
+
+def _drive_home_dashboard(
+    workshop: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    script: list[tuple[int, float]],
+    *,
+    mouse_state: int = 0,
+) -> list[float]:
+    """Run the real home loop under a fake clock; return pane-probe timestamps.
+
+    Each probe stands for one `vc-frame action list-panes` CLI client, whose
+    attach makes the server re-broadcast Tab/Pane/Session updates to every
+    plugin in the session.
+    """
+    clock = [0.0]
+    probes: list[float] = []
+    steps = iter(script)
+
+    def probe() -> object:
+        probes.append(clock[0])
+        return workshop.AgentPresence(("codex · init · vibecrafted",), ())
+
+    class ScriptedWindow:
+        def getmaxyx(self) -> tuple[int, int]:
+            return (30, 100)
+
+        def addstr(self, *_args: object) -> None:
+            pass
+
+        def erase(self) -> None:
+            pass
+
+        def refresh(self) -> None:
+            pass
+
+        def getch(self) -> int:
+            try:
+                key, elapsed = next(steps)
+            except StopIteration:
+                raise _StopDashboard from None
+            clock[0] += elapsed
+            return key
+
+    monkeypatch.setattr(workshop, "current_agent_presence", probe)
+    monkeypatch.setattr(workshop, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(workshop.Workshop, "configure", lambda _self: None)
+    monkeypatch.setattr(
+        workshop.curses, "getmouse", lambda: (0, 0, 0, 0, mouse_state), raising=False
+    )
+    dashboard = workshop.Workshop(ScriptedWindow(), mode="home")
+    with pytest.raises(_StopDashboard):
+        dashboard.run()
+    return probes
+
+
+def test_home_dashboard_idle_minute_spawns_at_most_four_pane_probes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workshop = _load()
+
+    probes = _drive_home_dashboard(workshop, monkeypatch, [_IDLE_TICK] * 120)
+
+    # 121 redraws across 60 s of idle.  The old 2 s poll spawned ~24 clients.
+    assert len(probes) <= 4, probes
+    assert probes[0] == 0.0, "the first draw must show real pane state"
+
+
+def test_home_dashboard_probes_immediately_after_user_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workshop = _load()
+    script = [_IDLE_TICK] * 41 + [(workshop.curses.KEY_RIGHT, 0.1)] + [_IDLE_TICK] * 2
+
+    probes = _drive_home_dashboard(workshop, monkeypatch, script)
+
+    # first draw, the 15 s idle cadence, then the draw right after the key
+    assert len(probes) == 3, probes
+    assert probes[-1] == pytest.approx(20.6)
+
+
+def test_home_dashboard_pointer_motion_never_probes_but_click_does(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workshop = _load()
+    hover = [_IDLE_TICK] * 41 + [(workshop.curses.KEY_MOUSE, 0.05)] * 10
+    hover_probes = _drive_home_dashboard(
+        workshop,
+        monkeypatch,
+        hover + [_IDLE_TICK] * 2,
+        mouse_state=workshop.curses.REPORT_MOUSE_POSITION,
+    )
+    assert len(hover_probes) == 2, hover_probes
+
+    click_probes = _drive_home_dashboard(
+        workshop,
+        monkeypatch,
+        [_IDLE_TICK] * 41 + [(workshop.curses.KEY_MOUSE, 0.1)] + [_IDLE_TICK],
+        mouse_state=workshop.curses.BUTTON1_CLICKED,
+    )
+    assert len(click_probes) == 3, click_probes
+    assert click_probes[-1] == pytest.approx(20.6)
+
+
+def test_presence_schedule_backs_off_while_unchanged_and_resets_on_change() -> None:
+    workshop = _load()
+    schedule = workshop.PresenceSchedule(base=15.0, ceiling=60.0, floor=2.0)
+
+    assert schedule.due(0.0)
+    schedule.record(0.0, changed=True)
+    assert not schedule.due(14.9)
+    assert schedule.due(15.0)
+    schedule.record(15.0, changed=False)
+    assert not schedule.due(44.9)
+    assert schedule.due(45.0)
+    schedule.record(45.0, changed=False)
+    schedule.record(105.0, changed=False)
+    assert schedule.interval == 60.0
+    schedule.record(165.0, changed=True)
+    assert schedule.interval == 15.0
+    schedule.request()
+    assert not schedule.due(166.9)
+    assert schedule.due(167.0)
+
+
 @pytest.mark.parametrize("width", [58, 92])
 def test_launcher_choice_redraw_preserves_final_cells_and_selected_row_styling(
     width: int, monkeypatch: pytest.MonkeyPatch
