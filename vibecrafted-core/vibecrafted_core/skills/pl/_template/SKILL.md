@@ -67,6 +67,12 @@ Poprzeczka z `CONTRIBUTING-SKILLS.md`: jedna ostra oś, nie scyzoryk szwajcarski
 
 ---
 
+## Goal
+
+**Propozycja — Founder zatwierdza ostateczne brzmienie.** {{SKILL_NAME}} wytwarza TODO konkretny rezultat i jest skończony, gdy TODO weryfikowalny punkt końcowy da się sprawdzić niezależnie od tego przebiegu. Agent proponuje ten jeden akapit zaraz po Celu; Founder potwierdza albo przepisuje go po ludzku, zanim skill stanie się kanoniczny. Ten akapit nie zastępuje Kryteriów akceptacji poniżej.
+
+---
+
 ## Kiedy używać
 
 Warunki wyzwalające (zastąp wszystkie punkty):
