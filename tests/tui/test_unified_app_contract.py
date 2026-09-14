@@ -1585,8 +1585,8 @@ def test_host_path_scan_distinguishes_windows_examples_from_unix_paths(
 def test_host_path_scan_allows_only_known_libpython_documentation_paths(
     tmp_path: Path,
 ) -> None:
-    payload = tmp_path / "libpython3.12.dylib"
-    relative = "Contents/Resources/runtime/python/lib/libpython3.12.dylib"
+    payload = tmp_path / "libpython3.14.dylib"
+    relative = "Contents/Resources/runtime/python/lib/libpython3.14.dylib"
     payload.write_bytes(
         b"example /usr/local/lib/python2.5/site-packages "
         b"/usr/local/lib/python2.5/site-packages/bar "
@@ -3944,9 +3944,11 @@ def test_unified_release_has_one_top_level_owner() -> None:
     assert '"$runtime/bin/vc-server"' in builder
     assert '"$runtime/server/site/"' in builder
     assert "install_portable_python" in builder
+    assert "portable_python_load_pin" in builder
     assert "scripts/lib/portable-python.sh" in builder
     assert "uv python install 3.12.3" not in builder
-    assert "install_name_tool -id '@loader_path/libpython3.12.dylib'" in builder
+    assert 'install_name_tool -id "@loader_path/${PORTABLE_PYTHON_DYLIB}"' in builder
+    assert "python3.12" not in builder
     # The remaps are built from PATH_REMAPS rather than written as one literal
     # string, because the snapshot pair is conditional and because rustc applies
     # the LAST match — so the list has to be ordered broadest-first, with $HOME
