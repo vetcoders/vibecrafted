@@ -113,8 +113,8 @@ def framework_store_dir() -> Path:
 
 
 def helper_layer_path() -> Path:
-    """Path to the shell helper layer sourced by interactive shells."""
-    return xdg_config_home() / "vetcoders" / "vc-skills.sh"
+    """Path to the opt-in shell helper shim in the product shell tree."""
+    return xdg_config_home() / "vibecrafted" / "shell" / "vc-skills.sh"
 
 
 def install_log_path() -> Path:

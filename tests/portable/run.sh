@@ -218,13 +218,16 @@ require_symlink "$home_dir/.claude/skills/vc-agents"
 require_file "$home_dir/.local/share/vibecrafted/tools/vibecrafted-current/vibecrafted-core/vibecrafted_core/runtime/scripts/codex_spawn.sh"
 require_file "$home_dir/.local/share/vibecrafted/tools/vibecrafted-current/vibecrafted-core/vibecrafted_core/runtime/scripts/claude_spawn.sh"
 require_file "$home_dir/.local/share/vibecrafted/tools/vibecrafted-current/vibecrafted-core/vibecrafted_core/runtime/scripts/agy_spawn.sh"
-# Canonical + compat helper locations
-require_file "$config_dir/vetcoders/vc-skills.sh"
-require_file "$config_dir/zsh/vc-skills.zsh"
-assert_contains "$config_dir/vetcoders/vc-skills.sh" '𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. helper shim'
+# The helper shim has one home: the product shell tree under the one config
+# home. Nothing lands in a sibling or private config directory.
+helper_shim="$config_dir/vibecrafted/shell/vc-skills.sh"
+require_file "$helper_shim"
+[[ ! -e "$config_dir/zsh" ]] || die "install wrote into the private zsh config directory"
+[[ ! -e "$config_dir/vetcoders" ]] || die "install wrote into a retired sibling config directory"
+assert_contains "$helper_shim" '𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. helper shim'
 bad_helper_candidate="\${VIBECRAFTED_ROOT:-}/runtime/shell/vetcoders.sh"
-assert_not_contains "$config_dir/vetcoders/vc-skills.sh" "$bad_helper_candidate"
-assert_not_contains "$config_dir/vetcoders/vc-skills.sh" "vibecrafted-current/runtime/shell/vetcoders.sh"
+assert_not_contains "$helper_shim" "$bad_helper_candidate"
+assert_not_contains "$helper_shim" "vibecrafted-current/runtime/shell/vetcoders.sh"
 # Host-shell helper sourcing is intentionally retired (install-shell.sh:
 # the helper is loaded by vc-start, never by the ordinary host shell).
 # --write-shell-rc now means: PATH-only launcher guard in an rcfile, and any
@@ -455,13 +458,13 @@ assert_contains "$resume_prompt_capture" 'resume smoke'
 log "helper bash smoke"
 # shellcheck disable=SC2016
 env HOME="$home_dir" XDG_CONFIG_HOME="$config_dir" PATH="$home_dir/.local/bin:$fake_bin:$PATH" \
-  bash -c 'source "${XDG_CONFIG_HOME:-$HOME/.config}/vetcoders/vc-skills.sh"; command -v codex-implement >/dev/null && command -v claude-implement >/dev/null && command -v agy-implement >/dev/null && command -v vc-marbles >/dev/null && command -v skills-sync >/dev/null && echo helper-ok' \
+  bash -c 'source "${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/shell/vc-skills.sh"; command -v codex-implement >/dev/null && command -v claude-implement >/dev/null && command -v agy-implement >/dev/null && command -v vc-marbles >/dev/null && command -v skills-sync >/dev/null && echo helper-ok' \
   | grep -Fq 'helper-ok' || die 'bash helper layer not loaded'
 log "skill helper telemetry smoke"
 # shellcheck disable=SC2016
 skill_output="$(
   env HOME="$home_dir" XDG_CONFIG_HOME="$config_dir" PATH="$fake_bin:$PATH" VETCODERS_SPAWN_RUNTIME=headless \
-    bash -c 'cd "$1"; source "${XDG_CONFIG_HOME:-$HOME/.config}/vetcoders/vc-skills.sh"; codex-marbles --count 1 --prompt "telemetry smoke"' _ "$work_repo"
+    bash -c 'cd "$1"; source "${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/shell/vc-skills.sh"; codex-marbles --count 1 --prompt "telemetry smoke"' _ "$work_repo"
 )"
 skill_report="$(printf '%s\n' "$skill_output" | sed -n 's/^Agent launched\. Report will land at: //p' | tail -n 1)"
 [[ -n "$skill_report" ]] || die "skill helper did not report output path"
@@ -478,12 +481,12 @@ jq -e '.run_id | startswith("marb-")' "$skill_meta" >/dev/null || die "skill hel
 jq -e '.liveness == "terminal"' "$skill_meta" >/dev/null || die "skill helper did not finish with terminal liveness"
 assert_no_perception_watcher "$work_repo"
 
-# If zsh is available, also smoke test zsh loading via compat symlink
+# If zsh is available, also smoke test zsh loading of the same shim
 if command -v zsh >/dev/null 2>&1; then
   log "helper zsh smoke (bonus)"
   # shellcheck disable=SC2016
   env HOME="$home_dir" XDG_CONFIG_HOME="$config_dir" PATH="$home_dir/.local/bin:$fake_bin:$PATH" \
-    zsh -c 'source "${XDG_CONFIG_HOME:-$HOME/.config}/zsh/vc-skills.zsh"; command -v codex-implement >/dev/null && command -v claude-implement >/dev/null && command -v agy-implement >/dev/null && command -v vc-marbles >/dev/null && command -v skills-sync >/dev/null && echo helper-ok' \
+    zsh -c 'source "${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/shell/vc-skills.sh"; command -v codex-implement >/dev/null && command -v claude-implement >/dev/null && command -v agy-implement >/dev/null && command -v vc-marbles >/dev/null && command -v skills-sync >/dev/null && echo helper-ok' \
     | grep -Fq 'helper-ok' || die 'zsh helper layer not loaded'
 fi
 

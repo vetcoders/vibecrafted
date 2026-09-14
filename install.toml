@@ -138,7 +138,7 @@ additional_tools = ["mise", "starship", "atuin", "zoxide", "zsh-autosuggestions"
 
 [diagnostics.paths]
 store_dir = "$VIBECRAFTED_ROOT/.vibecrafted/skills"
-helpers = "$XDG_CONFIG_HOME/vetcoders/vc-skills.sh"
+helpers = "$XDG_CONFIG_HOME/vibecrafted/shell/vc-skills.sh"
 binaries = ["vibecraft", "vibecrafted"]
 symlinks = ["$HOME/.agents", "$HOME/.claude", "$HOME/.codex", "$HOME/.gemini", "$HOME/.agy", "$HOME/.junie", "$HOME/.grok"]
 

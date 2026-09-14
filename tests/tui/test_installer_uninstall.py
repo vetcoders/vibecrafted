@@ -2400,7 +2400,9 @@ def test_cmd_uninstall_prefers_manifest_tracked_launchers_and_helpers(
     helper_file = installer._helper_target_path()
     helper_file.parent.mkdir(parents=True, exist_ok=True)
     helper_file.write_text("# helper shim\n", encoding="utf-8")
-    manual_helper = installer._helper_legacy_path()
+    # An untracked helper-shaped file outside the product config home: the
+    # retired compat location is neither discovered nor removed.
+    manual_helper = home / ".config" / "zsh" / "vc-skills.zsh"
     manual_helper.parent.mkdir(parents=True, exist_ok=True)
     manual_helper.write_text("# user helper\n", encoding="utf-8")
 
@@ -2448,9 +2450,11 @@ def test_cmd_uninstall_prefers_manifest_tracked_launchers_and_helpers(
     manifest = json.loads(
         (backup_root / latest / "restore-manifest.json").read_text(encoding="utf-8")
     )
-    backed_paths = {Path(item["path"]).name for item in manifest["items"]}
-    assert "vc-skills.sh" in backed_paths
-    assert "vc-help" not in backed_paths
+    backed = [Path(item["path"]) for item in manifest["items"]]
+    # The shim lives in the product shell tree, so the backup may carry it as
+    # the file itself or inside its backed-up parent directory.
+    assert any(path == helper_file or path in helper_file.parents for path in backed)
+    assert "vc-help" not in {path.name for path in backed}
 
 
 def test_restore_roundtrip_recovers_launchers_and_runtime_symlinks(
@@ -2798,7 +2802,7 @@ def test_second_uninstall_after_full_teardown_is_a_no_op(
     stranger.mkdir()
     (stranger / "keep.txt").write_text("keep\n", encoding="utf-8")
     config_root = Path(os.environ["XDG_CONFIG_HOME"])
-    (config_root / "vibecrafted").mkdir(parents=True)
+    (config_root / "vibecrafted").mkdir(parents=True, exist_ok=True)
     (config_root / "vibecrafted" / "slack.env").write_text("T=1\n", encoding="utf-8")
 
     assert installer.cmd_uninstall(Namespace(dry_run=False)) == 0
