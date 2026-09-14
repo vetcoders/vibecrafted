@@ -86,13 +86,17 @@ func runtimeIdentityBlob(
   terminalRevision: String?,
   frameRevision: String?,
   runtimeHome: String,
-  configHome: String
+  xdgConfigHome: String
 ) -> String {
+  // Vibecrafted keeps its configuration only under <XDG_CONFIG_HOME>/vibecrafted.
+  // Report that directory, not the XDG base every other program shares.
+  let productConfigHome = URL(fileURLWithPath: xdgConfigHome, isDirectory: true)
+    .appendingPathComponent("vibecrafted", isDirectory: true).path
   var lines = ["vibecrafted-runtime: \(generation)"]
   lines.append("carrier-source: \(sourceRevision ?? "unknown")")
   lines.append("carrier-vc-terminal: \(terminalRevision ?? "unknown")")
   lines.append("carrier-vc-frame: \(frameRevision ?? "unknown")")
   lines.append("runtime-home: \(runtimeHome)")
-  lines.append("config-home: \(configHome)")
+  lines.append("config-home: \(productConfigHome)")
   return lines.joined(separator: "\n")
 }
