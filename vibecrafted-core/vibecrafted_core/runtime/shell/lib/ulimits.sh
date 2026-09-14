@@ -5,13 +5,13 @@
 
 _vetcoders_source_launcher_ulimits() {
   local candidate
+  # shellcheck disable=SC2154  # _vetcoders_shell_lib_dir is set by the vetcoders.sh facade loader
   for candidate in \
     "${_vetcoders_shell_lib_dir%/shell/lib}/scripts/lib/ulimits.sh" \
     "${VIBECRAFTED_ROOT:-}/vibecrafted-core/vibecrafted_core/runtime/scripts/lib/ulimits.sh" \
     "${VIBECRAFTED_TOOLS_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted/tools}/vibecrafted-current/vibecrafted-core/vibecrafted_core/runtime/scripts/lib/ulimits.sh" \
     "${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/runtime/scripts/lib/ulimits.sh"; do
     [[ -n "$candidate" && -r "$candidate" ]] || continue
-    # shellcheck disable=SC1090
     source "$candidate"
     vc_raise_launcher_limits
     return 0

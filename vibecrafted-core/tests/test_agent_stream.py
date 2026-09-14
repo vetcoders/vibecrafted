@@ -361,3 +361,85 @@ def test_filter_stream_writes_agy_last_message(tmp_path) -> None:
         last_message_file=missing,
     )
     assert not missing.exists()
+
+
+def test_agent_stream_parser_renders_kimi_stream_json_events(tmp_path) -> None:
+    """kimi stream-json: version head, assistant text+tool calls, retry, resume hint."""
+    parser = AgentStreamParser("kimi")
+
+    version = parser.feed_line(
+        b'{"role":"meta","type":"system.version","version":"0.42.0"}\n'
+    )
+    assert "kimi 0.42.0" in version
+
+    assistant = parser.feed_line(
+        b'{"role":"assistant","content":"working on it",'
+        b'"tool_calls":[{"type":"function","id":"call-1",'
+        b'"function":{"name":"Read","arguments":"{}"}}]}\n'
+    )
+    assert "Read" in assistant
+    assert "working on it" in assistant
+    assert parser.final_response == "working on it"
+
+    tool = parser.feed_line(
+        b'{"role":"tool","tool_call_id":"call-1","content":"file body"}\n'
+    )
+    assert "file body" in tool
+
+    retry = parser.feed_line(
+        b'{"role":"meta","type":"turn.step.retrying","failed_attempt":1,'
+        b'"next_attempt":2,"max_attempts":5,"delay_ms":1000,'
+        b'"error_name":"RateLimitError","error_message":"slow down",'
+        b'"status_code":429}\n'
+    )
+    assert "retry" in retry
+    assert "(attempt 2/5)" in retry
+    assert "slow down" in retry
+
+    final = parser.feed_line(b'{"role":"assistant","content":"the answer"}\n')
+    assert "the answer" in final
+    assert parser.final_response == "the answer"
+
+    hint = parser.feed_line(
+        b'{"role":"meta","type":"session.resume_hint","session_id":"kimi-sess-1",'
+        b'"command":"kimi -r kimi-sess-1","content":"resume"}\n'
+    )
+    assert "kimi-sess-1" in hint
+    assert parser.session_id == "kimi-sess-1"
+    assert parser.resume_command("/repo") == "cd /repo && kimi -S kimi-sess-1"
+
+    summary = parser.feed_line(
+        b'{"type":"goal.summary","goalId":"g1","status":"complete",'
+        b'"turnsUsed":2,"tokensUsed":100,"wallClockMs":5000}\n'
+    )
+    assert "goal: complete" in summary
+
+
+def test_filter_stream_writes_kimi_last_message(tmp_path) -> None:
+    import io
+
+    from vibecrafted_core.agent_stream import filter_stream
+
+    stream = io.BytesIO(
+        b'{"role":"meta","type":"system.version","version":"0.42.0"}\n'
+        b'{"role":"assistant","content":"intermediate"}\n'
+        b'{"role":"assistant","content":"final answer"}\n'
+        b'{"role":"meta","type":"session.resume_hint","session_id":"s-9"}\n'
+    )
+    out = io.BytesIO()
+    last = tmp_path / "last-message.md"
+    assert filter_stream("kimi", stdin=stream, stdout=out, last_message_file=last) == 0
+    assert last.read_text(encoding="utf-8") == "final answer"
+    assert b"final answer" in out.getvalue()
+
+    empty_out = io.BytesIO()
+    missing = tmp_path / "absent.md"
+    filter_stream(
+        "kimi",
+        stdin=io.BytesIO(
+            b'{"role":"meta","type":"system.version","version":"0.42.0"}\n'
+        ),
+        stdout=empty_out,
+        last_message_file=missing,
+    )
+    assert not missing.exists()

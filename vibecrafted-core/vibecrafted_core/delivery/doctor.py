@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import yaml  # type: ignore[import-untyped]
+import yaml
 
 from .model import (
     ContractValidationError,
@@ -293,7 +293,7 @@ def extract_payloads_from_markdown(
     for block in matches:
         try:
             doc = yaml.safe_load(block)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 - a malformed block is a parse error; the scan continues
             parse_errors.append(
                 DoctorError(path="brief", message=f"failed to parse code block: {exc}")
             )
@@ -355,7 +355,7 @@ def diagnose_file(path: str | Path) -> DoctorReport:
 
     try:
         doc = yaml.safe_load(text)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - an unparseable payload is a doctor report, not a traceback
         return DoctorReport(
             ok=False,
             errors=(

@@ -290,10 +290,11 @@ mod tests {
         let catalog = LauncherCatalog::parse(FIXTURE.as_bytes()).unwrap();
         assert_eq!(
             catalog.agents,
-            vec!["agy", "claude", "codex", "cursor", "grok", "junie"]
+            vec!["agy", "claude", "codex", "cursor", "grok", "junie", "kimi"]
         );
         assert!(catalog.provider("claude").unwrap().model_override.supported);
         assert!(!catalog.provider("junie").unwrap().model_override.supported);
+        assert!(catalog.provider("kimi").unwrap().model_override.supported);
         assert_eq!(
             catalog.environment("cloud-soon").unwrap().reason,
             "coming soon"
@@ -325,6 +326,16 @@ mod tests {
         assert!(!cell.supported);
         assert!(cell.reason.contains("cannot be enforced"));
         assert!(agy.control_cell(Some("read-only"), None).unwrap().supported);
+        let kimi = catalog.provider("kimi").unwrap();
+        let read_only = kimi.control_cell(Some("read-only"), None).unwrap();
+        assert!(!read_only.supported);
+        assert!(read_only.reason.contains("interactive-only"));
+        let bypass = kimi.control_cell(Some("bypass"), None).unwrap();
+        assert!(bypass.supported);
+        assert!(bypass.provider_flags.is_empty());
+        let sandbox_off = kimi.control_cell(None, Some("false")).unwrap();
+        assert!(!sandbox_off.supported);
+        assert!(sandbox_off.reason.contains("cannot be enforced"));
     }
 
     #[test]

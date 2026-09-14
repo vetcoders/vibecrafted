@@ -284,9 +284,8 @@ husky_lint_py_ruff_staged() {
   while IFS= read -r file; do paths+=("$file"); done <<< "$files"
   root="$(husky_lint_materialize_index)"
   for file in "${paths[@]}"; do projected+=("$root/$file"); done
-  # shellcheck disable=SC2086  # $ruff intentionally splits "uvx ruff"
+  # $ruff intentionally splits "uvx ruff"
   $ruff check --fix -- "${projected[@]}" || rc=$?
-  # shellcheck disable=SC2086
   [ "$rc" -ne 0 ] || $ruff format -- "${projected[@]}" || rc=$?
   [ "$rc" -eq 0 ] && husky_lint_write_projected_files_to_index "$root" "${paths[@]}" || rc=$?
   rm -rf "$root"
@@ -300,9 +299,7 @@ husky_lint_py_ruff_full() {
   elif command -v uvx >/dev/null 2>&1; then ruff="uvx ruff"
   else husky_warn "ruff/uvx not installed — skipping."; return 0
   fi
-  # shellcheck disable=SC2086
   $ruff check -- "$root" || return 1
-  # shellcheck disable=SC2086
   $ruff format --check -- "$root"
 }
 

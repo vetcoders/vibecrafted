@@ -688,7 +688,8 @@ _write_reception_convergence_guard() {
   local fallback_attempts="${3:-0}"
   local backoff_initial_s="${4:-0}"
   local backoff_max_s="${5:-0}"
-  local convergence="$store/reports/$(spawn_timestamp)_marbles-$(spawn_slug_from_path "$ancestor_plan")_CONVERGENCE.md"
+  local convergence
+  convergence="$store/reports/$(spawn_timestamp)_marbles-$(spawn_slug_from_path "$ancestor_plan")_CONVERGENCE.md"
   local agent_name=""
 
   agent_name="$(spawn_frontmatter_field "$ancestor_plan" "agent")"
@@ -742,7 +743,8 @@ _wait_for_loop_meta() {
   local timeout_s="$2"
   local elapsed=0
   local meta_path=""
-  local expected_run_id="${run_id}-$(printf '%03d' "$loop_nr")"
+  local expected_run_id
+  expected_run_id="${run_id}-$(printf '%03d' "$loop_nr")"
   local final_grace_s="${VIBECRAFTED_MARBLES_META_FINAL_GRACE_S:-4}"
   local grace_elapsed=0
 

@@ -978,7 +978,7 @@ materialize_runtime_payload() {
     "$SOURCE_ROOT/scripts/render-python-entrypoint-launchers.py" \
     --pyproject "$SOURCE_ROOT/vibecrafted-mcp/pyproject.toml" \
     --bin-dir "$runtime/bin"
-  # shellcheck disable=SC2016
+  # shellcheck disable=SC2016  # writes a launcher; expansions belong to the generated script
   printf '%s\n' \
     '#!/bin/bash' \
     'set -euo pipefail' \

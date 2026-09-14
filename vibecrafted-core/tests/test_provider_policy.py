@@ -1368,6 +1368,25 @@ def test_interactive_command_uses_contract_flags() -> None:
         interactive_policy_command("codex", "/vc-init", "local-native", "accept-edits")
 
 
+def test_kimi_interactive_command_is_flags_only_tui_entry() -> None:
+    """Interactive kimi enters the TUI with no prompt on argv (a prompt exists
+    only as -p, which is non-interactive and conflicts with --auto/--yolo/
+    --plan), so the contract flags are the whole command."""
+    assert interactive_policy_command("kimi", "/vc-init", "local-native", "bypass") == [
+        "kimi",
+        "--auto",
+    ]
+    assert interactive_policy_command("kimi", "/vc-init", "local-native", "auto") == [
+        "kimi",
+        "--yolo",
+    ]
+    assert interactive_policy_command(
+        "kimi", "/vc-init", "local-native", "read-only"
+    ) == ["kimi", "--plan"]
+    with pytest.raises(ValueError, match="no native accept-edits"):
+        interactive_policy_command("kimi", "/vc-init", "local-native", "accept-edits")
+
+
 def test_interactive_workspace_command_wraps_the_exact_init_route(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

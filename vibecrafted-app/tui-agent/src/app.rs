@@ -547,6 +547,7 @@ impl App {
         self.observe.status = ObserveHealth::Live;
         self.observe.error = None;
         self.observe.runs = observe::project_rendered_runs(&self.runs);
+        observe::sort_observe_runs(&mut self.observe.runs, self.observe.sort);
         self.observe.selected = selected_run_id
             .and_then(|run_id| {
                 self.observe
@@ -566,37 +567,80 @@ impl App {
     pub fn refresh_observe_transcript(&mut self) {
         let Some(run) = self.observe.runs.get(self.observe.selected) else {
             self.observe.transcript.clear();
+            self.observe.transcript_raw.clear();
             self.observe.transcript_run_id = None;
             return;
         };
         let run_id = run.run_id.clone();
         let transcript_path = run.transcript_path.clone();
         if self.observe.transcript_run_id.as_deref() == Some(run_id.as_str())
-            && !self.observe.transcript.is_empty()
+            && !self.observe.transcript_raw.is_empty()
         {
+            self.sync_observe_transcript_display();
             return;
         }
         if let Some(path) = transcript_path
             && let Ok(body) = fs::read_to_string(path)
         {
-            self.observe.transcript = crate::run_detail::humanize_transcript(&body);
+            self.observe.transcript_raw = body;
             self.observe.transcript_run_id = Some(run_id);
+            self.sync_observe_transcript_display();
             return;
         }
         match observe::fetch_transcript(&self.config.server, &run_id) {
             Ok(body) => {
-                self.observe.transcript = if body.trim().is_empty() {
-                    String::new()
-                } else {
-                    crate::run_detail::humanize_transcript(&body)
-                };
+                self.observe.transcript_raw = body;
                 self.observe.transcript_run_id = Some(run_id);
+                self.sync_observe_transcript_display();
             }
             Err(error) => {
+                self.observe.transcript_raw.clear();
                 self.observe.transcript = format!("transcript unavailable: {error}");
                 self.observe.transcript_run_id = Some(run_id);
             }
         }
+    }
+
+    fn sync_observe_transcript_display(&mut self) {
+        self.observe.transcript = match self.observe.transcript_view {
+            crate::observe::TranscriptView::Raw => self.observe.transcript_raw.clone(),
+            crate::observe::TranscriptView::Human => {
+                let human = crate::run_detail::humanize_transcript(&self.observe.transcript_raw);
+                if human.trim().is_empty() && !self.observe.transcript_raw.trim().is_empty() {
+                    "(no user/assistant/tool text in this stream — press t for raw)".to_string()
+                } else {
+                    human
+                }
+            }
+        };
+    }
+
+    pub fn toggle_observe_sort(&mut self) {
+        let selected_run_id = self
+            .observe
+            .runs
+            .get(self.observe.selected)
+            .map(|run| run.run_id.clone());
+        self.observe.sort = self.observe.sort.next();
+        observe::sort_observe_runs(&mut self.observe.runs, self.observe.sort);
+        self.observe.selected = selected_run_id
+            .and_then(|run_id| {
+                self.observe
+                    .runs
+                    .iter()
+                    .position(|run| run.run_id == run_id)
+            })
+            .unwrap_or(0);
+        self.append_status(format!("observe sort: {}", self.observe.sort.label()));
+    }
+
+    pub fn toggle_observe_transcript_view(&mut self) {
+        self.observe.transcript_view = self.observe.transcript_view.next();
+        self.sync_observe_transcript_display();
+        self.append_status(format!(
+            "transcript: {}",
+            self.observe.transcript_view.label()
+        ));
     }
 
     pub fn move_observe_selection(&mut self, delta: isize) {
@@ -610,6 +654,7 @@ impl App {
         }
         self.observe.selected = (index % count) as usize;
         self.observe.transcript.clear();
+        self.observe.transcript_raw.clear();
         self.observe.transcript_run_id = None;
         self.refresh_observe_transcript();
     }
@@ -1467,6 +1512,8 @@ impl App {
             "d           selected-run deep controls".to_string(),
             "y           copy resume/report/run identity to clipboard".to_string(),
             "f           cycle queue scope: live, history, all".to_string(),
+            "o           Observe: cycle latest/oldest by canonical timestamp".to_string(),
+            "t           Observe: cycle human/raw transcript".to_string(),
             "/           search runs by id, agent, skill, status, path".to_string(),
             "m           AICX memory overlay (continuity)".to_string(),
             "w           open aicx wizard search".to_string(),

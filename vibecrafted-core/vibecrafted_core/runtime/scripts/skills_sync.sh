@@ -148,13 +148,13 @@ if (( mirror )); then
 fi
 
 printf 'Syncing skills from %s to %s\n' "$repo_root" "$host"
-# shellcheck disable=SC2088,SC2016
+# shellcheck disable=SC2088,SC2016  # expands on the remote host over ssh
 remote_tools_target='$HOME/.local/share/vibecrafted/tools/vibecrafted-local'
-# shellcheck disable=SC2088,SC2016
+# shellcheck disable=SC2088,SC2016  # expands on the remote host over ssh
 remote_current_link='$HOME/.local/share/vibecrafted/tools/vibecrafted-current'
-# shellcheck disable=SC2088,SC2016
+# shellcheck disable=SC2088,SC2016  # expands on the remote host over ssh
 remote_package_target='$HOME/.local/share/vibecrafted/tools/vibecrafted-local/vibecrafted-core/vibecrafted_core/skills'
-# shellcheck disable=SC2088,SC2016
+# shellcheck disable=SC2088,SC2016  # expands on the remote host over ssh
 remote_shared_target='$HOME/.local/share/vibecrafted/tools/vibecrafted-current/vibecrafted-core/vibecrafted_core/skills'
 printf -- '-- canonical staged tools -> %s:%s\n' "$host" "$remote_shared_target"
 if (( dry_run )); then

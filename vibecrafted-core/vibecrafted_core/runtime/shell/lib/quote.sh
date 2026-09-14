@@ -36,7 +36,6 @@ _vetcoders_write_command_script() {
   # against the original command path, so self-deleting wrappers break attach
   # and respawn semantics.
   mkdir -p "$(dirname "$script_path")"
-  # shellcheck disable=SC2016
   printf '#!/usr/bin/env bash\nset -euo pipefail\n%s -lc %s\n' \
     "$(_vetcoders_shell_quote "$shell_bin")" \
     "$(_vetcoders_shell_quote "$command_text")" \

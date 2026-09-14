@@ -532,6 +532,18 @@ fn handle_key(
                 app.focus = LaunchFocus::EditModel;
             }
             KeyCode::Char('f') => app.toggle_filter(),
+            KeyCode::Char('o')
+                if app.config.view == crate::observe::ConsoleView::Observe
+                    && app.active_tab() == AppTab::Monitor =>
+            {
+                app.toggle_observe_sort();
+            }
+            KeyCode::Char('t')
+                if app.config.view == crate::observe::ConsoleView::Observe
+                    && app.active_tab() == AppTab::Monitor =>
+            {
+                app.toggle_observe_transcript_view();
+            }
             KeyCode::Char('/') => {
                 app.focus = LaunchFocus::Search;
                 app.append_status("search: type to filter runs, Enter/Esc closes, Ctrl+L clears");
@@ -718,6 +730,8 @@ fn click_hit(app: &mut App, hit: crate::layout::HitTarget) -> anyhow::Result<()>
                 } else {
                     app.observe.selected = index;
                     app.observe.transcript.clear();
+                    app.observe.transcript_raw.clear();
+                    app.observe.transcript_run_id = None;
                     app.refresh_observe_transcript();
                 }
             }

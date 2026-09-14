@@ -94,7 +94,7 @@ qlast_message="$(spawn_shell_quote "${SPAWN_TRANSCRIPT%.log}.last-message.md")"
 qstream_jsonl="$(spawn_shell_quote "${SPAWN_TRANSCRIPT%.log}.stream.jsonl")"
 qmodel="$(spawn_shell_quote "$model")"
 
-# shellcheck disable=SC2016
+# shellcheck disable=SC2016  # hook source is expanded by the launcher when the hook runs
 claude_success_hook='
   if [[ ! -s "$report" ]]; then
     spawn_write_frontmatter "$report" "$SPAWN_AGENT" "${SPAWN_MODEL:-unknown}" "completed"
@@ -107,7 +107,7 @@ ${transcript%.log}.last-message.md
 TXT
   fi'
 
-# shellcheck disable=SC2016
+# shellcheck disable=SC2016  # hook source is expanded by the launcher when the hook runs
 claude_failure_hook='
   if [[ ! -s "$report" ]]; then
     spawn_write_frontmatter "$report" "$SPAWN_AGENT" "${SPAWN_MODEL:-unknown}" "failed"

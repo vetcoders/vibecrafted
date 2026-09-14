@@ -59,7 +59,6 @@ _vetcoders_source_runtime_helpers() {
   owner_root="$(_vetcoders_runtime_owner_root)" || return $?
   helper="$(_vetcoders_runtime_helper_candidates)" || return $?
 
-  # shellcheck disable=SC1090
   if source "$helper"; then
     # The sourced helper resolves later runtime scripts through VIBECRAFTED_ROOT.
     # Bind it to this helper's physical owner only after the source succeeds.
@@ -177,6 +176,7 @@ _vetcoders_host_agent_bin_dirs() {
   for dir in \
     "${home:+$home/.local/bin}" \
     "${home:+$home/.cargo/bin}" \
+    "${home:+$home/.kimi-code/bin}" \
     "${home:+$home/tools/scripts}" \
     /opt/homebrew/bin \
     /opt/homebrew/sbin \

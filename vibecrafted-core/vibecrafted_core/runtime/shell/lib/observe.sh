@@ -86,16 +86,3 @@ _vetcoders_await() {
     bash "$script" "$@"
   fi
 }
-
-_vetcoders_loop() {
-  local script
-  script="$(_vetcoders_frontier_file "runtime/scripts/vibecrafted-loop.sh" 2>/dev/null || true)"
-  if [[ -z "$script" && -n "${VIBECRAFTED_ROOT:-}" ]]; then
-    script="${VIBECRAFTED_ROOT}/runtime/scripts/vibecrafted-loop.sh"
-  fi
-  [[ -n "$script" && -f "$script" ]] || {
-    echo "vibecrafted loop runtime script not found." >&2
-    return 1
-  }
-  bash "$script" "$@"
-}

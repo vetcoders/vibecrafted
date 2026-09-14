@@ -43,6 +43,10 @@ struct DashboardWorkspace {
     title: String,
     root: String,
     status: String,
+    /// `current` is live session/run truth. `catalog` is durable history.
+    /// Catalog `status=active` is not current inventory.
+    #[serde(default)]
+    inventory: String,
     selected: bool,
     active_runs: usize,
     recent_runs: usize,
@@ -414,7 +418,13 @@ fn load_dashboard_data_from(
                     Vec::new(),
                 )
             }
-        };
+        }
+        Err(error) => {
+            let message = error.to_string();
+            warnings.push(format!("Workspace data unavailable: {message}"));
+            ("unavailable".into(), message, Vec::new(), Vec::new())
+        }
+    };
 
     DashboardData {
         server_status: "healthy".into(),
@@ -677,13 +687,16 @@ fn is_quarantined_run(run: &DashboardRun) -> bool {
         || (run.skill.eq_ignore_ascii_case("marbles") && run.health != "active")
 }
 
-fn operator_active_runs(runs: Vec<DashboardRun>) -> Vec<DashboardRun> {
+fn current_live_runs(runs: Vec<DashboardRun>) -> Vec<DashboardRun> {
     runs.into_iter()
         .filter(|run| {
             run.health == "active" && !is_terminal_state(&run.state) && !is_quarantined_run(run)
         })
-        .take(8)
         .collect()
+}
+
+fn operator_active_runs(runs: Vec<DashboardRun>) -> Vec<DashboardRun> {
+    current_live_runs(runs)
 }
 
 fn operator_action_runs(runs: Vec<DashboardLifecycleRun>) -> Vec<DashboardLifecycleRun> {
@@ -860,9 +873,24 @@ fn aicx_page_script() -> &'static str {
   const form = document.getElementById('aicx-search-form');
   const q = document.getElementById('aicx-search-query');
   const project = document.getElementById('aicx-search-project');
+  const globalToggle = document.getElementById('aicx-search-global');
+  const scopeLabel = document.getElementById('aicx-search-scope');
   const status = document.getElementById('aicx-search-status');
   const results = document.getElementById('aicx-search-results');
   if (!form || !q || !status || !results) return;
+  const setScope = (kind, projectSlug) => {
+    if (!scopeLabel) return;
+    scopeLabel.dataset.scope = kind;
+    scopeLabel.textContent = kind === 'global'
+      ? 'Scope: all projects.'
+      : ('Scope: this project' + (projectSlug ? ' (' + projectSlug + ')' : ' (owner/repo required)') + '.');
+  };
+  setScope('project', '');
+  if (globalToggle) {
+    globalToggle.addEventListener('change', () => {
+      setScope(globalToggle.checked ? 'global' : 'project', project ? project.value.trim() : '');
+    });
+  }
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     const query = q.value.trim();
@@ -888,7 +916,10 @@ fn aicx_page_script() -> &'static str {
         throw new Error(message);
       }
       const items = payload.items || [];
-      status.textContent = items.length ? items.length + ' result(s)' : 'No AICX results.';
+      const visibleScope = payload.scope === 'global' ? 'all projects' : (payload.project || scope || 'this project');
+      status.textContent = items.length
+        ? (items.length + ' result(s) · ' + visibleScope)
+        : ('No AICX results · ' + visibleScope);
       for (const item of items) {
         const li = document.createElement('li');
         const label = [item.agent, item.date, item.session_id].filter(Boolean).join(' · ') || 'session';
@@ -920,14 +951,19 @@ pub fn AicxPage() -> impl IntoView {
         <Meta name="description" content="Search the local AICX intent corpus through the installed CLI." />
         <ServerFrame active=ServerSection::Structure status="intent search".to_string()>
             <div class="server-console-shell route-page-shell">
-                {route_header("Intent", "AICX search", "Search runs the installed AICX CLI on this host. The corpus is private: results are served to local peers only, and every hit opens through a server-owned reference route.")}
+                {route_header("Intent", "AICX search", "This page is project-scoped: enter owner/repo before searching. All-projects search is a separate, explicit scope. Missing project is form validation, not service-unavailable.")}
                 <section class="control-panel control-panel-wide" aria-label="AICX search">
                     <form id="aicx-search-form" class="server-console-links">
                         <input id="aicx-search-query" name="q" type="search" required=true maxlength="512" placeholder="Search intent (query)" />
-                        <input id="aicx-search-project" name="project" type="text" maxlength="129" placeholder="owner/repo (optional)" />
+                        <input id="aicx-search-project" name="project" type="text" maxlength="129" placeholder="owner/repo" />
+                        <label class="control-badge">
+                            <input id="aicx-search-global" type="checkbox" />
+                            "All projects"
+                        </label>
                         <button class="server-console-link server-console-link-primary" type="submit">"Search AICX"</button>
                     </form>
-                    <p id="aicx-search-status" class="control-empty">"Enter a query to search the local AICX corpus."</p>
+                    <p id="aicx-search-scope" class="control-empty" data-scope="project">"Scope: this project (owner/repo required)."</p>
+                    <p id="aicx-search-status" class="control-empty">"Enter a query and owner/repo to search the local AICX corpus."</p>
                     <ul id="aicx-search-results" class="control-warning-list"></ul>
                     <script inner_html=aicx_page_script()></script>
                 </section>
@@ -1017,7 +1053,11 @@ fn console_dashboard(dashboard: DashboardData) -> impl IntoView {
                                 <span class="server-console-panel-state">"live projection"</span>
                             </div>
                             <dl class="operator-now-cells">
-                                <a class="operator-summary-cell" href="/runs">
+                                <a
+                                    class="operator-summary-cell"
+                                    href="/runs"
+                                    data-scope="current_control_plane_merge"
+                                >
                                     <dt>"alive"</dt>
                                     <dd>{active_count}</dd>
                                 </a>
@@ -1048,7 +1088,7 @@ fn console_dashboard(dashboard: DashboardData) -> impl IntoView {
                                 </a>
                             </dl>
                             <p class="control-plane-meta">
-                                <span>"workspace data"</span><span>{workspace_status}</span>
+                                <span>"workspace inventory"</span><span>{workspace_status}</span>
                             </p>
                         </aside>
                     </div>
@@ -1106,6 +1146,7 @@ fn workspace_cards(workspaces: Vec<DashboardWorkspace>) -> impl IntoView {
                         <code class="control-run-root">{workspace.root}</code>
                     </div>
                     <div class="control-run-tags">
+                        <span class="control-badge">{workspace.inventory.clone()}</span>
                         <span class="control-badge">{workspace.status}</span>
                         {selection.map(|label| view! { <span class="control-badge">{label}</span> })}
                         <span class="control-badge">{format!("{} live", workspace.active_runs)}</span>
@@ -1228,6 +1269,13 @@ fn workspaces_dashboard(dashboard: DashboardData) -> impl IntoView {
     let history_count = history.len();
     let not_initialized = status == "not_initialized";
     let unavailable = status == "unavailable";
+    let frame_status = if unavailable {
+        "unavailable".to_string()
+    } else if not_initialized {
+        "not initialized".to_string()
+    } else {
+        format!("{current_count} current · {catalog_count} catalog")
+    };
     view! {
         <ServerFrame active=ServerSection::Workspaces status=format!("{live_count} live · {count} in catalog")>
             <div class="server-console-shell route-page-shell">
@@ -1251,7 +1299,13 @@ fn workspaces_dashboard(dashboard: DashboardData) -> impl IntoView {
                             {format!("Workspace data is unavailable: {error}")}
                         </p>
                     })}
-                    {(count == 0 && !not_initialized && !unavailable).then(|| view! {
+                    {(current_count == 0 && !not_initialized && !unavailable).then(|| view! {
+                        <p class="control-empty">
+                            "No current workspaces. The catalog may still retain historical identities."
+                        </p>
+                    })}
+                    <div class="control-panel-head"><h2>"Workspace catalog"</h2><span>{format!("{catalog_count} retained")}</span></div>
+                    {(catalog_count == 0 && !not_initialized && !unavailable).then(|| view! {
                         <p class="control-empty">
                             "The canonical catalog is healthy and contains no workspaces."
                         </p>
@@ -1280,13 +1334,23 @@ fn sessions_dashboard(dashboard: DashboardData) -> impl IntoView {
     let error = dashboard.workspace_error;
     let sessions = dashboard.sessions;
     let count = sessions.len();
+    let live_count = sessions
+        .iter()
+        .filter(|session| session.state == "live")
+        .count();
     let unavailable = source_status == "unavailable";
+    let frame_status = if unavailable {
+        "unavailable".to_string()
+    } else {
+        format!("{live_count} live · {count} recorded")
+    };
     view! {
-        <ServerFrame active=ServerSection::Sessions status=format!("{count} sessions")>
+        <ServerFrame active=ServerSection::Sessions status=frame_status>
             <div class="server-console-shell route-page-shell">
-                {route_header("Workspace", "Sessions", "Logical workspace sessions and their real runtime attachments from canonical session records.")}
-                <section class="control-panel control-panel-wide" aria-label="Canonical sessions" data-source-status=source_status>
-                    <div class="control-panel-head"><h2>"Session attachments"</h2><span>{count}</span></div>
+                {route_header("Workspace", "Sessions", "Live means an independently confirmed current session. Forged or identity-less live receipts are stale or unknown. Recorded sessions stay as history.")}
+                <section class="control-panel control-panel-wide" aria-label="Canonical sessions" data-source-status=source_status.clone() data-live=live_count.to_string() data-recorded=count.to_string()>
+                    <div class="control-panel-head"><h2>"Live attachments"</h2><span>{live_count}</span></div>
+                    <div class="control-panel-head"><h2>"Session attachments"</h2><span>{format!("{count} recorded")}</span></div>
                     <p class="control-empty control-error" hidden={!unavailable}>
                         {format!("Session data is unavailable: {error}")}
                     </p>
@@ -1530,11 +1594,14 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{
-        ActivityPage, ConsolePage, DashboardData, DashboardRun, DashboardSession,
+        ActivityPage, AicxPage, ConsolePage, DashboardData, DashboardRun, DashboardSession,
+        DashboardSessionRun, LifecyclePage, RunsPage, SessionsPage, StructurePage, WorkspacesPage,
+        aicx_page_script, console_dashboard, decode_dashboard_embed, encode_dashboard_embed,
+        ActivityPage, AicxPage, ConsolePage, DashboardData, DashboardRun, DashboardSession,
         DashboardSessionRun, LifecyclePage, RunsPage, SessionsPage, StructurePage, WorkspacesPage,
         aicx_page_script, console_dashboard, decode_dashboard_embed, encode_dashboard_embed,
         load_dashboard_data_from, operator_active_runs, run_cards, runs_dashboard, session_cards,
-        unique_runtime_labels, workspaces_dashboard,
+        sessions_dashboard, unique_runtime_labels, workspaces_dashboard,
     };
     use crate::control::api::{control_routes, state_payload};
     use crate::theme::provide_theme_context;
@@ -1600,6 +1667,34 @@ mod tests {
             serde_json::to_vec_pretty(&payload).expect("snapshot JSON"),
         )
         .expect("write snapshot");
+    }
+
+    fn write_current_run(runs_dir: &Path, run_id: &str, session_id: &str, root: &str, now: &str) {
+        fs::write(
+            runs_dir.join(format!("{run_id}.json")),
+            serde_json::to_vec(&json!({
+                "run_id": run_id,
+                "state": "active",
+                "agent": "grok",
+                "skill": "workflow",
+                "mode": "workflow",
+                "root": root,
+                "operator_session": format!("host-{run_id}"),
+                "latest_report": "",
+                "latest_transcript": "",
+                "last_error": "",
+                "updated_at": now,
+                "started_at": now,
+                "health": "active",
+                "source": "agent-meta",
+                "lock_present": false,
+                "liveness": "pid_alive",
+                "session_id": "",
+                "logical_session_id": session_id
+            }))
+            .expect("current run json"),
+        )
+        .expect("current run file");
     }
 
     fn write_workspace_catalog(home: &Path, schema: &str) {
@@ -1708,6 +1803,253 @@ mod tests {
         fs::remove_dir_all(&root).ok();
         fs::create_dir_all(root.join("contract_version_2")).expect("frame socket root");
         root
+    }
+
+    fn inventory_id(prefix: &str, index: usize) -> String {
+        format!("{prefix}{index:012x}")
+    }
+
+    #[test]
+    fn overview_workspace_count_is_current_inventory_not_retained_catalog() {
+        let home = temp_home();
+        let root = home.join("control_plane/workspaces");
+        let sessions_dir = root.join("sessions");
+        fs::create_dir_all(&sessions_dir).expect("workspace dirs");
+        let mut workspaces = serde_json::Map::new();
+        for index in 0..527 {
+            let workspace_id = inventory_id("0198f84e-0000-7abc-8def-", index);
+            workspaces.insert(
+                workspace_id.clone(),
+                json!({
+                    "schema": "vibecrafted.workspace.v1",
+                    "workspace_id": workspace_id,
+                    "display_label": format!("Catalog {index}"),
+                    "canonical_root": format!("/work/catalog-{index}"),
+                    "status": "active",
+                    "updated_at": "2026-09-14T00:00:00Z"
+                }),
+            );
+        }
+        fs::write(
+            root.join("catalog.json"),
+            serde_json::to_vec(&json!({
+                "schema": "vibecrafted.workspace-catalog.v1",
+                "updated_at": "2026-09-14T00:00:00Z",
+                "selected_workspace_id": inventory_id("0198f84e-0000-7abc-8def-", 0),
+                "workspaces": workspaces
+            }))
+            .expect("catalog json"),
+        )
+        .expect("catalog");
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-14T10:00:00Z")
+            .expect("fixed now")
+            .with_timezone(&Utc);
+        let runs_dir = home.join("control_plane/runs");
+        fs::create_dir_all(&runs_dir).expect("runs dir");
+        for index in 0..4 {
+            let session_id = inventory_id("0198f84e-1111-7abc-8def-", index);
+            fs::write(
+                sessions_dir.join(format!("{session_id}.json")),
+                serde_json::to_vec(&json!({
+                    "schema": "vibecrafted.workspace-session.v1",
+                    "session_id": session_id,
+                    "workspace_id": inventory_id("0198f84e-0000-7abc-8def-", index),
+                    "workspace_instance_id": inventory_id("0198f84e-2222-7abc-8def-", index),
+                    "updated_at": "2026-09-14T00:01:00Z",
+                    "attachments": [{
+                        "runtime": "vc-frame",
+                        "runtime_session_id": format!("frame-{index}"),
+                        "state": "live"
+                    }]
+                }))
+                .expect("confirmed session"),
+            )
+            .expect("confirmed session file");
+            write_current_run(
+                &runs_dir,
+                &format!("work-current-{index}"),
+                &session_id,
+                &format!("/work/catalog-{index}"),
+                &now.to_rfc3339(),
+            );
+        }
+        fs::write(
+            sessions_dir.join(format!(
+                "{}.json",
+                inventory_id("0198f84e-1111-7abc-8def-", 20)
+            )),
+            serde_json::to_vec(&json!({
+                "schema": "vibecrafted.workspace-session.v1",
+                "session_id": inventory_id("0198f84e-1111-7abc-8def-", 20),
+                "workspace_id": inventory_id("0198f84e-0000-7abc-8def-", 20),
+                "workspace_instance_id": inventory_id("0198f84e-2222-7abc-8def-", 20),
+                "updated_at": "2026-09-13T00:00:00Z",
+                "attachments": [{
+                    "runtime": "vc-frame",
+                    "runtime_session_id": "dead-frame",
+                    "state": "dead"
+                }]
+            }))
+            .expect("dead session"),
+        )
+        .expect("dead session file");
+        fs::write(
+            sessions_dir.join(format!(
+                "{}.json",
+                inventory_id("0198f84e-1111-7abc-8def-", 21)
+            )),
+            serde_json::to_vec(&json!({
+                "schema": "vibecrafted.workspace-session.v1",
+                "session_id": inventory_id("0198f84e-1111-7abc-8def-", 21),
+                "workspace_id": inventory_id("0198f84e-0000-7abc-8def-", 21),
+                "workspace_instance_id": inventory_id("0198f84e-2222-7abc-8def-", 21),
+                "updated_at": "2026-09-14T00:02:00Z",
+                "attachments": [{
+                    "runtime": "vc-frame",
+                    "runtime_session_id": "forged-frame",
+                    "state": "live",
+                    "owner_pid": 999_001,
+                    "start_token": "start:forged-not-current",
+                    "worker_identity": {
+                        "pid": 999_001,
+                        "start_token": "start:forged-not-current"
+                    }
+                }]
+            }))
+            .expect("forged session"),
+        )
+        .expect("forged session file");
+        fs::write(
+            sessions_dir.join(format!(
+                "{}.json",
+                inventory_id("0198f84e-1111-7abc-8def-", 22)
+            )),
+            serde_json::to_vec(&json!({
+                "schema": "vibecrafted.workspace-session.v1",
+                "session_id": inventory_id("0198f84e-1111-7abc-8def-", 22),
+                "workspace_id": inventory_id("0198f84e-0000-7abc-8def-", 22),
+                "workspace_instance_id": inventory_id("0198f84e-2222-7abc-8def-", 22),
+                "updated_at": "2026-09-14T00:03:00Z",
+                "attachments": [{
+                    "runtime": "vc-frame",
+                    "runtime_session_id": "missing-identity-frame",
+                    "state": "live"
+                }]
+            }))
+            .expect("missing identity session"),
+        )
+        .expect("missing identity session file");
+
+        let plane = ControlPlane::new(&home);
+        let dashboard = load_dashboard_data_from(&plane, now);
+        assert_eq!(dashboard.workspaces.len(), 527);
+        assert_eq!(
+            dashboard
+                .workspaces
+                .iter()
+                .filter(|workspace| workspace.inventory == "current")
+                .count(),
+            4
+        );
+        assert_eq!(
+            dashboard
+                .workspaces
+                .iter()
+                .filter(|workspace| workspace.inventory == "catalog")
+                .count(),
+            523
+        );
+        assert_eq!(
+            dashboard
+                .sessions
+                .iter()
+                .filter(|session| session.state == "live")
+                .count(),
+            4
+        );
+        assert_eq!(
+            dashboard
+                .sessions
+                .iter()
+                .filter(|session| session.state == "stale")
+                .count(),
+            1
+        );
+        assert_eq!(
+            dashboard
+                .sessions
+                .iter()
+                .filter(|session| session.state == "unknown")
+                .count(),
+            1
+        );
+        let owner = Owner::new();
+        let overview = owner.with(|| {
+            provide_theme_context();
+            console_dashboard(dashboard.clone()).to_html()
+        });
+        assert!(
+            overview.contains("data-scope=\"current_session_run_inventory\""),
+            "{overview}"
+        );
+        assert!(overview.contains(">4</dd>"), "{overview}");
+        assert!(!overview.contains(">527</dd>"), "{overview}");
+        assert!(!overview.contains("aria-label=\"Operator summary\""));
+        let page = owner.with(|| {
+            provide_theme_context();
+            workspaces_dashboard(dashboard.clone()).to_html()
+        });
+        assert!(page.contains("data-current=\"4\""), "{page}");
+        assert!(page.contains("data-catalog=\"527\""), "{page}");
+        assert!(
+            page.contains("523") || page.contains("527 retained"),
+            "{page}"
+        );
+        let sessions_page = owner.with(|| {
+            provide_theme_context();
+            sessions_dashboard(dashboard).to_html()
+        });
+        assert!(sessions_page.contains("data-live=\"4\""), "{sessions_page}");
+        assert!(
+            sessions_page.contains("data-recorded=\"7\""),
+            "{sessions_page}"
+        );
+        fs::remove_dir_all(home).ok();
+    }
+
+    #[test]
+    fn aicx_client_maps_validation_without_service_unavailable_label() {
+        let script = aicx_page_script();
+        assert!(script.contains("payload.kind === 'validation' || response.status === 400"));
+        assert!(script.contains("Enter an owner/repo project"));
+        assert!(script.contains("Project must be an owner/repo slug"));
+        assert!(script.contains("aicx-search-global"));
+        assert!(script.contains("Scope: all projects"));
+        let empty = script.split("if (!scope)").nth(1).expect("empty project");
+        let empty_return = empty.split("return;").next().expect("empty return");
+        assert!(empty_return.contains("Enter an owner/repo project"));
+        assert!(!empty_return.contains("fetch("));
+        assert!(!empty_return.contains("AICX unavailable:"));
+        let validation = script
+            .split("payload.kind === 'validation'")
+            .nth(1)
+            .expect("validation branch");
+        let before_catch = validation.split("catch (error)").next().expect("pre-catch");
+        assert!(before_catch.contains("status.textContent = message"));
+        assert!(!before_catch.contains("AICX unavailable:"));
+        let catch = script.split("catch (error)").nth(1).expect("catch");
+        assert!(catch.contains("AICX unavailable:"));
+        let owner = Owner::new();
+        let html = owner.with(|| {
+            leptos_meta::provide_meta_context();
+            provide_theme_context();
+            AicxPage().to_html()
+        });
+        assert!(html.contains("id=\"aicx-search-project\""), "{html}");
+        assert!(!html.contains("owner/repo (optional)"), "{html}");
+        assert!(html.contains("id=\"aicx-search-global\""), "{html}");
+        assert!(html.contains("data-scope=\"project\""), "{html}");
+        assert!(html.contains("All projects"), "{html}");
     }
 
     #[test]
@@ -1992,6 +2334,13 @@ mod tests {
         assert!(!html.contains("aria-label=\"Operator summary\""));
         assert!(!html.contains("aria-label=\"Retained run history\""));
         assert!(!html.contains("data-total-settled"));
+        assert!(html.contains("data-scope=\"current_control_plane_merge\""));
+        assert!(html.contains("data-scope=\"current_session_run_inventory\""));
+        assert_eq!(board["scope"], "retained_control_plane_snapshots");
+        assert_eq!(board["f"], 1);
+        assert_eq!(board["x"], 2);
+        assert_eq!(board["invalid"], 1);
+        assert_eq!(board["n"], 1);
         assert!(html.contains("aria-label=\"Switch to light theme\""));
         assert!(html.contains("http://127.0.0.1:8033/"));
         assert!(html.contains("Vibecrafted server navigation"));
@@ -2008,10 +2357,6 @@ mod tests {
         assert!(!html.contains("aria-label=\"Action plan\""));
         assert!(!html.contains("aria-label=\"Recent state view\""));
         assert!(!html.contains("aria-label=\"Event tail\""));
-        assert_eq!(board["f"], 1);
-        assert_eq!(board["x"], 2);
-        assert_eq!(board["invalid"], 1);
-        assert_eq!(board["n"], 1);
 
         fs::remove_dir_all(home).ok();
     }
