@@ -17,7 +17,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 
 def _generation_python_candidates() -> list[str]:
@@ -124,20 +124,27 @@ AGENTS = ("agy", "claude", "codex", "cursor", "grok", "junie")
 LAUNCH_MODES = ("init", "resume", "partner", "operator")
 MODE_PROMPTS = {"partner": "/vc-partner", "operator": "/vc-operator"}
 RUNTIME_HELP = {
-    "local-native": (
-        "Direct selected checkout; no isolation; full disk scope per provider permissions.",
-        "Shared checkout, no worktrees — for deliberate control.",
-    ),
-    "local-worktrees": (
-        "Safe recommended local default; one canonical worktree per Agent launch.",
-        "Maximum local concurrency; unattended pipelines require an Operator Agent via --operator auto or claude.",
-    ),
-    "local-vm": (
-        "Coming in H2b3; disabled until selected-workspace container launch and live proof exist.",
-        "",
-    ),
-    "cloud-soon": ("Coming soon; disabled.", ""),
+    "local-native": ("This checkout, shared with you.", ""),
+    "local-worktrees": ("A separate working copy for this Agent.", ""),
+    "local-vm": ("Not available yet.", ""),
+    "cloud-soon": ("Not available yet.", ""),
 }
+_WORKSHOP_TITLES = frozenset({"agent workspaces", "new agent", "voc", "start here"})
+_AGENT_BINARIES = {
+    "agy": "agy",
+    "gemini": "agy",
+    "claude": "claude",
+    "claude-code": "claude",
+    "codex": "codex",
+    "cursor": "cursor",
+    "cursor-agent": "cursor",
+    "grok": "grok",
+    "junie": "junie",
+}
+PRESENCE_SCOPE = "this session"
+PRESENCE_REFRESH_SECONDS = 15.0
+PRESENCE_MAX_REFRESH_SECONDS = 60.0
+PRESENCE_ON_DEMAND_FLOOR_SECONDS = 2.0
 
 
 def launch_argv(
@@ -168,7 +175,8 @@ def launch_argv(
         if not operator_decision.supported:
             raise ValueError(operator_decision.reason)
         # `init` defaults to opening another vc-frame tab.  The workshop's law
-        # is stricter: this exact floating panel becomes the Agent TTY.
+        # is stricter: the destination pane this launcher opens becomes the
+        # Agent TTY.  `--runtime plain` is that pane, not a nested composer.
         command = [
             "vibecrafted",
             "init",
@@ -205,6 +213,28 @@ def launch_argv(
     if root:
         command.extend(["--root", root])
     return command
+
+
+def launch_pane_argv(
+    title: str,
+    workspace: str | os.PathLike[str],
+    command: list[str],
+) -> list[str]:
+    """Open a tiled, durable pane beside the workshop — never a nested float."""
+    return [
+        "vc-frame",
+        "action",
+        "new-pane",
+        "--direction",
+        "right",
+        "--near-current-pane",
+        "--name",
+        title,
+        "--cwd",
+        str(workspace),
+        "--",
+        *command,
+    ]
 
 
 def mode_capabilities(
@@ -275,6 +305,45 @@ def normalized_workspace(raw: str, *, base: Path | None = None) -> Path:
     return candidate
 
 
+def public_reason(reason: str) -> str:
+    """Map internal policy text to a short User-facing sentence."""
+    text = reason.strip()
+    if not text:
+        return ""
+    low = text.casefold()
+    if any(
+        token in low
+        for token in (
+            "canonical",
+            "child-usage",
+            "child-attributable",
+            "admission",
+            "usage side channel",
+            "monotonic usage",
+        )
+    ):
+        if "coming" in low or "h2b" in low:
+            return "Not available yet"
+        return "Not available for this provider"
+    if "executable not found" in low:
+        return "This provider is not installed"
+    if "coming soon" in low or "coming in" in low or "h2b" in low:
+        return "Not available yet"
+    if "resume is supported only" in low:
+        return "Resume works only in this checkout"
+    if "expert-only" in low:
+        return "Needs a parent session"
+    if "no inherited memory" in low:
+        return "Starts without earlier memory"
+    if "git/dispatch manage_worktrees" in low:
+        return "Separate working copies are not available here"
+    if "no canonical vm" in low or "docker/colima" in low:
+        return "Not available yet"
+    if len(text) > 72:
+        return "Not available"
+    return text
+
+
 def _pane_rows(payload: Any) -> list[dict[str, Any]]:
     if isinstance(payload, list):
         return [item for item in payload if isinstance(item, dict)]
@@ -286,28 +355,133 @@ def _pane_rows(payload: Any) -> list[dict[str, Any]]:
     return []
 
 
-def agent_faces_from_payload(payload: Any) -> list[str]:
-    """Project vc-frame's pane JSON into human-facing Agents-tab faces."""
-    faces: list[str] = []
+class AgentFace(NamedTuple):
+    """One discoverable interactive Agent in the declared Frame session."""
+
+    label: str
+    tab: str
+    liveness: str
+
+
+class AgentPresence(NamedTuple):
+    """Pane-state projection. Unknown is never counted live. Status is honest."""
+
+    active: tuple[str, ...]
+    unknown: tuple[str, ...]
+    status: str = "ok"
+    scope: str = PRESENCE_SCOPE
+    faces: tuple[AgentFace, ...] = ()
+
+
+def _pane_liveness(pane: dict[str, Any]) -> str:
+    if pane.get("exit_status") is not None or pane.get("exited") is True:
+        return "inactive"
+    if pane.get("exited") is False:
+        return "active"
+    state = (
+        str(pane.get("state") or pane.get("lifecycle") or pane.get("status") or "")
+        .strip()
+        .casefold()
+    )
+    if state in {"running", "active", "alive", "connected"}:
+        return "active"
+    if state in {"exited", "closed", "dead", "terminated", "failed"}:
+        return "inactive"
+    return "unknown"
+
+
+def _agent_from_command(command: str) -> str:
+    tokens = command.split()
+    joined = " ".join(tokens).casefold()
+    if "vc-agent-workshop" in joined:
+        return ""
+    for agent in AGENTS:
+        if (
+            f"vibecrafted init {agent}" in joined
+            or f"vibecrafted resume {agent}" in joined
+        ):
+            return agent
+    if not tokens:
+        return ""
+    binary = Path(tokens[0]).name.casefold()
+    return _AGENT_BINARIES.get(binary, "")
+
+
+def _agent_face(pane: dict[str, Any]) -> AgentFace | None:
+    if pane.get("is_plugin"):
+        return None
+    title = str(
+        pane.get("pane_title") or pane.get("title") or pane.get("name") or ""
+    ).strip()
+    if title.casefold() in _WORKSHOP_TITLES:
+        return None
+    command = str(pane.get("command") or pane.get("pane_command") or "")
+    tab = str(pane.get("tab_name") or pane.get("tab") or "").strip()
+    label = ""
+    if " · " in title:
+        identity = title.split(" · ", 1)[0].casefold()
+        if identity in AGENTS:
+            label = title
+    if not label:
+        agent = _agent_from_command(command)
+        if not agent:
+            return None
+        label = title or (f"{agent} · {tab}" if tab else agent)
+    liveness = _pane_liveness(pane)
+    if liveness == "inactive":
+        return None
+    if liveness == "unknown" and _agent_from_command(command):
+        # An Agent command in an open pane is session-scope presence. It is
+        # not a provider-health claim; missing `exited` must not hide it.
+        liveness = "active"
+    return AgentFace(label=label, tab=tab, liveness=liveness)
+
+
+def agent_presence_from_payload(payload: Any) -> AgentPresence:
+    """Project live interactive Agents in the current Frame session.
+
+    Sidebar plugin labels are not liveness.  Titles without a provider
+    contract or Agent command are not counted.  Every tab in this session
+    is in scope — not only the Agents tab.
+    """
+    faces: list[AgentFace] = []
+    seen: set[str] = set()
     for pane in _pane_rows(payload):
-        if pane.get("is_plugin"):
+        face = _agent_face(pane)
+        if face is None or face.label in seen:
             continue
-        tab_name = str(pane.get("tab_name") or pane.get("tab") or "")
-        if tab_name and tab_name.casefold() != "agents":
-            continue
-        title = str(
-            pane.get("pane_title") or pane.get("title") or pane.get("name") or ""
-        )
-        command = str(pane.get("command") or pane.get("pane_command") or "")
-        label = title.strip() or Path(command).name.strip()
-        if not label or label.casefold() in {"agent workspaces", "new agent"}:
-            continue
-        if label not in faces:
-            faces.append(label)
-    return faces
+        seen.add(face.label)
+        faces.append(face)
+    active = tuple(face.label for face in faces if face.liveness == "active")
+    unknown = tuple(face.label for face in faces if face.liveness == "unknown")
+    return AgentPresence(
+        active=active,
+        unknown=unknown,
+        status="ok",
+        scope=PRESENCE_SCOPE,
+        faces=tuple(faces),
+    )
 
 
-def current_faces() -> list[str]:
+def agent_faces_from_payload(payload: Any) -> list[str]:
+    """Active-agent labels for the dashboard list."""
+    return list(agent_presence_from_payload(payload).active)
+
+
+def presence_headline(
+    status: str,
+    count: int,
+    *,
+    stale: bool = False,
+    scope: str = PRESENCE_SCOPE,
+) -> str:
+    if status == "unavailable" and count == 0 and not stale:
+        return f"Agents in {scope} — unavailable"
+    marker = ", stale" if stale else ""
+    return f"Agents in {scope} ({count}{marker})"
+
+
+def current_agent_presence() -> AgentPresence:
     try:
         result = subprocess.run(
             [
@@ -325,10 +499,98 @@ def current_faces() -> list[str]:
             timeout=1.5,
         )
         if result.returncode != 0:
-            return []
-        return agent_faces_from_payload(json.loads(result.stdout))
+            return AgentPresence((), (), status="unavailable")
+        return agent_presence_from_payload(json.loads(result.stdout))
     except (FileNotFoundError, json.JSONDecodeError, subprocess.TimeoutExpired):
+        return AgentPresence((), (), status="unavailable")
+
+
+def current_faces() -> list[str]:
+    presence = current_agent_presence()
+    if presence.status != "ok":
         return []
+    return list(presence.active)
+
+
+def session_names_from_listing(text: str) -> list[str]:
+    """Parse `vc-frame list-sessions --no-formatting` into session names."""
+    names: list[str] = []
+    for line in text.splitlines():
+        raw = line.strip()
+        if not raw:
+            continue
+        name = raw.split(" [", 1)[0].strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def list_other_sessions() -> tuple[list[str], str]:
+    """On-demand Frame session names. Never polled from the redraw loop."""
+    try:
+        result = subprocess.run(
+            ["vc-frame", "list-sessions", "--no-formatting"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=1.5,
+        )
+    except FileNotFoundError:
+        return [], "vc-frame is not available in this Runtime Pack"
+    except subprocess.TimeoutExpired:
+        return [], "other sessions — unavailable"
+    if result.returncode != 0:
+        return [], (
+            result.stderr or result.stdout or "other sessions — unavailable"
+        ).strip()
+    names = session_names_from_listing(result.stdout)
+    current = (
+        os.environ.get("ZELLIJ_SESSION_NAME")
+        or os.environ.get("VIBECRAFTED_FRAME_SESSION")
+        or ""
+    ).strip()
+    if current:
+        names = [name for name in names if name != current]
+    return names, ""
+
+
+class PresenceSchedule:
+    """Decide when the dashboard may spawn a pane-state probe.
+
+    Each probe is a short-lived `vc-frame action` CLI client.  Each attach
+    makes the server broadcast Tab/Pane/Session updates to every plugin, so
+    a 2 s poll flickered Plugin Manager, rail and bars.  The 500 ms redraw
+    spawns nothing; probes run on first draw, on User input (2 s floor),
+    and otherwise every 15 s doubling to 60 s while the answer is unchanged.
+    """
+
+    def __init__(
+        self,
+        *,
+        base: float = PRESENCE_REFRESH_SECONDS,
+        ceiling: float = PRESENCE_MAX_REFRESH_SECONDS,
+        floor: float = PRESENCE_ON_DEMAND_FLOOR_SECONDS,
+    ) -> None:
+        self.base = base
+        self.ceiling = ceiling
+        self.floor = floor
+        self.interval = base
+        self.last_at: float | None = None
+        self.requested = False
+
+    def request(self) -> None:
+        self.requested = True
+
+    def due(self, now: float) -> bool:
+        if self.last_at is None:
+            return True
+        elapsed = now - self.last_at
+        return elapsed >= (self.floor if self.requested else self.interval)
+
+    def record(self, now: float, *, changed: bool) -> None:
+        self.last_at = now
+        self.requested = False
+        self.interval = self.base if changed else min(self.ceiling, self.interval * 2)
 
 
 # Curses pair 0 is COLOR_BLACK. Signed palettes put purple-navy `#26233a` in
@@ -376,16 +638,18 @@ def _dim_unavailable_choices(
     col: int,
     choices: tuple[str, ...],
     available: tuple[bool, ...],
+    selected: int,
+    end_col: int,
 ) -> None:
     """Redraw disabled choice tokens with terminal-native dim styling."""
-    for token, enabled in zip(
-        _choice_tokens(choices, selected=-1, available=available),
-        available,
-        strict=True,
-    ):
+    tokens = _choice_tokens(choices, selected=selected, available=available)
+    visible = _clip(" ".join(tokens), end_col - col)
+    offset = 0
+    for token, enabled in zip(tokens, available, strict=True):
+        fragment = visible[offset : offset + len(token)]
         if not enabled:
-            _safe_addstr(window, row, col, token, curses.A_DIM)
-        col += len(token) + 1
+            _safe_addstr(window, row, col + offset, fragment, curses.A_DIM)
+        offset += len(token) + 1
 
 
 def _choice_tokens(
@@ -394,7 +658,7 @@ def _choice_tokens(
     selected: int,
     available: tuple[bool, ...] | None = None,
 ) -> tuple[str, ...]:
-    """Use one canonical bullet and leave available unselected choices plain."""
+    """Advanced rows keep one marker; the provider row uses reverse video."""
     enabled = available or tuple(True for _ in choices)
     return tuple(
         f"• {choice}"
@@ -404,15 +668,21 @@ def _choice_tokens(
     )
 
 
+def _provider_available(agent: str) -> bool:
+    capabilities = runtime_policy_capabilities(agent)
+    return any(bool(capabilities[name]["available"]) for name in RUNTIME_POLICIES)
+
+
 class Workshop:
     def __init__(self, window: curses.window, *, mode: str) -> None:
         self.window = window
         self.mode = mode
+        self.standalone_launcher = mode == "launcher"
         self.home_choice = 0
         self.row = 0
         self.agent = 2  # codex is the least surprising neutral default here
         self.launch_mode = 0
-        self.runtime = 1  # safe recommended local default when the provider supports it
+        self.runtime = 1  # separate working copy when the provider supports it
         self.permissions = 0
         self.continuity = 0
         self.continuity_parent = ""
@@ -422,8 +692,16 @@ class Workshop:
         self.path = str(Path.cwd())
         self.error = ""
         self.mouse_targets: list[tuple[int, int, int, int, str]] = []
-        self.last_faces_at = 0.0
+        self.presence_schedule = PresenceSchedule()
         self.faces: list[str] = []
+        self.unknown_faces: list[str] = []
+        self.face_records: tuple[AgentFace, ...] = ()
+        self.presence_status = "ok"
+        self.presence_stale = False
+        self.advanced = False
+        self.other_sessions: list[str] = []
+        self.other_error = ""
+        self.show_other = False
 
     def configure(self) -> None:
         try:
@@ -451,10 +729,11 @@ class Workshop:
             key = self.window.getch()
             if key == -1:
                 continue
-            if key == curses.KEY_RESIZE:
-                continue
             if key == curses.KEY_MOUSE:
                 self.handle_mouse()
+                continue
+            self.presence_schedule.request()
+            if key == curses.KEY_RESIZE:
                 continue
             if self.mode == "home":
                 self.handle_home_key(key)
@@ -470,238 +749,287 @@ class Workshop:
             self.draw_launcher()
         self.window.refresh()
 
+    def _refresh_presence(self) -> None:
+        now = time.monotonic()
+        if not self.presence_schedule.due(now):
+            return
+        presence = current_agent_presence()
+        if presence.status == "unavailable":
+            if self.faces or self.unknown_faces:
+                self.presence_stale = True
+            else:
+                self.presence_status = "unavailable"
+            self.presence_schedule.record(now, changed=False)
+            return
+        faces = list(presence.active)
+        unknown = list(presence.unknown)
+        changed = self.presence_schedule.last_at is None or (
+            faces,
+            unknown,
+            presence.status,
+        ) != (self.faces, self.unknown_faces, self.presence_status)
+        self.faces = faces
+        self.unknown_faces = unknown
+        self.face_records = presence.faces
+        self.presence_status = "ok"
+        self.presence_stale = False
+        self.presence_schedule.record(now, changed=changed)
+
     def draw_home(self) -> None:
         height, width = self.window.getmaxyx()
-        left = max(2, (width - min(width - 4, 78)) // 2)
-        top = max(1, min(6, (height - 18) // 2))
-        _safe_addstr(self.window, top, left, "AGENT WORKSPACES", curses.A_BOLD)
-        _safe_addstr(
-            self.window,
-            top + 2,
-            left,
-            "One workspace. Many interactive Agents. One shared context.",
+        compact = height < 14 or width < 48
+        left = 1 if compact else max(2, (width - min(width - 4, 78)) // 2)
+        top = 0 if compact else max(1, min(4, (height - 16) // 2))
+        self._refresh_presence()
+        _safe_addstr(self.window, top, left, "Agents", curses.A_BOLD)
+        workspace_name = Path(self.path).name or self.path
+        if not compact:
+            _safe_addstr(
+                self.window,
+                top + 1,
+                left,
+                f"{workspace_name} · {PRESENCE_SCOPE}",
+                curses.A_DIM,
+            )
+        headline = presence_headline(
+            self.presence_status,
+            len(self.faces),
+            stale=self.presence_stale,
+            scope=PRESENCE_SCOPE,
         )
-        _safe_addstr(self.window, top + 4, left, "Workspace", curses.A_DIM)
-        _safe_addstr(self.window, top + 5, left, self.path, curses.A_BOLD)
-
-        buttons = ("New agent", "voc")
-        col = left
-        for index, label in enumerate(buttons):
-            text = f"[ {label} ]"
-            attr = curses.A_REVERSE if index == self.home_choice else curses.A_BOLD
-            _safe_addstr(self.window, top + 7, col, text, attr)
-            self.mouse_targets.append((top + 7, col, col + len(text), index, "home"))
-            col += len(text) + 2
-
-        now = time.monotonic()
-        if now - self.last_faces_at > 2:
-            self.faces = current_faces()
-            self.last_faces_at = now
-        _safe_addstr(
-            self.window,
-            top + 10,
-            left,
-            f"Agents here ({len(self.faces)})",
-            curses.A_DIM,
-        )
-        if self.faces:
-            for offset, face in enumerate(self.faces[: max(1, height - top - 14)]):
-                _safe_addstr(self.window, top + 11 + offset, left + 2, f"• {face}")
+        headline_row = top + (1 if compact else 3)
+        _safe_addstr(self.window, headline_row, left, headline, curses.A_BOLD)
+        list_row = headline_row + 1
+        if self.presence_status == "unavailable" and not self.faces:
+            _safe_addstr(
+                self.window,
+                list_row,
+                left,
+                "Pane list is unavailable — not zero.",
+                curses.A_DIM,
+            )
+            list_row += 1
+        elif self.faces:
+            budget = max(1, height - list_row - (4 if compact else 6))
+            for offset, face in enumerate(self.faces[:budget]):
+                tab = ""
+                if offset < len(self.face_records):
+                    tab = self.face_records[offset].tab
+                suffix = f"  [{tab}]" if tab and tab.casefold() != "agents" else ""
+                line = f"  {face}{suffix}"
+                _safe_addstr(self.window, list_row + offset, left, line)
+                self.mouse_targets.append(
+                    (
+                        list_row + offset,
+                        left,
+                        left + min(len(line), max(1, width - left)),
+                        offset,
+                        "face",
+                    )
+                )
+            list_row += min(len(self.faces), budget)
         else:
             _safe_addstr(
                 self.window,
-                top + 11,
-                left + 2,
-                "No Agent faces yet — New agent opens the first interactive TTY.",
+                list_row,
+                left,
+                "No live Agents in this session yet.",
                 curses.A_DIM,
             )
-        _safe_addstr(
-            self.window,
-            height - 2,
-            left,
-            "←/→ choose · Enter open · n New agent · v voc · PANE+arrows switch faces",
-            curses.A_DIM,
+            list_row += 1
+        if self.unknown_faces and not compact:
+            _safe_addstr(
+                self.window,
+                list_row,
+                left,
+                f"Unverified ({len(self.unknown_faces)}) — titles only, not counted live",
+                curses.A_DIM,
+            )
+            list_row += 1
+        buttons = ("New agent", "voc")
+        col = left
+        button_row = min(height - 3, list_row + (0 if compact else 1))
+        for index, label in enumerate(buttons):
+            text = f"[ {label} ]"
+            attr = curses.A_REVERSE if index == self.home_choice else curses.A_BOLD
+            _safe_addstr(self.window, button_row, col, text, attr)
+            self.mouse_targets.append((button_row, col, col + len(text), index, "home"))
+            col += len(text) + 2
+        if self.show_other:
+            other_row = min(height - 2, button_row + 1)
+            if self.other_error:
+                _safe_addstr(
+                    self.window, other_row, left, self.other_error, curses.A_DIM
+                )
+            elif self.other_sessions:
+                _safe_addstr(
+                    self.window,
+                    other_row,
+                    left,
+                    "Other sessions (Enter opens): "
+                    + ", ".join(self.other_sessions[:4]),
+                    curses.A_DIM,
+                )
+            else:
+                _safe_addstr(
+                    self.window,
+                    other_row,
+                    left,
+                    "No other Frame sessions listed.",
+                    curses.A_DIM,
+                )
+        hint = (
+            "n New  v voc  o other sessions"
+            if compact
+            else "n New agent · v voc · o other sessions · click a row to open its tab"
         )
+        _safe_addstr(self.window, height - 2, left, hint, curses.A_DIM)
         if self.error:
             _safe_addstr(self.window, height - 1, left, self.error, curses.A_BOLD)
 
+    def _draw_providers(self, row: int, col: int, width: int) -> None:
+        x = col
+        for index, name in enumerate(AGENTS):
+            token = f" {name} "
+            if x + len(token) >= col + width:
+                row += 1
+                x = col
+            available = _provider_available(name)
+            if index == self.agent and available:
+                attr = curses.A_REVERSE | curses.A_BOLD
+            elif available:
+                attr = curses.A_BOLD
+            else:
+                attr = curses.A_DIM
+            _safe_addstr(self.window, row, x, token, attr)
+            self.mouse_targets.append((row, x, x + len(token), index, "provider"))
+            x += len(token) + 1
+
     def draw_launcher(self) -> None:
         height, width = self.window.getmaxyx()
-        card_width = min(max(58, width - 4), 92)
-        left = max(1, (width - card_width) // 2)
-        top = max(1, (height - 15) // 2)
-        inner = max(20, card_width - 4)
+        compact = height < 16 or width < 52
+        left = 1 if compact else max(1, (width - min(width - 2, 84)) // 2)
+        top = 0 if compact else max(1, (height - (18 if self.advanced else 10)) // 2)
+        inner = max(12, width - left - 2)
+        _safe_addstr(self.window, top, left, "New agent", curses.A_BOLD)
         _safe_addstr(
             self.window,
-            top,
+            top + 1,
             left,
-            "┌ ❯ New agent " + "─" * max(1, card_width - 29) + " [Cancel] ┐",
+            "Choose a provider, then Launch.",
+            curses.A_DIM,
         )
-        agent_line = "  agent    " + " ".join(
-            _choice_tokens(AGENTS, selected=self.agent)
+        self._draw_providers(top + 3, left, inner)
+        path_row = top + 5
+        path_attr = curses.A_REVERSE if self.row == 1 else 0
+        _safe_addstr(
+            self.window,
+            path_row,
+            left,
+            _clip(f"Project  {self.path}", inner),
+            path_attr,
         )
-        provider = AGENTS[self.agent]
-        capabilities = runtime_policy_capabilities(provider)
-        runtime_available = tuple(
-            bool(capabilities[name]["available"]) for name in RUNTIME_POLICIES
-        )
-        runtime_line = "  runtime  " + " ".join(
-            _choice_tokens(
-                RUNTIME_POLICIES,
-                selected=self.runtime,
-                available=runtime_available,
+        cursor = path_row + 2
+        if self.advanced and not compact:
+            provider = AGENTS[self.agent]
+            capabilities = runtime_policy_capabilities(provider)
+            runtime_available = tuple(
+                bool(capabilities[name]["available"]) for name in RUNTIME_POLICIES
             )
-        )
-        permission_available = tuple(
-            resolve_provider_policy(
-                provider, RUNTIME_POLICIES[self.runtime], name, "interactive"
-            ).supported
-            for name in PERMISSION_POLICIES
-        )
-        permission_line = "  permits  " + " ".join(
-            _choice_tokens(
-                PERMISSION_POLICIES,
-                selected=self.permissions,
-                available=permission_available,
+            permission_available = tuple(
+                resolve_provider_policy(
+                    provider, RUNTIME_POLICIES[self.runtime], name, "interactive"
+                ).supported
+                for name in PERMISSION_POLICIES
             )
-        )
-        mode_caps = mode_capabilities(
-            provider,
-            RUNTIME_POLICIES[self.runtime],
-            PERMISSION_POLICIES[self.permissions],
-        )
-        mode_available = tuple(
-            bool(mode_caps[name]["available"]) for name in LAUNCH_MODES
-        )
-        mode_line = "  mode     " + " ".join(
-            _choice_tokens(
-                LAUNCH_MODES,
-                selected=self.launch_mode,
-                available=mode_available,
+            mode_caps = mode_capabilities(
+                provider,
+                RUNTIME_POLICIES[self.runtime],
+                PERMISSION_POLICIES[self.permissions],
             )
-        )
-        continuity_caps = continuity_policy_capabilities(
-            provider,
-            root=self.path,
-            explicit_parent=self.continuity_parent,
-        )
-        continuity_available = tuple(
-            bool(continuity_caps[name]["available"]) for name in CONTINUITY_MODES
-        )
-        continuity_line = "  memory   " + " ".join(
-            _choice_tokens(
-                CONTINUITY_MODES,
-                selected=self.continuity,
-                available=continuity_available,
+            mode_available = tuple(
+                bool(mode_caps[name]["available"]) for name in LAUNCH_MODES
             )
-        )
-        rows = (
-            agent_line,
-            mode_line,
-            runtime_line,
-            permission_line,
-            continuity_line,
-            f"  parent   {self.continuity_parent or '(none)'}",
-            f"  path     {self.path}",
-        )
-        for index, line in enumerate(rows):
-            attr = curses.A_REVERSE if index == self.row else 0
+            continuity_caps = continuity_policy_capabilities(
+                provider,
+                root=self.path,
+                explicit_parent=self.continuity_parent,
+            )
+            continuity_available = tuple(
+                bool(continuity_caps[name]["available"]) for name in CONTINUITY_MODES
+            )
+            advanced_rows = (
+                (
+                    "Mode      ",
+                    LAUNCH_MODES,
+                    self.launch_mode,
+                    mode_available,
+                ),
+                (
+                    "Runtime   ",
+                    RUNTIME_POLICIES,
+                    self.runtime,
+                    runtime_available,
+                ),
+                (
+                    "Permits   ",
+                    PERMISSION_POLICIES,
+                    self.permissions,
+                    permission_available,
+                ),
+                (
+                    "Memory    ",
+                    CONTINUITY_MODES,
+                    self.continuity,
+                    continuity_available,
+                ),
+            )
+            for offset, (label, choices, selected, available) in enumerate(
+                advanced_rows
+            ):
+                line = label + " ".join(
+                    _choice_tokens(choices, selected=selected, available=available)
+                )
+                attr = curses.A_REVERSE if self.row == offset + 2 else 0
+                _safe_addstr(
+                    self.window, cursor + offset, left, _clip(line, inner), attr
+                )
+                _dim_unavailable_choices(
+                    self.window,
+                    cursor + offset,
+                    left + len(label),
+                    choices,
+                    available,
+                    selected,
+                    left + inner,
+                )
             _safe_addstr(
                 self.window,
-                top + index + 1,
+                cursor + 4,
                 left,
-                "│ "
-                + _clip(line, inner)
-                + " " * max(0, inner - len(_clip(line, inner)))
-                + " │",
-                attr,
+                _clip(f"Parent    {self.continuity_parent or '(none)'}", inner),
+                curses.A_REVERSE if self.row == 6 else 0,
             )
-        _dim_unavailable_choices(
-            self.window,
-            top + 2,
-            left + 2 + len("  mode     "),
-            LAUNCH_MODES,
-            mode_available,
+            help_text = public_reason(RUNTIME_HELP[RUNTIME_POLICIES[self.runtime]][0])
+            if not help_text:
+                help_text = RUNTIME_HELP[RUNTIME_POLICIES[self.runtime]][0]
+            _safe_addstr(
+                self.window, cursor + 5, left, _clip(help_text, inner), curses.A_DIM
+            )
+            cursor += 7
+        launch_label = "[ Launch ]"
+        launch_attr = curses.A_REVERSE | curses.A_BOLD
+        _safe_addstr(self.window, cursor, left, launch_label, launch_attr)
+        self.mouse_targets.append((cursor, left, left + len(launch_label), 0, "launch"))
+        hint = (
+            "Enter launch  Esc back"
+            if compact
+            else "←/→ provider · type to edit project · a advanced · Enter launch · Esc back"
         )
-        _dim_unavailable_choices(
-            self.window,
-            top + 3,
-            left + 2 + len("  runtime  "),
-            RUNTIME_POLICIES,
-            runtime_available,
-        )
-        _dim_unavailable_choices(
-            self.window,
-            top + 5,
-            left + 2 + len("  memory   "),
-            CONTINUITY_MODES,
-            continuity_available,
-        )
-        _dim_unavailable_choices(
-            self.window,
-            top + 4,
-            left + 2 + len("  permits  "),
-            PERMISSION_POLICIES,
-            permission_available,
-        )
-        runtime_help = RUNTIME_HELP[RUNTIME_POLICIES[self.runtime]]
-        _safe_addstr(
-            self.window,
-            top + 8,
-            left,
-            ("│ " + _clip(runtime_help[0], inner)).ljust(card_width - 1) + "│",
-            curses.A_DIM,
-        )
-        _safe_addstr(
-            self.window,
-            top + 9,
-            left,
-            ("│ " + _clip(runtime_help[1], inner)).ljust(card_width - 1) + "│",
-            curses.A_DIM,
-        )
-        _safe_addstr(
-            self.window,
-            top + 10,
-            left,
-            "│ Enter = interactive TTY on this Agents tab".ljust(card_width - 1) + "│",
-            curses.A_DIM,
-        )
-        _safe_addstr(
-            self.window,
-            top + 11,
-            left,
-            "└─ ↑/↓ row · ←/→ choose parent · type/edit path · Enter launch · Esc "
-            + "─" * max(0, card_width - 67)
-            + "┘",
-        )
-        unavailable = [
-            f"{name}: {capabilities[name]['reason']}"
-            for name in RUNTIME_POLICIES
-            if not capabilities[name]["available"]
-        ]
-        _safe_addstr(
-            self.window,
-            top + 12,
-            left,
-            "Unavailable — "
-            + " · ".join(
-                unavailable
-                + [
-                    f"{name}: {mode_caps[name]['reason']}"
-                    for name in LAUNCH_MODES
-                    if not mode_caps[name]["available"]
-                ]
-                + [
-                    f"{name}: {continuity_caps[name]['reason']}"
-                    for name in CONTINUITY_MODES
-                    if not continuity_caps[name]["available"]
-                ]
-            ),
-            curses.A_DIM,
-        )
+        _safe_addstr(self.window, height - 2, left, hint, curses.A_DIM)
         if self.error:
             _safe_addstr(
-                self.window, min(height - 1, top + 13), left, self.error, curses.A_BOLD
+                self.window, height - 1, left, public_reason(self.error) or self.error
             )
 
     def handle_home_key(self, key: int) -> None:
@@ -713,46 +1041,54 @@ class Workshop:
             self.open_launcher()
         elif key in (ord("v"), ord("V")):
             self.open_voc()
+        elif key in (ord("o"), ord("O")):
+            self._toggle_other_sessions()
         elif key in (10, 13, curses.KEY_ENTER):
-            (self.open_launcher, self.open_voc)[self.home_choice]()
+            if self.show_other and self.other_sessions:
+                self._attach_session(self.other_sessions[0])
+            else:
+                (self.open_launcher, self.open_voc)[self.home_choice]()
 
     def handle_launcher_key(self, key: int) -> None:
         self.error = ""
         if key == 27:
-            raise SystemExit(0)
+            if self.standalone_launcher:
+                raise SystemExit(0)
+            self.mode = "home"
+            return
+        if key in (ord("a"), ord("A")) and self.row == 0:
+            self.advanced = not self.advanced
+            return
+        rows = 7 if self.advanced else 2
         if key == curses.KEY_UP:
-            self.row = (self.row - 1) % 7
+            self.row = (self.row - 1) % rows
             return
         if key in (curses.KEY_DOWN, ord("\t")):
-            self.row = (self.row + 1) % 7
+            self.row = (self.row + 1) % rows
             return
         if key in (curses.KEY_LEFT, curses.KEY_RIGHT, ord(" ")):
             delta = -1 if key == curses.KEY_LEFT else 1
             if self.row == 0:
-                self.agent = (self.agent + delta) % len(AGENTS)
-                self._normalize_runtime_choice()
-                self._normalize_permission_choice()
-                self._normalize_mode_choice()
-                self._normalize_continuity_choice()
-                self.parent_sessions = []
-                self.parent_index = -1
-            elif self.row == 1:
+                self._cycle_agent(delta)
+            elif self.advanced and self.row == 2:
                 self._cycle_mode(delta)
-            elif self.row == 2:
+            elif self.advanced and self.row == 3:
                 self._cycle_runtime(delta)
-            elif self.row == 3:
+            elif self.advanced and self.row == 4:
                 self._cycle_permissions(delta)
-            elif self.row == 4:
+            elif self.advanced and self.row == 5:
                 self._cycle_continuity(delta)
-            elif self.row == 5:
+            elif self.advanced and self.row == 6:
                 self._cycle_parent(delta)
             return
         if key in (10, 13, curses.KEY_ENTER):
             self.launch()
             return
-        if self.row in (5, 6):
+        editing_parent = self.advanced and self.row == 6
+        editing_path = self.row == 1
+        if editing_path or editing_parent:
             if key in (curses.KEY_BACKSPACE, 127, 8):
-                if self.row == 5:
+                if editing_parent:
                     self.continuity_parent = self.continuity_parent[:-1]
                     self.parent_index = -1
                 else:
@@ -760,13 +1096,26 @@ class Workshop:
                     self.parent_sessions = []
                     self.parent_index = -1
             elif 32 <= key <= 126:
-                if self.row == 5:
+                if editing_parent:
                     self.continuity_parent += chr(key)
                     self.parent_index = -1
                 else:
                     self.path += chr(key)
                     self.parent_sessions = []
                     self.parent_index = -1
+
+    def _cycle_agent(self, delta: int) -> None:
+        for _ in AGENTS:
+            self.agent = (self.agent + delta) % len(AGENTS)
+            if _provider_available(AGENTS[self.agent]):
+                self._normalize_runtime_choice()
+                self._normalize_permission_choice()
+                self._normalize_mode_choice()
+                self._normalize_continuity_choice()
+                self.parent_sessions = []
+                self.parent_index = -1
+                return
+        self.error = "No provider is available"
 
     def _cycle_mode(self, delta: int) -> None:
         capabilities = mode_capabilities(
@@ -778,7 +1127,7 @@ class Workshop:
             self.launch_mode = (self.launch_mode + delta) % len(LAUNCH_MODES)
             if capabilities[LAUNCH_MODES[self.launch_mode]]["available"]:
                 return
-        self.error = "No interactive mode is available for this provider/runtime"
+        self.error = "No start mode is available for this provider"
 
     def _refresh_parent_sessions(self) -> None:
         self.parent_sessions, self.parent_error = parent_session_choices(
@@ -821,7 +1170,7 @@ class Workshop:
             ).supported:
                 self._normalize_mode_choice()
                 return
-        self.error = "No permission policy is available for this provider/runtime"
+        self.error = "No permission policy is available for this provider"
 
     def _normalize_runtime_choice(self) -> None:
         capabilities = runtime_policy_capabilities(AGENTS[self.agent])
@@ -867,7 +1216,7 @@ class Workshop:
             self.continuity = (self.continuity + delta) % len(CONTINUITY_MODES)
             if capabilities[CONTINUITY_MODES[self.continuity]]["available"]:
                 return
-        self.error = "No continuity policy is currently materializable"
+        self.error = "No memory option is available"
 
     def _normalize_continuity_choice(self) -> None:
         capabilities = continuity_policy_capabilities(
@@ -885,43 +1234,36 @@ class Workshop:
             return
         if not state:
             return
+        if state & ~curses.REPORT_MOUSE_POSITION:
+            self.presence_schedule.request()
+        else:
+            return
         for row, start, end, index, kind in self.mouse_targets:
-            if kind == "home" and y == row and start <= x < end:
+            if y != row or not (start <= x < end):
+                continue
+            if kind == "home":
                 self.home_choice = index
                 (self.open_launcher, self.open_voc)[index]()
                 return
+            if kind == "face":
+                self._focus_face(index)
+                return
+            if kind == "provider":
+                self.agent = index
+                self._normalize_runtime_choice()
+                self._normalize_permission_choice()
+                self._normalize_mode_choice()
+                return
+            if kind == "launch":
+                self.launch()
+                return
 
     def open_launcher(self) -> None:
-        script = str(Path(__file__).resolve())
-        command = [
-            "vc-frame",
-            "action",
-            "new-pane",
-            "--floating",
-            "--name",
-            "New agent",
-            "--width",
-            "72%",
-            "--height",
-            "32%",
-            "--cwd",
-            self.path,
-            "--",
-            sys.executable,
-            script,
-            "launcher",
-        ]
-        try:
-            result = subprocess.run(
-                command, check=False, capture_output=True, text=True
-            )
-        except FileNotFoundError:
-            self.error = "vc-frame is not available in this Runtime Pack"
-            return
-        if result.returncode != 0:
-            self.error = (
-                result.stderr or result.stdout or "cannot open launcher"
-            ).strip()
+        """Inline compose view in this pane. Never spawn a nested floating form."""
+        self.mode = "launcher"
+        self.row = 0
+        self.advanced = False
+        self.error = ""
 
     def open_voc(self) -> None:
         try:
@@ -937,6 +1279,50 @@ class Workshop:
         if result.returncode != 0:
             self.error = (
                 result.stderr or result.stdout or "voc tab is unavailable"
+            ).strip()
+
+    def _focus_face(self, index: int) -> None:
+        if index < 0 or index >= len(self.face_records):
+            return
+        tab = self.face_records[index].tab
+        if not tab:
+            self.error = "That Agent has no tab name to open"
+            return
+        try:
+            result = subprocess.run(
+                ["vc-frame", "action", "go-to-tab-name", tab],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError:
+            self.error = "vc-frame is not available in this Runtime Pack"
+            return
+        if result.returncode != 0:
+            self.error = (
+                result.stderr or result.stdout or f"cannot open tab {tab}"
+            ).strip()
+
+    def _toggle_other_sessions(self) -> None:
+        self.show_other = not self.show_other
+        if not self.show_other:
+            return
+        self.other_sessions, self.other_error = list_other_sessions()
+
+    def _attach_session(self, name: str) -> None:
+        try:
+            result = subprocess.run(
+                ["vc-frame", "attach", name],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError:
+            self.error = "vc-frame is not available in this Runtime Pack"
+            return
+        if result.returncode != 0:
+            self.error = (
+                result.stderr or result.stdout or f"cannot open session {name}"
             ).strip()
 
     def launch(self) -> None:
@@ -964,7 +1350,7 @@ class Workshop:
                 workspace=workspace,
             )
         except ValueError as exc:
-            self.error = str(exc)
+            self.error = public_reason(str(exc)) or str(exc)
             return
         executable = shutil.which(argv[0])
         if executable is None:
@@ -974,15 +1360,20 @@ class Workshop:
             f"{AGENTS[self.agent]} · "
             f"{LAUNCH_MODES[self.launch_mode]} · {workspace.name}"
         )
-        subprocess.run(
-            ["vc-frame", "action", "rename-pane", title],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        curses.endwin()
-        os.chdir(workspace)
-        os.execvpe(executable, argv, os.environ.copy())
+        pane = launch_pane_argv(title, workspace, argv)
+        try:
+            result = subprocess.run(pane, check=False, capture_output=True, text=True)
+        except FileNotFoundError:
+            self.error = "vc-frame is not available in this Runtime Pack"
+            return
+        if result.returncode != 0:
+            self.error = (
+                result.stderr or result.stdout or "cannot open a pane for that Agent"
+            ).strip()
+            return
+        self.mode = "home"
+        self.presence_schedule.last_at = None
+        self.presence_schedule.request()
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

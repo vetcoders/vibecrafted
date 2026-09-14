@@ -202,7 +202,7 @@ def test_parent_picker_uses_canonical_session_catalog(tmp_path: Path) -> None:
     assert picker.continuity_parent == "older-session"
 
 
-def test_successful_launch_renames_and_replaces_the_form(
+def test_successful_launch_opens_tiled_pane_and_keeps_workshop(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     workshop = _load()
@@ -234,39 +234,37 @@ def test_successful_launch_renames_and_replaces_the_form(
         workshop.subprocess,
         "run",
         lambda command, **_kwargs: (
-            calls.append(("rename", command))
-            or SimpleNamespace(returncode=0, stdout="", stderr="")
+            calls.append(command) or SimpleNamespace(returncode=0, stdout="", stderr="")
         ),
     )
-    monkeypatch.setattr(workshop.curses, "endwin", lambda: calls.append("endwin"))
-    monkeypatch.setattr(workshop.os, "chdir", lambda path: calls.append(("cwd", path)))
     monkeypatch.setattr(
         workshop.os,
         "execvpe",
-        lambda executable, argv, env: calls.append(("exec", executable, argv, env)),
+        lambda *_args, **_kwargs: calls.append("exec"),
     )
 
     launched.launch()
 
-    assert calls[0] == (
-        "rename",
-        [
-            "vc-frame",
-            "action",
-            "rename-pane",
-            f"codex · partner · {tmp_path.name}",
-        ],
-    )
-    assert calls[1:3] == ["endwin", ("cwd", tmp_path)]
-    exec_call = calls[3]
-    assert isinstance(exec_call, tuple)
-    assert exec_call[0:2] == ("exec", "/bin/vibecrafted")
-    assert exec_call[2][-4:] == [
-        "--root",
-        str(tmp_path),
-        "--prompt",
-        "/vc-partner",
+    assert launched.mode == "home"
+    assert "exec" not in calls
+    pane = calls[0]
+    assert isinstance(pane, list)
+    assert pane[:6] == [
+        "vc-frame",
+        "action",
+        "new-pane",
+        "--direction",
+        "right",
+        "--near-current-pane",
     ]
+    assert "--floating" not in pane
+    assert "--width" not in pane
+    assert "--height" not in pane
+    title = f"codex · partner · {tmp_path.name}"
+    assert pane[pane.index("--name") + 1] == title
+    command = pane[pane.index("--") + 1 :]
+    assert command[:3] == ["vibecrafted", "init", "codex"]
+    assert command[-4:] == ["--root", str(tmp_path), "--prompt", "/vc-partner"]
 
 
 def test_launcher_projects_explicit_continuity_selection() -> None:
@@ -316,23 +314,21 @@ def test_launcher_refuses_unsupported_policy_instead_of_approximating() -> None:
         workshop.launch_argv("claude", "resume", "local-worktrees", "auto")
 
 
-def test_runtime_help_preserves_product_truth_and_recommended_default() -> None:
+def test_runtime_help_is_user_facing_without_policy_jargon() -> None:
     workshop = _load()
     help_text = " ".join(
         line for detail in workshop.RUNTIME_HELP.values() for line in detail
     )
 
-    assert "no isolation" in help_text
-    assert "full disk scope per provider permissions" in help_text
-    assert "Shared checkout, no worktrees" in help_text
-    assert "Safe recommended local default" in help_text
-    assert "one canonical worktree per Agent launch" in help_text
-    assert "Maximum local concurrency" in help_text
-    assert "unattended pipelines require an Operator Agent" in help_text
-    assert "--operator auto or claude" in help_text
-    assert "Coming in H2b3" in help_text
-    assert "selected-workspace container launch and live proof" in help_text
-    assert "Coming soon; disabled" in help_text
+    assert "This checkout, shared with you." in help_text
+    assert "A separate working copy for this Agent." in help_text
+    assert "Not available yet." in help_text
+    assert "canonical worktree" not in help_text
+    assert "admission" not in help_text
+    assert "child-usage" not in help_text
+    assert "Operator Agent" not in help_text
+    assert "H2b3" not in help_text
+    assert "--operator" not in help_text
 
 
 def test_workspace_path_is_full_resolved_and_must_exist(tmp_path: Path) -> None:
@@ -354,10 +350,22 @@ def test_dashboard_projects_only_human_agent_faces_from_agents_tab() -> None:
             "is_plugin": True,
         },
         {"tab_name": "Agents", "pane_title": "Agent Workspaces"},
-        {"tab_name": "Agents", "pane_title": "codex · resume · vibecrafted"},
-        {"tab_name": "Agents", "pane_title": "claude · init · vibecrafted"},
-        {"tab_name": "Shell", "pane_title": "Shell"},
-        {"tab_name": "Agents", "pane_title": "codex · resume · vibecrafted"},
+        {
+            "tab_name": "Agents",
+            "pane_title": "codex · resume · vibecrafted",
+            "exited": False,
+        },
+        {
+            "tab_name": "Agents",
+            "pane_title": "claude · init · vibecrafted",
+            "exited": False,
+        },
+        {"tab_name": "Shell", "pane_title": "Shell", "exited": False},
+        {
+            "tab_name": "Agents",
+            "pane_title": "codex · resume · vibecrafted",
+            "exited": False,
+        },
     ]
 
     assert workshop.agent_faces_from_payload(payload) == [
@@ -510,3 +518,396 @@ def test_workshop_reexecs_uv_tools_python_when_env_unset(tmp_path: Path) -> None
     recorded = log.read_text(encoding="utf-8")
     assert str(stub) in recorded
     assert "home" in recorded
+
+
+def test_discovery_includes_live_agents_across_tabs_and_skips_labels() -> None:
+    workshop = _load()
+    payload = [
+        {
+            "tab_name": "Claude",
+            "title": "Claude",
+            "is_plugin": True,
+            "exited": False,
+        },
+        {
+            "tab_name": "Claude",
+            "pane_title": "claude · partner · vibecrafted",
+            "exited": False,
+        },
+        {
+            "tab_name": "Agy",
+            "pane_title": "shell",
+            "command": "/usr/bin/zsh",
+            "exited": False,
+        },
+        {
+            "tab_name": "Codex",
+            "pane_title": "",
+            "command": "vibecrafted init grok --runtime plain --root /tmp/p",
+            "exited": False,
+        },
+        {
+            "tab_name": "Agents",
+            "pane_title": "New agent",
+            "exited": False,
+        },
+        {
+            "tab_name": "Shell",
+            "pane_title": "dead-codex · init · vibecrafted",
+            "exited": True,
+            "exit_status": 1,
+        },
+    ]
+
+    presence = workshop.agent_presence_from_payload(payload)
+    assert presence.scope == "this session"
+    assert presence.status == "ok"
+    assert list(presence.active) == [
+        "claude · partner · vibecrafted",
+        "grok · Codex",
+    ]
+    assert workshop.agent_faces_from_payload(payload) == list(presence.active)
+
+    untitled = workshop.agent_presence_from_payload(
+        [
+            {
+                "tab_name": "Grok",
+                "command": "vibecrafted resume grok --root /tmp/p",
+            }
+        ]
+    )
+    assert untitled.status == "ok"
+    assert list(untitled.active) == ["grok · Grok"]
+
+    untitled = workshop.agent_presence_from_payload(
+        [
+            {
+                "tab_name": "Grok",
+                "command": "vibecrafted resume grok --root /tmp/p",
+            }
+        ]
+    )
+    assert untitled.status == "ok"
+    assert list(untitled.active) == ["grok · Grok"]
+
+
+def test_discovery_zero_unavailable_and_stale_headlines() -> None:
+    workshop = _load()
+    assert workshop.presence_headline("ok", 0) == "Agents in this session (0)"
+    assert (
+        workshop.presence_headline("unavailable", 0)
+        == "Agents in this session — unavailable"
+    )
+    assert (
+        workshop.presence_headline("ok", 3, stale=True)
+        == "Agents in this session (3, stale)"
+    )
+    empty = workshop.agent_presence_from_payload([])
+    assert empty.status == "ok"
+    assert empty.active == ()
+
+
+def test_current_presence_unavailable_is_not_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workshop = _load()
+    monkeypatch.setattr(
+        workshop.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=1, stdout="", stderr="no session"
+        ),
+    )
+    presence = workshop.current_agent_presence()
+    assert presence.status == "unavailable"
+    assert presence.active == ()
+    assert workshop.current_faces() == []
+
+
+def test_open_launcher_is_inline_not_floating() -> None:
+    workshop = _load()
+    dashboard = workshop.Workshop(SimpleNamespace(), mode="home")
+    dashboard.open_launcher()
+    assert dashboard.mode == "launcher"
+    assert dashboard.advanced is False
+
+
+def test_launch_pane_argv_is_tiled_and_usable(tmp_path: Path) -> None:
+    workshop = _load()
+    pane = workshop.launch_pane_argv(
+        "codex · init · demo",
+        tmp_path,
+        ["vibecrafted", "init", "codex", "--runtime", "plain"],
+    )
+    assert "--floating" not in pane
+    assert pane[pane.index("--direction") + 1] == "right"
+    assert "--near-current-pane" in pane
+    assert pane[pane.index("--cwd") + 1] == str(tmp_path)
+    assert pane[pane.index("--") + 1 :] == [
+        "vibecrafted",
+        "init",
+        "codex",
+        "--runtime",
+        "plain",
+    ]
+
+
+def test_public_reason_strips_policy_jargon() -> None:
+    workshop = _load()
+    assert (
+        workshop.public_reason(
+            "codex exposes no verified live child-attributable monotonic usage side channel"
+        )
+        == "Not available for this provider"
+    )
+    assert (
+        workshop.public_reason(
+            "Safe recommended local default; one canonical worktree per Agent launch."
+        )
+        == "Not available for this provider"
+    )
+    assert workshop.public_reason("coming soon") == "Not available yet"
+    assert workshop.public_reason("codex executable not found") == (
+        "This provider is not installed"
+    )
+
+
+def test_small_home_and_launcher_render_without_nested_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workshop = _load()
+    writes: list[str] = []
+
+    class FakeWindow:
+        def __init__(self, size: tuple[int, int]) -> None:
+            self.size = size
+
+        def getmaxyx(self) -> tuple[int, int]:
+            return self.size
+
+        def addstr(self, _row: int, _col: int, text: str, _attr: int = 0) -> None:
+            writes.append(text)
+
+        def erase(self) -> None:
+            pass
+
+        def refresh(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        workshop,
+        "current_agent_presence",
+        lambda: workshop.AgentPresence((), (), status="ok"),
+    )
+    home = workshop.Workshop(FakeWindow((10, 40)), mode="home")
+    home.draw_home()
+    home_text = "\n".join(writes)
+    assert "Agents in this session (0)" in home_text
+    assert "┌" not in home_text
+    assert "canonical" not in home_text
+    assert "unavailable" not in home_text
+
+    writes.clear()
+    monkeypatch.setattr(
+        workshop,
+        "runtime_policy_capabilities",
+        lambda _agent: {
+            name: {"available": name == "local-native", "reason": ""}
+            for name in workshop.RUNTIME_POLICIES
+        },
+    )
+    monkeypatch.setattr(
+        workshop,
+        "_provider_available",
+        lambda _agent: True,
+    )
+    form = workshop.Workshop(FakeWindow((12, 40)), mode="launcher")
+    form.draw_launcher()
+    form_text = "\n".join(writes)
+    assert "New agent" in form_text
+    assert "[ Launch ]" in form_text
+    assert "┌" not in form_text
+    assert "canonical worktree" not in form_text
+    assert "• agy" not in form_text
+
+
+def test_selected_provider_uses_reverse_not_only_a_dot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workshop = _load()
+    styled: list[tuple[str, int]] = []
+
+    class FakeWindow:
+        def getmaxyx(self) -> tuple[int, int]:
+            return (24, 80)
+
+        def addstr(self, _row: int, _col: int, text: str, attr: int = 0) -> None:
+            styled.append((text, attr))
+
+        def erase(self) -> None:
+            pass
+
+        def refresh(self) -> None:
+            pass
+
+    monkeypatch.setattr(workshop, "_provider_available", lambda _agent: True)
+    monkeypatch.setattr(
+        workshop,
+        "runtime_policy_capabilities",
+        lambda _agent: {
+            name: {"available": True, "reason": ""}
+            for name in workshop.RUNTIME_POLICIES
+        },
+    )
+    form = workshop.Workshop(FakeWindow(), mode="launcher")
+    form.agent = workshop.AGENTS.index("codex")
+    form.draw_launcher()
+    selected = [item for item in styled if item[0].strip() == "codex"]
+    assert selected
+    assert selected[0][1] & workshop.curses.A_REVERSE
+    bullets = [item[0] for item in styled if item[0].startswith("• codex")]
+    assert bullets == []
+
+
+class _StopDashboard(Exception):
+    """Ends the scripted home loop once the input script is exhausted."""
+
+
+_IDLE_TICK = (-1, 0.5)
+
+
+def _drive_home_dashboard(
+    workshop: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    script: list[tuple[int, float]],
+    *,
+    mouse_state: int = 0,
+) -> list[float]:
+    clock = [0.0]
+    probes: list[float] = []
+    steps = iter(script)
+
+    def probe() -> object:
+        probes.append(clock[0])
+        return workshop.AgentPresence(("codex · init · vibecrafted",), (), status="ok")
+
+    class ScriptedWindow:
+        def getmaxyx(self) -> tuple[int, int]:
+            return (30, 100)
+
+        def addstr(self, *_args: object) -> None:
+            pass
+
+        def erase(self) -> None:
+            pass
+
+        def refresh(self) -> None:
+            pass
+
+        def getch(self) -> int:
+            try:
+                key, elapsed = next(steps)
+            except StopIteration:
+                raise _StopDashboard from None
+            clock[0] += elapsed
+            return key
+
+    monkeypatch.setattr(workshop, "current_agent_presence", probe)
+    monkeypatch.setattr(workshop, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(workshop.Workshop, "configure", lambda _self: None)
+    monkeypatch.setattr(
+        workshop.curses, "getmouse", lambda: (0, 0, 0, 0, mouse_state), raising=False
+    )
+    dashboard = workshop.Workshop(ScriptedWindow(), mode="home")
+    with pytest.raises(_StopDashboard):
+        dashboard.run()
+    return probes
+
+
+def test_home_dashboard_idle_minute_spawns_at_most_four_pane_probes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workshop = _load()
+    probes = _drive_home_dashboard(workshop, monkeypatch, [_IDLE_TICK] * 120)
+    assert len(probes) <= 4, probes
+    assert probes[0] == 0.0
+
+
+def test_home_dashboard_probes_immediately_after_user_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workshop = _load()
+    script = [_IDLE_TICK] * 41 + [(workshop.curses.KEY_RIGHT, 0.1)] + [_IDLE_TICK] * 2
+    probes = _drive_home_dashboard(workshop, monkeypatch, script)
+    assert len(probes) == 3, probes
+    assert probes[-1] == pytest.approx(20.6)
+
+
+def test_home_dashboard_pointer_motion_never_probes_but_click_does(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workshop = _load()
+    hover = [_IDLE_TICK] * 41 + [(workshop.curses.KEY_MOUSE, 0.05)] * 10
+    hover_probes = _drive_home_dashboard(
+        workshop,
+        monkeypatch,
+        hover + [_IDLE_TICK] * 2,
+        mouse_state=workshop.curses.REPORT_MOUSE_POSITION,
+    )
+    assert len(hover_probes) == 2, hover_probes
+
+    click_probes = _drive_home_dashboard(
+        workshop,
+        monkeypatch,
+        [_IDLE_TICK] * 41 + [(workshop.curses.KEY_MOUSE, 0.1)] + [_IDLE_TICK],
+        mouse_state=workshop.curses.BUTTON1_CLICKED,
+    )
+    assert len(click_probes) == 3, click_probes
+    assert click_probes[-1] == pytest.approx(20.6)
+
+
+def test_presence_schedule_backs_off_while_unchanged_and_resets_on_change() -> None:
+    workshop = _load()
+    schedule = workshop.PresenceSchedule(base=15.0, ceiling=60.0, floor=2.0)
+    assert schedule.due(0.0)
+    schedule.record(0.0, changed=True)
+    assert not schedule.due(14.9)
+    assert schedule.due(15.0)
+    schedule.record(15.0, changed=False)
+    assert not schedule.due(44.9)
+    assert schedule.due(45.0)
+    schedule.record(45.0, changed=False)
+    schedule.record(105.0, changed=False)
+    assert schedule.interval == 60.0
+    schedule.record(165.0, changed=True)
+    assert schedule.interval == 15.0
+    schedule.request()
+    assert not schedule.due(166.9)
+    assert schedule.due(167.0)
+
+
+def test_session_names_from_listing_and_other_sessions_are_on_demand(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workshop = _load()
+    listing = (
+        "vibecrafted-921310b3-w [Created 2h ago]\n"
+        "other-root [Created 1h ago]\n"
+        "\n"
+        "vibecrafted-921310b3-w [Created 2h ago]\n"
+    )
+    assert workshop.session_names_from_listing(listing) == [
+        "vibecrafted-921310b3-w",
+        "other-root",
+    ]
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "vibecrafted-921310b3-w")
+    monkeypatch.setattr(
+        workshop.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0, stdout=listing, stderr=""
+        ),
+    )
+    names, error = workshop.list_other_sessions()
+    assert error == ""
+    assert names == ["other-root"]
