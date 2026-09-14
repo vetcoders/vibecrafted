@@ -22,6 +22,11 @@ pub(crate) struct DashboardData {
     workspace_error: String,
     workspaces: Vec<DashboardWorkspace>,
     sessions: Vec<DashboardSession>,
+    /// vc-frame sessions whose server runs right now — what the console
+    /// calls workspaces — each joined with its catalog workspace when a
+    /// session record claims it.
+    #[serde(default)]
+    live_frame_sessions: Vec<DashboardFrameSession>,
     settlement: DashboardSettlement,
     active_runs: Vec<DashboardRun>,
     stalled_runs: Vec<DashboardRun>,
@@ -61,6 +66,17 @@ struct DashboardSessionRun {
     run_id: String,
     state: String,
     health: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+struct DashboardFrameSession {
+    /// vc-frame session name, as `vc-frame list-sessions` prints it.
+    name: String,
+    /// Empty when the Frame runs but no workspace session record claims it.
+    session_id: String,
+    workspace_id: String,
+    workspace_title: String,
+    workspace_root: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -229,10 +245,10 @@ fn load_dashboard_data_from(
     if control_status == "unavailable" {
         warnings.push(format!("Control-plane data unavailable: {control_error}"));
     }
-    let (workspace_status, workspace_error, workspaces, sessions) =
+    let (workspace_status, workspace_error, workspaces, sessions, live_frame_sessions) =
         match plane.load_workspace_projection() {
             Ok(projection) => {
-                let titles = projection
+                let catalog_labels = projection
                     .catalog
                     .as_ref()
                     .map(|catalog| {
@@ -242,17 +258,46 @@ fn load_dashboard_data_from(
                             .map(|workspace| {
                                 (
                                     workspace.workspace_id.clone(),
-                                    workspace.display_label.clone(),
+                                    (
+                                        workspace.display_label.clone(),
+                                        workspace.canonical_root.clone(),
+                                    ),
                                 )
                             })
                             .collect::<std::collections::HashMap<_, _>>()
                     })
                     .unwrap_or_default();
-                let active_run_ids = state
-                    .active_runs
+                // One bounded read of the recorded Frame socket roots per
+                // refresh. No vc-frame client is spawned or connected: each
+                // client connection re-renders every plugin of that session.
+                let inventory =
+                    control_core::FrameSessionInventory::scan(projection.frame_socket_dirs());
+                let live_frames = projection.live_frame_sessions(&inventory);
+                let live_session_ids = live_frames
                     .iter()
-                    .map(|run| run.run_id.as_str())
+                    .filter_map(|frame| frame.owner.as_ref())
+                    .map(|owner| owner.session_id.clone())
                     .collect::<std::collections::HashSet<_>>();
+                let live_frame_sessions = live_frames
+                    .into_iter()
+                    .map(|frame| {
+                        let (session_id, workspace_id) = frame
+                            .owner
+                            .map(|owner| (owner.session_id, owner.workspace_id))
+                            .unwrap_or_default();
+                        let (workspace_title, workspace_root) = catalog_labels
+                            .get(&workspace_id)
+                            .cloned()
+                            .unwrap_or_default();
+                        DashboardFrameSession {
+                            name: frame.runtime_session_id,
+                            session_id,
+                            workspace_id,
+                            workspace_title,
+                            workspace_root,
+                        }
+                    })
+                    .collect::<Vec<_>>();
                 let mut runs_by_logical_session =
                     std::collections::HashMap::<String, Vec<DashboardSessionRun>>::new();
                 for run in state.active_runs.iter().chain(state.recent_runs.iter()) {
@@ -284,18 +329,13 @@ fn load_dashboard_data_from(
                         let runs = runs_by_logical_session
                             .remove(&session.session_id)
                             .unwrap_or_default();
-                        // A live attachment is live truth about the session
-                        // (an interactive frame needs no agent run to be real);
-                        // a current canonical run is live truth on its own.
-                        let has_current_run = runs
-                            .iter()
-                            .any(|run| active_run_ids.contains(run.run_id.as_str()));
-                        let state = if has_current_run
-                            || session
-                                .attachments
-                                .iter()
-                                .any(|attachment| attachment.state == "live")
-                        {
+                        // `live` means this session owns a vc-frame server
+                        // that runs right now. A recorded `live` attachment is
+                        // attach-time evidence that nothing downgrades when the
+                        // Frame exits, and a canonical run keeps its own state
+                        // on the transcript link instead of posing as a
+                        // running terminal.
+                        let state = if live_session_ids.contains(&session.session_id) {
                             "live"
                         } else if session.attachments.is_empty() {
                             "detached"
@@ -303,9 +343,9 @@ fn load_dashboard_data_from(
                             "inactive"
                         };
                         DashboardSession {
-                            workspace_title: titles
+                            workspace_title: catalog_labels
                                 .get(&session.workspace_id)
-                                .cloned()
+                                .map(|(title, _)| title.clone())
                                 .unwrap_or_else(|| "Unknown workspace".into()),
                             session_id: session.session_id,
                             workspace_id: session.workspace_id,
@@ -346,20 +386,33 @@ fn load_dashboard_data_from(
                                 }
                             })
                             .collect();
-                        ("available".into(), String::new(), workspaces, sessions)
+                        (
+                            "available".into(),
+                            String::new(),
+                            workspaces,
+                            sessions,
+                            live_frame_sessions,
+                        )
                     }
                     None => (
                         "not_initialized".into(),
                         String::new(),
                         Vec::new(),
                         sessions,
+                        live_frame_sessions,
                     ),
                 }
             }
             Err(error) => {
                 let message = error.to_string();
                 warnings.push(format!("Workspace data unavailable: {message}"));
-                ("unavailable".into(), message, Vec::new(), Vec::new())
+                (
+                    "unavailable".into(),
+                    message,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                )
             }
         };
 
@@ -373,6 +426,7 @@ fn load_dashboard_data_from(
         workspace_error,
         workspaces,
         sessions,
+        live_frame_sessions,
         settlement: DashboardSettlement {
             scope: serde_json::to_value(settlement.scope)
                 .ok()
@@ -710,11 +764,14 @@ fn warning_rows(warnings: Vec<String>) -> impl IntoView {
         .collect_view()
 }
 
-fn settlement_board(settlement: DashboardSettlement) -> impl IntoView {
+/// Settlement counts over every run snapshot this host still retains. They
+/// describe history, not the present, so they live on the runs page under a
+/// plain label — never on the console home beside live counts.
+fn retained_run_history(settlement: DashboardSettlement) -> impl IntoView {
     view! {
         <section
-            class="operator-summary-strip"
-            aria-label="Operator summary"
+            class="control-panel control-panel-wide"
+            aria-label="Retained run history"
             data-scope=settlement.scope.clone()
             data-active=settlement.active
             data-f=settlement.f
@@ -724,33 +781,20 @@ fn settlement_board(settlement: DashboardSettlement) -> impl IntoView {
             data-unclassified=settlement.unclassified
             data-total-settled=settlement.total_settled
         >
-            <div class="operator-summary-title">
-                <span class="mono-cap">"runtime truth"</span>
-                <strong>{settlement.scope.clone()}</strong>
-            </div>
-            <dl class="operator-summary-cells">
-                <a class="operator-summary-cell" href="/runs">
-                    <dt>"alive"</dt>
-                    <dd>{settlement.active}</dd>
-                </a>
-                <a class="operator-summary-cell" href="/runs">
-                    <dt>"final"</dt>
-                    <dd>{settlement.f}</dd>
-                </a>
-                <a class="operator-summary-cell" href="/runs">
-                    <dt>"failed"</dt>
-                    <dd>{settlement.x}</dd>
-                </a>
-                <a class="operator-summary-cell" href="/runs">
-                    <dt>"attention"</dt>
-                    <dd>{settlement.n}</dd>
-                </a>
-            </dl>
-            <div class="operator-summary-detail">
-                <span>{format!("{} invalid", settlement.invalid)}</span>
-                <span>{format!("{} unclassified", settlement.unclassified)}</span>
+            <div class="control-panel-head">
+                <h2>"Retained run history"</h2>
                 <span>{format!("{} settled", settlement.total_settled)}</span>
             </div>
+            <p class="control-plane-meta">
+                "Every run snapshot this host still keeps, from all days — not what is running now. Current agents are listed above."
+            </p>
+            <p class="control-plane-meta">
+                <span>{format!("{} finished", settlement.f)}</span>
+                <span>{format!("{} failed ({} invalid)", settlement.x, settlement.invalid)}</span>
+                <span>{format!("{} need attention", settlement.n)}</span>
+                <span>{format!("{} unclassified", settlement.unclassified)}</span>
+                <span>{format!("{} still marked active", settlement.active)}</span>
+            </p>
         </section>
     }
 }
@@ -906,11 +950,13 @@ fn console_dashboard(dashboard: DashboardData) -> impl IntoView {
     let recent_count = dashboard.recent_runs.len();
     let warning_count = dashboard.warnings.len();
     let action_count = action_runs.len();
-    let workspace_count = dashboard.workspaces.len();
+    // Workspaces with a running vc-frame session, not the durable catalog:
+    // the catalog keeps every identity ever registered (worker worktrees and
+    // test roots included) and lives on /workspaces as history.
+    let live_workspace_count = dashboard.live_frame_sessions.len();
     let workspace_status = dashboard.workspace_status;
     let server_status = dashboard.server_status;
 
-    let settlement = dashboard.settlement;
     let has_loctree_report = !loctree_report.is_empty();
 
     view! {
@@ -980,9 +1026,14 @@ fn console_dashboard(dashboard: DashboardData) -> impl IntoView {
                                     <dt>"recent"</dt>
                                     <dd>{recent_count}</dd>
                                 </a>
-                                <a class="operator-summary-cell" href="/workspaces">
+                                <a
+                                    class="operator-summary-cell"
+                                    href="/workspaces"
+                                    title="Workspaces with a running vc-frame session"
+                                    data-live-workspaces=live_workspace_count
+                                >
                                     <dt>"workspaces"</dt>
-                                    <dd>{workspace_count}</dd>
+                                    <dd>{live_workspace_count}</dd>
                                 </a>
                             </dl>
                             <p class="control-plane-meta">
@@ -991,10 +1042,6 @@ fn console_dashboard(dashboard: DashboardData) -> impl IntoView {
                         </aside>
                     </div>
                 </section>
-
-                <div class="settlement-board-wrap">
-                    {settlement_board(settlement)}
-                </div>
 
                 <section class="control-panel control-panel-wide overview-structure" aria-label="Structure">
                     <div class="control-panel-head">
@@ -1063,6 +1110,38 @@ fn workspace_cards(workspaces: Vec<DashboardWorkspace>) -> impl IntoView {
         .collect_view()
 }
 
+fn live_workspace_cards(frames: Vec<DashboardFrameSession>) -> impl IntoView {
+    frames
+        .into_iter()
+        .map(|frame| {
+            let unclaimed = frame.workspace_id.is_empty();
+            let title = if frame.workspace_title.is_empty() {
+                frame.name.clone()
+            } else {
+                frame.workspace_title.clone()
+            };
+            let frame_attr = frame.name.clone();
+            view! {
+                <article class="workspace-card" data-frame-session=frame_attr>
+                    <div class="control-run-primary">
+                        <strong class="workspace-title">{title}</strong>
+                        <code class="control-run-root">{frame.workspace_root}</code>
+                    </div>
+                    <div class="control-run-tags">
+                        <span class="control-badge">"live"</span>
+                        <span class="control-badge">{format!("frame {}", frame.name)}</span>
+                        {unclaimed.then(|| view! { <span class="control-badge">"no workspace record"</span> })}
+                    </div>
+                    <div class="control-run-meta">
+                        <span>{frame.workspace_id}</span>
+                        <span>{frame.session_id}</span>
+                    </div>
+                </article>
+            }
+        })
+        .collect_view()
+}
+
 fn session_cards(sessions: Vec<DashboardSession>) -> impl IntoView {
     sessions
         .into_iter()
@@ -1115,15 +1194,41 @@ pub fn WorkspacesPage() -> impl IntoView {
 fn workspaces_dashboard(dashboard: DashboardData) -> impl IntoView {
     let status = dashboard.workspace_status;
     let error = dashboard.workspace_error;
-    let workspaces = dashboard.workspaces;
-    let count = workspaces.len();
+    let live = dashboard.live_frame_sessions;
+    let live_count = live.len();
+    let live_workspace_ids = live
+        .iter()
+        .filter(|frame| !frame.workspace_id.is_empty())
+        .map(|frame| frame.workspace_id.clone())
+        .collect::<std::collections::HashSet<_>>();
+    let count = dashboard.workspaces.len();
+    // History: catalog identities without a running Frame, newest first.
+    let mut history = dashboard
+        .workspaces
+        .into_iter()
+        .filter(|workspace| !live_workspace_ids.contains(&workspace.workspace_id))
+        .collect::<Vec<_>>();
+    history.sort_by(|left, right| {
+        right
+            .updated_at
+            .cmp(&left.updated_at)
+            .then_with(|| left.workspace_id.cmp(&right.workspace_id))
+    });
+    let history_count = history.len();
     let not_initialized = status == "not_initialized";
     let unavailable = status == "unavailable";
     view! {
-        <ServerFrame active=ServerSection::Workspaces status=format!("{count} workspaces")>
+        <ServerFrame active=ServerSection::Workspaces status=format!("{live_count} live · {count} in catalog")>
             <div class="server-console-shell route-page-shell">
-                {route_header("Workspace", "Workspaces", "Durable identities from the canonical workspace catalog, with human labels, repository roots, and current run activity.")}
-                <section class="control-panel control-panel-wide" aria-label="Canonical workspaces" data-source-status=status.clone()>
+                {route_header("Workspace", "Workspaces", "Workspaces with a running vc-frame session come first. The durable catalog below keeps every identity ever registered, worker worktrees and test roots included, as history.")}
+                <section class="control-panel control-panel-wide" aria-label="Live workspaces" data-live-workspaces=live_count>
+                    <div class="control-panel-head"><h2>"Live now"</h2><span>{format!("{live_count} running vc-frame sessions")}</span></div>
+                    {(live_count == 0 && !unavailable).then(|| view! {
+                        <p class="control-empty">"No vc-frame session is running on this host."</p>
+                    })}
+                    <div class="workspace-card-list">{live_workspace_cards(live)}</div>
+                </section>
+                <section class="control-panel control-panel-wide" aria-label="Canonical workspaces" data-source-status=status.clone() data-history-count=history_count>
                     <div class="control-panel-head"><h2>"Workspace catalog"</h2><span>{status.clone()}</span></div>
                     {not_initialized.then(|| view! {
                         <p class="control-empty">
@@ -1140,7 +1245,10 @@ fn workspaces_dashboard(dashboard: DashboardData) -> impl IntoView {
                             "The canonical catalog is healthy and contains no workspaces."
                         </p>
                     })}
-                    <div class="workspace-card-list">{workspace_cards(workspaces)}</div>
+                    <details class="workspace-history">
+                        <summary>{format!("History · {history_count} catalog identities without a running vc-frame session")}</summary>
+                        <div class="workspace-card-list">{workspace_cards(history)}</div>
+                    </details>
                 </section>
             </div>
         </ServerFrame>
@@ -1222,6 +1330,7 @@ fn runs_dashboard(dashboard: DashboardData) -> impl IntoView {
     let active = operator_active_runs(dashboard.active_runs);
     let stalled = dashboard.stalled_runs;
     let recent = dashboard.recent_runs;
+    let settlement = dashboard.settlement;
     let active_count = active.len();
     let stalled_count = stalled.len();
     let recent_count = recent.len();
@@ -1255,6 +1364,7 @@ fn runs_dashboard(dashboard: DashboardData) -> impl IntoView {
                     {(available && recent_count == 0).then(|| view! { <p class="control-empty">"No recent settled runs."</p> })}
                     <div class="control-run-list">{run_cards(recent)}</div>
                 </section>
+                {retained_run_history(settlement)}
             </div>
         </ServerFrame>
     }
@@ -1412,7 +1522,7 @@ mod tests {
         ActivityPage, ConsolePage, DashboardData, DashboardRun, DashboardSession,
         DashboardSessionRun, LifecyclePage, RunsPage, SessionsPage, StructurePage, WorkspacesPage,
         console_dashboard, decode_dashboard_embed, encode_dashboard_embed,
-        load_dashboard_data_from, operator_active_runs, run_cards, session_cards,
+        load_dashboard_data_from, operator_active_runs, run_cards, runs_dashboard, session_cards,
         unique_runtime_labels, workspaces_dashboard,
     };
     use crate::control::api::{control_routes, state_payload};
@@ -1571,8 +1681,239 @@ mod tests {
         fs::remove_dir_all(home).ok();
     }
 
+    fn canonical_id(group: u16, n: u64) -> String {
+        format!("0198f84e-{group:04x}-7abc-8def-{n:012x}")
+    }
+
+    /// Short Frame socket root: macOS `sockaddr_un` holds 104 bytes, and the
+    /// default TMPDIR plus `contract_version_N/<name>` already exhausts it.
+    fn frame_socket_root() -> PathBuf {
+        static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
+        let root = PathBuf::from(format!(
+            "/tmp/vcws-{}-{}",
+            std::process::id(),
+            NEXT_ROOT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::remove_dir_all(&root).ok();
+        fs::create_dir_all(root.join("contract_version_2")).expect("frame socket root");
+        root
+    }
+
     #[test]
-    fn state_json_and_ssr_render_the_same_canonical_settlement_board() {
+    fn console_home_counts_running_frame_workspaces_not_the_catalog_size() {
+        use std::os::unix::net::UnixListener;
+
+        let home = temp_home();
+        let workspaces_root = home.join("control_plane/workspaces");
+        fs::create_dir_all(workspaces_root.join("sessions")).expect("workspace dirs");
+
+        // Two workspaces with a real terminal and forty worker/test identities
+        // the catalog registered along the way.
+        let studio = canonical_id(0x1000, 1);
+        let services = canonical_id(0x1000, 2);
+        let workers = (0..40).map(|n| canonical_id(0x2000, n)).collect::<Vec<_>>();
+        let mut catalog = serde_json::Map::new();
+        let mut register = |id: &str, label: &str, root: &str, updated_at: &str| {
+            catalog.insert(
+                id.to_string(),
+                json!({
+                    "schema": "vibecrafted.workspace.v1",
+                    "workspace_id": id,
+                    "display_label": label,
+                    "canonical_root": root,
+                    "status": "active",
+                    "updated_at": updated_at,
+                }),
+            );
+        };
+        register(&studio, "Studio", "/work/studio", "2026-09-12T12:48:00Z");
+        register(
+            &services,
+            "Services",
+            "/work/services",
+            "2026-09-13T15:27:00Z",
+        );
+        for (n, id) in workers.iter().enumerate() {
+            register(
+                id,
+                &format!("worker-{n}"),
+                &format!("/work/_integration/worker-{n}/vibecrafted"),
+                "2026-09-10T00:00:00Z",
+            );
+        }
+        fs::write(
+            workspaces_root.join("catalog.json"),
+            serde_json::to_vec_pretty(&json!({
+                "schema": "vibecrafted.workspace-catalog.v1",
+                "updated_at": "2026-09-13T18:49:06Z",
+                "selected_workspace_id": studio,
+                "workspaces": catalog,
+            }))
+            .expect("catalog JSON"),
+        )
+        .expect("catalog");
+
+        let sockets = frame_socket_root();
+        let socket_dir = sockets.to_str().expect("utf-8 socket root").to_string();
+        let _studio_frame =
+            UnixListener::bind(sockets.join("contract_version_2/studio")).expect("bind studio");
+        let _services_frame =
+            UnixListener::bind(sockets.join("contract_version_2/services")).expect("bind services");
+
+        let instance = canonical_id(0x3000, 1);
+        let write_session =
+            |session_id: &str, workspace_id: &str, name: &str, state: &str, updated_at: &str| {
+                fs::write(
+                    workspaces_root.join(format!("sessions/{session_id}.json")),
+                    serde_json::to_vec_pretty(&json!({
+                        "schema": "vibecrafted.workspace-session.v1",
+                        "session_id": session_id,
+                        "workspace_id": workspace_id,
+                        "workspace_instance_id": instance,
+                        "updated_at": updated_at,
+                        "attachments": [{
+                            "runtime": "vc-frame",
+                            "runtime_session_id": name,
+                            "state": state,
+                            "socket_dir": socket_dir,
+                            "updated_at": updated_at,
+                        }],
+                    }))
+                    .expect("session JSON"),
+                )
+                .expect("session");
+            };
+        let studio_session = canonical_id(0x4000, 1);
+        let services_earlier = canonical_id(0x4000, 2);
+        let services_current = canonical_id(0x4000, 3);
+        write_session(
+            &studio_session,
+            &studio,
+            "studio",
+            "live",
+            "2026-09-12T12:48:14+00:00",
+        );
+        write_session(
+            &services_earlier,
+            &services,
+            "services",
+            "live",
+            "2026-09-13T15:27:24+00:00",
+        );
+        write_session(
+            &services_current,
+            &services,
+            "services",
+            "live",
+            "2026-09-13T18:49:06+00:00",
+        );
+        // Six worker sessions still recorded `live` whose Frames exited long
+        // ago, plus one discovery record that saw `studio` and called it dead.
+        for (n, worker) in workers.iter().take(6).enumerate() {
+            write_session(
+                &canonical_id(0x5000, n as u64),
+                worker,
+                &format!("worker-{n}"),
+                "live",
+                "2026-09-10T00:00:00+00:00",
+            );
+        }
+        write_session(
+            &canonical_id(0x6000, 1),
+            &workers[7],
+            "studio",
+            "dead",
+            "2026-09-13T20:00:00+00:00",
+        );
+
+        let plane = ControlPlane::new(&home);
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-14T04:00:00Z")
+            .expect("fixed now")
+            .with_timezone(&Utc);
+        let dashboard = load_dashboard_data_from(&plane, now);
+
+        assert_eq!(dashboard.workspaces.len(), 42, "the catalog stays whole");
+        let live_frames = dashboard
+            .live_frame_sessions
+            .iter()
+            .map(|frame| {
+                (
+                    frame.name.as_str(),
+                    frame.workspace_title.as_str(),
+                    frame.session_id.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            live_frames,
+            vec![
+                ("services", "Services", services_current.as_str()),
+                ("studio", "Studio", studio_session.as_str()),
+            ]
+        );
+        let state_of = |session_id: &str| {
+            dashboard
+                .sessions
+                .iter()
+                .find(|session| session.session_id == session_id)
+                .map(|session| session.state.clone())
+                .expect("session projected")
+        };
+        assert_eq!(state_of(&studio_session), "live");
+        assert_eq!(state_of(&services_current), "live");
+        assert_eq!(
+            state_of(&services_earlier),
+            "inactive",
+            "an older claim on a running Frame is superseded"
+        );
+        assert_eq!(
+            dashboard
+                .sessions
+                .iter()
+                .filter(|session| session.state == "live")
+                .count(),
+            2,
+            "a `live` record without a running Frame is not live"
+        );
+
+        let owner = Owner::new();
+        let (console, workspaces) = owner.with(|| {
+            provide_theme_context();
+            (
+                console_dashboard(dashboard.clone()).to_html(),
+                workspaces_dashboard(dashboard).to_html(),
+            )
+        });
+        assert!(
+            console.contains("data-live-workspaces=\"2\""),
+            "home must count running Frame workspaces: {console}"
+        );
+        assert!(!console.contains("runtime truth"));
+        assert!(!console.contains("aria-label=\"Operator summary\""));
+        assert!(!console.contains("data-total-settled"));
+
+        assert!(workspaces.contains("2 live · 42 in catalog"));
+        assert!(workspaces.contains("data-live-workspaces=\"2\""));
+        assert!(workspaces.contains("data-frame-session=\"studio\""));
+        assert!(workspaces.contains("data-frame-session=\"services\""));
+        assert!(workspaces.contains("data-history-count=\"40\""));
+        let live_position = workspaces
+            .find("aria-label=\"Live workspaces\"")
+            .expect("live section");
+        let history_position = workspaces
+            .find("class=\"workspace-history\"")
+            .expect("history section");
+        assert!(live_position < history_position);
+        let history = &workspaces[history_position..];
+        assert!(history.contains("worker-39"), "catalog stays reachable");
+        assert!(!history.contains(&format!("data-workspace-id=\"{studio}\"")));
+
+        fs::remove_dir_all(home).ok();
+        fs::remove_dir_all(sockets).ok();
+    }
+
+    #[test]
+    fn state_json_and_runs_page_render_the_same_retained_history_counts() {
         let home = temp_home();
         let runs_dir = home.join("control_plane/runs");
         fs::create_dir_all(&runs_dir).expect("runs dir");
@@ -1595,9 +1936,12 @@ mod tests {
         let api = serde_json::to_value(state_payload(&plane, now)).expect("state JSON");
         let dashboard = load_dashboard_data_from(&plane, now);
         let owner = Owner::new();
-        let html = owner.with(|| {
+        let (html, runs) = owner.with(|| {
             provide_theme_context();
-            console_dashboard(dashboard).to_html()
+            (
+                console_dashboard(dashboard.clone()).to_html(),
+                runs_dashboard(dashboard).to_html(),
+            )
         });
         let board = &api["settlement_counts"];
         assert!(
@@ -1621,15 +1965,22 @@ mod tests {
             let expected = board[key].as_u64().expect("numeric settlement field");
             let attribute = key.replace('_', "-");
             assert!(
-                html.contains(&format!("data-{attribute}=\"{expected}\"")),
-                "SSR {key} must equal API value {expected}: {html}"
+                runs.contains(&format!("data-{attribute}=\"{expected}\"")),
+                "runs page {key} must equal API value {expected}: {runs}"
             );
         }
         let scope = board["scope"].as_str().expect("scope string");
-        assert!(html.contains(&format!("data-scope=\"{scope}\"")));
-        assert!(html.contains("final"));
-        assert!(html.contains("failed"));
-        assert!(html.contains("attention"));
+        assert!(runs.contains(&format!("data-scope=\"{scope}\"")));
+        assert!(runs.contains("aria-label=\"Retained run history\""));
+        assert!(runs.contains("1 finished"));
+        assert!(runs.contains("2 failed (1 invalid)"));
+        assert!(runs.contains("1 need attention"));
+        // The console home carries no history board: those counts describe
+        // every retained snapshot, not the present.
+        assert!(!html.contains("runtime truth"));
+        assert!(!html.contains("aria-label=\"Operator summary\""));
+        assert!(!html.contains("aria-label=\"Retained run history\""));
+        assert!(!html.contains("data-total-settled"));
         assert!(html.contains("aria-label=\"Switch to light theme\""));
         assert!(html.contains("http://127.0.0.1:8033/"));
         assert!(html.contains("Vibecrafted server navigation"));
@@ -1640,11 +1991,7 @@ mod tests {
         assert!(html.contains("href=\"/structure\""));
         assert!(html.contains("href=\"/scaffold\""));
         assert!(!html.contains("href=\"#fleet\""));
-        let board_position = html
-            .find("aria-label=\"Operator summary\"")
-            .expect("summary");
-        let structure_position = html.find("aria-label=\"Structure\"").expect("structure");
-        assert!(board_position < structure_position);
+        assert!(html.contains("aria-label=\"Structure\""));
         assert!(!html.contains("aria-label=\"Active runs\""));
         assert!(!html.contains("aria-label=\"Warnings\""));
         assert!(!html.contains("aria-label=\"Action plan\""));
