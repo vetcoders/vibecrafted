@@ -874,24 +874,11 @@ materialize_runtime_payload() {
   log "Embedding a private Python runtime; no shell profile or host Python is used"
   python_seed="$(mktemp -d "$BUILD_DIR/python-seed.XXXXXX")"
   mkdir -p "$python_seed"
-  # uv 0.9.7 has a transient ENOENT while creating the seed symlink. Retry
-  # the cheap Python staging step; do not repeat native compilation for it.
-  seed_python=""
-  local python_attempt
-  for python_attempt in 1 2 3; do
-    if uv python install 3.12.3 --install-dir "$python_seed" --no-bin; then
-      seed_python="$(find "$python_seed" -type f -path '*/bin/python3.12' -print -quit)"
-      if [[ -n "$seed_python" && -x "$seed_python" ]]; then
-        break
-      fi
-    fi
-    seed_python=""
-    rm -rf "$python_seed"
-    mkdir -p "$python_seed"
-    sleep "$python_attempt"
-  done
-  [[ -n "$seed_python" && -x "$seed_python" ]] \
-    || die "uv did not produce the requested CPython after retries"
+  # Published python-build-standalone install_only archive, pin+checksum in
+  # scripts/lib/portable-python-artifact.json. Retry transient curl; never compile.
+  # shellcheck source=/dev/null
+  . "$SOURCE_ROOT/scripts/lib/portable-python.sh"
+  seed_python="$(install_portable_python "$python_seed")"
   python_home="$(cd "$(dirname "$seed_python")/.." && pwd)"
   mkdir -p "$runtime/python" "$runtime/python-site"
   /bin/cp -RL "$python_home/." "$runtime/python/"
