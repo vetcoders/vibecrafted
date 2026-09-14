@@ -86,10 +86,13 @@ _ZSH_PLUGIN_SHARE_FILES = {
     "zsh-autosuggestions": (
         Path("/opt/homebrew/share/zsh-autosuggestions/zsh-autosuggestions.zsh"),
         Path("/usr/local/share/zsh-autosuggestions/zsh-autosuggestions.zsh"),
+        # Debian/Ubuntu apt packages install under /usr/share.
+        Path("/usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh"),
     ),
     "zsh-syntax-highlighting": (
         Path("/opt/homebrew/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"),
         Path("/usr/local/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"),
+        Path("/usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"),
     ),
 }
 

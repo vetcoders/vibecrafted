@@ -26,13 +26,13 @@ _vc_terminal_pin_product_env() {
 }
 
 _vc_terminal_apply_fallback_prompt() {
-  # Two-line offline prompt: path, then a simple ❯. Used only when Starship
-  # did not install a precmd hook. Do not reset a live Starship prompt.
+  # Two-line offline prompt in the shape of the product starship.toml: bold
+  # blue path, then ❯ (green after success, red after failure). Used only when
+  # Starship did not install a precmd hook. Do not reset a live Starship prompt.
   if (( $+functions[starship_precmd] || $+functions[prompt_starship_precmd] )); then
     return 0
   fi
-  PROMPT=$'%~
-❯ '
+  PROMPT=$'%B%F{blue}%~%f%b\n%(?.%F{green}.%F{red})❯%f '
   RPROMPT=''
 }
 
@@ -62,35 +62,112 @@ _vc_terminal_bind_owned_python() {
 }
 
 _vc_terminal_load_owned_layer() {
-  local vc_alias_dir vc_alias_file vc_alias_name
+  local vc_alias_dir vc_alias_file vc_name
+  local -a vc_before_aliases vc_before_functions vc_after
   _vc_terminal_pin_product_env
-  for vc_alias_name in "${_vc_terminal_owned_alias_names[@]}"; do
-    unalias "$vc_alias_name" 2>/dev/null || true
+  # Forget what the previous load defined, so a shortcut removed from disk is
+  # gone after reload instead of lingering under its old definition.
+  for vc_name in "${_vc_terminal_owned_alias_names[@]}" "${_vc_terminal_loaded_aliases[@]}"; do
+    unalias -- "$vc_name" 2>/dev/null || true
   done
+  for vc_name in "${_vc_terminal_loaded_functions[@]}"; do
+    unfunction -- "$vc_name" 2>/dev/null || true
+  done
+  vc_before_aliases=(${(k)aliases})
+  vc_before_functions=(${(k)functions})
+  typeset -g _vc_terminal_alias_dir=""
   # Installed product tree first; generation checkout is a source-only fallback.
   for vc_alias_dir in \
     "$_vc_terminal_product_shell/aliases" \
     "${VIBECRAFTED_ROOT:-}/vibecrafted-core/vibecrafted_core/runtime/shell/aliases"
   do
     [[ -d "$vc_alias_dir" ]] || continue
+    _vc_terminal_alias_dir="$vc_alias_dir"
     for vc_alias_file in "$vc_alias_dir"/*.zsh(N); do
       source "$vc_alias_file"
     done
     break
   done
-  unset vc_alias_dir vc_alias_file vc_alias_name
-  aliases() {
-    print -r -- 'navigation'
-    print -r -- '  ll  la  l  ..  ...  ....  cdr'
-    print -r -- 'git'
-    print -r -- '  gs  ga  gc  gp  gl  gd'
-    print -r -- 'frame'
-    print -r -- '  vcf-lp  vcf-ls  vcf-da'
-    print -r -- 'python'
-    print -r -- '  python  python3  generation CPython (not host 3.9.6)'
-  }
+  # Unquoted on purpose: a quoted ${a:|b} compares one joined string instead
+  # of removing elements.
+  vc_after=(${(k)aliases})
+  typeset -ga _vc_terminal_loaded_aliases=(${vc_after:|vc_before_aliases})
+  vc_after=(${(k)functions})
+  typeset -ga _vc_terminal_loaded_functions=(${vc_after:|vc_before_functions})
   _vc_terminal_bind_owned_python
   _vc_terminal_apply_fallback_prompt
+}
+
+_vc_terminal_catalog_emit() {
+  # One catalogue row: $1 group, $2 section, $3 name, $4 value or description.
+  # Group and section headers print once, and only above a row that matches.
+  emulate -L zsh
+  local vc_haystack="$1 $2 $3 $4"
+  if [[ -n $_vc_terminal_catalog_filter && ${(L)vc_haystack} != *"$_vc_terminal_catalog_filter"* ]]; then
+    return 0
+  fi
+  if [[ $1 != "$_vc_terminal_catalog_group" ]]; then
+    _vc_terminal_catalog_group="$1"
+    _vc_terminal_catalog_section=""
+    print -r -- "${_vc_terminal_catalog_head}$1${_vc_terminal_catalog_reset}"
+  fi
+  if [[ -n $2 && $2 != "$_vc_terminal_catalog_section" ]]; then
+    _vc_terminal_catalog_section="$2"
+    print -r -- "  ${_vc_terminal_catalog_dim}── $2${_vc_terminal_catalog_reset}"
+  fi
+  printf '    %s%-8s%s %s\n' "$_vc_terminal_catalog_name" "$3" "$_vc_terminal_catalog_reset" "$4"
+}
+
+aliases() {
+  # Grouped catalogue of what this profile loaded: one group per installed
+  # alias file (`## ` lines are its sections), then the profile's own commands.
+  # `aliases <text>` keeps rows whose group, section, name or value has <text>.
+  emulate -L zsh
+  local vc_file vc_group vc_section vc_line vc_value
+  local vc_shell_group='shell'
+  local vc_alias_re='^alias[[:space:]]+([^=[:space:]]+)=(.*)$'
+  local vc_function_re='^([A-Za-z][-A-Za-z0-9_.]*)[(][)][[:space:]]*[{][[:space:]]*(#[[:space:]]*(.*))?$'
+  local -a vc_files
+  typeset -g _vc_terminal_catalog_filter="${(L)*}"
+  typeset -g _vc_terminal_catalog_group="" _vc_terminal_catalog_section=""
+  typeset -g _vc_terminal_catalog_head="" _vc_terminal_catalog_dim=""
+  typeset -g _vc_terminal_catalog_name="" _vc_terminal_catalog_reset=""
+  if [[ -t 1 ]]; then
+    _vc_terminal_catalog_head=$'\e[1;34m'
+    _vc_terminal_catalog_dim=$'\e[2;33m'
+    _vc_terminal_catalog_name=$'\e[32m'
+    _vc_terminal_catalog_reset=$'\e[0m'
+  fi
+  [[ -z ${_vc_terminal_alias_dir:-} ]] || vc_files=("$_vc_terminal_alias_dir"/*.zsh(N))
+  for vc_file in "${vc_files[@]}"; do
+    vc_group="${vc_file:t:r}"
+    vc_section=""
+    while IFS= read -r vc_line || [[ -n $vc_line ]]; do
+      if [[ $vc_line == '## '* ]]; then
+        vc_section="${vc_line[4,-1]}"
+      elif [[ $vc_line =~ $vc_alias_re ]]; then
+        vc_value="${match[2]}"
+        if [[ $vc_value == \'*\' || $vc_value == \"*\" ]]; then
+          vc_value="${vc_value[2,-2]}"
+        fi
+        _vc_terminal_catalog_emit "$vc_group" "$vc_section" "${match[1]}" "$vc_value"
+      elif [[ $vc_line =~ $vc_function_re ]]; then
+        _vc_terminal_catalog_emit "$vc_group" "$vc_section" "${match[1]}" "${match[3]}"
+      fi
+    done < "$vc_file"
+  done
+  _vc_terminal_catalog_emit "$vc_shell_group" 'Profile' reload 're-read the installed product profile'
+  _vc_terminal_catalog_emit "$vc_shell_group" 'Profile' aliases '[text] list these shortcuts, optionally filtered'
+  if (( $+functions[atuin-search] )); then
+    _vc_terminal_catalog_emit "$vc_shell_group" 'History' 'Ctrl+R' 'search history with Atuin'
+  else
+    _vc_terminal_catalog_emit "$vc_shell_group" 'History' 'Ctrl+R' 'search history backwards'
+  fi
+  if (( $+functions[z] || $+aliases[z] )); then
+    _vc_terminal_catalog_emit "$vc_shell_group" 'History' 'z' '<directory> jump with zoxide'
+  fi
+  _vc_terminal_catalog_emit "$vc_shell_group" 'Python' python3 'generation CPython, not host python3'
+  _vc_terminal_catalog_emit "$vc_shell_group" 'Python' python 'same as python3'
 }
 
 reload() {
@@ -133,31 +210,57 @@ zstyle ':completion:*' menu select
 
 # One bounded snapshot, containing component names and statuses only. Never
 # capture init output: a third-party tool can print private configuration.
+# Warnings are counted on stderr at startup; notes only go to startup.log,
+# because the shell they describe is fully usable.
 typeset -ga _VC_TERMINAL_WARNINGS=()
+typeset -ga _VC_TERMINAL_NOTES=()
 
 # Public VC commands remain the installed PATH launchers. No automatic Frame
 # attach/create, provider process, or private generation-bin export belongs here.
 # Door python names are ZDOTDIR/bin wrappers plus functions over VIBECRAFTED_PYTHON.
-# Keep broken external completion installations out of this shell's scan.
-# Do not repair or unlink files owned by another product. compinit still audits
-# the remaining directories; -i excludes insecure entries instead of prompting.
-typeset -a vc_completion_path
+# A completion directory holding an unreadable entry (for example a Homebrew
+# link into an app that is gone) would make compinit fail on that one file.
+# Such a directory is replaced, at its fpath position, by a product-state
+# mirror of its readable entries, so the rest of it still completes. Never
+# repair or unlink files owned by another product. The mirror is rebuilt only
+# when the directory or its set of unreadable entries changes. compinit still
+# audits the remaining directories; -i excludes insecure entries instead of
+# prompting.
+typeset -a vc_completion_path vc_completion_readable vc_completion_unreadable
+vc_completion_mirror_root="${HISTFILE:h}/completion-mirror"
 for vc_completion_dir in $fpath; do
-  vc_completion_ok=1
+  vc_completion_readable=()
+  vc_completion_unreadable=()
   for vc_completion_file in "$vc_completion_dir"/_*(N); do
-    if [[ ! -r "$vc_completion_file" ]]; then
-      vc_completion_ok=0
-      break
+    if [[ -r "$vc_completion_file" ]]; then
+      vc_completion_readable+=("$vc_completion_file")
+    else
+      vc_completion_unreadable+=("${vc_completion_file:t}")
     fi
   done
-  if (( vc_completion_ok )); then
+  if (( ! ${#vc_completion_unreadable} )); then
     vc_completion_path+=("$vc_completion_dir")
-  else
-    _VC_TERMINAL_WARNINGS+=('skipped a completion directory containing unreadable entries')
+    continue
   fi
+  vc_completion_mirror="$vc_completion_mirror_root/${vc_completion_dir//\//%}"
+  vc_completion_stamp="${(j: :)vc_completion_unreadable}"
+  vc_completion_seen=""
+  [[ ! -r "$vc_completion_mirror/.unreadable" ]] || vc_completion_seen="$(<"$vc_completion_mirror/.unreadable")"
+  if [[ ! -d "$vc_completion_mirror" || "$vc_completion_dir" -nt "$vc_completion_mirror" \
+    || "$vc_completion_seen" != "$vc_completion_stamp" ]]; then
+    rm -rf -- "$vc_completion_mirror"
+    mkdir -p -- "$vc_completion_mirror"
+    (( ! ${#vc_completion_readable} )) \
+      || ln -s -- "${vc_completion_readable[@]}" "$vc_completion_mirror/"
+    print -r -- "$vc_completion_stamp" > "$vc_completion_mirror/.unreadable"
+  fi
+  vc_completion_path+=("$vc_completion_mirror")
+  _VC_TERMINAL_NOTES+=("skipped unreadable completion entries: $vc_completion_stamp")
 done
 fpath=("${vc_completion_path[@]}")
-unset vc_completion_path vc_completion_dir vc_completion_file vc_completion_ok
+unset vc_completion_path vc_completion_dir vc_completion_file vc_completion_readable \
+  vc_completion_unreadable vc_completion_mirror_root vc_completion_mirror \
+  vc_completion_stamp vc_completion_seen
 autoload -Uz compinit
 compinit -i -d "${HISTFILE:h}/zcompdump"
 if (( $+functions[compdef] )); then
@@ -244,12 +347,13 @@ fi
 
 # These plugins are already supplied by the product/host package paths.  Set
 # preferences before sourcing so their initialisation sees the intended order.
+# /usr covers the Debian/Ubuntu apt packages (/usr/share/<plugin>/<plugin>.zsh).
 ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE='fg=244'
 ZSH_AUTOSUGGEST_STRATEGY=(history completion)
 if [[ -n ${VC_TERMINAL_PLUGIN_PREFIXES:-} ]]; then
   vc_plugin_prefixes=(${=VC_TERMINAL_PLUGIN_PREFIXES})
 else
-  vc_plugin_prefixes=(/opt/homebrew /usr/local "$_vc_terminal_product_shell/plugins")
+  vc_plugin_prefixes=(/opt/homebrew /usr/local /usr "$_vc_terminal_product_shell/plugins")
 fi
 for vc_plugin in zsh-autosuggestions zsh-syntax-highlighting; do
   vc_plugin_file=""
@@ -272,7 +376,7 @@ _vc_terminal_load_owned_layer
 (
   umask 077
   print -r -- 'Vibecrafted terminal startup' > "${HISTFILE:h}/startup.log"
-  for vc_warning in "${_VC_TERMINAL_WARNINGS[@]}"; do
+  for vc_warning in "${_VC_TERMINAL_WARNINGS[@]}" "${_VC_TERMINAL_NOTES[@]}"; do
     print -r -- "$vc_warning" >> "${HISTFILE:h}/startup.log"
   done
 )
@@ -286,7 +390,7 @@ if [[ -t 1 ]]; then
   print '  vc-frame list-sessions   Find an existing workspace'
   print '  vc-frame attach <name>   Return to a workspace'
   print '  vibecrafted --help      Explore commands'
-  print '  aliases                 List product shortcuts'
+  print '  aliases [text]          List product shortcuts (vcf-* for vc-frame)'
   print '  reload                  Re-read the installed product profile'
   (( ! $+commands[atuin] )) || print '  Ctrl+R history'
   (( ! $+commands[zoxide] )) || print '  z <directory> jump'
