@@ -1717,46 +1717,6 @@ def test_host_shell_contract_checks_every_login_and_interactive_startup_file(
         rcfile.unlink()
 
 
-def test_frontier_contract_rejects_checkout_link(tmp_path: Path, monkeypatch) -> None:
-    home = tmp_path / "home"
-    config_home = home / ".config"
-    frontier = config_home / "vetcoders" / "frontier"
-    checkout = tmp_path / "checkout"
-    frontier.mkdir(parents=True)
-    checkout.mkdir()
-    (frontier / "legacy.bak.1").symlink_to(checkout)
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
-
-    [finding] = installer._managed_frontier_contract_findings()
-
-    assert finding.level == "fail"
-    assert finding.component == "frontier-links"
-    assert "legacy.bak.1" in finding.message
-
-
-def test_frontier_contract_accepts_installed_generation_link(
-    tmp_path: Path, monkeypatch
-) -> None:
-    home = tmp_path / "home"
-    config_home = home / ".config"
-    runtime_home = home / ".local" / "share" / "vibecrafted"
-    frontier = config_home / "vetcoders" / "frontier"
-    installed = runtime_home / "tools" / "vibecrafted-current" / "config"
-    frontier.mkdir(parents=True)
-    installed.mkdir(parents=True)
-    (installed / "starship.toml").write_text("format = ''\n", encoding="utf-8")
-    (frontier / "starship.toml").symlink_to(installed / "starship.toml")
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
-    monkeypatch.setenv("XDG_DATA_HOME", str(home / ".local" / "share"))
-
-    [finding] = installer._managed_frontier_contract_findings()
-
-    assert finding.level == "ok"
-    assert finding.component == "frontier-links"
-
-
 def test_public_launcher_contract_rejects_checkout_link(
     tmp_path: Path, monkeypatch
 ) -> None:

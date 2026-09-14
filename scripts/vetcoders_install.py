@@ -11698,43 +11698,6 @@ def _host_shell_contract_findings() -> list[DoctorFinding]:
     ]
 
 
-def _managed_frontier_contract_findings() -> list[DoctorFinding]:
-    """Fail if any symlink under the XDG 'frontier' config directory resolves outside the
-    installed runtime root.
-    """
-    frontier = xdg_config_home() / "vetcoders" / "frontier"
-    installed_root = vibecrafted_runtime_home().resolve(strict=False)
-    unsafe: list[str] = []
-    if frontier.is_dir():
-        for path in sorted(frontier.rglob("*")):
-            if not path.is_symlink():
-                continue
-            try:
-                target = path.resolve(strict=True)
-            except (OSError, RuntimeError):
-                unsafe.append(str(path.relative_to(frontier)))
-                continue
-            if not _is_subpath(target, installed_root):
-                unsafe.append(str(path.relative_to(frontier)))
-    if unsafe:
-        return [
-            DoctorFinding(
-                "fail",
-                "frontier-links",
-                f"{len(unsafe)} frontier link(s) escape the installed runtime: "
-                + ", ".join(unsafe[:5])
-                + (" ..." if len(unsafe) > 5 else ""),
-            )
-        ]
-    return [
-        DoctorFinding(
-            "ok",
-            "frontier-links",
-            "all managed frontier links resolve inside the installed runtime",
-        )
-    ]
-
-
 def _public_launcher_contract_findings() -> list[DoctorFinding]:
     """Reject Vibecrafted-owned launchers that resolve into a Git checkout.
 
@@ -12277,7 +12240,6 @@ def run_doctor(store_path: Path, state: InstallState) -> list[DoctorFinding]:
     findings.extend(_runtime_root_contract_findings())
     findings.extend(_runtime_generation_contract_findings())
     findings.extend(_host_shell_contract_findings())
-    findings.extend(_managed_frontier_contract_findings())
     findings.extend(_public_launcher_contract_findings())
     findings.extend(_slack_provider_contract_findings())
 
