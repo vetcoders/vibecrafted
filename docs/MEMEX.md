@@ -44,17 +44,23 @@ The fallthrough rule is documented inline in
 
 ## Configuration
 
-Two paths; the TOML file wins when both are present.
+Two paths; the `[memex]` table wins when both are present.
 
-### Option A — operator config file (recommended)
+### Option A — the `[memex]` table of the operator config (recommended)
 
-Copy the template:
+Memex settings are one table of `~/.config/vibecrafted/config.toml`, the same
+file that holds `[server]` (`XDG_CONFIG_HOME` is honoured). A token makes that
+file a secret, so keep it at mode 0600:
 
 ```bash
-mkdir -p ~/.config/vetcoders
-cp config/memex.toml.example ~/.config/vetcoders/memex.toml
-# Edit ~/.config/vetcoders/memex.toml — fill in endpoint and token.
+mkdir -p ~/.config/vibecrafted
+cat config/memex.toml.example >> ~/.config/vibecrafted/config.toml
+chmod 600 ~/.config/vibecrafted/config.toml
+# Edit the [memex] table — fill in endpoint and token.
 ```
+
+A standalone memex file from older installs is not read; the client logs one
+notice naming the `[memex]` table instead.
 
 Fields:
 

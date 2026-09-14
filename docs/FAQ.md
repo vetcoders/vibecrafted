@@ -13,7 +13,7 @@ For the long-form answer bank, see [FAQ-ANSWERED.md](FAQ-ANSWERED.md).
 
 - **Can I install without editing my shell config?**
   Yes. You can opt out of shell-helper installation and source
-  `${XDG_CONFIG_HOME:-$HOME/.config}/vetcoders/vc-skills.sh` manually when you want the helpers in your current session.
+  `${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/shell/vc-skills.sh` manually when you want the helpers in your current session.
 
 - **Do you have a guided GUI install path?**
   Yes. The public product is `Vibecrafted.app`, carried by the single signed and notarized canonical DMG on the [latest release](https://github.com/vetcoders/vibecrafted/releases/latest). Checkout-only `make wizard` and `make install` surfaces are maintainer tools, not alternative product installers.

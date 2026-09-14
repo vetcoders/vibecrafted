@@ -24,13 +24,13 @@ Answers from the trenches. This is the truth as of April 2026.
 
 - **Can I install 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. without giving it write access to my shell rc files?**
   Yes. You can opt-out of the shell-helper layer during the interactive install. You'll just need to manually source the
-  helper file (`${XDG_CONFIG_HOME:-$HOME/.config}/vetcoders/vc-skills.sh`) if you want the high-level aliases like
+  helper file (`${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/shell/vc-skills.sh`) if you want the high-level aliases like
   `vc-init`.
 
 - **What if I already have a Starship/Atuin config — will 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. overwrite it?**
   No. It detects existing configs and prompts you. It can install the 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. versions alongside yours or skip them
-  entirely. The repo now ships optional vc-frame sidecars too, but they stay opt-in: companion frontier paths can
-  override them per asset, and nothing launches a dashboard unless you ask for it.
+  entirely. Vibecrafted's own presets live only in `~/.config/vibecrafted/`; it never reads or writes your own
+  Starship/Atuin configuration, and nothing launches a dashboard unless you ask for it.
 
 - **How do I move my installation to a custom directory?**
   Set `VIBECRAFTED_HOME` in your environment before running the installer. The installer respects this variable for the
