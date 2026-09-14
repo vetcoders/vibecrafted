@@ -30,7 +30,9 @@ impl TestHome {
         ));
         fs::create_dir_all(path.join("control_plane/runtime_runs/run-http"))
             .expect("fixture run directory");
-        let writer = path.join("writer.sh");
+        let bin = path.join("bin");
+        fs::create_dir_all(&bin).expect("writer bin directory");
+        let writer = bin.join("vibecrafted");
         let writer_mode = path.join("writer-mode");
         let writer_pid = path.join("writer.pid");
         fs::write(&writer_mode, "pass").expect("writer mode");
@@ -50,9 +52,16 @@ impl TestHome {
         fs::set_permissions(&writer, permissions).expect("writer executable");
         // Safety: this integration binary contains one test, so its process-wide
         // observation configuration has a single owner for the test lifetime.
+        // The production writer name is the constant "vibecrafted"; the fixture
+        // shadows it on PATH with this script.
+        let path_env = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
         unsafe {
             std::env::set_var("VIBECRAFTED_HOME", &path);
-            std::env::set_var("VC_RUN_OBSERVATION_WRITER", &writer);
+            std::env::set_var("PATH", path_env);
             std::env::set_var("VC_RUN_OBSERVATION_WRITER_TIMEOUT_SECONDS", "5");
             std::env::set_var("VC_RUN_AWAIT_POLL_SECONDS", "0.02");
             std::env::set_var("VC_RUN_AWAIT_EMPTY_GRACE_SECONDS", "0.03");
@@ -111,7 +120,6 @@ impl Drop for TestHome {
     fn drop(&mut self) {
         unsafe {
             std::env::remove_var("VIBECRAFTED_HOME");
-            std::env::remove_var("VC_RUN_OBSERVATION_WRITER");
             std::env::remove_var("VC_RUN_OBSERVATION_WRITER_TIMEOUT_SECONDS");
             std::env::remove_var("VC_RUN_AWAIT_POLL_SECONDS");
             std::env::remove_var("VC_RUN_AWAIT_EMPTY_GRACE_SECONDS");
