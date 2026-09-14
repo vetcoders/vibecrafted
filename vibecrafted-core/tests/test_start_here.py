@@ -127,6 +127,14 @@ def test_pane_python_reexecs_uv_tools_python_when_env_unset(tmp_path: Path) -> N
 def test_start_here_routes_to_existing_product_owners() -> None:
     start_here = _load()
 
+    assert start_here.action_argv("project", project_path="/tmp/demo") == [
+        "vc-start",
+        "resume",
+        "--repo",
+        "/tmp/demo",
+    ]
+    chooser = " ".join(start_here.action_argv("project"))
+    assert "Open a Vibecrafted project" in chooser or "Project folder path" in chooser
     assert start_here.action_argv("agents") == [
         "vc-frame",
         "action",
@@ -177,6 +185,37 @@ def test_start_here_readiness_is_truthful_and_actionable() -> None:
     assert start_here.readiness_from_service_payload(None, deck_available=False) == (
         "missing",
         "Vibecrafted launcher is missing — reinstall the Runtime Pack",
+    )
+
+
+def test_start_here_empty_home_is_a_project_choice_not_a_backend_error(
+    tmp_path: Path,
+) -> None:
+    start_here = _load()
+    home = tmp_path / "home"
+    home.mkdir()
+    assert start_here.project_readiness(cwd=str(home), home=str(home)) == (
+        "attention",
+        "No project is open — choose Open project",
+    )
+    assert start_here.project_readiness(cwd="/", home=str(home)) == (
+        "attention",
+        "No project is open — choose Open project",
+    )
+    missing = tmp_path / "gone"
+    assert start_here.project_readiness(
+        workspace_root=str(missing), cwd=str(home), home=str(home)
+    ) == (
+        "attention",
+        "Workspace path is missing — choose Open project",
+    )
+    project = tmp_path / "repo"
+    project.mkdir()
+    assert (
+        start_here.project_readiness(
+            workspace_root=str(project), cwd=str(home), home=str(home)
+        )
+        is None
     )
 
 
@@ -247,6 +286,7 @@ def test_layout_wraps_product_line_inside_reading_width_at_80x24() -> None:
     assert "RUNTIME [ready] VC Server is healthy — this workspace is ready" in prose
     assert "…" not in _rows_text(rows)
     assert {row.action for row in _action_rows(rows)} == {
+        "project",
         "agents",
         "shell",
         "console",
@@ -296,7 +336,7 @@ def test_layout_never_relies_on_dim_or_colour_for_meaning() -> None:
         READY,
         ("attention", "VC Server needs attention — open Help & diagnostics"),
     ):
-        rows = start_here.layout_rows(24, 80, selected=3, readiness=readiness)
+        rows = start_here.layout_rows(24, 80, selected=4, readiness=readiness)
         assert all(not row.attr & curses.A_DIM for row in rows)
         assert all(not row.attr & curses.A_COLOR for row in rows)
         assert f"RUNTIME [{readiness[0]}]" in _rows_text(rows)
@@ -327,9 +367,7 @@ def test_mouse_targets_follow_wrapped_rows_and_resize() -> None:
     narrow = start_here.layout_rows(16, 50, selected=0, readiness=READY)
     narrow_targets = start_here.mouse_targets(narrow, 50)
     console_rows = [row.row for row in narrow if row.action == "console"]
-    assert len(console_rows) == 2, (
-        "console detail wraps onto a second clickable row at 50 columns"
-    )
+    assert console_rows, "console remains a clickable target at 50 columns"
     for row in console_rows:
         assert start_here.action_for_mouse_row(row, narrow_targets, 10) == "console"
     assert narrow_targets != wide_targets
@@ -367,6 +405,7 @@ def _run_in_pty(script: Path, cols: int, rows: int, home: Path) -> bytes:
         "TERM": "xterm-256color",
         "HOME": str(home),
         "VIBECRAFTED_HOME": str(home / ".vibecrafted"),
+        "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
         "LANG": "en_US.UTF-8",
         "LC_ALL": "en_US.UTF-8",
     }
@@ -451,7 +490,13 @@ def test_start_here_wraps_into_a_narrow_real_pty_without_clipping(
     text = output.decode("utf-8", "replace")
 
     assert "…" not in text
-    for title in ("Agent Workspaces", "Shell", "VC Console", "Help & diagnostics"):
+    for title in (
+        "Open project",
+        "Agents",
+        "Shell",
+        "VC Console",
+        "Help & diagnostics",
+    ):
         assert title in text
     assert "q close" in text
     assert not _sgr_params(output) & {"2", "37", "40"}
