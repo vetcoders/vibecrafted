@@ -227,7 +227,9 @@ fn twenty_real_http_await_clients_share_one_server_observation() {
     .expect("server config");
     write_runtime_meta(&home, "running", None);
 
-    let writer = root.join("control-plane-writer.sh");
+    let writer_bin = root.join("bin");
+    fs::create_dir_all(&writer_bin).expect("writer bin directory");
+    let writer = writer_bin.join("vibecrafted");
     fs::write(&writer, "#!/bin/sh\nexit 0\n").expect("writer shim");
     let mut permissions = fs::metadata(&writer)
         .expect("writer metadata")
@@ -235,11 +237,18 @@ fn twenty_real_http_await_clients_share_one_server_observation() {
     permissions.set_mode(0o755);
     fs::set_permissions(&writer, permissions).expect("writer executable");
 
+    // The production writer name is the constant "vibecrafted"; shadow it on
+    // PATH for the spawned server with this fixture script.
+    let path_env = format!(
+        "{}:{}",
+        writer_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
     let mut server = server_command();
     server
         .args(["--addr", &format!("127.0.0.1:{port}")])
         .env("VIBECRAFTED_HOME", &home)
-        .env("VC_RUN_OBSERVATION_WRITER", &writer)
+        .env("PATH", path_env)
         .env("VC_RUN_OBSERVATION_WRITER_TIMEOUT_SECONDS", "5")
         .env("VC_RUN_AWAIT_POLL_SECONDS", "0.03")
         .env("VC_RUN_AWAIT_EMPTY_GRACE_SECONDS", "0.05")

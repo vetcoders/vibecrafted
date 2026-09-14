@@ -171,13 +171,12 @@ struct WriterConfig {
 
 impl WriterConfig {
     fn production() -> Option<Self> {
-        let executable =
-            std::env::var_os("VC_RUN_OBSERVATION_WRITER").unwrap_or_else(|| "vibecrafted".into());
-        if executable == "off" {
+        // "off" disables the writer; the value never reaches Command::new.
+        if std::env::var_os("VC_RUN_OBSERVATION_WRITER").is_some_and(|value| value == "off") {
             return None;
         }
         Some(Self {
-            executable: executable.into(),
+            executable: PathBuf::from("vibecrafted"),
             timeout: env_seconds(
                 "VC_RUN_OBSERVATION_WRITER_TIMEOUT_SECONDS",
                 DEFAULT_WRITER_TIMEOUT_SECONDS,
@@ -369,10 +368,10 @@ async fn observe_once(
     }
 }
 
-/// The writer executable arrives from `VC_RUN_OBSERVATION_WRITER`; validate
-/// it before it becomes a spawned command. Bare names must be exactly
-/// `vibecrafted` (re-materialized as a literal so the env value never flows
-/// into `Command::new`); anything else must be an absolute path to a regular,
+/// Production spawns the constant `vibecrafted` name; tests inject
+/// `WriterConfig` directly. Validate the configured value before it becomes a
+/// spawned command: bare names must be exactly `vibecrafted` (re-materialized
+/// as a literal); anything else must be an absolute path to a regular,
 /// non-symlink file canonicalizing under the runtime home.
 fn validated_writer_executable(
     config: &WriterConfig,
