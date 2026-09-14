@@ -76,6 +76,15 @@ jobs:
         run: make check
       - name: Install uv
         uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+      - name: Pin uv to a managed Python on macOS
+        if: matrix.os == 'macOS'
+        run: |
+          # Homebrew's framework CPython resolves sys.executable through
+          # symlinks, which hides the generation interpreter from the
+          # runtime-bootstrap PYTHONPATH scrub and fails the installed-spawn
+          # installer tests. A uv-managed CPython keeps the invoked path,
+          # matching the operator lane and production Runtime Packs.
+          echo "UV_PYTHON_PREFERENCE=only-managed" >> "$GITHUB_ENV"
       - name: Run Semgrep security gate
         run: make semgrep
       - name: Run installer tests
