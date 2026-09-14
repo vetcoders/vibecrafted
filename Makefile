@@ -103,16 +103,16 @@ KEYS ?= $(HOME)/.keys
 RELEASE_FLAGS ?=
 
 app:
-	@VC_RELEASE_FLAGS='$(RELEASE_FLAGS)' zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" --app-only $${=VC_RELEASE_FLAGS}'
+	@VC_RELEASE_FLAGS='$(RELEASE_FLAGS)' zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" --app-only $${=VC_RELEASE_FLAGS} 2>&1'
 
 dmg dmg-signed release-local:
-	@VC_RELEASE_FLAGS='$(RELEASE_FLAGS)' zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" --no-notarize $${=VC_RELEASE_FLAGS}'
+	@VC_RELEASE_FLAGS='$(RELEASE_FLAGS)' zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" --no-notarize $${=VC_RELEASE_FLAGS} 2>&1'
 
 notarize:
-	@VC_RELEASE_FLAGS='$(RELEASE_FLAGS)' zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" --notarize-only $${=VC_RELEASE_FLAGS}'
+	@VC_RELEASE_FLAGS='$(RELEASE_FLAGS)' zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" --notarize-only $${=VC_RELEASE_FLAGS} 2>&1'
 
 release:
-	@VC_RELEASE_FLAGS='$(RELEASE_FLAGS)' zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" $${=VC_RELEASE_FLAGS}'
+	@VC_RELEASE_FLAGS='$(RELEASE_FLAGS)' zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" $${=VC_RELEASE_FLAGS} 2>&1'
 
 # Build the standalone macOS Runtime Pack directly from source and native donor
 # inputs. Vibecrafted.app consumes this carrier; it is not the carrier's source.
@@ -124,7 +124,7 @@ release:
 # then `make install` had nothing but a glob over eighteen legitimate historical
 # packs, which it correctly refused as ambiguous.
 runtime-pack:
-	@VC_RELEASE_FLAGS='$(RELEASE_FLAGS)' zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" --runtime-pack-only $${=VC_RELEASE_FLAGS}'
+	@VC_RELEASE_FLAGS='$(RELEASE_FLAGS)' zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" --runtime-pack-only $${=VC_RELEASE_FLAGS} 2>&1'
 	@bash -c '. "$(CURDIR)/$(RUNTIME_PACK_SELECTION_LIB)"; \
 	runtime_pack_selection_read "$(CURDIR)" "" "" \
 		|| { printf "%s\n" "$${RUNTIME_PACK_SELECTION_ERROR:-release builder produced no standalone Runtime Pack}" >&2; exit 1; }; \

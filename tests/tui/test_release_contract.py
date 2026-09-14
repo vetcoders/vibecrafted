@@ -1051,6 +1051,64 @@ def test_the_embedded_interpreter_forgets_where_it_was_seeded() -> None:
     assert 'normalize_embedded_python_paths "$runtime" "$python_seed"' in builder
 
 
+def test_embedded_interpreter_forgets_the_python_build_standalone_runner_home(
+    tmp_path: Path,
+) -> None:
+    """CPython 3.14 ships _sysconfig_vars__darwin_darwin.json with the PBS CI
+    runner's home frozen into `userbase`. The product contract refuses any
+    /Users path in a config file, so the release died at the bundled verifier.
+    Run the real normalizer function on a generation-shaped tree.
+    """
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+    start = builder.index("normalize_embedded_python_paths() {")
+    end = builder.index("\n}\n", start) + len("\n}\n")
+    function = builder[start:end]
+
+    runtime = tmp_path / "runtime"
+    seed = tmp_path / "python-seed.XXXXXX"
+    lib = runtime / "python/lib/python3.14"
+    lib.mkdir(parents=True)
+    vars_json = lib / "_sysconfig_vars__darwin_darwin.json"
+    vars_json.write_text(
+        json.dumps(
+            {
+                "userbase": "/Users/runner/.local",
+                "prefix": f"{seed}/python",
+                "EXT_SUFFIX": ".cpython-314-darwin.so",
+            },
+            indent=4,
+        ),
+        encoding="utf-8",
+    )
+    (lib / "_sysconfigdata__darwin_darwin.py").write_text(
+        f"build_time_vars = {{'prefix': '{seed}/python'}}\n", encoding="utf-8"
+    )
+    script = tmp_path / "normalize.sh"
+    script.write_text(
+        function + '\nnormalize_embedded_python_paths "$1" "$2"\n', encoding="utf-8"
+    )
+
+    result = subprocess.run(
+        ["/bin/bash", str(script), str(runtime), str(seed)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    values = json.loads(vars_json.read_text(encoding="utf-8"))
+    assert values["userbase"] == "/usr/src/python-build-standalone/.local"
+    assert values["prefix"] == "/usr/src/python-seed/python"
+    assert values["EXT_SUFFIX"] == ".cpython-314-darwin.so"
+    for path in lib.iterdir():
+        text = path.read_text(encoding="utf-8")
+        assert "/Users/" not in text, path.name
+        assert str(seed) not in text, path.name
+
+
 def test_release_binaries_never_probe_the_machine_that_compiled_them() -> None:
     """`env!("CARGO_MANIFEST_DIR")` is opaque to --remap-path-prefix.
 

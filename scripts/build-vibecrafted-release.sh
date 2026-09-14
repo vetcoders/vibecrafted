@@ -476,6 +476,31 @@ for path in runtime.rglob("*"):
     rewritten += 1
 
 print(f"normalized the embedded interpreter seed path in {rewritten} text file(s)")
+
+# CPython 3.13+ also ships _sysconfig_vars__*.json. python-build-standalone
+# freezes its CI runner's home directory into it (the userbase value). The
+# runtime recomputes userbase at startup, so the frozen value is informational
+# only, but it is an account-home absolute path the product contract refuses.
+import json
+import re
+
+account_home = re.compile(r"^/(?:Users|home)/[^/]+(?=/|$)")
+build_placeholder = "/usr/src/python-build-standalone"
+for path in runtime.rglob("_sysconfig_vars__*.json"):
+    if path.is_symlink() or not path.is_file():
+        continue
+    values = json.loads(path.read_text(encoding="utf-8"))
+    changed = [
+        key
+        for key, value in values.items()
+        if isinstance(value, str) and account_home.match(value)
+    ]
+    if not changed:
+        continue
+    for key in changed:
+        values[key] = account_home.sub(build_placeholder, values[key], count=1)
+    path.write_text(json.dumps(values, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(f"normalized the build account home in {path.relative_to(runtime)}: {', '.join(sorted(changed))}")
 if binary:
     print(f"binary files still naming the seed: {binary}", file=sys.stderr)
     raise SystemExit(1)

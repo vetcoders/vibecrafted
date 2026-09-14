@@ -1605,6 +1605,41 @@ def test_host_path_scan_allows_only_known_libpython_documentation_paths(
     )
 
 
+@pytest.mark.parametrize("name", ["python", "python3", "python3.14"])
+def test_host_path_scan_allows_libpython_documentation_paths_in_portable_python_executables(
+    tmp_path: Path, name: str
+) -> None:
+    """python-build-standalone 3.14 carries site.py's examples in the executable too."""
+    payload = tmp_path / name
+    relative = f"Contents/Resources/runtime/python/bin/{name}"
+    payload.write_bytes(
+        b"example /usr/local/lib/python2.5/site-packages "
+        b"/usr/local/lib/python2.5/site-packages/bar "
+        b"/usr/local/lib/python2.5/site-packages/foo"
+    )
+    contract._reject_host_bound_paths(payload, relative=relative, kind="executable")
+
+    payload.write_bytes(b"load /usr/local/lib/libescape.dylib")
+    _assert_error(
+        contract.E_PATH,
+        lambda: contract._reject_host_bound_paths(
+            payload,
+            relative=relative,
+            kind="executable",
+        ),
+    )
+    # Only the portable interpreter names qualify; a look-alike stays refused.
+    payload.write_bytes(b"example /usr/local/lib/python2.5/site-packages")
+    _assert_error(
+        contract.E_PATH,
+        lambda: contract._reject_host_bound_paths(
+            payload,
+            relative="Contents/Resources/runtime/bin/python3-helper",
+            kind="executable",
+        ),
+    )
+
+
 def test_host_path_scan_allows_vendored_openssl_openssl_dir_strings(
     tmp_path: Path,
 ) -> None:
