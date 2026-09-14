@@ -13,6 +13,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -55,6 +56,56 @@ def shell_for_path(path: Path) -> str | None:
 def is_shell_path(path: Path) -> bool:
     """True if `path` has a shell suffix or a recognized shell shebang."""
     return path.suffix.lower() in SHELL_SUFFIXES or shell_for_path(path) is not None
+
+
+# sh/Python polyglot launchers (bin/vc-*): an sh prelude opened by `"""":` on
+# line two and closed by `":"""`, then a Python module. Only the prelude is sh.
+POLYGLOT_OPENER = '"""":'
+POLYGLOT_CLOSER = '":"""'
+
+
+def shell_prelude(path: Path) -> str | None:
+    """Return the sh prelude of a polyglot launcher, or None for plain files."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except (OSError, UnicodeDecodeError):
+        return None
+    if len(lines) < 2 or not lines[0].startswith("#!"):
+        return None
+    if lines[1].strip() != POLYGLOT_OPENER:
+        return None
+    for index, line in enumerate(lines[2:], start=2):
+        if line.strip() == POLYGLOT_CLOSER:
+            return "".join(lines[:index])
+    return None
+
+
+def materialize_preludes(files: list[Path], workdir: Path) -> list[Path]:
+    """Swap each polyglot launcher for a copy of its sh prelude under `workdir`.
+
+    The Python body after the prelude is not shell and must not be linted as
+    shell; the prelude keeps the original shebang and file name so the dialect
+    and the reported name stay the same.
+    """
+    checkable: list[Path] = []
+    for index, path in enumerate(files):
+        prelude = shell_prelude(path)
+        if prelude is None:
+            checkable.append(path)
+            continue
+        target = workdir / str(index) / path.name
+        target.parent.mkdir(parents=True)
+        target.write_text(prelude, encoding="utf-8")
+        checkable.append(target)
+    return checkable
+
+
+def display_path(path: Path) -> str:
+    """Repo-relative name for reports; a materialized prelude keeps its own path."""
+    try:
+        return str(path.relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
 
 
 def tracked_shell_files(repo_root: Path = REPO_ROOT) -> list[Path]:
@@ -169,14 +220,14 @@ def run_syntax_fallback(files: list[Path]) -> int:
         if result.returncode == 0:
             continue
         failed = True
-        print(f"[fail] {path.relative_to(REPO_ROOT)}")
+        print(f"[fail] {display_path(path)}")
         if result.stdout:
             print(result.stdout.rstrip())
         if result.stderr:
             print(result.stderr.rstrip(), file=sys.stderr)
 
     if skipped:
-        names = ", ".join(str(p.relative_to(REPO_ROOT)) for p in skipped[:5])
+        names = ", ".join(display_path(p) for p in skipped[:5])
         more = f" (+{len(skipped) - 5} more)" if len(skipped) > 5 else ""
         print(
             f"[skip] {len(skipped)} file(s) unverifiable — interpreter missing"
@@ -218,19 +269,23 @@ def main(argv: list[str] | None = None) -> int:
         print("No shell files to check.")
         return 0
 
-    if shutil.which("shellcheck"):
-        return run_shellcheck(files)
+    with tempfile.TemporaryDirectory(prefix="check-shell-prelude-") as workdir:
+        files = materialize_preludes(files, Path(workdir))
+        if shutil.which("shellcheck"):
+            return run_shellcheck(files)
 
-    print("shellcheck not found; running syntax-only shell checks with local shells.")
-
-    if args.require_shellcheck or os.environ.get("CI"):
         print(
-            "shellcheck is required for this quality gate but is not installed.",
-            file=sys.stderr,
+            "shellcheck not found; running syntax-only shell checks with local shells."
         )
-        return 127
 
-    return run_syntax_fallback(files)
+        if args.require_shellcheck or os.environ.get("CI"):
+            print(
+                "shellcheck is required for this quality gate but is not installed.",
+                file=sys.stderr,
+            )
+            return 127
+
+        return run_syntax_fallback(files)
 
 
 if __name__ == "__main__":
