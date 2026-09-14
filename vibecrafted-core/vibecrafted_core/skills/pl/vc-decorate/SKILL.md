@@ -183,12 +183,12 @@ spójne znaki z tego samego bloku Unicode.
 | ----------- | -------------------- | ------------------------ |
 | Ramki       | `╭─╮│╰─╯`            | Box Drawing              |
 | Separatory  | `·` `─` `━` `┄`      | Box Drawing, Punctuation |
-| Znaczniki   | `✓` `✗` `⚠`          | Dingbats                 |
-| Punktory    | `▸` `▪` `◆` `›`      | Geometric Shapes         |
+| Znaczniki   | `✓` `✗` `⚠`         | Dingbats                 |
+| Punktory    | `▸` `▪` `◆` `›`     | Geometric Shapes         |
 | Postęp      | `⣿⣶⣤⣀` `█▓▒░`        | Braille, Block Elements  |
 | Sparkline'y | `⣀⣤⣶⣿` (8px/komórkę) | Braille (256 kombinacji) |
 | Strzałki    | `→` `←` `↑` `↓` `⟶`  | Arrows                   |
-| Status      | `⚒` `⚡` `⚙` `⟳`     | Misc Symbols             |
+| Status      | `⚒` `⚡` `⚙` `⟳`   | Misc Symbols             |
 | Marki       | `🄵·🅁·🄰·🄼·🄴·🅆·🄾·🅁·🄺`  | Enclosed Alphanumerics   |
 
 **Sparkline'y Braille'a** zasługują na uwagę. Pojedynczy znak Braille'a koduje 8 kropek

@@ -28,13 +28,13 @@ Total wall-clock: **2h 59m** session start → close-out.
 
 ## What was delivered in those ~3 hours
 
-| Artifact                | Commit                                  | LOC              | Surface                                                                               | Survived?                                                                            |
-| ----------------------- | --------------------------------------- | ---------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| vibecrafted supervisor  | `0fc9206`                               | 999 / 25 files   | Python supervisor + bin/vc-\* wrappers + session_id capture + last-finisher synthesis | ✅ ruff+mypy+pytest 148+ green                                                       |
-| vc-console spawn events | `4a9c5e5`                               | 1089 / 17 files  | IpcEvent::SpawnUpdate + jsonl bridge + tray rendering                                 | ✅ core IPC smoke green; 2 orthog cleanups flagged                                   |
-| wezterm Lua hooks       | `02645e75c`                             | (multiple)       | Tab title + status bar + toast + events.jsonl tail                                    | ✅ 8/8 busted + 17823-line integration smoke                                         |
+| Artifact                | Commit                                  | LOC              | Surface                                                                               | Survived?                                                                             |
+| ----------------------- | --------------------------------------- | ---------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| vibecrafted supervisor  | `0fc9206`                               | 999 / 25 files   | Python supervisor + bin/vc-\* wrappers + session_id capture + last-finisher synthesis | ✅ ruff+mypy+pytest 148+ green                                                        |
+| vc-console spawn events | `4a9c5e5`                               | 1089 / 17 files  | IpcEvent::SpawnUpdate + jsonl bridge + tray rendering                                 | ✅ core IPC smoke green; 2 orthog cleanups flagged                                    |
+| wezterm Lua hooks       | `02645e75c`                             | (multiple)       | Tab title + status bar + toast + events.jsonl tail                                    | ✅ 8/8 busted + 17823-line integration smoke                                          |
 | vc\_ apprt runtime      | `acd99c746` + `83e9acb80` + `4d0e72e4b` | (multiple)       | Zig 0.16 fix + session_id DiskPayload + terminal lifecycle emitter                    | ✅ apprt 74/74 + smoke; ⚠ repo-wide test fails on inherited substrate (not B-2 lane) |
-| iTerm2 Python plugin    | `eb6beb8`                               | 1382 / 11 files  | AutoLaunch + StatusBar + Triggers + GPL-separate-install                              | ✅ pytest 173/173, GPL boundary smoke clean                                          |
+| iTerm2 Python plugin    | `eb6beb8`                               | 1382 / 11 files  | AutoLaunch + StatusBar + Triggers + GPL-separate-install                              | ✅ pytest 173/173, GPL boundary smoke clean                                           |
 | Sandbox adapter         | (uncommitted, dirty worktree)           | (multiple files) | SandboxAdapter + msbserver lifecycle + policy + tests + docs                          | ⚠ SUBSTRATE-FAILURE: krunvm missing on host                                          |
 
 **5 of 6 work units survived contact with reality.** 1 hit honest

@@ -42,11 +42,11 @@ security reports.
 
 When signing contributions or generated artifacts, use the appropriate mark:
 
-| Context      | Mark                      |
-| ------------ | ------------------------- |
+| Context      | Mark                       |
+| ------------ | -------------------------- |
 | Full product | `⚒🅅·🄸·🄱·🄴·🄲·🅡·🄰·🄵·🅃·🄴·🄳·` |
-| Design work  | `𝓥𝓲𝓫𝓮𝓬𝓻𝓪𝓯𝓽𝓮𝓭`             |
-| Source code  | `// 𝚟𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍.`         |
+| Design work  | `𝓥𝓲𝓫𝓮𝓬𝓻𝓪𝓯𝓽𝓮𝓭`              |
+| Source code  | `// 𝚟𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍.`          |
 
 ---
 
