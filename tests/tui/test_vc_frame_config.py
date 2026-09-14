@@ -236,6 +236,8 @@ def test_operator_layout_matches_vibecrafted_standard() -> None:
     assert "default_tab_template" in payload
     assert "compact-bar" in payload
     assert "status-bar" in payload
+    assert "session_layer" in payload
+    assert 'tab name="Start here" focus=true' in payload
     assert "vibecrafted start" in payload
     # Rejected parallel path (ignore comments).
     active = "\n".join(

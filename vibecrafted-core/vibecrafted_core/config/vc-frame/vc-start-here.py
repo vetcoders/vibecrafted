@@ -90,7 +90,8 @@ PRODUCT_LINE = (
 )
 
 ACTIONS = (
-    ("Agent Workspaces", "Start or resume an Agent in the current workspace", "agents"),
+    ("Open project", "Choose a folder and enter or return to its workspace", "project"),
+    ("Agents", "Start or return to an Agent in this workspace", "agents"),
     ("Shell", "Open the installed work shell", "shell"),
     ("VC Console", "Open native run status and reports", "console"),
     ("Help & diagnostics", "Check this installed runtime and its owner", "help"),
@@ -106,8 +107,35 @@ MIN_CANVAS = 20
 DETAIL_INDENT = 6
 
 
-def action_argv(action: str) -> list[str]:
+def project_chooser_argv() -> list[str]:
+    """Return the host folder picker used by Open project."""
+    if sys.platform == "darwin" and os.access("/usr/bin/osascript", os.X_OK):
+        return [
+            "/usr/bin/osascript",
+            "-e",
+            'POSIX path of (choose folder with prompt "Open a Vibecrafted project")',
+        ]
+    zenity = shutil.which("zenity")
+    if zenity:
+        return [
+            zenity,
+            "--file-selection",
+            "--directory",
+            "--title=Open a Vibecrafted project",
+        ]
+    return [
+        "bash",
+        "-lc",
+        'printf "Project folder path: "; read -r path; printf "%s" "$path"',
+    ]
+
+
+def action_argv(action: str, *, project_path: str | None = None) -> list[str]:
     """Return the existing product owner command for a Start Here action."""
+    if action == "project":
+        if project_path:
+            return ["vc-start", "resume", "--repo", project_path]
+        return project_chooser_argv()
     if action == "agents":
         return ["vc-frame", "action", "go-to-tab-name", "Agents"]
     if action == "shell":
@@ -132,6 +160,31 @@ def action_argv(action: str) -> list[str]:
             "vibecrafted doctor; printf '\\nPress Enter to close diagnostics…'; read -r _",
         ]
     raise ValueError(f"unknown Start Here action: {action}")
+
+
+def project_readiness(
+    *,
+    workspace_root: str | None = None,
+    cwd: str | None = None,
+    home: str | None = None,
+) -> tuple[str, str] | None:
+    """Return an actionable line when no usable project is open.
+
+    Home and ``/`` as cwd are not a project. Do not send those at the
+    control-plane backend — Open project is the product choice.
+    """
+    if workspace_root is None:
+        workspace_root = os.environ.get("VIBECRAFTED_WORKSPACE_ROOT", "")
+    root = workspace_root.strip()
+    if root:
+        if not Path(root).is_dir():
+            return "attention", "Workspace path is missing — choose Open project"
+        return None
+    here = Path(cwd or os.getcwd()).resolve()
+    home_path = Path(home or Path.home()).resolve()
+    if here == home_path or here == Path("/"):
+        return "attention", "No project is open — choose Open project"
+    return None
 
 
 def readiness_from_service_payload(
@@ -170,6 +223,9 @@ def readiness_from_service_payload(
 
 
 def probe_readiness() -> tuple[str, str]:
+    project_state = project_readiness()
+    if project_state is not None:
+        return project_state
     deck = shutil.which("vibecrafted")
     frame = shutil.which("vc-frame")
     if deck is None or frame is None:
@@ -444,12 +500,31 @@ class StartHere:
 
     def activate(self, action: str) -> None:
         try:
+            argv = action_argv(action)
+            timeout = 8.0
+            if action == "project":
+                chosen = subprocess.run(
+                    argv,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=120.0,
+                )
+                path = (chosen.stdout or "").strip().rstrip("/")
+                if chosen.returncode != 0 or not path:
+                    self.error = "No project selected — choose a folder to open"
+                    return
+                if not Path(path).is_dir():
+                    self.error = "That folder is missing — choose Open project again"
+                    return
+                argv = action_argv("project", project_path=path)
+                timeout = 30.0
             result = subprocess.run(
-                action_argv(action),
+                argv,
                 check=False,
                 capture_output=True,
                 text=True,
-                timeout=8.0,
+                timeout=timeout,
             )
             if result.returncode != 0:
                 self.error = (result.stderr or result.stdout).strip() or (
@@ -457,6 +532,8 @@ class StartHere:
                 )
             else:
                 self.error = ""
+                if action == "project":
+                    self.readiness = probe_readiness()
         except (OSError, subprocess.TimeoutExpired) as error:
             self.error = f"Could not open {action}: {error}"
 

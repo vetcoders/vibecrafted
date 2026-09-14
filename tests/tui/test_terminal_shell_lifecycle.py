@@ -1581,3 +1581,107 @@ def test_real_frame_client_env_updates_no_server_but_a_product_server_does() -> 
     assert not sandbox.teardown_errors, sandbox.teardown_errors
     for name in (legacy_session, product_session):
         assert name not in sandbox.leftover, sandbox.leftover
+
+
+def _stub_vc_start(tmp_path: Path) -> Path:
+    commands = tmp_path / "bin"
+    commands.mkdir(parents=True, exist_ok=True)
+    command = commands / "vc-start"
+    log = tmp_path / "vc-start.argv"
+    command.write_text(
+        f'#!/bin/sh\nprintf \'%s\\n\' "$0" "$@" > {str(log)!r}\nexit 0\n',
+        encoding="utf-8",
+    )
+    command.chmod(0o700)
+    return commands
+
+
+def test_top_level_launch_enters_dashboard_via_vc_start_resume(
+    tmp_path: Path,
+) -> None:
+    commands = _stub_vc_start(tmp_path)
+    result = subprocess.run(
+        ["/bin/bash", str(ENTRY)],
+        input="printf 'SHELL_READY\\n'; exit 0\n",
+        text=True,
+        capture_output=True,
+        env={
+            "PATH": f"{commands}:/usr/bin:/bin",
+            "HOME": str(tmp_path),
+            "ZDOTDIR": str(tmp_path),
+            "TERM": "dumb",
+            "VIBECRAFTED_HOME": str(tmp_path / "state"),
+        },
+        cwd=tmp_path,
+        timeout=15,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "SHELL_READY" in result.stdout
+    recorded = (tmp_path / "vc-start.argv").read_text(encoding="utf-8").splitlines()
+    assert recorded[-1] == "resume"
+
+
+def test_nested_frame_and_quiet_shells_do_not_recursively_attach(
+    tmp_path: Path,
+) -> None:
+    commands = _stub_vc_start(tmp_path)
+    log = tmp_path / "vc-start.argv"
+    nested = subprocess.run(
+        ["/bin/bash", str(ENTRY)],
+        input="printf 'NESTED_READY\\n'; exit 0\n",
+        text=True,
+        capture_output=True,
+        env={
+            "PATH": f"{commands}:/usr/bin:/bin",
+            "HOME": str(tmp_path),
+            "ZDOTDIR": str(tmp_path),
+            "TERM": "dumb",
+            "VC_FRAME_PANE_ID": "pane-1",
+            "VC_FRAME_SESSION_NAME": "already-attached",
+            "VIBECRAFTED_HOME": str(tmp_path / "state"),
+        },
+        cwd=tmp_path,
+        timeout=15,
+        check=False,
+    )
+    assert nested.returncode == 0, nested.stderr
+    assert "NESTED_READY" in nested.stdout
+    assert not log.exists()
+
+    quiet = subprocess.run(
+        ["/bin/bash", str(ENTRY)],
+        input="printf 'QUIET_READY\\n'; exit 0\n",
+        text=True,
+        capture_output=True,
+        env={
+            "PATH": f"{commands}:/usr/bin:/bin",
+            "HOME": str(tmp_path),
+            "ZDOTDIR": str(tmp_path),
+            "TERM": "dumb",
+            "VIBECRAFTED_QUIET_START": "1",
+            "VIBECRAFTED_HOME": str(tmp_path / "state"),
+        },
+        cwd=tmp_path,
+        timeout=15,
+        check=False,
+    )
+    assert quiet.returncode == 0, quiet.stderr
+    assert "QUIET_READY" in quiet.stdout
+    assert not log.exists()
+
+
+def test_sourced_profile_does_not_launch_workspace(tmp_path: Path) -> None:
+    commands = _stub_vc_start(tmp_path)
+    _stage_product_profile(tmp_path)
+    result = _zsh_profile(
+        tmp_path,
+        (
+            'source "$HOME/.config/vibecrafted/vc-terminal/launch-primary-shell.zsh"; '
+            "print -r -- SOURCED_READY"
+        ),
+        path=f"{commands}:/usr/bin:/bin",
+    )
+    assert result.returncode == 0, result.stderr
+    assert "SOURCED_READY" in result.stdout
+    assert not (tmp_path / "vc-start.argv").exists()
