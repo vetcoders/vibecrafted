@@ -101,10 +101,10 @@ def test_runtime_foundations_relocate_darwin_prview_onto_pinned_openssl() -> Non
     assert "stage_relocatable_openssl" in relocator
     assert "@loader_path/libssl.3.dylib" in relocator
     assert (
-        "ffd8ac6981000def0928367924b6cb1e7a98712efbc06e2a2f3f750138bd89ca" in relocator
+        "ebee4a51513f22f6efc6d3b9ff9d638015d2d924c0e443b31df2735798cb8dcb" in relocator
     )
     assert (
-        "a12805a18cd5e4f733fa8727b91afa08b587f9da5a760517cd79cb508a3a3f71" in relocator
+        "380d32d4d229136f9ded004906634491c8d416779d031abadc3d6463b1ef8e3d" in relocator
     )
     assert "homebrew-bottle-dylib" in stager
     assert "SSL_CERT_FILE" in relocator
