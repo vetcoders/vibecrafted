@@ -170,6 +170,11 @@ _BUILD_HOST_PATH_RE = re.compile(
 _LIBPYTHON_DYLIB_RELATIVE = re.compile(
     r"^Contents/Resources/runtime/python/lib/libpython3\.\d+\.dylib$"
 )
+# python-build-standalone 3.14 links the interpreter into the executable as
+# well, so site.py's documentation examples also appear in python/bin/*.
+_PORTABLE_PYTHON_EXECUTABLE_RELATIVE = re.compile(
+    r"^Contents/Resources/runtime/python/bin/python(?:3(?:\.\d+)?)?$"
+)
 _LIBPYTHON_DOCUMENTATION_PATHS = frozenset(
     {
         "/usr/local/lib/python2.5/site-packages",
@@ -1239,7 +1244,10 @@ def _reject_host_bound_paths(path: Path, *, relative: str, kind: str) -> None:
     except OSError:
         return
     documentation_paths = _EMBEDDED_DOCUMENTATION_PATHS.get(relative, frozenset())
-    if not documentation_paths and _LIBPYTHON_DYLIB_RELATIVE.fullmatch(relative):
+    if not documentation_paths and (
+        _LIBPYTHON_DYLIB_RELATIVE.fullmatch(relative)
+        or _PORTABLE_PYTHON_EXECUTABLE_RELATIVE.fullmatch(relative)
+    ):
         documentation_paths = _LIBPYTHON_DOCUMENTATION_PATHS
     for match in _BUILD_HOST_PATH_RE.finditer(content):
         host_path = match.group("path").decode("utf-8", errors="replace")
