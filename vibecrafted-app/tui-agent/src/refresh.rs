@@ -1,12 +1,14 @@
-//! Control-plane reads off the input loop.
+//! Console reads off the input loop.
 //!
 //! Loading the projection walks `runs/`, replays `events.jsonl`, probes
 //! worker processes, and Mission Control walks every `*.meta.json` under the
-//! artifact root. Sampled on the operator host, that work filled the gaps
-//! between key presses for seconds at a time. One worker thread now owns those
-//! reads: the input loop only asks for them and applies what comes back. The
-//! control plane stays the sole owner of the state; this module owns no state
-//! of its own beyond the last answer it produced.
+//! artifact root; an Observe transcript is a file read or a server request
+//! plus its human rendering. Sampled on the operator host, that kind of work
+//! filled the gaps between key presses for seconds at a time. Two worker
+//! threads now own those reads, each with a single waiting slot: the input
+//! loop only asks for them and applies what comes back. The control plane
+//! stays the sole owner of the state; this module owns no state of its own
+//! beyond the last answer it produced.
 
 use crate::mission_control::MissionControlState;
 use crate::polarize::PolarizeIntent;
@@ -158,24 +160,10 @@ struct Cache {
     revision: Option<(PathBuf, u64)>,
 }
 
-#[derive(Default)]
-struct Slot {
-    pending: Option<RefreshJob>,
-    shutdown: bool,
-}
-
-type Shared = Arc<(Mutex<Slot>, Condvar)>;
-
-fn lock(shared: &Shared) -> MutexGuard<'_, Slot> {
-    shared.0.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-/// One thread and one waiting slot: however many invalidations arrive during
-/// a slow scan, at most one merged pass follows it.
-pub struct RefreshWorker {
-    shared: Shared,
-    thread: Option<JoinHandle<()>>,
-}
+/// The control-plane worker: however many invalidations arrive during a slow
+/// scan, at most one merged pass follows it.
+#[derive(Debug)]
+pub struct RefreshWorker(SlotWorker<RefreshJob>);
 
 impl RefreshWorker {
     /// Start the worker. `deliver` hands each result to the console and
@@ -185,44 +173,185 @@ impl RefreshWorker {
         S: RefreshSource,
         D: FnMut(RefreshResult) -> bool + Send + 'static,
     {
-        let shared: Shared = Arc::new((Mutex::new(Slot::default()), Condvar::new()));
-        let worker_shared = Arc::clone(&shared);
-        let thread = thread::Builder::new()
-            .name("voc-refresh".to_string())
-            .spawn(move || {
-                let mut cache = Cache {
-                    state: seed.state,
-                    intents: seed.intents,
-                    revision: None,
-                };
-                while let Some(job) = next_job(&worker_shared) {
-                    if !deliver(execute(&mut source, &mut cache, job)) {
-                        break;
-                    }
-                }
-            })?;
-        Ok(Self {
-            shared,
-            thread: Some(thread),
+        let mut cache = Cache {
+            state: seed.state,
+            intents: seed.intents,
+            revision: None,
+        };
+        SlotWorker::spawn("voc-refresh", RefreshJob::absorb, move |job| {
+            deliver(execute(&mut source, &mut cache, job))
         })
+        .map(Self)
     }
 
     /// Queue a pass. A request that arrives while another is still waiting is
     /// merged into it; the running pass is never interrupted.
     pub fn submit(&self, job: RefreshJob) {
-        let mut slot = lock(&self.shared);
-        slot.pending = Some(match slot.pending.take() {
-            Some(waiting) => waiting.absorb(job),
-            None => job,
-        });
-        self.shared.1.notify_one();
+        self.0.submit(job);
     }
 
     /// Stop taking work and wait up to `wait` for a pass in progress. A scan
     /// blocked in the filesystem is left to end on its own: exiting the
     /// console must not wait for it, and nobody applies what it returns.
     pub fn shutdown(&mut self, wait: Duration) -> bool {
-        self.signal_shutdown();
+        self.0.shutdown(wait)
+    }
+}
+
+/// A transcript read for one Observe selection, numbered so an answer for a
+/// selection the operator has already left is recognised and dropped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptJob {
+    pub generation: u64,
+    pub run_id: String,
+    pub path: Option<String>,
+    pub origin: String,
+}
+
+impl TranscriptJob {
+    /// Only the newest selection matters: it replaces a request still waiting.
+    fn absorb(self, newer: TranscriptJob) -> TranscriptJob {
+        let _ = self;
+        newer
+    }
+}
+
+/// A transcript and its human rendering, both produced off the input loop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedTranscript {
+    pub raw: String,
+    pub human: String,
+}
+
+#[derive(Debug)]
+pub struct TranscriptResult {
+    pub generation: u64,
+    pub run_id: String,
+    pub body: Result<LoadedTranscript, String>,
+}
+
+/// Where a transcript comes from. Production reads the run's transcript file
+/// and falls back to the server; tests hold the read at a barrier.
+pub trait TranscriptSource: Send + 'static {
+    fn read(&mut self, job: &TranscriptJob) -> Result<String, String>;
+}
+
+/// The reads the console used to do inline when the Observe selection moved.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CanonicalTranscriptSource;
+
+impl TranscriptSource for CanonicalTranscriptSource {
+    fn read(&mut self, job: &TranscriptJob) -> Result<String, String> {
+        if let Some(path) = &job.path
+            && let Ok(body) = std::fs::read_to_string(path)
+        {
+            return Ok(body);
+        }
+        crate::observe::fetch_transcript(&job.origin, &job.run_id)
+            .map_err(|error| error.to_string())
+    }
+}
+
+/// Read one transcript and render it for humans.
+pub fn load_transcript<S: TranscriptSource>(
+    source: &mut S,
+    job: TranscriptJob,
+) -> TranscriptResult {
+    let body = source.read(&job).map(|raw| LoadedTranscript {
+        human: crate::run_detail::humanize_transcript(&raw),
+        raw,
+    });
+    TranscriptResult {
+        generation: job.generation,
+        run_id: job.run_id,
+        body,
+    }
+}
+
+/// The transcript worker: one read at a time, only the newest selection waiting.
+#[derive(Debug)]
+pub struct TranscriptWorker(SlotWorker<TranscriptJob>);
+
+impl TranscriptWorker {
+    pub fn spawn<S, D>(mut source: S, mut deliver: D) -> io::Result<Self>
+    where
+        S: TranscriptSource,
+        D: FnMut(TranscriptResult) -> bool + Send + 'static,
+    {
+        SlotWorker::spawn("voc-transcript", TranscriptJob::absorb, move |job| {
+            deliver(load_transcript(&mut source, job))
+        })
+        .map(Self)
+    }
+
+    pub fn submit(&self, job: TranscriptJob) {
+        self.0.submit(job);
+    }
+
+    pub fn shutdown(&mut self, wait: Duration) -> bool {
+        self.0.shutdown(wait)
+    }
+}
+
+struct Slot<J> {
+    pending: Option<J>,
+    shutdown: bool,
+}
+
+type Shared<J> = Arc<(Mutex<Slot<J>>, Condvar)>;
+
+fn lock<J>(shared: &Shared<J>) -> MutexGuard<'_, Slot<J>> {
+    shared.0.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// One thread and one waiting slot. A request that arrives while another is
+/// still waiting is folded into it by `absorb`, so nothing queues behind it.
+struct SlotWorker<J> {
+    shared: Shared<J>,
+    absorb: fn(J, J) -> J,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl<J: Send + 'static> SlotWorker<J> {
+    fn spawn<P>(name: &str, absorb: fn(J, J) -> J, mut pass: P) -> io::Result<Self>
+    where
+        P: FnMut(J) -> bool + Send + 'static,
+    {
+        let shared: Shared<J> = Arc::new((
+            Mutex::new(Slot {
+                pending: None,
+                shutdown: false,
+            }),
+            Condvar::new(),
+        ));
+        let worker_shared = Arc::clone(&shared);
+        let thread = thread::Builder::new()
+            .name(name.to_string())
+            .spawn(move || {
+                while let Some(job) = next_job(&worker_shared) {
+                    if !pass(job) {
+                        break;
+                    }
+                }
+            })?;
+        Ok(Self {
+            shared,
+            absorb,
+            thread: Some(thread),
+        })
+    }
+
+    fn submit(&self, job: J) {
+        let mut slot = lock(&self.shared);
+        slot.pending = Some(match slot.pending.take() {
+            Some(waiting) => (self.absorb)(waiting, job),
+            None => job,
+        });
+        self.shared.1.notify_one();
+    }
+
+    fn shutdown(&mut self, wait: Duration) -> bool {
+        signal_shutdown(&self.shared);
         let Some(thread) = self.thread.take() else {
             return true;
         };
@@ -236,29 +365,29 @@ impl RefreshWorker {
         let _ = thread.join();
         true
     }
-
-    fn signal_shutdown(&self) {
-        lock(&self.shared).shutdown = true;
-        self.shared.1.notify_all();
-    }
 }
 
-impl Drop for RefreshWorker {
+fn signal_shutdown<J>(shared: &Shared<J>) {
+    lock(shared).shutdown = true;
+    shared.1.notify_all();
+}
+
+impl<J> Drop for SlotWorker<J> {
     fn drop(&mut self) {
-        self.signal_shutdown();
+        signal_shutdown(&self.shared);
     }
 }
 
-impl std::fmt::Debug for RefreshWorker {
+impl<J> std::fmt::Debug for SlotWorker<J> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("RefreshWorker")
+            .debug_struct("SlotWorker")
             .field("running", &self.thread.is_some())
             .finish()
     }
 }
 
-fn next_job(shared: &Shared) -> Option<RefreshJob> {
+fn next_job<J>(shared: &Shared<J>) -> Option<J> {
     let mut slot = lock(shared);
     loop {
         if slot.shutdown {
