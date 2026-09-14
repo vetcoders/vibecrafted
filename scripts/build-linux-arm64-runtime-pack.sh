@@ -120,9 +120,10 @@ python3 "$repo_root/scripts/distribution_manifest.py" carrier \
   --owner-repo vetcoders/vibecrafted --source-revision "$source_revision"
 "$repo_root/scripts/stage-runtime-foundations.sh" "$payload/bin"
 
-uv python install 3.12.3 --install-dir "$work/python-seed" --no-bin
-seed_python="$(find "$work/python-seed" -type f -path '*/bin/python3.12' -print -quit)"
-[[ -n "$seed_python" ]] || die "uv did not produce CPython 3.12.3"
+# shellcheck source=/dev/null
+. "$repo_root/scripts/lib/portable-python.sh"
+mkdir -p "$work/python-seed"
+seed_python="$(install_portable_python "$work/python-seed")"
 python_home="$(cd "$(dirname "$seed_python")/.." && pwd -P)"
 mkdir -p "$payload/python" "$payload/python-site"
 cp -RL "$python_home/." "$payload/python/"
