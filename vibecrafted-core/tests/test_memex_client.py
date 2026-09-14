@@ -77,8 +77,11 @@ def test_load_config_invalid_timeout_falls_back(
 
 
 def test_load_config_toml_wins_over_env(tmp_path: Path) -> None:
-    cfg_path = tmp_path / "memex.toml"
+    cfg_path = tmp_path / "config.toml"
     cfg_path.write_text(
+        "[server]\n"
+        "port = 3024\n\n"
+        "[memex]\n"
         'endpoint = "http://memex.local:11211"\n'
         'token = "tok-from-toml"\n'
         'default_namespace = "team-ns"\n'
@@ -102,9 +105,9 @@ def test_load_config_toml_wins_over_env(tmp_path: Path) -> None:
 
 
 def test_load_config_toml_without_token_can_borrow_env(tmp_path: Path) -> None:
-    cfg_path = tmp_path / "memex.toml"
+    cfg_path = tmp_path / "config.toml"
     cfg_path.write_text(
-        'endpoint = "http://memex.local:11211"\ndefault_namespace = "ops"\n',
+        '[memex]\nendpoint = "http://memex.local:11211"\ndefault_namespace = "ops"\n',
         encoding="utf-8",
     )
     env = {"MEMEX_TOKEN": "tok-borrowed"}
@@ -115,13 +118,73 @@ def test_load_config_toml_without_token_can_borrow_env(tmp_path: Path) -> None:
 
 
 def test_load_config_strips_trailing_slash(tmp_path: Path) -> None:
-    cfg_path = tmp_path / "memex.toml"
+    cfg_path = tmp_path / "config.toml"
     cfg_path.write_text(
-        'endpoint = "http://memex.local:11211/"\ntoken = "t"\n',
+        '[memex]\nendpoint = "http://memex.local:11211/"\ntoken = "t"\n',
         encoding="utf-8",
     )
     cfg = mc.load_config(config_path=cfg_path, environ={})
     assert cfg.endpoint == "http://memex.local:11211"
+
+
+def test_load_config_file_without_memex_table_falls_through_to_env(
+    tmp_path: Path,
+) -> None:
+    # The operator config holds other owners' tables ([server], [tools]);
+    # top-level keys are not memex settings and the file alone is not a source.
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(
+        'endpoint = "http://top-level.local"\ntoken = "top"\n\n[server]\nport = 3024\n',
+        encoding="utf-8",
+    )
+    env = {"MEMEX_ENDPOINT": "http://env.local", "MEMEX_TOKEN": "tok-env"}
+    cfg = mc.load_config(config_path=cfg_path, environ=env)
+    assert cfg.endpoint == "http://env.local"
+    assert cfg.token == "tok-env"
+    assert cfg.source == "env"
+
+
+def test_load_config_default_reads_memex_table_of_operator_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_home = tmp_path / "xdg"
+    operator_config = config_home / "vibecrafted" / "config.toml"
+    operator_config.parent.mkdir(parents=True)
+    operator_config.write_text(
+        '[server]\nport = 3024\n\n[memex]\nendpoint = "http://xdg.local"\ntoken = "t"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    cfg = mc.load_config(environ={})
+    assert cfg.endpoint == "http://xdg.local"
+    assert cfg.enabled is True
+    assert cfg.source == f"config:{operator_config}[memex]"
+
+
+def test_retired_standalone_memex_file_is_named_never_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    config_home = tmp_path / "xdg"
+    retired = config_home / "vetcoders" / "memex.toml"
+    retired.parent.mkdir(parents=True)
+    retired.write_text(
+        'endpoint = "http://retired.local"\ntoken = "tok-retired"\n', encoding="utf-8"
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    monkeypatch.setattr(mc, "_retired_notice_emitted", False)
+    with caplog.at_level(logging.WARNING, logger="vibecrafted_core.memex_client"):
+        cfg = mc.load_config(environ={})
+        mc.load_config(environ={})
+    assert cfg.enabled is False
+    assert cfg.token == ""
+    assert cfg.endpoint == mc.DEFAULT_ENDPOINT
+    notices = [rec.message for rec in caplog.records if "no longer read" in rec.message]
+    assert len(notices) == 1
+    assert str(retired) in notices[0]
+    assert str(config_home / "vibecrafted" / "config.toml") in notices[0]
+    assert "[memex]" in notices[0]
 
 
 # ----------------------------------------------------------- chunk parsing
@@ -378,7 +441,7 @@ def test_public_surface_exports_remain_stable() -> None:
     """Lock the __all__ surface so renames are caught by CI."""
     assert set(mc.__all__) == {
         "MEMEX_AUTHORITY_LABEL",
-        "DEFAULT_CONFIG_PATH",
+        "CONFIG_SECTION",
         "DEFAULT_ENDPOINT",
         "DEFAULT_TIMEOUT_SECONDS",
         "SPARSE_AICX_THRESHOLD",

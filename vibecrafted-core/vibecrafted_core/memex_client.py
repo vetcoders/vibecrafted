@@ -18,10 +18,13 @@ Design rules:
   (sticky operator intent) but useful for cross-session pattern
   matching. See ``skills/vc-init/SKILL.md`` Sense 1 for the trust
   ranking.
-- **Configuration precedence.** ``~/.config/vetcoders/memex.toml``
-  (if present) wins over environment variables; environment is the
-  fallback for ephemeral / CI use. Either path may set
-  ``endpoint``, ``token``, ``default_namespace``, ``timeout_seconds``.
+- **Configuration precedence.** The ``[memex]`` table of the one
+  operator config, ``${XDG_CONFIG_HOME:-~/.config}/vibecrafted/config.toml``
+  (the file that also holds ``[server]``), wins over environment
+  variables; environment is the fallback for ephemeral / CI use. Either
+  path may set ``endpoint``, ``token``, ``default_namespace``,
+  ``timeout_seconds``. A token in that file makes it a secret: keep the
+  file mode ``0600``.
 - **Transport.** HTTP POST to ``{endpoint}/search`` with a JSON body
   ``{"query": ..., "namespace": ..., "limit": ...}`` and bearer
   authorization. The rust-memex SSE wire form is consumed via the
@@ -52,8 +55,10 @@ from typing import Any
 
 import tomllib
 
+from .server_config import config_path as operator_config_path
+
 __all__ = [
-    "DEFAULT_CONFIG_PATH",
+    "CONFIG_SECTION",
     "DEFAULT_ENDPOINT",
     "DEFAULT_TIMEOUT_SECONDS",
     "MEMEX_AUTHORITY_LABEL",
@@ -74,8 +79,9 @@ _logger = logging.getLogger(__name__)
 #: than ``aicx_agent`` depending on operator review.
 MEMEX_AUTHORITY_LABEL: str = "memex_derived"
 
-#: Operator config file (precedence over env vars).
-DEFAULT_CONFIG_PATH: Path = Path.home() / ".config" / "vetcoders" / "memex.toml"
+#: Table of the operator config (``server_config.config_path()``) that holds
+#: the memex settings. Precedence over env vars.
+CONFIG_SECTION: str = "memex"
 
 #: Default memex endpoint. Override via config or env.
 DEFAULT_ENDPOINT: str = "http://memex.local:11211"
@@ -168,6 +174,26 @@ def _read_toml(path: Path) -> dict[str, Any]:
         return {}
 
 
+_retired_notice_emitted = False
+
+
+def _notice_retired_config(cfg_path: Path) -> None:
+    """Name the retired standalone memex file once per process; never read it."""
+    global _retired_notice_emitted
+    if _retired_notice_emitted:
+        return
+    config_home = cfg_path.parent.parent
+    retired = config_home / "vetcoders" / "memex.toml"
+    if retired.exists():
+        _retired_notice_emitted = True
+        _logger.warning(
+            "memex: %s is no longer read; move its keys into the [%s] table of %s",
+            retired,
+            CONFIG_SECTION,
+            cfg_path,
+        )
+
+
 def load_config(
     *,
     config_path: Path | None = None,
@@ -177,9 +203,11 @@ def load_config(
 
     Resolution order:
 
-    1. Config file (``~/.config/vetcoders/memex.toml`` by default) when
-       it exists and parses cleanly. ``endpoint`` + ``token`` MUST both
-       be present for ``enabled=True``.
+    1. The ``[memex]`` table of the operator config file (by default
+       ``server_config.config_path()``, i.e.
+       ``${XDG_CONFIG_HOME:-~/.config}/vibecrafted/config.toml``) when the
+       file parses cleanly and carries that table. ``endpoint`` + ``token``
+       MUST both be present for ``enabled=True``.
     2. Environment variables: ``MEMEX_ENDPOINT``, ``MEMEX_TOKEN``,
        ``MEMEX_NAMESPACE``, ``MEMEX_TIMEOUT_SECONDS``.
     3. Pure defaults (``enabled=False`` — endpoint set, token empty).
@@ -187,12 +215,16 @@ def load_config(
     The returned :class:`MemexConfig` is always usable; ``enabled``
     reflects whether :func:`search` will attempt network I/O.
 
-    :param config_path: override default config path (tests pass a
-        sandbox path).
+    :param config_path: override the operator config file (tests pass a
+        sandbox path); its ``[memex]`` table is read.
     :param environ: override ``os.environ`` (tests inject a dict).
     """
     env = environ if environ is not None else dict(os.environ)
-    cfg_path = config_path if config_path is not None else DEFAULT_CONFIG_PATH
+    if config_path is None:
+        cfg_path = operator_config_path()
+        _notice_retired_config(cfg_path)
+    else:
+        cfg_path = config_path
 
     endpoint = DEFAULT_ENDPOINT
     token = ""
@@ -200,14 +232,21 @@ def load_config(
     timeout = DEFAULT_TIMEOUT_SECONDS
     source = "default"
 
-    # Layer 1: config file (highest precedence).
-    if cfg_path.is_file():
-        data = _read_toml(cfg_path)
-        endpoint = _coerce_str(data.get("endpoint"), endpoint)
-        token = _coerce_str(data.get("token"), token)
-        namespace = _coerce_str(data.get("default_namespace"), namespace)
-        timeout = _coerce_float(data.get("timeout_seconds"), timeout)
-        source = f"config:{cfg_path}"
+    # Layer 1: [memex] table of the config file (highest precedence).
+    section: Any = (
+        _read_toml(cfg_path).get(CONFIG_SECTION) if cfg_path.is_file() else None
+    )
+    if section is not None and not isinstance(section, dict):
+        _logger.warning(
+            "memex: [%s] in %s is not a table; ignoring it", CONFIG_SECTION, cfg_path
+        )
+        section = None
+    if section is not None:
+        endpoint = _coerce_str(section.get("endpoint"), endpoint)
+        token = _coerce_str(section.get("token"), token)
+        namespace = _coerce_str(section.get("default_namespace"), namespace)
+        timeout = _coerce_float(section.get("timeout_seconds"), timeout)
+        source = f"config:{cfg_path}[{CONFIG_SECTION}]"
 
     # Layer 2: env vars (fill any gaps, never override an explicit
     # config-file value — except token, where an empty config token +

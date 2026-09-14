@@ -50,7 +50,7 @@ section() {
     printf '\n%s\n' "$(amber "── $1 ──")"
 }
 
-# Sandboxed config dir — never touches operator's ~/.config/vetcoders.
+# Sandboxed config dir — never touches the operator's real config.
 SANDBOX=$(mktemp -d -t vibecrafted-memex.XXXXXX)
 trap 'rm -rf "$SANDBOX"' EXIT
 
@@ -173,10 +173,14 @@ else
 fi
 
 # ----------------------------------------------------------------- section 5
-section "Config file precedence (TOML over env)"
+section "Config file precedence ([memex] table over env)"
 
-CFG_FILE="$SANDBOX/memex.toml"
+CFG_FILE="$SANDBOX/config.toml"
 cat > "$CFG_FILE" <<'TOML'
+[server]
+port = 3024
+
+[memex]
 endpoint = "http://from-toml.local:11211"
 token = "tok-toml"
 default_namespace = "toml-ns"
