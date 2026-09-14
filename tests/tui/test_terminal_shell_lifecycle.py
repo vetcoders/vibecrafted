@@ -107,6 +107,10 @@ def test_product_profile_survives_broken_completion_and_repeated_source(
     broken.mkdir()
     dangling = broken / "_missing_tool"
     dangling.symlink_to(broken / "absent")
+    # A readable sibling in the same foreign directory must keep completing:
+    # one dead link (a Homebrew completion for an app that is gone) may not
+    # take the whole directory's completions down with it.
+    (broken / "_good_tool").write_text("#compdef good_tool\n_arguments '--ok'\n")
     result = subprocess.run(
         [
             "/bin/zsh",
@@ -119,6 +123,8 @@ def test_product_profile_survives_broken_completion_and_repeated_source(
                 '[[ "$before_hooks" == "${precmd_functions[*]}|${preexec_functions[*]}" ]] || exit 11; '
                 "(( $+functions[compdef] )) || exit 12; "
                 '[[ "${fpath[(Ie)$1]}" == 0 ]] || exit 13; '
+                '[[ "${_comps[good_tool]}" == _good_tool ]] || exit 14; '
+                "(( ! $+_comps[missing_tool] )) || exit 15; "
                 'print -r -- "HISTORY=$HISTFILE" "ATUIN=$ATUIN_DATA_DIR" "READY"'
             ),
             "profile-test",
@@ -136,11 +142,12 @@ def test_product_profile_survives_broken_completion_and_repeated_source(
     assert "READY" in result.stdout
     assert f"HISTORY={tmp_path}/.vibecrafted/shell/zsh_history" in result.stdout
     assert f"ATUIN={tmp_path}/.vibecrafted/shell/atuin" in result.stdout
-    assert (
-        "skipped a completion directory"
-        in (tmp_path / ".vibecrafted/shell/startup.log").read_text()
-    )
+    log = (tmp_path / ".vibecrafted/shell/startup.log").read_text()
+    assert "skipped unreadable completion entries: _missing_tool" in log
     assert dangling.is_symlink()
+    (mirror,) = (tmp_path / ".vibecrafted/shell/completion-mirror").iterdir()
+    assert (mirror / "_good_tool").resolve() == (broken / "_good_tool").resolve()
+    assert not (mirror / "_missing_tool").is_symlink()
     assert not (tmp_path / ".zsh_history").exists()
     assert not (tmp_path / ".local/share/atuin").exists()
 
@@ -543,8 +550,8 @@ def test_reload_applies_updated_installed_profile_without_duplicating_hooks(
         "path = Path.home() / '.config/vibecrafted/vc-terminal/interactive.zsh'\n"
         "text = path.read_text()\n"
         "text = text.replace(\n"
-        "    \"print -r -- 'navigation'\",\n"
-        "    \"print -r -- 'navigation-reloaded-from-disk'\",\n"
+        "    \"local vc_shell_group='shell'\",\n"
+        "    \"local vc_shell_group='shell-reloaded-from-disk'\",\n"
         "    1,\n"
         ")\n"
         "needle = '_vc_terminal_owned_alias_names='\n"
@@ -573,7 +580,7 @@ def test_reload_applies_updated_installed_profile_without_duplicating_hooks(
             '[[ "$before_hooks" == "${precmd_functions[*]}|${preexec_functions[*]}" ]] || exit 55; '
             "(( $+functions[_vc_terminal_disk_reload_marker] )) || exit 56; "
             "_vc_terminal_disk_reload_marker; "
-            'aliases | grep -q "^navigation-reloaded-from-disk$" || exit 57; '
+            'aliases | grep -q "^shell-reloaded-from-disk$" || exit 57; '
             'print -r -- "CWD=$PWD"; '
             "print -r -- READY"
         ),
@@ -848,8 +855,13 @@ def test_two_line_prompt_without_starship_and_with_fake_starship(
     assert "READY" in offline.stdout
     assert "❯" in offline.stdout
     assert "%~" in offline.stdout
-    prompt = offline.stdout.split("PROMPT=", 1)[1]
-    assert "\n" in prompt.split("READY", 1)[0]
+    prompt = offline.stdout.split("PROMPT=", 1)[1].split("READY", 1)[0]
+    assert "\n" in prompt
+    # Same shape and colours as the product starship.toml: bold blue path on
+    # line one, then ❯ green after success and red after a failed command.
+    path_line, entry_line = prompt.rstrip("\n").split("\n", 1)
+    assert "%F{blue}%~" in path_line
+    assert entry_line.startswith("%(?.%F{green}.%F{red})❯")
 
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -907,6 +919,28 @@ def test_offline_startup_keeps_native_shell_without_optional_integrations(
     assert not (tmp_path / ".vibecrafted" / "control_plane").exists()
 
 
+# Every Frame shortcut the product shell defines, mapped to the native vc-frame
+# argv it must forward. Pinned in both directions: no shortcut outside this map
+# (a new destructive one cannot slip in unreviewed) and none missing.
+FRAME_SHORTCUTS = {
+    "vcf-ls": "list-sessions",
+    "vcf-lt": "action list-tabs",
+    "vcf-lp": "action list-panes",
+    "vcf-w": "watch",
+    "vcf-dr": "doctor",
+    "vcf-a": "attach",
+    "vcf-dt": "action detach",
+    "vcf-rn": "action rename-session",
+    "vcf-np": "action new-pane",
+    "vcf-nt": "action new-tab",
+    "vcf-ds": "action dump-screen",
+    "vcf-k": "kill-session",
+    "vcf-ka": "kill-all-sessions",
+    "vcf-d": "delete-session",
+    "vcf-da": "delete-all-sessions",
+}
+
+
 def test_frame_conveniences_forward_native_argv_without_force(
     tmp_path: Path,
 ) -> None:
@@ -917,21 +951,86 @@ def test_frame_conveniences_forward_native_argv_without_force(
     frame = bin_dir / "vc-frame"
     frame.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> {str(captured)!r}\n")
     frame.chmod(0o755)
+    calls = "".join(f"{name} probe-{name}; " for name in FRAME_SHORTCUTS)
     result = _zsh_profile(
         tmp_path,
         (
             'source "$HOME/.config/vibecrafted/vc-terminal/launch-primary-shell.zsh"; '
-            "vcf-lp --help; "
-            "vcf-da --dry-run; "
+            'for vc_fn in ${(k)functions[(I)vcf-*]}; do print -r -- "FN:$vc_fn"; done; '
+            + calls
+            + "vcf-da --dry-run; "
             "print -r -- READY"
         ),
         path=f"{bin_dir}:/usr/bin:/bin",
     )
     assert result.returncode == 0, result.stderr
-    argv = captured.read_text()
-    assert "action list-panes --help" in argv
-    assert "delete-all-sessions --dry-run" in argv
-    assert "--force" not in argv
+    assert "READY" in result.stdout
+    defined = {
+        line[3:] for line in result.stdout.splitlines() if line.startswith("FN:")
+    }
+    assert defined == set(FRAME_SHORTCUTS)
+    argv = captured.read_text().splitlines()
+    assert argv == [
+        *(f"{native} probe-{name}" for name, native in FRAME_SHORTCUTS.items()),
+        "delete-all-sessions --dry-run",
+    ]
+    for line in argv:
+        assert not {"--force", "-f", "--yes", "-y"} & set(line.split()), line
+
+
+def test_aliases_catalog_lists_installed_groups_filters_and_forgets_removed(
+    tmp_path: Path,
+) -> None:
+    _stage_product_profile(tmp_path)
+    frame_file = "$HOME/.config/vibecrafted/shell/aliases/frame.zsh"
+    result = _zsh_profile(
+        tmp_path,
+        (
+            'source "$HOME/.config/vibecrafted/vc-terminal/launch-primary-shell.zsh"; '
+            "print -r -- '== ALL'; aliases; "
+            "print -r -- '== FRAME'; aliases FRAME; "
+            "(( $+functions[vcf-w] )) || exit 61; "
+            # Shrink the installed Frame file to one shortcut: reload must
+            # forget every function the previous load defined from it.
+            "print -rl -- 'vcf-ls() { # list workspaces' "
+            "'  command vc-frame list-sessions \"$@\"' '}' "
+            f'> "{frame_file}"; '
+            "reload; "
+            "(( $+functions[vcf-w] )) && exit 62; "
+            "(( $+functions[vcf-ls] )) || exit 63; "
+            "print -r -- '== RELOADED'; aliases frame; "
+            "print -r -- READY"
+        ),
+    )
+    assert result.returncode == 0, result.stderr
+    everything, rest = result.stdout.split("== ALL", 1)[1].split("== FRAME", 1)
+    filtered, reloaded = rest.split("== RELOADED", 1)
+
+    def rows(block: str, name: str) -> list[str]:
+        return [line for line in block.splitlines() if line.split()[:1] == [name]]
+
+    lines = everything.splitlines()
+    for group in ("navigation", "git", "frame", "shell"):
+        assert group in lines
+    assert "  ── Look (read-only)" in lines
+    assert any(
+        "list panes of the current workspace" in r for r in rows(everything, "vcf-lp")
+    )
+    assert any(
+        "git log --oneline --graph --decorate -20" in r for r in rows(everything, "gl")
+    )
+    assert any(
+        "root of the current Git repository" in r for r in rows(everything, "cdr")
+    )
+    assert rows(everything, "reload")
+
+    filtered_lines = filtered.splitlines()
+    assert "frame" in filtered_lines
+    assert "git" not in filtered_lines and "navigation" not in filtered_lines
+    assert not rows(filtered, "gl")
+
+    assert rows(reloaded, "vcf-ls")
+    assert not rows(reloaded, "vcf-w")
 
 
 def test_interactive_login_zdotdir_loads_product_profile_not_host(

@@ -334,10 +334,13 @@ _ZSH_PLUGIN_SHARE_FILES: dict[str, tuple[str, ...]] = {
     "zsh-autosuggestions": (
         "/opt/homebrew/share/zsh-autosuggestions/zsh-autosuggestions.zsh",
         "/usr/local/share/zsh-autosuggestions/zsh-autosuggestions.zsh",
+        # Debian/Ubuntu apt packages install under /usr/share.
+        "/usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh",
     ),
     "zsh-syntax-highlighting": (
         "/opt/homebrew/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh",
         "/usr/local/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh",
+        "/usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh",
     ),
 }
 
