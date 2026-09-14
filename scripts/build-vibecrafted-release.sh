@@ -507,6 +507,40 @@ if binary:
 PY
 }
 
+# prune_embedded_python_unreachable <python-home> <interpreter> <libpython>
+#
+# python-build-standalone ships native code the product never loads, and the
+# product contract refuses a declared dylib no declared executable reaches
+# (VCPC027). MEASURED 2026-09-14 on the c71487bf candidate with CPython 3.14.7:
+# - the Tcl/Tk stack (libtcl9, libtcl9tk9, thread, itcl) exists for tkinter and
+#   IDLE, which no Vibecrafted surface imports; only dlopen from _tkinter or a
+#   Tcl `load` would reach those dylibs;
+# - the interpreter links libpython statically, so the shared libpython is an
+#   embedding artifact nothing loads. It stays when the interpreter links it.
+prune_embedded_python_unreachable() {
+  local python="$1" interpreter="$2" libpython="$3"
+  local path restore_nullglob
+  restore_nullglob="$(shopt -p nullglob)"
+  shopt -s nullglob
+  for path in \
+    "$python"/lib/tcl[0-9]* "$python"/lib/tk[0-9]* \
+    "$python"/lib/libtcl*.dylib "$python"/lib/libtk*.dylib \
+    "$python"/lib/thread[0-9]* "$python"/lib/itcl[0-9]* \
+    "$python"/lib/python3.*/tkinter "$python"/lib/python3.*/idlelib \
+    "$python"/lib/python3.*/turtledemo \
+    "$python"/lib/python3.*/lib-dynload/_tkinter.* \
+    "$python"/bin/idle3*; do
+    rm -rf "$path"
+  done
+  eval "$restore_nullglob"
+  [[ -f "$python/lib/$libpython" ]] || return 0
+  local links
+  links="$(otool -L "$python/bin/$interpreter")" || return 1
+  if [[ "$links" != *"$libpython"* ]]; then
+    rm -f "$python/lib/$libpython"
+  fi
+}
+
 run_bundled_verifier() {
   local verifier="$APP/Contents/Resources/runtime/bin/python3"
   [[ -x "$verifier" ]] || die "bundled product verifier is missing: $verifier"
@@ -908,11 +942,15 @@ materialize_runtime_payload() {
   python_home="$(cd "$(dirname "$seed_python")/.." && pwd)"
   mkdir -p "$runtime/python" "$runtime/python-site"
   /bin/cp -RL "$python_home/." "$runtime/python/"
+  prune_embedded_python_unreachable "$runtime/python" \
+    "$PORTABLE_PYTHON_BIN" "$PORTABLE_PYTHON_DYLIB"
   uv pip install --python "$seed_python" --target "$runtime/python-site" \
     'jsonschema>=4.23,<5' 'PyYAML>=6.0,<7' 'screenscribe==0.1.19' \
     'fastmcp>=2.0,<3'
-  install_name_tool -id "@loader_path/${PORTABLE_PYTHON_DYLIB}" \
-    "$runtime/python/lib/${PORTABLE_PYTHON_DYLIB}"
+  if [[ -f "$runtime/python/lib/${PORTABLE_PYTHON_DYLIB}" ]]; then
+    install_name_tool -id "@loader_path/${PORTABLE_PYTHON_DYLIB}" \
+      "$runtime/python/lib/${PORTABLE_PYTHON_DYLIB}"
+  fi
   rm -rf "$runtime/python-site/bin"
   normalize_embedded_python_paths "$runtime" "$python_seed"
 
