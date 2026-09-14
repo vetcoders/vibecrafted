@@ -2170,3 +2170,74 @@ def test_unhashed_previous_starship_keeps_current_on_bound_retry(
     assert starship.read_text(encoding="utf-8") == user
     selected = (roots["runtime_home"] / "tools/vibecrafted-current").resolve()
     assert selected.name == "9.9.10+b"
+
+
+def test_keep_current_starship_preserves_exact_multiline_bytes_after_success(
+    tmp_path, roots, capsys
+):
+    """Bound keep-current must not overlay Founder starship onto incoming canvas.
+
+    The live 85fb/02ef8bf7 install returned success then rewrote a multiline
+    starship.toml to an incoming-shaped product default (`$time$fill` canvas).
+    Reproduce that post-success rewrite: trusted previous defaults, overlapping
+    format assignment, then keep-current must keep operator spelling. New
+    incoming-only keys may still land (per-setting three-way); the file must
+    not become the product default.
+    """
+    previous = (
+        REPO_ROOT / "tests/tui/fixtures/starship-default-three-row.toml"
+    ).read_text(encoding="utf-8")
+    incoming_starship = (REPO_ROOT / "config/starship.toml").read_text(encoding="utf-8")
+    user = (
+        "add_newline = false\n"
+        'format = """\n'
+        "$directory$git_branch\n"
+        "$character\n"
+        '"""\n'
+        "[character]\nsuccess_symbol = '[λ](bold cyan)'\n"
+    )
+    first = seed_runtime_pack(
+        tmp_path / "pack-a",
+        version="9.9.9+a",
+        before_source_seal=lambda root: (root / "config/starship.toml").write_text(
+            previous, encoding="utf-8"
+        ),
+    )
+    _install(first, capsys)
+    starship = roots["product_config"] / "starship.toml"
+    starship.write_text(user, encoding="utf-8")
+    current_sha = installer._sha256_path(starship)
+    second = seed_runtime_pack(
+        tmp_path / "pack-b",
+        version="9.9.10+b",
+        before_source_seal=lambda root: (root / "config/starship.toml").write_text(
+            incoming_starship, encoding="utf-8"
+        ),
+    )
+    incoming_source = tmp_path / "pack-b/config/starship.toml"
+    incoming_sha = installer._sha256_path(incoming_source)
+    conflict = _install_conflict(second, capsys)
+    file_hit = next(
+        item
+        for item in conflict.envelope["files"]
+        if item["path"].endswith("starship.toml")
+    )
+    assert file_hit["current_sha256"] == current_sha
+    result = _install(
+        second,
+        capsys,
+        resolve_preference="keep-current",
+        preference_current_sha256=file_hit["current_sha256"],
+        preference_incoming_sha256=incoming_sha,
+        preference_path=str(starship),
+    )
+    assert result["schema"] == "vibecrafted.runtime-install-result.v1"
+    kept = starship.read_text(encoding="utf-8")
+    assert "add_newline = false" in kept
+    assert 'format = """\n$directory$git_branch\n$character\n"""' in kept
+    assert "success_symbol = '[λ](bold cyan)'" in kept
+    assert "$time$fill$jobs$cmd_duration" not in kept
+    assert installer._sha256_path(starship) != incoming_sha
+    assert kept != incoming_starship
+    selected = (roots["runtime_home"] / "tools/vibecrafted-current").resolve()
+    assert selected.name == "9.9.10+b"

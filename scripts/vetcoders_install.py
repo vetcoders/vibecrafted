@@ -16635,7 +16635,12 @@ def _toml_delete_assignment(text: str, dotted: str) -> str:
 def _merge_toml_runtime_preferences(
     previous: str, current: str, incoming: str, *, choice: str | None = None
 ) -> str:
-    """Three-way TOML merge by setting identity, then text overlay on incoming."""
+    """Three-way TOML merge by setting identity, then text overlay.
+
+    Default canvas is incoming so unchanged keys pick up new defaults.
+    Bound keep-current overlays onto the current file so operator spelling
+    and multiline assignments survive.
+    """
     import tomllib
 
     previous_values = _toml_flatten(tomllib.loads(previous))
@@ -16679,13 +16684,17 @@ def _merge_toml_runtime_preferences(
             "settings conflict with changed shipped defaults: " + ", ".join(conflicts)
         )
     intended = _toml_unflatten(resolved)
-    merged = incoming
-    for key in incoming_values:
+    # keep-current must rewrite on the operator's canvas. Overlaying onto
+    # incoming turns a bound keep-current into an incoming-shaped file
+    # (the live starship.toml rewrite).
+    keep_current = choice == "keep-current"
+    merged = current if keep_current else incoming
+    canvas_values = current_values if keep_current else incoming_values
+    for key in canvas_values:
         if key not in resolved:
             merged = _toml_delete_assignment(merged, key)
     for key, value in resolved.items():
-        incoming_value = incoming_values.get(key, _TOML_MISSING)
-        if incoming_value == value:
+        if canvas_values.get(key, _TOML_MISSING) == value:
             continue
         raw = (
             _toml_raw_assignment(current, key)
@@ -16801,7 +16810,7 @@ def _merge_runtime_preferences(
             return current
         raise ValueError("previous shipped defaults are unavailable")
     if current == previous:
-        return incoming
+        return current if choice == "keep-current" else incoming
     # An unchanged shipped default needs no three-way merge, irrespective of
     # its format. In particular, do not reject a user-owned custom KDL block
     # merely because this is a KDL preference file.
@@ -17193,29 +17202,62 @@ def _reconcile_runtime_preference(
                 )
             )
 
-        try:
-            # A later retry of an already-applied choice must not fail merely
-            # because the bound current hash is the pre-merge snapshot.
-            body = merge(None)
-        except ValueError:
-            if not choice:
-                raise
-            current_matches = (
-                not outcome["current_sha256"]
-                or outcome["current_sha256"] == expected_current_sha256
-            )
-            incoming_matches = outcome["incoming_sha256"] == expected_incoming_sha256
-            if current_matches and not incoming_matches:
+        current_matches = (
+            not outcome["current_sha256"]
+            or outcome["current_sha256"] == expected_current_sha256
+        )
+        incoming_matches = outcome["incoming_sha256"] == expected_incoming_sha256
+        if choice == "keep-current":
+            if current is None:
+                raise ValueError("keep-current requires an existing preference file")
+            if not incoming_matches:
                 raise ValueError(
                     "incoming defaults changed during retry; concurrent edit refused"
-                ) from None
-            if incoming_matches and outcome["current_sha256"] and not current_matches:
-                raise ValueError(
-                    "preference changed during retry; concurrent edit refused"
-                ) from None
-            if not (current_matches and incoming_matches):
-                raise
-            body = merge(choice)
+                )
+            if current_matches:
+                # Bound keep-current must merge on the current canvas even when
+                # auto-merge would succeed. merge(None) overlays onto incoming
+                # and rewrites operator spelling after a successful result.
+                body = merge(choice)
+            else:
+                # Idempotent retry: the first apply already rewrote bound keys
+                # (padding upgrade), so the pre-merge snapshot no longer
+                # matches. Accept only when replaying keep-current is a no-op
+                # on the live bytes; a concurrent edit still changes the tree.
+                try:
+                    replay = merge(choice)
+                except ValueError as exc:
+                    raise ValueError(
+                        "preference changed during retry; concurrent edit refused"
+                    ) from exc
+                if replay != current:
+                    raise ValueError(
+                        "preference changed during retry; concurrent edit refused"
+                    )
+                body = replay
+        else:
+            try:
+                # A later retry of an already-applied choice must not fail merely
+                # because the bound current hash is the pre-merge snapshot.
+                body = merge(None)
+            except ValueError:
+                if not choice:
+                    raise
+                if current_matches and not incoming_matches:
+                    raise ValueError(
+                        "incoming defaults changed during retry; concurrent edit refused"
+                    ) from None
+                if (
+                    incoming_matches
+                    and outcome["current_sha256"]
+                    and not current_matches
+                ):
+                    raise ValueError(
+                        "preference changed during retry; concurrent edit refused"
+                    ) from None
+                if not (current_matches and incoming_matches):
+                    raise
+                body = merge(choice)
         if not body.strip() or "\0" in body:
             raise ValueError("merged preference file is empty or invalid")
         if destination.suffix == ".toml":
