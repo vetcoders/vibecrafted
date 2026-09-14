@@ -369,6 +369,47 @@ async fn observe_once(
     }
 }
 
+/// The writer executable arrives from `VC_RUN_OBSERVATION_WRITER`; validate
+/// it before it becomes a spawned command. Bare names must be exactly
+/// `vibecrafted` (re-materialized as a literal so the env value never flows
+/// into `Command::new`); anything else must be an absolute path to a regular,
+/// non-symlink file canonicalizing under the runtime home.
+fn validated_writer_executable(
+    config: &WriterConfig,
+    home: &std::path::Path,
+) -> Result<PathBuf, &'static str> {
+    let executable = &config.executable;
+    let mut components = executable.components();
+    if let (Some(std::path::Component::Normal(name)), None) =
+        (components.next(), components.next())
+    {
+        return if name == "vibecrafted" {
+            Ok(PathBuf::from("vibecrafted"))
+        } else {
+            Err("invalid_writer_name")
+        };
+    }
+    if !executable.is_absolute() {
+        return Err("invalid_writer_path");
+    }
+    let Ok(meta) = std::fs::symlink_metadata(executable) else {
+        return Err("invalid_writer_path");
+    };
+    if meta.file_type().is_symlink() {
+        return Err("invalid_writer_path");
+    }
+    let canonical =
+        std::fs::canonicalize(executable).map_err(|_| "invalid_writer_path")?;
+    if !canonical.is_file() {
+        return Err("invalid_writer_path");
+    }
+    let canonical_home = std::fs::canonicalize(home).map_err(|_| "invalid_writer_home")?;
+    if !canonical.starts_with(canonical_home) {
+        return Err("invalid_writer_scope");
+    }
+    Ok(canonical)
+}
+
 async fn invoke_python_revalidation(
     plane: &ControlPlane,
     run_id: &str,
@@ -388,7 +429,15 @@ async fn invoke_python_revalidation(
             status: "invalid_control_plane_home".to_string(),
         };
     };
-    let mut command = Command::new(&config.executable);
+    let executable = match validated_writer_executable(config, &home) {
+        Ok(executable) => executable,
+        Err(status) => {
+            return WriterOutcome {
+                status: status.to_string(),
+            };
+        }
+    };
+    let mut command = Command::new(executable);
     command
         .args(["control-plane-revalidate", "--run-id", run_id, "--json"])
         .env("VIBECRAFTED_HOME", home)
@@ -713,6 +762,54 @@ mod tests {
         let outcome = invoke_python_revalidation(&plane, "../../foreign", &config, None).await;
 
         assert_eq!(outcome.status, "invalid_run_id");
+        fs::remove_dir_all(home).expect("remove fixture");
+    }
+
+    #[tokio::test]
+    async fn writer_boundary_rejects_foreign_bare_name_before_spawn() {
+        let home = fixture_home("foreign-bare-name");
+        let plane = ControlPlane::new(&home);
+        let config = WriterConfig {
+            executable: PathBuf::from("definitely-not-vibecrafted"),
+            timeout: Duration::from_secs(1),
+        };
+
+        let outcome = invoke_python_revalidation(&plane, "run-1", &config, None).await;
+
+        assert_eq!(outcome.status, "invalid_writer_name");
+        fs::remove_dir_all(home).expect("remove fixture");
+    }
+
+    #[tokio::test]
+    async fn writer_boundary_rejects_executable_outside_runtime_home() {
+        let home = fixture_home("foreign-path");
+        let plane = ControlPlane::new(&home);
+        let config = WriterConfig {
+            executable: PathBuf::from("/bin/ls"),
+            timeout: Duration::from_secs(1),
+        };
+
+        let outcome = invoke_python_revalidation(&plane, "run-1", &config, None).await;
+
+        assert_eq!(outcome.status, "invalid_writer_scope");
+        fs::remove_dir_all(home).expect("remove fixture");
+    }
+
+    #[tokio::test]
+    async fn writer_boundary_rejects_symlink_executable_before_spawn() {
+        let home = fixture_home("symlink-writer");
+        let plane = ControlPlane::new(&home);
+        let (writer, _pid_file) = blocking_writer(&home);
+        let link = home.join("linked-writer.sh");
+        std::os::unix::fs::symlink(&writer.executable, &link).expect("writer symlink");
+        let config = WriterConfig {
+            executable: link,
+            timeout: Duration::from_secs(1),
+        };
+
+        let outcome = invoke_python_revalidation(&plane, "run-1", &config, None).await;
+
+        assert_eq!(outcome.status, "invalid_writer_path");
         fs::remove_dir_all(home).expect("remove fixture");
     }
 
