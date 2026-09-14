@@ -436,6 +436,36 @@ async fn invoke_python_revalidation(
             };
         }
     };
+    // Allowlist barrier that is also a real boundary: the writer revalidates
+    // only a run that exists inside this control plane, and the request value
+    // reaches argv only after proving equality with the run's disk-canonical
+    // identity.
+    let runs_root = match std::fs::canonicalize(plane.control_plane_home().join("runtime_runs"))
+    {
+        Ok(root) => root,
+        Err(_) => {
+            return WriterOutcome {
+                status: "invalid_run_scope".to_string(),
+            };
+        }
+    };
+    let run_dir = match std::fs::canonicalize(runs_root.join(run_id)) {
+        Ok(dir) if dir.is_dir() && dir.starts_with(&runs_root) => dir,
+        _ => {
+            return WriterOutcome {
+                status: "invalid_run_scope".to_string(),
+            };
+        }
+    };
+    let verified_run_id = run_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    if run_id != verified_run_id {
+        return WriterOutcome {
+            status: "invalid_run_scope".to_string(),
+        };
+    }
     let mut command = Command::new(executable);
     command
         .args(["control-plane-revalidate", "--run-id", run_id, "--json"])
