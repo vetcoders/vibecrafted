@@ -15,9 +15,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   skill-loader:
     name: skill-loader (${{ matrix.os }})
+    timeout-minutes: 60
     env:
       # Foundation install may compile aicx from cargo; serial builds avoid runner OOM.
       CARGO_BUILD_JOBS: "1"

@@ -14,6 +14,7 @@ jobs:
     # fixture. Running this release-only gate on Linux makes the immutable tag
     # fail after all portable tests pass because xcrun/codesign are unavailable.
     runs-on: macos-15
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -52,6 +53,7 @@ jobs:
         run: make semgrep
 
       - name: Run installer and product tests
+        timeout-minutes: 90
         run: make test
 
       # The portable channel is the only artifact non-macOS users ever get, so

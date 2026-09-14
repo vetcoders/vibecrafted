@@ -1,15 +1,31 @@
 name: Portable Checks
 
+# PR-first event matrix:
+# - feature push: no run (open a PR)
+# - pull_request open/synchronize: run; group includes the PR number
+# - push to main: post-merge default-branch check
+# - merge_group: merge-queue check; cancel-in-progress is false
+# - tag: no run (Release source gate owns tags)
+# Required names preserved: "portable (macos-latest, macOS)" and
+# "portable (ubuntu-latest, Linux)" — do not add a job-level name here.
+
 on:
   push:
+    branches:
+      - main
   pull_request:
   merge_group:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
+
 jobs:
   portable:
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -79,6 +95,7 @@ jobs:
       - name: Run Semgrep security gate
         run: make semgrep
       - name: Run installer tests
+        timeout-minutes: 90
         run: make test
       - name: Build marketplace bundle
         run: make bundle
@@ -92,6 +109,7 @@ jobs:
   curl-bootstrap:
     name: Runtime Pack bootstrap (${{ matrix.os }})
     needs: portable
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
