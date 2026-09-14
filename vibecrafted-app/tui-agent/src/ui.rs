@@ -1932,10 +1932,12 @@ mod tests {
         };
         app.refresh_rendered_runs();
         app.refresh_observe();
+        app.load_requested_transcript();
         assert_eq!(app.observe.runs[app.observe.selected].run_id, "live-run");
         assert!(render_to_string(&app).contains("live transcript only"));
 
         app.toggle_filter();
+        app.load_requested_transcript();
         assert_eq!(app.queue_scope, QueueScope::History);
         assert_eq!(app.observe.runs.len(), 1);
         assert_eq!(app.observe.runs[app.observe.selected].run_id, "history-run");
@@ -2036,6 +2038,7 @@ mod tests {
         };
         app.refresh_rendered_runs();
         app.refresh_observe();
+        app.load_requested_transcript();
         assert_eq!(
             app.observe.transcript_view,
             crate::observe::TranscriptView::Human

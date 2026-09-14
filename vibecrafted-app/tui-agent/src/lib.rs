@@ -32,13 +32,14 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::Output;
+use std::process::Stdio;
 use std::sync::mpsc::{self, Sender};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::refresh::{
-    CanonicalRefreshSource, RefreshNeeds, RefreshSeed, RefreshSource, RefreshWorker,
+    CanonicalRefreshSource, CanonicalTranscriptSource, RefreshNeeds, RefreshSeed, RefreshSource,
+    RefreshWorker, TranscriptSource, TranscriptWorker,
 };
 
 const CHANGE_DEBOUNCE: Duration = Duration::from_millis(100);
@@ -186,6 +187,7 @@ pub use skills_catalog::{SkillEntry, SkillPayloadKind};
 pub enum BackgroundMessage {
     Catalog(CatalogState),
     Refresh(Box<refresh::RefreshResult>),
+    Transcript(Box<refresh::TranscriptResult>),
     Launch(Box<LaunchOutcome>),
     /// Stopped on the worker thread before the launcher was started, so
     /// nothing was admitted and there is nothing to be uncertain about.
@@ -224,6 +226,9 @@ const REFRESH_SHUTDOWN_GRACE: Duration = Duration::from_millis(250);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LoopControl {
     Continue,
+    /// A child had the terminal and gave it back: the physical screen no
+    /// longer shows the last frame, so the next frame writes every cell.
+    Repaint,
     Exit,
 }
 
@@ -242,6 +247,7 @@ struct ConsoleLoop {
     background_tx: Sender<BackgroundMessage>,
     background_rx: mpsc::Receiver<BackgroundMessage>,
     refresh: RefreshWorker,
+    transcripts: TranscriptWorker,
     scheduler: RefreshScheduler,
     feeds: ChangeFeeds,
     /// Set when the operator quit while a launch was still unanswered.
@@ -249,7 +255,12 @@ struct ConsoleLoop {
 }
 
 impl ConsoleLoop {
-    fn start<S: RefreshSource>(app: &App, source: S, feeds: ChangeFeeds) -> anyhow::Result<Self> {
+    fn start<S: RefreshSource, T: TranscriptSource>(
+        app: &App,
+        source: S,
+        transcript_source: T,
+        feeds: ChangeFeeds,
+    ) -> anyhow::Result<Self> {
         let (background_tx, background_rx) = mpsc::channel::<BackgroundMessage>();
         let results = background_tx.clone();
         let refresh = RefreshWorker::spawn(
@@ -265,6 +276,13 @@ impl ConsoleLoop {
             },
         )
         .context("failed to start the control-plane refresh worker")?;
+        let transcript_results = background_tx.clone();
+        let transcripts = TranscriptWorker::spawn(transcript_source, move |result| {
+            transcript_results
+                .send(BackgroundMessage::Transcript(Box::new(result)))
+                .is_ok()
+        })
+        .context("failed to start the transcript worker")?;
         let scheduler = RefreshScheduler::new(
             Instant::now(),
             feeds.state_watcher_active,
@@ -274,6 +292,7 @@ impl ConsoleLoop {
             background_tx,
             background_rx,
             refresh,
+            transcripts,
             scheduler,
             feeds,
             exit_after_receipt: false,
@@ -281,16 +300,18 @@ impl ConsoleLoop {
     }
 
     fn handle_event(&mut self, app: &mut App, event: Event) -> anyhow::Result<LoopControl> {
-        match event {
-            Event::Key(key) if handle_key(app, key, &self.background_tx)? => {
-                Ok(self.request_exit(app, key))
-            }
-            Event::Mouse(mouse) => {
-                handle_mouse(app, mouse)?;
-                Ok(LoopControl::Continue)
-            }
-            _ => Ok(LoopControl::Continue),
-        }
+        let outcome = match event {
+            Event::Key(key) => match handle_key(app, key, &self.background_tx)? {
+                InputOutcome::Quit => return Ok(self.request_exit(app, key)),
+                outcome => outcome,
+            },
+            Event::Mouse(mouse) => handle_mouse(app, mouse)?,
+            _ => InputOutcome::Handled,
+        };
+        Ok(match outcome {
+            InputOutcome::TerminalReturned => LoopControl::Repaint,
+            InputOutcome::Handled | InputOutcome::Quit => LoopControl::Continue,
+        })
     }
 
     /// Quit at once, unless a launch still waits for its receipt: leaving
@@ -355,6 +376,9 @@ impl ConsoleLoop {
         if let Some(job) = app.take_refresh_job() {
             self.refresh.submit(job);
         }
+        if let Some(job) = app.take_transcript_job() {
+            self.transcripts.submit(job);
+        }
         if self.exit_after_receipt && app.pending_launch.is_none() {
             LoopControl::Exit
         } else {
@@ -362,21 +386,32 @@ impl ConsoleLoop {
         }
     }
 
-    /// Block for the next background answer and apply it. The running console
-    /// never calls this; tests use it to wait on an event instead of a clock.
+    /// Apply background answers as they arrive until `done` holds. The running
+    /// console never calls this; tests use it to wait on events, with
+    /// `timeout` only as a failure guard.
     #[cfg(test)]
-    fn wait_for_background(&mut self, app: &mut App, timeout: Duration) -> bool {
-        match self.background_rx.recv_timeout(timeout) {
-            Ok(message) => {
-                apply_background(app, message);
-                true
+    fn wait_until(
+        &mut self,
+        app: &mut App,
+        timeout: Duration,
+        done: impl Fn(&App) -> bool,
+    ) -> bool {
+        let deadline = Instant::now() + timeout;
+        while !done(app) {
+            let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                return false;
+            };
+            match self.background_rx.recv_timeout(left) {
+                Ok(message) => apply_background(app, message),
+                Err(_) => return false,
             }
-            Err(_) => false,
         }
+        true
     }
 
     fn shutdown(mut self) {
         let _ = self.refresh.shutdown(REFRESH_SHUTDOWN_GRACE);
+        let _ = self.transcripts.shutdown(REFRESH_SHUTDOWN_GRACE);
     }
 }
 
@@ -385,6 +420,9 @@ fn apply_background(app: &mut App, message: BackgroundMessage) {
         BackgroundMessage::Catalog(state) => app.set_catalog(state),
         BackgroundMessage::Refresh(result) => {
             app.apply_refresh(*result);
+        }
+        BackgroundMessage::Transcript(result) => {
+            app.apply_transcript(*result);
         }
         BackgroundMessage::Launch(outcome) => app.record_launch_outcome(*outcome),
         BackgroundMessage::LaunchHalted { summary, detail } => {
@@ -423,6 +461,7 @@ fn run_app(config: AppConfig) -> anyhow::Result<()> {
         let mut console = ConsoleLoop::start(
             &app,
             CanonicalRefreshSource,
+            CanonicalTranscriptSource,
             ChangeFeeds {
                 state: state_rx,
                 artifacts: artifact_rx,
@@ -454,9 +493,15 @@ fn serve(
             .tick_rate
             .checked_sub(last_draw.elapsed())
             .unwrap_or(Duration::ZERO);
-        if event::poll(timeout)? && console.handle_event(app, event::read()?)? == LoopControl::Exit
-        {
-            return Ok(());
+        if event::poll(timeout)? {
+            match console.handle_event(app, event::read()?)? {
+                LoopControl::Exit => return Ok(()),
+                // Whatever the child left on the physical screen is not the
+                // frame Ratatui diffs against: drop that frame so the next draw
+                // writes every cell instead of only the ones that changed.
+                LoopControl::Repaint => terminal.clear()?,
+                LoopControl::Continue => {}
+            }
         }
         if console.tick(app, Instant::now()) == LoopControl::Exit {
             return Ok(());
@@ -475,14 +520,24 @@ fn shutdown_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> a
     Ok(())
 }
 
+/// What a key press or click did beyond changing the console's own state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputOutcome {
+    Handled,
+    Quit,
+    /// A child process had the terminal and gave it back.
+    TerminalReturned,
+}
+
 fn handle_key(
     app: &mut App,
     key: KeyEvent,
     tx: &Sender<BackgroundMessage>,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<InputOutcome> {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-        return Ok(true);
+        return Ok(InputOutcome::Quit);
     }
+    let mut outcome = InputOutcome::Handled;
 
     match app.focus {
         LaunchFocus::EditPrompt => match key.code {
@@ -553,7 +608,7 @@ fn handle_key(
                 app.refresh_memory();
             }
             KeyCode::Char('w') => {
-                launch_aicx_wizard(app)?;
+                outcome = launch_aicx_wizard(app)?;
             }
             _ => {}
         },
@@ -606,6 +661,10 @@ fn handle_key(
                         "auto-rewire",
                         &agent,
                     ])
+                    // It opens its own pane; its output must not land on the console.
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
                     .spawn();
                 app.focus = LaunchFocus::Browse;
             }
@@ -621,7 +680,7 @@ fn handle_key(
             _ => {}
         },
         LaunchFocus::Browse => match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => return Ok(true),
+            KeyCode::Char('q') | KeyCode::Esc => return Ok(InputOutcome::Quit),
             KeyCode::Char('?') => app.focus = LaunchFocus::Help,
             KeyCode::Tab => app.next_tab(),
             KeyCode::BackTab => app.previous_tab(),
@@ -731,7 +790,7 @@ fn handle_key(
                 app.focus = LaunchFocus::Memory;
             }
             KeyCode::Char('w') => {
-                launch_aicx_wizard(app)?;
+                outcome = launch_aicx_wizard(app)?;
             }
             KeyCode::Char('e') => {
                 app.set_active_tab(AppTab::Dispatch);
@@ -742,7 +801,7 @@ fn handle_key(
             KeyCode::Enter => match app.active_tab() {
                 AppTab::Monitor => {
                     if app.config.view == crate::observe::ConsoleView::Observe {
-                        switch_to_selected_observe_session(app)?;
+                        outcome = switch_to_selected_observe_session(app)?;
                     } else if app.selected_run().is_some() {
                         app.set_active_tab(AppTab::Controls);
                     }
@@ -754,7 +813,7 @@ fn handle_key(
                     _ => launch_selected(app, tx)?,
                 },
                 AppTab::Controls => {
-                    run_selected_deep_control(app, tx)?;
+                    outcome = run_selected_deep_control(app, tx)?;
                 }
                 AppTab::MissionControl => {
                     // Mission Control is a read-only situational-awareness
@@ -795,22 +854,21 @@ fn handle_key(
             _ => {}
         },
     }
-    Ok(false)
+    Ok(outcome)
 }
 
-fn handle_mouse(app: &mut App, mouse: MouseEvent) -> anyhow::Result<()> {
+fn handle_mouse(app: &mut App, mouse: MouseEvent) -> anyhow::Result<InputOutcome> {
     let (width, height) = crossterm::terminal::size()?;
-    apply_mouse(app, mouse, ratatui::layout::Rect::new(0, 0, width, height))?;
-    Ok(())
+    apply_mouse(app, mouse, ratatui::layout::Rect::new(0, 0, width, height))
 }
 
 fn apply_mouse(
     app: &mut App,
     mouse: MouseEvent,
     area: ratatui::layout::Rect,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<InputOutcome> {
     if app.focus != LaunchFocus::Browse {
-        return Ok(());
+        return Ok(InputOutcome::Handled);
     }
     let mux_height = crate::layout::mux_panel_height(app.mux_status_lines().len());
     let polarize_height = crate::layout::polarize_panel_height(app.polarize_status_lines().len());
@@ -823,15 +881,15 @@ fn apply_mouse(
         mouse.column,
         mouse.row,
     ) else {
-        return Ok(());
+        return Ok(InputOutcome::Handled);
     };
     match mouse.kind {
         MouseEventKind::ScrollUp => scroll_hit(app, area, hit, -1),
         MouseEventKind::ScrollDown => scroll_hit(app, area, hit, 1),
-        MouseEventKind::Down(MouseButton::Left) => click_hit(app, hit)?,
+        MouseEventKind::Down(MouseButton::Left) => return click_hit(app, hit),
         _ => {}
     }
-    Ok(())
+    Ok(InputOutcome::Handled)
 }
 
 fn scroll_hit(
@@ -862,7 +920,7 @@ fn scroll_hit(
         .scroll_pane(pane, delta, content_len, view_height);
 }
 
-fn click_hit(app: &mut App, hit: crate::layout::HitTarget) -> anyhow::Result<()> {
+fn click_hit(app: &mut App, hit: crate::layout::HitTarget) -> anyhow::Result<InputOutcome> {
     use crate::layout::{HitTarget, pane_for_hit};
     if let Some(pane) = pane_for_hit(hit) {
         app.interaction.focused = Some(pane);
@@ -890,14 +948,10 @@ fn click_hit(app: &mut App, hit: crate::layout::HitTarget) -> anyhow::Result<()>
             let index = usize::from(inner_row.saturating_add(app.interaction.scroll.observe_list));
             if index < app.observe.runs.len() {
                 if index == app.observe.selected {
-                    switch_to_selected_observe_session(app)?;
-                } else {
-                    app.observe.selected = index;
-                    app.observe.transcript.clear();
-                    app.observe.transcript_raw.clear();
-                    app.observe.transcript_run_id = None;
-                    app.refresh_observe_transcript();
+                    return switch_to_selected_observe_session(app);
                 }
+                app.observe.selected = index;
+                app.refresh_observe_transcript();
             }
         }
         HitTarget::MonitorList { inner_row } => {
@@ -922,7 +976,7 @@ fn click_hit(app: &mut App, hit: crate::layout::HitTarget) -> anyhow::Result<()>
         }
         _ => {}
     }
-    Ok(())
+    Ok(InputOutcome::Handled)
 }
 
 fn pane_rect(
@@ -1000,46 +1054,33 @@ fn pane_content_len(app: &App, pane: crate::layout::PaneId, view_width: u16) -> 
     }
 }
 
-fn switch_to_selected_observe_session(app: &mut App) -> anyhow::Result<()> {
+fn switch_to_selected_observe_session(app: &mut App) -> anyhow::Result<InputOutcome> {
     let Some(command) = app.observe_switch_command() else {
         app.show_error(
             "session switch unavailable",
             vec!["The canonical session has no vc-frame attach target.".to_string()],
         );
-        return Ok(());
+        return Ok(InputOutcome::Handled);
     };
     let summary = command.command_line();
-    if let Err(error) = suspend_and_run(&command) {
-        app.show_error("session switch failed", error.detail_lines(summary));
-    } else {
-        app.append_status(format!("returned from {summary}"));
-        app.request_full_refresh();
+    match suspend_and_run(&command)? {
+        Err(error) => app.show_error("session switch failed", error.detail_lines(summary)),
+        Ok(()) => {
+            app.append_status(format!("returned from {summary}"));
+            app.request_full_refresh();
+        }
     }
-    Ok(())
+    Ok(InputOutcome::TerminalReturned)
 }
 
-fn launch_aicx_wizard(app: &mut App) -> anyhow::Result<()> {
-    let mut stdout = io::stdout();
-    let leave = (|| -> anyhow::Result<()> {
-        disable_raw_mode().context("failed to disable raw mode before aicx wizard")?;
-        execute!(stdout, DisableMouseCapture, LeaveAlternateScreen)
-            .context("failed to leave alternate screen before aicx wizard")?;
-        stdout.flush().ok();
-        Ok(())
-    })();
-    let result = match leave {
-        Ok(()) => crate::memory::launch_wizard(&app.memory.project, &app.config.repo),
-        Err(error) => Err(error),
-    };
-    let restore_raw = enable_raw_mode();
-    let restore_screen = execute!(stdout, EnterAlternateScreen, EnableMouseCapture);
-    match result {
+fn launch_aicx_wizard(app: &mut App) -> anyhow::Result<InputOutcome> {
+    let project = app.memory.project.clone();
+    let repo = app.config.repo.clone();
+    match with_terminal_handed_over(|| crate::memory::launch_wizard(&project, &repo))? {
         Ok(()) => app.append_status("returned from aicx wizard"),
         Err(error) => app.show_error("aicx wizard failed", vec![error.to_string()]),
     }
-    restore_raw.context("failed to restore raw mode after aicx wizard")?;
-    restore_screen.context("failed to restore alternate screen after aicx wizard")?;
-    Ok(())
+    Ok(InputOutcome::TerminalReturned)
 }
 
 /// Hand the operator's declaration to the canonical launcher.
@@ -1112,11 +1153,14 @@ fn launch_selected(app: &mut App, tx: &Sender<BackgroundMessage>) -> anyhow::Res
     Ok(())
 }
 
-fn run_selected_deep_control(app: &mut App, tx: &Sender<BackgroundMessage>) -> anyhow::Result<()> {
+fn run_selected_deep_control(
+    app: &mut App,
+    tx: &Sender<BackgroundMessage>,
+) -> anyhow::Result<InputOutcome> {
     let Some(action) = app.selected_deep_action() else {
         app.append_status("No deep action is available for the selected run.");
         app.focus = LaunchFocus::Browse;
-        return Ok(());
+        return Ok(InputOutcome::Handled);
     };
     if matches!(
         action,
@@ -1125,13 +1169,13 @@ fn run_selected_deep_control(app: &mut App, tx: &Sender<BackgroundMessage>) -> a
         if let Err(error) = app.open_artifact(&action) {
             app.show_error("artifact open failed", vec![format!("{error:#}")]);
         }
-        return Ok(());
+        return Ok(InputOutcome::Handled);
     }
     if matches!(action, DeepAction::PolarizeIntent { .. }) {
         if let Err(error) = app.open_polarize_intent(&action) {
             app.show_error("polarize prism open failed", vec![format!("{error:#}")]);
         }
-        return Ok(());
+        return Ok(InputOutcome::Handled);
     }
     // A skill launch IS a launch: same declaration, same launcher, same
     // receipt. It must not take a second path with its own argv shape.
@@ -1141,7 +1185,7 @@ fn run_selected_deep_control(app: &mut App, tx: &Sender<BackgroundMessage>) -> a
                 "unknown skill",
                 vec![format!("{skill} is not in the VOC skill catalog")],
             );
-            return Ok(());
+            return Ok(InputOutcome::Handled);
         };
         let restore_kind = app.launch_kind;
         let restore_agent = app.launch_agent;
@@ -1156,19 +1200,20 @@ fn run_selected_deep_control(app: &mut App, tx: &Sender<BackgroundMessage>) -> a
         let result = launch_selected(app, tx);
         app.launch_kind = restore_kind;
         app.launch_agent = restore_agent;
-        return result;
+        return result.map(|()| InputOutcome::Handled);
     }
     let command = deep_control_command(app, &action);
     let summary = command.command_line();
-    if let Err(error) = suspend_and_run(&command) {
-        app.show_error("action failed", error.detail_lines(summary));
-    } else {
-        app.push_launch_history(summary.clone());
-        app.append_status(format!("ran: {summary}"));
-        app.focus = LaunchFocus::Browse;
+    match suspend_and_run(&command)? {
+        Err(error) => app.show_error("action failed", error.detail_lines(summary)),
+        Ok(()) => {
+            app.push_launch_history(summary.clone());
+            app.append_status(format!("ran: {summary}"));
+            app.focus = LaunchFocus::Browse;
+        }
     }
     app.request_full_refresh();
-    Ok(())
+    Ok(InputOutcome::TerminalReturned)
 }
 
 fn deep_control_command(app: &App, action: &DeepAction) -> LaunchCommand {
@@ -1271,41 +1316,47 @@ impl LaunchRunError {
     }
 }
 
-/// Hand the terminal to an interactive deep control and take it back when the
-/// child exits. Used for attach / resume / health checks only.
-fn suspend_and_run(command: &LaunchCommand) -> Result<(), LaunchRunError> {
+/// Give the terminal to an interactive child and take it back when it ends.
+///
+/// Every step that left the console's screen is undone whether the child ran,
+/// failed or never started. The caller must repaint: re-entering the alternate
+/// screen shows whatever the child left there, while Ratatui still holds the
+/// last frame it drew and would only write the cells that changed since. The
+/// outer `Err` means the terminal could not be restored at all.
+fn with_terminal_handed_over<T>(
+    child: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<anyhow::Result<T>> {
     let mut stdout = io::stdout();
-    disable_raw_mode()
-        .context("failed to disable raw mode before launch")
-        .map_err(launch_error)?;
-    execute!(stdout, DisableMouseCapture, LeaveAlternateScreen).map_err(launch_error)?;
+    let left = disable_raw_mode()
+        .context("failed to disable raw mode before handing over the terminal")
+        .and_then(|()| {
+            execute!(stdout, DisableMouseCapture, LeaveAlternateScreen)
+                .context("failed to leave the alternate screen")
+        });
+    let _ = stdout.flush();
+    let outcome = left.and_then(|()| child());
+    let screen = execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
+        .context("failed to restore the alternate screen and mouse capture");
+    let raw = enable_raw_mode().context("failed to restore raw mode");
+    screen?;
+    raw?;
+    Ok(outcome)
+}
 
-    let launch_result: Result<Output, LaunchRunError> =
-        match command.spawn_interactive_with_stderr() {
-            Ok(child) => child
-                .wait_with_output()
-                .map_err(|err| LaunchRunError::Exec {
-                    message: format!("process failed: {err}"),
-                    stderr: String::new(),
-                }),
-            Err(error) => Err(launch_error(error)),
-        };
-
-    let leave_result = execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
-        .context("failed to restore alternate screen");
-    let raw_result = enable_raw_mode().context("failed to re-enable raw mode after launch");
-
-    leave_result.map_err(launch_error)?;
-    raw_result.map_err(launch_error)?;
-    let output = launch_result?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(LaunchRunError::Exec {
+/// Run an interactive deep control (attach / resume / health) with the terminal.
+fn suspend_and_run(command: &LaunchCommand) -> anyhow::Result<Result<(), LaunchRunError>> {
+    let finished = with_terminal_handed_over(|| {
+        let child = command.spawn_interactive_with_stderr()?;
+        child.wait_with_output().context("process failed")
+    })?;
+    Ok(match finished {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => Err(LaunchRunError::Exec {
             message: format!("command exited with {}", output.status),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        })
-    }
+        }),
+        Err(error) => Err(launch_error(error)),
+    })
 }
 
 fn launch_error(error: impl Into<anyhow::Error>) -> LaunchRunError {
@@ -2073,7 +2124,43 @@ mod tests {
         loads: Arc<AtomicUsize>,
     }
 
+    /// Transcripts that answer at once, for tests that do not look at them.
+    struct FixtureTranscripts;
+
+    impl TranscriptSource for FixtureTranscripts {
+        fn read(&mut self, job: &refresh::TranscriptJob) -> Result<String, String> {
+            Ok(format!("transcript of {}", job.run_id))
+        }
+    }
+
+    /// A transcript source whose first read parks at a barrier; later reads
+    /// answer at once.
+    struct HeldTranscripts {
+        entered: mpsc::Sender<String>,
+        release: mpsc::Receiver<()>,
+        held_once: bool,
+    }
+
+    impl TranscriptSource for HeldTranscripts {
+        fn read(&mut self, job: &refresh::TranscriptJob) -> Result<String, String> {
+            if !self.held_once {
+                self.held_once = true;
+                let _ = self.entered.send(job.run_id.clone());
+                let _ = self.release.recv();
+            }
+            Ok(format!("transcript of {}", job.run_id))
+        }
+    }
+
     fn held_console(app: &App, loaded: ControlPlaneState) -> HeldConsole {
+        held_console_with(app, loaded, FixtureTranscripts)
+    }
+
+    fn held_console_with<T: TranscriptSource>(
+        app: &App,
+        loaded: ControlPlaneState,
+        transcripts: T,
+    ) -> HeldConsole {
         let (entered_tx, entered) = mpsc::channel();
         let (release, release_rx) = mpsc::channel();
         let (state_changes, state_rx) = mpsc::channel();
@@ -2087,6 +2174,7 @@ mod tests {
                 loaded,
                 loads: Arc::clone(&loads),
             },
+            transcripts,
             ChangeFeeds {
                 state: state_rx,
                 artifacts: artifact_rx,
@@ -2170,7 +2258,9 @@ mod tests {
 
         // Released, the answer arrives as a message and reaches the board.
         held.release.send(()).unwrap();
-        assert!(held.console.wait_for_background(&mut app, GUARD));
+        assert!(held.console.wait_until(&mut app, GUARD, |app| {
+            run_ids(app).contains(&"run-fresh".to_string())
+        }));
         assert!(run_ids(&app).contains(&"run-fresh".to_string()));
         assert_eq!(
             app.selected_run().unwrap().snapshot.run_id,
@@ -2396,7 +2486,9 @@ mod tests {
         assert!(app.pending_launch.is_some(), "status: {}", app.status_line);
         assert!(
             held.console
-                .wait_for_background(&mut app, Duration::from_secs(60)),
+                .wait_until(&mut app, Duration::from_secs(60), |app| {
+                    app.pending_launch.is_none()
+                }),
             "the launcher receipt arrives"
         );
         assert!(app.pending_launch.is_none());
@@ -2415,6 +2507,84 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.path().join("stdin.txt")).unwrap(),
             "Ship the destination fix"
+        );
+    }
+
+    #[test]
+    fn observe_navigation_is_served_while_a_transcript_read_is_held_and_a_late_answer_is_dropped() {
+        let mut app = sample_app();
+        app.config.view = crate::observe::ConsoleView::Observe;
+        app.queue_scope = QueueScope::All;
+        app.state = state_with_runs(
+            "/tmp/state",
+            &[("run-1", "codex"), ("run-2", "claude"), ("run-3", "grok")],
+        );
+        let (entered_tx, entered) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel();
+        let loaded = app.state.clone();
+        let mut held = held_console_with(
+            &app,
+            loaded,
+            HeldTranscripts {
+                entered: entered_tx,
+                release: release_rx,
+                held_once: false,
+            },
+        );
+
+        // Projecting the board asks for the selected run's transcript; the
+        // loop hands that read to the worker, which parks inside it.
+        app.refresh_rendered_runs();
+        let first = app.observe.runs[app.observe.selected].run_id.clone();
+        assert_eq!(
+            app.observe.transcript,
+            format!("loading transcript for {first}…")
+        );
+        held.console.tick(&mut app, Instant::now());
+        assert_eq!(
+            entered
+                .recv_timeout(GUARD)
+                .expect("the transcript read is held"),
+            first
+        );
+
+        // Navigation, a view toggle and a cancelled search are served meanwhile.
+        press(&mut held, &mut app, key(KeyCode::Char('j')));
+        let second = app.observe.runs[app.observe.selected].run_id.clone();
+        assert_ne!(second, first);
+        assert_eq!(
+            app.observe.transcript,
+            format!("loading transcript for {second}…")
+        );
+        press(&mut held, &mut app, key(KeyCode::Char('t')));
+        press(&mut held, &mut app, key(KeyCode::Char('/')));
+        assert_eq!(app.focus, LaunchFocus::Search);
+        press(&mut held, &mut app, key(KeyCode::Esc));
+        assert_eq!(app.focus, LaunchFocus::Browse);
+        held.console.tick(&mut app, Instant::now());
+
+        // Released: the read for the run already left must not land; the read
+        // for the current selection does.
+        let stale_generation = app.observe.transcript_generation - 1;
+        release.send(()).unwrap();
+        assert!(held.console.wait_until(&mut app, GUARD, |app| {
+            app.observe.transcript_raw == format!("transcript of {second}")
+        }));
+        assert_eq!(app.observe.runs[app.observe.selected].run_id, second);
+        assert!(app.observe.transcript_loading.is_none());
+
+        // The same late answer, delivered again, is refused outright.
+        assert!(!app.apply_transcript(refresh::TranscriptResult {
+            generation: stale_generation,
+            run_id: first.clone(),
+            body: Ok(refresh::LoadedTranscript {
+                raw: format!("transcript of {first}"),
+                human: String::new(),
+            }),
+        }));
+        assert_eq!(
+            app.observe.transcript_raw,
+            format!("transcript of {second}")
         );
     }
 

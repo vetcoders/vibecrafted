@@ -9,7 +9,9 @@ use crate::memory::{self, MemoryState};
 use crate::mission_control::{self, ActionQueueItem, ActionQueueKind, MissionControlState};
 use crate::observe::{self, ObserveHealth, ObserveState};
 use crate::polarize::{PolarizeBand, PolarizeIntent};
-use crate::refresh::{RefreshJob, RefreshNeeds, RefreshResult, RefreshState};
+use crate::refresh::{
+    RefreshJob, RefreshNeeds, RefreshResult, RefreshState, TranscriptJob, TranscriptResult,
+};
 use crate::skills_catalog::{self, SkillPayloadKind};
 use crate::state::{
     ControlPlaneState, RenderedRun, RunKind, is_actionable_kind, render_runs, workspace_matches,
@@ -663,40 +665,93 @@ impl App {
         true
     }
 
+    /// Show the selected run's transcript, asking for it when it is not loaded.
+    /// The read and its human rendering happen off the input loop; until the
+    /// answer for this selection arrives the pane says it is loading, and a
+    /// failed read keeps its honest error on screen while it is retried.
     pub fn refresh_observe_transcript(&mut self) {
         let Some(run) = self.observe.runs.get(self.observe.selected) else {
             self.observe.transcript.clear();
             self.observe.transcript_raw.clear();
+            self.observe.transcript_human.clear();
             self.observe.transcript_run_id = None;
+            self.observe.transcript_loading = None;
+            self.observe.transcript_request = None;
             return;
         };
         let run_id = run.run_id.clone();
-        let transcript_path = run.transcript_path.clone();
-        if self.observe.transcript_run_id.as_deref() == Some(run_id.as_str())
-            && !self.observe.transcript_raw.is_empty()
-        {
+        let path = run.transcript_path.clone();
+        let shown = self.observe.transcript_run_id.as_deref() == Some(run_id.as_str());
+        if shown && !self.observe.transcript_raw.is_empty() {
             self.sync_observe_transcript_display();
             return;
         }
-        if let Some(path) = transcript_path
-            && let Ok(body) = fs::read_to_string(path)
-        {
-            self.observe.transcript_raw = body;
-            self.observe.transcript_run_id = Some(run_id);
-            self.sync_observe_transcript_display();
+        if self.observe.transcript_loading.as_deref() == Some(run_id.as_str()) {
             return;
         }
-        match observe::fetch_transcript(&self.config.server, &run_id) {
-            Ok(body) => {
-                self.observe.transcript_raw = body;
-                self.observe.transcript_run_id = Some(run_id);
+        self.observe.transcript_generation += 1;
+        self.observe.transcript_loading = Some(run_id.clone());
+        self.observe.transcript_request = Some(TranscriptJob {
+            generation: self.observe.transcript_generation,
+            run_id: run_id.clone(),
+            path,
+            origin: self.config.server.clone(),
+        });
+        if !shown {
+            // Another run's transcript must never stand in for this one.
+            self.observe.transcript_raw.clear();
+            self.observe.transcript_human.clear();
+            self.observe.transcript_run_id = None;
+            self.observe.transcript = format!("loading transcript for {run_id}…");
+        }
+    }
+
+    /// Hand the waiting transcript read to the worker, if one is waiting.
+    pub fn take_transcript_job(&mut self) -> Option<TranscriptJob> {
+        self.observe.transcript_request.take()
+    }
+
+    /// Apply a transcript answer — only the read asked for last, and only
+    /// while its run is still selected: a late read for a selection the
+    /// operator already left never replaces what is on screen.
+    pub fn apply_transcript(&mut self, result: TranscriptResult) -> bool {
+        let selected = self
+            .observe
+            .runs
+            .get(self.observe.selected)
+            .map(|run| run.run_id.as_str());
+        if result.generation != self.observe.transcript_generation
+            || selected != Some(result.run_id.as_str())
+        {
+            return false;
+        }
+        self.observe.transcript_loading = None;
+        self.observe.transcript_run_id = Some(result.run_id);
+        match result.body {
+            Ok(loaded) => {
+                self.observe.transcript_raw = loaded.raw;
+                self.observe.transcript_human = loaded.human;
                 self.sync_observe_transcript_display();
             }
             Err(error) => {
                 self.observe.transcript_raw.clear();
+                self.observe.transcript_human.clear();
                 self.observe.transcript = format!("transcript unavailable: {error}");
-                self.observe.transcript_run_id = Some(run_id);
             }
+        }
+        true
+    }
+
+    /// Load a waiting transcript read inline through the worker's own reader.
+    /// Tests only: the running console hands the read to the transcript worker.
+    #[cfg(test)]
+    pub(crate) fn load_requested_transcript(&mut self) {
+        if let Some(job) = self.take_transcript_job() {
+            let result = crate::refresh::load_transcript(
+                &mut crate::refresh::CanonicalTranscriptSource,
+                job,
+            );
+            self.apply_transcript(result);
         }
     }
 
@@ -704,11 +759,12 @@ impl App {
         self.observe.transcript = match self.observe.transcript_view {
             crate::observe::TranscriptView::Raw => self.observe.transcript_raw.clone(),
             crate::observe::TranscriptView::Human => {
-                let human = crate::run_detail::humanize_transcript(&self.observe.transcript_raw);
-                if human.trim().is_empty() && !self.observe.transcript_raw.trim().is_empty() {
+                if self.observe.transcript_human.trim().is_empty()
+                    && !self.observe.transcript_raw.trim().is_empty()
+                {
                     "(no user/assistant/tool text in this stream — press t for raw)".to_string()
                 } else {
-                    human
+                    self.observe.transcript_human.clone()
                 }
             }
         };
@@ -735,7 +791,9 @@ impl App {
 
     pub fn toggle_observe_transcript_view(&mut self) {
         self.observe.transcript_view = self.observe.transcript_view.next();
-        self.sync_observe_transcript_display();
+        if !self.observe.transcript_raw.is_empty() {
+            self.sync_observe_transcript_display();
+        }
         self.append_status(format!(
             "transcript: {}",
             self.observe.transcript_view.label()
@@ -752,9 +810,6 @@ impl App {
             index += count;
         }
         self.observe.selected = (index % count) as usize;
-        self.observe.transcript.clear();
-        self.observe.transcript_raw.clear();
-        self.observe.transcript_run_id = None;
         self.refresh_observe_transcript();
     }
 
