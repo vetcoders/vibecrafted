@@ -510,7 +510,6 @@ Utilities:
   repo-full                      Legacy full git context helper
   skills-sync                    Sync skills to agents
   vc-frontier-paths              Show frontier config paths
-  vc-frontier-install            Install frontier presets (starship/atuin/vc_frame)
   vc-help                        This help
 
 Frontier docs:  docs/FRONTIER.md (starship, atuin, optional vc_frame)
@@ -948,20 +947,4 @@ vc-frontier-paths() {
   [[ -n "$atuin_config" ]] && printf 'ATUIN_CONFIG=%s\n' "$atuin_config"
   [[ -n "$vc_frame_config" ]] && printf 'VC_FRAME_CONFIG_DIR=%s\n' "$(dirname "$vc_frame_config")"
   return 0
-}
-
-vc-frontier-install() {
-  local repo_root script base
-  repo_root="$(_vetcoders_frontier_source_root)" || {
-    echo "Repo-owned frontier source not found." >&2
-    return 1
-  }
-  base="$(_vetcoders_spawn_home "vc-agents")"
-  script="$base/scripts/install-frontier-config.sh"
-  
-  [[ -f "$script" ]] || {
-    echo "Frontier installer not found: $script" >&2
-    return 1
-  }
-  bash "$script" --source "$repo_root" "$@"
 }

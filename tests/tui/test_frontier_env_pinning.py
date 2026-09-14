@@ -28,8 +28,10 @@ _GENERATION_FIXTURE_SPEC.loader.exec_module(gen)
 # "even when absent", together with VC_FRAME_CONFIG_FILE. The retired resolver
 # looked for vc-frame/ in the frontier companion
 # ($XDG_CONFIG_HOME/vetcoders/frontier) and kept a live user pin; neither is a
-# candidate any more. Starship/Atuin keep the old "suggest, never override"
-# frontier contract, so their assertions below are unchanged.
+# candidate any more. Starship/Atuin keep "suggest, never override" for an
+# explicit STARSHIP_CONFIG / ATUIN_CONFIG, but private files in the user's own
+# config directory are no longer consulted (Founder, 2026-09-14: configuration
+# lives only in ~/.config/vibecrafted).
 
 
 def _write_fake_binary(bin_dir: Path, name: str) -> None:
@@ -242,7 +244,9 @@ def test_sourcing_helper_pins_vc_frame_despite_default_user_vc_frame_config(
     tmp_path: Path,
 ) -> None:
     """vc-frame uses the product config home even when stock vc_frame has user
-    config and the frontier companion carries its own vc-frame/."""
+    config and the retired frontier companion carries its own vc-frame/.
+    Private Starship/Atuin files in the user's own config directory are never
+    consulted: they neither suppress nor replace the product preset."""
     home = tmp_path / "home"
     xdg_config_home = tmp_path / "xdg"
     fake_bin = tmp_path / "bin"
@@ -293,8 +297,15 @@ def test_sourcing_helper_pins_vc_frame_despite_default_user_vc_frame_config(
         text=True,
     )
 
-    assert "STARSHIP_CONFIG=\n" in result.stdout
-    assert "ATUIN_CONFIG=\n" in result.stdout
+    assert (
+        f"STARSHIP_CONFIG={REPO_ROOT / 'config' / 'starship.toml'}\n" in result.stdout
+    )
+    assert (
+        f"ATUIN_CONFIG={REPO_ROOT / 'config' / 'atuin' / 'config.toml'}\n"
+        in result.stdout
+    )
+    assert str(xdg_config_home / "starship.toml") not in result.stdout
+    assert str(xdg_config_home / "atuin") not in result.stdout
     product_config = gen.product_vc_frame_config_dir(home)
     assert f"VC_FRAME_CONFIG_DIR={product_config}\n" in result.stdout
     assert str(xdg_config_home / "vc-frame") not in result.stdout
