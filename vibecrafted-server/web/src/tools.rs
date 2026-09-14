@@ -39,13 +39,13 @@ pub mod api {
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
-    use axum::extract::{ConnectInfo, Query, Request, State};
-    use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
-    use axum::response::{IntoResponse, Response};
     use axum::Json;
+    use axum::extract::{ConnectInfo, Query, Request, State};
+    use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+    use axum::response::{IntoResponse, Response};
     use control_core::ControlPlane;
     use leptos::config::LeptosOptions;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     /// Query size the AICX CLI is asked to search. Long free text is a paste,
     /// not a query.
@@ -309,7 +309,12 @@ pub mod api {
         };
         let project = match query.get("project").map(String::as_str) {
             None => None,
-            Some(raw) if raw.trim().is_empty() => None,
+            Some(raw) if raw.trim().is_empty() => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "project is required; use owner/repo or omit the parameter for all-projects search",
+                );
+            }
             Some(raw) => match valid_project(raw) {
                 Some(project) => Some(project.to_string()),
                 None => {
@@ -353,6 +358,7 @@ pub mod api {
                             Json(json!({
                                 "schema": "vibecrafted.aicx-search.v1",
                                 "query": term,
+                                "scope": if project.is_some() { "project" } else { "global" },
                                 "project": project,
                                 "count": items.len(),
                                 "items": items,

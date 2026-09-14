@@ -332,18 +332,42 @@ async fn tool_surfaces_keep_their_boundaries() {
         "invalid input must not spawn aicx"
     );
 
-    // Empty project is omitted, not treated as service-unavailable.
-    fixture.aicx("ok", json!([]));
+    // Empty project= is missing-project validation, not unscoped and not unavailable.
+    let _ = fs::remove_file(&fixture.aicx_argv);
     let (status, _, body) = call(
         &app,
         "/api/aicx/search?q=native&project=",
         Some("127.0.0.1:5000"),
     )
     .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    let empty_project: Value = serde_json::from_slice(&body).expect("empty project json");
+    assert_eq!(empty_project["kind"], "validation");
+    assert!(
+        empty_project["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("project is required"),
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    assert!(
+        !fixture.aicx_argv.exists(),
+        "empty project must not spawn aicx"
+    );
+
+    // Omitting project is the explicit global search surface.
+    fixture.aicx("ok", json!([]));
+    let (status, _, body) = call(&app, "/api/aicx/search?q=native", Some("127.0.0.1:5000")).await;
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
-    let payload: Value = serde_json::from_slice(&body).expect("empty project json");
-    assert_eq!(payload["kind"], Value::Null);
-    assert_eq!(payload["project"], Value::Null);
+    let global: Value = serde_json::from_slice(&body).expect("global search json");
+    assert_eq!(global["scope"], "global");
+    assert_eq!(global["project"], Value::Null);
 
     // Success: bounded argv, projected items, references only inside extracts.
     fixture.aicx(
@@ -385,6 +409,8 @@ async fn tool_surfaces_keep_their_boundaries() {
     );
     let payload: Value = serde_json::from_slice(&body).expect("json");
     assert_eq!(payload["schema"], "vibecrafted.aicx-search.v1");
+    assert_eq!(payload["scope"], "project");
+    assert_eq!(payload["project"], "vetcoders/vibecrafted");
     assert_eq!(payload["count"], 4);
     let text = String::from_utf8_lossy(&body);
     assert!(

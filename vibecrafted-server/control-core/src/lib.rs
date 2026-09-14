@@ -74,6 +74,7 @@ pub use scaffold::{
 };
 pub use scaffold_verifiers::{execute_brief_verifiers, extract_brief_verifier_commands};
 pub use workspace::{
-    WorkspaceCatalogProjection, WorkspaceProjection, WorkspaceProjectionError, WorkspaceRecord,
-    WorkspaceSession, current_workspace_ids,
+    AttachmentIdentity, RuntimeSessionAttachment, SessionCurrency, WorkspaceCatalogProjection,
+    WorkspaceProjection, WorkspaceProjectionError, WorkspaceRecord, WorkspaceSession,
+    current_workspace_ids,
 };
