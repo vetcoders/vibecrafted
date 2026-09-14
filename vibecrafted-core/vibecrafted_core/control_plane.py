@@ -4469,7 +4469,9 @@ def await_run(
     process dies or the re-arm budget (``hard_cap_seconds``, else
     ``timeout_seconds``) lapses. Returning early with a live process would
     force every supervisor into ad-hoc hedge polling, which AGENT_OPS names a
-    Class 3 violation with the fix pointed at this function.
+    Class 3 violation with the fix pointed at this function. An await that
+    outruns the dispatcher's own boot (no socket, no durable trace yet) gets
+    one bounded launch-grace slice before the run is declared missing.
 
     ``on_poll`` remains accepted for API compatibility; ``interval_seconds``
     only paces liveness re-checks while no socket exists.
@@ -4489,6 +4491,14 @@ def await_run(
         except (TypeError, ValueError):
             rearm_budget = 300.0
     rearm_deadline = time.monotonic() + rearm_budget if rearm_budget > 0 else None
+    # Launch lag: an await can outrun the dispatcher's own boot — socket not
+    # bound, meta not seeded. While no durable trace exists at all, re-arm
+    # inside one interval slice instead of declaring the run missing.
+    launch_grace_deadline = (
+        time.monotonic() + min(rearm_interval, rearm_budget)
+        if rearm_budget > 0
+        else None
+    )
 
     while True:
         signal = wait_for_run_signal(target, timeout=hard_cap)
@@ -4551,6 +4561,15 @@ def await_run(
 
         if on_poll is not None:
             on_poll(last_run)
+
+        if (
+            kind == "missing"
+            and last_run is None
+            and launch_grace_deadline is not None
+            and time.monotonic() < launch_grace_deadline
+        ):
+            time.sleep(min(0.1, launch_grace_deadline - time.monotonic()))
+            continue
 
         if kind == "timeout":
             worker_alive = bool(
