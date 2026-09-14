@@ -1499,6 +1499,10 @@ def _record(repo: Path) -> dict[str, str]:
             {"DEVELOPER_DIR": "/nonexistent/Xcode.app/Contents/Developer"},
             "no usable Xcode developer dir",
             id="unusable-xcode",
+            marks=pytest.mark.skipif(
+                sys.platform != "darwin",
+                reason="Xcode preflight is darwin-only; the builder's platform gate fires first elsewhere",
+            ),
         ),
     ),
 )
