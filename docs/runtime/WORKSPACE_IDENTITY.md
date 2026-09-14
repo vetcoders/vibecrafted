@@ -146,6 +146,18 @@ process to resurrect or delete. A replacement is added as another attachment
 with `replaces_runtime_session_id`, while the dead attachment and its socket
 namespace remain visible to WES.
 
+An attachment's `state` is attach-time evidence. The writer stamps `live` when
+a Frame is bound and nothing downgrades it when that Frame exits, so readers
+never report it as current liveness. The server (`control-core`
+`FrameSessionInventory`) answers "which Frames run now" by reading
+`<socket_dir>/contract_version_*/` for the socket roots recorded on
+attachments — the same socket files `vc-frame list-sessions` enumerates — and
+never connects to them, because every client connection re-renders all plugins
+of that session. A running Frame is owned by the newest attachment that
+recorded it `live`; older claims on the same name are superseded, and `dead` /
+`missing` attachments never own one. A socket file left by a crashed server
+counts as running until the next `list-sessions` removes it.
+
 On macOS, Vibecrafted.app opens new frames under the short product socket root
 `/tmp/vc-frame-$UID`. Before opening the new window it reads the former
 TMPDIR-based namespace and attaches every discovered live/dead session to WES.
