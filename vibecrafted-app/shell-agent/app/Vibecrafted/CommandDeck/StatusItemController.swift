@@ -80,6 +80,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
   private let handler: Handler
   private var statusItem: NSStatusItem?
   private var presentation: StatusItemPresentation
+  private static weak var installedController: StatusItemController?
 
   private weak var statusLineItem: NSMenuItem?
   private var actionItems: [StatusItemAction: NSMenuItem] = [:]
@@ -116,8 +117,13 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     super.init()
   }
 
-  /// Install the one shell status item. Idempotent.
+  /// Install the one shell status item. Idempotent inside this object and
+  /// across controllers in the same process. Process-wide ownership across
+  /// alternate bundle paths is `AppInstanceOwnership` in AppDelegate.
   func install() {
+    if let installed = Self.installedController, installed !== self {
+      return
+    }
     guard statusItem == nil else {
       applyPresentation()
       return
@@ -160,6 +166,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     item.menu = menu
     statusItem = item
+    Self.installedController = self
     applyPresentation()
   }
 
@@ -170,6 +177,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     statusItem = nil
     statusLineItem = nil
     actionItems.removeAll()
+    if Self.installedController === self {
+      Self.installedController = nil
+    }
   }
 
   func update(_ presentation: StatusItemPresentation) {
