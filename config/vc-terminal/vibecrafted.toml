@@ -5,7 +5,9 @@
 live_config_reload = true
 
 [terminal]
-# A terminal is usable without a Frame workspace. vc-start is explicit.
+# Top-level VC Terminal runs launch-primary-shell, which enters the operator
+# workspace (`vc-start resume`) unless this process is already on a Frame
+# canvas, a Quick cmd / nested login shell, or an explicit product argv.
 # Expand the product path without first loading the user's login profile.
 # The entrypoint sets ZDOTDIR before starting the interactive zsh.
 shell = { program = "/bin/sh", args = ["-c", "exec \"$HOME/.config/vibecrafted/vc-terminal/launch-primary-shell.zsh\""] }
