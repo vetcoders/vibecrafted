@@ -16,23 +16,26 @@ shell = { program = "/bin/sh", args = ["-c", "exec \"$HOME/.config/vibecrafted/v
 blur = true
 opacity = 0.9
 title = "𝓥𝓲𝓫𝓮𝓬𝓻𝓪𝓯𝓽𝓮𝓭."
-# Borderless is the product default: vc-frame paints the chrome, so an OS
-# titlebar — even a transparent one with its traffic lights — is a second
-# window frame competing with the one the product draws.
-decorations = "None"
+# Founder-stated product chrome (Maciej, 2026-09-15): transparent macOS title
+# controls over the vc-frame chrome, window draggable, rounded corners. The
+# borderless "None" default shipped in c95ef76a was an implementation
+# judgement that removed the traffic lights and the drag handle on a fresh
+# install; a first-time user reported the window could not be moved at all.
+decorations = "Transparent"
 startup_mode = "Maximized"
-# No title controls float above the grid any more, so the top inset only has
-# to keep the first row off the window edge.
-padding = { x = 8, y = 8 }
+# Zero inset: the Founder's pixel-counted Spot Mono grid (size 19.5, offset
+# -3/-8 below) already clears the transparent title controls.
+padding = { x = 0, y = 0 }
 dynamic_padding = true
 option_as_alt = "Both"
 
 [font]
-size = 18.5
+# Founder's pixel-counted Spot Mono grid (laptop + dragon policy, 2026-09-15).
+size = 19.5
 
 [font.offset]
-x = -1
-y = 2
+x = -3
+y = -8
 
 [font.normal]
 family = "Spot Mono"

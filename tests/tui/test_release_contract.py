@@ -695,7 +695,7 @@ def test_release_bundle_binds_the_canonical_terminal_policy_and_font() -> None:
     installer = (REPO_ROOT / "scripts/vetcoders_install.py").read_text(encoding="utf-8")
 
     assert 'family = "Spot Mono"' in terminal
-    assert "size = 18.5" in terminal
+    assert "size = 19.5" in terminal
     assert "live_config_reload = true" in terminal
     assert 'background = "#0b0b12"' in dark
     assert 'background = "#fafafa"' in light
