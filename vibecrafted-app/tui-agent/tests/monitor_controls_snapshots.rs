@@ -97,6 +97,8 @@ fn board_app() -> App {
         observe: Default::default(),
         memory: Default::default(),
         interaction: Default::default(),
+        repo_edit: Default::default(),
+        refresh: Default::default(),
     }
 }
 

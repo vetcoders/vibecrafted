@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import errno
+
 try:
     import fcntl
 except ImportError:  # native Windows — flock-shaped portable_lock
@@ -69,7 +70,6 @@ from .settlement import (
     SettlementEventV2,
     TrustReceiptV1,
 )
-from .settlement_board import SettlementBoardPublisher
 
 LOGGER = logging.getLogger(__name__)
 
@@ -691,7 +691,7 @@ CursorParser = Callable[[str], CursorToken | None]
 
 
 def _ignore_board_publish() -> None:
-    """Default no-op board publisher used when no rail projection is wired."""
+    """Default no-op: the built-in vc-frame settlement pipe is retired."""
     return
 
 
@@ -3191,7 +3191,12 @@ class GuardianWorker:
         self._ready_announced = False
 
     def _publish_board_safely(self) -> None:
-        """Refresh the rail projection without owning or blocking settlement."""
+        """Optional projection hook; must never own or block settlement.
+
+        Production CLI wiring no longer attaches a Frame publisher. Tests may
+        still inject a callback to prove a broken viewer cannot stall the
+        durable cursor.
+        """
 
         try:
             self.board_publisher()
@@ -3906,7 +3911,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             server_url=args.server_url,
             timeout=args.recovery_timeout,
         )
-        settlement_board = SettlementBoardPublisher(server_url=args.server_url)
         worker = GuardianWorker(
             server_url=args.server_url,
             state=state,
@@ -3916,7 +3920,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             connect_timeout=args.connect_timeout,
             replay_heartbeats=args.replay_heartbeats,
             ready_callback=ready_callback,
-            board_publisher=settlement_board.request_refresh,
         )
         backoff = BoundedBackoff(args.backoff_initial, args.backoff_max)
     except ValueError as exc:
@@ -3926,7 +3929,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         with single_instance_lock(args.lock):
             try:
                 _recover_pending_trust_before_attach()
-                settlement_board.start_periodic_refresh()
                 LOGGER.info(
                     "guardian attaching to %s/api/control/events; "
                     "guarded native recovery adapter active",
@@ -3934,7 +3936,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 worker.run_forever(backoff=backoff)
             finally:
-                settlement_board.stop_periodic_refresh()
                 if args.ready_file is not None and args.ready_nonce is not None:
                     remove_ready_receipt_if_owned(
                         args.ready_file,
