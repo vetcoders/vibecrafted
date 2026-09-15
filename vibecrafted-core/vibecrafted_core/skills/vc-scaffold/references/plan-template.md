@@ -147,10 +147,12 @@ Document the reasoning. Future engineers will thank you.
 
 ## Running This Plan
 
-`<plan-id>.dispatch.toml` is the only execution contract. Validate it, then hand that exact artifact
-to `/vc-ship`; do not launch cuts manually:
+`<plan-id>.dispatch.toml` is the only execution contract. Run the plan-package gate, validate the
+dispatch artifact, then hand that exact artifact to `/vc-ship`; do not launch cuts manually.
+REFUSE from scaffold-doctor means no handoff.
 
 ```bash
+vibecrafted scaffold-doctor --plan <plan-root> --repo <git-root>
 vibecrafted dispatch <absolute-plan-root>/<plan-id>.dispatch.toml --doctor
 vibecrafted dispatch <absolute-plan-root>/<plan-id>.dispatch.toml --dry-run --json
 ````
