@@ -2567,6 +2567,7 @@ LAUNCHER_WRAPPERS = [
     "vc-status",
     "vc-update",
     "vc-receipt",
+    "vc-scaffold-doctor",
     "vc-agents",
     "telemetry",
     *[f"vc-{name}" for name in SKILL_WRAPPER_NAMES],
@@ -15894,6 +15895,7 @@ _RUNTIME_WRAPPER_VERBS = {
     "vc-operator": "operator",
     "vc-receipt": "receipt",
     "vc-resume": "resume",
+    "vc-scaffold-doctor": "scaffold-doctor",
     "vc-status": "status",
     "vc-update": "update",
 }
