@@ -73,6 +73,77 @@ def test_launcher_commands_keep_interactive_agent_in_this_panel() -> None:
         workshop.launch_argv("codex", "workflow")
 
 
+def test_kimi_launch_builds_the_same_command_shape() -> None:
+    workshop = _load()
+
+    assert workshop.launch_argv("kimi", "init") == [
+        "vibecrafted",
+        "init",
+        "kimi",
+        "--runtime",
+        "plain",
+        "--policy-runtime",
+        "local-native",
+        "--permissions",
+        "bypass",
+        "--operator",
+        "none",
+        "--continuity",
+        "fresh",
+    ]
+    assert workshop.launch_argv("kimi", "resume") == [
+        "vibecrafted",
+        "resume",
+        "kimi",
+    ]
+
+
+def test_default_provider_stays_codex_with_kimi_on_the_row() -> None:
+    workshop = _load()
+
+    assert workshop.AGENTS[2] == "codex"
+    picker = workshop.Workshop(SimpleNamespace(), mode="launcher")
+
+    assert picker.agent == workshop.AGENTS.index("codex")
+
+
+def test_provider_row_renders_every_catalog_provider_including_kimi(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workshop = _load()
+    drawn: list[str] = []
+
+    class FakeWindow:
+        def getmaxyx(self) -> tuple[int, int]:
+            return (24, 80)
+
+        def addstr(self, _row: int, _col: int, text: str, _attr: int = 0) -> None:
+            drawn.append(text)
+
+        def erase(self) -> None:
+            pass
+
+        def refresh(self) -> None:
+            pass
+
+    monkeypatch.setattr(workshop, "_provider_available", lambda _agent: True)
+    monkeypatch.setattr(
+        workshop,
+        "runtime_policy_capabilities",
+        lambda _agent: {
+            name: {"available": True, "reason": ""}
+            for name in workshop.RUNTIME_POLICIES
+        },
+    )
+    form = workshop.Workshop(FakeWindow(), mode="launcher")
+    form.draw_launcher()
+
+    tokens = [text.strip() for text in drawn if text.strip() in workshop.AGENTS]
+    assert len(workshop.AGENTS) == 7
+    assert sorted(tokens) == sorted(workshop.AGENTS)
+    assert "kimi" in tokens
+
+
 def test_choice_markers_are_unboxed_and_selected_once() -> None:
     workshop = _load()
 
