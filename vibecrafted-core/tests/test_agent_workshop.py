@@ -305,10 +305,16 @@ def test_parent_picker_uses_canonical_session_catalog(tmp_path: Path) -> None:
     assert picker.continuity_parent == "older-session"
 
 
-def test_successful_launch_opens_tiled_pane_and_keeps_workshop(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    workshop = _load()
+def _prepare_launch(
+    workshop: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    destination: str,
+    live: list[str],
+    listing_error: str = "",
+    current: str = "",
+) -> tuple[object, list[object]]:
     launched = workshop.Workshop(SimpleNamespace(), mode="launcher")
     launched.path = str(tmp_path)
     launched.agent = workshop.AGENTS.index("codex")
@@ -331,6 +337,17 @@ def test_successful_launch_opens_tiled_pane_and_keeps_workshop(
             "fresh": {"available": True, "reason": ""},
         },
     )
+    monkeypatch.setattr(
+        workshop,
+        "destination_session_for_workspace",
+        lambda *_args, **_kwargs: destination,
+    )
+    monkeypatch.setattr(
+        workshop,
+        "list_live_frame_sessions",
+        lambda: (list(live), listing_error),
+    )
+    monkeypatch.setattr(workshop, "current_frame_session", lambda: current)
     monkeypatch.setattr(workshop.shutil, "which", lambda _name: "/bin/vibecrafted")
     monkeypatch.setattr(
         workshop.subprocess,
@@ -344,29 +361,204 @@ def test_successful_launch_opens_tiled_pane_and_keeps_workshop(
         "execvpe",
         lambda *_args, **_kwargs: calls.append("exec"),
     )
+    return launched, calls
+
+
+def test_launch_pane_argv_requires_session_and_opens_a_new_tab(
+    tmp_path: Path,
+) -> None:
+    workshop = _load()
+    command = ["vibecrafted", "init", "codex", "--runtime", "plain"]
+    argv = workshop.launch_pane_argv(
+        "codex · init · vibecrafted", tmp_path, command, session="vibecrafted"
+    )
+
+    assert argv[:6] == [
+        "vc-frame",
+        "--session",
+        "vibecrafted",
+        "action",
+        "new-tab",
+        "--name",
+    ]
+    assert "--near-current-pane" not in argv
+    assert "new-pane" not in argv
+    assert "--floating" not in argv
+    assert argv[argv.index("--cwd") + 1] == str(tmp_path)
+    assert argv[argv.index("--") + 1 :] == command
+    with pytest.raises(ValueError, match="destination Frame session is missing"):
+        workshop.launch_pane_argv("t", tmp_path, command, session="  ")
+
+
+def test_destination_session_uses_catalog_place_session_not_current_seat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workshop = _load()
+    loctree = tmp_path / "loctree"
+    vibe = tmp_path / "vibecrafted"
+    loctree.mkdir()
+    vibe.mkdir()
+    monkeypatch.setattr(
+        workshop,
+        "resolve_operator_place_session",
+        lambda *, root, env=None: Path(root).name,
+    )
+    monkeypatch.setenv("VC_FRAME_SESSION_NAME", "loctree")
+
+    assert workshop.destination_session_for_workspace(vibe) == "vibecrafted"
+    assert workshop.current_frame_session() == "loctree"
+    assert workshop.destination_session_for_workspace(loctree) == "loctree"
+
+
+def test_require_live_destination_refuses_missing_and_wrong_context() -> None:
+    workshop = _load()
+    live = ["loctree", "vibecrafted"]
+    workshop.require_live_destination("vibecrafted", live)
+    with pytest.raises(ValueError, match="No live Frame session"):
+        workshop.require_live_destination("codescribe", live)
+    with pytest.raises(ValueError, match="No live Frame session"):
+        workshop.require_live_destination("vibecrafted", [])
+    with pytest.raises(ValueError, match="could not resolve"):
+        workshop.require_live_destination("  ", live)
+
+
+def test_session_names_from_listing_skip_exited_sessions() -> None:
+    workshop = _load()
+    listing = (
+        "loctree [Created 2h ago]\n"
+        "vibecrafted [Created 1h ago] (current)\n"
+        "old EXITED\n"
+        "codescribe [EXITED]\n"
+    )
+    assert workshop.session_names_from_listing(listing) == [
+        "loctree",
+        "vibecrafted",
+    ]
+
+
+def test_successful_launch_opens_destination_tab_and_keeps_workshop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workshop = _load()
+    launched, calls = _prepare_launch(
+        workshop,
+        tmp_path,
+        monkeypatch,
+        destination="vibecrafted",
+        live=["loctree", "vibecrafted"],
+        current="loctree",
+    )
 
     launched.launch()
 
     assert launched.mode == "home"
+    assert launched.error == ""
     assert "exec" not in calls
     pane = calls[0]
     assert isinstance(pane, list)
     assert pane[:6] == [
         "vc-frame",
+        "--session",
+        "vibecrafted",
         "action",
-        "new-pane",
-        "--direction",
-        "right",
-        "--near-current-pane",
+        "new-tab",
+        "--name",
     ]
+    assert "--near-current-pane" not in pane
+    assert "new-pane" not in pane
     assert "--floating" not in pane
-    assert "--width" not in pane
-    assert "--height" not in pane
     title = f"codex · partner · {tmp_path.name}"
     assert pane[pane.index("--name") + 1] == title
     command = pane[pane.index("--") + 1 :]
     assert command[:3] == ["vibecrafted", "init", "codex"]
     assert command[-4:] == ["--root", str(tmp_path), "--prompt", "/vc-partner"]
+    assert calls[1] == ["vc-frame", "attach", "vibecrafted"]
+
+
+def test_same_project_launch_still_opens_a_new_tab_without_attach(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workshop = _load()
+    launched, calls = _prepare_launch(
+        workshop,
+        tmp_path,
+        monkeypatch,
+        destination="loctree",
+        live=["loctree"],
+        current="loctree",
+    )
+
+    launched.launch()
+
+    assert launched.mode == "home"
+    assert launched.error == ""
+    assert len(calls) == 1
+    pane = calls[0]
+    assert isinstance(pane, list)
+    assert pane[:5] == ["vc-frame", "--session", "loctree", "action", "new-tab"]
+    assert "attach" not in pane
+
+
+def test_existing_target_session_is_used_when_already_live(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workshop = _load()
+    launched, calls = _prepare_launch(
+        workshop,
+        tmp_path,
+        monkeypatch,
+        destination="vibecrafted",
+        live=["codescribe", "vibecrafted", "loctree"],
+        current="codescribe",
+    )
+
+    launched.launch()
+
+    assert launched.mode == "home"
+    pane = calls[0]
+    assert isinstance(pane, list)
+    assert pane[2] == "vibecrafted"
+
+
+def test_launch_refuses_missing_destination_without_current_session_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workshop = _load()
+    launched, calls = _prepare_launch(
+        workshop,
+        tmp_path,
+        monkeypatch,
+        destination="vibecrafted",
+        live=["loctree"],
+        current="loctree",
+    )
+
+    launched.launch()
+
+    assert launched.mode == "launcher"
+    assert "No live Frame session" in launched.error
+    assert calls == []
+
+
+def test_launch_refuses_when_session_listing_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workshop = _load()
+    launched, calls = _prepare_launch(
+        workshop,
+        tmp_path,
+        monkeypatch,
+        destination="vibecrafted",
+        live=[],
+        listing_error="Frame sessions are unavailable",
+        current="loctree",
+    )
+
+    launched.launch()
+
+    assert launched.mode == "launcher"
+    assert launched.error == "Frame sessions are unavailable"
+    assert calls == []
 
 
 def test_launch_refuses_unadmittable_worktree_before_invoking_launcher(
@@ -1105,10 +1297,12 @@ def test_launch_pane_argv_is_tiled_and_usable(tmp_path: Path) -> None:
         "codex · init · demo",
         tmp_path,
         ["vibecrafted", "init", "codex", "--runtime", "plain"],
+        session="vibecrafted",
     )
     assert "--floating" not in pane
-    assert pane[pane.index("--direction") + 1] == "right"
-    assert "--near-current-pane" in pane
+    assert "--near-current-pane" not in pane
+    assert "new-pane" not in pane
+    assert pane[:5] == ["vc-frame", "--session", "vibecrafted", "action", "new-tab"]
     assert pane[pane.index("--cwd") + 1] == str(tmp_path)
     assert pane[pane.index("--") + 1 :] == [
         "vibecrafted",
