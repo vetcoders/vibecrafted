@@ -55,6 +55,9 @@ REQUIRED_FILES = (
     "scripts/distribution_manifest.py",
     "scripts/build-linux-arm64-runtime-pack.sh",
     "scripts/build-linux-runtime-pack.sh",
+    "scripts/build-windows-x64-runtime-pack.ps1",
+    "scripts/install-runtime-pack.ps1",
+    "scripts/package-runtime-pack.ps1",
     "scripts/installer_brand.py",
     "scripts/vetcoders_install.py",
     "scripts/vibecrafted",
@@ -347,7 +350,7 @@ def _load_source_provenance_with_bytes(
     except OSError as exc:
         raise ManifestError(f"cannot inspect {SOURCE_PROVENANCE_FILE}: {exc}") from exc
     raw, mode = _read_stable_regular_bytes(path, label=SOURCE_PROVENANCE_FILE)
-    if mode != 0o644:
+    if mode != 0o644 and sys.platform != "win32":
         raise ManifestError(f"{SOURCE_PROVENANCE_FILE} must have canonical mode 0644")
     try:
         parsed = json.loads(raw.decode("utf-8"))

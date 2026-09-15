@@ -385,6 +385,8 @@ async fn tool_surfaces_keep_their_boundaries() {
     );
     let payload: Value = serde_json::from_slice(&body).expect("json");
     assert_eq!(payload["schema"], "vibecrafted.aicx-search.v1");
+    assert_eq!(payload["scope"], "project");
+    assert_eq!(payload["project"], "vetcoders/vibecrafted");
     assert_eq!(payload["count"], 4);
     let text = String::from_utf8_lossy(&body);
     assert!(

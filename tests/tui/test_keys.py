@@ -297,6 +297,7 @@ def test_non_python_launcher_wrappers_have_explicit_deck_verbs() -> None:
         "vc-operator": "operator",
         "vc-receipt": "receipt",
         "vc-resume": "resume",
+        "vc-scaffold-doctor": "scaffold-doctor",
         "vc-start": "start",
         "vc-status": "status",
         "vc-update": "update",

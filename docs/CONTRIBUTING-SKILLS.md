@@ -84,6 +84,27 @@ substitutes:
 
 It also prints operator next-steps and the discoverability commands.
 
+The template inserts a **Goal** proposal immediately after **Purpose**. That
+paragraph is agent-authored draft text: it names `{{SKILL_NAME}}`, a
+`TODO concrete result`, and a `TODO verifiable endpoint`. Founder confirms or
+rewrites the paragraph in human language before the skill is canonical. Leave
+**Acceptance Criteria** as a separate falsifier list — the Goal is one breath
+of "what done looks like", not a second checklist.
+
+---
+
+## Goal (Founder-owned)
+
+Every skill has one sharp Purpose and, directly under it, a single-paragraph
+**Goal**. The Goal is the entry point of the skill: one result, one
+independently checkable endpoint, no bullets.
+
+- **Agent** proposes the paragraph while scaffolding or authoring.
+- **Founder** owns the final wording. Until Founder confirms or rewrites it,
+  keep the proposal marker. Do not silently promote agent prose to canon.
+- Refine by tightening the result and the endpoint, not by adding a second
+  paragraph or merging the Goal into Acceptance Criteria.
+
 ---
 
 ## Delegation Matrix gate (invocation craft)
@@ -156,6 +177,10 @@ Before opening a PR:
 
 - [ ] Replace every `TODO` marker in `SKILL.md`, `README.md`, and every file in
       `examples/`.
+- [ ] **Goal** sits directly after Purpose as one paragraph naming a concrete
+      result and a verifiable endpoint; Founder has confirmed or rewritten it
+      (agent text stays a proposal until then). Acceptance Criteria remain a
+      separate falsifier list.
 - [ ] At least one realistic `examples/*.md` pair (trigger phrase +
       expected agent behavior).
 - [ ] **Matrix class chosen** (core launcher / meta / foundation) and

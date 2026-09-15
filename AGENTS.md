@@ -1016,5 +1016,5 @@ bot = mouth/ear; workers = hands. Unit green ≠ Slack green (STALE
 bridge / empty allowlist = Founder residual, not architecture debt).
 Hydrate residual pack (slack-agent): `deploy/OPERATOR_SMOKE_CARD.md`,
 `npm run doctor`, `npm run install:launchagent`.
-Parent: `docs/adr/0002-unified-operator-ownership.md` (`run-lifecycle` →
+Parent: `docs/adr/ownership-matrix.json` (`run-lifecycle` →
 `control-plane`; Slack owns `a2a-envelopes` only).

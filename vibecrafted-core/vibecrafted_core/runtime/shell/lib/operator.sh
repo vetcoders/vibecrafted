@@ -111,21 +111,6 @@ _vetcoders_operator_runtime() {
   esac
 }
 
-_vetcoders_compose_operator_prompt() {
-  local prompt_text="${1:-}"
-  local file_path="${2:-}"
-  local operator_prompt="/vc-operator"
-  local extra
-
-  extra="$(_vetcoders_compose_input_context "$prompt_text" "$file_path")" || return 1
-  if [[ -n "$extra" ]]; then
-    operator_prompt+=$'\n\n'
-    operator_prompt+="$extra"
-  fi
-
-  printf '%s' "$operator_prompt"
-}
-
 _vetcoders_operator_command_text() {
   local tool="$1"
   local operator_prompt="$2"
@@ -134,21 +119,6 @@ _vetcoders_operator_command_text() {
 
 _vetcoders_partner_runtime() {
   _vetcoders_init_runtime "${1:-terminal}"
-}
-
-_vetcoders_compose_partner_prompt() {
-  local prompt_text="${1:-}"
-  local file_path="${2:-}"
-  local partner_prompt="/vc-partner"
-  local extra
-
-  extra="$(_vetcoders_compose_input_context "$prompt_text" "$file_path")" || return 1
-  if [[ -n "$extra" ]]; then
-    partner_prompt+=$'\n\n'
-    partner_prompt+="$extra"
-  fi
-
-  printf '%s' "$partner_prompt"
 }
 
 _vetcoders_partner_command_text() {
@@ -161,7 +131,7 @@ _vetcoders_partner_command_text() {
 # Carry only the admitted command (private file references) across a new window.
 # 0: terminal handoff accepted; 2: caller already has a surface; 1: failed.
 _vetcoders_enter_admitted_interactive() {
-  local verb="$1" command_text="$2" python_spec py import_root
+  local command_text="$2" python_spec py import_root
   python_spec="$(_vetcoders_core_python_spec)" || return 1
   py="${python_spec%%$'\t'*}"
   import_root="${python_spec#*$'\t'}"

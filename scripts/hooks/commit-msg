@@ -98,7 +98,7 @@ printf '  session_id: 019e93be-379d-7303-9ad4-ffae468db99f\n' >&2
 printf '  time: 2026-06-05T12:52:47-06:00\n' >&2
 printf '  runtime: iterm2\n' >&2
 printf '\nSession id discovery:\n' >&2
-# shellcheck disable=SC2016
+# shellcheck disable=SC2016  # printed for the user to copy, not expanded here
 printf '%s\n' '  echo "${CODEX_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-${ATUIN_SESSION:-}}}"' >&2
 printf '  or read the run meta under ~/.vibecrafted/artifacts/**/reports/*.meta.json\n' >&2
 exit 1

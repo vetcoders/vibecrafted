@@ -17,22 +17,29 @@ and runtime resolution remains ready.
 
 ## Shipped chrome default
 
-Merge ownership alone did not deliver the product default. The shipped policy
-still carried `decorations = "Transparent"`, so a fresh install produced an OS
-titlebar with traffic lights on top of the chrome vc-frame already draws. The
-canonical default is now:
+Merge ownership alone did not deliver the product default. On 2026-09-13
+(`c95ef76a`) the shipped policy was moved from `decorations = "Transparent"`
+to `"None"` as an implementation judgement, on the reasoning that an OS
+titlebar competes with the chrome vc-frame draws. That judgement was wrong on
+the product surface: a fresh install had no traffic lights, square corners
+and no drag handle, and a first-time user reported the window could not be
+moved at all (2026-09-15). The Founder's own machines never showed it because
+the installer preserved their explicit `Transparent` answer. The canonical
+default is the Founder-stated chrome:
 
-| setting                          | value                 |
-| -------------------------------- | --------------------- |
-| `window.decorations`             | `"None"` (borderless) |
-| `window.blur`                    | `true`                |
-| `window.opacity`                 | `0.9`                 |
-| `font.normal/bold/italic.family` | `"Spot Mono"`         |
+| setting                          | value                            |
+| -------------------------------- | -------------------------------- |
+| `window.decorations`             | `"Transparent"` (title controls) |
+| `window.padding`                 | `{ x = 0, y = 0 }`               |
+| `font.size` / `font.offset`      | `19.5` / `{ x = -3, y = -8 }`    |
+| `window.blur`                    | `true`                           |
+| `window.opacity`                 | `0.9`                            |
+| `font.normal/bold/italic.family` | `"Spot Mono"`                    |
 
-`window.padding` moved from `{ x = 8, y = 24 }` to `{ x = 8, y = 8 }`. The
-asymmetric top inset existed only to keep transparent title controls off the
-grid; with no titlebar it was a workaround outliving its cause. This one is an
-implementation judgement, not a Founder-stated value.
+Zero inset with the Founder's pixel-counted Spot Mono grid (size 19.5,
+offset -3/-8) is the laptop and dragon policy as of 2026-09-15; it already
+clears the transparent title controls, so the earlier `y = 24` workaround
+(`49356cb6`) is gone with it.
 
 Three installer regressions in
 `tests/tui/test_runtime_resolution_publication.py` hold the contract: a fresh

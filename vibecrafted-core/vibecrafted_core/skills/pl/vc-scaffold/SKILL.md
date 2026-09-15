@@ -189,10 +189,11 @@ MUSI zawierać wszystkie pięć:
    następne; dlaczego para jest **SEQUENCE** (współdzielona domena plików → konflikt Living Tree) vs **PARALLEL**
    (rozłączne domeny → bezpieczne współbieżnie); i gdzie siedzi każdy **⛔ operator-button STOP** (push/merge,
    decyzje produktowe). Graf bez `why` to diagram, nie driver.
-3. **Gotowe przekazanie** — dokładnie jeden blok walidacji poziomu planu dla kanonicznego
-   `<plan-id>.dispatch.toml` (doctor + dry-run), a potem przekazanie A→Z do `/vc-ship`. `/vc-ship`
-   jest właścicielem startu i resume; DAG jest właścicielem kolejności cięć i dozwolonej
-   równoległości. Nie zamieniaj DRIVER-a w listę launcherów per cięcie i nie ucz ręcznego
+3. **Gotowe przekazanie** — najpierw uruchom `vibecrafted scaffold-doctor --plan <root> --repo <git-root>`
+   (REFUSE = brak handoffu), potem dokładnie jeden blok walidacji poziomu planu dla kanonicznego
+   `<plan-id>.dispatch.toml` (`vibecrafted dispatch … --doctor` + dry-run), a potem przekazanie A→Z
+   do `/vc-ship`. `/vc-ship` jest właścicielem startu i resume; DAG jest właścicielem kolejności cięć
+   i dozwolonej równoległości. Nie zamieniaj DRIVER-a w listę launcherów per cięcie i nie ucz ręcznego
    sekwencjonowania `vibecrafted workflow ... --prompt`.
 4. **Alfabet stanów + reguła `[ ]→[x]`, odtworzone verbatim** (lustro Pomiaru):
    `[ ]` todo · `[~]` running · `[?]` done-unverified · `[!]` blocked · `[x]` verifier-green.
@@ -286,18 +287,24 @@ dwadzieścia pytań w trakcie scaffoldu. Dopracowujesz Z operatorem na zaserwowa
 visual-companion z `/brainstorming` (sprawdzone generatory mockupów/diagramów HTML). Zakładka server-review
 musi być wielozakładkowa + edytowalna od pierwszego dnia, nie statyczny zrzut.
 
-**scaffold-doctor (bramka, sprawdzana maszynowo):** deterministyczny walidator w
-`vibecrafted-server/control-core`, który ładuje ten sam typowany `manifest.json` co server i odmawia
-przekazania batonu scaffold→implement, dopóki: tożsamość manifestu nie zgadza się z kanonicznym rootem
-planu; wszystkie wymagane artefakty nie istnieją; ID i ścieżki nie są unikalne; zależności się nie
-rozwiązują; edytowalne ścieżki są symlinkami lub wychodzą poza root; briefy na dysku nie są zadeklarowane;
-oraz master-dispatch
-nie ma wave atlasu + grafu zależności; każde cięcie nie ma `briefs/<wave>-<slot>_<slug>.md` z wszystkimi 12
-sekcjami; bullety acceptance nie są atomowe + poparte verifierem; nie istnieje design doc dla każdego cięcia oznaczonego
-`needs_design`; **nie istnieje `DRIVER.md` niosący wszystkie pięć (pełne ścieżki · graf z adnotacją why ·
-gotowe komendy · reguła `[ ]→[x]` verbatim · snapshot statusu)**. Bramka jest **sprawdzana maszynowo, nie
-obiecywana przez agenta** — to ta sama bramka artefakt-jako-prawda, której async runtime używa między każdym
-przekazaniem cadence read-write.
+**scaffold-doctor (bramka, sprawdzana maszynowo):** uruchom verba produktu przed każdym
+przekazaniem scaffold→implement — nie opisuj walidatora jako zewnętrznego narzędzia serwera:
+
+```bash
+vibecrafted scaffold-doctor --plan <root> --repo <git-root>
+```
+
+REFUSE (exit 1) = brak handoffu. Verb odnajduje binarkę `scaffold-doctor` (generacja albo lokalny
+build) i ładuje ten sam typowany `manifest.json` co server. Odmawia, dopóki: tożsamość manifestu nie
+zgadza się z kanonicznym rootem planu; wszystkie wymagane artefakty nie istnieją; ID i ścieżki nie
+są unikalne; zależności się nie rozwiązują; edytowalne ścieżki są symlinkami lub wychodzą poza root;
+briefy na dysku nie są zadeklarowane; oraz master-dispatch nie ma wave atlasu + grafu zależności;
+każde cięcie nie ma `briefs/<wave>-<slot>_<slug>.md` z wszystkimi 12 sekcjami; bullety acceptance nie
+są atomowe + poparte verifierem; nie istnieje design doc dla każdego cięcia oznaczonego
+`needs_design`; **nie istnieje `DRIVER.md` niosący wszystkie pięć (pełne ścieżki · graf z adnotacją
+why · gotowe komendy · reguła `[ ]→[x]` verbatim · snapshot statusu)**. Bramka jest **sprawdzana
+maszynowo, nie obiecywana przez agenta** — to ta sama bramka artefakt-jako-prawda, której async
+runtime używa między każdym przekazaniem cadence read-write.
 
 ## Pomiar (pancerz)
 

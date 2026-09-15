@@ -212,6 +212,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       }
     }
 
+    if !claimUserAppInstanceOrHandoff() {
+      return
+    }
+
     installLifecycleSignalHandlers()
     let launchArgs = ProcessInfo.processInfo.arguments.dropFirst().joined(separator: " ")
     let launchedByLS = ProcessInfo.processInfo.environment["__CFBundleIdentifier"] != nil
@@ -1365,6 +1369,63 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     alert.informativeText = message
     alert.addButton(withTitle: "OK")
     alert.runModal()
+  }
+
+  /// Process-wide single user-instance ownership. A later launch of a
+  /// displaced updater capture must activate `/Applications/Vibecrafted.app`
+  /// instead of installing a second menu icon. Special CLI flags are handled
+  /// before this runs. Never kills another process and never deletes backups.
+  @discardableResult
+  private func claimUserAppInstanceOrHandoff() -> Bool {
+    let identifier = Bundle.main.bundleIdentifier ?? AppInstanceOwnership.productBundleIdentifier
+    let selfPid = Int32(getpid())
+    let selfURL = Bundle.main.bundleURL
+    let peers = NSRunningApplication.runningApplications(withBundleIdentifier: identifier)
+      .compactMap { app -> AppInstancePeer? in
+        guard app.processIdentifier != selfPid, let url = app.bundleURL else { return nil }
+        return AppInstancePeer(pid: app.processIdentifier, bundleURL: url)
+      }
+    let lockURL = AppInstanceOwnership.lockFileURL(
+      bundleIdentifier: identifier, home: FileManager.default.homeDirectoryForCurrentUser)
+    let parsed = (try? String(contentsOf: lockURL, encoding: .utf8))
+      .flatMap(AppInstanceOwnership.parseLockRecord)
+    var live = Set(peers.map(\.pid))
+    live.insert(selfPid)
+    if let pid = parsed?.pid, kill(pid_t(pid), 0) == 0 {
+      live.insert(pid)
+    }
+    let decision = AppInstanceOwnership.decide(
+      AppInstanceContext(
+        selfPid: selfPid,
+        selfBundleURL: selfURL,
+        arguments: ProcessInfo.processInfo.arguments,
+        peers: peers,
+        lockOwnerPid: parsed?.pid,
+        livePids: live))
+    switch decision {
+    case .becomeOwner:
+      persistInstanceLock(lockURL, pid: Int32(selfPid), bundleURL: selfURL)
+      lifecycleLog("instance owner pid=\(selfPid) path=\(selfURL.path)")
+      return true
+    case .activateExisting(let pid, let url):
+      lifecycleLog("instance handoff pid=\(pid) path=\(url.path)")
+      if let other = NSRunningApplication(processIdentifier: pid) {
+        other.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        exit(EXIT_SUCCESS)
+      }
+      persistInstanceLock(lockURL, pid: Int32(selfPid), bundleURL: selfURL)
+      lifecycleLog("instance owner after stale peer pid=\(selfPid) path=\(selfURL.path)")
+      return true
+    }
+  }
+
+  /// Best-effort owner record. The installer owns Application Support layout;
+  /// this host never creates that directory (unified-app contract).
+  private func persistInstanceLock(_ lockURL: URL, pid: Int32, bundleURL: URL) {
+    let parent = lockURL.deletingLastPathComponent()
+    guard FileManager.default.fileExists(atPath: parent.path) else { return }
+    try? AppInstanceOwnership.lockRecord(pid: pid, bundleURL: bundleURL)
+      .write(to: lockURL, atomically: true, encoding: .utf8)
   }
 
   // MARK: - Main Menu

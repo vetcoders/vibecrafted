@@ -14,10 +14,14 @@ MODEL_OVERRIDE_FLAGS = {
     # grok 1.0.21 documents both `-m` and `--model`; inject the long form to
     # match grok_spawn.sh, and treat `-m` as an existing pin.
     "grok": "--model",
+    # kimi 0.42.0 documents both `-m` and `--model <alias>`; inject the long
+    # form and treat `-m` as an existing pin (same rule as grok).
+    "kimi": "--model",
 }
 
 MODEL_OVERRIDE_FLAG_ALIASES: dict[str, tuple[str, ...]] = {
     "grok": ("--model", "-m"),
+    "kimi": ("--model", "-m"),
 }
 
 
@@ -111,6 +115,29 @@ def _with_agy_model_override(
     return _with_direct_model_override(command_list, flag, requested)
 
 
+def _with_kimi_model_override(
+    command: Sequence[str], flag: str, requested: str
+) -> list[str]:
+    """Inject Kimi's pin into its direct argv, refusing any shell wrapper.
+
+    Kimi's headless command is a plain argv (``kimi -p <prompt>
+    --output-format stream-json``; the prompt is the ``-p`` value). A
+    ``bash -c 'kimi -p "$(cat)"'`` wrapper is rejected for the same reason
+    as agy's retired shape: a flag spliced after ``bash`` would be swallowed
+    by the shell while the receipt claimed the pin reached Kimi.
+    """
+
+    command_list = list(command)
+    if not command_list or Path(command_list[0]).name != "kimi":
+        raise ValueError("model_override_unsupported_kimi_command_shape")
+    return _with_direct_model_override(
+        command_list,
+        flag,
+        requested,
+        existing_flags=MODEL_OVERRIDE_FLAG_ALIASES["kimi"],
+    )
+
+
 def _with_direct_model_override(
     command: Sequence[str],
     flag: str,
@@ -158,6 +185,8 @@ def _with_model_override(
     aliases = MODEL_OVERRIDE_FLAG_ALIASES.get(agent, (flag,))
     if agent == "agy":
         return _with_agy_model_override(command_list, flag, requested)
+    if agent == "kimi":
+        return _with_kimi_model_override(command_list, flag, requested)
     return _with_direct_model_override(
         command_list, flag, requested, existing_flags=aliases
     )

@@ -94,7 +94,6 @@ detect_linux_distro() {
   LINUX_PKG_MGR=""
   [[ "$PLATFORM_OS" == "linux" || "$PLATFORM_OS" == "wsl" ]] || return 0
   if [[ -r /etc/os-release ]]; then
-    # shellcheck disable=SC1091
     LINUX_DISTRO_ID="$(. /etc/os-release && printf '%s' "${ID:-}")"
   fi
   case "$LINUX_DISTRO_ID" in
@@ -233,6 +232,9 @@ REQUIRED_FILES = frozenset(
         "scripts/distribution_manifest.py",
         "scripts/build-linux-arm64-runtime-pack.sh",
         "scripts/build-linux-runtime-pack.sh",
+        "scripts/build-windows-x64-runtime-pack.ps1",
+        "scripts/install-runtime-pack.ps1",
+        "scripts/package-runtime-pack.ps1",
         "scripts/installer_brand.py",
         "scripts/vetcoders_install.py",
         "scripts/vibecrafted",
@@ -1466,8 +1468,6 @@ if [[ "$target" == "vibecrafted" ]]; then
     info "Bootstrapping uv (one-time setup)..."
     curl -LsSf https://astral.sh/uv/install.sh | sh \
       || die "Failed to bootstrap uv"
-    # shellcheck disable=SC1090
-    # shellcheck disable=SC1091
     [[ -f "$HOME/.local/bin/env" ]] && source "$HOME/.local/bin/env"
     export PATH="$HOME/.local/bin:$PATH"
   fi

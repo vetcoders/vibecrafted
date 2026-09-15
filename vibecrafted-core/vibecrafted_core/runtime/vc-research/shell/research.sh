@@ -326,7 +326,7 @@ _vetcoders_research() {
   local first_arg="${1:-}"
   local inherited_run_id inherited_run_lock
   local prompt root run_id run_lock runtime run_dir prompt_file layout_file summary_file
-  local session_name agent launcher cmd_file research_mode requested_research_agent lock_actor launch_label research_synthesizer
+  local session_name agent launcher cmd_file research_mode lock_actor launch_label research_synthesizer
   local -a research_agents launchers launcher_entries command_entries positional_research_agents contract_args
 
   for _arg in "$@"; do
@@ -339,7 +339,6 @@ _vetcoders_research() {
   done
 
   research_mode="swarm"
-  requested_research_agent=""
   positional_research_agents=()
   # Explicit arity keywords. They declare how many positional agents MUST
   # follow — the operator's selection is a contract, never a hint.
@@ -385,7 +384,7 @@ _vetcoders_research() {
   fi
   if (( expected_lane_count > 0 )) && (( ${#positional_research_agents[@]} != expected_lane_count )); then
     printf 'vc-research: %s expects exactly %d agent(s), got %d (%s).\n' \
-      "$([[ $expected_lane_count == 1 ]] && echo uno || { [[ $expected_lane_count == 2 ]] && echo duo || echo trio; })" \
+      "$(case $expected_lane_count in (1) echo uno ;; (2) echo duo ;; (*) echo trio ;; esac)" \
       "$expected_lane_count" "${#positional_research_agents[@]}" "${positional_research_agents[*]:-none}" >&2
     printf 'Supported agents: claude codex agy junie grok cursor (gemini is deprecated - use agy).\n' >&2
     return 1
@@ -395,7 +394,6 @@ _vetcoders_research() {
       "${#positional_research_agents[@]}" "${positional_research_agents[*]}" >&2
     return 1
   fi
-  requested_research_agent="${positional_research_agents[0]:-}"
 
   research_synthesizer=""
   contract_args=()
@@ -536,22 +534,14 @@ _vetcoders_research() {
     done
     _vetcoders_write_research_layout "$layout_file" "${command_entries[@]}"
 
-    # Intended exports to env for the vc_frame child process — false-positive SC2031.
-    # shellcheck disable=SC2031
+    # Intended exports to env for the vc_frame child process.
     export VIBECRAFTED_RUN_ID="$run_id"
-    # shellcheck disable=SC2031
     export VIBECRAFTED_RUN_LOCK="$run_lock"
-    # shellcheck disable=SC2031
     export VIBECRAFTED_SKILL_CODE="rsch"
-    # shellcheck disable=SC2031
     export VIBECRAFTED_SKILL_NAME="research"
-    # shellcheck disable=SC2031
     export VIBECRAFTED_RESEARCH_MODE="1"
-    # shellcheck disable=SC2031
     export VIBECRAFTED_STORE_DIR="$run_dir"
-    # shellcheck disable=SC2031
     export VIBECRAFTED_STORE_ROOT="$root"
-    # shellcheck disable=SC2031
     export VIBECRAFTED_RESEARCH_RUN_DIR="$run_dir"
     local focus_flag=""
     if "$vc_frame_bin" action new-tab --help 2>&1 | command grep -q -- '--no-focus'; then

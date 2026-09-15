@@ -27,12 +27,15 @@ from vibecrafted_core.spawn import (
     _fresh_child_environment,
     _materialize_continuity,
     _validate_operator_protocol_event,
+    classify_interactive_failure_reason,
+    format_interactive_launch_failure,
     interactive_launch_interpreter,
     interactive_policy_command,
     interactive_workspace_command,
     launch_interactive_workspace,
     main,
     prepare_interactive_workspace_launch,
+    record_interactive_launch_cli_failure,
     resolve_continuity_policy,
     resolve_operator_agent_policy,
     resolve_provider_policy,
@@ -1368,6 +1371,25 @@ def test_interactive_command_uses_contract_flags() -> None:
         interactive_policy_command("codex", "/vc-init", "local-native", "accept-edits")
 
 
+def test_kimi_interactive_command_is_flags_only_tui_entry() -> None:
+    """Interactive kimi enters the TUI with no prompt on argv (a prompt exists
+    only as -p, which is non-interactive and conflicts with --auto/--yolo/
+    --plan), so the contract flags are the whole command."""
+    assert interactive_policy_command("kimi", "/vc-init", "local-native", "bypass") == [
+        "kimi",
+        "--auto",
+    ]
+    assert interactive_policy_command("kimi", "/vc-init", "local-native", "auto") == [
+        "kimi",
+        "--yolo",
+    ]
+    assert interactive_policy_command(
+        "kimi", "/vc-init", "local-native", "read-only"
+    ) == ["kimi", "--plan"]
+    with pytest.raises(ValueError, match="no native accept-edits"):
+        interactive_policy_command("kimi", "/vc-init", "local-native", "accept-edits")
+
+
 def test_interactive_workspace_command_wraps_the_exact_init_route(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1514,6 +1536,7 @@ def test_exact_session_usage_is_monotonic_and_deduplicates_message_ids(
         "output_tokens": 2,
         "total_tokens": 5,
         "messages": 1,
+        "foreign_workspace_events": 0,
     }
     transcript.write_text(
         transcript.read_text(encoding="utf-8")
@@ -1571,6 +1594,226 @@ def test_usage_reader_rejects_preexisting_exact_session_source(tmp_path: Path) -
             provider_version="2.1.232",
             env={"CLAUDE_CONFIG_DIR": str(config)},
         )
+
+
+def test_usage_reader_accepts_event_from_subdirectory_of_effective_root(
+    tmp_path: Path,
+) -> None:
+    session_id = "55555555-5555-4555-8555-555555555555"
+    repo = tmp_path / "repo"
+    nested = repo / "vibecrafted-core"
+    nested.mkdir(parents=True)
+    config = tmp_path / "claude"
+    reader = _ClaudeTranscriptUsage(
+        provider_session_id=session_id,
+        effective_root=str(repo),
+        provider_version="2.1.232",
+        env={"CLAUDE_CONFIG_DIR": str(config)},
+    )
+    transcript = config / "projects" / "fixture" / f"{session_id}.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text(
+        json.dumps(
+            _usage_event(session_id=session_id, cwd=nested, message_id="msg-sub")
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    measured = reader.poll()
+    assert measured["messages"] == 1
+    assert measured["total_tokens"] == 5
+    assert measured["foreign_workspace_events"] == 0
+
+
+def test_usage_reader_accepts_event_from_own_run_directory(tmp_path: Path) -> None:
+    session_id = "66666666-6666-4666-8666-666666666666"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run_id = "init-260915-083822-55412"
+    run_dir = tmp_path / "runtime_runs" / run_id
+    run_dir.mkdir(parents=True)
+    config = tmp_path / "claude"
+    reader = _ClaudeTranscriptUsage(
+        provider_session_id=session_id,
+        effective_root=str(repo),
+        provider_version="2.1.232",
+        env={"CLAUDE_CONFIG_DIR": str(config)},
+        run_id=run_id,
+        run_root=str(run_dir),
+    )
+    transcript = config / "projects" / "fixture" / f"{session_id}.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text(
+        json.dumps(
+            _usage_event(session_id=session_id, cwd=run_dir, message_id="msg-run")
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    measured = reader.poll()
+    assert measured["messages"] == 1
+    assert measured["total_tokens"] == 5
+    assert measured["foreign_workspace_events"] == 0
+
+
+def test_usage_reader_records_foreign_workspace_without_raising(
+    tmp_path: Path,
+) -> None:
+    session_id = "77777777-7777-4777-8777-777777777777"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    foreign = tmp_path / "vc-frame"
+    foreign.mkdir()
+    config = tmp_path / "claude"
+    reader = _ClaudeTranscriptUsage(
+        provider_session_id=session_id,
+        effective_root=str(repo),
+        provider_version="2.1.232",
+        env={"CLAUDE_CONFIG_DIR": str(config)},
+    )
+    transcript = config / "projects" / "fixture" / f"{session_id}.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text(
+        json.dumps(
+            _usage_event(
+                session_id=session_id,
+                cwd=foreign,
+                message_id="msg-foreign-cwd",
+                input_tokens=9,
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    measured = reader.poll()
+    assert measured["foreign_workspace_events"] == 1
+    assert measured["messages"] == 0
+    assert measured["total_tokens"] == 0
+    transcript.write_text(
+        transcript.read_text(encoding="utf-8")
+        + json.dumps(
+            _usage_event(session_id=session_id, cwd=repo, message_id="msg-own")
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    measured = reader.poll()
+    assert measured["foreign_workspace_events"] == 1
+    assert measured["messages"] == 1
+    assert measured["total_tokens"] == 5
+
+
+def test_usage_reader_still_rejects_version_mismatch(tmp_path: Path) -> None:
+    session_id = "88888888-8888-4888-8888-888888888888"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    config = tmp_path / "claude"
+    reader = _ClaudeTranscriptUsage(
+        provider_session_id=session_id,
+        effective_root=str(repo),
+        provider_version="2.1.232",
+        env={"CLAUDE_CONFIG_DIR": str(config)},
+    )
+    transcript = config / "projects" / "fixture" / f"{session_id}.jsonl"
+    transcript.parent.mkdir(parents=True)
+    event = _usage_event(session_id=session_id, cwd=repo, message_id="msg-ver")
+    event["version"] = "9.9.9"
+    transcript.write_text(json.dumps(event) + "\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="version differs"):
+        reader.poll()
+
+
+def test_format_interactive_launch_failure_includes_resume() -> None:
+    text = format_interactive_launch_failure(
+        run_id="init-260915-104809-93621",
+        reason="provider usage event belongs to a foreign workspace",
+        agent_session_id="c9c1307b-ce19-4fa3-be77-5b0f8dcef380",
+        started=True,
+        provider="claude",
+    )
+    assert "init-260915-104809-93621" in text
+    assert "provider usage event belongs to a foreign workspace" in text
+    assert "claude --resume c9c1307b-ce19-4fa3-be77-5b0f8dcef380" in text
+    assert "was stopped after it had already started" in text
+
+
+def test_classify_interactive_failure_reason_splits_start_from_kill() -> None:
+    assert classify_interactive_failure_reason({}) == "interactive_start_failed"
+    assert (
+        classify_interactive_failure_reason(
+            {"spawned_at": "2026-09-15T10:10:41Z", "worker_pid": 12, "status": "active"}
+        )
+        == "killed_after_start"
+    )
+    assert (
+        classify_interactive_failure_reason({"terminal_reason": "wrapper_exception"})
+        == "killed_after_start"
+    )
+
+
+def test_record_interactive_launch_cli_failure_preserves_live_receipt(
+    tmp_path: Path, monkeypatch
+) -> None:
+    run_id = "init-260915-104809-93621"
+    home = tmp_path / "home"
+    meta_path = home / "control_plane" / "runtime_runs" / run_id / "meta.json"
+    meta_path.parent.mkdir(parents=True)
+    live = {
+        "run_id": run_id,
+        "agent": "claude",
+        "status": "failed",
+        "liveness": "terminal",
+        "terminal_reason": "killed_after_start",
+        "spawned_at": "2026-09-15T08:48:09Z",
+        "worker_pid": 4242,
+        "provider_session_id": "c9c1307b-ce19-4fa3-be77-5b0f8dcef380",
+        "measured_usage": {"total_tokens": 12, "foreign_workspace_events": 2},
+        "error": "provider usage event belongs to a foreign workspace",
+    }
+    meta_path.write_text(json.dumps(live), encoding="utf-8")
+    monkeypatch.setattr(
+        "vibecrafted_core.spawn.control_plane_home",
+        lambda: home / "control_plane",
+    )
+    message, failed = record_interactive_launch_cli_failure(
+        admission={"run_id": run_id, "agent": "claude", "skill": "init"},
+        exc=RuntimeError("provider usage event belongs to a foreign workspace"),
+        provider="claude",
+    )
+    assert failed["terminal_reason"] == "killed_after_start"
+    assert failed["provider_session_id"] == "c9c1307b-ce19-4fa3-be77-5b0f8dcef380"
+    assert failed["measured_usage"]["foreign_workspace_events"] == 2
+    assert failed["worker_pid"] == 4242
+    assert "claude --resume c9c1307b-ce19-4fa3-be77-5b0f8dcef380" in message
+    rewritten = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert rewritten["provider_session_id"] == live["provider_session_id"]
+    assert rewritten["measured_usage"] == live["measured_usage"]
+
+
+def test_record_interactive_launch_cli_failure_marks_start_failed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    run_id = "init-260915-000000-00000"
+    home = tmp_path / "home"
+    (home / "control_plane" / "runtime_runs" / run_id).mkdir(parents=True)
+    monkeypatch.setattr(
+        "vibecrafted_core.spawn.control_plane_home",
+        lambda: home / "control_plane",
+    )
+    monkeypatch.setattr(
+        "vibecrafted_core.spawn.append_event", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        "vibecrafted_core.spawn._project_interactive_snapshot", lambda _run_id: ""
+    )
+    message, failed = record_interactive_launch_cli_failure(
+        admission={"run_id": run_id, "agent": "claude", "skill": "init"},
+        exc=ValueError("unsafe interactive admission file"),
+        provider="claude",
+    )
+    assert failed["terminal_reason"] == "interactive_start_failed"
+    assert "failed to start" in message
+    assert run_id in message
 
 
 def test_policy_cli_reads_the_same_contract(monkeypatch, capsys) -> None:

@@ -5,7 +5,8 @@
 //! human labels, no second liveness census.
 
 use serde::Deserialize;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::cmp::Ordering;
+use std::time::{Duration, SystemTime};
 
 /// Canonical product origin — the loopback bind vc-server and server_config
 /// default to (`127.0.0.1:3024`; 3025 is only the leptos reload port). A
@@ -17,6 +18,52 @@ pub const DEFAULT_SERVER: &str = "http://127.0.0.1:3024";
 pub enum ConsoleView {
     Observe,
     Full,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ObserveSort {
+    #[default]
+    Latest,
+    Oldest,
+}
+
+impl ObserveSort {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Latest => Self::Oldest,
+            Self::Oldest => Self::Latest,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Latest => "latest",
+            Self::Oldest => "oldest",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TranscriptView {
+    #[default]
+    Human,
+    Raw,
+}
+
+impl TranscriptView {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Human => Self::Raw,
+            Self::Raw => Self::Human,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Human => "human",
+            Self::Raw => "raw",
+        }
+    }
 }
 
 impl ConsoleView {
@@ -37,8 +84,19 @@ pub struct ObserveState {
     pub error: Option<String>,
     pub runs: Vec<ObserveRun>,
     pub selected: usize,
+    pub sort: ObserveSort,
+    pub transcript_view: TranscriptView,
     pub transcript: String,
+    pub transcript_raw: String,
     pub transcript_run_id: Option<String>,
+    /// Human rendering of `transcript_raw`, computed together with the read.
+    pub transcript_human: String,
+    /// Run whose transcript read is outstanding.
+    pub transcript_loading: Option<String>,
+    /// Number of the newest transcript read asked for.
+    pub transcript_generation: u64,
+    /// A transcript read not yet handed to the worker.
+    pub transcript_request: Option<crate::refresh::TranscriptJob>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -71,6 +129,9 @@ pub struct ObserveRun {
     pub state: String,
     pub age: String,
     pub liveness: String,
+    /// Canonical seconds used for latest/oldest ordering. Display `age` is
+    /// never a sort key. `None` stays honest: missing timestamps sort last.
+    pub sort_ts: Option<i64>,
 }
 
 impl ObserveRun {
@@ -234,6 +295,7 @@ fn runs_from_envelope(envelope: StateEnvelope, now: SystemTime) -> Vec<ObserveRu
             state: empty_as_unknown(dto.state),
             age: age_label(&dto.started_at, now),
             liveness: dto.liveness,
+            sort_ts: parse_canonical_ts(&dto.started_at),
         };
         if run.is_archive() && !run.state.eq_ignore_ascii_case("stalled") {
             continue;
@@ -266,6 +328,7 @@ pub fn project_rendered_runs(runs: &[crate::state::RenderedRun]) -> Vec<ObserveR
         .cloned()
         .map(|run| {
             let snapshot = run.snapshot;
+            let sort_ts = canonical_snapshot_ts(&snapshot);
             let state_label = snapshot.display_state();
             let liveness = snapshot
                 .extra
@@ -284,9 +347,54 @@ pub fn project_rendered_runs(runs: &[crate::state::RenderedRun]) -> Vec<ObserveR
                 state: state_label,
                 age: run.age_label,
                 liveness,
+                sort_ts,
             }
         })
         .collect()
+}
+
+pub fn sort_observe_runs(runs: &mut [ObserveRun], sort: ObserveSort) {
+    runs.sort_by(|left, right| compare_observe_runs(left, right, sort));
+}
+
+fn compare_observe_runs(left: &ObserveRun, right: &ObserveRun, sort: ObserveSort) -> Ordering {
+    match (left.sort_ts, right.sort_ts) {
+        (Some(left_ts), Some(right_ts)) => {
+            let primary = match sort {
+                ObserveSort::Latest => right_ts.cmp(&left_ts),
+                ObserveSort::Oldest => left_ts.cmp(&right_ts),
+            };
+            primary.then_with(|| left.run_id.cmp(&right.run_id))
+        }
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => left.run_id.cmp(&right.run_id),
+    }
+}
+
+fn canonical_snapshot_ts(snapshot: &crate::state::RunSnapshot) -> Option<i64> {
+    snapshot
+        .started_at
+        .as_deref()
+        .and_then(parse_canonical_ts)
+        .or_else(|| snapshot.updated_at.as_deref().and_then(parse_canonical_ts))
+        .or_else(|| {
+            snapshot
+                .last_heartbeat
+                .as_deref()
+                .and_then(parse_canonical_ts)
+        })
+}
+
+pub fn parse_canonical_ts(raw: &str) -> Option<i64> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(trimmed) {
+        return Some(parsed.timestamp());
+    }
+    trimmed.parse::<i64>().ok()
 }
 
 fn observe_age_is_archive(age: &str) -> bool {
@@ -320,9 +428,7 @@ pub fn fetch_transcript(origin: &str, run_id: &str) -> anyhow::Result<String> {
     );
     let response = ureq::get(&url).timeout(Duration::from_secs(3)).call()?;
     let dto: TranscriptDto = response.into_json()?;
-    Ok(crate::run_detail::humanize_transcript(
-        &dto.body.unwrap_or_default(),
-    ))
+    Ok(dto.body.unwrap_or_default())
 }
 
 pub fn is_safe_run_id(run_id: &str) -> bool {
@@ -352,14 +458,10 @@ fn truncate(value: &str, width: usize) -> String {
         + "…"
 }
 
-#[allow(dead_code)]
-fn _unix_now_for_tests() -> SystemTime {
-    UNIX_EPOCH + Duration::from_secs(1_787_000_000)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::UNIX_EPOCH;
 
     #[test]
     fn parse_live_payload_uses_human_labels() {
@@ -424,6 +526,127 @@ mod tests {
     fn reject_path_run_ids() {
         assert!(!is_safe_run_id("../secret"));
         assert!(is_safe_run_id("work-260816-215903-94636"));
+    }
+
+    #[test]
+    fn observe_sort_uses_canonical_timestamps_not_age_labels() {
+        let mut runs = vec![
+            ObserveRun {
+                run_id: "work-older".into(),
+                session_id: None,
+                operator_session: None,
+                transcript_path: None,
+                agent: "agy".into(),
+                skill: "workflow".into(),
+                repo: "vibecrafted".into(),
+                state: "completed".into(),
+                age: "17h".into(),
+                liveness: "terminal".into(),
+                sort_ts: Some(1_000),
+            },
+            ObserveRun {
+                run_id: "work-newer".into(),
+                session_id: None,
+                operator_session: None,
+                transcript_path: None,
+                agent: "agy".into(),
+                skill: "workflow".into(),
+                repo: "vibecrafted".into(),
+                state: "completed".into(),
+                age: "15h".into(),
+                liveness: "terminal".into(),
+                sort_ts: Some(3_000),
+            },
+            ObserveRun {
+                run_id: "work-mid".into(),
+                session_id: None,
+                operator_session: None,
+                transcript_path: None,
+                agent: "agy".into(),
+                skill: "workflow".into(),
+                repo: "vibecrafted".into(),
+                state: "completed".into(),
+                age: "16h".into(),
+                liveness: "terminal".into(),
+                sort_ts: Some(2_000),
+            },
+        ];
+        sort_observe_runs(&mut runs, ObserveSort::Latest);
+        assert_eq!(
+            runs.iter()
+                .map(|run| run.run_id.as_str())
+                .collect::<Vec<_>>(),
+            ["work-newer", "work-mid", "work-older"]
+        );
+        sort_observe_runs(&mut runs, ObserveSort::Oldest);
+        assert_eq!(
+            runs.iter()
+                .map(|run| run.run_id.as_str())
+                .collect::<Vec<_>>(),
+            ["work-older", "work-mid", "work-newer"]
+        );
+    }
+
+    #[test]
+    fn observe_sort_keeps_missing_timestamps_honest_and_ties_on_run_id() {
+        let mut runs = vec![
+            ObserveRun {
+                run_id: "b-same".into(),
+                session_id: None,
+                operator_session: None,
+                transcript_path: None,
+                agent: "codex".into(),
+                skill: "review".into(),
+                repo: "vibecrafted".into(),
+                state: "unknown".into(),
+                age: "—".into(),
+                liveness: "unknown".into(),
+                sort_ts: Some(5_000),
+            },
+            ObserveRun {
+                run_id: "a-same".into(),
+                session_id: None,
+                operator_session: None,
+                transcript_path: None,
+                agent: "codex".into(),
+                skill: "review".into(),
+                repo: "vibecrafted".into(),
+                state: "unknown".into(),
+                age: "—".into(),
+                liveness: "unknown".into(),
+                sort_ts: Some(5_000),
+            },
+            ObserveRun {
+                run_id: "missing".into(),
+                session_id: None,
+                operator_session: None,
+                transcript_path: None,
+                agent: "codex".into(),
+                skill: "review".into(),
+                repo: "vibecrafted".into(),
+                state: "unknown".into(),
+                age: "age unknown".into(),
+                liveness: "unknown".into(),
+                sort_ts: None,
+            },
+        ];
+        sort_observe_runs(&mut runs, ObserveSort::Latest);
+        assert_eq!(
+            runs.iter()
+                .map(|run| run.run_id.as_str())
+                .collect::<Vec<_>>(),
+            ["a-same", "b-same", "missing"]
+        );
+        assert!(parse_canonical_ts("").is_none());
+        assert!(parse_canonical_ts("not-a-date").is_none());
+        assert_eq!(
+            parse_canonical_ts("2026-09-13T12:00:00Z"),
+            Some(
+                chrono::DateTime::parse_from_rfc3339("2026-09-13T12:00:00Z")
+                    .unwrap()
+                    .timestamp()
+            )
+        );
     }
 
     #[test]

@@ -39,6 +39,7 @@ from vibecrafted_core.workflow import (
 )
 
 from .model import (
+    BASE_CUT_PREFIX,
     STATE_FAILED,
     STATE_PENDING,
     STATE_UNKNOWN,
@@ -48,6 +49,7 @@ from .model import (
     Cut,
     Dispatch,
     Verdict,
+    classify_base,
 )
 from .receipts import DispatchReceiptStore, IntegratorLease
 from .schema import render_cell_prompt, render_cut_verifies
@@ -758,6 +760,16 @@ class DispatchSupervisor:
         selection = self._baseline_for(cut, verdicts)
         baseline = selection.selected
         previous = self._receipt_store.cut(cut.id)
+        if cut.base and previous.get("baseline_sha") and previous.get("worktree_path"):
+            # An explicit base is frozen at first resolution. A resume keeps
+            # the base recorded on the receipt instead of re-resolving a
+            # moved branch ref or re-reading a settled dependency.
+            selection = BaselineSelection(
+                planned=str(previous.get("planned_baseline_sha") or selection.planned),
+                selected=str(previous["baseline_sha"]),
+                reason="receipt_base_kept",
+            )
+            baseline = selection.selected
         previous_root = Path(str(previous.get("worktree_path") or "")).expanduser()
         recovering_active = (
             previous.get("state") in {"launching", "active", "reported"}
@@ -814,6 +826,9 @@ class DispatchSupervisor:
             artifact_path=geometry.artifact_path,
             branch=geometry.branch,
             baseline_sha=geometry.baseline_sha,
+            base_ref=cut.base,
+            base_sha=geometry.baseline_sha,
+            base_source=classify_base(cut.base),
             planned_baseline_sha=selection.planned,
             baseline_selection_reason=(
                 "recovered_existing_worktree" if recovered else selection.reason
@@ -842,6 +857,8 @@ class DispatchSupervisor:
     def _baseline_for(
         self, cut: Cut, verdicts: dict[str, Verdict]
     ) -> BaselineSelection:
+        if cut.base:
+            return self._explicit_base_for(cut)
         if not cut.depends_on:
             return self._prefer_live_head(
                 str(self.dispatch.meta.baseline.get("head") or self._git_head())
@@ -894,6 +911,59 @@ class DispatchSupervisor:
                     f"[{cut.id}] dependency tips are not an integrated ancestry chain; add a named integrator cut"
                 )
         return self._prefer_live_head(candidate)
+
+    def _explicit_base_for(self, cut: Cut) -> BaselineSelection:
+        """Resolve a declared per-cut ``base`` to a pinned commit.
+
+        Explicit bases are frozen: the local-069/071 living-tree descendant
+        follow applies only to the plan baseline, never to ``base``. A
+        ``cut:<id>`` base resolves at launch time from the dependency's
+        settled receipt (its ``delivered_commit_sha``).
+        """
+        kind = classify_base(cut.base)
+        if kind == "cut":
+            target = cut.base[len(BASE_CUT_PREFIX) :].strip()
+            commit = str(
+                self._receipt_store.cut(target).get("delivered_commit_sha") or ""
+            )
+            resolved = (
+                self._git(["rev-parse", "--verify", f"{commit}^{{commit}}"])
+                if commit
+                else ""
+            )
+            if not resolved:
+                raise WorktreeContractError(
+                    f"[{cut.id}] base {cut.base!r} has no settled delivered"
+                    " commit to build on"
+                )
+            return BaselineSelection(
+                planned=resolved,
+                selected=resolved,
+                reason="explicit_cut_base",
+            )
+        if kind == "sha":
+            resolved = self._git(["rev-parse", "--verify", f"{cut.base}^{{commit}}"])
+            if not resolved:
+                raise WorktreeContractError(
+                    f"[{cut.id}] base not reachable in meta.repo ({cut.base!r})"
+                )
+            return BaselineSelection(
+                planned=resolved,
+                selected=resolved,
+                reason="explicit_sha_base",
+            )
+        resolved = self._git(
+            ["rev-parse", "--verify", f"refs/heads/{cut.base}^{{commit}}"]
+        )
+        if not resolved:
+            raise WorktreeContractError(
+                f"[{cut.id}] base not reachable in meta.repo ({cut.base!r} as branch)"
+            )
+        return BaselineSelection(
+            planned=resolved,
+            selected=resolved,
+            reason="explicit_branch_base",
+        )
 
     def _baton_from_verdicts(self, verdicts: dict[str, Verdict]) -> Baton:
         baton = self.dispatch.empty_baton()
@@ -2054,16 +2124,32 @@ class DispatchSupervisor:
                 handle.write(f"- {timestamp} {message}\n")
 
     def _write_tracker(self) -> None:
-        """Rewrite tracker.md in full from the current in-memory per-cut states."""
+        """Rewrite tracker.md with package YAML frontmatter and the cut table."""
         meta = self.dispatch.meta
+        project = _artifact_plane_project(
+            meta.reports_dir, self.tracker_path, self.artifacts_dir
+        ) or _repo_checkout_project(meta.repo)
+        written = datetime.now(timezone.utc)
+        # session_id repeats run_id: R11 requires a non-empty session_id and
+        # the dispatcher has no agent session of its own.
         lines = [
+            "---",
+            f"plan_id: {meta.name or 'unnamed'}",
+            f"run_id: {self.run_id}",
+            f"session_id: {self.run_id}",
+            "role: tracker",
+            "agent: dispatcher",
+            f"date: {written.date().isoformat()}",
+            f"project: {project}",
+            "---",
+            "",
             f"# dispatch tracker — {meta.name or 'unnamed'}",
             "",
             f"- repo: {meta.repo}",
             f"- baseline_branch: {meta.baseline.get('branch', '')}",
             f"- baseline_head: {meta.baseline.get('head', '')}",
             f"- validated_copy: {self.artifacts_dir / 'validated-dispatch.toml'}",
-            f"- updated: {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
+            f"- updated: {written.isoformat(timespec='seconds')}",
             (
                 "- writer: dispatch supervisor (single writer; verified state"
                 " flips only after green supervisor verify)"
@@ -2245,6 +2331,44 @@ def _path_in_scope(path: str, scopes: tuple[str, ...]) -> bool:
         if path == anchor or path.startswith(anchor + "/"):
             return True
     return False
+
+
+def _artifact_plane_project(*candidates: str | Path) -> str:
+    """Return ``org/repo`` from a canonical ``artifacts/<org>/<repo>/…`` path."""
+    for raw in candidates:
+        if not raw:
+            continue
+        parts = Path(str(raw)).expanduser().parts
+        try:
+            index = parts.index("artifacts")
+        except ValueError:
+            continue
+        if index + 2 >= len(parts):
+            continue
+        org, repo = parts[index + 1], parts[index + 2]
+        if org and repo:
+            return f"{org}/{repo}"
+    return ""
+
+
+def _repo_checkout_project(repo: str | Path) -> str:
+    """Return ``owner/repo`` from origin, else the checkout directory name."""
+    root = Path(repo).expanduser()
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "config", "--get", "remote.origin.url"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        proc = None
+    url = proc.stdout.strip() if proc is not None and proc.returncode == 0 else ""
+    identity = _repo_identity_from_url(url)
+    if identity:
+        return identity
+    return root.name or "unversioned-checkout"
 
 
 def run_dispatch(

@@ -133,7 +133,7 @@ jobs:
           bash -n install.sh
           # The project excludes SC1091 (sourced env files we don't follow)
           # in scripts/check_shell.py — match that policy here.
-          shellcheck -e SC1090,SC1091,SC2155,SC2034,SC2154,SC2015 install.sh
+          shellcheck -e SC1090,SC1091 install.sh
 
       # ubuntu-22.04 ships system Python 3.10, below the project floor
       # (requires-python >=3.11; vibecrafted_core imports tomllib, 3.11+ stdlib).
@@ -296,7 +296,7 @@ jobs:
         run: |
           set -euo pipefail
           bash -n install.sh
-          shellcheck -e SC1090,SC1091,SC2155,SC2034,SC2154,SC2015 install.sh
+          shellcheck -e SC1090,SC1091 install.sh
 
       - name: Install uv
         run: |

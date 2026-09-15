@@ -36,6 +36,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         LaunchFocus::Help => draw_help_overlay(frame, app),
         LaunchFocus::EditPrompt => draw_prompt_overlay(frame, app),
         LaunchFocus::EditModel => draw_model_overlay(frame, app),
+        LaunchFocus::EditRepo => draw_repo_overlay(frame, app),
         LaunchFocus::Confirmation => draw_confirmation_overlay(frame, app),
         LaunchFocus::Search => draw_search_overlay(frame, app),
         LaunchFocus::Error => draw_error_overlay(frame, app),
@@ -176,7 +177,10 @@ fn draw_observe(frame: &mut Frame, area: Rect, app: &App) {
         .iter()
         .filter(|run| run.kind_label() == "stalled")
         .count();
-    let title = format!(" Observe · {active} active · {stalled} stalled ");
+    let title = format!(
+        " Observe · {} · {active} active · {stalled} stalled ",
+        app.observe.sort.label()
+    );
     frame.render_widget(
         List::new(items).block(Block::default().borders(Borders::ALL).title(Span::styled(
             title,
@@ -233,7 +237,7 @@ fn draw_observe(frame: &mut Frame, area: Rect, app: &App) {
             .wrap(Wrap { trim: false })
             .scroll((app.interaction.scroll.observe_transcript, 0))
             .block(Block::default().borders(Borders::ALL).title(Span::styled(
-                " Transcript ",
+                format!(" Transcript · {} ", app.observe.transcript_view.label()),
                 Style::default().add_modifier(Modifier::BOLD),
             ))),
         columns.transcript,
@@ -649,6 +653,9 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         (AppTab::Dispatch, LaunchFocus::EditPrompt) => {
             "Dispatch edit: type prompt  Enter newline  Ctrl+S/Esc save"
         }
+        (AppTab::Dispatch, LaunchFocus::EditRepo) => {
+            "Dispatch edit: type repository path  Enter/Ctrl+S apply  Ctrl+U clear  Esc keep current"
+        }
         (_, LaunchFocus::Error) => "Error: Enter/Esc closes the failure details",
         (_, LaunchFocus::Artifact) => "Artifact viewer: Enter/Esc closes the native viewer",
         (AppTab::Dispatch, _) => {
@@ -667,7 +674,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     );
 
     let shortcuts = if app.config.view == ConsoleView::Observe {
-        "Observe: j/k select  m memory  w aicx wizard  r refresh  q quit"
+        "Observe: j/k select  o latest/oldest  t human/raw  m memory  w aicx wizard  r refresh  q quit"
     } else {
         "Global: q quit  r refresh  a cycle agent  v cycle runtime  y copy  Ctrl+L clear search  ? help"
     };
@@ -1602,6 +1609,30 @@ fn draw_model_overlay(frame: &mut Frame, app: &App) {
     frame.render_widget(model, area);
 }
 
+fn draw_repo_overlay(frame: &mut Frame, app: &App) {
+    let area = centered_rect(72, 44, frame.area());
+    frame.render_widget(Clear, area);
+    let border = if app.repo_edit.error.is_some() {
+        Color::Red
+    } else {
+        Color::Cyan
+    };
+    let lines = app
+        .repo_edit_lines()
+        .into_iter()
+        .map(Line::from)
+        .collect::<Vec<_>>();
+    let repo = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Destination repository")
+                .border_style(Style::default().fg(border)),
+        )
+        .wrap(Wrap { trim: false });
+    frame.render_widget(repo, area);
+}
+
 fn draw_confirmation_overlay(frame: &mut Frame, app: &App) {
     let area = centered_rect(78, 68, frame.area());
     frame.render_widget(Clear, area);
@@ -1847,6 +1878,8 @@ mod tests {
             observe: Default::default(),
             memory: Default::default(),
             interaction: Default::default(),
+            repo_edit: Default::default(),
+            refresh: Default::default(),
         }
     }
 
@@ -1899,10 +1932,12 @@ mod tests {
         };
         app.refresh_rendered_runs();
         app.refresh_observe();
+        app.load_requested_transcript();
         assert_eq!(app.observe.runs[app.observe.selected].run_id, "live-run");
         assert!(render_to_string(&app).contains("live transcript only"));
 
         app.toggle_filter();
+        app.load_requested_transcript();
         assert_eq!(app.queue_scope, QueueScope::History);
         assert_eq!(app.observe.runs.len(), 1);
         assert_eq!(app.observe.runs[app.observe.selected].run_id, "history-run");
@@ -1916,6 +1951,108 @@ mod tests {
         assert!(app.observe.transcript_run_id.is_none());
         assert!(app.observe_switch_command().is_none());
         assert!(render_to_string(&app).contains("no history runs in canonical control plane"));
+    }
+
+    #[test]
+    fn observe_sort_preserves_selection_and_renders_control() {
+        use crate::state::ControlPlaneState;
+        use std::collections::HashSet;
+        use std::fs;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let older = dir.path().join("older.log");
+        let newer = dir.path().join("newer.log");
+        fs::write(&older, "older body").unwrap();
+        fs::write(&newer, "newer body").unwrap();
+
+        let mut old_run = sample_run("work-old", "agy", "old-session");
+        old_run.snapshot.started_at = Some("2026-09-13T00:00:00Z".to_string());
+        old_run.snapshot.updated_at = old_run.snapshot.started_at.clone();
+        old_run.snapshot.latest_transcript = Some(older.display().to_string());
+        old_run.age_label = "17h".to_string();
+        let mut new_run = sample_run("work-new", "agy", "new-session");
+        new_run.snapshot.started_at = Some("2026-09-13T02:00:00Z".to_string());
+        new_run.snapshot.updated_at = new_run.snapshot.started_at.clone();
+        new_run.snapshot.latest_transcript = Some(newer.display().to_string());
+        new_run.age_label = "15h".to_string();
+
+        let mut app = sample_app();
+        app.config.view = crate::observe::ConsoleView::Observe;
+        app.queue_scope = QueueScope::All;
+        app.state = ControlPlaneState {
+            root: dir.path().to_path_buf(),
+            retained_runs: vec![old_run.snapshot.clone(), new_run.snapshot.clone()],
+            runs: vec![old_run.snapshot, new_run.snapshot],
+            events: Vec::new(),
+            archived_run_ids: HashSet::new(),
+        };
+        app.refresh_rendered_runs();
+        app.refresh_observe();
+        assert_eq!(app.observe.sort.label(), "latest");
+        assert_eq!(app.observe.runs[0].run_id, "work-new");
+        app.observe.selected = 0;
+        app.toggle_observe_sort();
+        assert_eq!(app.observe.sort.label(), "oldest");
+        assert_eq!(app.observe.runs[app.observe.selected].run_id, "work-new");
+        assert_eq!(app.observe.runs[0].run_id, "work-old");
+        let rendered = render_to_string(&app);
+        assert!(rendered.contains("oldest"));
+        assert!(rendered.contains("Transcript · human"));
+    }
+
+    #[test]
+    fn observe_transcript_defaults_to_human_and_raw_is_selectable() {
+        use crate::state::ControlPlaneState;
+        use std::collections::HashSet;
+        use std::fs;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let transcript = dir.path().join("agy.log");
+        fs::write(
+            &transcript,
+            concat!(
+                r#"{"event":"init","init":{"conversation_id":"c1"}}"#,
+                "\n",
+                r#"{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"hello"}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let mut run = sample_run("agy-run", "agy", "sess");
+        let now = chrono::Utc::now().to_rfc3339();
+        run.snapshot.started_at = Some(now.clone());
+        run.snapshot.updated_at = Some(now.clone());
+        run.snapshot.last_heartbeat = Some(now);
+        run.snapshot.latest_transcript = Some(transcript.display().to_string());
+        let mut app = sample_app();
+        app.config.view = crate::observe::ConsoleView::Observe;
+        app.queue_scope = QueueScope::All;
+        app.state = ControlPlaneState {
+            root: dir.path().to_path_buf(),
+            retained_runs: vec![run.snapshot.clone()],
+            runs: vec![run.snapshot],
+            events: Vec::new(),
+            archived_run_ids: HashSet::new(),
+        };
+        app.refresh_rendered_runs();
+        app.refresh_observe();
+        app.load_requested_transcript();
+        assert_eq!(
+            app.observe.transcript_view,
+            crate::observe::TranscriptView::Human
+        );
+        assert!(app.observe.transcript.contains("assistant: hello"));
+        assert!(!app.observe.transcript.contains("\"event\":\"init\""));
+        app.toggle_observe_transcript_view();
+        assert_eq!(
+            app.observe.transcript_view,
+            crate::observe::TranscriptView::Raw
+        );
+        assert!(app.observe.transcript.contains("\"event\":\"init\""));
+        let rendered = render_to_string(&app);
+        assert!(rendered.contains("Transcript · raw"));
     }
 
     #[test]

@@ -57,7 +57,7 @@ from .workflow import (
     resolve_session_selection,
 )
 
-AGENTS = {"claude", "codex", "agy", "junie", "grok", "cursor", "swarm"}
+AGENTS = {"claude", "codex", "agy", "junie", "grok", "cursor", "kimi", "swarm"}
 RESEARCH_ARITY = {"uno": 1, "duo": 2, "trio": 3}
 LAUNCHERS = (
     "audit",
@@ -104,6 +104,7 @@ SHELL_WRAPPER_VERBS = {
     "vc-operator": "operator",
     "vc-receipt": "receipt",
     "vc-resume": "resume",
+    "vc-scaffold-doctor": "scaffold-doctor",
     "vc-start": "start",
     "vc-status": "status",
     "vc-update": "update",
@@ -324,6 +325,25 @@ def _add_launch_parser(sub: argparse._SubParsersAction, name: str) -> None:
             "require (true) or refuse (false) the agent CLI's own sandbox; "
             "refused before launch when the installed CLI cannot enforce it"
         ),
+    )
+    run.add_argument(
+        "--remediate-trust-block",
+        action="store_true",
+        help=(
+            "Founder-authorized continuation on a recorded trust BLOCK; "
+            "does not rewrite the journal or report PASS"
+        ),
+    )
+    run.add_argument(
+        "--remediation-reason",
+        default="",
+        help="Required with --remediate-trust-block; recorded on the launch receipt",
+    )
+    run.add_argument(
+        "--remediation-task",
+        default="",
+        metavar="repair|admission",
+        help="Bounded task identity for --remediate-trust-block (repair or admission)",
     )
     run.add_argument("--mode", default="")
     run.add_argument("--count", type=int)
@@ -781,6 +801,17 @@ def _print_launch_receipt(payload: dict[str, Any]) -> None:
             f"sandbox:    {controls.get('sandbox_effective', '')}"
             f"  (requested: {sandbox_requested})"
         )
+    guard_info = payload.get("guard")
+    if isinstance(guard_info, dict) and guard_info:
+        print(
+            f"guard:      {guard_info.get('continuation', '')}"
+            f"  (trust {guard_info.get('blocking_verdict') or 'unchanged'}"
+            f" {str(guard_info.get('blocking_sha') or '')[:12]})"
+        )
+        if guard_info.get("remediation_task"):
+            print(f"remediation-task: {guard_info.get('remediation_task')}")
+        if guard_info.get("remediation_reason"):
+            print(f"remediation-reason: {guard_info.get('remediation_reason')}")
     print(f"dispatch:   {_field(payload, 'dispatch', '0')}")
     print(f"status:     {_field(payload, 'status', 'launching')}")
     reasons = _launch_receipt_reasons(payload)
@@ -1695,6 +1726,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         # --prompt/--file are extra seed context, never launch_workflow.
         is_lifecycle = True
 
+    if sys.platform == "win32" and raw_args and raw_args[0] == "server":
+        from .windows_server import main as windows_server_main
+
+        return windows_server_main(raw_args[1:])
+
     if is_lifecycle:
         from .runtime_paths import vibecrafted_tools_home
 
@@ -2288,6 +2324,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "base": args.base,
         "permissions": getattr(args, "permissions", ""),
         "sandbox": getattr(args, "sandbox", ""),
+        "remediate_trust_block": bool(getattr(args, "remediate_trust_block", False)),
+        "remediation_reason": getattr(args, "remediation_reason", ""),
+        "remediation_task": getattr(args, "remediation_task", ""),
         "mode": args.mode or args.command,
         "count": args.count,
         "depth": args.depth,
@@ -2323,6 +2362,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "status": "failed",
                 "error": f"{type(exc).__name__}: {exc}",
             }
+            from .guard import GuardRefusal, launch_disclosure
+
+            if isinstance(exc, GuardRefusal):
+                result["reason"] = exc.decision.reason
+                disclosure = launch_disclosure(exc.decision)
+                if disclosure:
+                    result["guard"] = disclosure
     return _emit_launch_result(result, json_mode=bool(args.json))
 
 

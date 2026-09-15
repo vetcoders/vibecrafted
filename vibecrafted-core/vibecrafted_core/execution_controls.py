@@ -89,6 +89,16 @@ SANDBOX_EVIDENCE: dict[str, str] = {
         "prove the sandbox is off"
     ),
     "junie": "junie 26.8.31 --help: no sandbox surface",
+    "kimi": (
+        "kimi 0.42.0 --help + binary option validation (probed 2026-09-13): no "
+        "--sandbox surface. Permission modes are explicit startup flags, not a "
+        "sandbox: -y/--yolo (Ask When Needed: routine edits and commands run "
+        "automatically; risky actions, questions and plans still ask), --auto "
+        "(Never Ask), --plan (plan mode). All three conflict with -p/--prompt "
+        "(OptionConflictError: Cannot combine --prompt with --yolo/--auto/--plan), "
+        "so print mode always runs under kimi's auto (never-ask) permission "
+        "policy with static deny rules still in effect"
+    ),
 }
 
 # What each provider's sandbox actually confines. Named in every receipt so a
@@ -108,6 +118,7 @@ SANDBOX_BOUNDARY: dict[str, str] = {
     "cursor": "cursor-agent sandbox mode for agent commands",
     "agy": "agy terminal sandbox ('terminal restrictions') for agent commands",
     "junie": "",
+    "kimi": "",
 }
 
 # Claude Code's documented hard-gate shape: the sandbox must be on, a missing
@@ -357,6 +368,15 @@ def _apply_sandbox(
         raise _refuse(
             provider,
             "junie 26.8.31 exposes no sandbox control, so --sandbox "
+            f"{sandbox_word(sandbox)} cannot be enforced. Omit --sandbox.",
+        )
+
+    if provider == "kimi":
+        if sandbox is None:
+            return base_flags, "provider-default", "kimi exposes no sandbox control"
+        raise _refuse(
+            provider,
+            "kimi 0.42.0 exposes no sandbox control, so --sandbox "
             f"{sandbox_word(sandbox)} cannot be enforced. Omit --sandbox.",
         )
 

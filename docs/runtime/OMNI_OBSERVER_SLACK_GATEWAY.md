@@ -9,10 +9,10 @@ live `@mention → run_id` requires operator buttons (allowlist + fresh
 Socket Mode bridge), not a second status store.
 
 Parent ownership doctrine (same axis, wider domains):
-[`docs/adr/0002-unified-operator-ownership.md`](../adr/0002-unified-operator-ownership.md)
+[`docs/adr/ownership-matrix.json`](../adr/ownership-matrix.json)
 — domain `run-lifecycle` owned by `control-plane`; Slack owns `a2a-envelopes`
-only, never run status. This file is the gateway-specific contract; the ADR
-is not a second truth.
+only, never run status. This file is the gateway-specific contract; the
+matrix is not a second truth.
 
 Plan: `vc-server-mcp-slack-gateway` (2026-07-28 scaffold · implement →
 marbles fortify → polarize L1–L3 2026-07-30). **Polarize depth complete** —
