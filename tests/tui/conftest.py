@@ -1,9 +1,37 @@
 from __future__ import annotations
 
+import os
 import shlex
 from collections.abc import Callable, Mapping
 
 import pytest
+
+# Product-shell PATH doors. A deck in Development mode does `command -v python3`
+# and, with these still first on PATH, hits ~/.config/vibecrafted/vc-terminal/bin
+# or a share/vibecrafted/releases shim. Those exit 127 without VIBECRAFTED_PYTHON
+# ("Development Python interpreter does not run as Python 3"). Tests copy
+# os.environ, so the autouse fixture must drop the doors before any child env
+# is built. Fixture PATH entries that later include share/vibecrafted are set
+# by the test itself and must not be re-scrubbed here.
+_PRODUCT_SHELL_PATH_MARKERS = (
+    "vc-terminal/bin",
+    "share/vibecrafted",
+)
+
+
+def without_product_shell_path(raw: str) -> str:
+    """Drop product-shell python doors from an inherited PATH string."""
+
+    kept: list[str] = []
+    for part in raw.split(":"):
+        if not part:
+            continue
+        normalized = part.replace("\\", "/")
+        if any(marker in normalized for marker in _PRODUCT_SHELL_PATH_MARKERS):
+            continue
+        kept.append(part)
+    return ":".join(kept) if kept else "/usr/bin:/bin"
+
 
 # Frame/session targeting env leaks from a live operator shell (vc-frame is a
 # zellij fork, so both spellings appear). With any of these set, launcher paths
@@ -55,7 +83,14 @@ def _disable_live_perception_side_effects(
 
     home = tmp_path_factory.mktemp("tui-home").resolve()
     monkeypatch.setenv("HOME", str(home))
-    for name in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME"):
+    monkeypatch.setenv("PATH", without_product_shell_path(os.environ.get("PATH", "")))
+    for name in (
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+        "ZDOTDIR",
+        "PYTHONPATH",
+    ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("VC_FRAME_SOCKET_DIR", str(home / "frame-sockets"))
     monkeypatch.setenv("VIBECRAFTED_PERCEPTION_WATCH", "0")
