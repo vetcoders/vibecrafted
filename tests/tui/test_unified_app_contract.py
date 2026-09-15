@@ -4025,9 +4025,9 @@ def test_terminal_policy_uses_operator_toml_and_primary_shell_chain() -> None:
     installer = (REPO_ROOT / "scripts/vetcoders_install.py").read_text(encoding="utf-8")
 
     assert 'family = "Spot Mono"' in terminal
-    assert "size = 18.5" in terminal
-    assert "x = -1" in terminal
-    assert "y = 2" in terminal
+    assert "size = 19.5" in terminal
+    assert "x = -3" in terminal
+    assert "y = -8" in terminal
     assert 'style = { shape = "Underline", blinking = "On" }' in terminal
     assert 'cyan    = "#7dc4e4"' in dark
     assert 'cyan    = "#56949f"' in light

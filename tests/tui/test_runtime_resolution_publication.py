@@ -1480,7 +1480,7 @@ def _previous_terminal_policy() -> str:
     return (
         _REPO_TERMINAL_POLICY.read_text(encoding="utf-8")
         .replace(_INCOMING_SHELL, _PREVIOUS_SHELL)
-        .replace("padding = { x = 8, y = 8 }", "padding = { x = 0, y = 0 }")
+        .replace("padding = { x = 0, y = 0 }", "padding = { x = 8, y = 8 }")
     )
 
 
@@ -1521,7 +1521,7 @@ def test_three_way_shell_correction_keeps_user_chrome_and_accepts_new_defaults(
     )
     text = policy.read_text(encoding="utf-8")
     assert _INCOMING_SHELL in text
-    assert "padding = { x = 8, y = 8 }" in text
+    assert "padding = { x = 0, y = 0 }" in text
     assert 'family = "User Mono"' in text
     assert 'background = "#111111"' in text
     assert 'mods = "Control"' in text
@@ -1562,13 +1562,13 @@ def test_terminal_chrome_and_font_overrides_survive_matching_default_then_retry(
     user = (
         base.replace("blur = true", "blur = false")
         .replace("opacity = 0.9", "opacity = 0.75")
-        .replace('decorations = "None"', 'decorations = "Full"')
+        .replace('decorations = "Transparent"', 'decorations = "Full"')
         .replace('family = "Spot Mono"', 'family = "Founder Mono"')
     )
     first_update = (
         base.replace("blur = true", "blur = false")
         .replace("opacity = 0.9", "opacity = 0.85")
-        .replace('decorations = "None"', 'decorations = "Transparent"')
+        .replace('decorations = "Transparent"', 'decorations = "None"')
         .replace('family = "Spot Mono"', 'family = "Shipped Mono"')
     )
     second_update = base.replace("opacity = 0.9", "opacity = 0.95").replace(
@@ -1620,7 +1620,7 @@ def test_terminal_chrome_and_font_overrides_survive_matching_default_then_retry(
 _PRODUCT_WINDOW_DEFAULTS = {
     "blur": True,
     "opacity": 0.9,
-    "decorations": "None",
+    "decorations": "Transparent",
 }
 _PRODUCT_FONT_FAMILY = "Spot Mono"
 
@@ -1652,7 +1652,7 @@ def test_upgrade_keeps_the_product_chrome_when_the_owner_never_touched_it(
 ):
     """Untouched defaults follow the product; they are not frozen on install."""
     base = _REPO_TERMINAL_POLICY.read_text(encoding="utf-8")
-    shipped_before = base.replace('decorations = "None"', 'decorations = "Transparent"')
+    shipped_before = base.replace('decorations = "Transparent"', 'decorations = "None"')
     assert shipped_before != base
 
     _install(
@@ -1661,7 +1661,7 @@ def test_upgrade_keeps_the_product_chrome_when_the_owner_never_touched_it(
         ),
         capsys,
     )
-    assert _installed_policy(roots)["window"]["decorations"] == "Transparent"
+    assert _installed_policy(roots)["window"]["decorations"] == "None"
 
     _install(
         seed_runtime_pack(
@@ -1676,12 +1676,12 @@ def test_upgrade_keeps_the_product_chrome_when_the_owner_never_touched_it(
     _resolve(roots, capsys, status="ready")
 
 
-def test_upgrade_to_borderless_default_keeps_an_explicit_decoration_choice(
+def test_upgrade_of_the_default_keeps_an_explicit_decoration_choice(
     tmp_path, roots, capsys
 ):
     """The correction to the default must not overwrite a deliberate answer."""
     base = _REPO_TERMINAL_POLICY.read_text(encoding="utf-8")
-    shipped_before = base.replace('decorations = "None"', 'decorations = "Transparent"')
+    shipped_before = base.replace('decorations = "Transparent"', 'decorations = "None"')
 
     _install(
         seed_runtime_pack(
@@ -1692,7 +1692,7 @@ def test_upgrade_to_borderless_default_keeps_an_explicit_decoration_choice(
     policy_path = roots["product_config"] / "terminal-policy.toml"
     policy_path.write_text(
         policy_path.read_text(encoding="utf-8").replace(
-            'decorations = "Transparent"', 'decorations = "Full"'
+            'decorations = "None"', 'decorations = "Full"'
         ),
         encoding="utf-8",
     )
@@ -1779,7 +1779,7 @@ def test_explicit_shell_preference_stays_a_bound_choice(tmp_path, roots, capsys)
             preference_path=str(policy),
         )
         assert _EXPLICIT_FISH_SHELL in policy.read_text(encoding="utf-8")
-        assert "padding = { x = 8, y = 8 }" in policy.read_text(encoding="utf-8")
+        assert "padding = { x = 0, y = 0 }" in policy.read_text(encoding="utf-8")
         _resolve(roots, capsys, status="ready")
 
 
