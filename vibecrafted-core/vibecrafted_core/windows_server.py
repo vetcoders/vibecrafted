@@ -176,7 +176,9 @@ def status(*, addr: str = DEFAULT_ADDR) -> dict[str, Any]:
         except OSError:
             same_generation = False
         else:
-            same_generation = os.path.normcase(str(left)) == os.path.normcase(str(right))
+            same_generation = os.path.normcase(str(left)) == os.path.normcase(
+                str(right)
+            )
     return {
         "schema": "vibecrafted.windows-server-status.v1",
         "addr": addr,

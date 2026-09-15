@@ -8,6 +8,7 @@ import argparse
 import contextlib
 import datetime as dt
 import errno
+
 try:
     import fcntl
 except ImportError:  # native Windows — flock-shaped portable_lock

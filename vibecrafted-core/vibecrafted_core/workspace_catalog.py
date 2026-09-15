@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+
 try:
     import fcntl
 except ImportError:  # native Windows — flock-shaped portable_lock
