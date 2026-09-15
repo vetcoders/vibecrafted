@@ -42,6 +42,25 @@ def _isolate_fixed_runtime_label(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(installer, "_runtime_loaded_service_home", lambda: None)
 
 
+def test_inherited_path_drops_product_shell_python_doors() -> None:
+    """Child env is built from os.environ; product-shell doors must already be gone."""
+
+    from tests.tui.conftest import without_product_shell_path
+
+    dirty = (
+        "/Users/x/.config/vibecrafted/vc-terminal/bin:"
+        "/Users/x/.local/share/vibecrafted/releases/current/bin:"
+        "/usr/bin:/bin"
+    )
+    cleaned = without_product_shell_path(dirty)
+    assert "vc-terminal/bin" not in cleaned
+    assert "share/vibecrafted" not in cleaned
+    assert "/usr/bin" in cleaned.split(":")
+    entries = os.environ.get("PATH", "").split(":")
+    assert not any("vc-terminal/bin" in part.replace("\\", "/") for part in entries)
+    assert not any("share/vibecrafted" in part.replace("\\", "/") for part in entries)
+
+
 def _write_executable(path: Path, body: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body, encoding="utf-8")
