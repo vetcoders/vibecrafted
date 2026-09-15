@@ -400,17 +400,24 @@ def public_reason(reason: str) -> str:
         return "Parent sessions are unavailable right now"
     if "workspace does not exist" in low:
         return "That project folder does not exist"
+    # Host VM unavailability is not a provider limit.  The token "canonical"
+    # in "no canonical VM entrypoint" used to fall through to the provider
+    # bucket and lie; keep this branch ahead of that gate.
+    if "no canonical vm" in low or "docker/colima" in low:
+        return "VM runtime is not available on this host"
     if any(
         token in low
         for token in (
-            "canonical",
             "child-usage",
             "child-attributable",
-            "admission",
             "usage side channel",
             "monotonic usage",
         )
     ):
+        if "coming" in low or "h2b" in low:
+            return "Not available yet"
+        return "Needs live usage metering; only claude today"
+    if any(token in low for token in ("canonical", "admission")):
         if "coming" in low or "h2b" in low:
             return "Not available yet"
         return "Not available for this provider"
@@ -426,8 +433,6 @@ def public_reason(reason: str) -> str:
         return "Starts without earlier memory"
     if "git/dispatch manage_worktrees" in low:
         return "Separate working copies are not available here"
-    if "no canonical vm" in low or "docker/colima" in low:
-        return "Not available yet"
     if "no live frame session" in low:
         return (
             text
@@ -747,17 +752,23 @@ def _dim_unavailable_choices(
     selected: int,
     end_col: int,
 ) -> None:
-    """Redraw disabled choice tokens with terminal-native dim styling."""
+    """Paint unavailable tokens dim and the selected token in reverse video."""
     tokens = _choice_tokens(choices, selected=selected, available=available)
     # The base line clips the *whole* token sequence.  Slice that same rendered
-    # sequence before applying dim attributes so a trailing disabled token cannot
-    # overwrite its ellipsis or drift relative to a selected bullet.
+    # sequence before applying token attributes so a trailing disabled token
+    # cannot overwrite its ellipsis or drift relative to the selected token.
     visible = _clip(" ".join(tokens), end_col - col)
     offset = 0
-    for token, enabled in zip(tokens, available, strict=True):
+    for index, (token, enabled) in enumerate(zip(tokens, available, strict=True)):
         fragment = visible[offset : offset + len(token)]
+        if not fragment:
+            break
         if not enabled:
             _safe_addstr(window, row, col + offset, fragment, curses.A_DIM)
+        elif index == selected:
+            _safe_addstr(
+                window, row, col + offset, fragment, curses.A_REVERSE | curses.A_BOLD
+            )
         offset += len(token) + 1
 
 
@@ -767,14 +778,9 @@ def _choice_tokens(
     selected: int,
     available: tuple[bool, ...] | None = None,
 ) -> tuple[str, ...]:
-    """Advanced rows keep one marker; the provider row uses reverse video."""
-    enabled = available or tuple(True for _ in choices)
-    return tuple(
-        f"• {choice}"
-        if index == selected and enabled[index]
-        else (choice if enabled[index] else f"× {choice}")
-        for index, choice in enumerate(choices)
-    )
+    """Bare labels. Selection is reverse video; unavailable is dim."""
+    _ = (selected, available)
+    return tuple(choices)
 
 
 def _provider_available(agent: str) -> bool:
@@ -1022,7 +1028,7 @@ class Workshop:
         height, width = self.window.getmaxyx()
         compact = height < 16 or width < 52
         left = 1 if compact else max(1, (width - min(width - 2, 84)) // 2)
-        top = 0 if compact else max(1, (height - (18 if self.advanced else 10)) // 2)
+        top = 0 if compact else max(1, (height - (19 if self.advanced else 11)) // 2)
         inner = max(12, width - left - 2)
         _safe_addstr(self.window, top, left, "New agent", curses.A_BOLD)
         _safe_addstr(
@@ -1042,7 +1048,13 @@ class Workshop:
             _clip(f"Project  {self.path}", inner),
             path_attr,
         )
-        cursor = path_row + 2
+        toggle = "▾ Advanced options" if self.advanced else "▸ Advanced options"
+        toggle_row = path_row + 2
+        _safe_addstr(self.window, toggle_row, left, _clip(toggle, inner), curses.A_BOLD)
+        self.mouse_targets.append(
+            (toggle_row, left, left + min(len(toggle), inner), 0, "advanced")
+        )
+        cursor = toggle_row + 1
         if self.advanced and not compact:
             provider = AGENTS[self.agent]
             capabilities = runtime_policy_capabilities(provider)
@@ -1103,10 +1115,12 @@ class Workshop:
                 line = label + " ".join(
                     _choice_tokens(choices, selected=selected, available=available)
                 )
-                attr = curses.A_REVERSE if self.row == offset + 2 else 0
-                _safe_addstr(
-                    self.window, cursor + offset, left, _clip(line, inner), attr
-                )
+                focused = self.row == offset + 2
+                _safe_addstr(self.window, cursor + offset, left, _clip(line, inner), 0)
+                if focused:
+                    _safe_addstr(
+                        self.window, cursor + offset, left, label, curses.A_REVERSE
+                    )
                 _dim_unavailable_choices(
                     self.window,
                     cursor + offset,
@@ -1196,8 +1210,12 @@ class Workshop:
                 raise SystemExit(0)
             self.mode = "home"
             return
-        if key in (ord("a"), ord("A")) and self.row == 0:
+        editing_parent = self.advanced and self.row == 6
+        editing_path = self.row == 1
+        if key in (ord("a"), ord("A")) and not editing_path and not editing_parent:
             self.advanced = not self.advanced
+            if not self.advanced:
+                self.row = min(self.row, 1)
             return
         rows = 7 if self.advanced else 2
         if key == curses.KEY_UP:
@@ -1403,6 +1421,11 @@ class Workshop:
                 return
             if kind == "launch":
                 self.launch()
+                return
+            if kind == "advanced":
+                self.advanced = not self.advanced
+                if not self.advanced:
+                    self.row = min(self.row, 1)
                 return
 
     def open_launcher(self) -> None:
