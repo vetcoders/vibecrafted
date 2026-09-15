@@ -63,6 +63,20 @@ vector: <stabilize|implement|recon|e2e>
 ## 12. Report (sections + honest handoff: proven [x] vs runtime-pending [?])
 ```
 
+### Sekcja Files: nowe vs istniejące ścieżki
+
+C4 (`named_path_missing`) wymaga, żeby każda ścieżka z sekcji Files istniała na HEAD. Gdy cięcie
+**tworzy** plik, którego jeszcze nie ma na HEAD, dopisz sufiks ` (new)` albo ` (nowy)` po ścieżce:
+
+```markdown
+- `tests/x_new.py` (new)
+- `src/foo.rs` (nowy)
+```
+
+scaffold-doctor wtedy sprawdza, że **katalog nadrzędny** istnieje na HEAD, a nie sam plik.
+Literówka w katalogu nadal wpada jako `named_path_parent_missing`. Nie oznaczaj tak edycji
+istniejących plików — nieoznaczona brakująca ścieżka nadal kończy się `named_path_missing`.
+
 ## Schemat tracker.md
 
 ```markdown
