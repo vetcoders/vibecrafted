@@ -251,7 +251,7 @@ pub struct ScaffoldChange {
 pub struct ScaffoldDoctorError {
     /// Stable machine code, e.g. `driver_contract`, `frontmatter_missing`.
     pub code: String,
-    /// Acceptance-rule id R1..R11 when the code maps to the skill gate.
+    /// Acceptance-rule id R1..R12 when the code maps to the skill gate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rule: Option<String>,
     pub artifact_id: Option<String>,
@@ -1869,6 +1869,9 @@ fn validate_manifest_plan(root: &Path, manifest: &ScaffoldManifest) -> ScaffoldD
                             validate_frontmatter(artifact, &content, &mut errors);
                         }
                         validate_role_contract(artifact, &content, &mut errors);
+                        if artifact.role == ScaffoldArtifactRole::Driver {
+                            validate_reception_matrix(root, artifact, &content, &mut errors);
+                        }
                         if artifact.role == ScaffoldArtifactRole::Brief {
                             validate_brief_naming(artifact, &mut errors);
                             validate_brief_sections(artifact, &content, &mut errors);
@@ -2143,6 +2146,56 @@ fn validate_driver_contract(
             Some(&artifact.id),
             Some(&artifact.path),
             &format!("DRIVER.md missing required parts: {}", missing.join(", ")),
+        );
+    }
+}
+
+/// R12 — DRIVER carries the reception matrix (Odbiór, Founder 2026-09-15):
+/// a section whose heading names the odbiór/reception, the three-signature
+/// line `Worker [ ] Operator [ ] Founder [ ]`, and a Founder box that is
+/// NEVER pre-checked by an agent. `Founder [x]` is valid only when the plan
+/// root carries founder acceptance evidence at `acceptance/founder.json`
+/// (the surface `vibecrafted accept <plan> --founder` writes). Without that
+/// file, a checked Founder box is a forged signature and the plan is refused.
+fn validate_reception_matrix(
+    plan_root: &Path,
+    artifact: &ScaffoldArtifactDeclaration,
+    content: &str,
+    errors: &mut Vec<ScaffoldDoctorError>,
+) {
+    let lower = content.to_lowercase();
+    let mut missing = Vec::new();
+    let has_section = lower.contains("odbi") || lower.contains("reception");
+    if !has_section {
+        missing.push("an `Odbiór (matryca wyników)` section");
+    }
+    let has_triple = lower.contains("worker [")
+        && lower.contains("operator [")
+        && lower.contains("founder [");
+    if !has_triple {
+        missing.push("the `Worker [ ] Operator [ ] Founder [ ]` signature line");
+    }
+    if !missing.is_empty() {
+        doctor_error(
+            errors,
+            "reception_matrix",
+            Some("R12"),
+            Some(&artifact.id),
+            Some(&artifact.path),
+            &format!(
+                "DRIVER.md missing reception matrix parts: {}",
+                missing.join(", ")
+            ),
+        );
+    }
+    if lower.contains("founder [x]") && !plan_root.join("acceptance/founder.json").is_file() {
+        doctor_error(
+            errors,
+            "reception_matrix",
+            Some("R12"),
+            Some(&artifact.id),
+            Some(&artifact.path),
+            "Founder [x] without acceptance/founder.json — an agent never signs for the Founder",
         );
     }
 }

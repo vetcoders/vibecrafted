@@ -1859,6 +1859,16 @@ class DispatchSupervisor:
 
     def _verify(self, cut: Cut) -> Verdict:
         """Run the cut's rendered verifiers and journal each verifier's outcome."""
+        flip_failures = self._acceptance_flip_failures(cut)
+        if flip_failures:
+            for failure in flip_failures:
+                self._journal(f"[{cut.id}] acceptance gate: {failure}")
+            return Verdict(
+                cut_id=cut.id,
+                phase=cut.phase,
+                state=STATE_FAILED,
+                failures=tuple(flip_failures),
+            )
         if self.policy.verify_executor != "supervisor":
             self._journal(
                 f"[{cut.id}] verify_executor={self.policy.verify_executor!r}"
@@ -1886,6 +1896,40 @@ class DispatchSupervisor:
                 gates=[evidence.to_dict() for evidence in verdict.verifiers],
             )
         return verdict
+
+    def _acceptance_flip_failures(self, cut: Cut) -> list[str]:
+        """Refuse to verify a cut whose brief still carries unflipped `[ ]` boxes.
+
+        Founder 2026-09-15: an untouched `[ ]` is a delivery indicator, not a
+        formatting nit — the worker either did not deliver the requirement or
+        never measured it. The worker must flip its own Acceptance checkboxes
+        before the supervisor spends verifier time. The flip itself remains a
+        claim, never proof: when every box is flipped, the declared verifiers
+        still run and are the only thing that settles the cut as `[x]`.
+        Briefs without an Acceptance checkbox section keep the legacy path.
+        """
+        if not cut.brief:
+            return []
+        try:
+            content = Path(cut.brief).expanduser().read_text(encoding="utf-8")
+        except OSError:
+            return []
+        in_acceptance = False
+        unflipped: list[str] = []
+        for line in content.splitlines():
+            stripped = line.strip()
+            lowered = stripped.lower()
+            if lowered.startswith("#") and "acceptance" in lowered:
+                in_acceptance = True
+                continue
+            if in_acceptance and stripped.startswith("## "):
+                break
+            if in_acceptance and stripped.startswith("-") and "[ ]" in stripped:
+                unflipped.append(stripped)
+        return [
+            f"acceptance checkbox never flipped by the worker: {line!r}"
+            for line in unflipped
+        ]
 
     def _repair_prompt(self, prompt: str, failures: tuple[str, ...]) -> str:
         """Append a REPAIR ROUND directive citing prior failure evidence to the base prompt."""
