@@ -589,7 +589,8 @@ _vetcoders_product_entry_prepare() {
   }
 
   # Host CLIs (node/codex) must be on PATH before workspace resolve and the
-  # control-plane eye — AppDelegate/vc-start start with a closed allowlist.
+  # control-plane eye — AppDelegate/vc-start sanitize the inherited PATH
+  # rather than trusting it blindly.
   if declare -F _vetcoders_path_with_bundled_bin_priority >/dev/null 2>&1; then
     PATH="$(_vetcoders_path_with_bundled_bin_priority "${PATH:-}")"
     export PATH

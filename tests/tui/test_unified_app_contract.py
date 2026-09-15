@@ -1241,12 +1241,14 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     assert "copyItem(at:" not in delegate
     assert "writeLauncher(" not in delegate
     assert 'appendingPathComponent("active.json")' not in delegate
-    # PATH composes: the caller's tools win and the signed generation remains a
-    # fallback. A hard-coded system-only PATH strips Homebrew/~/.local/bin/
-    # ~/.cargo/bin from spawned agent CLIs, so `#!/usr/bin/env` shebangs exit 127.
+    # PATH composes guest-not-landlord: the generation's canonical bin is
+    # prepended so pinned runtime tools resolve deterministically, and every
+    # inherited user entry (Homebrew, ~/.local/bin, ~/.cargo/bin) survives
+    # behind it. A hard-coded system-only PATH strips those tools from spawned
+    # agent CLIs, so `#!/usr/bin/env` shebangs exit 127.
     assert 'environment["PATH"] = composedPath(' in delegate
     assert 'environment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"' not in delegate
-    assert 'return (entries + [generationBin]).joined(separator: ":")' in delegate
+    assert 'return ([generationBin] + entries).joined(separator: ":")' in delegate
     assert '["server", "service", "reconcile"]' in delegate
     assert "shell-agent" not in delegate
     assert 'name = "vc-start"' in cargo
@@ -1256,10 +1258,11 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     assert 'Command::new("/bin/bash")' in launcher
     assert "fn host_agent_search_path(" in launcher
     assert '"/opt/homebrew/bin"' in launcher
-    # vc-start composes: the PATH AppDelegate hands it (the Founder's
-    # Homebrew/npm/cargo/nvm entries first, generation fallback last) survives,
-    # sanitized rather than amputated — a closed allowlist here re-created the
-    # exit-127 shebang failures the composed PATH fixed one process earlier.
+    # vc-start composes: the PATH AppDelegate hands it (the generation's
+    # canonical bin first, the Founder's Homebrew/npm/cargo/nvm entries
+    # surviving behind it) survives, sanitized rather than amputated — a closed
+    # allowlist here re-created the exit-127 shebang failures the composed PATH
+    # fixed one process earlier.
     assert 'let inherited_path = env::var("PATH").ok();' in launcher
     assert "inherited_path.as_deref()" in launcher
     assert "!entry.starts_with('/')" in launcher
