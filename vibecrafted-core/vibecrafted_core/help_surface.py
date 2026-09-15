@@ -458,6 +458,7 @@ Commands:
   status               Today's agent activity
   doctor               Installation health — pass/fail
   receipt              Delivery/runtime receipt (source ↔ installed)
+  scaffold-doctor     Plan-package gate before implement handoff
   message              Persist/inspect run-addressed Codex queue receipts
   capabilities         Launcher catalog: agents, models, controls, environments (--json)
   claims               Atomic Living Tree path claims (acquire|heartbeat|status|list|release)
