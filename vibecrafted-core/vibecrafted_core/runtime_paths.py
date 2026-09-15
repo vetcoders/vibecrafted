@@ -473,12 +473,16 @@ def _host_agent_bin_dirs(environment: Mapping[str, str]) -> list[Path]:
     home = Path(raw_home).expanduser() if raw_home else Path.home()
     if is_windows():
         system_root = Path(
-            environment.get("SystemRoot") or os.environ.get("SystemRoot") or r"C:\Windows"
+            environment.get("SystemRoot")
+            or os.environ.get("SystemRoot")
+            or r"C:\Windows"
         )
         launcher = (
             Path(environment["VIBECRAFTED_LAUNCHER_BIN"]).expanduser()
             if str(environment.get("VIBECRAFTED_LAUNCHER_BIN", "")).strip()
-            else Path(environment.get("LOCALAPPDATA", "")).expanduser() / "Vibecrafted" / "bin"
+            else Path(environment.get("LOCALAPPDATA", "")).expanduser()
+            / "Vibecrafted"
+            / "bin"
             if str(environment.get("LOCALAPPDATA", "")).strip()
             else home / "AppData" / "Local" / "Vibecrafted" / "bin"
         )
@@ -588,7 +592,8 @@ def _read_active_runtime_root(pointer: Path, runtime_home: Path) -> Path | None:
     try:
         resolved = generation.resolve(strict=True)
         home = runtime_home.resolve(strict=False)
-    except OSError as exc:
+    except (OSError, RuntimeError) as exc:
+        # pathlib re-raises ELOOP as RuntimeError, not OSError.
         raise GenerationResolutionError(
             f"active runtime_root cannot be resolved: {exc}"
         ) from exc
@@ -633,7 +638,9 @@ def resolve_active_generation(runtime_home: Path | None = None) -> Path:
             )
         try:
             current_root = current.resolve(strict=True)
-        except OSError as exc:
+        except (OSError, RuntimeError) as exc:
+            # pathlib re-raises ELOOP (symlink loop) as RuntimeError, not
+            # OSError; a corrupt pointer must fail closed, never crash.
             raise GenerationResolutionError(
                 f"cannot resolve current runtime generation: {exc}"
             ) from exc
