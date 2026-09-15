@@ -1024,7 +1024,8 @@ def test_launcher_choice_redraw_preserves_final_cells_and_selected_row_styling(
         assert visible == exact_visible
 
     selected_col = left + len("Mode      ")
-    assert grid[cursor][selected_col][1] & workshop.curses.A_REVERSE
+    assert grid[cursor][selected_col][1] & workshop.curses.A_BOLD
+    assert not grid[cursor][selected_col][1] & workshop.curses.A_REVERSE
 
     # The worktree gate keeps a visible reason in plain words.
     rendered = "\n".join(text for _, _, text, _ in writes)
@@ -1478,7 +1479,7 @@ def test_small_home_and_launcher_render_without_nested_frame(
     assert "• agy" not in form_text
 
 
-def test_selected_provider_uses_reverse_not_only_a_dot(
+def test_selected_provider_is_bold_only_not_a_dot_or_block(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workshop = _load()
@@ -1511,9 +1512,56 @@ def test_selected_provider_uses_reverse_not_only_a_dot(
     form.draw_launcher()
     selected = [item for item in styled if item[0].strip() == "codex"]
     assert selected
-    assert selected[0][1] & workshop.curses.A_REVERSE
+    assert selected[0][1] & workshop.curses.A_BOLD
+    assert not selected[0][1] & workshop.curses.A_REVERSE
     bullets = [item[0] for item in styled if item[0].startswith("• codex")]
     assert bullets == []
+
+
+def test_focused_picker_row_is_underlined_and_selection_stays_bold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Founder 2026-09-15: selected = bold letters, focused row = underline."""
+    workshop = _load()
+    styled: list[tuple[str, int]] = []
+
+    class FakeWindow:
+        def getmaxyx(self) -> tuple[int, int]:
+            return (24, 80)
+
+        def addstr(self, _row: int, _col: int, text: str, attr: int = 0) -> None:
+            styled.append((text, attr))
+
+        def erase(self) -> None:
+            pass
+
+        def refresh(self) -> None:
+            pass
+
+    monkeypatch.setattr(workshop, "_provider_available", lambda _agent: True)
+    form = workshop.Workshop(FakeWindow(), mode="launcher")
+    form.agent = workshop.AGENTS.index("codex")
+    form.row = 0
+    form.draw_launcher()
+    providers = [item for item in styled if item[0].strip() in workshop.AGENTS]
+    assert providers and all(
+        attr & workshop.curses.A_UNDERLINE for _, attr in providers
+    )
+    assert not any(attr & workshop.curses.A_REVERSE for _, attr in styled)
+    selected = [attr for text, attr in providers if text.strip() == "codex"]
+    assert selected[0] & workshop.curses.A_BOLD
+    others = [attr for text, attr in providers if text.strip() != "codex"]
+    assert others and not any(attr & workshop.curses.A_BOLD for attr in others)
+
+    styled.clear()
+    form.row = 1
+    form.draw_launcher()
+    providers = [item for item in styled if item[0].strip() in workshop.AGENTS]
+    assert not any(attr & workshop.curses.A_UNDERLINE for _, attr in providers)
+    path_rows = [attr for text, attr in styled if text.startswith("Project  ")]
+    assert path_rows and path_rows[0] & workshop.curses.A_UNDERLINE
+    launch = [attr for text, attr in styled if text == "[ Launch ]"]
+    assert launch and launch[0] == workshop.curses.A_BOLD
 
 
 def test_public_reason_vm_is_host_not_provider() -> None:
@@ -1591,7 +1639,8 @@ def test_selected_advanced_choice_uses_reverse_not_only_a_dot(
     form.draw_launcher()
     selected = [item for item in styled if item[0] == "init"]
     assert selected
-    assert selected[0][1] & workshop.curses.A_REVERSE
+    assert selected[0][1] & workshop.curses.A_BOLD
+    assert not selected[0][1] & workshop.curses.A_REVERSE
     assert not any(item[0].startswith("• ") for item in styled)
     assert not any(item[0].startswith("× ") for item in styled)
 
