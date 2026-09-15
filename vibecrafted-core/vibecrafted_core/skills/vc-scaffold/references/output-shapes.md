@@ -63,6 +63,20 @@ vector: <stabilize|implement|recon|e2e>
 ## 12. Report (sections + honest handoff: proven [x] vs runtime-pending [?])
 ```
 
+### Files section: new vs existing paths
+
+C4 (`named_path_missing`) requires every Files-section path to exist on HEAD. When the cut
+**creates** a file that is not on HEAD yet, suffix the path with ` (new)` or ` (nowy)`:
+
+```markdown
+- `tests/x_new.py` (new)
+- `src/foo.rs` (nowy)
+```
+
+scaffold-doctor then checks that the **parent directory** exists on HEAD instead of the file.
+A typo in the directory still fails, as `named_path_parent_missing`. Do not mark edits to
+existing files this way — unmarked missing paths still fail as `named_path_missing`.
+
 ## tracker.md schema
 
 ```markdown
