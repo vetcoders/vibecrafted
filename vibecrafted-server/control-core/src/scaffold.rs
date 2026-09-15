@@ -1064,7 +1064,9 @@ pub fn doctor_plan_root_in_repo(
 }
 
 /// C4 geometry: named git baseline must be an ancestor of HEAD, and every
-/// repo path named in mission/DRIVER/brief Files must exist on HEAD.
+/// repo path named in mission/DRIVER/brief Files must exist on HEAD — unless
+/// the Files line marks the path as new with a suffix `(new)` / `(nowy)`,
+/// in which case the parent directory must exist on HEAD instead.
 ///
 /// Local `git merge-base --is-ancestor` / `git cat-file` only — no network.
 /// C5 may call this after its own verifier inventory.
@@ -1107,8 +1109,8 @@ pub fn apply_plan_geometry(
                     "plan/briefs name repo path(s) {} but no git checkout was found (pass --repo)",
                     named_paths
                         .iter()
+                        .map(|named| named.rel.as_str())
                         .take(6)
-                        .cloned()
                         .collect::<Vec<_>>()
                         .join(", ")
                 ),
@@ -1141,8 +1143,24 @@ pub fn apply_plan_geometry(
         }
     }
 
-    for rel in &named_paths {
-        if !git_path_exists_on_head(&repo, rel) {
+    for named in &named_paths {
+        let rel = named.rel.as_str();
+        if named.is_new {
+            let parent = parent_repo_path(rel);
+            if !git_tree_exists_on_head(&repo, parent) {
+                let parent_label = if parent.is_empty() { "." } else { parent };
+                doctor_error(
+                    &mut report.errors,
+                    "named_path_parent_missing",
+                    Some("C4"),
+                    None,
+                    Some(rel),
+                    &format!(
+                        "named path `{rel}` is marked (new) but parent directory `{parent_label}` is missing on HEAD"
+                    ),
+                );
+            }
+        } else if !git_path_exists_on_head(&repo, rel) {
             doctor_error(
                 &mut report.errors,
                 "named_path_missing",
@@ -1251,8 +1269,13 @@ fn collect_named_baseline_shas(sources: &GeometrySources) -> Vec<String> {
     shas.into_iter().collect()
 }
 
-fn collect_named_repo_paths(sources: &GeometrySources) -> Vec<String> {
-    let mut paths = BTreeSet::new();
+struct NamedRepoPath {
+    rel: String,
+    is_new: bool,
+}
+
+fn collect_named_repo_paths(sources: &GeometrySources) -> Vec<NamedRepoPath> {
+    let mut paths = BTreeMap::new();
     for (_, content) in &sources.mission_driver {
         extract_repo_paths_from_text(content, false, &mut paths);
     }
@@ -1261,7 +1284,17 @@ fn collect_named_repo_paths(sources: &GeometrySources) -> Vec<String> {
             extract_repo_paths_from_text(&files, true, &mut paths);
         }
     }
-    paths.into_iter().collect()
+    paths
+        .into_iter()
+        .map(|(rel, is_new)| NamedRepoPath { rel, is_new })
+        .collect()
+}
+
+fn record_named_path(paths: &mut BTreeMap<String, bool>, path: String, is_new: bool) {
+    paths
+        .entry(path)
+        .and_modify(|was_new| *was_new &= is_new)
+        .or_insert(is_new);
 }
 
 const BASELINE_MARKERS: &[&str] = &[
@@ -1365,16 +1398,22 @@ fn is_git_sha(token: &str) -> bool {
         && token.bytes().any(|byte| byte.is_ascii_digit())
 }
 
-fn extract_repo_paths_from_text(text: &str, files_section: bool, paths: &mut BTreeSet<String>) {
+fn extract_repo_paths_from_text(
+    text: &str,
+    files_section: bool,
+    paths: &mut BTreeMap<String, bool>,
+) {
     for line in text.lines() {
         if is_plan_store_line(line) {
             continue;
         }
         for span in backtick_spans(line) {
             if let Some(path) = normalize_named_path(&span) {
-                if !files_section || !path_marked_create_only(line, &span) {
-                    paths.insert(path);
+                let is_new = files_section && path_marked_new(line, &span);
+                if files_section && !is_new && path_marked_create_only(line, &span) {
+                    continue;
                 }
+                record_named_path(paths, path, is_new);
             }
         }
         if files_section {
@@ -1390,9 +1429,11 @@ fn extract_repo_paths_from_text(text: &str, files_section: bool, paths: &mut BTr
                     .next()
                     .unwrap_or("");
                 if let Some(path) = normalize_named_path(token) {
-                    if !path_marked_create_only(line, token) {
-                        paths.insert(path);
+                    let is_new = path_marked_new(line, token);
+                    if !is_new && path_marked_create_only(line, token) {
+                        continue;
                     }
+                    record_named_path(paths, path, is_new);
                 }
             }
         }
@@ -1418,6 +1459,24 @@ fn backtick_spans(text: &str) -> Vec<String> {
         rest = &rest[end + 1..];
     }
     spans
+}
+
+fn path_marked_new(line: &str, path: &str) -> bool {
+    let Some(index) = line.find(path) else {
+        return false;
+    };
+    let rest = line[index + path.len()..]
+        .trim_start_matches('`')
+        .trim_start()
+        .to_ascii_lowercase();
+    rest.starts_with("(new)") || rest.starts_with("(nowy)")
+}
+
+fn parent_repo_path(rel: &str) -> &str {
+    match rel.rsplit_once('/') {
+        Some((parent, _)) if !parent.is_empty() => parent,
+        _ => "",
+    }
 }
 
 fn path_marked_create_only(line: &str, path: &str) -> bool {
@@ -1630,6 +1689,19 @@ fn git_path_exists_on_head(repo: &Path, relative: &str) -> bool {
     }
     let spec = format!("HEAD:{relative}");
     git_command(repo, &["cat-file", "-e", &spec]).is_some_and(|output| output.status.success())
+}
+
+fn git_tree_exists_on_head(repo: &Path, relative: &str) -> bool {
+    if relative.is_empty() {
+        return true;
+    }
+    if relative.starts_with('-') {
+        return false;
+    }
+    let spec = format!("HEAD:{relative}");
+    git_command(repo, &["cat-file", "-t", &spec]).is_some_and(|output| {
+        output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "tree"
+    })
 }
 
 fn git_command(repo: &Path, args: &[&str]) -> Option<std::process::Output> {
@@ -2853,15 +2925,28 @@ mod tests {
 
     #[test]
     fn files_section_skips_create_only_and_unqualified_names() {
-        let mut paths = BTreeSet::new();
+        let mut paths = BTreeMap::new();
         extract_repo_paths_from_text(
             "- Edit: `scripts/build-vibecrafted-release.sh` and a.rs\n- add (or new `tests/tui/test_repo_symlink_free.py`)\n",
             true,
             &mut paths,
         );
         assert_eq!(
-            paths.iter().cloned().collect::<Vec<_>>(),
-            ["scripts/build-vibecrafted-release.sh"]
+            paths.into_iter().collect::<Vec<_>>(),
+            [("scripts/build-vibecrafted-release.sh".into(), false)]
         );
+    }
+
+    #[test]
+    fn files_section_marks_new_and_nowy_suffixes() {
+        let mut paths = BTreeMap::new();
+        extract_repo_paths_from_text(
+            "- `tests/x_new.py` (new)\n- `src/foo.rs` (nowy)\n- Edit: `src/keep.rs`\n",
+            true,
+            &mut paths,
+        );
+        assert_eq!(paths.get("tests/x_new.py"), Some(&true));
+        assert_eq!(paths.get("src/foo.rs"), Some(&true));
+        assert_eq!(paths.get("src/keep.rs"), Some(&false));
     }
 }
