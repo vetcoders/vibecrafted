@@ -82,8 +82,8 @@ def test_choice_markers_are_unboxed_and_selected_once() -> None:
         available=(True, True, False),
     )
 
-    assert tokens == ("init", "• resume", "× operator")
-    assert sum(token.startswith("• ") for token in tokens) == 1
+    assert tokens == ("init", "resume", "operator")
+    assert all(not token.startswith(("•", "×")) for token in tokens)
     assert all("[" not in token and "«" not in token for token in tokens)
 
 
@@ -335,7 +335,7 @@ def test_launch_refuses_unadmittable_worktree_before_invoking_launcher(
     # The gate still refuses before any pane exists; the User reads the plain
     # sentence instead of the internal admission wording.
     assert launched.error == workshop.public_reason(message)
-    assert launched.error == "Not available for this provider"
+    assert launched.error == "Needs live usage metering; only claude today"
     assert launched.mode == "launcher"
 
 
@@ -735,11 +735,11 @@ def test_launcher_choice_redraw_preserves_final_cells_and_selected_row_styling(
     # Inline advanced view, no bordered card: the geometry of draw_launcher.
     left = max(1, (width - min(width - 2, 84)) // 2)
     inner = max(12, width - left - 2)
-    cursor = max(1, (24 - 18) // 2) + 7
+    cursor = max(1, (24 - 19) // 2) + 8
     assert all(
         col + len(text) <= left + inner
         for row, col, text, _ in writes
-        if cursor <= row < cursor + 4 and text.startswith("× ")
+        if cursor <= row < cursor + 4
     )
     grid = [[(" ", 0) for _ in range(width)] for _ in range(24)]
     for row, col, text, attr in writes:
@@ -748,10 +748,10 @@ def test_launcher_choice_redraw_preserves_final_cells_and_selected_row_styling(
                 grid[row][col + offset] = (character, attr)
 
     expected = (
-        "Mode      • init × resume partner operator",
-        "Runtime   • local-native × local-worktrees × local-vm × cloud-soon",
-        "Permits   • bypass × auto × accept-edits × read-only",
-        "Memory    × full-lineage • fresh × bare-fork",
+        "Mode      init resume partner operator",
+        "Runtime   local-native local-worktrees local-vm cloud-soon",
+        "Permits   bypass auto accept-edits read-only",
+        "Memory    full-lineage fresh bare-fork",
     )
     for row, text in enumerate(expected, start=cursor):
         exact_visible = text if len(text) <= inner else text[: inner - 1] + "…"
@@ -768,7 +768,9 @@ def test_launcher_choice_redraw_preserves_final_cells_and_selected_row_styling(
     assert "child-attributable" not in rendered
     reasons = [text for _, _, text, _ in writes if text.startswith("Unavailable — ")]
     assert reasons
-    assert "local-worktrees: Not available" in reasons[0]
+    assert "local-worktrees: Needs live usage" in reasons[0]
+    assert "Not available for this provider" not in rendered
+    assert any("Advanced options" in text for _, _, text, _ in writes)
 
 
 def _host_python_without_core() -> Path | None:
@@ -1054,7 +1056,7 @@ def test_public_reason_strips_policy_jargon() -> None:
         workshop.public_reason(
             "codex exposes no verified live child-attributable monotonic usage side channel"
         )
-        == "Not available for this provider"
+        == "Needs live usage metering; only claude today"
     )
     assert (
         workshop.public_reason(
@@ -1247,6 +1249,198 @@ def test_selected_provider_uses_reverse_not_only_a_dot(
     assert selected[0][1] & workshop.curses.A_REVERSE
     bullets = [item[0] for item in styled if item[0].startswith("• codex")]
     assert bullets == []
+
+
+def test_public_reason_vm_is_host_not_provider() -> None:
+    workshop = _load()
+    assert workshop.public_reason("no canonical VM entrypoint") == (
+        "VM runtime is not available on this host"
+    )
+    assert "for this provider" not in workshop.public_reason(
+        "no canonical VM entrypoint for anyone"
+    )
+
+
+def test_public_reason_worktrees_name_the_usage_gap() -> None:
+    workshop = _load()
+    message = (
+        "codex exposes no verified live, child-attributable, monotonic usage "
+        "side channel compatible with inherited interactive TTY"
+    )
+    assert workshop.public_reason(message) == (
+        "Needs live usage metering; only claude today"
+    )
+
+
+def test_selected_advanced_choice_uses_reverse_not_only_a_dot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workshop = _load()
+    styled: list[tuple[str, int]] = []
+
+    class FakeWindow:
+        def getmaxyx(self) -> tuple[int, int]:
+            return (24, 80)
+
+        def addstr(self, _row: int, _col: int, text: str, attr: int = 0) -> None:
+            styled.append((text, attr))
+
+        def erase(self) -> None:
+            pass
+
+        def refresh(self) -> None:
+            pass
+
+    monkeypatch.setattr(workshop, "_provider_available", lambda _agent: True)
+    monkeypatch.setattr(
+        workshop,
+        "runtime_policy_capabilities",
+        lambda _agent: {
+            name: {"available": name == "local-native", "reason": ""}
+            for name in workshop.RUNTIME_POLICIES
+        },
+    )
+    monkeypatch.setattr(
+        workshop,
+        "mode_capabilities",
+        lambda *_args, **_kwargs: {
+            name: {"available": True, "reason": ""} for name in workshop.LAUNCH_MODES
+        },
+    )
+    monkeypatch.setattr(
+        workshop,
+        "resolve_provider_policy",
+        lambda *_args, **_kwargs: SimpleNamespace(supported=True, reason=""),
+    )
+    monkeypatch.setattr(
+        workshop,
+        "continuity_policy_capabilities",
+        lambda *_args, **_kwargs: {
+            name: {"available": True, "reason": ""}
+            for name in workshop.CONTINUITY_MODES
+        },
+    )
+    form = workshop.Workshop(FakeWindow(), mode="launcher")
+    form.advanced = True
+    form.launch_mode = 0
+    form.draw_launcher()
+    selected = [item for item in styled if item[0] == "init"]
+    assert selected
+    assert selected[0][1] & workshop.curses.A_REVERSE
+    assert not any(item[0].startswith("• ") for item in styled)
+    assert not any(item[0].startswith("× ") for item in styled)
+
+
+def test_advanced_toggle_is_visible_clickable_and_keyed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workshop = _load()
+    writes: list[tuple[int, int, str, int]] = []
+
+    class FakeWindow:
+        def getmaxyx(self) -> tuple[int, int]:
+            return (24, 80)
+
+        def addstr(self, row: int, col: int, text: str, attr: int = 0) -> None:
+            writes.append((row, col, text, attr))
+
+        def erase(self) -> None:
+            pass
+
+        def refresh(self) -> None:
+            pass
+
+    monkeypatch.setattr(workshop, "_provider_available", lambda _agent: True)
+    monkeypatch.setattr(
+        workshop,
+        "runtime_policy_capabilities",
+        lambda _agent: {
+            name: {"available": True, "reason": ""}
+            for name in workshop.RUNTIME_POLICIES
+        },
+    )
+    form = workshop.Workshop(FakeWindow(), mode="launcher")
+    form.draw_launcher()
+    assert any(text == "▸ Advanced options" for _, _, text, _ in writes)
+    assert any(kind == "advanced" for *_, kind in form.mouse_targets)
+    form.handle_launcher_key(ord("a"))
+    assert form.advanced is True
+    writes.clear()
+    form.draw_launcher()
+    assert any(text == "▾ Advanced options" for _, _, text, _ in writes)
+
+    form.row = 1
+    form.path = "/tmp/project"
+    form.handle_launcher_key(ord("a"))
+    assert form.advanced is True
+    assert form.path.endswith("a")
+
+    form.path = "/tmp/project"
+    form.row = 2
+    form.handle_launcher_key(ord("a"))
+    assert form.advanced is False
+    assert form.path == "/tmp/project"
+
+    monkeypatch.setattr(
+        workshop.curses,
+        "getmouse",
+        lambda: (0, 2, 10, 0, workshop.curses.BUTTON1_CLICKED),
+        raising=False,
+    )
+    form.mouse_targets = [(10, 0, 20, 0, "advanced")]
+    form.handle_mouse()
+    assert form.advanced is True
+
+
+def test_small_launcher_does_not_overlap_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workshop = _load()
+    writes: list[tuple[int, str]] = []
+
+    class FakeWindow:
+        def __init__(self, size: tuple[int, int]) -> None:
+            self.size = size
+
+        def getmaxyx(self) -> tuple[int, int]:
+            return self.size
+
+        def addstr(self, row: int, _col: int, text: str, _attr: int = 0) -> None:
+            writes.append((row, text))
+
+        def erase(self) -> None:
+            pass
+
+        def refresh(self) -> None:
+            pass
+
+    monkeypatch.setattr(workshop, "_provider_available", lambda _agent: True)
+    monkeypatch.setattr(
+        workshop,
+        "runtime_policy_capabilities",
+        lambda _agent: {
+            name: {"available": name == "local-native", "reason": ""}
+            for name in workshop.RUNTIME_POLICIES
+        },
+    )
+    form = workshop.Workshop(FakeWindow((14, 50)), mode="launcher")
+    form.advanced = True
+    form.draw_launcher()
+
+    def first_row(predicate) -> int:
+        for row, text in writes:
+            if predicate(text):
+                return row
+        raise AssertionError("missing row")
+
+    title = first_row(lambda text: text == "New agent")
+    project = first_row(lambda text: text.startswith("Project"))
+    toggle = first_row(lambda text: "Advanced options" in text)
+    launch = first_row(lambda text: text.startswith("[ Launch ]"))
+    rows = (title, project, toggle, launch)
+    assert rows == tuple(sorted(rows))
+    assert len(set(rows)) == 4
+    assert all(0 <= row < 14 for row in rows)
 
 
 def test_session_names_from_listing_and_other_sessions_are_on_demand(
