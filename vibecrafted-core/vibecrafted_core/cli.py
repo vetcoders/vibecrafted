@@ -104,6 +104,7 @@ SHELL_WRAPPER_VERBS = {
     "vc-operator": "operator",
     "vc-receipt": "receipt",
     "vc-resume": "resume",
+    "vc-scaffold-doctor": "scaffold-doctor",
     "vc-start": "start",
     "vc-status": "status",
     "vc-update": "update",

@@ -4688,6 +4688,10 @@ cmd_help() {
       cmd_doctor_help
       return
       ;;
+    scaffold-doctor)
+      cmd_scaffold_doctor --help
+      return
+      ;;
     server)
       cmd_server_help
       return
@@ -4764,6 +4768,7 @@ cmd_help() {
   printf '  %bstatus%b               Today'"'"'s agent activity\n' "$_cyan" "$_reset"
   printf '  %bdoctor%b               Installation health — pass/fail\n' "$_cyan" "$_reset"
   printf '  %breceipt%b              Delivery/runtime receipt (source ↔ installed)\n' "$_cyan" "$_reset"
+  printf '  %bscaffold-doctor%b     Plan-package gate before implement handoff\n' "$_cyan" "$_reset"
   printf '  %bresume-session%b       Continue an exact provider session as a tracked run\n' "$_cyan" "$_reset"
   printf '  %brelocate%b             Snapshot open sessions + worktrees (snapshot|restore)\n' "$_cyan" "$_reset"
   printf '  %bmessage%b              Persist/inspect run-addressed Codex queue receipts\n' "$_cyan" "$_reset"
@@ -5266,7 +5271,7 @@ _scaffold_doctor_first_source_root() {
 
 cmd_scaffold_doctor() {
   # Deterministic plan-package gate (control-core). Not the install doctor.
-  local bin="" plan="" json=0 source_root=""
+  local bin="" plan="" repo="" json=0 source_root=""
   local args=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -5278,10 +5283,18 @@ cmd_scaffold_doctor() {
         plan="$2"
         shift 2
         ;;
+      --repo)
+        if [[ $# -lt 2 || -z "${2:-}" || "${2:-}" == -* ]]; then
+          printf 'scaffold-doctor: --repo requires a path\n' >&2
+          return 2
+        fi
+        repo="$2"
+        shift 2
+        ;;
       --json) json=1; shift ;;
       -h|--help)
-        printf 'Usage: vibecrafted scaffold-doctor --plan <plan_root> [--json]\n'
-        printf '       vibecrafted scaffold-doctor <home> <org> <repo> <day> <plan-id> [--json]\n'
+        printf 'Usage: vibecrafted scaffold-doctor --plan <plan_root> [--repo <git-root>] [--json]\n'
+        printf '       vibecrafted scaffold-doctor <home> <org> <repo> <day> <plan-id> [--repo <git-root>] [--json]\n'
         printf 'Exit 0=pass, 1=refuse (rule violations), 2=not a plan / usage.\n'
         return 0
         ;;
@@ -5321,19 +5334,26 @@ cmd_scaffold_doctor() {
   fi
 
   if [[ -n "$plan" ]]; then
-    if [[ "$json" -eq 1 ]]; then
+    if [[ -n "$repo" && "$json" -eq 1 ]]; then
+      "$bin" --plan "$plan" --repo "$repo" --json
+    elif [[ -n "$repo" ]]; then
+      "$bin" --plan "$plan" --repo "$repo"
+    elif [[ "$json" -eq 1 ]]; then
       "$bin" --plan "$plan" --json
     else
       "$bin" --plan "$plan"
     fi
   elif [[ ${#args[@]} -ge 5 ]]; then
+    if [[ -n "$repo" ]]; then
+      args+=(--repo "$repo")
+    fi
     if [[ "$json" -eq 1 ]]; then
       "$bin" "${args[@]}" --json
     else
       "$bin" "${args[@]}"
     fi
   else
-    printf 'Usage: vibecrafted scaffold-doctor --plan <plan_root> [--json]\n' >&2
+    printf 'Usage: vibecrafted scaffold-doctor --plan <plan_root> [--repo <git-root>] [--json]\n' >&2
     return 2
   fi
 }
@@ -6489,6 +6509,10 @@ run_wrapper() {
   fi
   if [[ "$wrapper" == "vc-receipt" ]]; then
     cmd_receipt "$@"
+    return
+  fi
+  if [[ "$wrapper" == "vc-scaffold-doctor" ]]; then
+    cmd_scaffold_doctor "$@"
     return
   fi
   local skill="${wrapper#vc-}"

@@ -147,10 +147,12 @@ Udokumentuj rozumowanie. Przyszli inżynierowie ci podziękują.
 
 ## Running This Plan
 
-`<plan-id>.dispatch.toml` jest jedynym kontraktem wykonania. Zweryfikuj go, a potem przekaż dokładnie
-ten artefakt do `/vc-ship`; nie odpalaj cięć ręcznie:
+`<plan-id>.dispatch.toml` jest jedynym kontraktem wykonania. Uruchom bramkę pakietu planu, zweryfikuj
+artefakt dispatch, a potem przekaż dokładnie ten artefakt do `/vc-ship`; nie odpalaj cięć ręcznie.
+REFUSE z scaffold-doctor = brak handoffu.
 
 ```bash
+vibecrafted scaffold-doctor --plan <root-planu> --repo <git-root>
 vibecrafted dispatch <absolutny-root-planu>/<plan-id>.dispatch.toml --doctor
 vibecrafted dispatch <absolutny-root-planu>/<plan-id>.dispatch.toml --dry-run --json
 ````

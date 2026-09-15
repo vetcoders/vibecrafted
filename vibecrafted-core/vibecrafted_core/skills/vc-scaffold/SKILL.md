@@ -189,10 +189,12 @@ It MUST contain all five:
    the next; why a pair is **SEQUENCE** (shared file domain → Living Tree conflict) vs **PARALLEL**
    (disjoint domains → safe concurrent); and where every **⛔ operator-button STOP** sits (push/merge,
    product decisions). A graph without `why` is a diagram, not a driver.
-3. **Ready handoff** — exactly one plan-level validation block for the canonical
-   `<plan-id>.dispatch.toml` (doctor + dry-run), followed by the `/vc-ship` A→Z handoff. `/vc-ship`
-   owns start and resume; the DAG owns cut order and allowed parallelism. Do not turn DRIVER into a
-   per-cut launcher list and do not teach manual `vibecrafted workflow ... --prompt` sequencing.
+3. **Ready handoff** — run `vibecrafted scaffold-doctor --plan <root> --repo <git-root>` first
+   (REFUSE = no handoff), then exactly one plan-level validation block for the canonical
+   `<plan-id>.dispatch.toml` (`vibecrafted dispatch … --doctor` + dry-run), followed by the `/vc-ship`
+   A→Z handoff. `/vc-ship` owns start and resume; the DAG owns cut order and allowed parallelism. Do
+   not turn DRIVER into a per-cut launcher list and do not teach manual `vibecrafted workflow ... --prompt`
+   sequencing.
 4. **The state alphabet + the `[ ]→[x]` rule, reproduced verbatim** (mirrors Measurement):
    `[ ]` todo · `[~]` running · `[?]` done-unverified · `[!]` blocked · `[x]` verifier-green.
    **Only a delivery-verifier flips `[~]→[x]`; an agent's claim NEVER reaches `[x]` on its own.**
@@ -288,17 +290,23 @@ twenty questions mid-scaffold. Refine WITH the operator on the served artifacts.
 `/brainstorming`'s visual-companion (proven HTML mockup/diagram generators). The server-review tab
 must be multi-tab + editable from day one, not a static dump.
 
-**scaffold-doctor (the gate, machine-checked):** a deterministic validator in
-`vibecrafted-server/control-core` that loads the same typed `manifest.json` used by the server and
-refuses the scaffold→implement baton until: the manifest identity matches its canonical plan root;
-all declared required artifacts exist; IDs and paths are unique; dependencies resolve; editable
-paths are non-symlinked and remain inside the plan root; briefs on disk are declared; and the atlas
-has a wave atlas + dependency graph; every cut has a `briefs/<wave>-<slot>_<slug>.md` with all 12
-sections; acceptance bullets are atomic + verifier-backed; a design doc exists for every cut flagged
-`needs_design`; **a `DRIVER.md` exists and carries all five (full paths · why-annotated graph ·
-ready commands · the `[ ]→[x]` rule verbatim · status snapshot)**. The gate is **machine-checked, not
-agent-promised** — it is the same artifact-as-truth gate the async runtime uses between every
-read-write cadence handoff.
+**scaffold-doctor (the gate, machine-checked):** run the product verb before any
+scaffold→implement handoff — do not treat the validator as an external server-only tool:
+
+```bash
+vibecrafted scaffold-doctor --plan <root> --repo <git-root>
+```
+
+REFUSE (exit 1) means no handoff. The verb locates the generation (or locally built)
+`scaffold-doctor` binary and loads the same typed `manifest.json` the server uses. It refuses
+until: the manifest identity matches its canonical plan root; all declared required artifacts
+exist; IDs and paths are unique; dependencies resolve; editable paths are non-symlinked and remain
+inside the plan root; briefs on disk are declared; and the atlas has a wave atlas + dependency
+graph; every cut has a `briefs/<wave>-<slot>_<slug>.md` with all 12 sections; acceptance bullets are
+atomic + verifier-backed; a design doc exists for every cut flagged `needs_design`; **a `DRIVER.md`
+exists and carries all five (full paths · why-annotated graph · ready commands · the `[ ]→[x]` rule
+verbatim · status snapshot)**. The gate is **machine-checked, not agent-promised** — it is the
+same artifact-as-truth gate the async runtime uses between every read-write cadence handoff.
 
 ## Measurement (the armor)
 
