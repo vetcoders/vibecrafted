@@ -1,6 +1,9 @@
-// operator — launch alias for the vibecrafted operator entrypoint
+// operator — Start here / guest workspace content for vc-start
 // Path kept as operator.kdl for: vibecrafted start | dashboard operator
-// Content CANON = the shipped default_layout "operator" in config.kdl.
+// The first product session is layouts/host.kdl (default_layout "host").
+// This file is the guest workspace surface (Start here, Agents, Shell, voc).
+// The Sessions rail carries frame_host true so a first vc-start that still
+// creates this layout as kind=host is a frame host, not a black-frame client.
 //
 //
 // Tabs:
@@ -31,6 +34,7 @@ layout {
                     session_canvas true
                     session_canvas_kind "session-manager"
                     rail true
+                    frame_host true
                     pane_title "Sessions"
                 }
             }
