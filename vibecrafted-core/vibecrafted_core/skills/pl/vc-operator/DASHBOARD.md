@@ -163,7 +163,7 @@ Control `voc` ORAZ w samodzielnym rendererze `vc-admin` (`b534103`, scope fix
 | Active dispatches     | LANDED  | live runy control-plane, wszystkie roots + etykiety roots, age/ETA, wave | złączenie pidfile + JSONL `tasks/*.output`; link do viewera transkryptu/stanu |
 | Wave atlas            | LANDED  | grupowanie po `prompt_id` z `meta.json` + live runy, glify stanu         | parsowanie tracker.md; SHA-on-green; branch; strzałki zależności              |
 | Per-agent stats       | LANDED  | agregacja `meta.json` z 30d: runy/✓/✗/⌀dur/rate model-known              | zgodność peer-tier; rollup token/koszt; cross-check `aicx steer`              |
-| Per-skill stats       | LANDED  | wywołania z 30d/✓/✗/⌀dur + flaga ⚠ quiet-skill                          | okna 7/90d; timestamp ostatniego wywołania                                    |
+| Per-skill stats       | LANDED  | wywołania z 30d/✓/✗/⌀dur + flaga ⚠ quiet-skill                           | okna 7/90d; timestamp ostatniego wywołania                                    |
 | Fleet health          | PARTIAL | control-plane, artifact-root, meta-scan, parytet model/duration          | dysk per host; `aicx health`; żywotność MCP; link Tailscale                   |
 | Failure board         | LANDED  | okno 24h z `meta.json` + live runy failed, powód + age                   | klasy modalności awarii; linki odzyskiwania `recovers:`                       |
 | Operator action queue | LANDED  | wyprowadzone: zacięte runy + awarie + intencje polarize + świeże raporty | śledzenie `.md` z punktu stopu; akcje spełnienia one-click                    |

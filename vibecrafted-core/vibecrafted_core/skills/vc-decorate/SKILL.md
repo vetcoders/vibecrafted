@@ -184,12 +184,12 @@ consistent characters from the same Unicode block.
 | ---------- | ------------------- | ------------------------ |
 | Box frames | `╭─╮│╰─╯`           | Box Drawing              |
 | Separators | `·` `─` `━` `┄`     | Box Drawing, Punctuation |
-| Checkmarks | `✓` `✗` `⚠`        | Dingbats                 |
-| Bullets    | `▸` `▪` `◆` `›`    | Geometric Shapes         |
+| Checkmarks | `✓` `✗` `⚠`         | Dingbats                 |
+| Bullets    | `▸` `▪` `◆` `›`     | Geometric Shapes         |
 | Progress   | `⣿⣶⣤⣀` `█▓▒░`       | Braille, Block Elements  |
 | Sparklines | `⣀⣤⣶⣿` (8px/cell)   | Braille (256 combos)     |
 | Arrows     | `→` `←` `↑` `↓` `⟶` | Arrows                   |
-| Status     | `⚒` `⚡` `⚙` `⟳`  | Misc Symbols             |
+| Status     | `⚒` `⚡` `⚙` `⟳`    | Misc Symbols             |
 | Brands     | `🄵·🅁·🄰·🄼·🄴·🅆·🄾·🅁·🄺` | Enclosed Alphanumerics   |
 
 **Braille sparklines** deserve attention. A single Braille char encodes 8 dots

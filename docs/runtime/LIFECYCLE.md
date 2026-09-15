@@ -22,20 +22,20 @@ proof after pressure.
 
 ## Phase cadence (vc-ship pipeline order)
 
-| #   | Phase        | Cadence | Tooling                                                                                             | Notes                                                               |
-| --- | ------------ | ------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| 1   | VC Scaffold  | READ    | `vc-init`, `vc-loctree`, `vc-research`                                                              |                                                                     |
-| 2   | VC Implement | WRITE   | `vc-init`, `vc-operator`, `vc-agents`                                                               |                                                                     |
-| 3   | VC Review    | READ    | `vc-init`, `vc-loctree`, `vc-review`, `vc-screenscribe`, `vc-prview`                                | Deviation from "tests always last" — Review is test-heavy           |
-| 4   | VC Workflow  | WRITE   | `vc-init`, `vc-research`, `vc-justdo`                                                               |                                                                     |
-| 5   | Follow-up    | READ    | `vc-init`, `vc-intents` (main intention engine), `vc-loctree`, TDD                                  | Tests always at the end                                             |
+| #   | Phase        | Cadence | Tooling                                                                                             | Notes                                                              |
+| --- | ------------ | ------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| 1   | VC Scaffold  | READ    | `vc-init`, `vc-loctree`, `vc-research`                                                              |                                                                    |
+| 2   | VC Implement | WRITE   | `vc-init`, `vc-operator`, `vc-agents`                                                               |                                                                    |
+| 3   | VC Review    | READ    | `vc-init`, `vc-loctree`, `vc-review`, `vc-screenscribe`, `vc-prview`                                | Deviation from "tests always last" — Review is test-heavy          |
+| 4   | VC Workflow  | WRITE   | `vc-init`, `vc-research`, `vc-justdo`                                                               |                                                                    |
+| 5   | Follow-up    | READ    | `vc-init`, `vc-intents` (main intention engine), `vc-loctree`, TDD                                  | Tests always at the end                                            |
 | 6   | VC Marbles   | WRITE   | `vc-init` + `vc-marbles` (unique runtime)                                                           | ⬆ entropy — we fill every crack                                    |
-| 7   | VC Audit     | READ    | `vc-init`, `vc-loctree`, `vc-aicx`, `vc-research`                                                   |                                                                     |
+| 7   | VC Audit     | READ    | `vc-init`, `vc-loctree`, `vc-aicx`, `vc-research`                                                   |                                                                    |
 | 8   | VC Polarize  | WRITE   | `vc-init` + `vc-polarize` (marbles runtime)                                                         | ⬇ entropy — we cut the excess, choose one truth — without scruples |
-| 9   | VC DoU       | READ    | `vc-init`, `vc-intents`, `vc-loctree`; TDD irrelevant (assumed green)                               | Detects gaps before the release procedure                           |
-| 10  | VC Hydrate   | WRITE   | Preflight Hard Job — `vc-init`, `vc-operator`, `vc-decorate`                                        |                                                                     |
-| 11  | VC Release   | WRITE   | SEO, deployment, Docker, publishing, codesigning and everything else agents can't do _totallissimo_ |                                                                     |
-| +   | **Fanfary**  | —       | —                                                                                                   | At the very end                                                     |
+| 9   | VC DoU       | READ    | `vc-init`, `vc-intents`, `vc-loctree`; TDD irrelevant (assumed green)                               | Detects gaps before the release procedure                          |
+| 10  | VC Hydrate   | WRITE   | Preflight Hard Job — `vc-init`, `vc-operator`, `vc-decorate`                                        |                                                                    |
+| 11  | VC Release   | WRITE   | SEO, deployment, Docker, publishing, codesigning and everything else agents can't do _totallissimo_ |                                                                    |
+| +   | **Fanfary**  | —       | —                                                                                                   | At the very end                                                    |
 
 ## Invocation
 

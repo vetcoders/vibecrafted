@@ -10,7 +10,7 @@ and in how finished they are, so this page states both.
 | ---------------------------- | -------------------- | ------------------------------------------------------------------- | ---------------------------------------- |
 | Signed `Vibecrafted.app` DMG | macOS 14+, arm64     | Full desktop product: terminal, frame, runtime, server              | Build path complete; publication pending |
 | Portable tarball             | Linux, WSL2, macOS   | Command deck, runtime, control plane, skills — pinned to one commit | Build path complete; publication pending |
-| Native Runtime Pack          | Windows win32-x64    | Command deck, pack Python, foundations, vc-server; no WSL         | Built from checkout; publication pending |
+| Native Runtime Pack          | Windows win32-x64    | Command deck, pack Python, foundations, vc-server; no WSL           | Built from checkout; publication pending |
 | Bootstrap `install.sh`       | macOS, Linux, WSL2   | Command deck, runtime, control plane, skills                        | Published; CI-gated                      |
 | Source checkout              | macOS, Linux, WSL2   | Development tree and targets — not a native Runtime Pack            | Published                                |
 | Container                    | anywhere Docker runs | Isolated operator runtime                                           | Published                                |
