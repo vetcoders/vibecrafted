@@ -1932,10 +1932,14 @@ def test_app_launch_contract_rejects_noncanonical_product_entry(
     )
 
 
-def test_launch_environment_is_fresh_closed_and_resolves_writable_runtime_home(
+def test_launch_environment_is_the_users_environment_with_pins_overlaid(
     tmp_path: Path,
     macho_executable: Path,
 ) -> None:
+    """Guest, not landlord: the child environment is the user's own
+    environment with the deny-list scrubbed and Vibecrafted pins overlaid;
+    the user's PATH survives behind the bundle's canonical bin."""
+
     app = tmp_path / "Vibecrafted.app"
     _app_fixture(app, macho_executable)
     runtime_home = tmp_path / "data/runtime"
@@ -1944,24 +1948,29 @@ def test_launch_environment_is_fresh_closed_and_resolves_writable_runtime_home(
         "HOME": str(tmp_path),
         "USER": "operator",
         "LANG": "pl_PL.UTF-8",
-        "PATH": "/attacker/bin",
+        "PATH": "/opt/homebrew/bin:/usr/bin",
+        "SSH_AUTH_SOCK": "/tmp/probe.sock",
+        "GITHUB_TOKEN": "user-owned-flows-through",
+        "PYTHONPATH": "/foreign/runtime/site",
         "VIBECRAFTED_RUNTIME_HOME": str(runtime_home),
-        "VIBECRAFTED_ROOT": "/attacker/root",
-        "VIBECRAFTED_TOOLS_HOME": "/attacker/tools",
-        "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
-        "VC_FRAME_BIN": "/attacker/vc-frame",
     }
 
     child = contract.build_launch_environment(app, host_environment=host)
 
+    resolved = app.resolve()
     assert child == {
         "HOME": str(tmp_path),
         "USER": "operator",
         "LANG": "pl_PL.UTF-8",
-        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+        "PATH": (
+            f"{resolved / 'Contents/Resources/runtime/bin'}:"
+            "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        ),
+        "SSH_AUTH_SOCK": "/tmp/probe.sock",
+        "GITHUB_TOKEN": "user-owned-flows-through",
         "VIBECRAFTED_RUNTIME_HOME": str(runtime_home),
-        "VIBECRAFTED_APP_ROOT": str(app.resolve()),
-        "VIBECRAFTED_VC_FRAME_BIN": str(app.resolve() / "Contents/Helpers/vc-frame"),
+        "VIBECRAFTED_APP_ROOT": str(resolved),
+        "VIBECRAFTED_VC_FRAME_BIN": str(resolved / "Contents/Helpers/vc-frame"),
     }
 
 

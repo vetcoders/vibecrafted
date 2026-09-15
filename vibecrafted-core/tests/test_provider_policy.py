@@ -2406,3 +2406,59 @@ def test_owned_generation_path_anchors_on_real_owned_roots(tmp_path: Path) -> No
         str(tmp_path / ".local" / "share" / "vibecrafted" / "releases"), env
     )
     assert not is_owned_generation_path("", env)
+
+
+# --------------------------------------------------------------------------
+# launch environment (W1-01): the product is a guest in the user's shell,
+# not a landlord — the launch composition starts from the full user
+# environment and only overlays Vibecrafted pins
+# --------------------------------------------------------------------------
+
+
+def test_launch_environment_is_guest_not_landlord(tmp_path: Path) -> None:
+    from vibecrafted_core import product_contract
+
+    app = tmp_path / "Vibecrafted.app"
+    host = {
+        "HOME": str(tmp_path),
+        "SSH_AUTH_SOCK": "/tmp/probe.sock",
+        "GITHUB_TOKEN": "user-owned-flows-through",
+        "EDITOR": "nvim",
+        "PATH": f"/opt/homebrew/bin:{tmp_path}/.cargo/bin:bin::/usr/bin",
+        "PYTHONPATH": "/foreign/runtime/site",
+        "PYTHONHOME": "/foreign/runtime/python",
+    }
+
+    child = product_contract._guest_environment(host)
+
+    # The user's environment is the base: agent socket, tokens and tools flow.
+    assert child["SSH_AUTH_SOCK"] == "/tmp/probe.sock"
+    assert child["GITHUB_TOKEN"] == "user-owned-flows-through"
+    assert child["EDITOR"] == "nvim"
+    assert child["HOME"] == str(tmp_path)
+    # Only the explicit deny-list is scrubbed (interpreter-poison class).
+    for name in product_contract._LAUNCH_ENV_DENYLIST:
+        assert name not in child
+    assert set(host) - set(child) <= product_contract._LAUNCH_ENV_DENYLIST
+
+    path = product_contract._launch_child_path(app, host["PATH"]).split(os.pathsep)
+
+    # Canonical bundle bin is prepended; the user's absolute PATH entries
+    # survive behind it; relative/empty segments are dropped.
+    assert path[0] == str(app / "Contents/Resources/runtime/bin")
+    assert "/opt/homebrew/bin" in path
+    assert f"{tmp_path}/.cargo/bin" in path
+    assert path.index(path[0]) < path.index("/opt/homebrew/bin")
+    assert "bin" not in path
+    assert "" not in path
+    assert "/usr/sbin" in path  # system floor stays present
+    assert len(path) == len(set(path))
+
+    # And build_launch_environment composes exactly from these two helpers:
+    # the guest base plus pins — no hidden allow-list left in the launch path.
+    import inspect
+
+    source = inspect.getsource(product_contract.build_launch_environment)
+    assert "_guest_environment(host)" in source
+    assert "_launch_child_path(app" in source
+    assert "_LAUNCH_INHERITED_ENV" not in source
