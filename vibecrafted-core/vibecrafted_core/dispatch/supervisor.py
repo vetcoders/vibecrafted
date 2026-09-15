@@ -2054,16 +2054,32 @@ class DispatchSupervisor:
                 handle.write(f"- {timestamp} {message}\n")
 
     def _write_tracker(self) -> None:
-        """Rewrite tracker.md in full from the current in-memory per-cut states."""
+        """Rewrite tracker.md with package YAML frontmatter and the cut table."""
         meta = self.dispatch.meta
+        project = _artifact_plane_project(
+            meta.reports_dir, self.tracker_path, self.artifacts_dir
+        ) or _repo_checkout_project(meta.repo)
+        written = datetime.now(timezone.utc)
+        # session_id repeats run_id: R11 requires a non-empty session_id and
+        # the dispatcher has no agent session of its own.
         lines = [
+            "---",
+            f"plan_id: {meta.name or 'unnamed'}",
+            f"run_id: {self.run_id}",
+            f"session_id: {self.run_id}",
+            "role: tracker",
+            "agent: dispatcher",
+            f"date: {written.date().isoformat()}",
+            f"project: {project}",
+            "---",
+            "",
             f"# dispatch tracker — {meta.name or 'unnamed'}",
             "",
             f"- repo: {meta.repo}",
             f"- baseline_branch: {meta.baseline.get('branch', '')}",
             f"- baseline_head: {meta.baseline.get('head', '')}",
             f"- validated_copy: {self.artifacts_dir / 'validated-dispatch.toml'}",
-            f"- updated: {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
+            f"- updated: {written.isoformat(timespec='seconds')}",
             (
                 "- writer: dispatch supervisor (single writer; verified state"
                 " flips only after green supervisor verify)"
@@ -2245,6 +2261,44 @@ def _path_in_scope(path: str, scopes: tuple[str, ...]) -> bool:
         if path == anchor or path.startswith(anchor + "/"):
             return True
     return False
+
+
+def _artifact_plane_project(*candidates: str | Path) -> str:
+    """Return ``org/repo`` from a canonical ``artifacts/<org>/<repo>/…`` path."""
+    for raw in candidates:
+        if not raw:
+            continue
+        parts = Path(str(raw)).expanduser().parts
+        try:
+            index = parts.index("artifacts")
+        except ValueError:
+            continue
+        if index + 2 >= len(parts):
+            continue
+        org, repo = parts[index + 1], parts[index + 2]
+        if org and repo:
+            return f"{org}/{repo}"
+    return ""
+
+
+def _repo_checkout_project(repo: str | Path) -> str:
+    """Return ``owner/repo`` from origin, else the checkout directory name."""
+    root = Path(repo).expanduser()
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "config", "--get", "remote.origin.url"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        proc = None
+    url = proc.stdout.strip() if proc is not None and proc.returncode == 0 else ""
+    identity = _repo_identity_from_url(url)
+    if identity:
+        return identity
+    return root.name or "unversioned-checkout"
 
 
 def run_dispatch(

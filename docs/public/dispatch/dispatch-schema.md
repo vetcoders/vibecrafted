@@ -213,3 +213,19 @@ commands render these placeholders:
 Anything not listed in these tables is not part of the v1 schema. When in
 doubt, `--doctor` is the authority: it reports every unknown or invalid
 field by path (for example `cuts[2].verify[0].expect.exit_code`).
+
+## Brief frontmatter: `agent:` must equal `cuts[].agent`
+
+When a cut's `brief` (or an inline `prompt` that itself begins with YAML
+frontmatter) names an `agent:`, that value must equal the cut's
+`cuts[].agent` — the selected fleet provider. `vibecrafted dispatch
+--doctor` and launch refuse a mismatch with:
+
+```text
+cuts[N].model: frontmatter agent conflicts with selected provider
+```
+
+This is independent of `cuts[].model`. The brief's `agent:` is the fleet
+agent (`claude`, `codex`, `agy`, `junie`, `grok`, `cursor`); the cut must
+name the same agent. A model pin may still live on the brief as `model:`
+or on the cut as `model`.
