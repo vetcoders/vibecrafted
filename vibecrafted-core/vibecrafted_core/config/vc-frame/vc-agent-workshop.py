@@ -751,8 +751,15 @@ def _dim_unavailable_choices(
     available: tuple[bool, ...],
     selected: int,
     end_col: int,
+    base: int = 0,
 ) -> None:
-    """Paint unavailable tokens dim and the selected token in reverse video."""
+    """Paint unavailable tokens dim and the selected token bold.
+
+    Selection is bold letters and nothing else; ``base`` carries the row's
+    focus underline so every token on a focused row keeps it (Founder,
+    2026-09-15: no reverse-video blocks, the rail already carries the
+    selected/active semantics).
+    """
     tokens = _choice_tokens(choices, selected=selected, available=available)
     # The base line clips the *whole* token sequence.  Slice that same rendered
     # sequence before applying token attributes so a trailing disabled token
@@ -764,11 +771,9 @@ def _dim_unavailable_choices(
         if not fragment:
             break
         if not enabled:
-            _safe_addstr(window, row, col + offset, fragment, curses.A_DIM)
+            _safe_addstr(window, row, col + offset, fragment, curses.A_DIM | base)
         elif index == selected:
-            _safe_addstr(
-                window, row, col + offset, fragment, curses.A_REVERSE | curses.A_BOLD
-            )
+            _safe_addstr(window, row, col + offset, fragment, curses.A_BOLD | base)
         offset += len(token) + 1
 
 
@@ -1008,6 +1013,9 @@ class Workshop:
 
     def _draw_providers(self, row: int, col: int, width: int) -> None:
         x = col
+        # Focused picker row: constant underline.  Selected provider: bold
+        # letters, nothing else.  Never a reverse-video block.
+        base = curses.A_UNDERLINE if self.row == 0 else 0
         for index, name in enumerate(AGENTS):
             token = f" {name} "
             if x + len(token) >= col + width:
@@ -1015,11 +1023,11 @@ class Workshop:
                 x = col
             available = _provider_available(name)
             if index == self.agent and available:
-                attr = curses.A_REVERSE | curses.A_BOLD
+                attr = curses.A_BOLD | base
             elif available:
-                attr = curses.A_BOLD
+                attr = base
             else:
-                attr = curses.A_DIM
+                attr = curses.A_DIM | base
             _safe_addstr(self.window, row, x, token, attr)
             self.mouse_targets.append((row, x, x + len(token), index, "provider"))
             x += len(token) + 1
@@ -1040,7 +1048,7 @@ class Workshop:
         )
         self._draw_providers(top + 3, left, inner)
         path_row = top + 5
-        path_attr = curses.A_REVERSE if self.row == 1 else 0
+        path_attr = curses.A_UNDERLINE if self.row == 1 else 0
         _safe_addstr(
             self.window,
             path_row,
@@ -1116,11 +1124,10 @@ class Workshop:
                     _choice_tokens(choices, selected=selected, available=available)
                 )
                 focused = self.row == offset + 2
-                _safe_addstr(self.window, cursor + offset, left, _clip(line, inner), 0)
-                if focused:
-                    _safe_addstr(
-                        self.window, cursor + offset, left, label, curses.A_REVERSE
-                    )
+                base = curses.A_UNDERLINE if focused else 0
+                _safe_addstr(
+                    self.window, cursor + offset, left, _clip(line, inner), base
+                )
                 _dim_unavailable_choices(
                     self.window,
                     cursor + offset,
@@ -1129,13 +1136,14 @@ class Workshop:
                     available,
                     selected,
                     left + inner,
+                    base=base,
                 )
             _safe_addstr(
                 self.window,
                 cursor + 4,
                 left,
                 _clip(f"Parent    {self.continuity_parent or '(none)'}", inner),
-                curses.A_REVERSE if self.row == 6 else 0,
+                curses.A_UNDERLINE if self.row == 6 else 0,
             )
             runtime_help = RUNTIME_HELP[RUNTIME_POLICIES[self.runtime]]
             help_text = public_reason(runtime_help[0]) or runtime_help[0]
@@ -1172,7 +1180,7 @@ class Workshop:
                 )
             cursor += 9
         launch_label = "[ Launch ]"
-        launch_attr = curses.A_REVERSE | curses.A_BOLD
+        launch_attr = curses.A_BOLD
         _safe_addstr(self.window, cursor, left, launch_label, launch_attr)
         self.mouse_targets.append((cursor, left, left + len(launch_label), 0, "launch"))
         hint = (
