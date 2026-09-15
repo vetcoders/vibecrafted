@@ -20,6 +20,7 @@ The shell twin lives in ``runtime/helpers/vetcoders-runtime-core.sh``
 from __future__ import annotations
 
 import argparse
+
 try:
     import fcntl
 except ImportError:  # native Windows — flock-shaped portable_lock

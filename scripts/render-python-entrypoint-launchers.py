@@ -49,13 +49,17 @@ def render_launchers(
                     "setlocal EnableExtensions",
                     'set "bin_dir=%~dp0"',
                     f'set "target={target}"',
-                    f'set "VIBECRAFTED_DECLARED_LAUNCHER=%~f0"',
-                    "if defined VIBECRAFTED_DECLARED_LAUNCHER_OVERRIDE set "
-                    '"VIBECRAFTED_DECLARED_LAUNCHER=%VIBECRAFTED_DECLARED_LAUNCHER_OVERRIDE%"',
+                    'set "VIBECRAFTED_DECLARED_LAUNCHER=%~f0"',
+                    (
+                        "if defined VIBECRAFTED_DECLARED_LAUNCHER_OVERRIDE set "
+                        '"VIBECRAFTED_DECLARED_LAUNCHER=%VIBECRAFTED_DECLARED_LAUNCHER_OVERRIDE%"'
+                    ),
                     'set "PYTHONIOENCODING=utf-8"',
                     'set "PYTHONUTF8=1"',
-                    f'"%bin_dir%python.exe" -c "{_DISPATCH}" "%target%" '
-                    '"%VIBECRAFTED_DECLARED_LAUNCHER%" %*',
+                    (
+                        f'"%bin_dir%python.exe" -c "{_DISPATCH}" "%target%" '
+                        '"%VIBECRAFTED_DECLARED_LAUNCHER%" %*'
+                    ),
                     "",
                 )
             )
@@ -78,10 +82,7 @@ def render_launchers(
             )
             destination.write_text(payload, encoding="utf-8")
             destination.chmod(
-                destination.stat().st_mode
-                | stat.S_IXUSR
-                | stat.S_IXGRP
-                | stat.S_IXOTH
+                destination.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
             )
         created.append(name)
     return created
