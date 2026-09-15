@@ -48,19 +48,28 @@ _TOOLS_INSTALL_LEASE_ENV = "VIBECRAFTED_INSTALL_LEASE_FD"
 _TOOLS_INSTALL_LOCK_NAME = ".vibecrafted-install.lock"
 _HOST_PATTERN = re.compile(r"[A-Za-z0-9._:-]+")
 _MINIMAL_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
-_PASSTHROUGH_ENVIRONMENT = (
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "TMPDIR",
-    "VIBECRAFTED_GUARDIAN_READY_TICKS",
-    "VIBECRAFTED_LIFECYCLE_LOCK_TICKS",
-    "VIBECRAFTED_PYTHON",
-    "VIBECRAFTED_STOP_KILL_WAIT_TICKS",
-    "VIBECRAFTED_STOP_TERM_WAIT_TICKS",
-    "VIBECRAFTED_TRIAGE_RUN",
-    "VIBECRAFTED_TEST_LIFECYCLE_LOG",
-    "VIBECRAFTED_TEST_SERVER_STOP_DELAY",
+# Child environments start from the operator's full environment — the product
+# is a guest in the user's shell, not a landlord (AGENTS.md). This deny-list is
+# the only scrub, and every entry names why it must not cross into a child.
+_CHILD_ENV_DENYLIST = frozenset(
+    {
+        # Repoints child imports at whatever runtime or test harness spawned
+        # the supervisor; children must import from the installed generation,
+        # never from a foreign runtime's module tree.
+        "PYTHONPATH",
+        # Relocates the interpreter's stdlib and breaks any bundled python
+        # a child resolves.
+        "PYTHONHOME",
+        # Generation-bootstrap posture: our own python bootstrap sets it for
+        # itself; imposing it on children overrides the user's site setup.
+        "PYTHONNOUSERSITE",
+        # Same bootstrap posture as PYTHONNOUSERSITE — runtime state, not the
+        # operator's choice.
+        "PYTHONDONTWRITEBYTECODE",
+        # macOS framework-python breadcrumb pinning children to the parent
+        # interpreter's launcher instead of their own resolution.
+        "__PYVENV_LAUNCHER__",
+    }
 )
 
 
@@ -706,12 +715,15 @@ def _sane_path_entries(value: str | None) -> list[str]:
 
 
 def _child_environment(paths: SupervisorPaths) -> dict[str, str]:
-    """Build the sanitized environment for spawned launcher subprocesses: a
-    passthrough allowlist plus fixed HOME/PATH/VIBECRAFTED_* overrides so the
-    child can never inherit an operator's arbitrary shell environment."""
+    """Build the environment for spawned launcher subprocesses: the operator's
+    full environment minus `_CHILD_ENV_DENYLIST` (guest, not landlord — the
+    user's SSH agent, tokens and tools flow through), with the supervisor's
+    HOME/PATH/VIBECRAFTED_* pins overlaid on top."""
 
     environment = {
-        key: os.environ[key] for key in _PASSTHROUGH_ENVIRONMENT if os.environ.get(key)
+        key: value
+        for key, value in os.environ.items()
+        if key not in _CHILD_ENV_DENYLIST
     }
     environment.update(
         {
