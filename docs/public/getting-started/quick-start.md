@@ -94,16 +94,16 @@ vibecrafted help            # the deck
 vibecrafted help --all      # full workflow reference
 ```
 
-| Command           | Purpose                                        |
-| ----------------- | ---------------------------------------------- |
-| `init [agent]`    | Orient an agent in this repo                   |
-| `<skill> <agent>` | Run a workflow with an agent                   |
-| `resume <agent>`  | Continue a stopped run or a provider session   |
-| `status`          | Today's agent activity                         |
-| `doctor`          | Installation health — pass/fail                |
+| Command           | Purpose                                       |
+| ----------------- | --------------------------------------------- |
+| `init [agent]`    | Orient an agent in this repo                  |
+| `<skill> <agent>` | Run a workflow with an agent                  |
+| `resume <agent>`  | Continue a stopped run or a provider session  |
+| `status`          | Today's agent activity                        |
+| `doctor`          | Installation health — pass/fail               |
 | `receipt`         | Delivery/runtime receipt (source ↔ installed) |
-| `settlements`     | Read-only f/x/n ledger query                   |
-| `update`          | Update to the latest release                   |
+| `settlements`     | Read-only f/x/n ledger query                  |
+| `update`          | Update to the latest release                  |
 
 The full ship cycle when you want to walk it end to end:
 

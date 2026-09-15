@@ -350,10 +350,14 @@ def test_windows_install_uninstall_round_trip_and_second_fresh_install(
     launcher = installer.vibecrafted_launcher_bin() / "vibecrafted.cmd"
     assert launcher.is_file()
     assert "VIBECRAFTED_RUNTIME_ROOT" in launcher.read_text(encoding="utf-8")
-    walkaround = installer.vibecrafted_launcher_bin() / "verify-vibecrafted-walkaround.cmd"
+    walkaround = (
+        installer.vibecrafted_launcher_bin() / "verify-vibecrafted-walkaround.cmd"
+    )
     assert walkaround.is_file()
     walkaround_bytes = walkaround.read_bytes()
-    assert installer.SECURE_WALKAROUND_LAUNCHER_MARKER.encode("ascii") in walkaround_bytes
+    assert (
+        installer.SECURE_WALKAROUND_LAUNCHER_MARKER.encode("ascii") in walkaround_bytes
+    )
     expected_walkaround = installer._secure_walkaround_launcher_contents(
         current,
         generation / "bin" / "python.exe",
@@ -373,8 +377,7 @@ def test_windows_install_uninstall_round_trip_and_second_fresh_install(
     else:
         operator_keep = False
     assert (
-        installer.cmd_runtime_uninstall(Namespace(dry_run=False, emit_result=True))
-        == 0
+        installer.cmd_runtime_uninstall(Namespace(dry_run=False, emit_result=True)) == 0
     )
     removed = json.loads(capsys.readouterr().out)
     assert removed["status"] == "removed"
@@ -741,7 +744,7 @@ def test_windows_entrypoint_renderer_writes_cmd_not_posix_shim(
 ) -> None:
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text(
-        "[project.scripts]\ndemo-cli = \"demo_module:main\"\n",
+        '[project.scripts]\ndemo-cli = "demo_module:main"\n',
         encoding="utf-8",
     )
     bin_dir = tmp_path / "bin"

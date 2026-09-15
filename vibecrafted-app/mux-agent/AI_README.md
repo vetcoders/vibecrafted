@@ -157,7 +157,7 @@ MuxConfig::new(socket, cmd)
 | `health`        | Verify socket reachability for a service                               |
 | `daemon-status` | Query running multi-service daemon status via Unix socket              |
 | `dashboard`     | Tray dashboard for multi-service status (feature: tray)                |
-| `proxy`         | STDIO↔socket proxy (also exposed as the `rmcp-mux-proxy` binary)      |
+| `proxy`         | STDIO↔socket proxy (also exposed as the `rmcp-mux-proxy` binary)       |
 
 ## Config (JSON / YAML / TOML)
 
@@ -294,7 +294,7 @@ CI (`.github/workflows/ci.yml`) runs with `--no-default-features` (tray off) so 
 | `server_manager`                                             | `runtime/server.rs`                   | Child process lifecycle + restart backoff                                                          |
 | `handle_client`                                              | `runtime/client.rs`                   | Per-client connection handler                                                                      |
 | `heartbeat_loop`                                             | `runtime/heartbeat.rs`                | Child health probe                                                                                 |
-| `run_proxy`                                                  | `runtime/proxy.rs`                    | STDIO↔socket bridge (also `rmcp-mux-proxy` binary)                                                |
+| `run_proxy`                                                  | `runtime/proxy.rs`                    | STDIO↔socket bridge (also `rmcp-mux-proxy` binary)                                                 |
 | `run_wizard`                                                 | `wizard/mod.rs`                       | TUI entry point (feature: cli)                                                                     |
 | `WizardStep`                                                 | `wizard/types.rs`                     | Five-step enum (DiscoverySources / ServerReview / StrategyChoice / SummaryConfirm / ResultAndTray) |
 | `discover_hosts`                                             | `scan.rs`                             | Find host config files (feature: cli)                                                              |

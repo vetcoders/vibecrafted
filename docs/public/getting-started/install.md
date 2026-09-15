@@ -17,7 +17,7 @@ Pick the channel that matches your platform, then verify the result with
 | ---------------------------- | -------------------- | -------------------------------------------------------- | ---------------------------------------- |
 | Signed `Vibecrafted.app` DMG | macOS 14+, arm64     | Full desktop product: terminal, frame, runtime, server   | Build path complete; publication pending |
 | Signed Runtime Pack          | macOS 14+, per-arch  | Same prebuilt runtime without DMG/App                    | Built and signed with the DMG            |
-| Native Runtime Pack          | Windows win32-x64    | Command deck, pack Python, foundations, vc-server       | Built from checkout; publication pending |
+| Native Runtime Pack          | Windows win32-x64    | Command deck, pack Python, foundations, vc-server        | Built from checkout; publication pending |
 | Bootstrap `install.sh`       | macOS, Linux, WSL2   | Command deck, runtime, control plane, skills             | Published; CI-gated                      |
 | Source checkout              | macOS, Linux, WSL2   | Development tree and targets — not a native Runtime Pack | Published                                |
 | Container                    | anywhere Docker runs | Isolated operator runtime                                | Published                                |
