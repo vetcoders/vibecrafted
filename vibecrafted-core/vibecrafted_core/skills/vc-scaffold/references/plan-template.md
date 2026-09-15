@@ -132,6 +132,19 @@ every cut `[~]→[x]`.
 - **always** → no exposed secrets; integrator structural admission records Semgrep and
   secret/security review, while verified delivery after closure records the full language-appropriate gates
 
+## Odbiór (matryca wyników) — R12
+
+Every requirement in this plan starts as `[ ]`. An untouched `[ ]` at the end of a run is a
+non-delivery indicator, not a formatting nit. The worker flips its own boxes as part of delivery;
+no flip is believed — the supervisor re-runs the verifiers regardless. The Founder box is never
+filled by an agent: `Founder [x]` is valid only next to `acceptance/founder.json` in the plan root.
+
+| cut | agent | commit | dowód (Operator) | zintegrowane | Worker | Operator | Founder |
+|---|---|---|---|---|---|---|---|
+| [W1-01] | [agent] | — | — | — | [ ] | [ ] | [ ] |
+
+Zatwierdzono przez: Worker [ ] Operator [ ] Founder [ ]
+
 ## Living Tree Note
 
 This plan is alive. It changes as we learn. When you change the plan:
