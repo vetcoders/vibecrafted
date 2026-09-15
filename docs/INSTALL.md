@@ -1,7 +1,8 @@
 # Install Vibecrafted
 
-Vibecrafted runs on macOS, Linux and Windows-through-WSL2. The channels differ
-in what they give you and in how finished they are, so this page states both.
+Vibecrafted runs on macOS, Linux, and native Windows (win32-x64 Runtime Pack).
+WSL2 remains a POSIX alternative. The channels differ in what they give you
+and in how finished they are, so this page states both.
 
 ## Channel matrix
 
@@ -9,13 +10,14 @@ in what they give you and in how finished they are, so this page states both.
 | ---------------------------- | -------------------- | ------------------------------------------------------------------- | ---------------------------------------- |
 | Signed `Vibecrafted.app` DMG | macOS 14+, arm64     | Full desktop product: terminal, frame, runtime, server              | Build path complete; publication pending |
 | Portable tarball             | Linux, WSL2, macOS   | Command deck, runtime, control plane, skills — pinned to one commit | Build path complete; publication pending |
+| Native Runtime Pack          | Windows win32-x64    | Command deck, pack Python, foundations, vc-server; no WSL         | Built from checkout; publication pending |
 | Bootstrap `install.sh`       | macOS, Linux, WSL2   | Command deck, runtime, control plane, skills                        | Published; CI-gated                      |
 | Source checkout              | macOS, Linux, WSL2   | Development tree and targets — not a native Runtime Pack            | Published                                |
 | Container                    | anywhere Docker runs | Isolated operator runtime                                           | Published                                |
-| `install.ps1`                | Windows              | WSL2 detection and handoff — not a native install                   | In repo; not yet served over HTTP        |
+| `install.ps1`                | Windows              | Native Runtime Pack entry (delegates to `install-runtime-pack.ps1`) | In repo; not yet served over HTTP        |
 
 If you want one sentence: **on macOS and Linux use the bootstrap today; on
-Windows install WSL2 first and then use the same bootstrap.**
+Windows install the win32-x64 Runtime Pack with `install.ps1 -Pack`.**
 
 ---
 
@@ -88,8 +90,9 @@ Scope, stated plainly:
   produced by macOS `make release`. 4.3.1 does not ship a systemd unit;
   on Linux the process pair is `vibecrafted server start` (server +
   guardian), not `systemctl`.
-- On Windows this is what you install _inside_ WSL2. There is no native
-  Windows build; see the `install.ps1` section.
+- On Windows, use the native win32-x64 Runtime Pack (`install.ps1 -Pack`).
+  The portable Linux tarball is what you install _inside_ WSL2 if you choose
+  the POSIX alternative.
 
 Maintainers build it with `make portable`. It needs no signing identity and no
 notary account — only `git` and `python3` — so it builds on Linux too.
@@ -154,15 +157,44 @@ settlement ledger — runs on Linux.
 
 ---
 
-## Windows — WSL2
+## Windows — native Runtime Pack
 
-Vibecrafted has no native Windows build. The installer is POSIX shell, and the
-runtime assumes a POSIX process model. On Windows you install WSL2 once and then
-use the ordinary Linux path inside it.
+The native Windows product is the **win32-x64 Runtime Pack**. It does not
+require WSL. Layout:
 
-### 1. Install WSL2
+- Runtime home: `%LOCALAPPDATA%\Vibecrafted` (`active.json` + `releases/<version>`)
+- Launchers: `%LOCALAPPDATA%\Vibecrafted\bin\*.cmd`
+- Control plane: `%LOCALAPPDATA%\Vibecrafted\home`
+- Product config: `%APPDATA%\Vibecrafted`
+- `tools/vibecrafted-current` is a directory **junction**, not a unix symlink.
 
-From an elevated PowerShell prompt:
+Mandatory payload: pack-owned `python.exe`, loct, loctree, loctree-mcp,
+loctree-lsp, aicx, aicx-mcp, vc-server. Optional surfaces that must not vanish
+silently: prview/screenscribe (`release-blocker`); voc/vc-start/vc-frame/
+vc-terminal/vc-server-supervisor (`limited-platform-scope`). Rescue/flock
+recovery is POSIX-only and is not claimed here.
+
+From a checkout:
+
+```powershell
+powershell -NoProfile -File .\scripts\build-windows-x64-runtime-pack.ps1
+powershell -NoProfile -File .\install.ps1 -Pack .\build\Vibecrafted_RuntimePack_<version>-win32-x64.tar.gz
+```
+
+Or call the verifier/installer directly:
+
+```powershell
+powershell -NoProfile -File .\scripts\install-runtime-pack.ps1 -Pack <RuntimePack.tar.gz>
+```
+
+Checksum (`.sha256`) and detached signature (`.sig`) are checked **before**
+extract. System32 `tar.exe` unpacks the carrier. Pack Python then runs
+`runtime-install`.
+
+### POSIX alternative — WSL2
+
+WSL2 remains available for the Linux bootstrap. It is not the native Windows
+product. From an elevated PowerShell prompt:
 
 ```powershell
 wsl --install
@@ -189,29 +221,19 @@ install layout.
 
 ### What `install.ps1` is for
 
-The repository ships `install.ps1` as an honest Windows entry point. It is not a
-native installer and does not pretend to be one. It:
-
-1. requires PowerShell 5.1 or newer,
-2. probes whether WSL is installed and healthy (`wsl --status`),
-3. if WSL is available, prints the exact one-liner to bootstrap inside your
-   default distro,
-4. if WSL is missing, prints the canonical WSL2 install path and **exits
-   non-zero** so no caller mistakes the outcome for success.
-
-It never silently succeeds. Either it tells you exactly what to run next, or it
-tells you what is missing.
-
-Run it from a checkout:
+`install.ps1` is the native Windows entry. With `-Pack` (or
+`VIBECRAFTED_RUNTIME_PACK`, or a single `dist/*-win32-x64.tar.gz`) it
+delegates to `scripts/install-runtime-pack.ps1`. Without a pack it prints
+the exact build/install commands and **exits non-zero**.
 
 ```powershell
-.\install.ps1
+.\install.ps1 -Pack .\build\Vibecrafted_RuntimePack_<version>-win32-x64.tar.gz
 ```
 
 > **Current status.** `install.ps1` is not yet served from
 > `https://vibecrafted.io/install.ps1`, so do not `iwr | iex` it. Use the
-> checkout form above, or run the `wsl` one-liner directly. Native Windows
-> binaries are not shipped; WSL2 is the supported answer.
+> checkout form. Publication of signed win32-x64 carriers is still pending;
+> the builder and installer are in-tree.
 
 ---
 
