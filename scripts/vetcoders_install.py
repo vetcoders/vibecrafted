@@ -36,6 +36,7 @@ import ast
 import ctypes
 import difflib
 import errno
+
 try:
     import fcntl
 except ImportError:  # native Windows
@@ -3570,7 +3571,9 @@ def _tools_lease_owner(descriptor: int) -> str:
     placeholder.
     """
     try:
-        raw = _pread_bytes(descriptor, 4096, 0).decode("utf-8", errors="replace").strip()
+        raw = (
+            _pread_bytes(descriptor, 4096, 0).decode("utf-8", errors="replace").strip()
+        )
         payload = json.loads(raw)
     except (OSError, json.JSONDecodeError):
         return "owner metadata unavailable"
@@ -4763,7 +4766,7 @@ def _teardown_owned_runtime_for_uninstall(
             from vibecrafted_core.windows_server import uninstall_windows_server
 
             return tuple(uninstall_windows_server() or ())
-        except Exception:
+        except Exception:  # noqa: BLE001  # service teardown never blocks uninstall
             return ()
     if sys.platform != "darwin":
         return ()
@@ -7041,9 +7044,9 @@ def _windows_path_without_extended_prefix(path: Path) -> Path:
     if sys.platform != "win32":
         return path
     text = os.fspath(path)
-    if text.startswith("\\\\?\\UNC\\") or text.startswith("//?/UNC/"):
+    if text.startswith(("\\\\?\\UNC\\", "//?/UNC/")):
         text = "\\\\" + text[8:]
-    elif text.startswith("\\\\?\\") or text.startswith("//?/"):
+    elif text.startswith(("\\\\?\\", "//?/")):
         text = text[4:]
     return Path(text)
 
@@ -10944,11 +10947,11 @@ def _secure_walkaround_windows_launcher_contents(
             "        finally:",
             "            sys.argv = saved",
             "        runner = os.path.join(",
-            "            snapshot, \"vibecrafted-core\", \"vibecrafted_core\", \"walkaround_runner.py\"",
+            '            snapshot, "vibecrafted-core", "vibecrafted_core", "walkaround_runner.py"',
             "        )",
             "        return int(",
             "            subprocess.call(",
-            "                [INTERPRETER, \"-I\", \"-B\", \"-X\", f\"pycache_prefix={pycache}\", runner, *user_args]",
+            '                [INTERPRETER, "-I", "-B", "-X", f"pycache_prefix={pycache}", runner, *user_args]',
             "            )",
             "        )",
             "    finally:",
@@ -10969,9 +10972,8 @@ def _secure_walkaround_launcher_contents(
     launcher_path: Path | None = None,
 ) -> bytes:
     """Render the exact wrapper with a stdlib preflight before candidate execution."""
-    destination = (
-        launcher_path
-        or python_bin.parent / launcher_name(SECURE_WALKAROUND_LAUNCHER)
+    destination = launcher_path or python_bin.parent / launcher_name(
+        SECURE_WALKAROUND_LAUNCHER
     )
     if sys.platform == "win32":
         return _secure_walkaround_windows_launcher_contents(
@@ -15902,7 +15904,12 @@ def _runtime_install_paths(runtime_home_override: str | None = None) -> dict[str
             raise RuntimeError("--runtime-home requires an absolute path")
     else:
         runtime_home = vibecrafted_runtime_home()
-    product_config = vibecrafted_product_config_home()
+    if sys.platform == "win32":
+        product_config = vibecrafted_product_config_home()
+    else:
+        # POSIX keeps the pre-Windows canonical product config root:
+        # always ~/.config/vibecrafted, never $XDG_CONFIG_HOME.
+        product_config = Path.home() / ".config" / "vibecrafted"
     return {
         "runtime_home": runtime_home,
         "config_home": product_config.parent,
@@ -20762,9 +20769,7 @@ def _stage_runtime_product_config(
     theme = staged / "terminal-theme.toml"
     if not theme.exists():
         theme_source = generation / "config/vc-terminal/themes/dark.toml"
-        if theme_source.is_file():
-            shutil.copy2(theme_source, theme)
-        elif sys.platform != "win32":
+        if theme_source.is_file() or sys.platform != "win32":
             shutil.copy2(theme_source, theme)
     if theme.exists():
         import tomllib
@@ -20800,9 +20805,7 @@ def _stage_runtime_product_config(
             terminal / "interactive.zsh",
         ),
     ):
-        if src.is_file():
-            shutil.copy2(src, dst)
-        elif sys.platform != "win32":
+        if src.is_file() or sys.platform != "win32":
             shutil.copy2(src, dst)
     python_door = generation / "config/vc-terminal/bin"
     if python_door.is_dir():
@@ -20824,9 +20827,7 @@ def _stage_runtime_product_config(
         if not destination.exists():
             destination.parent.mkdir(parents=True, exist_ok=True)
             source = generation / "config" / relative
-            if source.is_file():
-                shutil.copy2(source, destination)
-            elif sys.platform != "win32":
+            if source.is_file() or sys.platform != "win32":
                 shutil.copy2(source, destination)
     if str(product / "vc-terminal") not in receipt["owned_dirs"]:
         receipt["owned_dirs"].append(str(product / "vc-terminal"))
@@ -21131,7 +21132,10 @@ def _runtime_launcher_public_name(name: str) -> str | None:
             base = base[: -len(suffix)]
             lowered = base.lower()
             break
-    if lowered.startswith(_RUNTIME_NAMESPACE_PREFIXES) or lowered in _RUNTIME_NAMESPACE_NAMES:
+    if (
+        lowered.startswith(_RUNTIME_NAMESPACE_PREFIXES)
+        or lowered in _RUNTIME_NAMESPACE_NAMES
+    ):
         return launcher_name(base)
     return None
 
@@ -21665,10 +21669,10 @@ def _runtime_install_result(
     paths: Mapping[str, Path],
 ) -> dict[str, str]:
     product_config = paths["product_config"]
-    return {
+    result = {
         "schema": "vibecrafted.runtime-install-result.v1",
         "root": str(generation),
-        "launcher": str(paths["launcher_home"] / launcher_name("vibecrafted")),
+        "launcher": str(paths["launcher_home"] / "vibecrafted"),
         "terminal": str(generation / "bin/vc-terminal"),
         "terminal_host": str(
             _product_terminal_host(generation=generation, app_root=app_root)
@@ -21689,6 +21693,10 @@ def _runtime_install_result(
         "crafted_home": str(paths["crafted_home"]),
         "app_root": str(app_root) if app_root else "",
     }
+    if sys.platform == "win32":
+        # The public launcher is a .cmd shim on native Windows.
+        result["launcher"] = str(paths["launcher_home"] / launcher_name("vibecrafted"))
+    return result
 
 
 def cmd_runtime_resolve(args: argparse.Namespace) -> int:
@@ -22722,7 +22730,12 @@ def _install_runtime_pack(
 
     releases = runtime_home / "releases"
     generation = releases / version
-    _prepare_runtime_generation_destination(runtime_home, generation)
+    if sys.platform == "win32":
+        # win32 owns the active.json/junction pair; there is no POSIX
+        # collision-backup transaction to reclaim a stale pointer, so the
+        # destination must be validated before staging. POSIX keeps the
+        # pre-merge flow (foreign pointers are checkpointed and replaced).
+        _prepare_runtime_generation_destination(runtime_home, generation)
     _assert_runtime_physical_path(generation)
     for directory in (
         releases,
@@ -22854,9 +22867,16 @@ def _install_runtime_pack(
             )
         token = hashlib.sha256(str(destination).encode()).hexdigest()
         staged = staging_root / f"link-{token}"
-        _atomic_symlink(target.resolve(strict=True), staged)
+        resolved_target = target.resolve(strict=True)
+        if sys.platform == "win32":
+            _atomic_symlink(resolved_target, staged)
+        else:
+            # The staged link is renamed into `destination` later; a relative
+            # target computed against the staging root would dangle one level
+            # off, so POSIX keeps the pre-merge absolute symlink here.
+            staged.symlink_to(resolved_target)
         replacements[destination] = staged
-        receipt["owned_symlinks"][str(destination)] = str(target.resolve(strict=True))
+        receipt["owned_symlinks"][str(destination)] = str(resolved_target)
 
     bin_dir = generation / "bin"
     skip_launcher_names = {
@@ -22962,7 +22982,12 @@ def _install_runtime_pack(
             current_link, runtime_home=runtime_home, receipt=receipt
         )
     staged_pointer = staging_root / "current"
-    _atomic_symlink(generation, staged_pointer)
+    if sys.platform == "win32":
+        _atomic_symlink(generation, staged_pointer)
+    else:
+        # Renamed into `current_link` below; the target must stay absolute or
+        # the published pointer dangles relative to the wrong parent.
+        staged_pointer.symlink_to(generation)
     receipt["owned_symlinks"][str(current_link)] = str(generation)
     # All root postimages exist. Selectors are published last; readers reject
     # install_pending/config_transaction throughout the multi-root transition.
