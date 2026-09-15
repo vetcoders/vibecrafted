@@ -769,19 +769,36 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   /// The environment every generation-owned subprocess inherits: the tray's
   /// caretaker poll, the service actions and the workspace terminal all run
   /// with exactly this, so they can never address different roots.
+  ///
+  /// Guest, not landlord: the base is the user's own environment — the app is
+  /// launched from Finder/Dock, so this is the launchd user-session env, not a
+  /// login shell; `SSH_AUTH_SOCK`, the user's PATH and every user variable
+  /// flow through. Only the explicit deny-list below is scrubbed, then the
+  /// Vibecrafted pins overlay the result.
   private func composeRuntimeEnvironment(install: CanonicalRuntimeInstall) -> [String: String] {
     let host = ProcessInfo.processInfo.environment
-    let inherited = [
-      "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "COLORTERM", "TMPDIR",
-      "SHELL",
+    // The only variables scrubbed from the inherited environment, each with
+    // the reason it must not cross into the child. Everything else survives.
+    let denied: [String] = [
+      // Repoints python children at a foreign runtime's or test harness's
+      // module tree; the launched product must import its own generation.
+      "PYTHONPATH",
+      // Relocates the interpreter's stdlib and breaks any bundled python.
+      "PYTHONHOME",
+      // macOS framework-python breadcrumb pinning children to the invoking
+      // interpreter's launcher instead of their own resolution.
+      "__PYVENV_LAUNCHER__",
     ]
-    var environment = Dictionary(
-      uniqueKeysWithValues: inherited.compactMap { key in host[key].map { (key, $0) } })
+    var environment = host
+    for name in denied {
+      environment.removeValue(forKey: name)
+    }
     // The workspace terminal spawns agent CLIs (codex, gh, claude, loct) whose
-    // `#!/usr/bin/env` shebangs resolve against exactly this PATH. Amputating the
-    // caller's PATH down to the system set hides Homebrew, ~/.local/bin and
-    // ~/.cargo/bin, so those tools die with exit 127. Keep the host PATH first;
-    // the signed generation is a fallback, not a shadow of user-owned tools.
+    // `#!/usr/bin/env` shebangs resolve against exactly this PATH. The
+    // inherited PATH is never replaced: the generation's canonical bin is
+    // prepended so the runtime's own pinned tools resolve deterministically,
+    // and every user entry (Homebrew, ~/.local/bin, ~/.cargo/bin) survives
+    // behind it.
     environment["PATH"] = composedPath(
       generation: install.root, inherited: host["PATH"])
     environment["PYTHONNOUSERSITE"] = "1"
@@ -1347,13 +1364,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     return stdout
   }
 
-  /// Inherited PATH first, then the signed generation fallback; use the minimal
-  /// system set only when the caller carried no PATH at all.
+  /// The generation's canonical bin is prepended to the inherited PATH so the
+  /// runtime's own pinned tools resolve deterministically; every user entry
+  /// survives behind it, and the minimal system set is the floor only when the
+  /// caller carried no PATH at all.
   private func composedPath(generation: URL, inherited: String?) -> String {
     let generationBin = generation.appendingPathComponent("bin").path
     let head = (inherited ?? "").isEmpty ? "/usr/bin:/bin:/usr/sbin:/sbin" : inherited!
     let entries = head.split(separator: ":").map(String.init).filter { $0 != generationBin }
-    return (entries + [generationBin]).joined(separator: ":")
+    return ([generationBin] + entries).joined(separator: ":")
   }
 
   /// Surface a launch failure where the operator can actually see it: the unified
