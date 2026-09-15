@@ -32,6 +32,23 @@ SCHEDULER_STATES = {
     "stopped",
 }
 
+BASE_CUT_PREFIX = "cut:"
+BASE_SOURCES = {"plan", "sha", "branch", "cut"}
+_BASE_SHA_RE = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+
+
+def classify_base(declared: str) -> str:
+    """Classify a declared ``base`` value: ``plan`` (absent), ``cut:<id>``,
+    a full commit ``sha``, or a local ``branch`` name."""
+    value = declared.strip()
+    if not value:
+        return "plan"
+    if value.startswith(BASE_CUT_PREFIX):
+        return "cut"
+    if _BASE_SHA_RE.fullmatch(value):
+        return "sha"
+    return "branch"
+
 
 @dataclass(frozen=True)
 class Meta:
@@ -160,6 +177,9 @@ class Cut:
     recovery: Recovery | None = None
     depends_on: tuple[str, ...] = ()
     integrator: bool = False
+    # Optional per-cut checkout base declaration: "<sha>", "<branch>", or
+    # "cut:<cut-id>". Absent = the plan baseline (today's behavior).
+    base: str = ""
     # Runtime-resolved fields are never accepted from dispatch TOML. The
     # supervisor stamps them after it has created and validated the linked
     # checkout for this specific run.
