@@ -4,12 +4,15 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import textwrap
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HELPER_SCRIPT = (
@@ -19,6 +22,15 @@ HELPER_SCRIPT = (
     / "runtime"
     / "shell"
     / "vetcoders.sh"
+)
+PATHS_LIB = (
+    REPO_ROOT
+    / "vibecrafted-core"
+    / "vibecrafted_core"
+    / "runtime"
+    / "scripts"
+    / "lib"
+    / "paths.sh"
 )
 
 _GENERATION_FIXTURE_SPEC = importlib.util.spec_from_file_location(
@@ -1885,6 +1897,7 @@ def test_marbles_verification_poll_survives_watcher_exit_without_job_noise(
     assert verification_status == "timed_out"
     assert "Terminated: 15" not in result.stdout
     assert "Terminated: 15" not in result.stderr
+    _assert_source_checkout_has_no_artifact_symlinks()
 
 
 def _pending_verification_state(path: Path) -> None:
@@ -1956,3 +1969,72 @@ def test_marbles_verifier_rejects_symlinked_archived_run(tmp_path: Path) -> None
 
     state = json.loads(outside_state.read_text(encoding="utf-8"))
     assert state["loops"][0]["verification_status"] == "pending"
+
+
+def _assert_source_checkout_has_no_artifact_symlinks() -> None:
+    for name in ("plans", "reports"):
+        path = REPO_ROOT / ".vibecrafted" / name
+        assert not path.is_symlink(), (
+            f"marbles convenience symlink leaked into the source checkout: "
+            f"{path} -> {os.readlink(path)}"
+        )
+
+
+def _run_spawn_link_repo_artifacts(
+    *,
+    store: Path,
+    repo_root: Path,
+    env: dict[str, str],
+) -> None:
+    (store / "plans").mkdir(parents=True, exist_ok=True)
+    (store / "reports").mkdir(parents=True, exist_ok=True)
+    script = textwrap.dedent(
+        f"""\
+        #!/usr/bin/env bash
+        set -euo pipefail
+        # shellcheck source=vibecrafted-core/vibecrafted_core/runtime/scripts/lib/paths.sh
+        source {shlex.quote(str(PATHS_LIB))}
+        spawn_link_repo_artifacts {shlex.quote(str(store))} {shlex.quote(str(repo_root))}
+        """
+    )
+    subprocess.run(
+        ["bash", "-c", script],
+        check=True,
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_spawn_link_repo_artifacts_skips_source_checkout_in_test_mode(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "store"
+    env = os.environ.copy()
+    env["VIBECRAFTED_TEST_MODE"] = "1"
+    env["VIBECRAFTED_HOME"] = str(tmp_path / "home" / ".vibecrafted")
+    _run_spawn_link_repo_artifacts(store=store, repo_root=REPO_ROOT, env=env)
+    _assert_source_checkout_has_no_artifact_symlinks()
+    assert (store / "plans").is_dir()
+    assert (store / "reports").is_dir()
+
+
+def test_spawn_link_repo_artifacts_links_fixture_project_outside_test_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("VIBECRAFTED_TEST_MODE", raising=False)
+    repo = tmp_path / "project"
+    repo.mkdir()
+    store = tmp_path / "store"
+    env = os.environ.copy()
+    env.pop("VIBECRAFTED_TEST_MODE", None)
+    env["VIBECRAFTED_HOME"] = str(tmp_path / "home" / ".vibecrafted")
+    _run_spawn_link_repo_artifacts(store=store, repo_root=repo, env=env)
+    plans = repo / ".vibecrafted" / "plans"
+    reports = repo / ".vibecrafted" / "reports"
+    assert plans.is_symlink()
+    assert reports.is_symlink()
+    assert plans.resolve() == (store / "plans").resolve()
+    assert reports.resolve() == (store / "reports").resolve()
