@@ -120,7 +120,7 @@ from vibecrafted_core.spawn import (
     runtime_policy_capabilities,
 )
 
-AGENTS = ("agy", "claude", "codex", "cursor", "grok", "junie")
+AGENTS = ("agy", "claude", "codex", "cursor", "grok", "junie", "kimi")
 LAUNCH_MODES = ("init", "resume", "partner", "operator")
 MODE_PROMPTS = {"partner": "/vc-partner", "operator": "/vc-operator"}
 RUNTIME_HELP = {
@@ -146,6 +146,7 @@ _AGENT_BINARIES = {
     "cursor-agent": "cursor",
     "grok": "grok",
     "junie": "junie",
+    "kimi": "kimi",
 }
 PRESENCE_SCOPE = "this session"
 PRESENCE_REFRESH_SECONDS = 15.0
