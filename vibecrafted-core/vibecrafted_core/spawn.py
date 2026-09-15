@@ -37,6 +37,7 @@ from .control_plane import (
 from .events import append_event
 from .execution_controls import PERMISSION_POLICIES, ExecutionControls
 from .model_overrides import _with_model_override
+from .package_resources import skills_path
 from .report_contract import (
     CLAIM_DIGEST_ENV,
     materialize_launcher_report_template,
@@ -98,6 +99,173 @@ _INHERITED_CONTINUITY_ENV = (
 USER_OBSERVED_WARNING = (
     "User-observed only: no Operator Agent is supervising this Agent Workspace."
 )
+
+INTERACTIVE_LAUNCHERS = frozenset({"init", "operator", "partner", "resume", "fork"})
+_SLASH_SKILL_TOKEN = re.compile(r"^/vc-([A-Za-z0-9][A-Za-z0-9-]{0,62})$")
+_LAUNCHER_ROLE = {
+    "init": (
+        "orientation gate (vc-init). This is due diligence at session entry — "
+        "map, intent, and ground truth — not an implementation mission. Do not "
+        "invent a task."
+    ),
+    "operator": (
+        "orchestration posture (vc-operator). Conduct a plan only if one is "
+        "already in this session. Do not invent an autonomous implementation "
+        "mission or become the worker."
+    ),
+    "partner": (
+        "shared-steering posture (vc-partner). Preserve the operator's shape. "
+        "Do not invent a mission or silently take ownership."
+    ),
+    "resume": (
+        "launcher verb, not a skill-catalog entry. Continue the already-selected "
+        "native session with the existing continuity policy. Do not start a new "
+        "mission or equate settlement counts with recovered conversation."
+    ),
+    "fork": (
+        "launcher verb, not a skill-catalog entry. Branch the already-selected "
+        "native session. Do not invent a new implementation task unless the "
+        "operator supplied one below."
+    ),
+}
+
+
+def legacy_slash_interactive_prompt(skill: str, source: str) -> str:
+    """Historical interactive-launch body: slash token plus plan-source.
+
+    Kept as the regression contrast for the slash-only defect. Providers are
+    not assumed to expand ``/vc-*`` from a Markdown task file.
+    """
+    return f"/vc-{skill}\n\n{source}"
+
+
+def slash_skill_name(text: str) -> str | None:
+    """Return the skill/launcher token inside a single ``/vc-name`` line, else None."""
+    match = _SLASH_SKILL_TOKEN.fullmatch(text.strip())
+    return match.group(1) if match else None
+
+
+def canonical_skill_file(name: str) -> Path | None:
+    """Resolve ``SKILL.md`` from the running package, never a hardcoded checkout.
+
+    ``resume`` and ``fork`` are launcher verbs. They yield None unless a real
+    catalog skill file exists in this runtime.
+    """
+    token = str(name or "").strip().removeprefix("vc-")
+    if not token or "/" in token or "\\" in token or ".." in token:
+        return None
+    path = skills_path() / f"vc-{token}" / "SKILL.md"
+    try:
+        return path if path.is_file() else None
+    except OSError:
+        return None
+
+
+def compose_interactive_task_prompt(
+    *,
+    skill: str,
+    source: str,
+    root: str | os.PathLike[str],
+    resume_block: str | None = None,
+) -> str:
+    """Build the private ``prompt.md`` body for interactive init/operator/partner/resume/fork.
+
+    Explicit role, canonical skill files when they exist, preserved extra,
+    and the existing ``init_resume_block`` projection. Empty extra is not a
+    license to invent work. Does not wrap headless ``_runtime_prompt``.
+    """
+    launcher = str(skill or "init").strip() or "init"
+    extra = source if isinstance(source, str) else str(source or "")
+    duplicate_slash = slash_skill_name(extra) == launcher
+    requested: list[str] = [launcher]
+    for line in extra.splitlines():
+        name = slash_skill_name(line)
+        if name and name not in requested:
+            requested.append(name)
+    skill_lines: list[str] = []
+    for name in requested:
+        path = canonical_skill_file(name)
+        if path is None:
+            if name != launcher:
+                skill_lines.append(
+                    f"- `/vc-{name}` is not a skill file in this runtime; treat it as "
+                    "operator text, not a slash-command expansion."
+                )
+            elif name in INTERACTIVE_LAUNCHERS - {"init", "operator", "partner"}:
+                skill_lines.append(
+                    f"- `{name}` is a launcher verb. There is no `vc-{name}/SKILL.md` "
+                    "in this runtime catalog; do not invent one."
+                )
+            else:
+                skill_lines.append(
+                    f"- No `vc-{name}/SKILL.md` in this runtime; keep the launcher "
+                    "role below and do not assume a provider slash command."
+                )
+            continue
+        skill_lines.append(f"- `{name}` → read `{path}`")
+    if resume_block is None:
+        from .init_resume import init_resume_block
+
+        resume_block = init_resume_block(root)
+    role = _LAUNCHER_ROLE.get(
+        launcher,
+        "interactive launcher. Follow the role named above; do not invent a mission.",
+    )
+    lines = [
+        "You are in an interactive Vibecrafted session.",
+        "",
+        f"Repository root: {root}",
+        f"Launcher: {launcher}",
+        f"Role: {role}",
+        "",
+        "This private task file is the complete orientation payload. Do not assume",
+        "provider-specific slash commands execute from Markdown. Read the skill",
+        "files named below (when present) instead of treating `/vc-*` tokens as",
+        "executable commands.",
+        "",
+        "Skill and launcher resolution:",
+        *(skill_lines or ["- No catalog skill file applies to this launcher."]),
+        "",
+    ]
+    if launcher in {"init", "operator", "partner"}:
+        lines.extend(
+            [
+                "Orientation (not a ship mission):",
+                f"- Map: materialize the Loctree context atlas for {root} and read it to the end.",
+                "- Intent: recover AICX history for why this tree is shaped this way.",
+                "- Ground truth + risk: git/security sanity, then grade blast radius.",
+                "- Stop after orientation unless the operator supplied a task below.",
+                "",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "Continuity: native session identity and continuity policy are already",
+                "selected by this launcher. Keep them. Settlement counts are unfinished-work",
+                "projection, not recovered conversation.",
+                "",
+            ]
+        )
+    if resume_block:
+        lines.extend([resume_block.rstrip(), ""])
+    if extra.strip() and not duplicate_slash:
+        lines.extend(
+            [
+                "Operator-supplied extra (verbatim; preserve it, do not replace it):",
+                extra.rstrip(),
+                "",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "No operator-supplied implementation task. Do not invent one from",
+                "journals, settlements, or prior sessions.",
+                "",
+            ]
+        )
+    return "\n".join(lines)
 
 
 @dataclass(frozen=True)
@@ -5302,7 +5470,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     or args.root != admission["root"]
                 ):
                     raise ValueError("interactive admission target mismatch")
-                args.prompt = f"/vc-{admission['skill']}\n\n" + source.decode("utf-8")
+                args.prompt = compose_interactive_task_prompt(
+                    skill=str(admission["skill"]),
+                    source=source.decode("utf-8"),
+                    root=admission["root"],
+                )
                 # Exclusive execution claim: reopening a view cannot run the provider twice.
                 claim_fd = os.open(
                     expected / "execution.claim",

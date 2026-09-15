@@ -25,6 +25,18 @@ _vc_terminal_pin_product_env() {
     "$STARSHIP_CACHE"
 }
 
+_vc_terminal_release_product_tool_env() {
+  # Intentional personal-shell: stop forcing product Atuin/Starship/zoxide
+  # config, history, and keys. Frame config and the typed python door stay
+  # product-owned. Do not wrap the source builtin; this is the explicit route.
+  unset STARSHIP_CONFIG ATUIN_CONFIG_DIR ATUIN_DATA_DIR ATUIN_DB_PATH \
+    _ZO_DATA_DIR STARSHIP_CACHE
+  unset ZDOTDIR
+  if [[ "${HISTFILE:-}" == "${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/shell/zsh_history" ]]; then
+    HISTFILE="$HOME/.zsh_history"
+  fi
+}
+
 _vc_terminal_apply_fallback_prompt() {
   # Two-line offline prompt in the shape of the product starship.toml: bold
   # blue path, then ❯ (green after success, red after failure). Used only when
@@ -157,6 +169,7 @@ aliases() {
     done < "$vc_file"
   done
   _vc_terminal_catalog_emit "$vc_shell_group" 'Profile' reload 're-read the installed product profile'
+  _vc_terminal_catalog_emit "$vc_shell_group" 'Profile' personal-shell 'load ~/.zshrc without product Atuin/Starship pins'
   _vc_terminal_catalog_emit "$vc_shell_group" 'Profile' aliases '[text] list these shortcuts, optionally filtered'
   if (( $+functions[atuin-search] )); then
     _vc_terminal_catalog_emit "$vc_shell_group" 'History' 'Ctrl+R' 'search history with Atuin'
@@ -179,6 +192,24 @@ reload() {
     source "$vc_profile"
   fi
   _vc_terminal_load_owned_layer
+}
+
+personal-shell() {
+  # Load the personal home profile inside this already-started product shell.
+  # `source ~/.zshrc` is not this transition: product ATUIN_*/STARSHIP_CONFIG
+  # /ZDOTDIR remain exported and keep winning over the personal files.
+  if [[ -n ${_VC_TERMINAL_PERSONAL_LOADING:-} ]]; then
+    return 0
+  fi
+  typeset -g _VC_TERMINAL_PERSONAL_LOADING=1
+  _vc_terminal_release_product_tool_env
+  typeset -g _VC_TERMINAL_PERSONAL_SHELL=1
+  if [[ -r "$HOME/.zshrc" ]]; then
+    builtin source "$HOME/.zshrc"
+  else
+    print -u2 -r -- 'Vibecrafted: personal-shell found no ~/.zshrc; product tool pins were released.'
+  fi
+  unset _VC_TERMINAL_PERSONAL_LOADING
 }
 
 [[ -z ${_VC_TERMINAL_PROFILE_LOADED:-} ]] || return 0
@@ -395,6 +426,7 @@ if [[ -t 1 && -z "${VIBECRAFTED_QUIET_START:-}" && -z "${VC_FRAME_PANE_ID:-}" ]]
   print '  vibecrafted --help      Explore commands'
   print '  aliases [text]          List product shortcuts (vcf-* for vc-frame)'
   print '  reload                  Re-read the installed product profile'
+  print '  personal-shell          Load ~/.zshrc without product Atuin/Starship pins'
   (( ! $+commands[atuin] )) || print '  Ctrl+R history'
   (( ! $+commands[zoxide] )) || print '  z <directory> jump'
   print '  Tab completion'

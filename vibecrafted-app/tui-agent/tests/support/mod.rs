@@ -79,6 +79,8 @@ pub fn fixture_app(repo: &Path, deck: &Path, roots: &Path) -> App {
         observe: voc::observe::ObserveState::default(),
         memory: Default::default(),
         interaction: Default::default(),
+        repo_edit: Default::default(),
+        refresh: Default::default(),
     }
 }
 

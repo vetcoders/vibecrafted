@@ -89,6 +89,14 @@ pub struct ObserveState {
     pub transcript: String,
     pub transcript_raw: String,
     pub transcript_run_id: Option<String>,
+    /// Human rendering of `transcript_raw`, computed together with the read.
+    pub transcript_human: String,
+    /// Run whose transcript read is outstanding.
+    pub transcript_loading: Option<String>,
+    /// Number of the newest transcript read asked for.
+    pub transcript_generation: u64,
+    /// A transcript read not yet handed to the worker.
+    pub transcript_request: Option<crate::refresh::TranscriptJob>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
