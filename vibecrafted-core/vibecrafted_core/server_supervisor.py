@@ -6,7 +6,10 @@ from __future__ import annotations
 import argparse
 import contextlib
 import errno
-import fcntl
+try:
+    import fcntl
+except ImportError:  # native Windows — flock-shaped portable_lock
+    from . import portable_lock as fcntl
 import hashlib
 import http.client
 import json

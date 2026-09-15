@@ -6,7 +6,10 @@ EOF means the dispatcher disappeared and clients must reconcile file truth.
 
 from __future__ import annotations
 
-import fcntl
+try:
+    import fcntl
+except ImportError:  # native Windows — flock-shaped portable_lock
+    from . import portable_lock as fcntl
 import json
 import os
 import secrets

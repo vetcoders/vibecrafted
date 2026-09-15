@@ -8,7 +8,10 @@ claim never depends on any of them being available.
 from __future__ import annotations
 
 import argparse
-import fcntl
+try:
+    import fcntl
+except ImportError:  # native Windows — flock-shaped portable_lock
+    from . import portable_lock as fcntl
 import hashlib
 import json
 import os

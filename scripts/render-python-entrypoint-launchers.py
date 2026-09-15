@@ -20,7 +20,9 @@ _DISPATCH = (
 )
 
 
-def render_launchers(pyproject: Path, bin_dir: Path) -> list[str]:
+def render_launchers(
+    pyproject: Path, bin_dir: Path, *, windows: bool = False
+) -> list[str]:
     """Create every missing ``project.scripts`` launcher in ``bin_dir``."""
 
     with pyproject.open("rb") as handle:
@@ -36,33 +38,51 @@ def render_launchers(pyproject: Path, bin_dir: Path) -> list[str]:
         if not isinstance(target, str) or not _ENTRYPOINT_TARGET.fullmatch(target):
             raise ValueError(f"invalid launcher target for {name}: {target!r}")
 
-        destination = bin_dir / name
+        destination = bin_dir / (f"{name}.cmd" if windows else name)
         if destination.exists() or destination.is_symlink():
             continue
 
-        dispatch_command = (
-            'exec "$bin_dir/python3" -c '
-            f'{shlex.quote(_DISPATCH)} "$target" "$launcher" "$@"'
-        )
-        payload = "\n".join(
-            (
-                "#!/bin/bash",
-                "set -euo pipefail",
-                'bin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',
-                f"target={shlex.quote(target)}",
-                # The launcher value rides into the process argv, and the deck's
-                # identity guard matches the DECLARED absolute path against that
-                # argv. A bare name here made every python-entrypoint sidecar
-                # (vc-guardian) fail capture-identity through any wrapper chain.
-                f'launcher="${{VIBECRAFTED_DECLARED_LAUNCHER:-$bin_dir/{name}}}"',
-                dispatch_command,
-                "",
+        if windows:
+            payload = "\r\n".join(
+                (
+                    "@echo off",
+                    "setlocal EnableExtensions",
+                    'set "bin_dir=%~dp0"',
+                    f'set "target={target}"',
+                    f'set "VIBECRAFTED_DECLARED_LAUNCHER=%~f0"',
+                    "if defined VIBECRAFTED_DECLARED_LAUNCHER_OVERRIDE set "
+                    '"VIBECRAFTED_DECLARED_LAUNCHER=%VIBECRAFTED_DECLARED_LAUNCHER_OVERRIDE%"',
+                    'set "PYTHONIOENCODING=utf-8"',
+                    'set "PYTHONUTF8=1"',
+                    f'"%bin_dir%python.exe" -c "{_DISPATCH}" "%target%" '
+                    '"%VIBECRAFTED_DECLARED_LAUNCHER%" %*',
+                    "",
+                )
             )
-        )
-        destination.write_text(payload, encoding="utf-8")
-        destination.chmod(
-            destination.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
-        )
+            destination.write_text(payload, encoding="ascii")
+        else:
+            dispatch_command = (
+                'exec "$bin_dir/python3" -c '
+                f'{shlex.quote(_DISPATCH)} "$target" "$launcher" "$@"'
+            )
+            payload = "\n".join(
+                (
+                    "#!/bin/bash",
+                    "set -euo pipefail",
+                    'bin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',
+                    f"target={shlex.quote(target)}",
+                    f'launcher="${{VIBECRAFTED_DECLARED_LAUNCHER:-$bin_dir/{name}}}"',
+                    dispatch_command,
+                    "",
+                )
+            )
+            destination.write_text(payload, encoding="utf-8")
+            destination.chmod(
+                destination.stat().st_mode
+                | stat.S_IXUSR
+                | stat.S_IXGRP
+                | stat.S_IXOTH
+            )
         created.append(name)
     return created
 
@@ -71,8 +91,13 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pyproject", type=Path, required=True)
     parser.add_argument("--bin-dir", type=Path, required=True)
+    parser.add_argument(
+        "--windows",
+        action="store_true",
+        help="Render .cmd launchers that exec generation python.exe",
+    )
     args = parser.parse_args()
-    created = render_launchers(args.pyproject, args.bin_dir)
+    created = render_launchers(args.pyproject, args.bin_dir, windows=args.windows)
     print(f"rendered {len(created)} Python entrypoint launcher(s)")
     return 0
 
