@@ -6,6 +6,7 @@ import hashlib
 import os
 import re
 import shlex
+import subprocess
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ from vibecrafted_core.runtime_paths import vibecrafted_home
 from vibecrafted_core.workflow import SUPPORTED_WORKFLOWS, select_plan_model
 
 from .model import (
+    BASE_CUT_PREFIX,
     CRITICAL_FAIL_POLICIES,
     MATCHER_TYPES,
     READ_MUTATIONS,
@@ -33,6 +35,7 @@ from .model import (
     Policy,
     Recovery,
     Verify,
+    classify_base,
 )
 
 FORBIDDEN_COMMAND_NEEDLES = (
@@ -80,6 +83,7 @@ def doctor_dispatch(
     try:
         dispatch = parse_dispatch(text, base_dir=base_dir)
         policy_errors = _doctor_policy_errors(dispatch)
+        policy_errors.extend(_base_reachability_errors(dispatch))
         warnings = tuple(
             f"cuts[{index}].model: pin {cut.model!r} will be forwarded to "
             f"{cut.agent}; provider/account availability is not validated"
@@ -463,6 +467,14 @@ def _parse_cuts(
         if mode == "read" and mutation and mutation not in READ_MUTATIONS:
             errors.append(f"cuts[{index}].mutation: unsupported value {mutation!r}")
 
+        depends_on = _string_tuple(
+            item.get("depends_on"), f"cuts[{index}].depends_on", errors
+        )
+        integrator = bool(item.get("integrator"))
+        base = _string(item.get("base"))
+        if base:
+            _validate_base_declaration(base, index, depends_on, integrator, errors)
+
         cuts.append(
             Cut(
                 id=cut_id,
@@ -483,10 +495,9 @@ def _parse_cuts(
                 observational=observational,
                 verify=tuple(verify),
                 recovery=_parse_recovery(item.get("recovery"), index, errors),
-                depends_on=_string_tuple(
-                    item.get("depends_on"), f"cuts[{index}].depends_on", errors
-                ),
-                integrator=bool(item.get("integrator")),
+                depends_on=depends_on,
+                integrator=integrator,
+                base=base,
             )
         )
     return cuts
@@ -514,6 +525,42 @@ def _doctor_policy_errors(dispatch: Dispatch) -> list[str]:
             "policy.concurrency: shared CARGO_TARGET_DIR is forbidden for concurrent plans; unset CARGO_TARGET_DIR — Vibecrafted assigns $PWD/target per worker"
         )
     return errors
+
+
+def _base_reachability_errors(dispatch: Dispatch) -> list[str]:
+    """Falsify declared ``sha``/``branch`` bases against ``meta.repo`` (doctor only).
+
+    ``cut:<id>`` bases resolve at launch from the dependency's settled receipt,
+    so they carry no parse-time reachability check.
+    """
+    errors: list[str] = []
+    for index, cut in enumerate(dispatch.cuts):
+        kind = classify_base(cut.base)
+        if kind not in {"sha", "branch"}:
+            continue
+        ref = cut.base if kind == "sha" else f"refs/heads/{cut.base}"
+        if not _git_resolves(dispatch.meta.repo, ref):
+            errors.append(
+                f"cuts[{index}].base: base not reachable in meta.repo"
+                f" ({cut.base!r} as {kind})"
+            )
+    return errors
+
+
+def _git_resolves(repo: str, ref: str) -> bool:
+    """True when ``ref`` names a commit in ``repo``; any Git failure is False."""
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0
 
 
 _PROVIDER_RUNTIME_MARKERS = (
@@ -720,6 +767,36 @@ def _validate_recovery_targets(
             errors.append(f"cuts[{index}].recovery.goto: unknown target {target!r}")
 
 
+def _validate_base_declaration(
+    base: str,
+    cut_index: int,
+    depends_on: tuple[str, ...],
+    integrator: bool,
+    errors: list[str],
+) -> None:
+    """Validate one cut's declared ``base`` structurally (no Git access)."""
+    prefix = f"cuts[{cut_index}].base"
+    if integrator:
+        errors.append(
+            f"{prefix}: integrators work on the main checkout and cannot declare base"
+        )
+    kind = classify_base(base)
+    if kind != "cut":
+        return
+    target = base[len(BASE_CUT_PREFIX) :].strip()
+    if not target:
+        errors.append(f"{prefix}: 'cut:' requires a cut id")
+    elif target not in depends_on:
+        errors.append(f"{prefix}: {base!r} requires {target!r} in depends_on")
+
+
+def _base_cut_target(base: str) -> str:
+    """Return the cut id a ``cut:<id>`` base names, or "" for other forms."""
+    if classify_base(base) != "cut":
+        return ""
+    return base[len(BASE_CUT_PREFIX) :].strip()
+
+
 def _validate_cut_dag(cuts: list[Cut], errors: list[str]) -> None:
     """Validate dependency references and reject cycles before any launch."""
     positions = {cut.id: index for index, cut in enumerate(cuts)}
@@ -729,6 +806,9 @@ def _validate_cut_dag(cuts: list[Cut], errors: list[str]) -> None:
                 errors.append(f"cuts[{index}].depends_on: cut cannot depend on itself")
             elif dependency not in positions:
                 errors.append(f"cuts[{index}].depends_on: unknown cut {dependency!r}")
+        base_target = _base_cut_target(cut.base)
+        if base_target and base_target not in positions:
+            errors.append(f"cuts[{index}].base: unknown cut {base_target!r}")
 
     visiting: set[str] = set()
     visited: set[str] = set()
@@ -741,7 +821,11 @@ def _validate_cut_dag(cuts: list[Cut], errors: list[str]) -> None:
             errors.append(f"cuts: dependency cycle includes {cut_id!r}")
             return
         visiting.add(cut_id)
-        for dependency in by_id[cut_id].depends_on:
+        edges = list(by_id[cut_id].depends_on)
+        base_target = _base_cut_target(by_id[cut_id].base)
+        if base_target and base_target not in edges:
+            edges.append(base_target)
+        for dependency in edges:
             visit(dependency)
         visiting.remove(cut_id)
         visited.add(cut_id)

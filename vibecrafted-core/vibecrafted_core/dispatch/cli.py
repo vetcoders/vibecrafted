@@ -16,7 +16,7 @@ from typing import Any
 from vibecrafted_core.workflow import reserve_run_id
 
 from .doctor import diagnose_file
-from .model import STATE_VERIFIED, Dispatch
+from .model import BASE_CUT_PREFIX, STATE_VERIFIED, Cut, Dispatch, classify_base
 from .receipts import DispatchReceiptStore, ReceiptContractError
 from .schema import render_cell_prompt
 from .supervisor import DispatchResult, cleanup_settled_run, run_dispatch
@@ -205,6 +205,7 @@ def _dry_run(
         "run_id": run_id or "",
         "cuts": [cut.id for cut in dispatch.cuts],
         "prompts": prompt_paths,
+        "bases": {cut.id: _dry_run_base(dispatch, cut) for cut in dispatch.cuts},
         "artifacts": {
             "dry_run_dir": str(dry_run_dir),
             "tracker": str(dry_run_dir / "tracker.md"),
@@ -218,6 +219,31 @@ def _dry_run(
         encoding="utf-8",
     )
     return payload
+
+
+def _dry_run_base(dispatch: Dispatch, cut: Cut) -> dict[str, str]:
+    """Show one cut's resolved base the way a launch would see it.
+
+    ``cut:<id>`` bases resolve only after the dependency settles, so a
+    dry-run reports them as pending instead of guessing a commit.
+    """
+    kind = classify_base(cut.base)
+    if kind == "plan":
+        return {
+            "base_ref": "",
+            "base_sha": str(dispatch.meta.baseline.get("head") or ""),
+            "base_source": "plan",
+        }
+    if kind == "cut":
+        target = cut.base[len(BASE_CUT_PREFIX) :].strip()
+        return {
+            "base_ref": cut.base,
+            "base_sha": f"<pending: {target}>",
+            "base_source": "cut",
+        }
+    ref = cut.base if kind == "sha" else f"refs/heads/{cut.base}"
+    resolved = _git(dispatch.meta.repo, ["rev-parse", "--verify", f"{ref}^{{commit}}"])
+    return {"base_ref": cut.base, "base_sha": resolved, "base_source": kind}
 
 
 def _write_dry_run_tracker(
