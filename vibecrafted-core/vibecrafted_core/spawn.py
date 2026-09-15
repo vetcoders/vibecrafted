@@ -1748,14 +1748,7 @@ def prepare_interactive_workspace_launch(
                 ),
                 "monotonic": capability.supported,
             },
-            "measured_usage": {
-                "input_tokens": 0,
-                "cache_creation_input_tokens": 0,
-                "cache_read_input_tokens": 0,
-                "output_tokens": 0,
-                "total_tokens": 0,
-                "messages": 0,
-            },
+            "measured_usage": _empty_measured_usage(),
             "provider_session_id": effective_provider_session_id,
             "continuity": (
                 continuity_material.receipt()
@@ -1829,18 +1822,33 @@ def _git_output(root: Path, *args: str) -> str:
     return completed.stdout.strip() if completed.returncode == 0 else ""
 
 
+def _empty_measured_usage() -> dict[str, int]:
+    """Zeroed receipt shape shared by unmetered and Claude session readers."""
+    return {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "messages": 0,
+        "foreign_workspace_events": 0,
+    }
+
+
+def _path_is_within(candidate: Path, root: str) -> bool:
+    if not root:
+        return False
+    try:
+        return candidate.is_relative_to(Path(root))
+    except (ValueError, OSError):
+        return False
+
+
 class _UnmeteredUsage:
     """Null usage reader for providers lacking an attributable live side channel."""
 
     def poll(self) -> dict[str, int]:
-        return {
-            "input_tokens": 0,
-            "cache_creation_input_tokens": 0,
-            "cache_read_input_tokens": 0,
-            "output_tokens": 0,
-            "total_tokens": 0,
-            "messages": 0,
-        }
+        return _empty_measured_usage()
 
 
 class _ClaudeTranscriptUsage:
@@ -1860,6 +1868,8 @@ class _ClaudeTranscriptUsage:
         effective_root: str,
         provider_version: str,
         env: dict[str, str],
+        run_id: str = "",
+        run_root: str = "",
     ) -> None:
         configured = env.get("CLAUDE_CONFIG_DIR", "").strip()
         base = (
@@ -1871,11 +1881,21 @@ class _ClaudeTranscriptUsage:
         self.provider_session_id = provider_session_id
         self.effective_root = str(Path(effective_root).resolve())
         self.provider_version = provider_version.split()[0]
+        self.run_id = run_id
+        if run_root:
+            self.run_root = str(Path(run_root).resolve())
+        elif run_id:
+            self.run_root = str(
+                (control_plane_home() / "runtime_runs" / run_id).resolve()
+            )
+        else:
+            self.run_root = ""
         self.path: Path | None = None
         self.identity: tuple[int, int] | None = None
         self.offset = 0
         self.seen_message_ids: set[str] = set()
         self.totals = {field: 0 for field in self._FIELDS}
+        self.foreign_workspace_events = 0
         self._reject_existing_source()
 
     def _matching_paths(self) -> list[Path]:
@@ -1944,11 +1964,12 @@ class _ClaudeTranscriptUsage:
         if event.get("sessionId") != self.provider_session_id:
             raise RuntimeError("provider usage event belongs to a foreign session")
         event_cwd = event.get("cwd")
-        if (
-            not isinstance(event_cwd, str)
-            or str(Path(event_cwd).resolve()) != self.effective_root
-        ):
-            raise RuntimeError("provider usage event belongs to a foreign workspace")
+        if not isinstance(event_cwd, str) or not event_cwd.strip():
+            self.foreign_workspace_events += 1
+            return
+        if not self._cwd_is_own(event_cwd):
+            self.foreign_workspace_events += 1
+            return
         if event.get("version") != self.provider_version:
             raise RuntimeError(
                 "provider usage event version differs from probed executable"
@@ -1969,11 +1990,22 @@ class _ClaudeTranscriptUsage:
         for field_name, value in values.items():
             self.totals[field_name] += value
 
+    def _cwd_is_own(self, event_cwd: str) -> bool:
+        """Count cwd inside effective_root or this run's control-plane directory."""
+        try:
+            resolved = Path(event_cwd).expanduser().resolve()
+        except (OSError, RuntimeError, ValueError):
+            return False
+        return _path_is_within(resolved, self.effective_root) or _path_is_within(
+            resolved, self.run_root
+        )
+
     def as_dict(self) -> dict[str, int]:
         return {
             **self.totals,
             "total_tokens": sum(self.totals.values()),
             "messages": len(self.seen_message_ids),
+            "foreign_workspace_events": self.foreign_workspace_events,
         }
 
 
@@ -2150,6 +2182,7 @@ def launch_interactive_workspace(
                 effective_root=launch.effective_root,
                 provider_version=capability.provider_version,
                 env=child_env,
+                run_id=launch.run_id,
             )
         except Exception:
             _cleanup_unspawned_interactive_launch(launch)
@@ -2362,7 +2395,7 @@ def launch_interactive_workspace(
             receipt,
             status="failed",
             exit_code=1,
-            terminal_reason="wrapper_exception",
+            terminal_reason="killed_after_start",
             error=str(exc),
         )
         raise
@@ -2479,6 +2512,7 @@ def _launch_supervised_interactive_workspace(
                 effective_root=launch.effective_root,
                 provider_version=child_capability.provider_version,
                 env=base_env,
+                run_id=launch.run_id,
             )
         except Exception:
             _cleanup_unspawned_interactive_launch(launch)
@@ -2546,14 +2580,7 @@ def _launch_supervised_interactive_workspace(
         "provider_session_id": operator_session_id,
         "operator_policy": operator_policy.as_dict(),
         "supervision": dict(relation),
-        "measured_usage": {
-            "input_tokens": 0,
-            "cache_creation_input_tokens": 0,
-            "cache_read_input_tokens": 0,
-            "output_tokens": 0,
-            "total_tokens": 0,
-            "messages": 0,
-        },
+        "measured_usage": _empty_measured_usage(),
     }
     operator_command = interactive_policy_command(
         operator_policy.provider,
@@ -2928,7 +2955,7 @@ def _launch_supervised_interactive_workspace(
             child_receipt,
             status="failed",
             exit_code=1,
-            terminal_reason="wrapper_exception",
+            terminal_reason="killed_after_start",
             error=str(exc),
             extra={"provider_exit_code": _shell_status(child_code)},
         )
@@ -2938,7 +2965,7 @@ def _launch_supervised_interactive_workspace(
             operator_receipt,
             status="failed",
             exit_code=_shell_status(operator_code),
-            terminal_reason="wrapper_exception",
+            terminal_reason="killed_after_start",
             error=str(exc),
         )
         raise
@@ -3559,6 +3586,127 @@ def _cleanup_settled_interactive_launch(launch: InteractiveWorkspaceLaunch) -> s
         )
     except (OSError, RuntimeError, ValueError) as exc:
         return f"preserved:{exc}"
+
+
+def interactive_child_had_started(meta: Mapping[str, Any] | None) -> bool:
+    """True when the provider child was published before the failure."""
+    if not meta:
+        return False
+    if str(meta.get("spawned_at") or "").strip():
+        return True
+    if str(meta.get("terminal_reason") or "") in {
+        "killed_after_start",
+        "wrapper_exception",
+    }:
+        return True
+    return meta.get("status") == "active" and bool(meta.get("worker_pid"))
+
+
+def classify_interactive_failure_reason(existing_meta: Mapping[str, Any] | None) -> str:
+    """Distinguish a failed start from a live session that supervision then killed."""
+    if interactive_child_had_started(existing_meta):
+        return "killed_after_start"
+    return "interactive_start_failed"
+
+
+def format_interactive_launch_failure(
+    *,
+    run_id: str,
+    reason: str,
+    agent_session_id: str = "",
+    started: bool = False,
+    provider: str = "claude",
+) -> str:
+    """Panel text for an interactive-launch failure: run_id, reason, resume."""
+    verb = "was stopped after it had already started" if started else "failed to start"
+    lines = [f"Session {run_id} {verb}.", f"Reason: {reason}"]
+    session = str(agent_session_id or "").strip()
+    if session:
+        lines.append(f"{agent_cli_name(provider)} --resume {session}")
+    return "\n".join(lines)
+
+
+def record_interactive_launch_cli_failure(
+    *,
+    admission: Mapping[str, Any],
+    exc: BaseException,
+    provider: str = "claude",
+) -> tuple[str, dict[str, Any]]:
+    """Settle interactive-launch CLI failure without wiping a live receipt."""
+    run_id = str(admission.get("run_id") or "")
+    meta_path = control_plane_home() / "runtime_runs" / run_id / "meta.json"
+    existing = _read_meta(meta_path)
+    started = interactive_child_had_started(existing)
+    session = str(
+        existing.get("provider_session_id")
+        or existing.get("agent_session_id")
+        or admission.get("provider_session_id")
+        or admission.get("agent_session_id")
+        or ""
+    )
+    agent = str(existing.get("agent") or admission.get("agent") or provider)
+    if existing.get("liveness") == "terminal":
+        failed = dict(existing)
+        if failed.get("terminal_reason") == "wrapper_exception":
+            failed["terminal_reason"] = "killed_after_start"
+            failed.setdefault("error", str(exc))
+            _write_meta(meta_path, failed)
+        message = format_interactive_launch_failure(
+            run_id=str(failed.get("run_id") or run_id),
+            reason=str(failed.get("error") or exc),
+            agent_session_id=str(
+                failed.get("provider_session_id")
+                or failed.get("agent_session_id")
+                or session
+            ),
+            started=interactive_child_had_started(failed),
+            provider=agent,
+        )
+        return message, failed
+
+    if started:
+        failed = {
+            **existing,
+            "status": "failed",
+            "state": "failed",
+            "liveness": "terminal",
+            "terminal_reason": "killed_after_start",
+            "error": str(exc),
+            "completed_at": utc_now_iso(),
+        }
+        event_detail = "interactive session killed after start"
+    else:
+        failed = {
+            **admission,
+            "status": "failed",
+            "state": "failed",
+            "liveness": "terminal",
+            "terminal_reason": "interactive_start_failed",
+            "error": str(exc),
+            "completed_at": utc_now_iso(),
+        }
+        event_detail = "interactive start failed"
+    meta_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_meta(meta_path, failed)
+    append_event(
+        "lifecycle:failed",
+        run_id,
+        event_detail,
+        {**failed, "meta": str(meta_path)},
+    )
+    _project_interactive_snapshot(run_id)
+    message = format_interactive_launch_failure(
+        run_id=run_id,
+        reason=str(exc),
+        agent_session_id=str(
+            failed.get("provider_session_id")
+            or failed.get("agent_session_id")
+            or session
+        ),
+        started=started,
+        provider=agent,
+    )
+    return message, failed
 
 
 def _terminalize_interactive_launch(
@@ -5514,30 +5662,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         except (OSError, RuntimeError, ValueError) as exc:
             if claimed:
-                failed = {
-                    **admission,
-                    "status": "failed",
-                    "state": "failed",
-                    "liveness": "terminal",
-                    "terminal_reason": "interactive_start_failed",
-                    "error": str(exc),
-                    "completed_at": utc_now_iso(),
-                }
-                meta_path = (
-                    control_plane_home()
-                    / "runtime_runs"
-                    / admission["run_id"]
-                    / "meta.json"
+                message, _failed = record_interactive_launch_cli_failure(
+                    admission=admission,
+                    exc=exc,
+                    provider=str(args.provider),
                 )
-                _write_meta(meta_path, failed)
-                append_event(
-                    "lifecycle:failed",
-                    admission["run_id"],
-                    "interactive start failed",
-                    {**failed, "meta": str(meta_path)},
-                )
-                _project_interactive_snapshot(admission["run_id"])
-            print(str(exc), file=sys.stderr)
+                print(message, file=sys.stderr)
+            else:
+                print(str(exc), file=sys.stderr)
             return 2
         finally:
             if native_lease is not None:
