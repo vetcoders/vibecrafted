@@ -740,6 +740,7 @@ _vetcoders_launch_dashboard() {
   esac
 
   local layout_name layout_file session_name state inside_vc_frame current_session vc_frame_bin
+  local other_host="" other_rc=0
   _vetcoders_normalize_ambient_context
   layout_name="$(_vetcoders_dashboard_layout_name "${first_arg}")" || return 1
   (( $# )) && shift
@@ -759,6 +760,28 @@ _vetcoders_launch_dashboard() {
 
   _vetcoders_load_frontier_sidecars
 
+  session_name="$(_vetcoders_dashboard_session_name "$layout_name")"
+  # Layout aliases (dashboard/marbles/research/workflow) used to call
+  # ensure_vc_frame_session and raise a second full-chrome canvas when a
+  # live product host already existed. Outside a frame, join that host
+  # or refuse — never standalone chrome.
+  if ! _vetcoders_in_vc_frame; then
+    other_host="$(_vetcoders_start_resolve_inventory_host "$session_name")" || other_rc=$?
+    if ((other_rc == 2)); then
+      _vetcoders_start_refuse_inventory "$session_name"
+      return $?
+    fi
+    if ((other_rc == 3)); then
+      printf 'vc-start: a live Frame host already exists; not creating a standalone chrome session. Join the existing host with: vc-frame --session <host> project-workspace %s\n' \
+        "$(_vetcoders_shell_quote "$session_name")" >&2
+      return 4
+    fi
+    if [[ -n "$other_host" && "$other_host" != "$session_name" ]]; then
+      _vetcoders_start_refuse_standalone_chrome "$other_host" "$session_name"
+      return $?
+    fi
+  fi
+
   layout_file="$(_vetcoders_dashboard_layout_file "$layout_name" 2>/dev/null || true)"
   [[ -n "$layout_file" ]] || {
     echo "Dashboard layout not found for: $layout_name" >&2
@@ -767,7 +790,6 @@ _vetcoders_launch_dashboard() {
     return 1
   }
 
-  session_name="$(_vetcoders_dashboard_session_name "$layout_name")"
   state="$(_vetcoders_vc_frame_session_state "$session_name")"
   # Trusted attached-context signal only: stale VC_FRAME/ZELLIJ leaks in a
   # parent shell must not route new-tab/switch-session at a session this
@@ -985,6 +1007,104 @@ _vetcoders_start_session_inventory_state() {
     fi
   done <<<"$listing"
   printf '%s\n' "$found"
+}
+
+# Live (non-EXITED) session names from the same inventory as
+# `_vetcoders_start_session_inventory_state`. One name per line. Empty
+# inventory is success with no lines. Parse/engine failure is 2; the
+# reason is left in `_vetcoders_start_inventory_error`.
+_vetcoders_start_live_inventory_hosts() {
+  local vc_frame_bin="" listing="" rc=0 line="" name=""
+  _vetcoders_start_inventory_error=""
+  vc_frame_bin="$(_vetcoders_vc_frame_bin 2>/dev/null)" || {
+    _vetcoders_start_inventory_error="the selected vc-frame engine is unavailable"
+    printf 'vc-start: %s\n' "$_vetcoders_start_inventory_error" >&2
+    return 2
+  }
+  listing="$(_vetcoders_start_frame_env "$vc_frame_bin" list-sessions --no-formatting 2>&1)" || rc=$?
+  if ((rc != 0)); then
+    if [[ "$listing" == *"No active vc-frame sessions found."* ]]; then
+      return 0
+    fi
+    _vetcoders_start_inventory_error="list-sessions exited ${rc}${listing:+: ${listing%%$'\n'*}}"
+    printf 'vc-start: %s\n' "$_vetcoders_start_inventory_error" >&2
+    return 2
+  fi
+  while IFS= read -r line; do
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -n "$line" ]] || continue
+    case "$line" in
+      *" [Created "*) ;;
+      *)
+        _vetcoders_start_inventory_error="unrecognized inventory line: ${line}"
+        printf 'vc-start: %s\n' "$_vetcoders_start_inventory_error" >&2
+        return 2
+        ;;
+    esac
+    name="${line%% \[Created *}"
+    if [[ "$line" != *"(EXITED"* ]]; then
+      printf '%s\n' "$name"
+    fi
+  done <<<"$listing"
+  return 0
+}
+
+# Pick the live product host for an outside caller. $1 is the workspace
+# about to be created and is never chosen. Returns:
+#   0  printed one host name
+#   1  no live host (first-session standalone create is legal)
+#   2  inventory unreadable
+#   3  more than one live session and no unique-client owner
+_vetcoders_start_resolve_inventory_host() {
+  local exclude="${1:-}" hosts="" line="" count=0 chosen="" unique="" uniq_count=0
+  local vc_frame_bin="" listing_rc=0
+  hosts="$(_vetcoders_start_live_inventory_hosts)" || listing_rc=$?
+  if ((listing_rc != 0)); then
+    return 2
+  fi
+  while IFS= read -r line; do
+    [[ -n "$line" && "$line" != "$exclude" ]] || continue
+    count=$((count + 1))
+    if [[ -z "$chosen" ]]; then
+      chosen="$line"
+    fi
+  done <<<"$hosts"
+  if ((count == 0)); then
+    return 1
+  fi
+  if ((count == 1)); then
+    printf '%s\n' "$chosen"
+    return 0
+  fi
+  vc_frame_bin="$(_vetcoders_vc_frame_bin 2>/dev/null)" || return 2
+  while IFS= read -r line; do
+    [[ -n "$line" && "$line" != "$exclude" ]] || continue
+    if _vetcoders_start_host_has_unique_client "$line" "$vc_frame_bin"; then
+      uniq_count=$((uniq_count + 1))
+      unique="$line"
+    fi
+  done <<<"$hosts"
+  if ((uniq_count == 1)); then
+    printf '%s\n' "$unique"
+    return 0
+  fi
+  _vetcoders_start_inventory_error="multiple live vc-frame sessions; refusing a second chrome canvas"
+  return 3
+}
+
+# One-line instruction naming the live host and the guest command.
+_vetcoders_start_standalone_chrome_instruction() {
+  local host="${1:-}" guest="${2:-}"
+  printf 'vc-start: live host %s exists; not creating a standalone chrome session. Join it with: vc-frame --session %s project-workspace %s\n' \
+    "$(_vetcoders_shell_quote "$host")" \
+    "$(_vetcoders_shell_quote "$host")" \
+    "$(_vetcoders_shell_quote "$guest")" >&2
+}
+
+# Refuse an outside door that would have raised its own canvas. Exit 4.
+_vetcoders_start_refuse_standalone_chrome() {
+  _vetcoders_start_standalone_chrome_instruction "$@"
+  return 4
 }
 
 # Refuse a start whose name is taken. Every command printed is a real one:
@@ -1487,38 +1607,17 @@ _vetcoders_start_project_guest_into_host() {
   return 4
 }
 
-# Inside a live Frame host: exclusive guest create + project through the
-# attached owner. Host canvas stays; switch-session is never used.
-_vetcoders_start_inside_host_guest() {
-  local session_name="${1:-}" root="${2:-}"
-  local vc_frame_bin="" layout_file="" host="" tab="" rc=0 state=""
+# Guest create + project into a named live host. Callers have already
+# admitted the guest API and a unique host client. Host canvas stays;
+# switch-session is never used.
+_vetcoders_start_create_guest_and_project() {
+  local session_name="${1:-}" root="${2:-}" host="${3:-}"
+  local vc_frame_bin="" layout_file="" tab="" rc=0 state=""
   local PATH="${PATH:-}"
   PATH="$(_vetcoders_path_with_bundled_bin_priority "$PATH")"
   export PATH
-  _vetcoders_require_vc_frame || return 1
-  _vetcoders_pin_vc_frame_config_dir || return $?
   vc_frame_bin="$(_vetcoders_vc_frame_bin)" || return 1
-
-  if ! _vetcoders_start_frame_guest_api_supported "$vc_frame_bin"; then
-    printf 'vc-start: shared-host guest workspace creation is unavailable in this generation; the Frame guest API must be admitted before creating a workspace inside this host.\n' >&2
-    return 4
-  fi
-
-  host="$(_vetcoders_start_resolve_attached_host)" || {
-    printf 'vc-start: could not determine the live Frame host from the attached owner; refusing before creating %s.\n' \
-      "$(_vetcoders_shell_quote "$session_name")" >&2
-    return 4
-  }
-  if [[ "$host" == "$session_name" ]]; then
-    printf 'vc-start: host %s cannot project into itself; pass a different workspace name.\n' \
-      "$(_vetcoders_shell_quote "$host")" >&2
-    return 4
-  fi
-  if ! _vetcoders_start_host_has_unique_client "$host" "$vc_frame_bin"; then
-    printf 'vc-start: Frame host %s does not have exactly one attached client; refusing before creating %s so the previous canvas stays put.\n' \
-      "$(_vetcoders_shell_quote "$host")" "$(_vetcoders_shell_quote "$session_name")" >&2
-    return 4
-  fi
+  [[ -n "$host" && "$host" != "$session_name" ]] || return 4
   tab="$(_vetcoders_start_resolve_host_tab "$host" "$vc_frame_bin" 2>/dev/null || true)"
 
   _vetcoders_product_entry_prepare "$root" || return $?
@@ -1566,16 +1665,135 @@ _vetcoders_start_inside_host_guest() {
   return 0
 }
 
+# Inside a live Frame host: exclusive guest create + project through the
+# attached owner. Host canvas stays; switch-session is never used.
+_vetcoders_start_inside_host_guest() {
+  local session_name="${1:-}" root="${2:-}"
+  local vc_frame_bin="" host=""
+  local PATH="${PATH:-}"
+  PATH="$(_vetcoders_path_with_bundled_bin_priority "$PATH")"
+  export PATH
+  _vetcoders_require_vc_frame || return 1
+  _vetcoders_pin_vc_frame_config_dir || return $?
+  vc_frame_bin="$(_vetcoders_vc_frame_bin)" || return 1
+
+  if ! _vetcoders_start_frame_guest_api_supported "$vc_frame_bin"; then
+    printf 'vc-start: shared-host guest workspace creation is unavailable in this generation; the Frame guest API must be admitted before creating a workspace inside this host.\n' >&2
+    return 4
+  fi
+
+  host="$(_vetcoders_start_resolve_attached_host)" || {
+    printf 'vc-start: could not determine the live Frame host from the attached owner; refusing before creating %s.\n' \
+      "$(_vetcoders_shell_quote "$session_name")" >&2
+    return 4
+  }
+  if [[ "$host" == "$session_name" ]]; then
+    printf 'vc-start: host %s cannot project into itself; pass a different workspace name.\n' \
+      "$(_vetcoders_shell_quote "$host")" >&2
+    return 4
+  fi
+  if ! _vetcoders_start_host_has_unique_client "$host" "$vc_frame_bin"; then
+    printf 'vc-start: Frame host %s does not have exactly one attached client; refusing before creating %s so the previous canvas stays put.\n' \
+      "$(_vetcoders_shell_quote "$host")" "$(_vetcoders_shell_quote "$session_name")" >&2
+    return 4
+  fi
+  _vetcoders_start_create_guest_and_project "$session_name" "$root" "$host"
+}
+
+# Outside a frame: a live host in the inventory is the product canvas.
+# Project the workspace as a guest, or refuse with the host and guest command.
+# Never create a standalone chrome session beside that host.
+_vetcoders_start_outside_join_live_host() {
+  local session_name="${1:-}" root="${2:-}" host="${3:-}"
+  local vc_frame_bin="" layout_file="" rc=0 state=""
+  local PATH="${PATH:-}"
+  PATH="$(_vetcoders_path_with_bundled_bin_priority "$PATH")"
+  export PATH
+  _vetcoders_require_vc_frame || return 1
+  _vetcoders_pin_vc_frame_config_dir || return $?
+  vc_frame_bin="$(_vetcoders_vc_frame_bin)" || return 1
+  [[ -n "$host" ]] || return 4
+  if [[ "$host" == "$session_name" ]]; then
+    printf 'vc-start: host %s cannot project into itself; pass a different workspace name.\n' \
+      "$(_vetcoders_shell_quote "$host")" >&2
+    return 4
+  fi
+  if ! _vetcoders_start_frame_guest_api_supported "$vc_frame_bin"; then
+    _vetcoders_start_refuse_standalone_chrome "$host" "$session_name"
+    return $?
+  fi
+  if _vetcoders_start_host_has_unique_client "$host" "$vc_frame_bin"; then
+    _vetcoders_start_create_guest_and_project "$session_name" "$root" "$host"
+    return $?
+  fi
+  # Detached live host: still no second chrome canvas. Same create-only
+  # shape as `_vetcoders_start_create_before_terminal` (no product
+  # prepare — that belongs to a terminal child), but with the guest kind.
+  layout_file="$(_vetcoders_operator_layout_file 2>/dev/null || true)"
+  _vetcoders_start_create_workspace_session "$vc_frame_bin" "$session_name" "$layout_file" guest || rc=$?
+  if ((rc == 3)); then
+    state="$(_vetcoders_start_session_inventory_state "$session_name")"
+    [[ "$state" == dead ]] || state="live"
+    _vetcoders_start_refuse_existing_workspace "$session_name" "$state" "$root"
+    return $?
+  fi
+  ((rc == 0)) || return "$rc"
+  printf 'vc-start: created workspace %s for %s\n' \
+    "$(_vetcoders_shell_quote "$session_name")" "$(_vetcoders_shell_quote "$root")"
+  _vetcoders_start_standalone_chrome_instruction "$host" "$session_name"
+  export VIBECRAFTED_OPERATOR_SESSION="$session_name"
+  return 0
+}
+
+# Outside-caller door helper. Returns:
+#   0  joined the live host (or refused after a host was found)
+#   1  no live host — caller may create the first standalone session
+#   3  guest name already taken
+#   4  refused standalone chrome / inventory / projection
+_vetcoders_start_maybe_join_outside_live_host() {
+  local session_name="${1:-}" root="${2:-}" host="" resolve_rc=0
+  [[ -n "$session_name" ]] || return 1
+  [[ -z "${VIBECRAFTED_START_CREATED_SESSION:-}" ]] || return 1
+  if _vetcoders_in_vc_frame; then
+    return 1
+  fi
+  host="$(_vetcoders_start_resolve_inventory_host "$session_name")" || resolve_rc=$?
+  case "$resolve_rc" in
+    2)
+      _vetcoders_start_refuse_inventory "$session_name"
+      return $?
+      ;;
+    3)
+      printf 'vc-start: a live Frame host already exists; not creating a standalone chrome session. Join the existing host with: vc-frame --session <host> project-workspace %s\n' \
+        "$(_vetcoders_shell_quote "$session_name")" >&2
+      return 4
+      ;;
+    0)
+      if [[ -n "$host" && "$host" != "$session_name" ]]; then
+        _vetcoders_start_outside_join_live_host "$session_name" "$root" "$host"
+        return $?
+      fi
+      return 1
+      ;;
+  esac
+  return 1
+}
+
 # Create-only start from a caller WITHOUT a controlling terminal: the create
 # itself needs no PTY, so it happens here, before any window -- the caller's
 # exit status reflects the workspace, not the terminal host. Config pin and
 # engine admission only; the full product preparation (workspace record,
 # server eye) runs in the terminal child, which has the surface.
 _vetcoders_start_create_before_terminal() {
-  local session_name="${1:-}" root="${2:-}" vc_frame_bin="" layout_file="" rc=0 state=""
+  local session_name="${1:-}" root="${2:-}" vc_frame_bin="" layout_file="" rc=0 state="" join_rc=0
   local PATH="${PATH:-}"
   PATH="$(_vetcoders_path_with_bundled_bin_priority "$PATH")"
   export PATH
+  _vetcoders_start_maybe_join_outside_live_host "$session_name" "$root"
+  join_rc=$?
+  if ((join_rc != 1)); then
+    return "$join_rc"
+  fi
   _vetcoders_require_vc_frame || return 1
   _vetcoders_pin_vc_frame_config_dir || return $?
   vc_frame_bin="$(_vetcoders_vc_frame_bin)" || return 1
@@ -1594,7 +1812,7 @@ _vetcoders_start_create_before_terminal() {
 # the root). Re-read the inventory (cheap; the create below is exclusive
 # anyway), create unless this very start already did, then enter.
 _vetcoders_start_launch_workspace() {
-  local session_name="${1:-}" root="${2:-}" vc_frame_bin="" layout_file="" state="" rc=0
+  local session_name="${1:-}" root="${2:-}" vc_frame_bin="" layout_file="" state="" rc=0 join_rc=0
   if [[ -n "${VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS:-}" ]]; then
     printf 'vc-start: product preparation failed; the workspace was not created.\n' >&2
     return "$VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS"
@@ -1634,6 +1852,11 @@ _vetcoders_start_launch_workspace() {
       _vetcoders_record_vc_frame_attachment live "$session_name" || return $?
       ;;
     *)
+      _vetcoders_start_maybe_join_outside_live_host "$session_name" "$root"
+      join_rc=$?
+      if ((join_rc != 1)); then
+        return "$join_rc"
+      fi
       _vetcoders_start_create_workspace_session "$vc_frame_bin" "$session_name" "$layout_file" || rc=$?
       if ((rc == 3)); then
         state="$(_vetcoders_start_session_inventory_state "$session_name")"
@@ -1654,7 +1877,7 @@ _vetcoders_start_launch_workspace() {
 # Shared entry for shell `vc-start` and deck `cmd_start`, after
 # _vetcoders_start_prepare_arguments. $@ = _vetcoders_start_frame_argv.
 _vetcoders_start_entry() {
-  local root="" session_name="" state="" rc=0
+  local root="" session_name="" state="" rc=0 join_rc=0
   root="$(_vetcoders_start_resolve_root)" || {
     printf 'vc-start: could not resolve the project root.\n' >&2
     return 1
@@ -1721,6 +1944,17 @@ _vetcoders_start_entry() {
   if _vetcoders_in_vc_frame && [[ -z "${VIBECRAFTED_START_CREATED_SESSION:-}" ]]; then
     _vetcoders_start_inside_host_guest "$session_name" "$root"
     return $?
+  fi
+
+  # Outside: a live host in the inventory is the product canvas. Do not
+  # raise a second chrome session (create-before-terminal / launch-workspace
+  # used to call create without the guest kind). Join as guest, or refuse.
+  if [[ -z "${VIBECRAFTED_START_CREATED_SESSION:-}" ]]; then
+    _vetcoders_start_maybe_join_outside_live_host "$session_name" "$root"
+    join_rc=$?
+    if ((join_rc != 1)); then
+      return "$join_rc"
+    fi
   fi
 
   # 4+5 without a surface: create here, then open the terminal that enters.
