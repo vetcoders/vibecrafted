@@ -899,6 +899,181 @@ def _vc_frame_truth_drift_findings(
     ]
 
 
+_PS_SCAN_TIMEOUT_SEC = 10
+
+
+def _run_ps_scan(runner: Callable[..., Any]) -> tuple[int, str, str]:
+    """Run one process-table scan and return (rc, stdout, stderr). Never raises."""
+    try:
+        completed = runner(
+            ["ps", "-axo", "pid=,comm="],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_PS_SCAN_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired:
+        return 124, "", f"ps timed out after {_PS_SCAN_TIMEOUT_SEC}s"
+    except OSError as exc:
+        return 127, "", str(exc)
+    return (
+        int(getattr(completed, "returncode", 1) or 0),
+        str(getattr(completed, "stdout", "") or ""),
+        str(getattr(completed, "stderr", "") or ""),
+    )
+
+
+def _live_vc_frame_servers(ps_output: str) -> tuple[list[tuple[int, str]], list[int]]:
+    """Extract vc-frame server rows: (pid, path) pairs plus unresolvable pids.
+
+    A row whose executable carries no path separator (Linux ``comm`` truncates
+    to the bare command name) cannot be attributed to a generation directory;
+    its pid is returned separately so the caller degrades honestly instead of
+    guessing.
+    """
+    servers: list[tuple[int, str]] = []
+    unresolved: list[int] = []
+    for line in ps_output.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        pid_text, _, exe = stripped.partition(" ")
+        exe = exe.strip()
+        if not exe:
+            continue
+        try:
+            pid = int(pid_text)
+        except ValueError:
+            continue
+        if Path(exe).name != "vc-frame":
+            continue
+        if "/" in exe:
+            servers.append((pid, exe))
+        else:
+            unresolved.append(pid)
+    return servers, unresolved
+
+
+def _vc_frame_server_generation(exe: str) -> str:
+    """Name the generation a live vc-frame executable runs from.
+
+    The app channel lays servers out as ``releases/<generation>/libexec/
+    vc-frame``; for any other installed layout the generation directory is the
+    nearest ancestor carrying a ``VERSION`` file. An executable that matches
+    neither shape reports ``unknown`` rather than a guess.
+    """
+    parts = Path(exe).parts
+    if "releases" in parts:
+        index = parts.index("releases")
+        if index + 1 < len(parts):
+            return parts[index + 1]
+    exe_path = Path(exe)
+    if exe_path.is_file():
+        for ancestor in exe_path.parents:
+            if (ancestor / "VERSION").is_file():
+                return ancestor.name
+    return "unknown"
+
+
+def _vc_frame_generation_split_findings(
+    *,
+    which: Callable[[str], str | None] = shutil.which,
+    runner: Callable[..., Any] | None = None,
+    generation_resolver: Callable[[], Path] | None = None,
+) -> list[_Finding]:
+    """Tripwire: live vc-frame servers must run from the active generation.
+
+    Sessions silently outlive generations — the launcher already points at a
+    newer release while every live vc-frame server still runs older bytes, so
+    shipped fixes never reach the screen. Doctor measures and reports the
+    split; restarting anything or refusing the stale server is a separate cut.
+    """
+    from .runtime_paths import GenerationResolutionError, resolve_active_generation
+
+    hint = ""
+    if which("diagnose-which"):
+        hint = " A deeper report is available: run `diagnose-which vc-frame`."
+
+    resolver = generation_resolver or resolve_active_generation
+    try:
+        active = resolver()
+    except (GenerationResolutionError, OSError, RuntimeError) as exc:
+        return [
+            _Finding(
+                "warn",
+                "vc-frame:generation-split",
+                f"inconclusive: cannot resolve the active generation ({exc}), "
+                "so the generation-split tripwire cannot prove anything about "
+                f"live vc-frame servers.{hint}",
+            )
+        ]
+
+    rc, out, err = _run_ps_scan(runner or subprocess.run)
+    if rc != 0:
+        detail = (err or out).strip() or f"exit {rc}"
+        return [
+            _Finding(
+                "warn",
+                "vc-frame:generation-split",
+                f"inconclusive: process scan unavailable ({detail}) — cannot "
+                "prove live vc-frame servers match the active generation "
+                f"{active.name}.{hint}",
+            )
+        ]
+
+    servers, unresolved = _live_vc_frame_servers(out)
+    if unresolved:
+        return [
+            _Finding(
+                "warn",
+                "vc-frame:generation-split",
+                f"inconclusive: {len(unresolved)} live vc-frame process(es) "
+                f"(pids {', '.join(str(pid) for pid in unresolved)}) have no "
+                "resolvable executable path in the process scan — cannot "
+                f"prove they match the active generation {active.name}.{hint}",
+            )
+        ]
+    if not servers:
+        return [
+            _Finding(
+                "ok",
+                "vc-frame:generation-split",
+                f"no live vc-frame servers — nothing claimed "
+                f"(active generation {active.name})",
+            )
+        ]
+
+    stale = [
+        (pid, _vc_frame_server_generation(exe), exe)
+        for pid, exe in servers
+        if not _is_inside(Path(exe), active)
+    ]
+    if stale:
+        rows = "; ".join(
+            f"pid {pid} runs generation {generation} ({exe})"
+            for pid, generation, exe in stale
+        )
+        return [
+            _Finding(
+                "warn",
+                "vc-frame:generation-split",
+                f"SPLIT: active generation is {active.name} but "
+                f"{len(stale)} of {len(servers)} live vc-frame server(s) run "
+                f"stale generations: {rows}. Sessions outlive generations "
+                "silently — fixes ship and never reach the screen. Restart "
+                f"the stale servers; doctor only reports.{hint}",
+            )
+        ]
+    return [
+        _Finding(
+            "ok",
+            "vc-frame:generation-split",
+            f"all {len(servers)} live vc-frame server(s) match the active "
+            f"generation {active.name}.{hint}",
+        )
+    ]
+
+
 _RELEASE_REPO_DEFAULT = "vetcoders/vibecrafted"
 _RELEASE_SOURCE_GATE_WORKFLOW = "Release source gate"
 _RELEASE_OPERATOR_BUTTON = (
@@ -1185,6 +1360,7 @@ def doctor_run(
         findings.extend(_packaged_asset_findings())
     findings.extend(_launcher_shim_findings())
     findings.extend(_vc_frame_launcher_findings())
+    findings.extend(_vc_frame_generation_split_findings())
     findings.extend(_codex_mcp_config_findings())
     findings.extend(_server_supervision_findings())
     findings.extend(_vc_frame_delivery_findings())
