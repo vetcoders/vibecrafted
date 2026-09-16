@@ -714,7 +714,10 @@ class Scene:
         env["VIBECRAFTED_HOME"] = str(self.home / ".vibecrafted")
         env["XDG_CONFIG_HOME"] = str(self.home / ".config")
         env["XDG_DATA_HOME"] = str(self.home / ".local" / "share")
-        env["VC_FRAME_SOCKET_DIR"] = str(self.tmp_path / "sock")
+        sock = self.tmp_path / "sock"
+        sock.mkdir(exist_ok=True)
+        env["VC_FRAME_SOCKET_DIR"] = str(sock)
+        env["ZELLIJ_SOCKET_DIR"] = str(sock)
         env["VIBECRAFTED_PRODUCT_CORE_CLI"] = str(self.owner)
         env["OWNER_CLI_LOG"] = str(self.owner_log)
         env["VC_FRAME_LOG"] = str(self.frame_log)
