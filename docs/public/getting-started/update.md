@@ -25,6 +25,8 @@ Update checks the installed version against the latest release and reinstalls wh
 
 When you are already current, update says so; pass `--force` to reinstall the same version. From a local checkout, `make update` pulls latest and reinstalls.
 
+Install and update also reconcile **skill-copy shadows**: real directory copies of bundled skills that a pre-3.x installer left in per-runtime skill dirs such as `~/.junie/skills`. A copy whose Vibecrafted provenance is proven is moved into `~/.vibecrafted/backups/installer/shadowed-views-<timestamp>/` and then removed, so the canonical `~/.agents/skills` view is the only truth. A `vc-*` directory whose provenance cannot be proven is only reported — never removed. `vibecrafted doctor` names both cases; see [Doctor](../troubleshooting/doctor.md).
+
 ## Runtime generations
 
 The public launcher (`~/.local/bin/vibecrafted` and its `vc-*` aliases) enters only the command deck under:
