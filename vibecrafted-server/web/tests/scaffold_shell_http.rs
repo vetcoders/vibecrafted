@@ -305,7 +305,9 @@ async fn populated_plan_renders_studio_inside_the_shared_frame() {
     assert_shared_chrome("editor-explicit", &content_type, &html);
     assert!(html.contains(r#"class="review-shell""#));
 
-    // Library lists the plan as a card inside the same frame.
+    // Library lists plans as dense rows inside the same frame.
+    home.setup_plan("vetcoders", "vc-frame", "2026_0915", "vc-frame-f03-0915");
+    home.setup_plan("vetcoders", "vibecrafted", "2026_0916", "vc-truth-0916");
     let (status, content_type, html) = get(&app, "/scaffold/library").await;
     assert_eq!(status, StatusCode::OK);
     assert_shared_chrome("library", &content_type, &html);
@@ -313,6 +315,9 @@ async fn populated_plan_renders_studio_inside_the_shared_frame() {
     assert!(html.contains("<h1>Plans</h1>"));
     assert!(!html.contains("Choose the truth"));
     assert!(!html.contains("you want to move"));
+    assert!(html.contains("Shell Plan"));
+    assert!(html.contains("Vc Frame F03 0915"));
+    assert!(html.contains("Vc Truth 0916"));
     assert!(html.contains(
         r#"href="/scaffold?org=vetcoders&amp;repo=vibecrafted&amp;day=2026_0908&amp;plan_id=shell-plan""#
     ));
