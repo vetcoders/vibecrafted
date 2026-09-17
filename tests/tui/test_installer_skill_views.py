@@ -1,3 +1,5 @@
+import hashlib
+import json
 from pathlib import Path
 
 from scripts import vetcoders_install as installer
@@ -388,3 +390,241 @@ def test_doctor_reports_stale_real_directory_shadow(
         "reconcile stale runtime skill copies" in action
         for action in installer._doctor_action_items(findings)
     )
+
+
+# ---------------------------------------------------------------------------
+# Historical-release provenance manifest (June-2026 copies carry no markers)
+# ---------------------------------------------------------------------------
+
+PLAIN_SKILL_MD = """---
+name: vc-x
+description: a skill with none of the marker fields
+---
+
+body
+"""
+
+
+def _write_provenance(store: Path, skills: dict[str, list[str]]) -> Path:
+    manifest = store / installer.SKILL_PROVENANCE_FILE
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema": installer.SKILL_PROVENANCE_SCHEMA,
+                "generated_at": "2026-09-17",
+                "skills": skills,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return manifest
+
+
+def _plain_store_skill(store: Path, name: str, body: str) -> Path:
+    skill = store / name
+    skill.mkdir(parents=True, exist_ok=True)
+    (skill / "SKILL.md").write_text(PLAIN_SKILL_MD + body, encoding="utf-8")
+    return skill
+
+
+def test_historical_release_hash_proves_a_markerless_stale_copy(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The real June-2026 ~/.junie/skills copies carry no marker token at all,
+    so the only offline proof left is the set of hashes we ever shipped."""
+    home = tmp_path / "home"
+    crafted_home = tmp_path / "crafted"
+    store = tmp_path / "store"
+    _pin_home(monkeypatch, home, crafted_home)
+    _plain_store_skill(store, "vc-x", "2026-09 body\n")
+    canonical = _canonical_view(home, store, "vc-x")
+    june = PLAIN_SKILL_MD + "june 2026 body\n"
+    shadow = _junie_copy(home, "vc-x", june)
+    _write_provenance(
+        store, {"vc-x": [hashlib.sha256(june.encode("utf-8")).hexdigest()]}
+    )
+
+    # No marker proof is available in either copy — the manifest is the proof.
+    assert installer._managed_skill_marker_tokens(shadow) == set()
+    detected = installer.collect_shadowed_skill_dirs(store, ["vc-x"])
+    assert [(d.classification, d.is_managed) for d in detected] == [
+        ("managed_stale", True)
+    ]
+    assert "matches a historical Vibecrafted release" in detected[0].detail
+
+    reconciled, kept = installer.reconcile_shadowed_skill_dirs(
+        store, ["vc-x"], ["agents"], shadows=detected
+    )
+
+    assert [d.path for d in reconciled] == [shadow]
+    assert kept == []
+    assert not shadow.exists()
+    quarantined = _quarantine_dirs(crafted_home)
+    assert len(quarantined) == 1
+    assert (quarantined[0] / "junie" / "vc-x" / "SKILL.md").read_text(
+        encoding="utf-8"
+    ) == june
+    assert canonical.is_symlink()
+
+
+def test_hand_edited_copy_absent_from_the_manifest_stays_unknown(
+    tmp_path: Path, monkeypatch
+) -> None:
+    home = tmp_path / "home"
+    crafted_home = tmp_path / "crafted"
+    store = tmp_path / "store"
+    _pin_home(monkeypatch, home, crafted_home)
+    _plain_store_skill(store, "vc-x", "2026-09 body\n")
+    _canonical_view(home, store, "vc-x")
+    june = PLAIN_SKILL_MD + "june 2026 body\n"
+    shadow = _junie_copy(home, "vc-x", june + "operator edit\n")
+    _write_provenance(
+        store, {"vc-x": [hashlib.sha256(june.encode("utf-8")).hexdigest()]}
+    )
+
+    detected = installer.collect_shadowed_skill_dirs(store, ["vc-x"])
+    assert [d.classification for d in detected] == ["unknown"]
+
+    reconciled, kept = installer.reconcile_shadowed_skill_dirs(
+        store, ["vc-x"], ["agents"], shadows=detected
+    )
+
+    assert reconciled == []
+    assert [d.path for d in kept] == [shadow]
+    assert shadow.is_dir()
+
+
+def test_missing_or_corrupt_manifest_degrades_to_the_other_proofs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The manifest only ever adds certainty: a machine without it, or with a
+    truncated one, must still install — and must still see the marker proof."""
+    home = tmp_path / "home"
+    crafted_home = tmp_path / "crafted"
+    store = tmp_path / "store"
+    _pin_home(monkeypatch, home, crafted_home)
+    _store_skill(store, "vc-x", "canonical body\n")
+    _canonical_view(home, store, "vc-x")
+    _junie_copy(home, "vc-x", MANAGED_SKILL_MD + "june 2026 body\n")
+
+    assert installer.load_skill_provenance(store) == {}
+    assert [
+        d.classification for d in installer.collect_shadowed_skill_dirs(store, ["vc-x"])
+    ] == ["managed_stale"]
+
+    (store / installer.SKILL_PROVENANCE_FILE).write_text(
+        '{"schema": "vibecrafted.skill', encoding="utf-8"
+    )
+    assert installer.load_skill_provenance(store) == {}
+    assert [
+        d.classification for d in installer.collect_shadowed_skill_dirs(store, ["vc-x"])
+    ] == ["managed_stale"]
+
+    # A well-formed document of some other schema is not our proof either.
+    (store / installer.SKILL_PROVENANCE_FILE).write_text(
+        json.dumps({"schema": "something.else.v1", "skills": {"vc-x": ["deadbeef"]}}),
+        encoding="utf-8",
+    )
+    assert installer.load_skill_provenance(store) == {}
+
+
+def test_prose_containing_a_marker_word_never_proves_provenance(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`dogfooding:` is a plain English word plus a colon. An operator skill
+    that merely mentions it must not inherit the store copy's provenance."""
+    home = tmp_path / "home"
+    crafted_home = tmp_path / "crafted"
+    store = tmp_path / "store"
+    _pin_home(monkeypatch, home, crafted_home)
+    _store_skill(store, "vc-x", 'dogfooding: "required"\n')
+    _canonical_view(home, store, "vc-x")
+    shadow = _junie_copy(
+        home,
+        "vc-x",
+        "---\nname: vc-x\n---\n\nSome notes on dogfooding: we run it daily.\n"
+        "Also mentions loctree_value: high, inline.\n",
+    )
+
+    assert installer._managed_skill_marker_tokens(shadow) == set()
+    detected = installer.collect_shadowed_skill_dirs(store, ["vc-x"])
+    assert [d.classification for d in detected] == ["unknown"]
+    assert shadow.is_dir()
+
+
+# ---------------------------------------------------------------------------
+# Symlinked runtime skill dirs must never route a removal into the store
+# ---------------------------------------------------------------------------
+
+
+def test_symlinked_runtime_skills_dir_is_never_a_shadow_candidate(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`ln -s ~/.vibecrafted/skills ~/.junie/skills` is the obvious manual
+    workaround for the junie gap. Comparing the store with itself classifies
+    every skill as an identical copy, and rmtree would follow the link and
+    delete the canonical store."""
+    home = tmp_path / "home"
+    crafted_home = tmp_path / "crafted"
+    store = tmp_path / "store"
+    _pin_home(monkeypatch, home, crafted_home)
+    _store_skill(store, "vc-x", "canonical body\n")
+    _canonical_view(home, store, "vc-x")
+    junie = home / ".junie"
+    junie.mkdir(parents=True)
+    (junie / "skills").symlink_to(store)
+
+    assert installer.collect_shadowed_skill_dirs(store, ["vc-x"]) == []
+    assert (store / "vc-x" / "SKILL.md").is_file()
+
+    # Even if a caller hands the reconciler that path, the store survives.
+    forced = installer.ShadowedSkillDir(
+        "junie",
+        "vc-x",
+        junie / "skills" / "vc-x",
+        "managed_identical",
+        "forced by a caller",
+    )
+    reconciled, kept = installer.reconcile_shadowed_skill_dirs(
+        store, ["vc-x"], ["agents"], shadows=[forced]
+    )
+
+    assert reconciled == []
+    assert [d.path for d in kept] == [forced.path]
+    assert (store / "vc-x" / "SKILL.md").is_file()
+
+
+def test_symlinked_runtime_home_resolving_into_the_store_is_skipped(
+    tmp_path: Path, monkeypatch
+) -> None:
+    home = tmp_path / "home"
+    crafted_home = tmp_path / "crafted"
+    store = tmp_path / "vibecrafted" / "skills"
+    _pin_home(monkeypatch, home, crafted_home)
+    _store_skill(store, "vc-x", "canonical body\n")
+    _canonical_view(home, store, "vc-x")
+    home.mkdir(parents=True, exist_ok=True)
+    (home / ".junie").symlink_to(store.parent)
+
+    assert installer.collect_shadowed_skill_dirs(store, ["vc-x"]) == []
+    assert (store / "vc-x" / "SKILL.md").is_file()
+
+
+def test_symlinked_shadow_entry_is_left_to_the_view_pruner(
+    tmp_path: Path, monkeypatch
+) -> None:
+    home = tmp_path / "home"
+    crafted_home = tmp_path / "crafted"
+    store = tmp_path / "store"
+    _pin_home(monkeypatch, home, crafted_home)
+    _store_skill(store, "vc-x", "canonical body\n")
+    _canonical_view(home, store, "vc-x")
+    junie_skills = home / ".junie" / "skills"
+    junie_skills.mkdir(parents=True)
+    link = junie_skills / "vc-x"
+    link.symlink_to(store / "vc-x")
+
+    assert installer.collect_shadowed_skill_dirs(store, ["vc-x"]) == []
+    assert link.is_symlink()
+    assert (store / "vc-x" / "SKILL.md").is_file()
