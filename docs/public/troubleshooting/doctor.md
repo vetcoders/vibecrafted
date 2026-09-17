@@ -17,14 +17,29 @@ vibecrafted doctor --release      # VERSION vs GitHub Latest + last source gate
 
 ## What doctor audits
 
-| Audit               | What it proves                                                                                                                                                      |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Generation manifest | `runtime-manifest.json` (schema `vibecrafted.runtime-generation.v2`) exists, carries the v2 source-payload identity, and is valid for the current generation        |
-| Content hashes      | SHA-256 digests for `VERSION`, launcher/deck, generated vc-frame config, and verifier engine/runner/schema/policy/key still match — any drift fails                 |
-| Launcher binding    | The public launcher resolves to the exact current generation entrypoint inside `~/.local/share/vibecrafted` — a launcher resolving outside the installed root fails |
-| Checkout-link scan  | No active config, KDL, helper, or command-deck content references a source checkout                                                                                 |
-| Symlink census      | No installed symlink is broken or resolves outside its generation                                                                                                   |
-| Foundations         | Product-managed foundation binaries (loct, aicx, prview, screenscribe) are present and are never silently replaced with stale copies                                |
+| Audit               | What it proves                                                                                                                                                                                           |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Generation manifest | `runtime-manifest.json` (schema `vibecrafted.runtime-generation.v2`) exists, carries the v2 source-payload identity, and is valid for the current generation                                             |
+| Content hashes      | SHA-256 digests for `VERSION`, launcher/deck, generated vc-frame config, and verifier engine/runner/schema/policy/key still match — any drift fails                                                      |
+| Launcher binding    | The public launcher resolves to the exact current generation entrypoint inside `~/.local/share/vibecrafted` — a launcher resolving outside the installed root fails                                      |
+| Checkout-link scan  | No active config, KDL, helper, or command-deck content references a source checkout                                                                                                                      |
+| Symlink census      | No installed symlink is broken or resolves outside its generation                                                                                                                                        |
+| Foundations         | Product-managed foundation binaries (loct, aicx, prview, screenscribe) are present and are never silently replaced with stale copies                                                                     |
+| Skill-copy shadows  | No per-runtime skill directory (`~/.junie/skills`, `~/.agy/skills`, `~/.grok/skills`, `~/.cursor/skills`) holds a real directory copy of a bundled skill shadowing the canonical `~/.agents/skills` view |
+
+## Skill-copy shadows (`shadow-dir:<runtime>/<skill>`)
+
+Installers before 3.x materialized **real directory copies** of `vc-*` skills into per-runtime skill dirs instead of views. Those copies survive next to the canonical `~/.agents/skills` symlink view, drift silently, and an agent that reads both directories (Junie does) sees a stale duplicate. Neither install, update nor doctor used to notice: shadow pruning covered only `claude`/`codex` and only symlinks, and orphan pruning covered only names that had left the bundle.
+
+Doctor now reports one `shadow-dir:<runtime>/<skill>` warning per copy, with the exact path and its provenance class:
+
+| Class               | Meaning                                                                                                                             | What install/update does                                   |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| `managed_identical` | File tree and content hashes match the store copy of that skill                                                                     | Copied into a quarantine dir, then removed                 |
+| `managed_stale`     | Content differs, but the copy's `SKILL.md` carries a Vibecrafted-only marker that the store copy of the **same** skill also carries | Copied into a quarantine dir, then removed                 |
+| `unknown`           | A real `vc-*` directory whose Vibecrafted provenance cannot be proven                                                               | **Never touched** — reported with a manual `mv` suggestion |
+
+Provenance is proven from content, never from the `vc-` name: your own skill parked under a `vc-*` name is reported and left alone. Runtimes that carry a managed view (`agents`, `claude`, `codex`, plus anything the manifest recorded) are audited by the symlink checks instead, so nothing is double-reported. Quarantined copies land in `~/.vibecrafted/backups/installer/shadowed-views-<timestamp>/<runtime>/<skill>` and are never removed by the installer; the canonical `~/.agents/skills` view is never modified by this reconciliation.
 
 Launcher audits are scoped by **ownership, not naming**: doctor judges only the launchers Vibecrafted publishes itself (the installer's wrappers and Python entrypoints, the legacy packs, and the provider-published `vc-slack`). Another product that shares `~/.local/bin` and the `vc-` prefix — and legitimately links into its own checkout — keeps its own installation contract and is left alone.
 
