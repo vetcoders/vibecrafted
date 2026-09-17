@@ -745,6 +745,20 @@ SHADOWED_SKILL_VIEW_RUNTIMES = ("claude", "codex")
 # standard install must keep their views or the /vc-* deck goes dark.
 STANDARD_VIEW_RUNTIMES = [*SYMLINK_TARGETS, *SHADOWED_SKILL_VIEW_RUNTIMES]
 
+# Provenance tokens only the Vibecrafted skill bundle emits. A real directory
+# (not a symlink) sitting at ~/.<runtime>/skills/<vc-skill> is an artifact of a
+# pre-3.x installer that materialized copies instead of views; the vc-* name
+# alone never proves ownership, so a shadow is claimed as managed only when its
+# SKILL.md carries at least one token that the canonical store copy of the SAME
+# skill also carries. Operator-authored skills under a vc-* name stay untouched.
+MANAGED_SKILL_MARKERS = (
+    "<!-- fleet-imperative:",
+    "loctree_value:",
+    "aicx_value:",
+    "dogfooding:",
+)
+SHADOW_QUARANTINE_PREFIX = "shadowed-views-"
+
 # ---------------------------------------------------------------------------
 # Install state
 # ---------------------------------------------------------------------------
@@ -847,6 +861,11 @@ def _doctor_action_items(findings: Sequence[DoctorFinding]) -> list[str]:
         actions.append("enable tracking and restore: run the installer once")
     if any(finding.component.startswith("orphan:") for finding in issues):
         actions.append("clean bundle leftovers: re-run the installer")
+    if any(finding.component.startswith("shadow-dir:") for finding in issues):
+        actions.append(
+            "reconcile stale runtime skill copies: `vibecrafted update` "
+            "(unproven copies are only reported, never removed)"
+        )
     if not actions:
         actions.append("review the warnings above, then re-run `vibecrafted doctor`")
     return actions
@@ -1708,6 +1727,147 @@ def collect_orphaned_skills(
                 orphans.append((rt, entry))
 
     return orphans
+
+
+@dataclass(frozen=True)
+class ShadowedSkillDir:
+    """One real-directory skill copy shadowing the canonical `.agents` view.
+
+    `classification` is one of `managed_identical` (byte-identical to the store
+    copy), `managed_stale` (differs, but provenance is proven) or `unknown`
+    (provenance cannot be proven — never removed automatically).
+    """
+
+    runtime: str
+    skill: str
+    path: Path
+    classification: str
+    detail: str
+
+    @property
+    def is_managed(self) -> bool:
+        """True when provenance is proven and reconciliation may remove the copy."""
+        return self.classification in ("managed_identical", "managed_stale")
+
+
+def _skill_fingerprint_ignored(rel_parts: tuple[str, ...]) -> bool:
+    """True for editor/interpreter litter that must not decide skill-copy identity."""
+    if any(part == "__pycache__" for part in rel_parts):
+        return True
+    name = rel_parts[-1]
+    return name == ".DS_Store" or name.endswith(".pyc")
+
+
+def _skill_tree_fingerprint(root: Path) -> dict[str, str]:
+    """Map each path under `root` to a content digest, ignoring editor litter.
+
+    Directory symlinks are recorded by their raw target and never descended
+    into, so a looping link inside a skill copy cannot hang the walk.
+    """
+    fingerprint: dict[str, str] = {}
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames[:] = sorted(name for name in dirnames if name != "__pycache__")
+        base = Path(dirpath)
+        for name in [*dirnames, *sorted(filenames)]:
+            path = base / name
+            rel_parts = path.relative_to(root).parts
+            if _skill_fingerprint_ignored(rel_parts):
+                continue
+            rel = "/".join(rel_parts)
+            if path.is_symlink():
+                fingerprint[rel] = f"link:{os.readlink(path)}"
+            elif path.is_dir():
+                fingerprint[rel] = "dir"
+            elif path.is_file():
+                try:
+                    fingerprint[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+                except OSError:
+                    fingerprint[rel] = "unreadable"
+    return fingerprint
+
+
+def _managed_skill_marker_tokens(skill_dir: Path) -> set[str]:
+    """Vibecrafted-only generator tokens present in `skill_dir`'s SKILL.md."""
+    try:
+        text = (skill_dir / "SKILL.md").read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return set()
+    return {marker for marker in MANAGED_SKILL_MARKERS if marker in text}
+
+
+def shadow_candidate_runtimes() -> list[str]:
+    """Agent runtimes whose skill dir may hold a copy shadowing the `.agents` view."""
+    return [rt for rt in AGENT_RUNTIMES if rt not in SYMLINK_TARGETS]
+
+
+def collect_shadowed_skill_dirs(
+    store_path: Path,
+    skill_names: Sequence[str],
+    runtimes: Sequence[str] | None = None,
+) -> list[ShadowedSkillDir]:
+    """Find real-directory copies of bundled skills inside per-runtime skill dirs.
+
+    Pure detection: the canonical `.agents` view is never a candidate, symlinked
+    views belong to `prune_shadowed_skill_views`, and provenance is derived from
+    content only (store fingerprint, then shared `MANAGED_SKILL_MARKERS`).
+    """
+    candidates = (
+        shadow_candidate_runtimes()
+        if runtimes is None
+        else list(dict.fromkeys(runtimes))
+    )
+    shadows: list[ShadowedSkillDir] = []
+
+    for runtime in candidates:
+        if runtime in SYMLINK_TARGETS:
+            continue
+        rt_skills = runtime_skills_dir(runtime)
+        if not rt_skills.is_dir():
+            continue
+        for skill_name in skill_names:
+            shadow = rt_skills / skill_name
+            if shadow.is_symlink() or not shadow.is_dir():
+                continue
+            expected = store_path / skill_name
+            if not expected.is_dir():
+                # Nothing canonical to defer to; orphan pruning owns this name.
+                continue
+            if _skill_tree_fingerprint(shadow) == _skill_tree_fingerprint(expected):
+                shadows.append(
+                    ShadowedSkillDir(
+                        runtime,
+                        skill_name,
+                        shadow,
+                        "managed_identical",
+                        f"identical copy of {expected}",
+                    )
+                )
+                continue
+            shared_markers = sorted(
+                _managed_skill_marker_tokens(shadow)
+                & _managed_skill_marker_tokens(expected)
+            )
+            if shared_markers:
+                shadows.append(
+                    ShadowedSkillDir(
+                        runtime,
+                        skill_name,
+                        shadow,
+                        "managed_stale",
+                        f"differs from {expected}; managed marker {shared_markers[0]!r}",
+                    )
+                )
+            else:
+                shadows.append(
+                    ShadowedSkillDir(
+                        runtime,
+                        skill_name,
+                        shadow,
+                        "unknown",
+                        "real directory with no provable Vibecrafted provenance",
+                    )
+                )
+    return shadows
 
 
 def create_backup(
@@ -10574,6 +10734,75 @@ def prune_shadowed_skill_views(
     return removed
 
 
+def reconcile_shadowed_skill_dirs(
+    store_path: Path,
+    skill_names: Sequence[str],
+    active_runtimes: Sequence[str],
+    shadows: Sequence[ShadowedSkillDir] | None = None,
+    dry_run: bool = False,
+) -> tuple[list[ShadowedSkillDir], list[ShadowedSkillDir]]:
+    """Quarantine and remove proven-managed real-directory skill copies.
+
+    Returns `(reconciled, kept)`. A copy is removed only when provenance is
+    proven, its runtime is not an active view target in this run (those are
+    already handled by `create_skill_view_symlink`), and the canonical
+    `~/.agents/skills/<skill>` view is in place — otherwise it is kept and
+    reported. Nothing is ever removed before it has been copied aside.
+    """
+    detected = (
+        list(shadows)
+        if shadows is not None
+        else collect_shadowed_skill_dirs(store_path, skill_names)
+    )
+    reconciled: list[ShadowedSkillDir] = []
+    kept: list[ShadowedSkillDir] = []
+    if not detected:
+        return reconciled, kept
+
+    canonical_root = runtime_skills_dir("agents")
+    quarantine_root = _backup_root(store_path) / (
+        SHADOW_QUARANTINE_PREFIX + datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    )
+
+    for shadow in detected:
+        if shadow.runtime in active_runtimes:
+            continue
+        if not shadow.is_managed:
+            kept.append(shadow)
+            print(
+                f"  {WARN} Unproven skill copy kept: {shadow.path} "
+                f"({shadow.detail}); move it aside yourself if it is stale: "
+                f"mv {shlex_quote(str(shadow.path))} {shlex_quote(str(shadow.path) + '.bak')}"
+            )
+            continue
+        canonical = canonical_root / shadow.skill
+        expected = store_path / shadow.skill
+        if not canonical.is_symlink() or canonical.resolve(
+            strict=False
+        ) != expected.resolve(strict=False):
+            kept.append(shadow)
+            print(
+                f"  {WARN} Keeping {shadow.path}: canonical view {canonical} "
+                "is not linked to the store"
+            )
+            continue
+
+        destination = quarantine_root / shadow.runtime / shadow.skill
+        if dry_run:
+            print(f"  {dim('quarantine')} {shadow.path} -> {destination}")
+            print(f"  {dim('rm -r')} {shadow.path}")
+            reconciled.append(shadow)
+            continue
+        _copy_path_to_backup(shadow.path, destination)
+        shutil.rmtree(shadow.path)
+        print(f"  {dim('reconciled shadow dir')} {shadow.path} -> {destination}")
+        reconciled.append(shadow)
+
+    if reconciled and not dry_run:
+        print(f"  {dim('quarantined copies kept in')} {quarantine_root}")
+    return reconciled, kept
+
+
 def _copy_managed_launcher(src: Path, dst: Path) -> bool:
     """Copy `src` over `dst` as a managed launcher, refusing to clobber an unmanaged existing
     file.
@@ -12581,6 +12810,39 @@ def run_doctor(store_path: Path, state: InstallState) -> list[DoctorFinding]:
                     )
                 )
 
+    # 4a. Real-directory skill copies in runtimes that carry no managed view.
+    # A pre-3.x installer materialized copies into dirs such as ~/.junie/skills;
+    # they survive next to the canonical .agents view and go stale invisibly.
+    # Runtimes covered by section 4 are skipped — that check already owns them.
+    shadow_runtimes = [
+        rt for rt in shadow_candidate_runtimes() if rt not in view_runtimes
+    ]
+    shadowed_dirs = collect_shadowed_skill_dirs(
+        store_path, state.skills, shadow_runtimes
+    )
+    for shadow in shadowed_dirs:
+        if shadow.is_managed:
+            action = "`vibecrafted update` quarantines and removes it"
+        else:
+            action = "left untouched — move it aside yourself if it is stale"
+        findings.append(
+            DoctorFinding(
+                "warn",
+                f"shadow-dir:{shadow.runtime}/{shadow.skill}",
+                f"{shadow.path} is a real directory shadowing the canonical "
+                f".agents view [{shadow.classification}: {shadow.detail}] — {action}",
+            )
+        )
+    if shadow_runtimes and not shadowed_dirs:
+        findings.append(
+            DoctorFinding(
+                "ok",
+                "shadow-dirs",
+                "no stale skill copies in "
+                + ", ".join(f"~/.{rt}/skills" for rt in shadow_runtimes),
+            )
+        )
+
     # 4b. Agent slash-command views. These are separate from skills and used by
     # provider-native command palettes such as ~/.codex/commands and
     # ~/.claude/commands.
@@ -13712,6 +13974,9 @@ def _cmd_install_verbose(args: argparse.Namespace, repo_root: Path) -> int:
         store_path, selected_skills, all_runtimes, dry_run=dry_run
     ):
         print(f"  {dim('removed shadow')} {shadow}")
+    reconcile_shadowed_skill_dirs(
+        store_path, selected_skills, all_runtimes, dry_run=dry_run
+    )
     print()
 
     # --- Execute: agent command surfaces ---
@@ -14227,6 +14492,9 @@ def _cmd_install_compact(args: argparse.Namespace, repo_root: Path) -> int:
             store_path, selected_skills, all_runtimes, dry_run=dry_run
         ):
             print(f"  removed shadow: {shadow}")
+        reconcile_shadowed_skill_dirs(
+            store_path, selected_skills, all_runtimes, dry_run=dry_run
+        )
         print()
 
         print("Installing agent commands:")

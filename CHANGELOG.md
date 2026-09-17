@@ -7,6 +7,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- Install, update and doctor now see **real directory copies** of bundled
+  skills sitting in per-runtime skill dirs. Installers before 3.x materialized
+  copies instead of views, so hosts carried stale `vc-*` directories in
+  `~/.junie/skills` next to the canonical `~/.agents/skills` symlink view
+  (27 on one host, 17 on another) — an agent that reads both directories saw a
+  stale duplicate, and no install, update or doctor run ever noticed:
+  shadow pruning only covered `claude`/`codex` and only symlinks, and orphan
+  pruning only covered names no longer in the bundle. Doctor reports one
+  `shadow-dir:<runtime>/<skill>` warning per copy with its exact path and
+  provenance class, and install/update quarantine the copy under
+  `~/.vibecrafted/backups/installer/shadowed-views-<timestamp>/` before
+  removing it. Provenance is proven from content, never from the `vc-` name:
+  either the copy is byte-identical to the store copy of that skill, or its
+  `SKILL.md` carries a Vibecrafted-only generator marker that the store copy of
+  the **same** skill also carries. A `vc-*` directory that proves neither is
+  classified `unknown` and is only reported, never touched. The canonical
+  `~/.agents/skills` view is never modified, runtimes that carry a managed view
+  stay owned by the existing symlink checks, and `--dry-run` mutates nothing.
+
 - Server web: the Loctree report opens whole in a browser. The document now
   lives at the directory-style `/structure/report/` (`/structure/report`
   redirects there), so Loctree's relative `loctree-*.js` references resolve
