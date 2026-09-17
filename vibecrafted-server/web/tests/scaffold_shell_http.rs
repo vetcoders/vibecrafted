@@ -310,7 +310,9 @@ async fn populated_plan_renders_studio_inside_the_shared_frame() {
     assert_eq!(status, StatusCode::OK);
     assert_shared_chrome("library", &content_type, &html);
     assert!(html.contains(r#"class="plan-library""#));
-    assert!(html.contains("Choose the truth"));
+    assert!(html.contains("<h1>Plans</h1>"));
+    assert!(!html.contains("Choose the truth"));
+    assert!(!html.contains("you want to move"));
     assert!(html.contains(
         r#"href="/scaffold?org=vetcoders&amp;repo=vibecrafted&amp;day=2026_0908&amp;plan_id=shell-plan""#
     ));
@@ -331,7 +333,7 @@ async fn error_states_stay_inside_the_shared_frame_and_are_recoverable() {
     .await;
     assert_eq!(status, StatusCode::OK, "{html}");
     assert_shared_chrome("blocked", &content_type, &html);
-    assert!(html.contains("The plan exists."));
+    assert!(html.contains("Cannot open this plan"));
     assert!(html.contains(r#"class="back-link" href="/scaffold/library""#));
     write_fixture("blocked", &html);
 

@@ -100,8 +100,8 @@ pub fn ServerFrame(active: ServerSection, status: String, children: Children) ->
                     <div class="server-sidebar-note">
                         <span class="server-status-dot" aria-hidden="true"></span>
                         <p>
-                            <strong>"Runtime truth"</strong>
-                            <small>"read-only control-plane projection"</small>
+                            <strong>"Control plane"</strong>
+                            <small>"read-only projection"</small>
                         </p>
                     </div>
                 </aside>
