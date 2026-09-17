@@ -751,12 +751,32 @@ STANDARD_VIEW_RUNTIMES = [*SYMLINK_TARGETS, *SHADOWED_SKILL_VIEW_RUNTIMES]
 # alone never proves ownership, so a shadow is claimed as managed only when its
 # SKILL.md carries at least one token that the canonical store copy of the SAME
 # skill also carries. Operator-authored skills under a vc-* name stay untouched.
-MANAGED_SKILL_MARKERS = (
-    "<!-- fleet-imperative:",
+#
+# A marker must be anchored, never merely present. `dogfooding:` is a plain
+# English word followed by a colon: an operator-authored skill whose prose says
+# "notes on dogfooding: ..." would otherwise share a token with the store copy
+# (247 of 268 shipped SKILL.md files carry the field) and be claimed as ours.
+# So frontmatter fields count only as keys inside the leading `---` block, and
+# the generator's HTML comment counts only at the start of a line.
+MANAGED_SKILL_FRONTMATTER_MARKERS = (
     "loctree_value:",
     "aicx_value:",
     "dogfooding:",
 )
+MANAGED_SKILL_BODY_MARKERS = ("<!-- fleet-imperative:",)
+MANAGED_SKILL_MARKERS = (
+    *MANAGED_SKILL_BODY_MARKERS,
+    *MANAGED_SKILL_FRONTMATTER_MARKERS,
+)
+# Markers only prove provenance for skills generated after those tokens existed.
+# Measured against the real June-2026 copies recovered from ~/.junie/skills, not
+# one carried a marker — yet every one of their SKILL.md files still exists, byte
+# for byte, as a blob in the Vibecrafted git history. So the bundle also ships a
+# manifest of the sha256 of every SKILL.md Vibecrafted has ever released per
+# skill; a shadow whose SKILL.md hashes into that set came from us, whatever its
+# age. Regenerate with `scripts/gen_skill_provenance.py`.
+SKILL_PROVENANCE_FILE = "SKILL_PROVENANCE.json"
+SKILL_PROVENANCE_SCHEMA = "vibecrafted.skill-provenance.v1"
 SHADOW_QUARANTINE_PREFIX = "shadowed-views-"
 
 # ---------------------------------------------------------------------------
@@ -1787,12 +1807,88 @@ def _skill_tree_fingerprint(root: Path) -> dict[str, str]:
 
 
 def _managed_skill_marker_tokens(skill_dir: Path) -> set[str]:
-    """Vibecrafted-only generator tokens present in `skill_dir`'s SKILL.md."""
+    """Vibecrafted-only generator tokens present in `skill_dir`'s SKILL.md.
+
+    Anchored, not substring: a frontmatter marker counts only as a key inside
+    the leading `---` block and a body marker only at the start of a line, so
+    prose that happens to contain the word cannot fake provenance.
+    """
     try:
         text = (skill_dir / "SKILL.md").read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return set()
-    return {marker for marker in MANAGED_SKILL_MARKERS if marker in text}
+    lines = text.splitlines()
+    frontmatter: list[str] = []
+    if lines and lines[0].strip() == "---":
+        for line in lines[1:]:
+            if line.strip() in ("---", "..."):
+                break
+            frontmatter.append(line)
+    found = {
+        marker
+        for marker in MANAGED_SKILL_FRONTMATTER_MARKERS
+        if any(line.startswith(marker) for line in frontmatter)
+    }
+    found |= {
+        marker
+        for marker in MANAGED_SKILL_BODY_MARKERS
+        if any(line.startswith(marker) for line in lines)
+    }
+    return found
+
+
+def _skill_md_sha256(skill_dir: Path) -> str | None:
+    """sha256 of `skill_dir`'s SKILL.md, or None when it cannot be read."""
+    try:
+        return hashlib.sha256((skill_dir / "SKILL.md").read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def load_skill_provenance(store_path: Path) -> dict[str, frozenset[str]]:
+    """Read the shipped historical-release manifest: skill name → sha256 set.
+
+    A missing, unreadable, corrupt or foreign-schema manifest yields an empty
+    map. This proof only ever *adds* certainty, so its absence must degrade to
+    "no proof" — never to an installer traceback on someone's machine.
+    """
+    try:
+        data = json.loads(
+            (store_path / SKILL_PROVENANCE_FILE).read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict) or data.get("schema") != SKILL_PROVENANCE_SCHEMA:
+        return {}
+    skills = data.get("skills")
+    if not isinstance(skills, dict):
+        return {}
+    manifest: dict[str, frozenset[str]] = {}
+    for name, hashes in skills.items():
+        if isinstance(name, str) and isinstance(hashes, list):
+            manifest[name] = frozenset(h for h in hashes if isinstance(h, str))
+    return manifest
+
+
+def _path_is_symlink_free(path: Path) -> bool:
+    """True when neither `path` nor any ancestor below the home dir is a symlink.
+
+    A symlinked ancestor turns a per-runtime skill dir into a window onto
+    another tree — `ln -s ~/.vibecrafted/skills ~/.junie/skills` is the obvious
+    manual workaround for the junie gap — and `shutil.rmtree` follows it. Only
+    the operator-owned span between `$HOME` and the entry is inspected; the
+    system path above `$HOME` is not ours to judge.
+    """
+    home = Path.home()
+    current = path
+    for _ in range(64):
+        if current.is_symlink():
+            return False
+        parent = current.parent
+        if parent == current or current == home:
+            return True
+        current = parent
+    return False
 
 
 def shadow_candidate_runtimes() -> list[str]:
@@ -1809,7 +1905,13 @@ def collect_shadowed_skill_dirs(
 
     Pure detection: the canonical `.agents` view is never a candidate, symlinked
     views belong to `prune_shadowed_skill_views`, and provenance is derived from
-    content only (store fingerprint, then shared `MANAGED_SKILL_MARKERS`).
+    content only — store fingerprint, then anchored `MANAGED_SKILL_MARKERS`
+    shared with the store copy, then the shipped `SKILL_PROVENANCE_FILE`.
+
+    A runtime whose skill dir is reached through a symlink, or which resolves
+    into the store itself, is skipped outright: comparing the store with itself
+    would classify every skill as an identical copy, and removing it would take
+    the canonical store with it.
     """
     candidates = (
         shadow_candidate_runtimes()
@@ -1817,12 +1919,17 @@ def collect_shadowed_skill_dirs(
         else list(dict.fromkeys(runtimes))
     )
     shadows: list[ShadowedSkillDir] = []
+    provenance = load_skill_provenance(store_path)
+    store_resolved = store_path.resolve(strict=False)
 
     for runtime in candidates:
         if runtime in SYMLINK_TARGETS:
             continue
         rt_skills = runtime_skills_dir(runtime)
-        if not rt_skills.is_dir():
+        if not rt_skills.is_dir() or not _path_is_symlink_free(rt_skills):
+            continue
+        rt_resolved = rt_skills.resolve(strict=False)
+        if rt_resolved == store_resolved or store_resolved in rt_resolved.parents:
             continue
         for skill_name in skill_names:
             shadow = rt_skills / skill_name
@@ -1831,6 +1938,9 @@ def collect_shadowed_skill_dirs(
             expected = store_path / skill_name
             if not expected.is_dir():
                 # Nothing canonical to defer to; orphan pruning owns this name.
+                continue
+            if shadow.resolve(strict=False) == expected.resolve(strict=False):
+                # Not a copy at all — the store copy seen through a link.
                 continue
             if _skill_tree_fingerprint(shadow) == _skill_tree_fingerprint(expected):
                 shadows.append(
@@ -1857,16 +1967,29 @@ def collect_shadowed_skill_dirs(
                         f"differs from {expected}; managed marker {shared_markers[0]!r}",
                     )
                 )
-            else:
+                continue
+            digest = _skill_md_sha256(shadow)
+            if digest and digest in provenance.get(skill_name, frozenset()):
                 shadows.append(
                     ShadowedSkillDir(
                         runtime,
                         skill_name,
                         shadow,
-                        "unknown",
-                        "real directory with no provable Vibecrafted provenance",
+                        "managed_stale",
+                        f"differs from {expected}; SKILL.md matches a historical "
+                        f"Vibecrafted release (sha256 {digest[:12]})",
                     )
                 )
+                continue
+            shadows.append(
+                ShadowedSkillDir(
+                    runtime,
+                    skill_name,
+                    shadow,
+                    "unknown",
+                    "real directory with no provable Vibecrafted provenance",
+                )
+            )
     return shadows
 
 
@@ -10745,7 +10868,8 @@ def reconcile_shadowed_skill_dirs(
 
     Returns `(reconciled, kept)`. A copy is removed only when provenance is
     proven, its runtime is not an active view target in this run (those are
-    already handled by `create_skill_view_symlink`), and the canonical
+    already handled by `create_skill_view_symlink`), it is a real path that no
+    symlink leads into and that lies outside the store, and the canonical
     `~/.agents/skills/<skill>` view is in place — otherwise it is kept and
     reported. Nothing is ever removed before it has been copied aside.
     """
@@ -10773,6 +10897,25 @@ def reconcile_shadowed_skill_dirs(
                 f"  {WARN} Unproven skill copy kept: {shadow.path} "
                 f"({shadow.detail}); move it aside yourself if it is stale: "
                 f"mv {shlex_quote(str(shadow.path))} {shlex_quote(str(shadow.path) + '.bak')}"
+            )
+            continue
+        # Independent of detection, because `shadows=` may be supplied by a
+        # caller: nothing inside the store is ever removed, and a symlinked
+        # ancestor makes `shutil.rmtree` delete whatever the link points at.
+        resolved = shadow.path.resolve(strict=False)
+        store_resolved = store_path.resolve(strict=False)
+        if resolved == store_resolved or store_resolved in resolved.parents:
+            kept.append(shadow)
+            print(
+                f"  {WARN} Keeping {shadow.path}: it resolves into the "
+                f"canonical store ({resolved})"
+            )
+            continue
+        if not _path_is_symlink_free(shadow.path):
+            kept.append(shadow)
+            print(
+                f"  {WARN} Keeping {shadow.path}: reached through a symlink, "
+                "so removing it would delete another tree"
             )
             continue
         canonical = canonical_root / shadow.skill
