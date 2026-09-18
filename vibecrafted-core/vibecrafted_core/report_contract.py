@@ -609,8 +609,14 @@ def stamp_launcher_report_identity(
     status: str,
     model: str = "",
     claim_digest: str = "",
+    runtime_fields: Mapping[str, str] | None = None,
 ) -> bool:
-    """Authoritatively stamp launcher-owned identity without clobbering claims."""
+    """Authoritatively stamp launcher-owned identity without clobbering claims.
+
+    ``runtime_fields`` (run-close telemetry: usage, cost, failure cause,
+    provider session) are measured by the runtime, so like ``run_id`` they
+    always replace whatever the report carried.
+    """
 
     report = Path(path)
     try:
@@ -627,6 +633,8 @@ def stamp_launcher_report_identity(
     # copied or guessed values. An unavailable child session stays explicit.
     fields["run_id"] = run_id or "unknown"
     fields["session_id"] = session_id or _PENDING_TEMPLATE_STATUS
+    for key, value in (runtime_fields or {}).items():
+        fields[key] = str(value)
     launcher_digest = str(claim_digest or "").strip()
     if launcher_digest:
         fields["claim_digest"] = launcher_digest

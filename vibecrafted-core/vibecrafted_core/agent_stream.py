@@ -40,6 +40,26 @@ COST_PATTERNS = (
     re.compile(r"\$([0-9]+\.[0-9]+)\s*(?:usd)?", re.IGNORECASE),
 )
 GROK_IGNORABLE_TRANSPORT_ERROR = "worker quit with fatal: Transport channel closed"
+# Every provider spelling of a token count. A usage dict carrying none of these
+# is not a usage event — zero must stay a measurement, not a default.
+_USAGE_KEYS = (
+    "input_tokens",
+    "inputTokens",
+    "prompt_tokens",
+    "cached_input_tokens",
+    "cache_read_input_tokens",
+    "cacheReadInputTokens",
+    "cacheReadTokens",
+    "cacheInputTokens",
+    "cached_prompt_tokens",
+    "cache_read_tokens",
+    "cache_creation_input_tokens",
+    "cacheCreateTokens",
+    "cacheWriteTokens",
+    "output_tokens",
+    "outputTokens",
+    "completion_tokens",
+)
 
 
 def stamp() -> str:
@@ -207,6 +227,9 @@ class AgentStreamParser:
         self.tokens_cached_input = 0
         self.tokens_cache_write: int | None = None
         self.tokens_output = 0
+        # Provider usage events actually observed; 0 means "never reported",
+        # which the close path records as unknown rather than zero tokens.
+        self.usage_events = 0
         self.cost_usd: float | None = None
         self.cost_source: str | None = None
         # Final assistant answer of a stream that reports one (agy
@@ -267,6 +290,7 @@ class AgentStreamParser:
             self.tokens_input += int(raw_in)
             self.tokens_cached_input += int(raw_cached or 0)
             self.tokens_output += int(raw_out)
+            self.usage_events += 1
         model_matches = MODEL_PATTERN.findall(clean)
         if model_matches:
             self.model_id = model_matches[-1]
@@ -274,6 +298,8 @@ class AgentStreamParser:
             matches = pattern.findall(clean)
             if matches:
                 self.cost_usd = _as_float(matches[-1])
+                if self.cost_usd is not None:
+                    self.cost_source = "provider_reported"
 
     def _record_model(self, event: dict[str, Any]) -> None:
         """Capture the first model id found in ``event`` (recursing into nested dicts).
@@ -314,8 +340,11 @@ class AgentStreamParser:
     def _record_usage(self, usage: dict[str, Any]) -> None:
         """Accumulate input/cached-input/cache-write/output token counts from a usage dict.
 
-        Handles each provider's differing key names for the same fields.
+        Handles each provider's differing key names for the same fields. Only
+        a dict carrying at least one token field counts as a usage event.
         """
+        if any(usage.get(key) is not None for key in _USAGE_KEYS):
+            self.usage_events += 1
         self.tokens_input += _as_int(
             usage.get("input_tokens")
             or usage.get("inputTokens")
@@ -629,15 +658,14 @@ class AgentStreamParser:
 
     def _format_junie_event(self, event: dict[str, Any]) -> str:
         """Render one Junie streaming-json event's message/step text."""
+        # Nested telemetry already walks the top-level ``usage`` dict; a second
+        # _record_usage here counted every junie token twice.
         self._record_nested_telemetry(event)
         for key in ("session_id", "sessionId"):
             value = event.get(key)
             if isinstance(value, str) and value:
                 self.session_id = value
                 break
-        usage = event.get("usage")
-        if isinstance(usage, dict):
-            self._record_usage(usage)
         message = (
             event.get("message")
             or event.get("text")

@@ -4,6 +4,7 @@ Python launch/observe/await surface or falls back to the legacy bash deck."""
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import os
 import stat
@@ -18,6 +19,7 @@ from . import doctor as doctor_module
 from .agent_stream import ANSI_PATTERN, AgentStreamParser, resolve_default_model
 from .control_plane import (
     RunNotResolved,
+    control_plane_home,
     lookup_run,
     resolve_run,
     sync_state,
@@ -43,6 +45,7 @@ from .server_observation import (
 from .server_observation import (
     resolve_run_id as resolve_server_run_id,
 )
+from .telemetry import is_unknown, run_telemetry_from_meta, unknown_reason
 from .workflow import (
     classify_resume_identity,
     find_run_for_identity_token,
@@ -152,6 +155,7 @@ def python_owned_commands() -> frozenset[str]:
             "settle",
             "ship",
             "stop",
+            "usage",
         }
         | set(LAUNCHERS)
         | set(CORE_SURFACE_COMMANDS)
@@ -1238,7 +1242,91 @@ def _run_for_agent(
     return None
 
 
-def _print_run_status(run: dict[str, Any], *, include_tail: bool = True) -> None:
+def _observed_telemetry(run: dict[str, Any]) -> dict[str, Any]:
+    """Usage, cost, failure cause and provider session of an observed run.
+
+    Read-only: the run's own meta when it recorded telemetry, otherwise a lazy
+    derivation from its transcript (``source: transcript(lazy)``). Someone
+    else's closed run is never rewritten by looking at it.
+    """
+    run_id = str(run.get("run_id") or "")
+    meta: dict[str, Any] = {}
+    transcript: Path | None = None
+    if run_id:
+        try:
+            resolved = resolve_run(run_id)
+        except (RunNotResolved, ValueError):
+            resolved = None
+        if resolved is not None:
+            transcript = resolved.transcript
+            if resolved.meta is not None:
+                try:
+                    loaded = json.loads(resolved.meta.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    loaded = {}
+                meta = loaded if isinstance(loaded, dict) else {}
+    if transcript is None:
+        raw = str(run.get("latest_transcript") or run.get("transcript") or "")
+        transcript = Path(raw) if raw else None
+    subject = {"run_id": run_id, "agent": run.get("agent") or "", **meta}
+    if subject.get("exit_code") is None:
+        subject["exit_code"] = run.get("exit_code")
+    return run_telemetry_from_meta(subject, transcript=transcript)
+
+
+def _print_run_telemetry(telemetry: dict[str, Any]) -> None:
+    """Print exit cause, usage, cost and provider session lines."""
+    exit_code = telemetry.get("exit_code")
+    failure = telemetry.get("failure")
+    if exit_code is not None:
+        cause = ""
+        if isinstance(failure, dict):
+            summary = str(failure.get("summary") or "")
+            prefix = f"exit_code={exit_code} "
+            cause = " " + summary.removeprefix(prefix)
+        print(f"exit:       {exit_code}{cause}")
+    if isinstance(failure, dict):
+        evidence = failure.get("evidence")
+        where = (
+            f"evidence unknown ({unknown_reason(evidence)})"
+            if not isinstance(evidence, dict) or is_unknown(evidence)
+            else f"evidence {evidence.get('path')}:{evidence.get('line')}"
+        )
+        print(
+            f"failure:    {failure.get('kind')} · {where} · source: {failure.get('source')}"
+        )
+    usage = telemetry.get("usage") or {}
+    total = usage.get("tokens_total")
+    if is_unknown(total):
+        usage_text = f"unknown ({unknown_reason(total)})"
+    else:
+        usage_text = (
+            f"{total} {usage.get('unit') or 'tokens'} (in {usage.get('tokens_input')}"
+            f" / cached {usage.get('tokens_cached_input')}"
+            f" / out {usage.get('tokens_output')})"
+        )
+    print(f"usage:      {usage_text} · source: {usage.get('source')}")
+    cost = telemetry.get("cost") or {}
+    amount = cost.get("amount")
+    cost_text = (
+        f"unknown ({unknown_reason(amount)})"
+        if is_unknown(amount)
+        else f"{amount} {cost.get('unit') or cost.get('currency') or ''}".rstrip()
+    )
+    print(f"cost:       {cost_text} · source: {cost.get('source')}")
+    session = telemetry.get("provider_session_id")
+    session_text = (
+        f"unknown ({unknown_reason(session)})" if is_unknown(session) else str(session)
+    )
+    print(f"provider_session_id: {session_text}")
+
+
+def _print_run_status(
+    run: dict[str, Any],
+    *,
+    include_tail: bool = True,
+    telemetry: dict[str, Any] | None = None,
+) -> None:
     """Print the standard multi-line run status block, optionally with transcript tail."""
     state = str(run.get("state") or "")
     print(f"run_id:     {run.get('run_id') or ''}")
@@ -1254,6 +1342,8 @@ def _print_run_status(run: dict[str, Any], *, include_tail: bool = True) -> None
     print(f"report:     {run.get('latest_report') or run.get('report') or ''}")
     transcript = str(run.get("latest_transcript") or run.get("transcript") or "")
     print(f"transcript: {transcript}")
+    if telemetry is not None:
+        _print_run_telemetry(telemetry)
     if not include_tail:
         return
     tail, tail_error = _tail_lines(transcript, agent=str(run.get("agent") or ""))
@@ -1299,6 +1389,7 @@ def _observe_watch(
     *,
     interval: float,
     json_output: bool,
+    telemetry: dict[str, Any],
 ) -> int:
     """Follow a run's transcript until the run turns terminal.
 
@@ -1346,12 +1437,13 @@ def _observe_watch(
                     "agent": agent,
                     "transcript": transcript,
                     "terminal": terminal,
+                    "telemetry": telemetry,
                 },
                 ensure_ascii=False,
             )
         )
     else:
-        _print_run_status(run, include_tail=False)
+        _print_run_status(run, include_tail=False, telemetry=telemetry)
         print(
             f"watch:      following {transcript or '(transcript not yet created)'}"
             f" every {interval:g}s — Ctrl-C detaches, the run continues"
@@ -1419,11 +1511,13 @@ def _observe_watch(
                                 "event": "terminal",
                                 "run_id": run_id,
                                 "state": state,
+                                "telemetry": _observed_telemetry(run),
                             },
                             ensure_ascii=False,
                         )
                     )
                 else:
+                    _print_run_telemetry(_observed_telemetry(run))
                     print(f"watch:      run {run_id} is terminal ({state}); detached")
                 return 0 if _run_succeeded(run) else 1
             time.sleep(interval)
@@ -1728,6 +1822,7 @@ def _agent_observe(agent: str, argv: Sequence[str]) -> int:
     if not isinstance(run, dict):
         print("No run found. Pass --run-id or --last.", file=sys.stderr)
         return 1
+    telemetry = _observed_telemetry(run)
     if args.tail is not None or args.head is not None:
         which = "tail" if args.tail is not None else "head"
         count = args.tail if args.tail is not None else args.head
@@ -1738,12 +1833,13 @@ def _agent_observe(agent: str, argv: Sequence[str]) -> int:
             lines, window_error = _head_lines(transcript, agent=agent, max_lines=count)
         if args.json:
             payload = dict(observation)
+            payload["telemetry"] = telemetry
             payload[f"transcript_{which}"] = lines
             if window_error:
                 payload[f"transcript_{which}_error"] = window_error
             print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
             return 0
-        _print_run_status(run, include_tail=False)
+        _print_run_status(run, include_tail=False, telemetry=telemetry)
         if lines:
             print(f"transcript_{which}:")
             for line in lines:
@@ -1757,7 +1853,202 @@ def _agent_observe(agent: str, argv: Sequence[str]) -> int:
         observation,
         interval=float(args.interval),
         json_output=bool(args.json),
+        telemetry=telemetry,
     )
+
+
+_SINCE_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+USAGE_REPORT_SCHEMA = "vibecrafted.usage-report.v1"
+
+
+def _since_seconds(value: str) -> int | None:
+    """Seconds in a ``<N><s|m|h|d|w>`` window, or None when unparseable."""
+    text = str(value or "").strip().lower()
+    if len(text) < 2 or text[-1] not in _SINCE_UNITS or not text[:-1].isdigit():
+        return None
+    return int(text[:-1]) * _SINCE_UNITS[text[-1]]
+
+
+def _epoch(stamp: object) -> float | None:
+    """POSIX seconds of an ISO-8601 meta timestamp, or None."""
+    try:
+        parsed = dt.datetime.fromisoformat(str(stamp or "").strip())
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.timestamp()
+
+
+def _usage_row(meta: dict[str, Any], transcript: Path | None) -> dict[str, Any]:
+    """One ``vibecrafted usage`` row: tokens, cost and failure cause of a run."""
+    telemetry = run_telemetry_from_meta(meta, transcript=transcript)
+    failure = telemetry.get("failure")
+    return {
+        "run_id": telemetry["run_id"],
+        "agent": telemetry["agent"],
+        "model": telemetry["model"],
+        "status": telemetry["status"],
+        "exit_code": telemetry["exit_code"],
+        "tokens": telemetry["usage"],
+        "cost": telemetry["cost"],
+        "failure_kind": failure.get("kind") if isinstance(failure, dict) else None,
+        "failure": failure.get("summary") if isinstance(failure, dict) else None,
+        "provider_session_id": telemetry["provider_session_id"],
+        "telemetry_source": telemetry["telemetry_source"],
+    }
+
+
+def _load_meta(path: Path) -> dict[str, Any]:
+    """A run's meta.json as a dict ({} when missing or unreadable)."""
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _usage_totals(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Known-token sum and cost per currency/unit; unknowns are counted, not zeroed.
+
+    Credits and dollars never share a field: each unit keeps its own sum.
+    """
+    tokens_known = 0
+    tokens_unknown = 0
+    cost_unknown = 0
+    by_unit: dict[str, float] = {}
+    for row in rows:
+        total = row["tokens"].get("tokens_total")
+        if isinstance(total, int) and not isinstance(total, bool):
+            tokens_known += total
+        else:
+            tokens_unknown += 1
+        amount = row["cost"].get("amount")
+        if isinstance(amount, (int, float)) and not isinstance(amount, bool):
+            unit = str(row["cost"].get("unit") or row["cost"].get("currency") or "USD")
+            by_unit[unit] = round(by_unit.get(unit, 0.0) + float(amount), 6)
+        else:
+            cost_unknown += 1
+    return {
+        "runs": len(rows),
+        "tokens_total_known": tokens_known,
+        "runs_tokens_unknown": tokens_unknown,
+        "cost_by_unit": dict(sorted(by_unit.items())),
+        "runs_cost_unknown": cost_unknown,
+    }
+
+
+def _usage_cell(value: object) -> str:
+    """Compact table cell: a number/string, or "unknown"."""
+    if is_unknown(value) or value in (None, ""):
+        return "unknown"
+    return str(value)
+
+
+def _usage_main(argv: Sequence[str]) -> int:
+    """``vibecrafted usage``: per-run tokens, cost (with unit and source) and failure."""
+    parser = argparse.ArgumentParser(
+        prog="vibecrafted usage",
+        description=(
+            "Per-run usage: tokens (or unknown with a reason), cost with its "
+            "unit and source, and the failure cause. Read-only; runs closed "
+            "before telemetry existed are derived from their transcripts."
+        ),
+    )
+    parser.add_argument("--run-id", action="append", default=[], help="repeatable")
+    parser.add_argument("--since", default="", help="window such as 30m, 24h, 7d")
+    parser.add_argument("--json", action="store_true")
+    try:
+        args = parser.parse_args(list(argv))
+    except SystemExit as exc:
+        return int(exc.code or 0)
+    run_ids = sorted({str(run_id).strip() for run_id in args.run_id if run_id})
+    if run_ids and args.since:
+        print("usage: pass --run-id or --since, not both", file=sys.stderr)
+        return 2
+    since = "" if run_ids else (args.since or "24h")
+    window = _since_seconds(since) if since else None
+    if since and window is None:
+        print(
+            f"usage: --since must look like 30m, 24h or 7d (got {since!r})",
+            file=sys.stderr,
+        )
+        return 2
+
+    rows: list[dict[str, Any]] = []
+    if run_ids:
+        for run_id in run_ids:
+            try:
+                resolved = resolve_run(run_id)
+            except (RunNotResolved, ValueError) as exc:
+                print(f"usage: {exc}", file=sys.stderr)
+                return 1
+            meta = _load_meta(resolved.meta) if resolved.meta is not None else {}
+            meta.setdefault("run_id", run_id)
+            rows.append(_usage_row(meta, resolved.transcript))
+    else:
+        cutoff = time.time() - float(window or 0)
+        for meta_path in sorted(
+            (control_plane_home() / "runtime_runs").glob("*/meta.json")
+        ):
+            meta = _load_meta(meta_path)
+            stamp = _epoch(meta.get("completed_at") or meta.get("updated_at"))
+            if stamp is None or stamp < cutoff:
+                continue
+            meta.setdefault("run_id", meta_path.parent.name)
+            transcript = meta_path.parent / "transcript.log"
+            rows.append(_usage_row(meta, transcript if transcript.is_file() else None))
+    rows.sort(key=lambda row: str(row["run_id"]))
+    report = {
+        "schema": USAGE_REPORT_SCHEMA,
+        "filter": {"run_ids": run_ids} if run_ids else {"since": since},
+        "runs": rows,
+        "totals": _usage_totals(rows),
+    }
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    header = ("run_id", "agent", "model", "tokens", "cost", "failure")
+    table = [header]
+    for row in rows:
+        cost = row["cost"]
+        unit = cost.get("unit") or cost.get("currency") or ""
+        amount = cost.get("amount")
+        cost_cell = (
+            "unknown"
+            if is_unknown(amount)
+            else f"{amount} {unit} ({cost.get('source')})"
+        )
+        table.append(
+            (
+                str(row["run_id"]),
+                str(row["agent"] or "unknown"),
+                _usage_cell(row["model"]),
+                _usage_cell(row["tokens"].get("tokens_total")),
+                cost_cell,
+                str(row["failure_kind"] or "-"),
+            )
+        )
+    widths = [max(len(line[index]) for line in table) for index in range(len(header))]
+    for line in table:
+        print(
+            "  ".join(cell.ljust(width) for cell, width in zip(line, widths)).rstrip()
+        )
+    totals = report["totals"]
+    costs = " · ".join(
+        f"{amount} {unit}" for unit, amount in totals["cost_by_unit"].items()
+    )
+    tokens = (
+        "none known"
+        if totals["runs_tokens_unknown"] == totals["runs"]
+        else f"{totals['tokens_total_known']} known"
+    )
+    print(
+        f"totals: {totals['runs']} runs · tokens {tokens}"
+        f" ({totals['runs_tokens_unknown']} unknown) · cost {costs or 'none known'}"
+        f" ({totals['runs_cost_unknown']} unknown)"
+    )
+    return 0
 
 
 def _observe_resolved(run_id: str, *, json_output: bool) -> int:
@@ -2090,6 +2381,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .repository_claims import claims_cli_main
 
         return _invoke_owned_main(claims_cli_main, raw_args[1:])
+    if raw_args and raw_args[0] == "usage":
+        return _usage_main(raw_args[1:])
     if raw_args and raw_args[0] == "control-plane-revalidate":
         parser = _build_parser()
         args = parser.parse_args(raw_args)
