@@ -276,9 +276,21 @@ pub(crate) fn load_human_transcript(
     }
 }
 
-/// Search the canonical human log from the start, capped, so a needle that
-/// lives only in the head of a long transcript is still found. The live run
-/// page keeps the tail preview; this path is for `/api/control/transcripts`.
+/// Byte-offset of `needle` in `haystack`, ASCII-case-insensitive.
+#[cfg(feature = "ssr")]
+fn find_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window.eq_ignore_ascii_case(needle))
+}
+
+/// Search the canonical human log from the start through the whole file.
+/// The live run page keeps the tail preview; this path is for
+/// `/api/control/transcripts`. Chunks overlap by `needle.len() - 1` so a
+/// match that straddles a read boundary is still found.
 #[cfg(feature = "ssr")]
 pub(crate) fn match_human_transcript(
     plane: &control_core::ControlPlane,
@@ -287,7 +299,7 @@ pub(crate) fn match_human_transcript(
 ) -> TranscriptMatch {
     use std::io::Read;
 
-    const SEARCH_MAX_BYTES: u64 = 256 * 1024;
+    const CHUNK: usize = 64 * 1024;
 
     if needle.trim().is_empty() {
         let preview = load_human_transcript(plane, run_id);
@@ -299,23 +311,38 @@ pub(crate) fn match_human_transcript(
         };
     }
 
-    let Some((file, len)) = confined_human_transcript(plane, run_id) else {
+    let Some((mut file, _)) = confined_human_transcript(plane, run_id) else {
         return TranscriptMatch::default();
     };
-    let mut limited = file.take(SEARCH_MAX_BYTES);
-    let mut bytes = Vec::new();
-    if limited.read_to_end(&mut bytes).is_err() {
-        return TranscriptMatch::default();
+    let needle_bytes = needle.as_bytes();
+    let overlap = needle_bytes.len().saturating_sub(1).max(4);
+    let mut leftover = Vec::new();
+    let mut buf = vec![0_u8; CHUNK];
+    loop {
+        let read = match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(count) => count,
+            Err(_) => return TranscriptMatch::default(),
+        };
+        leftover.extend_from_slice(&buf[..read]);
+        if find_ignore_ascii_case(&leftover, needle_bytes).is_some() {
+            let stripped = strip_terminal_escapes(&String::from_utf8_lossy(&leftover));
+            return TranscriptMatch {
+                available: true,
+                truncated: false,
+                matched: true,
+                snippet: snippet_for(&stripped, needle),
+            };
+        }
+        if leftover.len() > overlap {
+            leftover.drain(..leftover.len() - overlap);
+        }
     }
-    let stripped = strip_terminal_escapes(&String::from_utf8_lossy(&bytes));
-    let matched = stripped
-        .to_ascii_lowercase()
-        .contains(&needle.to_ascii_lowercase());
     TranscriptMatch {
         available: true,
-        truncated: len > SEARCH_MAX_BYTES,
-        matched,
-        snippet: snippet_for(&stripped, needle),
+        truncated: false,
+        matched: false,
+        snippet: String::new(),
     }
 }
 
@@ -1047,6 +1074,33 @@ mod tests {
         assert!(hit.available);
         assert!(hit.matched);
         assert!(hit.snippet.contains("HEAD-NEEDLE-unique"));
+
+        fs::remove_dir_all(home).ok();
+    }
+
+    #[test]
+    fn transcript_search_reads_past_the_old_256kib_head_cap() {
+        let home = temp_home();
+        let run_id = "impl-260918-deep";
+        let runs_dir = home.join("control_plane/runs");
+        let transcript_dir = home.join("control_plane/runtime_runs").join(run_id);
+        fs::create_dir_all(&runs_dir).expect("runs dir");
+        fs::create_dir_all(&transcript_dir).expect("transcript dir");
+        write_snapshot(&runs_dir, run_id, "/tmp/repo/reports/final.md");
+        let mut transcript = String::new();
+        while transcript.len() < 256 * 1024 + 2048 {
+            transcript.push_str("pad-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n");
+        }
+        transcript.push_str("DEEP-NEEDLE-unique\n");
+        fs::write(transcript_dir.join("transcript.human.log"), &transcript)
+            .expect("human transcript");
+
+        let plane = ControlPlane::new(home.clone());
+        let hit = match_human_transcript(&plane, run_id, "DEEP-NEEDLE-unique");
+        assert!(hit.available);
+        assert!(hit.matched);
+        assert!(hit.snippet.contains("DEEP-NEEDLE-unique"));
+        assert!(!hit.truncated);
 
         fs::remove_dir_all(home).ok();
     }

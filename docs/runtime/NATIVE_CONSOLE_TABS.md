@@ -161,7 +161,9 @@ headless worker.
   never granted. Assets are regular files in the
   report's directory with a known extension; symlinks and traversal are
   refused. The document keeps its interactive graph and holds no control-plane
-  authority.
+  authority. `POST /api/structure/report` is the generate door (local peer,
+  cwd a known control-plane workspace/run root, `loct report --output
+  .loctree/report.html`); tabs never spawn it.
 - `/api/aicx/search` and `/api/aicx/reference`: the AICX corpus is private to
   the host. Both routes require a verified local peer — loopback, or the same
   interface the listener is bound to (a tailnet bind reached from this

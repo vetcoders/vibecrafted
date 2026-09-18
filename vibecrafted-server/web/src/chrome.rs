@@ -243,6 +243,12 @@ pub fn operator_desk_script() -> &'static str {
     try { return localStorage.getItem(ROOT_KEY) || ''; } catch (_) { return ''; }
   };
 
+  const repoName = (path) => {
+    const trimmed = String(path || '').replace(/[\\/]+$/, '');
+    const parts = trimmed.split(/[\\/]/);
+    return parts[parts.length - 1] || '';
+  };
+
   const applyFocus = (mode) => {
     const next = mode === 'project' ? 'project' : 'fleet';
     html.dataset.focus = next;
@@ -256,12 +262,20 @@ pub fn operator_desk_script() -> &'static str {
         ? (root ? ('Project · ' + root) : 'Project · pick a workspace')
         : 'Fleet · all workspaces';
     }
-    document.querySelectorAll('[data-focus-root]').forEach((el) => {
-      if (next === 'fleet' || !root) {
-        el.hidden = false;
-        return;
+    const repo = repoName(root);
+    document.querySelectorAll('[data-focus-root], [data-focus-repo]').forEach((el) => {
+      const searchMiss = el.getAttribute('data-search-hit') === '0';
+      let focusMiss = false;
+      if (next === 'project' && root) {
+        const focusRoot = el.getAttribute('data-focus-root');
+        if (focusRoot) {
+          focusMiss = focusRoot !== root;
+        } else {
+          const focusRepo = el.getAttribute('data-focus-repo') || '';
+          focusMiss = !focusRepo || focusRepo !== repo;
+        }
       }
-      el.hidden = (el.getAttribute('data-focus-root') || '') !== root;
+      el.hidden = searchMiss || focusMiss;
     });
   };
 
@@ -277,6 +291,7 @@ pub fn operator_desk_script() -> &'static str {
   }
 
   applyFocus(html.dataset.focus);
+  document.documentElement.addEventListener('vc-focus-refresh', () => applyFocus(html.dataset.focus));
   document.querySelectorAll('[data-focus-mode]').forEach((btn) => {
     btn.addEventListener('click', () => applyFocus(btn.getAttribute('data-focus-mode')));
   });
@@ -312,12 +327,20 @@ pub fn operator_desk_script() -> &'static str {
     if (menu && !event.target.closest('#vc-ppm')) menu.hidden = true;
   });
 
+  const transcriptUrl = (target) => {
+    const named = target.getAttribute('data-transcript-url') || '';
+    if (named) return named;
+    if (target.getAttribute('data-ppm') !== 'run') return '';
+    const id = target.getAttribute('data-run-id') || '';
+    return id ? ('/api/control/runs/' + id + '/transcript') : '';
+  };
+
   const bindMenu = (target) => {
     if (!menu || !target) return;
     menuTarget = target;
     const id = target.getAttribute('data-run-id') || target.getAttribute('data-copy-id') || '';
     const href = target.getAttribute('data-href') || (id ? ('/run/' + id) : '');
-    const transcript = target.getAttribute('data-transcript-url') || (id ? ('/api/control/runs/' + id + '/transcript') : '');
+    const transcript = transcriptUrl(target);
     menu.querySelectorAll('[data-ppm-action]').forEach((btn) => {
       const action = btn.getAttribute('data-ppm-action');
       btn.hidden = (action === 'copy-id' && !id)
@@ -345,7 +368,7 @@ pub fn operator_desk_script() -> &'static str {
       const action = btn.getAttribute('data-ppm-action');
       const id = menuTarget.getAttribute('data-run-id') || menuTarget.getAttribute('data-copy-id') || '';
       const href = menuTarget.getAttribute('data-href') || (id ? ('/run/' + id) : '');
-      const transcript = menuTarget.getAttribute('data-transcript-url') || (id ? ('/api/control/runs/' + id + '/transcript') : '');
+      const transcript = transcriptUrl(menuTarget);
       menu.hidden = true;
       if (action === 'copy-id') return copyText(id);
       if (action === 'copy-url') return copyText(href ? (location.origin + href) : location.href);
@@ -711,6 +734,19 @@ mod tests {
 
     /// One theme contract for every route: the raw-HTML document and the Leptos
     /// shell must ship the same pre-paint restore and the same control script.
+    #[test]
+    fn operator_desk_keeps_plan_cards_out_of_run_transcripts() {
+        let script = operator_desk_script();
+        assert!(script.contains("getAttribute('data-ppm') !== 'run'"));
+        assert!(script.contains("data-focus-repo"));
+        assert!(script.contains("vc-focus-refresh"));
+        assert!(script.contains("data-search-hit"));
+        assert!(
+            !script.contains("data-copy-id') || (id ? ('/api/control/runs/'"),
+            "plan copy-id must not invent a run transcript URL"
+        );
+    }
+
     #[test]
     fn every_route_shares_one_theme_contract() {
         let html = render_document(&ServerDocument {

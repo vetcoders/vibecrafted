@@ -974,14 +974,6 @@ fn console_dashboard(dashboard: DashboardData) -> impl IntoView {
                         <a class="server-navbar-action" href="/aicx">"AICX"</a>
                         <a class="server-navbar-action" href="/structure">"Loctree"</a>
                         <a class="server-navbar-action" href="/frame">"Frame"</a>
-                        <a
-                            class="server-navbar-action"
-                            href="http://127.0.0.1:8033/?q=vibecrafted+server&sort=oldest"
-                            target="_blank"
-                            rel="noopener noreferrer"
-                        >
-                            "AICX desk ↗"
-                        </a>
                     </p>
                 </header>
 
@@ -1032,6 +1024,14 @@ fn route_header(
     }
 }
 
+fn git_repo_name(root: &str) -> String {
+    root.trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
 fn workspace_cards(workspaces: Vec<DashboardWorkspace>) -> impl IntoView {
     workspaces
         .into_iter()
@@ -1040,11 +1040,13 @@ fn workspace_cards(workspaces: Vec<DashboardWorkspace>) -> impl IntoView {
             let workspace_id_attr = workspace.workspace_id.clone();
             let root = workspace.root.clone();
             let selected = workspace.selected;
+            let repo = git_repo_name(&root);
             view! {
                 <article
                     class="workspace-card"
                     data-workspace-id=workspace_id_attr
                     data-focus-root=root.clone()
+                    data-focus-repo=repo
                     data-selected=selected.then_some("1")
                 >
                     <div class="control-run-primary">
@@ -1113,7 +1115,11 @@ fn transcripts_search_script() -> &'static str {
   const q = document.getElementById('transcript-search-query');
   const status = document.getElementById('transcript-search-status');
   const list = document.getElementById('transcript-search-results');
-  if (!form || !q || !status || !list) return;
+  const more = document.getElementById('transcript-search-more');
+  if (!form || !q || !status || !list || !more) return;
+  const LIMIT = 50;
+  let offset = 0;
+  let accumulated = [];
   const text = (value) => (value == null ? '' : String(value));
   const render = (items) => {
     list.replaceChildren();
@@ -1125,6 +1131,7 @@ fn transcripts_search_script() -> &'static str {
       row.setAttribute('data-run-id', id);
       row.setAttribute('data-href', '/run/' + encodeURIComponent(id));
       row.setAttribute('data-focus-root', text(item.root));
+      row.setAttribute('data-transcript-url', '/api/control/runs/' + encodeURIComponent(id) + '/transcript');
       const primary = document.createElement('div');
       primary.className = 'control-run-primary';
       const link = document.createElement('a');
@@ -1155,27 +1162,39 @@ fn transcripts_search_script() -> &'static str {
       list.append(row);
     }
   };
-  const search = async () => {
+  const search = async (reset) => {
     const query = q.value.trim();
+    if (reset) {
+      offset = 0;
+      accumulated = [];
+    }
     status.textContent = query ? 'Searching…' : 'Listing transcripts…';
     const params = new URLSearchParams();
     if (query) params.set('q', query);
+    params.set('offset', String(offset));
+    params.set('limit', String(LIMIT));
     try {
       const response = await fetch('/api/control/transcripts?' + params.toString(), { credentials: 'same-origin' });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error || ('HTTP ' + response.status));
       const items = payload.items || [];
-      status.textContent = items.length ? items.length + ' transcript(s)' : 'No transcripts.';
-      render(items);
+      accumulated = reset ? items : accumulated.concat(items);
+      offset = (payload.offset || 0) + items.length;
+      const total = payload.total || accumulated.length;
+      status.textContent = total ? (accumulated.length + ' of ' + total + ' transcript(s)') : 'No transcripts.';
+      more.hidden = !payload.has_more;
+      render(accumulated);
     } catch (error) {
       status.textContent = 'Search unavailable: ' + error.message;
+      more.hidden = true;
     }
   };
   form.addEventListener('submit', (event) => {
     event.preventDefault();
-    search();
+    search(true);
   });
-  search();
+  more.addEventListener('click', () => search(false));
+  search(true);
 })();"#
 }
 
@@ -1186,7 +1205,7 @@ pub fn TranscriptsPage() -> impl IntoView {
         <Meta name="description" content="Every human transcript on this host, searchable in the browser." />
         <ServerFrame active=ServerSection::Transcripts status="transcripts".to_string()>
             <div class="server-console-shell route-page-shell">
-                {route_header("Runtime", "Transcripts", "Every canonical transcript.human.log on this host. Search reads each log from the start (byte-capped); each row opens the run in the browser.")}
+                {route_header("Runtime", "Transcripts", "Every canonical transcript.human.log on this host. Search streams each log from the start; pages of 50 keep the whole corpus reachable.")}
                 <section class="control-panel control-panel-wide" aria-label="Transcript search">
                     <form id="transcript-search-form" class="server-console-links">
                         <input id="transcript-search-query" name="q" type="search" maxlength="512" placeholder="Search transcripts" />
@@ -1194,6 +1213,9 @@ pub fn TranscriptsPage() -> impl IntoView {
                     </form>
                     <p id="transcript-search-status" class="control-empty">"Loading transcripts…"</p>
                     <div id="transcript-search-results" class="control-run-list"></div>
+                    <p class="server-console-links">
+                        <button id="transcript-search-more" class="server-console-link" type="button" hidden>"Load more"</button>
+                    </p>
                     <script inner_html=transcripts_search_script()></script>
                 </section>
             </div>
@@ -1459,23 +1481,74 @@ pub fn StructurePage() -> impl IntoView {
 fn structure_dashboard(dashboard: DashboardData) -> impl IntoView {
     let report = dashboard.loctree_report;
     let has_report = !report.is_empty();
+    let selected_root = dashboard
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.selected)
+        .map(|workspace| workspace.root.clone())
+        .unwrap_or_default();
     view! {
         <ServerFrame active=ServerSection::Structure status="structural evidence".to_string()>
             <div class="server-console-shell route-page-shell">
-                {route_header("Repository", "Structure", "Loctree report for the selected workspace. Local filesystem paths are never emitted as broken browser links.")}
+                <div
+                    id="vc-focus-context"
+                    data-selected-workspace-root=selected_root
+                    hidden
+                ></div>
+                {route_header("Repository", "Structure", "Loctree report for the selected workspace. Generate it here; tabs never start this process. Local filesystem paths are never emitted as broken browser links.")}
                 <section class="control-panel control-panel-wide" aria-label="Structural evidence">
                     <div class="control-panel-head"><h2>"Latest Loctree report"</h2><span>{if has_report { "available" } else { "not found" }}</span></div>
                     <p class="run-detail-artifact-path" hidden={!has_report}>{report}</p>
                     <p class="server-console-links" hidden={!has_report}>
                         <a class="server-console-link server-console-link-primary" href="/structure/report" target="_blank" rel="noopener noreferrer">"Open Loctree report ↗"</a>
                     </p>
-                    <p class="control-empty" hidden=has_report>"No Loctree report is known for the roots in the canonical state view. Generate one with `loct report --output .loctree/report.html` in the workspace root."</p>
+                    <p class="control-empty" hidden=has_report>"No Loctree report is known for the roots in the canonical state view."</p>
+                    <p class="server-console-links">
+                        <button id="loctree-generate" class="server-console-link server-console-link-primary" type="button">"Generate Loctree report"</button>
+                    </p>
+                    <p id="loctree-generate-status" class="control-empty"></p>
                     <p class="control-plane-meta" hidden={!has_report}>"The report opens sandboxed: its scripts run, but it holds no control-plane authority."</p>
                     <p class="server-console-links"><a class="server-console-link server-console-link-primary" href="/scaffold">"Open scaffold studio"</a><a class="server-console-link" href="/aicx">"Search intent (AICX)"</a></p>
+                    <script inner_html=loctree_generate_script()></script>
                 </section>
             </div>
         </ServerFrame>
     }
+}
+
+fn loctree_generate_script() -> &'static str {
+    r#"(() => {
+  const btn = document.getElementById('loctree-generate');
+  const status = document.getElementById('loctree-generate-status');
+  if (!btn || !status) return;
+  btn.addEventListener('click', async () => {
+    let root = '';
+    try { root = localStorage.getItem('vc-focus-root') || ''; } catch (_) {}
+    const ctx = document.getElementById('vc-focus-context');
+    const live = ctx && ctx.getAttribute('data-selected-workspace-root');
+    if (live) root = live;
+    status.textContent = 'Generating…';
+    btn.disabled = true;
+    try {
+      const response = await fetch('/api/structure/report', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(root ? { root } : {}),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || ('HTTP ' + response.status));
+      if (payload.href) {
+        location.href = payload.href;
+        return;
+      }
+      location.reload();
+    } catch (error) {
+      status.textContent = 'Generate failed: ' + error.message;
+      btn.disabled = false;
+    }
+  });
+})();"#
 }
 
 #[component]
@@ -1540,7 +1613,7 @@ mod tests {
         ActivityPage, ConsolePage, DashboardData, DashboardRun, DashboardSession,
         DashboardSessionRun, FramePage, LifecyclePage, RunsPage, SessionsPage, StructurePage,
         TranscriptsPage, WorkspacesPage, console_dashboard, decode_dashboard_embed,
-        encode_dashboard_embed, load_dashboard_data_from, operator_active_runs, run_cards,
+        encode_dashboard_embed, git_repo_name, load_dashboard_data_from, operator_active_runs, run_cards,
         session_cards, unique_runtime_labels, workspaces_dashboard,
     };
     use crate::control::api::{control_routes, state_payload};
@@ -1759,7 +1832,10 @@ mod tests {
         assert!(html.contains("failed"));
         assert!(html.contains("attention"));
         assert!(html.contains("aria-label=\"Switch to light theme\""));
-        assert!(html.contains("http://127.0.0.1:8033/"));
+        assert!(html.contains("href=\"/aicx\""));
+        assert!(!html.contains("http://127.0.0.1:8033/"));
+        assert!(!html.contains("AICX desk"));
+        assert!(!html.contains("Choose the truth"));
         assert!(html.contains("Vibecrafted server navigation"));
         assert!(html.contains("server-sidebar"));
         assert!(html.contains("href=\"/runs\""));
@@ -1820,6 +1896,8 @@ mod tests {
         assert!(activity.contains("Runtime context"));
         assert!(activity.contains("Warnings"));
         assert!(structure.contains("Latest Loctree report"));
+        assert!(structure.contains("id=\"loctree-generate\""));
+        assert!(structure.contains("/api/structure/report"));
         assert!(!structure.contains("href=\"/Volumes/"));
         assert!(card.contains("href=\"/run/impl-live-agent\""));
         assert!(card.contains("Open transcript"));
@@ -1837,6 +1915,8 @@ mod tests {
         });
         assert!(transcripts.contains("id=\"transcript-search-form\""));
         assert!(transcripts.contains("/api/control/transcripts"));
+        assert!(transcripts.contains("id=\"transcript-search-more\""));
+        assert!(transcripts.contains("has_more"));
         assert!(!transcripts.contains("row.innerHTML"));
         assert!(transcripts.contains("snippet.textContent"));
         assert!(frame.contains("vc-frame web"));
@@ -1875,6 +1955,13 @@ mod tests {
             unique_runtime_labels(["vc-frame", "vc-frame", "vc-terminal", ""]),
             "vc-frame, vc-terminal"
         );
+    }
+
+    #[test]
+    fn git_repo_name_uses_the_last_path_segment() {
+        assert_eq!(git_repo_name("/work/vibecrafted"), "vibecrafted");
+        assert_eq!(git_repo_name("/work/vibecrafted/"), "vibecrafted");
+        assert_eq!(git_repo_name("vibecrafted"), "vibecrafted");
     }
 
     #[test]
