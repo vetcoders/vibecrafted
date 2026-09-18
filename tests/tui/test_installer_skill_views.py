@@ -738,6 +738,56 @@ def test_a_first_install_links_and_reconciles_in_one_pass(
         assert view.resolve() == (store / "vc-x").resolve(), runtime
 
 
+def test_a_selection_without_agents_still_reconciles(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`--tool claude` or an advanced selection can leave `agents` out, and then
+    ~/.agents/skills/<skill> never exists. Requiring it made the precondition
+    unmeetable by construction, stranding every proven copy on the host."""
+    home = tmp_path / "home"
+    crafted_home = tmp_path / "crafted"
+    store = tmp_path / "store"
+    _pin_home(monkeypatch, home, crafted_home)
+    _store_skill(store, "vc-x", "canonical body\n")
+    shadow = _junie_copy(home, "vc-x", SKILL_MD + "june 2026 body\n")
+    _prove(store, "vc-x", shadow)
+
+    _install_pass(store, ["vc-x"], ["junie"])
+
+    assert not (home / ".agents").exists(), "agents was not part of the selection"
+    assert shadow.is_symlink()
+    assert shadow.resolve() == (store / "vc-x").resolve()
+    quarantined = _quarantine_dirs(crafted_home)
+    assert (
+        (quarantined[0] / "junie" / "vc-x" / "SKILL.md")
+        .read_text(encoding="utf-8")
+        .endswith("june 2026 body\n")
+    )
+
+
+def test_a_copy_in_a_runtime_nobody_links_is_kept(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """The other half of the same rule: with no canonical view and no view being
+    written for that runtime, removing the copy would take the skill away."""
+    home = tmp_path / "home"
+    crafted_home = tmp_path / "crafted"
+    store = tmp_path / "store"
+    _pin_home(monkeypatch, home, crafted_home)
+    _store_skill(store, "vc-x", "canonical body\n")
+    shadow = _junie_copy(home, "vc-x", SKILL_MD + "june 2026 body\n")
+    _prove(store, "vc-x", shadow)
+
+    reconciled, kept = installer.reconcile_shadowed_skill_dirs(
+        store, ["vc-x"], view_runtimes=["claude"]
+    )
+
+    assert reconciled == []
+    assert [d.path for d in kept] == [shadow]
+    assert shadow.is_dir()
+    assert "no view is being written for junie" in capsys.readouterr().out
+
+
 def test_the_canonical_view_is_written_before_shadows_are_reconciled(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -10994,13 +10994,21 @@ def link_and_reconcile_skill_views(
     is written first, then shadows are reconciled, then the remaining runtimes
     are linked. Relinking a runtime twice would be harmless anyway — the writer
     skips a link that already resolves to its target — but there is no need.
+
+    `view_runtimes` carries the whole selection into reconciliation, because
+    `agents` need not be in it at all: an advanced or `--tool` install can pick
+    `claude` alone, and then the canonical view will never exist. A copy in a
+    runtime this pass is about to link is still safe to quarantine — the view
+    lands a moment later, in the call below.
     """
     canonical = [rt for rt in all_runtimes if rt in SYMLINK_TARGETS]
     rest = [rt for rt in all_runtimes if rt not in SYMLINK_TARGETS]
     _write_skill_views(
         canonical, store_path, skills_dir, skill_names, dry_run=dry_run, styled=styled
     )
-    reconcile_shadowed_skill_dirs(store_path, skill_names, dry_run=dry_run)
+    reconcile_shadowed_skill_dirs(
+        store_path, skill_names, dry_run=dry_run, view_runtimes=list(all_runtimes)
+    )
     _write_skill_views(
         rest, store_path, skills_dir, skill_names, dry_run=dry_run, styled=styled
     )
@@ -11048,6 +11056,7 @@ def reconcile_shadowed_skill_dirs(
     skill_names: Sequence[str],
     shadows: Sequence[ShadowedSkillDir] | None = None,
     dry_run: bool = False,
+    view_runtimes: Sequence[str] = (),
 ) -> tuple[list[ShadowedSkillDir], list[ShadowedSkillDir]]:
     """Quarantine and remove proven-managed real-directory skill copies.
 
@@ -11062,9 +11071,16 @@ def reconcile_shadowed_skill_dirs(
 
     Returns `(reconciled, kept)`. A copy is removed only when provenance is
     proven, it is a real path that no symlink leads into and that lies outside
-    the store, and the canonical `~/.agents/skills/<skill>` view is in place —
-    otherwise it is kept and reported. Nothing is ever removed before it has
-    been copied aside.
+    the store, and the skill will still be readable afterwards — otherwise it is
+    kept and reported. Nothing is ever removed before it has been copied aside.
+
+    "Still readable" is the canonical `~/.agents/skills/<skill>` view pointing
+    at the store, *or* the copy's own runtime being one of `view_runtimes`: the
+    caller links those immediately after this returns, so the copy is replaced
+    by a view rather than simply taken away. Without that second half, an
+    advanced or `--tool` selection that leaves `agents` out could never
+    reconcile anything — the precondition would be unmeetable by construction,
+    and every proven copy would be stranded on the host forever.
     """
     detected = (
         list(shadows)
@@ -11111,13 +11127,15 @@ def reconcile_shadowed_skill_dirs(
             continue
         canonical = canonical_root / shadow.skill
         expected = store_path / shadow.skill
-        if not canonical.is_symlink() or canonical.resolve(
+        canonical_linked = canonical.is_symlink() and canonical.resolve(
             strict=False
-        ) != expected.resolve(strict=False):
+        ) == expected.resolve(strict=False)
+        if not canonical_linked and shadow.runtime not in view_runtimes:
             kept.append(shadow)
             print(
                 f"  {WARN} Keeping {shadow.path}: canonical view {canonical} "
-                "is not linked to the store"
+                f"is not linked to the store and no view is being written for "
+                f"{shadow.runtime} in this run"
             )
             continue
 
