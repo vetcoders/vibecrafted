@@ -11,10 +11,9 @@
 //! * `GET /api/health` — constant-time process readiness; never scans the
 //!   control plane.
 //! * `GET /api/control/state` — cached [`StateView`](control_core::StateView)
-//!   (canonical settlement board, active/recent runs, warnings, event tail)
-//!   read from the Python-owned snapshots. The raw self-sufficient merge stays
-//!   available to TUI/diagnostic consumers, but is too expensive for an HTTP
-//!   request over a long-lived control plane.
+//!   from [`ControlPlane::compute_view`] (events + snapshots + liveness at
+//!   read). Cheap snapshot-only `read_state_view` is not this route; it
+//!   advertised `launching` for ownerless lifecycle containers.
 //! * `GET /api/control/dashboard` — the exact JSON the Leptos console hydrates
 //!   and client-navigates with (state + lifecycle summaries + loctree report).
 //! * `GET /api/control/runs` — every `runs/<id>.json` snapshot, newest-first.
@@ -148,7 +147,7 @@ pub mod api {
     }
 
     fn build_state_payload(plane: &ControlPlane, now: DateTime<Utc>) -> StateEnvelope {
-        let view = plane.read_state_view();
+        let view = plane.compute_view(now);
         StateEnvelope {
             control_plane: plane.control_plane_home().display().to_string(),
             generated_at: now.to_rfc3339(),
@@ -356,7 +355,7 @@ pub mod api {
     /// them; omits those keys for legacy runs (no completed→delivery guess).
     async fn run(Path(run_id): Path<String>) -> impl IntoResponse {
         let plane = ControlPlane::from_env();
-        match plane.lookup_run(&run_id) {
+        match plane.derived_run(&run_id, Utc::now()) {
             Some(run) => Json(json!(run)).into_response(),
             None => (
                 StatusCode::NOT_FOUND,

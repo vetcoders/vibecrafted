@@ -26,7 +26,7 @@ use crate::model::{
     AgentMeta, ContinuityPolicyProjection, DeliverySealRef, Event, FINAL_STATES, Health,
     LifecycleRun, LifecycleRunSummary, OperatorAgentPolicyProjection, OperatorAgentProjection,
     RECENT_RUN_LIMIT, RUN_STALL_SECONDS, RunStatus, SettlementBoard, SettlementTui,
-    SettlementVerdict, SupervisionRelationProjection, TrustReceiptV1, coerce_int_value,
+    SettlementVerdict, SupervisionRelationProjection, TrustReceiptV1, age_label, coerce_int_value,
     is_active_state, is_final_state, merge_status, operator_session_name, parse_iso,
     skill_from_code, state_health,
 };
@@ -617,10 +617,9 @@ impl ControlPlane {
             return None;
         }
         let state_path = self.lifecycle_run_dir(target).join("state.json");
-        let mut run = read_json::<LifecycleRun>(&state_path)?;
+        let run = read_json::<LifecycleRun>(&state_path)?;
         if run.run_id == target {
-            run.project_delivery_axes();
-            Some(run)
+            Some(self.project_lifecycle_read(run, &state_path, Utc::now()))
         } else {
             None
         }
@@ -640,13 +639,13 @@ impl ControlPlane {
                 continue;
             }
             let state_path = entry.path().join("state.json");
-            let Some(mut run) = read_json::<LifecycleRun>(&state_path) else {
+            let Some(run) = read_json::<LifecycleRun>(&state_path) else {
                 continue;
             };
             if !is_safe_run_id(&run.run_id) {
                 continue;
             }
-            run.project_delivery_axes();
+            let run = self.project_lifecycle_read(run, &state_path, Utc::now());
             runs.push((modified_at(&state_path), run));
         }
         runs.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
@@ -689,11 +688,11 @@ impl ControlPlane {
         state_paths
             .into_iter()
             .filter_map(|(_, state_path)| {
-                let mut run = read_json::<LifecycleRun>(&state_path)?;
+                let run = read_json::<LifecycleRun>(&state_path)?;
                 if run.run_id.is_empty() {
                     return None;
                 }
-                run.project_delivery_axes();
+                let run = self.project_lifecycle_read(run, &state_path, Utc::now());
                 Some(self.lifecycle_run_summary(&run))
             })
             .take(limit)
@@ -714,6 +713,69 @@ impl ControlPlane {
             self.lifecycle_run_updated_at(run),
             self.lifecycle_dou_index_from_reports(run),
         )
+    }
+
+    /// Overlay liveness + stall at read time. Never writes `state.json`.
+    ///
+    /// A lifecycle container with no live owner and no movement past
+    /// [`RUN_STALL_SECONDS`] is `abandoned` and must not keep
+    /// `approve_transition` as a human control. This is the same class of
+    /// derivation as [`Self::compute_view`], not a second policy.
+    fn project_lifecycle_read(
+        &self,
+        mut run: LifecycleRun,
+        state_path: &Path,
+        now: DateTime<Utc>,
+    ) -> LifecycleRun {
+        run.project_delivery_axes();
+        if run.state_path.trim().is_empty() {
+            run.state_path = state_path.display().to_string();
+        }
+        if is_final_state(&run.status) {
+            return run;
+        }
+        let owner_live = [run.pid, run.owner_pid, run.launcher_pid]
+            .into_iter()
+            .flatten()
+            .any(pid_is_alive);
+        if owner_live {
+            return run;
+        }
+        let updated_at = if run.updated_at.trim().is_empty() {
+            self.lifecycle_run_updated_at(&run)
+        } else {
+            run.updated_at.clone()
+        };
+        let age_secs = parse_iso(&updated_at)
+            .map(|updated| (now - updated).num_seconds())
+            .unwrap_or(i64::MAX);
+        if age_secs > RUN_STALL_SECONDS {
+            let age = parse_iso(&updated_at)
+                .map(|updated| age_label(updated, now))
+                .unwrap_or_else(|| "unknown age".to_string());
+            run.status = "abandoned".to_string();
+            run.human_controls.clear();
+            run.error = format!("no live owner for {age}");
+        }
+        run
+    }
+
+    /// One run as [`compute_view`] would show it, else the single-id lookup.
+    ///
+    /// Observe/CLI/web detail must not bypass this and re-read `meta.json`.
+    #[must_use]
+    pub fn derived_run(&self, run_id: &str, now: DateTime<Utc>) -> Option<RunStatus> {
+        let target = run_id.trim();
+        if !is_safe_run_id(target) {
+            return None;
+        }
+        let view = self.compute_view(now);
+        view.active_runs
+            .into_iter()
+            .chain(view.stalled_runs)
+            .chain(view.recent_runs)
+            .find(|run| run.run_id == target)
+            .or_else(|| self.lookup_run(target))
     }
 
     fn lifecycle_run_status(&self, run: &LifecycleRun) -> RunStatus {
@@ -780,13 +842,17 @@ impl ControlPlane {
 
     fn append_discoverable_lifecycle_runs(&self, merged: &mut Vec<RunStatus>) {
         for mut run in self.iter_lifecycle_run_status() {
+            let abandoned = run.state == "abandoned";
             if !merged.iter().any(|existing| existing.run_id == run.run_id)
-                && (run.is_terminal() || run.health == "active")
+                && (run.is_terminal() || abandoned || run.health == "active")
             {
                 // Lifecycle containers remain discoverable in `recent`, but
                 // they are neither workers nor heartbeat sources. Only their
                 // dispatched worker runs may enter active/stalled projections.
-                if !run.is_terminal() {
+                if abandoned {
+                    run.health = "stalled".to_string();
+                    run.last_error = "no live owner".to_string();
+                } else if !run.is_terminal() {
                     run.health = "unknown".to_string();
                 }
                 merged.push(run);

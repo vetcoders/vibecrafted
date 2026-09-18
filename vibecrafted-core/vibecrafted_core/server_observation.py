@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from .server_config import load_server_config
@@ -104,12 +107,11 @@ def _observation_from_payload(
     *,
     reason: str,
 ) -> dict[str, Any]:
-    """Classify one local fallback observation.
+    """Legacy classifier retained for unit characterization only.
 
-    Mirrors ``RunObservationV1::from_run`` plus the overlay consistent-terminal
-    rule so Python does not grow a second policy. Missing worker evidence stays
-    ``None`` (not death). Writer-unavailable plus a stale non-live read stays
-    uncertain. Live process proof is writer lag, not disappearance.
+    Production observe never calls this. Fallback is ``control-observe``
+    (``compute_view``) or an explicit ``control_core_observe_unavailable``
+    payload with no Python classification.
     """
     from .control_plane import ACTIVE_STATES, FINAL_STATES
 
@@ -208,18 +210,86 @@ def _observation_from_payload(
     }
 
 
+def _control_observe_bin() -> Path | None:
+    """Locate the control-core observe binary. Never a second classifier."""
+    raw = str(os.environ.get("VIBECRAFTED_CONTROL_OBSERVE") or "").strip()
+    if raw:
+        candidate = Path(raw).expanduser()
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    which = shutil.which("control-observe")
+    if which:
+        return Path(which)
+    scaffold = shutil.which("scaffold-doctor")
+    if scaffold:
+        sibling = Path(scaffold).with_name("control-observe")
+        if sibling.is_file() and os.access(sibling, os.X_OK):
+            return sibling
+    root = str(os.environ.get("VIBECRAFTED_ROOT") or "").strip()
+    if root:
+        for profile in ("release", "debug"):
+            candidate = (
+                Path(root)
+                / "vibecrafted-server"
+                / "target"
+                / profile
+                / "control-observe"
+            )
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return candidate
+    return None
+
+
+def _observation_from_control_core(run_id: str) -> dict[str, Any] | None:
+    """Ask the same crate voc uses. No Python classification."""
+    binary = _control_observe_bin()
+    if binary is None:
+        return None
+    home = str(os.environ.get("VIBECRAFTED_HOME") or Path.home() / ".vibecrafted")
+    try:
+        completed = subprocess.run(
+            [
+                str(binary),
+                "--home",
+                home,
+                "--run-id",
+                run_id,
+                "--json",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=observe_timeout_seconds(),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    payload["source"] = "control_core_compute_view"
+    return payload
+
+
 def _local_observation(run_id: str, *, reason: str) -> dict[str, Any] | None:
-    """Read-follows-write fallback when vc-server is slow or fail-closed.
+    """Fallback when vc-server is slow or fail-closed.
 
-    Durable truth lives in ``runtime_runs/`` and the projected snapshot. A
-    timeout or 503 on the HTTP eye must not report disappearance of a run
-    that is still on disk.
+    Classification belongs to control-core (`compute_view`). Python only locates
+    the binary or admits that the eye is unavailable.
     """
-    from .control_plane import RunNotResolved, lookup_run, resolve_run
-
     target = str(run_id or "").strip()
     if not target:
         return None
+    derived = _observation_from_control_core(target)
+    if derived is not None:
+        derived["writer_revalidation"] = reason
+        return derived
+    from .control_plane import RunNotResolved, lookup_run, resolve_run
+
     run = lookup_run(target)
     resolved = None
     if run is None:
@@ -229,18 +299,25 @@ def _local_observation(run_id: str, *, reason: str) -> dict[str, Any] | None:
             resolved = None
     if run is None and resolved is None:
         return None
-    payload_run = dict(run) if isinstance(run, Mapping) else None
-    if payload_run is None and resolved is not None and resolved.meta is not None:
-        try:
-            meta_payload = json.loads(resolved.meta.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, TypeError):
-            meta_payload = {}
-        if isinstance(meta_payload, dict):
-            payload_run = dict(meta_payload)
-            payload_run["run_id"] = target
-            if resolved.transcript is not None:
-                payload_run.setdefault("latest_transcript", str(resolved.transcript))
-    return _observation_from_payload(target, payload_run, reason=reason)
+    return {
+        "schema": "vibecrafted.run-observation.v1",
+        "run_id": target,
+        "found": True,
+        "terminal": False,
+        "worker_alive": None,
+        "process_truth": "unknown",
+        "evidence_disagreement": True,
+        "disagreement_reasons": [
+            "control_core_observe_unavailable",
+            reason,
+        ],
+        "run": {
+            "run_id": target,
+            "source": "control_core_observe_unavailable",
+        },
+        "writer_revalidation": reason,
+        "source": "control_core_observe_unavailable",
+    }
 
 
 def _request_json(path: str, *, timeout: float | None) -> dict[str, Any]:
@@ -277,14 +354,21 @@ def _request_json(path: str, *, timeout: float | None) -> dict[str, Any]:
         ) from exc
     if not isinstance(payload, dict):
         raise ServerObservationError("vc-server returned a non-object observation")
+    payload.setdefault("source", "vc-server-compute_view")
+    return payload
+
+
+def _ensure_source(payload: dict[str, Any], default: str) -> dict[str, Any]:
+    if not str(payload.get("source") or "").strip():
+        payload["source"] = default
     return payload
 
 
 def observe_run(run_id: str) -> dict[str, Any]:
-    """Perform one bounded observation; fall back to local files if HTTP fails."""
+    """Perform one bounded observation; fall back to control-core if HTTP fails."""
     encoded = urllib.parse.quote(run_id, safe="")
     try:
-        return _request_json(
+        payload = _request_json(
             f"/api/control/runs/{encoded}/observe",
             timeout=observe_timeout_seconds(),
         )
@@ -293,8 +377,11 @@ def observe_run(run_id: str) -> dict[str, Any]:
             run_id, reason=f"local_fallback_after_server_error:{type(exc).__name__}"
         )
         if local is not None:
-            return local
+            return _ensure_source(local, "control_core_observe_unavailable")
         raise
+    if not isinstance(payload, dict):
+        raise ServerObservationError("vc-server observe omitted object")
+    return _ensure_source(payload, "vc-server-compute_view")
 
 
 def list_runs() -> list[dict[str, Any]]:

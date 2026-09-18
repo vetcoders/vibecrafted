@@ -50,6 +50,7 @@ pub(crate) struct RunObservationV1 {
     monitor_witness: Value,
     aicx_witness: Value,
     writer_revalidation: String,
+    source: String,
 }
 
 impl RunObservationV1 {
@@ -142,6 +143,7 @@ impl RunObservationV1 {
                 "reason": "continuity_witness_not_available_for_run"
             }),
             writer_revalidation,
+            source: "vc-server-compute_view".to_string(),
         }
     }
 
@@ -359,7 +361,8 @@ async fn observe_once(
     };
     let read_plane = plane.clone();
     let read_run_id = run_id.clone();
-    let run = tokio::task::spawn_blocking(move || read_plane.lookup_run(&read_run_id)).await;
+    let run =
+        tokio::task::spawn_blocking(move || read_plane.derived_run(&read_run_id, Utc::now())).await;
     match run {
         Ok(run) => RunObservationV1::from_run(&plane, &run_id, run, writer_outcome.status),
         Err(_) => {
@@ -379,8 +382,7 @@ fn validated_writer_executable(
 ) -> Result<PathBuf, &'static str> {
     let executable = &config.executable;
     let mut components = executable.components();
-    if let (Some(std::path::Component::Normal(name)), None) =
-        (components.next(), components.next())
+    if let (Some(std::path::Component::Normal(name)), None) = (components.next(), components.next())
     {
         return if name == "vibecrafted" {
             Ok(PathBuf::from("vibecrafted"))
@@ -397,8 +399,7 @@ fn validated_writer_executable(
     if meta.file_type().is_symlink() {
         return Err("invalid_writer_path");
     }
-    let canonical =
-        std::fs::canonicalize(executable).map_err(|_| "invalid_writer_path")?;
+    let canonical = std::fs::canonicalize(executable).map_err(|_| "invalid_writer_path")?;
     if !canonical.is_file() {
         return Err("invalid_writer_path");
     }
@@ -440,8 +441,7 @@ async fn invoke_python_revalidation(
     // only a run that exists inside this control plane, and the request value
     // reaches argv only after proving equality with the run's disk-canonical
     // identity.
-    let runs_root = match std::fs::canonicalize(plane.control_plane_home().join("runtime_runs"))
-    {
+    let runs_root = match std::fs::canonicalize(plane.control_plane_home().join("runtime_runs")) {
         Ok(root) => root,
         Err(_) => {
             return WriterOutcome {

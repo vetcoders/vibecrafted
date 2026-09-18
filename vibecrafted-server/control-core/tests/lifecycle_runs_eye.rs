@@ -324,3 +324,85 @@ fn lifecycle_summary_falls_back_to_canonical_files_when_embedded_paths_are_stale
         "canonical state.json mtime remains the summary timestamp when embedded state_path is stale"
     );
 }
+
+#[test]
+fn stale_launching_lifecycle_without_pid_is_abandoned_not_approve() {
+    let home = temp_home("lifecycle-abandoned");
+    let run_id = "life-audi-stale-launching";
+    write_lifecycle_run(&home, run_id, None);
+    let state_path = home
+        .join("control_plane")
+        .join("lifecycle_runs")
+        .join(run_id)
+        .join("state.json");
+    let stale = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(7 * 24 * 60 * 60))
+        .expect("stale clock");
+    fs::File::open(&state_path)
+        .expect("state file")
+        .set_modified(stale)
+        .expect("mtime");
+
+    let plane = ControlPlane::new(&home);
+    let summary = plane
+        .load_lifecycle_run_summaries()
+        .into_iter()
+        .find(|summary| summary.run_id == run_id)
+        .expect("summary present");
+
+    assert_eq!(summary.status, "abandoned");
+    assert!(
+        summary.human_controls.is_empty(),
+        "abandoned runs must not keep approve_transition"
+    );
+    assert!(
+        summary.next_action.starts_with("Abandoned ·"),
+        "next action names abandonment with age, got {:?}",
+        summary.next_action
+    );
+    assert!(
+        !summary.next_action.contains("approve_transition"),
+        "next action must not be Operator: approve_transition"
+    );
+
+    let resolved = plane
+        .resolve_lifecycle_run(run_id)
+        .expect("nested lifecycle");
+    assert_eq!(resolved.status, "abandoned");
+    assert!(resolved.human_controls.is_empty());
+
+    let view = plane.compute_view(Utc::now());
+    let derived = plane.derived_run(run_id, Utc::now()).expect("derived run");
+    assert_eq!(derived.state, "abandoned");
+    assert_eq!(
+        view.recent_runs
+            .iter()
+            .find(|run| run.run_id == run_id)
+            .map(|run| run.state.as_str())
+            .or(Some(derived.state.as_str())),
+        Some("abandoned"),
+        "reader surfaces agree on abandoned"
+    );
+}
+
+#[test]
+fn fresh_launching_lifecycle_without_pid_is_not_abandoned() {
+    let home = temp_home("lifecycle-fresh-launching");
+    let run_id = "life-audi-fresh-launching";
+    write_lifecycle_run(&home, run_id, None);
+
+    let plane = ControlPlane::new(&home);
+    let summary = plane
+        .load_lifecycle_run_summaries()
+        .into_iter()
+        .find(|summary| summary.run_id == run_id)
+        .expect("summary present");
+
+    assert_eq!(summary.status, "launching");
+    assert!(
+        summary
+            .human_controls
+            .contains(&"approve_transition".to_string()),
+        "fresh launching still exposes the written human control"
+    );
+}
