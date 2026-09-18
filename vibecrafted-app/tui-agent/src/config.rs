@@ -26,7 +26,7 @@ impl Default for CliOptions {
             tick_ms: 250,
             no_verify_gate: false,
             server: None,
-            view: ConsoleView::Observe,
+            view: ConsoleView::Home,
         }
     }
 }
@@ -402,10 +402,14 @@ fn print_help() {
     println!("Voc Agent");
     println!();
     println!("Usage:");
-    println!("  voc [--view observe|full] [--server <url>] [--state-root <dir>] [--repo <path>]");
+    println!(
+        "  voc [--view home|observe|full] [--server <url>] [--state-root <dir>] [--repo <path>]"
+    );
     println!();
     println!("Options:");
-    println!("  --view observe|full  Default observe: server-backed live board + AICX memory");
+    println!(
+        "  --view home|observe|full  Default home: attention / work / history, then an existing conversation"
+    );
     println!(
         "  --server <url>       Vibecrafted Server origin (default: VC_SERVER_URL or http://127.0.0.1:3024)"
     );
@@ -428,6 +432,7 @@ pub fn path_display(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::observe::ConsoleView;
 
     fn parse(args: &[&str]) -> anyhow::Result<CliOptions> {
         parse_args_from(args.iter().map(|arg| arg.to_string()))
@@ -506,6 +511,17 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .starts_with("unknown argument")
+        );
+    }
+
+    #[test]
+    fn default_view_is_the_shared_home_console() {
+        let options = parse(&[]).unwrap();
+        assert_eq!(options.view, ConsoleView::Home);
+        assert_eq!(parse(&["--view", "home"]).unwrap().view, ConsoleView::Home);
+        assert_eq!(
+            parse(&["--view", "observe"]).unwrap().view,
+            ConsoleView::Observe
         );
     }
 
