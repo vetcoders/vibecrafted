@@ -31,6 +31,8 @@ vibecrafted doctor --release      # VERSION vs GitHub Latest + last source gate
 
 Installers before 3.x materialized **real directory copies** of `vc-*` skills into per-runtime skill dirs instead of views. Those copies survive next to the canonical `~/.agents/skills` symlink view, drift silently, and an agent that reads both directories (Junie does) sees a stale duplicate. Neither install, update nor doctor used to notice: shadow pruning covered only `claude`/`codex` and only symlinks, and orphan pruning covered only names that had left the bundle.
 
+The same proof governs **orphans** — a `vc-*` directory whose name is no longer in the bundle. A retired skill like `vc-canvas` is also a name you could put your own work under, and orphan pruning used to remove the directory either way (with the prompt defaulting to yes, and returning that default in a non-interactive install). A real orphan directory now has to prove the same provenance before it is quarantined and removed; one that cannot is kept, reported with the `mv` command, and never offered at the prompt. Pointers and stray files are still removed as the leftovers of views we wrote.
+
 Doctor now reports one `shadow-dir:<runtime>/<skill>` warning per copy, with the exact path and its provenance class:
 
 | Class               | What is proven                                                                                                                                                                                                                        | What install/update does                                   |
