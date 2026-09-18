@@ -1,6 +1,6 @@
 import hashlib
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from scripts import vetcoders_install as installer
@@ -156,17 +156,38 @@ def _write_provenance(store: Path, skills: dict[str, dict[str, list[str]]]) -> P
     return manifest
 
 
-def _prove(store: Path, name: str, *released: Path, paths: Sequence[str] = ()) -> Path:
-    """Record `released` SKILL.md files and `paths` as shipped for `name`."""
+def _prove(
+    store: Path,
+    name: str,
+    *released: Path,
+    extra: Mapping[str, Sequence[bytes]] | None = None,
+) -> Path:
+    """Record every `released` directory as a Vibecrafted release of `name`.
+
+    Each directory contributes its SKILL.md sha256 and, for every file in it,
+    the git blob id of those exact bytes at that exact relative path — which is
+    what the installer checks. `extra` adds bodies we shipped at a path but no
+    longer do, the way history outlives the current store.
+    """
+    digests: set[str] = set()
+    files: dict[str, set[str]] = {}
+    for skill in released:
+        digests.add(hashlib.sha256((skill / "SKILL.md").read_bytes()).hexdigest())
+        for rel, path in installer._skill_copy_entries(skill):
+            if path.is_file() and not path.is_symlink():
+                files.setdefault(rel, set()).add(
+                    installer._git_blob_id(path.read_bytes())
+                )
+    for rel, bodies in (extra or {}).items():
+        files.setdefault(rel, set()).update(
+            installer._git_blob_id(body) for body in bodies
+        )
     return _write_provenance(
         store,
         {
             name: {
-                "sha256": sorted(
-                    hashlib.sha256((skill / "SKILL.md").read_bytes()).hexdigest()
-                    for skill in released
-                ),
-                "paths": sorted({"SKILL.md", *paths}),
+                "sha256": sorted(digests),
+                "files": {rel: sorted(files[rel]) for rel in sorted(files)},
             }
         },
     )
@@ -247,18 +268,27 @@ def test_identical_managed_copy_is_quarantined_and_removed(
     (shadow / "references" / "notes.md").write_text("ref\n", encoding="utf-8")
     # Editor litter must not make an identical copy look drifted.
     (shadow / ".DS_Store").write_bytes(b"\x00")
-    _prove(store, "vc-x", shadow, paths=["references/notes.md"])
+    _prove(store, "vc-x", shadow)
 
     detected = installer.collect_shadowed_skill_dirs(store, ["vc-x"])
     assert [d.classification for d in detected] == ["managed_identical"]
 
-    # A single nested byte of drift flips the classification, not the removal
-    # policy: provenance still holds, so the copy is still reconciled.
+    # One nested byte of drift withdraws the claim outright: those bytes are
+    # not a version of that file we ever shipped, so the copy is not ours.
     (shadow / "references" / "notes.md").write_text("drifted\n", encoding="utf-8")
+    assert [
+        d.classification for d in installer.collect_shadowed_skill_dirs(store, ["vc-x"])
+    ] == ["unknown"]
+
+    # Drift we DID ship is a different matter. Once those bytes are a release,
+    # the copy is stale rather than foreign — the classification changes, the
+    # removal policy does not.
+    _prove(store, "vc-x", shadow, extra={"references/notes.md": [b"ref\n"]})
     assert [
         d.classification for d in installer.collect_shadowed_skill_dirs(store, ["vc-x"])
     ] == ["managed_stale"]
     (shadow / "references" / "notes.md").write_text("ref\n", encoding="utf-8")
+    _prove(store, "vc-x", shadow)
 
     reconciled, kept = installer.reconcile_shadowed_skill_dirs(
         store, ["vc-x"], shadows=detected
@@ -467,16 +497,17 @@ def test_historical_release_hash_proves_a_stale_copy(
     shadow = _junie_copy(home, "vc-x", june)
     (shadow / "scripts").mkdir()
     (shadow / "scripts" / "await.sh").write_text("#!/bin/sh\n", encoding="utf-8")
-    # A file the current store no longer carries is still ours when the path is
-    # in history — that is the point of a *path* set rather than a tree compare.
+    # A file the current store no longer carries is still ours when those exact
+    # bytes are in history — that is the point of recording blob ids per path
+    # rather than comparing against the current tree.
     assert not (store / "vc-x" / "scripts").exists()
-    _prove(store, "vc-x", shadow, paths=["scripts/await.sh"])
+    _prove(store, "vc-x", shadow)
 
     detected = installer.collect_shadowed_skill_dirs(store, ["vc-x"])
     assert [(d.classification, d.is_managed) for d in detected] == [
         ("managed_stale", True)
     ]
-    assert "matches a historical Vibecrafted release" in detected[0].detail
+    assert "byte for byte a version we shipped" in detected[0].detail
 
     reconciled, kept = installer.reconcile_shadowed_skill_dirs(
         store, ["vc-x"], shadows=detected
@@ -551,12 +582,70 @@ def test_a_file_we_never_shipped_withdraws_the_whole_claim(
     assert (shadow / "references" / "my-notes.md").is_file()
 
 
+def test_an_edited_file_at_a_shipped_path_withdraws_the_claim(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The path is one we ship and the SKILL.md is one we released, so a
+    path-only proof claimed this copy. The operator's edit to `scripts/await.sh`
+    would have gone into the quarantine and out of their reach."""
+    home = tmp_path / "home"
+    crafted_home = tmp_path / "crafted"
+    store = tmp_path / "store"
+    _pin_home(monkeypatch, home, crafted_home)
+    _store_skill(store, "vc-x", "2026-09 body\n")
+    _canonical_view(home, store, "vc-x")
+    shadow = _junie_copy(home, "vc-x", SKILL_MD + "june 2026 body\n")
+    (shadow / "scripts").mkdir()
+    await_sh = shadow / "scripts" / "await.sh"
+    await_sh.write_text("#!/bin/sh\necho ours\n", encoding="utf-8")
+    _prove(store, "vc-x", shadow)
+    assert [
+        d.classification for d in installer.collect_shadowed_skill_dirs(store, ["vc-x"])
+    ] == ["managed_stale"]
+
+    await_sh.write_text("#!/bin/sh\necho my own tweak\n", encoding="utf-8")
+
+    detected = installer.collect_shadowed_skill_dirs(store, ["vc-x"])
+    assert [d.classification for d in detected] == ["unknown"]
+    assert "'scripts/await.sh' differs from every version" in detected[0].detail
+
+    reconciled, kept = installer.reconcile_shadowed_skill_dirs(
+        store, ["vc-x"], shadows=detected
+    )
+
+    assert reconciled == []
+    assert [d.path for d in kept] == [shadow]
+    assert await_sh.read_text(encoding="utf-8").endswith("my own tweak\n")
+
+
+def test_a_symlink_inside_a_copy_withdraws_the_claim(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A materialized copy is files. A link inside one points somewhere we
+    cannot vouch for, and quarantining it would copy whatever it aims at."""
+    home = tmp_path / "home"
+    crafted_home = tmp_path / "crafted"
+    store = tmp_path / "store"
+    _pin_home(monkeypatch, home, crafted_home)
+    _store_skill(store, "vc-x", "2026-09 body\n")
+    _canonical_view(home, store, "vc-x")
+    shadow = _junie_copy(home, "vc-x", SKILL_MD + "june 2026 body\n")
+    _prove(store, "vc-x", shadow)
+    (shadow / "notes.md").symlink_to(tmp_path / "elsewhere.md")
+
+    detected = installer.collect_shadowed_skill_dirs(store, ["vc-x"])
+
+    assert [d.classification for d in detected] == ["unknown"]
+    assert "'notes.md' is a symlink" in detected[0].detail
+
+
 def test_manifest_that_is_absent_corrupt_or_v1_proves_nothing(
     tmp_path: Path, monkeypatch
 ) -> None:
     """A machine without the manifest, or with a truncated one, must still
-    install — with the manifest proof gone, not with a guess in its place. The
-    v1 shape counts as gone too: it recorded hashes but no file-path history."""
+    install — with the manifest proof gone, not with a guess in its place. An
+    older shape counts as gone too: v1 recorded hashes alone and v2 added bare
+    paths, and neither can say whether a file's bytes are ours."""
     home = tmp_path / "home"
     crafted_home = tmp_path / "crafted"
     store = tmp_path / "store"
@@ -588,6 +677,12 @@ def test_manifest_that_is_absent_corrupt_or_v1_proves_nothing(
             {
                 "schema": "vibecrafted.skill-provenance.v1",
                 "skills": {"vc-x": [june_digest]},
+            }
+        ),
+        json.dumps(
+            {
+                "schema": "vibecrafted.skill-provenance.v2",
+                "skills": {"vc-x": {"sha256": [june_digest], "paths": ["SKILL.md"]}},
             }
         ),
     ):
