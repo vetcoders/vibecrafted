@@ -15,6 +15,7 @@ MATCHER_TYPES = {"contains", "equals", "matches", "not_contains", "exit_code"}
 READ_MUTATIONS = {"forbid", "allow-report-only", "allow"}
 TIMEOUT_POLICIES = {"repair", "fail", "continue"}
 CRITICAL_FAIL_POLICIES = {"break", "continue"}
+NONCRITICAL_DEP_FAIL_POLICIES = {"continue", "stop"}
 STATE_PENDING = "[ ]"
 STATE_WORKER_DONE = "[~]"
 STATE_UNKNOWN = "[?]"
@@ -75,6 +76,12 @@ class Policy:
     allow_concurrency: bool = False
     require_commit: bool = False
     allow_idempotent_existing: bool = True
+    # A failed `critical = false` dependency does not stop its dependents by
+    # default: the plan declared that cut expendable, so the wave stays
+    # fail-open and the dependent receives the failure in its baton instead
+    # (field incident 2026-09-17: `stopped because dependencies failed`
+    # cascaded from a non-critical straggler). "stop" restores the old fence.
+    on_noncritical_dep_fail: str = "continue"
 
 
 @dataclass(frozen=True)
@@ -185,6 +192,11 @@ class Cut:
     # checkout for this specific run.
     runtime_root: str = ""
     runtime_branch: str = ""
+    # Durable execution-runtime declaration ("local-worktrees"/"living-tree").
+    # Stamped together with the geometry so repair/resume relaunches inherit
+    # the initial launch's runtime even when transient geometry fields are
+    # empty — a worktree cut must never fall back to Living Tree admission.
+    runtime_class: str = ""
     baseline_sha: str = ""
     target_path: str = ""
     artifact_path: str = ""
