@@ -113,6 +113,12 @@ def _raw_entries(
 
     `-z` is what keeps the paths honest: without it git quotes anything outside
     ASCII, and the localized `pl/` mirror is full of them.
+
+    Known limitation: without `-m`, `git log --raw` emits no entries for merge
+    commits, so a blob introduced only by an evil merge, never touched by a
+    later commit and absent from the current working tree store, is not
+    recorded; such a copy classifies unproven and is kept, never removed
+    (fail-safe).
     """
     if not pathspecs:
         return []

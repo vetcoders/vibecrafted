@@ -14936,7 +14936,7 @@ def _cmd_install_compact(args: argparse.Namespace, repo_root: Path) -> int:
             " \u00b7 ".join(agent_names) if agent_names else "none detected",
         )
 
-        # Prune (logged only)
+        # Prune orphans: pointers and proven copies go (quarantined first); unproven ones are kept
         prune_orphaned_skills(
             store_path,
             all_runtimes,
