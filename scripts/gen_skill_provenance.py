@@ -256,12 +256,22 @@ def collect_worktree(store: Path) -> dict[str, SkillRecord]:
 
 
 def load_manifest(path: Path) -> dict[str, SkillRecord]:
-    """Read the existing manifest, tolerating absence or corruption."""
+    """Read the existing manifest, tolerating absence, corruption or drift.
+
+    The schema is checked here for the same reason the installer checks it: the
+    merge is additive, so carrying entries over from a document this version
+    does not understand would preserve them forever without ever being able to
+    say what they mean. A v1 manifest recorded hashes and no path history, and
+    an entry with half a proof cannot prove anything — it is regenerated from
+    the repository, not salvaged.
+    """
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
-    skills = data.get("skills") if isinstance(data, dict) else None
+    if not isinstance(data, dict) or data.get("schema") != SCHEMA:
+        return {}
+    skills = data.get("skills")
     if not isinstance(skills, dict):
         return {}
     merged: dict[str, SkillRecord] = {}

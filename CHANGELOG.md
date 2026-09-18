@@ -59,6 +59,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   rather than unlinked and rewritten, which is what kept a runtime skills dir
   symlinked into the store from having the store copy removed under it.
 
+- Doctor's fix for a `shadow-dir:` finding is now `vibecrafted update --force`.
+  It used to say `vibecrafted update`, which on a host already on the latest
+  version prints `up to date` and returns before the reconciliation runs — the
+  advice could not fix what the finding reported.
+
 - Server web: the Loctree report opens whole in a browser. The document now
   lives at the directory-style `/structure/report/` (`/structure/report`
   redirects there), so Loctree's relative `loctree-*.js` references resolve
