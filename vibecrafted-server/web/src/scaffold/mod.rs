@@ -952,7 +952,7 @@ pub mod api {
                         .as_deref()
                         .unwrap_or("(unknown plan_id)");
                     format!(
-                        r#"<article class="plan-card plan-card-invalid" data-search="{}">
+                        r#"<article class="plan-card plan-card-invalid" data-search="{}" data-ppm="plan" data-copy-id="{}">
   <span class="plan-number">!</span>
   <div class="plan-card-title">
     <h3>{}</h3>
@@ -962,6 +962,7 @@ pub mod api {
   <p class="plan-skip-path"><code>{}</code></p>
 </article>"#,
                         escape_attr(&format!("{} {}", id, skip.plan_root).to_ascii_lowercase()),
+                        escape_attr(id),
                         escape_html(&humanize_plan_id(id)),
                         escape_html(&skip.reason),
                         escape_html(&skip.plan_root),
@@ -3321,6 +3322,8 @@ button.md-status.md-status-done .md-status-glyph{color:var(--status-success)}
             assert!(html.contains("vc-server-mcp-slack-gateway"));
             assert!(html.contains("unknown variant `mission`"));
             assert!(html.contains("plan-card-invalid"));
+            assert!(html.contains("data-ppm=\"plan\""));
+            assert!(html.contains("data-copy-id=\"vc-server-mcp-slack-gateway\""));
         }
 
         #[test]

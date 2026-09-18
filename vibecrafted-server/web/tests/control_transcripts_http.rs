@@ -236,3 +236,33 @@ async fn transcripts_search_pages_past_two_hundred_matches() {
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["run_id"], "run-page-000");
 }
+
+#[tokio::test]
+async fn transcripts_listing_pages_the_whole_corpus_without_a_query() {
+    let home = TestHome::new();
+    for index in 0..51 {
+        home.write_run(
+            &format!("run-list-{index:03}"),
+            &format!("2026-09-18T{:02}:{:02}:00+00:00", index / 60, index % 60),
+            "canonical human log body\n",
+        );
+    }
+
+    let (status, _, first) = get_transcripts("").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first["q"], "");
+    assert_eq!(first["total"], 51);
+    assert_eq!(first["offset"], 0);
+    assert_eq!(first["limit"], 50);
+    assert_eq!(first["count"], 50);
+    assert_eq!(first["has_more"], true);
+
+    let (status, _, second) =
+        get_transcripts_uri("/api/control/transcripts?offset=50&limit=50").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(second["total"], 51);
+    assert_eq!(second["offset"], 50);
+    assert_eq!(second["count"], 1);
+    assert_eq!(second["has_more"], false);
+    assert_eq!(second["items"][0]["run_id"], "run-list-000");
+}

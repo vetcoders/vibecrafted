@@ -77,12 +77,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   contract the App applies.
 - Server web: `GET /api/control/transcripts` streams each canonical
   `transcript.human.log` from the start (no 256 KiB search window) and
-  paginates matching results (`offset`, `limit`, `has_more`, `total`). The
-  transcripts page loads pages of 50. The live run page still shows a tail
-  preview. Overview no longer links a guessed AICX port; `/aicx` is the
-  search door. `POST /api/structure/report` runs `loct report` in a known
-  control-plane workspace (local-peer gated). Plan cards expose
-  `data-focus-repo` and PPM infers a transcript URL only for `data-ppm="run"`.
+  paginates matching results (`offset`, `limit`, `has_more`, `total`),
+  including the unfiltered listing. The transcripts page loads pages of 50
+  and re-applies Fleet/Project focus after each fetch. The live run page
+  still shows a tail preview. Overview no longer links a guessed AICX port;
+  `/aicx` is the search door. `POST /api/structure/report` runs `loct report`
+  in a known control-plane workspace (local-peer gated; proven against a real
+  `loct` binary). Plan cards expose `data-focus-repo` and PPM infers a
+  transcript URL only for `data-ppm="run"`.
 - macOS App: when `[tools.vc-frame]` names a loopback `http` origin,
   AppDelegate starts `vc-frame web` on that host:port while connecting the
   deck. Tabs still never start the service; no port is guessed.
