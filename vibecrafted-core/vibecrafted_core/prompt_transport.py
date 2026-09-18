@@ -4,9 +4,13 @@ Every headless lane writes the operator prompt to a 0600 file and hands that
 file to the worker on stdin (never argv: ``ps`` and ARG_MAX). Most providers
 read that text verbatim. Agy's print mode has no text stdin lane at all; its
 only private input is ``--input-format stream-json`` — one NDJSON user turn
-per line, requiring ``--output-format stream-json``. This module owns that
-shape so the async supervisor, the shell launcher and the tests agree on one
-encoder.
+per line, requiring ``--output-format stream-json``. Kimi's print mode has no
+stdin lane of any kind (kimi 0.42.0: ``-p`` takes the prompt as its argv
+value, and bare ``-p`` is a parse error, so nothing is read from stdin): the
+prompt is inlined into the launch argv by the command builder — a deliberate
+ps/ARG_MAX tradeoff, since kimi offers no private alternative. This module
+owns both shapes so the async supervisor, the shell launcher and the tests
+agree on one encoder.
 """
 
 from __future__ import annotations
@@ -19,13 +23,26 @@ from collections.abc import Sequence
 from pathlib import Path
 
 STREAM_JSON_AGENTS = frozenset({"agy"})
+# kimi print mode cannot consume a prompt from stdin at all; its launch argv
+# carries the prompt as the ``-p`` value (inlined by the command builder from
+# the same 0600 prompt file every lane writes).
+ARGV_PROMPT_AGENTS = frozenset({"kimi"})
 TEXT_TRANSPORT = "text"
 STREAM_JSON_TRANSPORT = "stream-json"
+ARGV_TRANSPORT = "argv"
 
 
 def stdin_transport(agent: str) -> str:
-    """Name the stdin encoding a provider's headless argv expects."""
-    return STREAM_JSON_TRANSPORT if agent in STREAM_JSON_AGENTS else TEXT_TRANSPORT
+    """Name the stdin encoding a provider's headless argv expects.
+
+    ``argv`` means the provider has no stdin prompt lane: the prompt rides
+    the launch argv (kimi ``-p``) and the wired stdin is ignored.
+    """
+    if agent in STREAM_JSON_AGENTS:
+        return STREAM_JSON_TRANSPORT
+    if agent in ARGV_PROMPT_AGENTS:
+        return ARGV_TRANSPORT
+    return TEXT_TRANSPORT
 
 
 def encode_stream_json_user_turn(prompt: str) -> bytes:

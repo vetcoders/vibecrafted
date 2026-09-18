@@ -19,6 +19,14 @@ The installed terminal uses its own startup files under
 your private login profile. Your other terminal applications keep their existing
 setup.
 
+The isolated default pins Atuin, Starship, zoxide, `HISTFILE`, and `ZDOTDIR` to
+product paths so the two histories never mix. To load your personal home
+environment in that already-started shell, run `personal-shell`. That command
+releases those pins and sources `~/.zshrc`, so personal Atuin config (for
+example `enter_accept`) and keybindings take effect. Typing `source ~/.zshrc`
+alone is not that transition: the product pins stay exported and keep winning.
+`reload` re-reads the product profile.
+
 The profile initializes installed Starship, Atuin, zoxide, zsh-autosuggestions
 and zsh-syntax-highlighting. Atuin uses **Ctrl+R**; ordinary Up-arrow behavior is
 preserved. Zoxide provides `z <directory-name>` after you have visited a directory.

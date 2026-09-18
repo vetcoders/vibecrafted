@@ -7,7 +7,6 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
 
 /// PATH for the `aicx` subprocess: absolute inherited entries, minus the
 /// generation `bin/` that would shadow the Founder's own `aicx` (Homebrew /
@@ -217,9 +216,6 @@ fn wait_for_wizard(command: &mut Command) -> anyhow::Result<()> {
 pub fn wizard_hint() -> &'static str {
     "w  aicx wizard   ·   m  refresh memory   ·   server is the donor"
 }
-
-#[allow(dead_code)]
-const _REFRESH_HINT: Duration = Duration::from_secs(30);
 
 #[cfg(test)]
 mod tests {

@@ -828,7 +828,7 @@ fn real_selected_generation_catalog_reaches_voc() {
     let catalog = LauncherCatalog::load(&deck, &std::collections::BTreeMap::new()).unwrap();
     assert_eq!(
         catalog.agents,
-        vec!["agy", "claude", "codex", "cursor", "grok", "junie"]
+        vec!["agy", "claude", "codex", "cursor", "grok", "junie", "kimi"]
     );
     let codex = catalog.provider("codex").unwrap();
     assert!(codex.model_override.supported);

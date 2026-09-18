@@ -362,6 +362,75 @@ def test_child_environment_keeps_the_inherited_path_behind_canonical_bins(
     assert len(path) == len(set(path))
 
 
+def test_child_path_keeps_user_path_after_canonical_bins(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Guest, not landlord: every absolute entry of the user's PATH survives
+    into the child PATH, behind the canonical bins that must win name
+    collisions we own."""
+
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    config = _config(tmp_path, launcher)
+    user_path = [
+        "/opt/homebrew/bin",
+        f"{tmp_path}/.cargo/bin",
+        f"{tmp_path}/.local/share/mise/shims",
+        "/usr/bin",
+    ]
+    monkeypatch.setenv("PATH", os.pathsep.join(user_path))
+
+    path = supervisor._child_path(config.paths).split(os.pathsep)
+
+    canonical = [
+        f"{config.paths.operator_home}/.local/bin",
+        "/usr/local/bin",
+        "/opt/homebrew/bin",
+    ]
+    assert path[: len(canonical)] == canonical
+    for entry in user_path:
+        assert entry in path
+    assert max(path.index(entry) for entry in canonical) < path.index(
+        f"{tmp_path}/.cargo/bin"
+    )
+
+
+def test_child_environment_passes_ssh_auth_sock_through(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The user's SSH agent must survive into supervised children — its death
+    was the first-time-user symptom that motivated the guest contract."""
+
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    config = _config(tmp_path, launcher)
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/probe.sock")
+
+    environment = supervisor._child_environment(config.paths)
+
+    assert environment["SSH_AUTH_SOCK"] == "/tmp/probe.sock"
+
+
+def test_child_environment_scrubs_only_the_explicit_denylist(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deny-list is the exception, not the rule: deny-listed variables are
+    scrubbed, everything else in the user's environment flows through."""
+
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    config = _config(tmp_path, launcher)
+    for name in supervisor._CHILD_ENV_DENYLIST:
+        monkeypatch.setenv(name, "/foreign/runtime/poison")
+    monkeypatch.setenv("EDITOR", "nvim")
+
+    environment = supervisor._child_environment(config.paths)
+
+    for name in supervisor._CHILD_ENV_DENYLIST:
+        assert name not in environment
+    assert environment["EDITOR"] == "nvim"
+
+
 def test_launch_agent_propagates_terminal_triage_kill_switch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1938,23 +2007,29 @@ def test_service_logs_reports_canonical_owner_paths(
     assert not (operator_home / "Library" / "LaunchAgents").exists()
 
 
-def test_child_environment_is_a_minimal_nonsecret_allowlist(
+def test_child_environment_is_the_users_environment_with_pins_overlaid(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Guest, not landlord: the user's own variables — including their
+    credentials and agent sockets — flow through to supervised children;
+    the supervisor only overlays its identity pins on top."""
+
     launcher = _executable(tmp_path / "bin" / "vibecrafted")
     config = _config(tmp_path, launcher)
-    monkeypatch.setenv("GITHUB_TOKEN", "must-not-cross")
-    monkeypatch.setenv("OPENAI_API_KEY", "must-not-cross")
+    monkeypatch.setenv("GITHUB_TOKEN", "user-owned-flows-through")
+    monkeypatch.setenv("OPENAI_API_KEY", "user-owned-flows-through")
     monkeypatch.setenv("VIBECRAFTED_STOP_TERM_WAIT_TICKS", "9")
     monkeypatch.setenv("VIBECRAFTED_TRIAGE_RUN", "0")
+    monkeypatch.setenv("VIBECRAFTED_HOME", "/foreign/home-must-not-win")
 
     environment = supervisor._child_environment(config.paths)
 
-    assert "GITHUB_TOKEN" not in environment
-    assert "OPENAI_API_KEY" not in environment
+    assert environment["GITHUB_TOKEN"] == "user-owned-flows-through"
+    assert environment["OPENAI_API_KEY"] == "user-owned-flows-through"
     assert environment["VIBECRAFTED_STOP_TERM_WAIT_TICKS"] == "9"
     assert environment["VIBECRAFTED_TRIAGE_RUN"] == "0"
+    assert environment["HOME"] == str(config.paths.operator_home)
     assert environment["VIBECRAFTED_HOME"] == str(config.paths.home)
     assert environment["VIBECRAFTED_RUNTIME_HOME"] == str(config.paths.runtime_home)
     assert environment["VIBECRAFTED_SERVER_SUPERVISOR_CHILD"] == "1"

@@ -16,6 +16,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(not(unix))]
 use std::process::{Command, Stdio};
 
 use chrono::{DateTime, Utc};
@@ -1412,6 +1413,26 @@ fn event_owner_pid(event: &Event) -> Option<i64> {
     event.payload.get("owner_pid").and_then(coerce_int_value)
 }
 
+/// Whether `pid` names a process this user may signal.
+///
+/// Signal 0 runs the kernel's existence and permission checks without
+/// delivering anything — the same answer `kill -0` gave: a missing process
+/// and one owned by another user (`EPERM`) both read as not alive. Every
+/// projection read probes each in-flight run, so a probe must not cost a
+/// process spawn.
+#[cfg(unix)]
+fn pid_is_alive(pid: i64) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: kill(2) with signal 0 delivers no signal; it only checks `pid`.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+#[cfg(not(unix))]
 fn pid_is_alive(pid: i64) -> bool {
     if pid <= 0 {
         return false;
@@ -2005,6 +2026,29 @@ mod tests {
             }
         }
         panic!("could not allocate an isolated fixture home")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pid_probe_keeps_the_kill_zero_answers_without_spawning_kill() {
+        assert!(super::pid_is_alive(i64::from(std::process::id())));
+        for invalid in [0, -1, i64::from(i32::MAX) + 1, i64::MAX, i64::MIN] {
+            assert!(!super::pid_is_alive(invalid), "pid {invalid}");
+        }
+
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn true");
+        let reaped = i64::from(child.id());
+        child.wait().expect("reap true");
+        assert!(!super::pid_is_alive(reaped), "a reaped child is gone");
+
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } != 0 {
+            // pid 1 belongs to root: signal 0 answers EPERM, which `kill -0`
+            // also reported as a failure.
+            assert!(!super::pid_is_alive(1));
+        }
     }
 
     #[test]

@@ -1,6 +1,9 @@
 #[cfg(feature = "ssr")]
 pub mod api {
     use std::collections::BTreeSet;
+    use std::path::{Component, Path, PathBuf};
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
 
     use axum::extract::{Form, Query};
     use axum::http::{StatusCode, header};
@@ -8,9 +11,9 @@ pub mod api {
     use axum::routing::{get, post};
     use axum::{Json, Router};
     use control_core::{
-        ScaffoldArtifact, ScaffoldArtifactPatch, ScaffoldArtifactStore, ScaffoldCheckpointPatch,
-        ScaffoldDoctorReport, ScaffoldError, ScaffoldPlanSummary, ScaffoldStatusPatch,
-        ScaffoldWorkspace, vibecrafted_home,
+        ScaffoldArtifact, ScaffoldArtifactPatch, ScaffoldArtifactRole, ScaffoldArtifactStore,
+        ScaffoldCheckpointPatch, ScaffoldDoctorReport, ScaffoldError, ScaffoldPlanSummary,
+        ScaffoldStatusPatch, ScaffoldWorkspace, vibecrafted_home,
     };
     use serde::Deserialize;
 
@@ -50,6 +53,15 @@ pub mod api {
     }
 
     #[derive(Debug, Clone, Deserialize)]
+    pub struct DispatchForm {
+        pub org: String,
+        pub repo: String,
+        pub day: String,
+        pub plan_id: String,
+        pub artifact_id: String,
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
     pub struct SaveStatusForm {
         pub org: String,
         pub repo: String,
@@ -84,6 +96,7 @@ pub mod api {
             .route("/api/scaffold/artifact", post(save_artifact))
             .route("/api/scaffold/checkpoint", post(save_checkpoint))
             .route("/api/scaffold/status", post(save_status))
+            .route("/api/scaffold/dispatch", post(dispatch_plan))
     }
 
     async fn editor(Query(mut query): Query<ScaffoldQuery>) -> impl IntoResponse {
@@ -327,6 +340,319 @@ pub mod api {
         }
     }
 
+    const DISPATCH_BOOTSTRAP: &str =
+        "from vibecrafted_core.cli import main; import sys; raise SystemExit(main(sys.argv[1:]))";
+
+    async fn dispatch_plan(headers: axum::http::HeaderMap, body: String) -> impl IntoResponse {
+        let is_json = headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|content_type| content_type.contains("application/json"))
+            .unwrap_or(false);
+        let form: DispatchForm = if is_json {
+            match serde_json::from_str(&body) {
+                Ok(form) => form,
+                Err(error) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({ "error": error.to_string() })),
+                    )
+                        .into_response();
+                }
+            }
+        } else {
+            match serde_urlencoded::from_str(&body) {
+                Ok(form) => form,
+                Err(error) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({ "error": error.to_string() })),
+                    )
+                        .into_response();
+                }
+            }
+        };
+
+        let store = ScaffoldArtifactStore::new(vibecrafted_home());
+        let workspace = match store.workspace(&form.org, &form.repo, &form.day, Some(&form.plan_id))
+        {
+            Ok(workspace) => workspace,
+            Err(error) => return scaffold_error_response(error),
+        };
+        let artifact = match workspace
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.id == form.artifact_id)
+        {
+            Some(artifact) => artifact.clone(),
+            None => {
+                return scaffold_error_response(ScaffoldError::ArtifactNotFound {
+                    id: form.artifact_id,
+                });
+            }
+        };
+        let file = match dispatch_artifact_file(&workspace, &artifact) {
+            Ok(file) => file,
+            Err(error) => return scaffold_error_response(error),
+        };
+        let python = match generation_python() {
+            Ok(python) => python,
+            Err(error) => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({ "error": error })),
+                )
+                    .into_response();
+            }
+        };
+
+        let doctor_python = python.clone();
+        let doctor_file = file.clone();
+        let doctor = tokio::time::timeout(
+            Duration::from_secs(45),
+            tokio::task::spawn_blocking(move || {
+                run_dispatch_door(&doctor_python, &doctor_file, true)
+            }),
+        )
+        .await;
+        let doctor_output = match doctor {
+            Ok(Ok(Ok(output))) => output,
+            Ok(Ok(Err(error))) => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({
+                        "error": format!("vibecrafted dispatch doctor failed to start: {error}")
+                    })),
+                )
+                    .into_response();
+            }
+            Ok(Err(error)) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": format!("vibecrafted dispatch doctor join failed: {error}")
+                    })),
+                )
+                    .into_response();
+            }
+            Err(_) => {
+                return (
+                    StatusCode::GATEWAY_TIMEOUT,
+                    Json(serde_json::json!({
+                        "error": "vibecrafted dispatch doctor timed out"
+                    })),
+                )
+                    .into_response();
+            }
+        };
+        if !doctor_output.status.success() {
+            let detail = [doctor_output.stderr.as_slice(), doctor_output.stdout.as_slice()]
+                .into_iter()
+                .find(|bytes| !bytes.is_empty())
+                .map(|bytes| String::from_utf8_lossy(bytes).trim().to_string())
+                .filter(|text| !text.is_empty())
+                .unwrap_or_else(|| "dispatch doctor refused the plan".to_string());
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": detail,
+                    "door": "vibecrafted dispatch",
+                })),
+            )
+                .into_response();
+        }
+
+        let spawn_python = python.clone();
+        let spawn_file = file.clone();
+        match tokio::task::spawn_blocking(move || {
+            spawn_dispatch_door(&spawn_python, &spawn_file)
+        })
+        .await
+        {
+            Ok(Ok(pid)) => (
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({
+                    "status": "accepted",
+                    "door": "vibecrafted dispatch",
+                    "artifact_id": artifact.id,
+                    "path": file.display().to_string(),
+                    "pid": pid,
+                })),
+            )
+                .into_response(),
+            Ok(Err(error)) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": format!("vibecrafted dispatch failed to start: {error}")
+                })),
+            )
+                .into_response(),
+            Err(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("vibecrafted dispatch join failed: {error}")
+                })),
+            )
+                .into_response(),
+        }
+    }
+
+    fn generation_python() -> Result<PathBuf, String> {
+        let from_env = std::env::var("VIBECRAFTED_PYTHON")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+        let from_root = std::env::var("VIBECRAFTED_RUNTIME_ROOT")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(|root| PathBuf::from(root).join("bin/python3"));
+        let path = from_env.or(from_root).ok_or_else(|| {
+            "generation Python is not available (set VIBECRAFTED_PYTHON or VIBECRAFTED_RUNTIME_ROOT)"
+                .to_string()
+        })?;
+        if !path.is_absolute() {
+            return Err("generation Python must be an absolute path".to_string());
+        }
+        let metadata = std::fs::metadata(&path).map_err(|_| {
+            format!(
+                "generation Python is not available: {}",
+                path.display()
+            )
+        })?;
+        if !metadata.is_file() {
+            return Err(format!(
+                "generation Python is not a file: {}",
+                path.display()
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o111 == 0 {
+                return Err(format!(
+                    "generation Python is not executable: {}",
+                    path.display()
+                ));
+            }
+        }
+        Ok(path)
+    }
+
+    fn dispatch_artifact_file(
+        workspace: &ScaffoldWorkspace,
+        artifact: &ScaffoldArtifact,
+    ) -> Result<PathBuf, ScaffoldError> {
+        if artifact.role != ScaffoldArtifactRole::Dispatch {
+            return Err(ScaffoldError::ReadOnly {
+                message: format!(
+                    "artifact is not a dispatch file: {} ({})",
+                    artifact.id,
+                    artifact.role.as_str()
+                ),
+            });
+        }
+        let relative = Path::new(&artifact.relative_path);
+        if artifact.relative_path.is_empty()
+            || relative.is_absolute()
+            || artifact.relative_path.contains('\\')
+            || !artifact.relative_path.ends_with(".dispatch.toml")
+            || !relative
+                .components()
+                .all(|component| matches!(component, Component::Normal(_)))
+        {
+            return Err(ScaffoldError::UnsafePath {
+                message: "refusing unsafe or non-dispatch scaffold artifact path".into(),
+            });
+        }
+        let declared = PathBuf::from(&artifact.path);
+        if !declared.is_absolute() {
+            return Err(ScaffoldError::UnsafePath {
+                message: "refusing unsafe scaffold dispatch path".into(),
+            });
+        }
+        let plan_root = PathBuf::from(&workspace.plan_root)
+            .canonicalize()
+            .map_err(ScaffoldError::from)?;
+        if dispatch_path_has_symlink(&plan_root, &declared) {
+            return Err(ScaffoldError::UnsafePath {
+                message: "refusing symlinked scaffold dispatch path".into(),
+            });
+        }
+        let file = declared.canonicalize().map_err(ScaffoldError::from)?;
+        if !file.starts_with(&plan_root) {
+            return Err(ScaffoldError::UnsafePath {
+                message: "refusing scaffold dispatch path outside the plan root".into(),
+            });
+        }
+        if !file.is_file() {
+            return Err(ScaffoldError::UnsafePath {
+                message: "refusing missing scaffold dispatch file".into(),
+            });
+        }
+        Ok(file)
+    }
+
+    fn dispatch_path_has_symlink(root: &Path, path: &Path) -> bool {
+        let Ok(relative) = path.strip_prefix(root) else {
+            return true;
+        };
+        let mut cursor = root.to_path_buf();
+        if std::fs::symlink_metadata(&cursor)
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            return true;
+        }
+        for component in relative.components() {
+            cursor.push(component.as_os_str());
+            if std::fs::symlink_metadata(&cursor)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn dispatch_command(python: &Path, file: &Path, doctor: bool) -> Command {
+        let mut command = Command::new(python);
+        command
+            .arg("-c")
+            .arg(DISPATCH_BOOTSTRAP)
+            .arg("dispatch");
+        if doctor {
+            command.arg("--doctor");
+        }
+        command.arg(file);
+        command.env_remove("PYTHONPATH");
+        command.stdin(Stdio::null());
+        command
+    }
+
+    fn run_dispatch_door(
+        python: &Path,
+        file: &Path,
+        doctor: bool,
+    ) -> std::io::Result<std::process::Output> {
+        dispatch_command(python, file, doctor).output()
+    }
+
+    fn spawn_dispatch_door(python: &Path, file: &Path) -> std::io::Result<u32> {
+        let mut command = dispatch_command(python, file, false);
+        command.stdout(Stdio::null());
+        command.stderr(Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let child = command.spawn()?;
+        let pid = child.id();
+        std::mem::forget(child);
+        Ok(pid)
+    }
+
     fn redirect_after_mutation(
         org: &str,
         repo: &str,
@@ -547,6 +873,10 @@ pub mod api {
       <h3>Checkpoint</h3>
       <p class="inspector-hint">Switch artifact to load checkpoint controls.</p>
     </div>
+    <div class="inspector-block" id="inspector-dispatch-slot">
+      <h3>Dispatch</h3>
+      <p class="inspector-hint">Switch to a dispatch artifact to run the real <code>vibecrafted dispatch</code> door.</p>
+    </div>
     <div class="inspector-block">
       <h3>Endpoints</h3>
       <a class="api-link" href="/api/scaffold/artifacts?org={}&repo={}&day={}&plan_id={}" target="_blank" rel="noopener noreferrer">artifact endpoint ↗</a>
@@ -622,19 +952,17 @@ pub mod api {
                         .as_deref()
                         .unwrap_or("(unknown plan_id)");
                     format!(
-                        r#"<article class="plan-card plan-card-invalid" data-search="{}">
-  <div class="plan-card-top">
-    <span class="plan-number">!</span>
-    <span class="plan-access">invalid</span>
-  </div>
+                        r#"<article class="plan-card plan-card-invalid" data-search="{}" data-ppm="plan" data-copy-id="{}">
+  <span class="plan-number">!</span>
   <div class="plan-card-title">
-    <p>manifest unreadable</p>
     <h3>{}</h3>
+    <p class="plan-skip-reason">{}</p>
   </div>
-  <p class="plan-skip-reason">{}</p>
+  <span class="plan-access">invalid</span>
   <p class="plan-skip-path"><code>{}</code></p>
 </article>"#,
                         escape_attr(&format!("{} {}", id, skip.plan_root).to_ascii_lowercase()),
+                        escape_attr(id),
                         escape_html(&humanize_plan_id(id)),
                         escape_html(&skip.reason),
                         escape_html(&skip.plan_root),
@@ -645,12 +973,9 @@ pub mod api {
             format!(
                 r#"<section class="plan-field plan-invalid-field" aria-labelledby="plan-invalid-title">
   <div class="plan-toolbar">
-    <div>
-      <p class="eyebrow">Not in index</p>
-      <h2 id="plan-invalid-title">Broken manifests ({})</h2>
-    </div>
+    <h2 id="plan-invalid-title">Broken manifests ({})</h2>
   </div>
-  <p class="library-lede">These packages sit under <code>…/plans/&lt;id&gt;/manifest.json</code> but failed to load. Fix the role enum / schema — illegal values like <code>"mission"</code> must be <code>"other"</code> for MISSION.md.</p>
+  <p class="plan-index-note">Failed to load under <code>…/plans/&lt;id&gt;/manifest.json</code>. Illegal role values like <code>"mission"</code> must be <code>"other"</code>.</p>
   <div class="plan-grid">{}</div>
 </section>"#,
                 skipped.len(),
@@ -659,40 +984,34 @@ pub mod api {
         };
         let canvas = format!(
             r#"<div class="plan-library">
-  <header class="library-header">
-    <div class="library-intro">
-      <div>
-        <p class="eyebrow">Plan control room</p>
-        <h1>Choose the truth<br>you want to move.</h1>
-      </div>
-      <p class="library-lede">Every manifest-backed scaffold package available to this runtime. Search the field, open a plan, then edit and checkpoint its actual artifacts. Invalid packages no longer vanish — they surface below as broken manifests.</p>
+  <header class="plan-index-head">
+    <div class="plan-index-copy">
+      <p class="eyebrow">Plans / Scaffold</p>
+      <h1>Plans</h1>
     </div>
-    <dl class="library-stats">
+    <dl class="plan-index-stats">
       <div><dt>plans</dt><dd>{}</dd></div>
       <div><dt>repositories</dt><dd>{}</dd></div>
       <div><dt>reviewable</dt><dd>{}</dd></div>
       <div><dt>artifacts</dt><dd>{}</dd></div>
       <div><dt>invalid</dt><dd>{}</dd></div>
     </dl>
+    <label class="plan-search">
+      <span>Find a plan</span>
+      <input id="plan-search" type="search" placeholder="repo, date, plan…" autocomplete="off">
+      <kbd>/</kbd>
+    </label>
   </header>
 
   <section class="plan-field" aria-labelledby="plan-field-title">
     <div class="plan-toolbar">
-      <div>
-        <p class="eyebrow">Manifest index</p>
-        <h2 id="plan-field-title">Scaffold plans</h2>
-      </div>
-      <label class="plan-search">
-        <span>Find a plan</span>
-        <input id="plan-search" type="search" placeholder="repo, date, plan…" autocomplete="off">
-        <kbd>/</kbd>
-      </label>
+      <h2 id="plan-field-title">Manifest index</h2>
+      <p class="result-count" aria-live="polite"><span id="visible-count">{}</span> visible</p>
     </div>
-    <p class="result-count" aria-live="polite"><span id="visible-count">{}</span> plans visible</p>
     <div class="plan-grid" id="plan-grid">{}</div>
     <div class="plan-no-results" id="plan-no-results" hidden>
       <p class="eyebrow">No match</p>
-      <strong>Nothing in the manifest index answers that search.</strong>
+      <strong>No plan matches that search.</strong>
       <button type="button" id="clear-search">Clear search</button>
     </div>
   </section>
@@ -737,31 +1056,31 @@ pub mod api {
             ("", "open")
         };
         format!(
-            r#"<a class="plan-card{}" href="{}" data-search="{}">
-  <div class="plan-card-top">
-    <span class="plan-number">{:02}</span>
-    <span class="plan-access">{}</span>
-  </div>
+            r#"<a class="plan-card{}" href="{}" data-search="{}" data-ppm="plan" data-copy-id="{}" data-href="{}" data-focus-repo="{}">
+  <span class="plan-number">{:02}</span>
   <div class="plan-card-title">
-    <p>{} / {}</p>
     <h3>{}</h3>
+    <p>{} / {}</p>
   </div>
   <dl class="plan-card-meta">
     <div><dt>day</dt><dd>{}</dd></div>
     <div><dt>artifacts</dt><dd>{}</dd></div>
   </dl>
-  <span class="plan-open">Open plan <b aria-hidden="true">↗</b></span>
+  <span class="plan-access">{}</span>
 </a>"#,
             state_class,
             escape_attr(&href),
             escape_attr(&search.to_ascii_lowercase()),
+            escape_attr(&plan.plan_id),
+            escape_attr(&href),
+            escape_attr(&plan.repo),
             index + 1,
-            access,
+            escape_html(&humanize_plan_id(&plan.plan_id)),
             escape_html(&plan.org),
             escape_html(&plan.repo),
-            escape_html(&humanize_plan_id(&plan.plan_id)),
             escape_html(&plan.day.replace('_', " · ")),
             plan.artifact_count,
+            access,
         )
     }
 
@@ -807,7 +1126,7 @@ pub mod api {
         let issue_count = report.map_or(1, |report| report.errors.len().max(1));
         let canvas = format!(
             r#"<div class="blocked-plan-shell">
-  <p class="blocked-plan-nav"><a class="back-link" href="/scaffold/library">← Scaffold library</a></p>
+  <p class="blocked-plan-nav"><a class="back-link" href="/scaffold/library">← All plans</a></p>
   <header class="blocked-plan-head">
     <div>
       <p class="eyebrow">{}/{}</p>
@@ -817,9 +1136,9 @@ pub mod api {
   </header>
   <div class="blocked-plan-grid">
     <section class="blocked-explainer">
-      <p class="eyebrow">Runtime truth</p>
-      <h2>The plan exists.<br>The editor refuses to lie.</h2>
-      <p>The manifest is indexed, but its current artifact contract cannot be opened safely. Repair these findings and the same card will become reviewable automatically.</p>
+      <p class="eyebrow">Contract</p>
+      <h2>Cannot open this plan</h2>
+      <p>The manifest is indexed, but its artifact contract failed. Repair the findings below and the plan becomes reviewable.</p>
       <dl>
         <div><dt>day</dt><dd>{}</dd></div>
         <div><dt>artifacts</dt><dd>{}</dd></div>
@@ -857,6 +1176,7 @@ pub mod api {
         plan_id
             .split(['-', '_'])
             .filter(|part| !part.is_empty())
+            .filter(|part| !part.eq_ignore_ascii_case("truth"))
             .map(|part| {
                 let mut chars = part.chars();
                 match chars.next() {
@@ -891,11 +1211,12 @@ pub mod api {
     var visible = 0;
     cards.forEach(function (card) {
       var match = !needle || normalize(card.dataset.search).indexOf(needle) !== -1;
-      card.hidden = !match;
+      card.setAttribute("data-search-hit", match ? "1" : "0");
       if (match) visible += 1;
     });
     count.textContent = String(visible);
     empty.hidden = visible !== 0;
+    document.documentElement.dispatchEvent(new Event("vc-focus-refresh"));
   }
 
   search.addEventListener("input", filterPlans);
@@ -983,11 +1304,24 @@ pub mod api {
         };
         let active_class = if active { " is-active" } else { "" };
         let hidden_attr = if active { "" } else { " hidden" };
+        let dispatch_form = if artifact.role == ScaffoldArtifactRole::Dispatch {
+            format!(
+                r#"<form method="post" action="/api/scaffold/dispatch" class="dispatch-form">
+    {}
+    <p class="inspector-hint">Runs the real <code>vibecrafted dispatch</code> door after doctor. Closing this studio does not stop workers.</p>
+    <button type="submit">Dispatch</button>
+    <p class="dispatch-status inspector-meta" aria-live="polite"></p>
+  </form>"#,
+                hidden_context(workspace, artifact)
+            )
+        } else {
+            String::new()
+        };
         // Default view is formatted rich markdown. "Edit" opens the mono
         // source textarea; "Save" persists (if dirty) and returns to rich.
         // Only the active panel is visible (studio shell — one document).
         format!(
-            r#"<article class="artifact-panel{}" id="{}" data-render-mode="rich"{} aria-hidden="{}">
+            r#"<article class="artifact-panel{}" id="{}" data-role="{}" data-render-mode="rich"{} aria-hidden="{}">
   <header class="artifact-head">
     <div>
       <p class="eyebrow">{}</p>
@@ -1013,9 +1347,11 @@ pub mod api {
     <input name="note" value="{}" placeholder="checkpoint note">
     <button type="submit">Update checkpoint</button>
   </form>
+  {}
 </article>"#,
             active_class,
             escape_attr(&artifact.id),
+            escape_attr(artifact.role.as_str()),
             hidden_attr,
             if active { "false" } else { "true" },
             artifact.role.as_str(),
@@ -1026,7 +1362,8 @@ pub mod api {
             escape_html(&artifact.content),
             hidden_context(workspace, artifact),
             checked,
-            escape_attr(&artifact.checkpoint.note)
+            escape_attr(&artifact.checkpoint.note),
+            dispatch_form
         )
     }
 
@@ -1788,6 +2125,54 @@ pub mod api {
       }
     }
 
+    var dispatchSlot = document.getElementById("inspector-dispatch-slot");
+    if (dispatchSlot) {
+      var parkedDispatch = dispatchSlot.querySelector("form.dispatch-form");
+      if (parkedDispatch && parkedDispatch.dataset.homePanel) {
+        var dispatchHome = document.getElementById(parkedDispatch.dataset.homePanel);
+        if (dispatchHome) dispatchHome.appendChild(parkedDispatch);
+      }
+      dispatchSlot.innerHTML = "<h3>Dispatch</h3>";
+      var dispatchForm = panel.querySelector("form.dispatch-form");
+      if (dispatchForm) {
+        dispatchForm.dataset.homePanel = panel.id;
+        dispatchSlot.appendChild(dispatchForm);
+        if (dispatchForm.dataset.dispatchBound !== "1") {
+          dispatchForm.dataset.dispatchBound = "1";
+          dispatchForm.addEventListener("submit", function (ev) {
+            ev.preventDefault();
+            var statusEl = dispatchForm.querySelector(".dispatch-status");
+            var payload = {};
+            Array.prototype.slice.call(dispatchForm.querySelectorAll("input[name]")).forEach(function (input) {
+              payload[input.name] = input.value;
+            });
+            if (statusEl) statusEl.textContent = "Doctoring…";
+            fetch("/api/scaffold/dispatch", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "Accept": "application/json" },
+              credentials: "same-origin",
+              body: JSON.stringify(payload)
+            }).then(function (res) {
+              return res.json().then(function (body) { return { res: res, body: body }; });
+            }).then(function (pair) {
+              if (!statusEl) return;
+              if (pair.res.status === 202) {
+                statusEl.textContent = "Accepted. Workers keep running if you close this tab. Watch the tracker.";
+              } else {
+                statusEl.textContent = (pair.body && pair.body.error)
+                  ? pair.body.error
+                  : ("Dispatch refused (" + pair.res.status + ")");
+              }
+            }).catch(function (err) {
+              if (statusEl) statusEl.textContent = "Dispatch unavailable: " + err.message;
+            });
+          });
+        }
+      } else {
+        dispatchSlot.insertAdjacentHTML("beforeend", '<p class="inspector-hint">This artifact is not a dispatch file. Open the dispatch artifact to run <code>vibecrafted dispatch</code>.</p>');
+      }
+    }
+
     bindStats(panel);
     updateStats(panel);
 
@@ -1872,39 +2257,40 @@ pub mod api {
 .server-route-document{--bg:var(--surface-page);--panel:var(--surface-card);--panel-lift:var(--surface-elevated);--line:var(--border-subtle);--line-strong:var(--border-active);--text:var(--text-primary);--muted:var(--text-secondary);--accent:var(--amber);--warn:var(--status-warning);--bad:var(--status-danger);height:100%;min-height:0;color:var(--text);font:14px/1.45 var(--font-body)}
 :where(.server-route-document) *{box-sizing:border-box}
 :where(.server-route-document) a{color:inherit}
-.plan-library{min-height:100%;background:var(--bg)}
-.library-header{padding:26px clamp(24px,5vw,76px) 54px;border-bottom:1px solid var(--line)}
-.library-intro{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(280px,.6fr);gap:clamp(28px,6vw,90px);align-items:end}
-.library-intro h1{max-width:850px;margin:12px 0 0;font:400 clamp(48px,7vw,102px)/.89 var(--font-display);letter-spacing:-.055em}
-.library-lede{max-width:540px;margin:0 0 8px;color:var(--muted);font-size:clamp(15px,1.5vw,19px);line-height:1.55}
-.library-stats{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));max-width:920px;margin:54px 0 0;border-top:1px solid var(--line)}
-.plan-card-invalid{border-color:color-mix(in srgb,var(--status-warning) 40%,transparent);background:var(--panel);cursor:default}
-.plan-card-invalid:hover{transform:none;border-color:color-mix(in srgb,var(--status-warning) 55%,transparent)}
-.plan-skip-reason{margin:0;color:var(--warn);font-size:13px;line-height:1.45}
-.plan-skip-path{margin:8px 0 0;color:var(--muted);font:11px var(--font-mono);overflow-wrap:anywhere}
+.plan-library{min-height:100%;height:100%;background:var(--bg);display:flex;flex-direction:column}
+.plan-index-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:12px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+.plan-index-copy{min-width:0}
+.plan-index-copy h1{margin:3px 0 0;font:650 var(--deck-title)/1.2 var(--font-body);letter-spacing:-.02em}
+.plan-index-stats{display:flex;flex-wrap:wrap;gap:4px 20px;margin:0 0 2px;flex:1 1 auto}
+.plan-index-stats div{display:grid;gap:1px;min-width:4.5rem}
+.plan-index-stats dt,.plan-card-meta dt{color:var(--muted);font:10px var(--font-mono);text-transform:uppercase;letter-spacing:.12em}
+.plan-index-stats dd{margin:0;color:var(--text);font:13px/1.2 var(--font-mono)}
+.plan-index-note{margin:0 16px 8px;color:var(--muted);font-size:12px;line-height:1.45;max-width:72ch}
+.plan-card-invalid{cursor:default;grid-template-columns:2.25rem minmax(0,1fr) auto}
+.plan-card-invalid:hover{transform:none;background:var(--panel-lift)}
+.plan-skip-reason{margin:2px 0 0;color:var(--warn);font:12px/1.4 var(--font-body);text-transform:none;letter-spacing:0}
+.plan-skip-path{margin:0;color:var(--muted);font:11px var(--font-mono);overflow-wrap:anywhere;grid-column:2 / -1}
 .plan-invalid-field{padding-top:8px;border-top:1px solid var(--line)}
-.library-stats div{padding:14px 24px 0 0}.library-stats dt,.plan-card-meta dt{color:var(--muted);font:10px var(--font-mono);text-transform:uppercase;letter-spacing:.12em}
-.library-stats dd{margin:2px 0 0;color:var(--text);font:24px var(--font-mono)}
-.plan-field{padding:42px clamp(24px,5vw,76px) 80px}
-.plan-toolbar{display:flex;align-items:end;justify-content:space-between;gap:30px}.plan-toolbar h2{margin:5px 0 0;font:400 34px/1.05 var(--font-display)}
-.plan-search{position:relative;display:grid;gap:7px;width:min(100%,390px);color:var(--muted);font:10px var(--font-mono);text-transform:uppercase;letter-spacing:.12em}
-.plan-search input{width:100%;border:0;border-bottom:1px solid var(--line);outline:0;background:transparent;color:var(--text);padding:8px 34px 10px 0;font:15px var(--font-body);text-transform:none;letter-spacing:0}
-.plan-search input:focus{border-color:var(--teal)}.plan-search kbd{position:absolute;right:0;bottom:10px;border:1px solid var(--line);border-radius:4px;padding:1px 6px;color:var(--muted);font:11px var(--font-mono)}
-.result-count{margin:32px 0 14px;color:var(--muted);font:11px var(--font-mono);text-transform:uppercase;letter-spacing:.1em}
-.plan-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr));gap:12px}
-.plan-card{min-height:290px;display:flex;flex-direction:column;justify-content:space-between;gap:28px;padding:22px;border:var(--stroke-width) solid var(--line);border-radius:var(--radius-surface);background:var(--panel);text-decoration:none;transition:transform var(--motion-base) var(--ease-ui),border-color var(--motion-base) var(--ease-ui),background var(--motion-base) var(--ease-ui)}
-.plan-card:hover,.plan-card:focus-visible{transform:translateY(-3px);border-color:var(--teal);background:var(--panel-lift)}
-.plan-card-blocked{border-color:color-mix(in srgb,var(--status-danger) 35%,transparent);background:var(--panel)}.plan-card-blocked .plan-access{border-color:color-mix(in srgb,var(--status-danger) 45%,transparent);color:var(--bad)}
-.plan-card[hidden]{display:none}.plan-card-top,.plan-card-meta,.plan-open{display:flex;align-items:center;justify-content:space-between;gap:16px}
-.plan-number{color:var(--muted);font:12px var(--font-mono)}.plan-access{border:1px solid var(--line);border-radius:99px;padding:4px 8px;color:var(--muted);font:9px var(--font-mono);text-transform:uppercase;letter-spacing:.1em}
-.plan-card-title p{margin:0 0 9px;color:var(--muted);font:11px var(--font-mono)}.plan-card-title h3{max-width:470px;margin:0;font:400 28px/1.03 var(--font-display);letter-spacing:-.025em}
-.plan-card-meta{margin:0;padding-top:14px;border-top:1px solid var(--line)}.plan-card-meta div{display:grid;gap:3px}.plan-card-meta div:last-child{text-align:right}.plan-card-meta dd{margin:0;color:var(--text);font:12px var(--font-mono)}
-.plan-open{color:var(--muted);font-weight:700}.plan-open b{color:var(--accent);font-size:18px}.plan-card:hover .plan-open{color:var(--text)}
-.plan-no-results{margin-top:12px;border:1px dashed var(--line);border-radius:9px;padding:50px 24px;text-align:center;color:var(--muted)}.plan-no-results strong{display:block;color:var(--text);font:400 24px var(--font-display)}.plan-library .plan-no-results button{justify-self:auto;margin:20px 0 0}
-.blocked-plan-shell{min-height:100%;padding:26px clamp(24px,5vw,76px) 80px;background:var(--bg)}.blocked-plan-nav{margin:0 0 26px}.blocked-plan-nav .back-link{display:inline-block;margin:0}.back-link{color:var(--muted);font:11px var(--font-mono);text-decoration:none;text-transform:uppercase;letter-spacing:.12em}.back-link:hover{color:var(--text)}
-.blocked-plan-head{display:flex;align-items:end;justify-content:space-between;gap:30px;padding-bottom:36px;border-bottom:1px solid var(--line)}.blocked-plan-head h1{max-width:900px;margin:10px 0 0;font:600 var(--deck-title)/1.25 var(--font-display);letter-spacing:-.01em}.blocked-pill{flex:0 0 auto;border:var(--stroke-width) solid color-mix(in srgb,var(--status-danger) 45%,transparent);border-radius:99px;padding:7px 11px;color:var(--bad);font:10px var(--font-mono);text-transform:uppercase;letter-spacing:.1em}
-.blocked-plan-grid{display:grid;grid-template-columns:minmax(280px,.72fr) minmax(0,1.28fr);gap:clamp(36px,7vw,110px);padding-top:42px}.blocked-explainer h2{margin:8px 0 18px;font:400 clamp(31px,4vw,52px)/.98 var(--font-display)}.blocked-explainer>p:not(.eyebrow){max-width:520px;color:var(--muted);font-size:16px;line-height:1.6}.blocked-explainer dl{display:grid;gap:12px;margin:36px 0 0}.blocked-explainer dl div{display:grid;grid-template-columns:80px 1fr;gap:16px;padding-top:10px;border-top:1px solid var(--line)}.blocked-explainer dt{color:var(--muted);font:10px var(--font-mono);text-transform:uppercase}.blocked-explainer dd{min-width:0;margin:0;overflow-wrap:anywhere;font:12px var(--font-mono)}
-.blocked-findings{border:1px solid var(--line);border-radius:9px;background:var(--panel);overflow:hidden}.blocked-findings-head{display:flex;align-items:end;justify-content:space-between;gap:20px;padding:18px 20px;border-bottom:1px solid var(--line)}.blocked-findings-head p{margin:0}.blocked-findings-head strong{color:var(--bad);font:11px var(--font-mono)}.blocked-findings ol{max-height:68vh;margin:0;padding:0;overflow:auto;list-style:none}.blocked-findings li{padding:17px 20px;border-bottom:1px solid var(--line)}.blocked-findings li:last-child{border:0}.blocked-findings li div{display:flex;justify-content:space-between;gap:14px}.blocked-findings li span{color:var(--bad);font:11px var(--font-mono);text-transform:uppercase}.blocked-findings li code{color:var(--teal);font:11px var(--font-mono)}.blocked-findings li p{margin:8px 0 0;color:var(--muted);line-height:1.5}
+.plan-field{padding:0 0 40px;width:100%;margin:0}
+.plan-toolbar{display:flex;align-items:baseline;justify-content:space-between;gap:16px;padding:10px 16px 0}
+.plan-toolbar h2{margin:0;font:650 12px/1.2 var(--font-body);letter-spacing:.02em}
+.plan-search{position:relative;display:grid;gap:4px;width:min(100%,280px);color:var(--muted);font:10px var(--font-mono);text-transform:uppercase;letter-spacing:.12em}
+.plan-search input{width:100%;border:1px solid var(--line);border-radius:var(--radius-surface);background:var(--panel-lift);color:var(--text);padding:7px 28px 7px 10px;font:13px var(--font-body);text-transform:none;letter-spacing:0}
+.plan-search input:focus{border-color:var(--accent)}.plan-search kbd{position:absolute;right:8px;bottom:7px;border:1px solid var(--line);border-radius:4px;padding:1px 5px;color:var(--muted);font:10px var(--font-mono)}
+.result-count{margin:0;color:var(--muted);font:11px var(--font-mono);text-transform:uppercase;letter-spacing:.1em}
+.plan-grid{display:flex;flex-direction:column;gap:0;margin:8px 0 0;border-top:1px solid var(--line)}
+.plan-card{min-height:0;display:grid;grid-template-columns:2.25rem minmax(0,1.6fr) 7rem 5.25rem auto;align-items:center;gap:8px 14px;padding:9px 16px;border:0;border-bottom:1px solid var(--line);border-radius:0;background:transparent;text-decoration:none;transition:background var(--motion-base) var(--ease-ui),border-color var(--motion-base) var(--ease-ui)}
+.plan-card:hover,.plan-card:focus-visible{transform:none;border-color:var(--line);background:var(--panel-lift)}
+.plan-card-blocked{background:transparent}.plan-card-blocked .plan-access{border-color:color-mix(in srgb,var(--status-danger) 45%,transparent);color:var(--bad)}
+.plan-card[hidden]{display:none}
+.plan-number{color:var(--muted);font:12px var(--font-mono)}.plan-access{border:1px solid var(--line);border-radius:var(--radius-surface);padding:3px 7px;color:var(--muted);font:9px var(--font-mono);text-transform:uppercase;letter-spacing:.1em;justify-self:end}
+.plan-card-title{min-width:0}.plan-card-title p{margin:2px 0 0;color:var(--muted);font:11px var(--font-mono)}.plan-card-title h3{max-width:none;margin:0;font:600 14px/1.25 var(--font-body);letter-spacing:-.01em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.plan-card-meta{display:contents;margin:0;padding:0;border:0}.plan-card-meta div{display:grid;gap:1px}.plan-card-meta dd{margin:0;color:var(--text);font:12px var(--font-mono)}
+.plan-no-results{margin:12px 16px;border:1px dashed var(--line);border-radius:var(--radius-surface);padding:28px 16px;text-align:center;color:var(--muted)}.plan-no-results strong{display:block;color:var(--text);font:600 14px var(--font-body)}.plan-library .plan-no-results button{justify-self:auto;margin:16px auto 0}
+.blocked-plan-shell{min-height:100%;padding:16px 20px 40px;background:var(--bg)}.blocked-plan-nav{margin:0 0 12px}.blocked-plan-nav .back-link{display:inline-block;margin:0}.back-link{color:var(--muted);font:11px var(--font-mono);text-decoration:none;text-transform:uppercase;letter-spacing:.12em}.back-link:hover{color:var(--text)}
+.blocked-plan-head{display:flex;align-items:end;justify-content:space-between;gap:16px;padding-bottom:12px;border-bottom:1px solid var(--line)}.blocked-plan-head h1{max-width:none;margin:4px 0 0;font:650 var(--deck-title)/1.25 var(--font-body);letter-spacing:-.02em}.blocked-pill{flex:0 0 auto;border:var(--stroke-width) solid color-mix(in srgb,var(--status-danger) 45%,transparent);border-radius:var(--radius-surface);padding:4px 8px;color:var(--bad);font:10px var(--font-mono);text-transform:uppercase;letter-spacing:.1em}
+.blocked-plan-grid{display:grid;grid-template-columns:minmax(240px,.7fr) minmax(0,1.3fr);gap:20px;padding-top:16px}.blocked-explainer h2{margin:4px 0 10px;font:650 var(--deck-title)/1.25 var(--font-body)}.blocked-explainer>p:not(.eyebrow){max-width:52ch;color:var(--muted);font-size:13px;line-height:1.5}.blocked-explainer dl{display:grid;gap:8px;margin:16px 0 0}.blocked-explainer dl div{display:grid;grid-template-columns:80px 1fr;gap:12px;padding-top:8px;border-top:1px solid var(--line)}.blocked-explainer dt{color:var(--muted);font:10px var(--font-mono);text-transform:uppercase}.blocked-explainer dd{min-width:0;margin:0;overflow-wrap:anywhere;font:12px var(--font-mono)}
+.blocked-findings{border:1px solid var(--line);border-radius:var(--radius-surface);background:var(--panel);overflow:hidden}.blocked-findings-head{display:flex;align-items:end;justify-content:space-between;gap:16px;padding:12px 14px;border-bottom:1px solid var(--line)}.blocked-findings-head p{margin:0}.blocked-findings-head strong{color:var(--bad);font:11px var(--font-mono)}.blocked-findings ol{max-height:68vh;margin:0;padding:0;overflow:auto;list-style:none}.blocked-findings li{padding:12px 14px;border-bottom:1px solid var(--line)}.blocked-findings li:last-child{border:0}.blocked-findings li div{display:flex;justify-content:space-between;gap:14px}.blocked-findings li span{color:var(--bad);font:11px var(--font-mono);text-transform:uppercase}.blocked-findings li code{color:var(--accent);font:11px var(--font-mono)}.blocked-findings li p{margin:8px 0 0;color:var(--muted);line-height:1.5}
 /* --- Scaffold studio shell (GlyphPulse shape: nav | canvas | inspector + stats) --- */
 .review-shell{display:grid;grid-template-columns:280px minmax(0,1fr) 300px;height:100%;overflow:hidden;background:var(--bg)}
 .review-sidebar{border-right:1px solid var(--line);padding:18px 14px;height:100%;display:flex;flex-direction:column;gap:14px;background:var(--panel);min-height:0;overflow:hidden}
@@ -2036,10 +2422,10 @@ button.md-status.md-status-done .md-status-glyph{color:var(--status-success)}
   border-radius:var(--radius-surface);border:var(--stroke-width) solid color-mix(in srgb,var(--status-success) 55%,transparent);background:color-mix(in srgb,var(--status-success) 14%,transparent);color:var(--text);font-weight:700
 }
 .artifact-panel.is-active .editor-form>.save-artifact-btn{margin:8px 16px 12px}
-.checkpoint-form{display:flex;flex-direction:column;align-items:stretch;gap:10px;padding:0;margin:0}
+.checkpoint-form,.dispatch-form{display:flex;flex-direction:column;align-items:stretch;gap:10px;padding:0;margin:0}
 .checkpoint-form label{display:flex;align-items:center;gap:8px;color:var(--text);font-size:13px}
 .checkpoint-form input[name=note]{width:100%;min-width:0;border:1px solid var(--line);background:var(--panel);color:var(--text);border-radius:var(--radius-surface);padding:8px;font:13px var(--font-body)}
-.checkpoint-form button{margin:0;width:100%;justify-self:stretch}
+.checkpoint-form button,.dispatch-form button{margin:0;width:100%;justify-self:stretch}
 /* Right inspector (tools + status) */
 .review-inspector{height:100%;min-height:0;overflow:auto;padding:14px 14px 20px;background:var(--panel);display:flex;flex-direction:column;gap:14px}
 .inspector-head{color:var(--muted);font:10px var(--font-mono);text-transform:uppercase;letter-spacing:.14em;padding-bottom:6px;border-bottom:1px solid var(--line)}
@@ -2056,9 +2442,12 @@ button.md-status.md-status-done .md-status-glyph{color:var(--status-success)}
   .review-shell{grid-template-columns:240px minmax(0,1fr) 260px}
 }
 @media(max-width:820px){
-  .library-intro,.blocked-plan-grid{grid-template-columns:1fr}
-  .library-stats{max-width:none}
-  .plan-toolbar{align-items:stretch;flex-direction:column}.plan-search{width:100%}
+  .plan-index-head{align-items:stretch;flex-direction:column}
+  .plan-search{width:100%}
+  .plan-card{grid-template-columns:2.25rem minmax(0,1fr) auto}
+  .plan-card-meta{display:flex;gap:16px;grid-column:2 / -1}
+  .blocked-plan-grid{grid-template-columns:1fr}
+  .plan-toolbar{align-items:stretch;flex-direction:column}
   .blocked-plan-head{align-items:start;flex-direction:column}
   .review-shell{grid-template-columns:1fr;grid-template-rows:auto minmax(60vh,1fr) auto;height:auto;min-height:100%;overflow:visible}
   .review-sidebar{position:relative;height:auto;max-height:40vh;border-right:0;border-bottom:1px solid var(--line)}
@@ -2075,22 +2464,8 @@ button.md-status.md-status-done .md-status-glyph{color:var(--status-success)}
 .tab,.render-mode-btn,.checkpoint-state,.inspector-pill{background:var(--panel-lift)}
 .tab.is-active{border-color:var(--line-strong);background:var(--panel-lift);box-shadow:inset 2px 0 0 var(--text)}
 .tab:hover,.tab:focus,.api-link{color:var(--text)}
-.plan-library{background:var(--bg)}
-.library-header{padding:26px 0 30px;border-bottom:1px solid var(--line)}
-.library-intro,.library-stats{margin-left:auto;margin-right:auto;width:min(calc(100% - 48px),1152px)}
-.library-intro{grid-template-columns:minmax(0,1fr) minmax(280px,.72fr);gap:40px}
-.library-intro h1{max-width:760px;margin:9px 0 0;font:650 clamp(32px,4.4vw,54px)/.98 var(--font-mono);letter-spacing:-.055em}
-.library-lede{font-size:14px;line-height:1.6}
-.library-stats{margin-top:30px;border-top:1px solid var(--line)}
-.library-stats div{padding-top:12px}.library-stats dd{color:var(--text);font-size:22px}
-.plan-field{width:min(100%,1200px);margin:0 auto;padding:28px 24px 68px}
-.plan-toolbar h2{font:650 26px/1.05 var(--font-mono)}
-.plan-card{min-height:230px;border-radius:var(--radius-surface);background:var(--panel)}
-.plan-card:hover,.plan-card:focus-visible{transform:translateY(-2px);border-color:var(--line-strong);background:var(--panel-lift)}
-.plan-card-title h3{font:600 22px/1.08 var(--font-body)}
-.plan-card-title p,.plan-number,.plan-open b{color:var(--text)}
-.blocked-plan-shell{padding:22px clamp(24px,5vw,76px) 80px;background:var(--bg)}
-.blocked-plan-head h1,.blocked-explainer h2{font-family:var(--font-mono)}
+.plan-library{height:100%;min-height:0;background:var(--bg)}
+.plan-card:hover,.plan-card:focus-visible{transform:none;border-color:var(--line);background:var(--panel-lift)}
 @media(max-width:820px){
   .server-route-document{height:auto;min-height:100%}
   .review-shell{height:auto;min-height:100%}
@@ -2098,15 +2473,12 @@ button.md-status.md-status-done .md-status-glyph{color:var(--status-success)}
   .tabs{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(190px,72vw);overflow-x:auto;overflow-y:hidden;padding:0 0 5px}
   .review-workspace{min-height:64vh}
   .review-inspector{height:auto}
-  .library-intro{grid-template-columns:1fr}
+  .plan-index-head{flex-direction:column}
 }
 @media(max-width:620px){
-  .library-intro,.library-stats{width:min(calc(100% - 32px),1152px)}
-  .library-stats{grid-template-columns:repeat(2,minmax(0,1fr))}
-  .library-intro h1{font-size:32px}
-  .plan-grid{grid-template-columns:1fr}
+  .plan-index-stats{gap:8px 14px}
+  .plan-card{grid-template-columns:2.25rem minmax(0,1fr) auto}
 }
-@media(max-width:520px){.library-header,.plan-field{padding-left:18px;padding-right:18px}.library-stats dd{font-size:20px}}
 "#
     }
 
@@ -2338,7 +2710,7 @@ button.md-status.md-status-done .md-status-glyph{color:var(--status-success)}
 
         /// One shared canvas: every scaffold HTML state is a route page inside
         /// `chrome::ServerFrame` — one navbar, one global sidebar, one `<main>`,
-        /// Plans / Scaffold active, Home reachable, no second chrome vocabulary.
+        /// Plans active, Home reachable, no second chrome vocabulary.
         fn assert_shared_server_frame(html: &str, state: &str) {
             assert!(
                 html.starts_with("<!DOCTYPE html>"),
@@ -2380,7 +2752,7 @@ button.md-status.md-status-done .md-status-glyph{color:var(--status-success)}
                     r#"href="/scaffold" class="server-nav-link is-active""#
                 ),
                 2,
-                "{state}: Plans / Scaffold active in sidebar and mobile nav"
+                "{state}: Plans active in sidebar and mobile nav"
             );
             assert!(
                 html.contains(r#"href="/" aria-label="Vibecrafted server overview""#),
@@ -2452,7 +2824,7 @@ button.md-status.md-status-done .md-status-glyph{color:var(--status-success)}
 
             let blocked = render_plan_blocked(&plan, None, "invalid manifest");
             assert_shared_server_frame(&blocked, "blocked");
-            assert!(blocked.contains("The plan exists."));
+            assert!(blocked.contains("Cannot open this plan"));
             assert!(blocked.contains(r#"class="back-link" href="/scaffold/library""#));
 
             let unavailable = render_empty("Scaffold artifacts unavailable: <boom>");
@@ -2737,6 +3109,19 @@ button.md-status.md-status-done .md-status-glyph{color:var(--status-success)}
                 "the plan library is an index, not a landing page"
             );
             assert!(
+                !css.contains("clamp(48px")
+                    && !css.contains("102px")
+                    && !css.contains("translateY(-")
+                    && !css.contains("min-height:290px")
+                    && !css.contains("min-height:230px"),
+                "plan index must not keep landing-page type or magazine-card lift"
+            );
+            assert!(
+                css.contains(".plan-index-copy h1{")
+                    && css.contains("font:650 var(--deck-title)/1.2 var(--font-body)"),
+                "plan index title must use the native deck title scale"
+            );
+            assert!(
                 css.contains("--accent:var(--amber)"),
                 "the studio bridge must point at the live accent, not plain text"
             );
@@ -2844,6 +3229,29 @@ button.md-status.md-status-done .md-status-glyph{color:var(--status-success)}
             );
         }
 
+        #[test]
+        fn dispatch_artifact_ships_the_real_door_form() {
+            let mut workspace = fixture();
+            workspace.artifacts[0].id = "wave".into();
+            workspace.artifacts[0].role = ScaffoldArtifactRole::Dispatch;
+            workspace.artifacts[0].relative_path = "plan.dispatch.toml".into();
+            let html = render_editor(&workspace);
+            assert!(
+                html.contains(r#"data-role="dispatch""#),
+                "dispatch panel must declare its role"
+            );
+            assert!(
+                html.contains(r#"action="/api/scaffold/dispatch""#),
+                "inspector must post the real dispatch door"
+            );
+            assert!(
+                html.contains("vibecrafted dispatch"),
+                "copy must name the product CLI, not a fake launch button"
+            );
+            assert!(html.contains("inspector-dispatch-slot"));
+            assert!(html.contains("Closing this studio does not stop workers"));
+        }
+
         /// The repaint must not have touched a single byte of persistence. This
         /// asserts the write path end to end: source markers, the cycle, the
         /// request reconciliation, the save form and the checkpoint note field.
@@ -2886,7 +3294,14 @@ button.md-status.md-status-done .md-status-glyph{color:var(--status-success)}
                 &[],
             );
 
-            assert!(html.contains("Choose the truth"));
+            assert!(html.contains("<h1>Plans</h1>"));
+            assert!(!html.contains("Choose the truth"));
+            assert!(!html.contains("Runtime Truth"));
+            assert!(!html.contains("you want to move"));
+            assert!(html.contains("data-ppm=\"plan\""));
+            assert!(html.contains("data-focus-repo=\"vibecrafted\""));
+            assert!(html.contains("vc-focus-refresh"));
+            assert!(!html.contains("Plan control room"));
             assert!(html.contains("id=\"plan-search\""));
             assert!(html.contains(".normalize(\"NFD\")"));
             assert!(html.contains(
@@ -2907,6 +3322,8 @@ button.md-status.md-status-done .md-status-glyph{color:var(--status-success)}
             assert!(html.contains("vc-server-mcp-slack-gateway"));
             assert!(html.contains("unknown variant `mission`"));
             assert!(html.contains("plan-card-invalid"));
+            assert!(html.contains("data-ppm=\"plan\""));
+            assert!(html.contains("data-copy-id=\"vc-server-mcp-slack-gateway\""));
         }
 
         #[test]
@@ -2935,7 +3352,8 @@ button.md-status.md-status-done .md-status-glyph{color:var(--status-success)}
             };
             let html = render_plan_blocked(&plan, Some(&report), "invalid manifest");
 
-            assert!(html.contains("The plan exists."));
+            assert!(html.contains("Cannot open this plan"));
+            assert!(!html.contains("The editor refuses to lie"));
             assert!(html.contains("frontmatter_missing · R11"));
             assert!(html.contains("DRIVER.md"));
             assert!(html.contains("frontmatter is required"));

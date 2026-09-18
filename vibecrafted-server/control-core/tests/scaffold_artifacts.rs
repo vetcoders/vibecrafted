@@ -48,7 +48,7 @@ fn frontmatter(role: &str, plan_id: &str) -> String {
 
 fn driver_body(plan_id: &str) -> String {
     format!(
-        "{}# DRIVER\n\n## 1. Pełne ścieżki\n\n| Rzecz | Ścieżka |\n|---|---|\n| Root | /Users/tester/.vibecrafted/artifacts/vetcoders/vibecrafted/2026_0720/plans/{plan_id}/ |\n\n## 2. Graf zależności — why\n\n| Krawędź | Why |\n|---|---|\n| A → B | why shared domain |\n\n## 3. Gotowe komendy\n\n```bash\nvibecrafted implement claude --file /Users/tester/.vibecrafted/artifacts/vetcoders/vibecrafted/2026_0720/plans/{plan_id}/briefs/W1-01_cut.md\n```\n\n## 4. Reguła `[ ]→[x]`\n\n`[ ]` todo · `[~]` running · `[?]` done-unverified · `[!]` blocked · `[x]` verifier-green\n**Only a delivery-verifier flips `[~]→[x]`.**\n\n## 5. Snapshot\n\nW1-01 [ ]\ndou-index = 0/1 = 0.00\n",
+        "{}# DRIVER\n\n## 1. Pełne ścieżki\n\n| Rzecz | Ścieżka |\n|---|---|\n| Root | /Users/tester/.vibecrafted/artifacts/vetcoders/vibecrafted/2026_0720/plans/{plan_id}/ |\n\n## 2. Graf zależności — why\n\n| Krawędź | Why |\n|---|---|\n| A → B | why shared domain |\n\n## 3. Gotowe komendy\n\n```bash\nvibecrafted implement claude --file /Users/tester/.vibecrafted/artifacts/vetcoders/vibecrafted/2026_0720/plans/{plan_id}/briefs/W1-01_cut.md\n```\n\n## 4. Reguła `[ ]→[x]`\n\n`[ ]` todo · `[~]` running · `[?]` done-unverified · `[!]` blocked · `[x]` verifier-green\n**Only a delivery-verifier flips `[~]→[x]`.**\n\n## 5. Snapshot\n\nW1-01 [ ]\ndou-index = 0/1 = 0.00\n\n## 6. Odbiór (matryca wyników)\n\n| cut | commit | dowód (Operator) | Worker | Operator | Founder |\n|---|---|---|---|---|---|\n| W1-01 | — | — | [ ] | [ ] | [ ] |\n\nZatwierdzono przez: Worker [ ] Operator [ ] Founder [ ]\n",
         frontmatter("driver", plan_id)
     )
 }
@@ -713,5 +713,74 @@ fn typed_status_update_and_control_event_bridge_holds() {
 
     assert!(running.content.contains("- [~] W1-01 first task"));
 
+    fs::remove_dir_all(home).ok();
+}
+
+#[test]
+fn doctor_r12_requires_reception_matrix_in_driver() {
+    let home = temp_home("r12-missing-matrix");
+    let root = write_plan(&home, "plan-r12", declarations());
+    populate(&root, "plan-r12");
+    // Strip the Odbiór section from the driver: R12 must refuse.
+    let driver = fs::read_to_string(root.join("DRIVER.md")).expect("driver");
+    let stripped = driver
+        .split("## 6. Odbiór")
+        .next()
+        .expect("driver head")
+        .to_string();
+    fs::write(root.join("DRIVER.md"), stripped).expect("driver rewrite");
+
+    let report = ScaffoldArtifactStore::new(&home)
+        .doctor("vetcoders", "vibecrafted", "2026_0720", "plan-r12")
+        .expect("doctor");
+    assert!(!report.valid);
+    assert!(
+        report.errors.iter().any(|error| {
+            error.code == "reception_matrix" && error.rule.as_deref() == Some("R12")
+        }),
+        "errors={:?}",
+        report.errors
+    );
+    fs::remove_dir_all(home).ok();
+}
+
+#[test]
+fn doctor_r12_refuses_forged_founder_signature() {
+    let home = temp_home("r12-forged-founder");
+    let root = write_plan(&home, "plan-forged", declarations());
+    populate(&root, "plan-forged");
+    let driver = fs::read_to_string(root.join("DRIVER.md")).expect("driver");
+    let forged = driver.replace(
+        "Zatwierdzono przez: Worker [ ] Operator [ ] Founder [ ]",
+        "Zatwierdzono przez: Worker [x] Operator [x] Founder [x]",
+    );
+    assert_ne!(driver, forged, "fixture must carry the signature line");
+    fs::write(root.join("DRIVER.md"), forged).expect("driver rewrite");
+
+    let store = ScaffoldArtifactStore::new(&home);
+    let report = store
+        .doctor("vetcoders", "vibecrafted", "2026_0720", "plan-forged")
+        .expect("doctor");
+    assert!(!report.valid);
+    assert!(
+        report.errors.iter().any(|error| {
+            error.code == "reception_matrix"
+                && error.message.contains("acceptance/founder.json")
+        }),
+        "errors={:?}",
+        report.errors
+    );
+
+    // Founder acceptance evidence on disk legitimizes the checked box.
+    fs::create_dir_all(root.join("acceptance")).expect("acceptance dir");
+    fs::write(
+        root.join("acceptance/founder.json"),
+        "{\"accepted_by\":\"founder\",\"date\":\"2026-09-15\"}",
+    )
+    .expect("founder evidence");
+    let report = store
+        .doctor("vetcoders", "vibecrafted", "2026_0720", "plan-forged")
+        .expect("doctor");
+    assert!(report.valid, "{:?}", report.errors);
     fs::remove_dir_all(home).ok();
 }

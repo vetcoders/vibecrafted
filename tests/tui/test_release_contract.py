@@ -18,7 +18,7 @@ RELEASE_PAGE = "https://github.com/vetcoders/vibecrafted/releases/latest"
 # 2026-08-18; both copies agreed at this digest. See
 # test_windows_entry_point_does_not_drift_between_its_two_copies for why a
 # constant is needed on top of the cross-repo comparison.
-INSTALL_PS1_SHA256 = "d23aad1c55bb8432e0d877b9be8b6dada73b9242468233676c793169f9c1830e"
+INSTALL_PS1_SHA256 = "a4360410be0d062314a4d08914b68a69231f47afa301ae880114cbc70c6ca7fd"
 
 # Binaries a developer laptop always has and the GitHub macos-15 image does
 # not. Measured 2026-08-18 against actions/runner-images
@@ -695,7 +695,7 @@ def test_release_bundle_binds_the_canonical_terminal_policy_and_font() -> None:
     installer = (REPO_ROOT / "scripts/vetcoders_install.py").read_text(encoding="utf-8")
 
     assert 'family = "Spot Mono"' in terminal
-    assert "size = 18.5" in terminal
+    assert "size = 19.5" in terminal
     assert "live_config_reload = true" in terminal
     assert 'background = "#0b0b12"' in dark
     assert 'background = "#fafafa"' in light

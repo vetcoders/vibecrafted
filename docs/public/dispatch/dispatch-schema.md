@@ -130,6 +130,7 @@ the titles.
 | `verify`           | usually      | Array of verifier tables (below)                                                                                      |
 | `recovery`         | no           | `{ on = "[!]", goto = "<cut-id-or-phase>", max_loops = <int> }` — `goto` must name an existing cut or phase           |
 | `depends_on`       | no           | Cut id array. A cut becomes ready only after every dependency settles successfully; cycles and unknown ids fail parse |
+| `base`             | no           | Per-cut worktree base: `"<sha>"`, `"<branch>"`, or `"cut:<cut-id>"`. Absent = the plan baseline (below)               |
 | `integrator`       | no           | `true` names an exclusive WRITE cut that alone may modify the main checkout                                           |
 
 ## Scheduling and checkout contract
@@ -169,6 +170,35 @@ vibecrafted dispatch plan.dispatch.toml --cleanup-settled <run-id>
 ```
 
 Branches and durable reports remain. Active cuts are never cleaned.
+
+### Per-cut `base`
+
+`depends_on` orders time only: a dependent cut still starts its worktree from
+the plan baseline and never sees its predecessor's commits. `base` orders the
+tree. Each form:
+
+```toml
+base = "<sha>"        # worktree from that commit (must be reachable in meta.repo)
+base = "<branch>"     # worktree from that local branch, pinned at resolution time
+base = "cut:w1-02"    # worktree from that cut's delivered_commit_sha (settled receipt)
+```
+
+- A `cut:<id>` base requires `<id>` in the cut's `depends_on` — the dependency
+  orders time, the base orders ancestry. The supervisor resolves it at launch,
+  after the dependency settles; `--dry-run --json` reports it as
+  `"<pending: cut-id>"`.
+- The doctor refuses a `cut:` base without the matching `depends_on`, an
+  unknown target, a cycle through `base` (same check as `depends_on`), and a
+  `sha`/`branch` that is not reachable in `meta.repo`
+  ("base not reachable in meta.repo").
+- An explicit base is frozen: the living-tree descendant follow that may
+  advance the _plan_ baseline never applies to `base`, and `--resume` keeps
+  the base recorded on the cut's receipt instead of re-resolving a moved ref.
+- An integrator cannot declare `base` — it works on the main checkout.
+- Every cut receipt records `base_ref` (the declaration), `base_sha` (the
+  resolved commit), and `base_source` (`plan` \| `sha` \| `branch` \| `cut`).
+- No `base` = the plan baseline, exactly as before; existing plans parse and
+  run unchanged. See `examples/dispatch/stacked-cuts.dispatch.toml`.
 
 ## `[[cuts.verify]]`
 
@@ -213,3 +243,19 @@ commands render these placeholders:
 Anything not listed in these tables is not part of the v1 schema. When in
 doubt, `--doctor` is the authority: it reports every unknown or invalid
 field by path (for example `cuts[2].verify[0].expect.exit_code`).
+
+## Brief frontmatter: `agent:` must equal `cuts[].agent`
+
+When a cut's `brief` (or an inline `prompt` that itself begins with YAML
+frontmatter) names an `agent:`, that value must equal the cut's
+`cuts[].agent` — the selected fleet provider. `vibecrafted dispatch
+--doctor` and launch refuse a mismatch with:
+
+```text
+cuts[N].model: frontmatter agent conflicts with selected provider
+```
+
+This is independent of `cuts[].model`. The brief's `agent:` is the fleet
+agent (`claude`, `codex`, `agy`, `junie`, `grok`, `cursor`); the cut must
+name the same agent. A model pin may still live on the brief as `model:`
+or on the cut as `model`.

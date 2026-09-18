@@ -15,19 +15,45 @@ pub enum ServerSection {
     Sessions,
     Agents,
     Runs,
+    Transcripts,
     Lifecycle,
     Activity,
     Structure,
     Scaffold,
     Guide,
+    Frame,
 }
 
 impl ServerSection {
+    /// Five primary views. Catalog pages (workspaces, sessions, agents, live
+    /// runs, control, activity, guide) stay reachable — they highlight Overview
+    /// in the primary nav and themselves in the rail. AICX lives under Structure.
+    fn family(self) -> Self {
+        match self {
+            Self::Workspaces
+            | Self::Sessions
+            | Self::Agents
+            | Self::Runs
+            | Self::Lifecycle
+            | Self::Activity
+            | Self::Guide => Self::Overview,
+            other => other,
+        }
+    }
+
     fn nav_class(self, section: Self) -> &'static str {
-        if self == section {
+        if self.family() == section {
             "server-nav-link is-active"
         } else {
             "server-nav-link"
+        }
+    }
+
+    fn rail_class(self, section: Self) -> &'static str {
+        if self == section {
+            "server-rail-link is-active"
+        } else {
+            "server-rail-link"
         }
     }
 }
@@ -41,8 +67,8 @@ pub fn ServerFrame(active: ServerSection, status: String, children: Children) ->
                     <a class="server-navbar-brand" href="/" aria-label="Vibecrafted server overview">
                         <span class="server-brand-mark" aria-hidden="true">"⌁"</span>
                         <span class="server-brand-copy">
-                            <strong>"Vibecrafted server"</strong>
-                            <small>{format!("control plane · {}", env!("VC_SERVER_VERSION"))}</small>
+                            <strong>"Vibecrafted"</strong>
+                            <small>{env!("VC_SERVER_VERSION")}</small>
                         </span>
                     </a>
                     <div class="server-navbar-actions">
@@ -50,7 +76,10 @@ pub fn ServerFrame(active: ServerSection, status: String, children: Children) ->
                             <span class="server-status-dot" aria-hidden="true"></span>
                             {status}
                         </span>
-                        <a class="server-navbar-action" href="/scaffold">"Open scaffold"</a>
+                        <div class="server-focus-toggle" role="group" aria-label="Focus">
+                            <button type="button" class="server-navbar-action" data-focus-mode="fleet">"Fleet"</button>
+                            <button type="button" class="server-navbar-action" data-focus-mode="project">"Project"</button>
+                        </div>
                         <button
                             type="button"
                             class="server-theme-toggle"
@@ -65,43 +94,78 @@ pub fn ServerFrame(active: ServerSection, status: String, children: Children) ->
             <div class="server-app-body">
                 <aside class="server-sidebar" aria-label="Vibecrafted server navigation">
                     <nav class="server-sidebar-nav">
-                        <p class="server-nav-label">"Workspace"</p>
                         <a class=active.nav_class(ServerSection::Overview) href="/">
-                            <span>"01"</span><strong>"Overview"</strong>
+                            <strong>"Overview"</strong>
                         </a>
-                        <a class=active.nav_class(ServerSection::Workspaces) href="/workspaces">
-                            <span>"02"</span><strong>"Workspaces"</strong>
-                        </a>
-                        <a class=active.nav_class(ServerSection::Sessions) href="/sessions">
-                            <span>"03"</span><strong>"Sessions"</strong>
-                        </a>
-                        <a class=active.nav_class(ServerSection::Agents) href="/agents">
-                            <span>"04"</span><strong>"Agent Manager"</strong>
-                        </a>
-                        <a class=active.nav_class(ServerSection::Runs) href="/runs">
-                            <span>"05"</span><strong>"Live runs"</strong>
-                        </a>
-                        <a class=active.nav_class(ServerSection::Lifecycle) href="/lifecycle">
-                            <span>"06"</span><strong>"Control"</strong>
-                        </a>
-                        <a class=active.nav_class(ServerSection::Activity) href="/activity">
-                            <span>"07"</span><strong>"Activity"</strong>
+                        <a class=active.nav_class(ServerSection::Transcripts) href="/transcripts">
+                            <strong>"Transcripts"</strong>
                         </a>
                         <a class=active.nav_class(ServerSection::Structure) href="/structure">
-                            <span>"08"</span><strong>"Structure"</strong>
+                            <strong>"Structure"</strong>
                         </a>
                         <a class=active.nav_class(ServerSection::Scaffold) href="/scaffold">
-                            <span>"09"</span><strong>"Plans / Scaffold"</strong>
+                            <strong>"Plans"</strong>
                         </a>
-                        <a class=active.nav_class(ServerSection::Guide) href="/guide">
-                            <span>"10"</span><strong>"Guide"</strong>
+                        <a class=active.nav_class(ServerSection::Frame) href="/frame">
+                            <strong>"Frame"</strong>
                         </a>
                     </nav>
+                    <ul class="server-sidebar-rail" aria-label="Overview filters and catalogs">
+                        <li>
+                            <a class="server-rail-link" href="/?rail=active" data-rail-filter="active">
+                                <span>"Active"</span>
+                            </a>
+                        </li>
+                        <li>
+                            <a class="server-rail-link" href="/?rail=failures" data-rail-filter="failures">
+                                <span>"Failures"</span>
+                            </a>
+                        </li>
+                        <li>
+                            <a class="server-rail-link" href="/?rail=health" data-rail-filter="health">
+                                <span>"Health"</span>
+                            </a>
+                        </li>
+                        <li>
+                            <a class=active.rail_class(ServerSection::Workspaces) href="/workspaces">
+                                <span>"Workspaces"</span>
+                            </a>
+                        </li>
+                        <li>
+                            <a class=active.rail_class(ServerSection::Sessions) href="/sessions">
+                                <span>"Sessions"</span>
+                            </a>
+                        </li>
+                        <li>
+                            <a class=active.rail_class(ServerSection::Agents) href="/agents">
+                                <span>"Agents"</span>
+                            </a>
+                        </li>
+                        <li>
+                            <a class=active.rail_class(ServerSection::Runs) href="/runs">
+                                <span>"Live"</span>
+                            </a>
+                        </li>
+                        <li>
+                            <a class=active.rail_class(ServerSection::Lifecycle) href="/lifecycle">
+                                <span>"Control"</span>
+                            </a>
+                        </li>
+                        <li>
+                            <a class=active.rail_class(ServerSection::Activity) href="/activity">
+                                <span>"Activity"</span>
+                            </a>
+                        </li>
+                        <li>
+                            <a class=active.rail_class(ServerSection::Guide) href="/guide">
+                                <span>"Guide"</span>
+                            </a>
+                        </li>
+                    </ul>
                     <div class="server-sidebar-note">
-                        <span class="server-status-dot" aria-hidden="true"></span>
                         <p>
-                            <strong>"Runtime truth"</strong>
-                            <small>"read-only control-plane projection"</small>
+                            <strong>"Focus"</strong>
+                            <small class="server-focus-caption">"Fleet · all workspaces"</small>
                         </p>
                     </div>
                 </aside>
@@ -111,36 +175,28 @@ pub fn ServerFrame(active: ServerSection, status: String, children: Children) ->
 
             <nav class="server-mobile-nav" aria-label="Vibecrafted server mobile navigation">
                 <a class=active.nav_class(ServerSection::Overview) href="/">
-                    <span>"01"</span><strong>"Overview"</strong>
+                    <strong>"Overview"</strong>
                 </a>
-                <a class=active.nav_class(ServerSection::Workspaces) href="/workspaces">
-                    <span>"02"</span><strong>"Workspaces"</strong>
-                </a>
-                <a class=active.nav_class(ServerSection::Sessions) href="/sessions">
-                    <span>"03"</span><strong>"Sessions"</strong>
-                </a>
-                <a class=active.nav_class(ServerSection::Agents) href="/agents">
-                    <span>"04"</span><strong>"Agents"</strong>
-                </a>
-                <a class=active.nav_class(ServerSection::Runs) href="/runs">
-                    <span>"05"</span><strong>"Runs"</strong>
-                </a>
-                <a class=active.nav_class(ServerSection::Lifecycle) href="/lifecycle">
-                    <span>"06"</span><strong>"Control"</strong>
-                </a>
-                <a class=active.nav_class(ServerSection::Activity) href="/activity">
-                    <span>"07"</span><strong>"Activity"</strong>
+                <a class=active.nav_class(ServerSection::Transcripts) href="/transcripts">
+                    <strong>"Logs"</strong>
                 </a>
                 <a class=active.nav_class(ServerSection::Structure) href="/structure">
-                    <span>"08"</span><strong>"Structure"</strong>
+                    <strong>"Structure"</strong>
                 </a>
                 <a class=active.nav_class(ServerSection::Scaffold) href="/scaffold">
-                    <span>"09"</span><strong>"Plans"</strong>
+                    <strong>"Plans"</strong>
                 </a>
-                <a class=active.nav_class(ServerSection::Guide) href="/guide">
-                    <span>"10"</span><strong>"Guide"</strong>
+                <a class=active.nav_class(ServerSection::Frame) href="/frame">
+                    <strong>"Frame"</strong>
                 </a>
             </nav>
+            <div id="vc-ppm" class="vc-ppm" hidden>
+                <button type="button" data-ppm-action="copy-id">"Copy id"</button>
+                <button type="button" data-ppm-action="copy-url">"Copy link"</button>
+                <button type="button" data-ppm-action="open">"Open"</button>
+                <button type="button" data-ppm-action="copy-transcript">"Copy transcript"</button>
+                <button type="button" data-ppm-action="search-aicx">"Search AICX"</button>
+            </div>
         </div>
     }
 }
@@ -189,6 +245,259 @@ pub fn theme_control_script() -> &'static str {
 })();"#
 }
 
+/// Restores Fleet/Project focus before first paint, same contract as theme.
+#[cfg(feature = "ssr")]
+pub fn operator_head_script() -> &'static str {
+    r#"(() => {
+  try {
+    const saved = localStorage.getItem('vc-focus-mode');
+    document.documentElement.dataset.focus = saved === 'project' ? 'project' : 'fleet';
+  } catch (_) {
+    document.documentElement.dataset.focus = 'fleet';
+  }
+})();"#
+}
+
+/// Focus toggle, copy buttons, and the operator context menu. Shared by the
+/// Leptos shell and every raw-HTML route so Copy / PPM / Fleet·Project exist
+/// on Plans as well as Overview.
+#[cfg(feature = "ssr")]
+pub fn operator_desk_script() -> &'static str {
+    r#"(() => {
+  const FOCUS_KEY = 'vc-focus-mode';
+  const ROOT_KEY = 'vc-focus-root';
+  const html = document.documentElement;
+  const caption = document.querySelector('.server-focus-caption');
+  const menu = document.getElementById('vc-ppm');
+  let menuTarget = null;
+
+  const selectedRoot = () => {
+    const ctx = document.getElementById('vc-focus-context');
+    const live = ctx && ctx.getAttribute('data-selected-workspace-root');
+    if (live) return live;
+    try { return localStorage.getItem(ROOT_KEY) || ''; } catch (_) { return ''; }
+  };
+
+  const repoName = (path) => {
+    const trimmed = String(path || '').replace(/[\\/]+$/, '');
+    const parts = trimmed.split(/[\\/]/);
+    return parts[parts.length - 1] || '';
+  };
+
+  const applyFocus = (mode) => {
+    const next = mode === 'project' ? 'project' : 'fleet';
+    html.dataset.focus = next;
+    document.querySelectorAll('[data-focus-mode]').forEach((btn) => {
+      btn.classList.toggle('is-active', btn.getAttribute('data-focus-mode') === next);
+    });
+    const root = selectedRoot();
+    try { localStorage.setItem(FOCUS_KEY, next); } catch (_) {}
+    if (caption) {
+      caption.textContent = next === 'project'
+        ? (root ? ('Project · ' + root) : 'Project · pick a workspace')
+        : 'Fleet · all workspaces';
+    }
+    const repo = repoName(root);
+    document.querySelectorAll('[data-focus-root], [data-focus-repo]').forEach((el) => {
+      const searchMiss = el.getAttribute('data-search-hit') === '0';
+      let focusMiss = false;
+      if (next === 'project' && root) {
+        const focusRoot = el.getAttribute('data-focus-root');
+        if (focusRoot) {
+          focusMiss = focusRoot !== root;
+        } else {
+          const focusRepo = el.getAttribute('data-focus-repo') || '';
+          focusMiss = !focusRepo || focusRepo !== repo;
+        }
+      }
+      el.hidden = searchMiss || focusMiss;
+    });
+  };
+
+  const ctx = document.getElementById('vc-focus-context');
+  const ctxRoot = ctx && ctx.getAttribute('data-selected-workspace-root');
+  if (ctxRoot) {
+    try { localStorage.setItem(ROOT_KEY, ctxRoot); } catch (_) {}
+  } else {
+    const selectedCard = document.querySelector('.workspace-card[data-selected="1"][data-focus-root]');
+    if (selectedCard) {
+      try { localStorage.setItem(ROOT_KEY, selectedCard.getAttribute('data-focus-root') || ''); } catch (_) {}
+    }
+  }
+
+  applyFocus(html.dataset.focus);
+  document.documentElement.addEventListener('vc-focus-refresh', () => applyFocus(html.dataset.focus));
+  document.querySelectorAll('[data-focus-mode]').forEach((btn) => {
+    btn.addEventListener('click', () => applyFocus(btn.getAttribute('data-focus-mode')));
+  });
+
+  const copyText = async (text) => {
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (_) {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      ta.remove();
+    }
+  };
+
+  document.addEventListener('click', (event) => {
+    const copy = event.target.closest('[data-copy]');
+    if (copy) {
+      event.preventDefault();
+      copyText(copy.getAttribute('data-copy') || copy.textContent || '');
+    }
+    const workspace = event.target.closest('.workspace-card[data-focus-root]');
+    if (workspace) {
+      const root = workspace.getAttribute('data-focus-root') || '';
+      try { localStorage.setItem(ROOT_KEY, root); } catch (_) {}
+      const ctx = document.getElementById('vc-focus-context');
+      if (ctx) ctx.setAttribute('data-selected-workspace-root', root);
+      applyFocus(html.dataset.focus);
+    }
+    if (menu && !event.target.closest('#vc-ppm')) menu.hidden = true;
+  });
+
+  const transcriptUrl = (target) => {
+    const named = target.getAttribute('data-transcript-url') || '';
+    if (named) return named;
+    if (target.getAttribute('data-ppm') !== 'run') return '';
+    const id = target.getAttribute('data-run-id') || '';
+    return id ? ('/api/control/runs/' + id + '/transcript') : '';
+  };
+
+  const bindMenu = (target) => {
+    if (!menu || !target) return;
+    menuTarget = target;
+    const id = target.getAttribute('data-run-id') || target.getAttribute('data-copy-id') || '';
+    const href = target.getAttribute('data-href') || (id ? ('/run/' + id) : '');
+    const transcript = transcriptUrl(target);
+    menu.querySelectorAll('[data-ppm-action]').forEach((btn) => {
+      const action = btn.getAttribute('data-ppm-action');
+      btn.hidden = (action === 'copy-id' && !id)
+        || (action === 'open' && !href)
+        || (action === 'copy-transcript' && !transcript)
+        || (action === 'search-aicx' && !id);
+    });
+    menu.hidden = false;
+    const rect = target.getBoundingClientRect();
+    menu.style.left = Math.min(rect.left + window.scrollX, window.scrollX + window.innerWidth - 220) + 'px';
+    menu.style.top = (rect.bottom + window.scrollY + 4) + 'px';
+  };
+
+  document.addEventListener('contextmenu', (event) => {
+    const row = event.target.closest('[data-ppm]');
+    if (!row) return;
+    event.preventDefault();
+    bindMenu(row);
+  });
+
+  const applyRail = (key) => {
+    const next = (key === 'active' || key === 'failures' || key === 'health') ? key : '';
+    document.querySelectorAll('[data-rail-filter]').forEach((el) => {
+      el.classList.toggle('is-active', next !== '' && el.getAttribute('data-rail-filter') === next);
+    });
+    const bands = document.querySelectorAll('[data-rail-band]');
+    if (!bands.length) return;
+    bands.forEach((band) => {
+      const id = band.getAttribute('data-rail-band');
+      let hide = false;
+      if (id === 'health') hide = next !== 'health';
+      else if (id === 'recent') hide = next !== '';
+      else if (id === 'active') hide = next === 'failures';
+      else if (id === 'failures') hide = next === 'active';
+      band.hidden = hide;
+    });
+  };
+  applyRail(new URLSearchParams(location.search).get('rail') || '');
+  document.querySelectorAll('[data-rail-filter]').forEach((el) => {
+    el.addEventListener('click', (event) => {
+      if (location.pathname !== '/') return;
+      event.preventDefault();
+      const key = el.getAttribute('data-rail-filter') || '';
+      const current = new URLSearchParams(location.search).get('rail') || '';
+      const next = current === key ? '' : key;
+      const url = next ? ('/?rail=' + encodeURIComponent(next)) : '/';
+      history.replaceState({}, '', url);
+      applyRail(next);
+    });
+  });
+
+  const fillInspector = async (row) => {
+    const pane = document.getElementById('overview-inspector');
+    if (!pane || !row) return;
+    document.querySelectorAll('.run-table tbody tr.is-selected').forEach((el) => el.classList.remove('is-selected'));
+    row.classList.add('is-selected');
+    const id = row.getAttribute('data-run-id') || '';
+    const href = row.getAttribute('data-href') || (id ? ('/run/' + id) : '');
+    const report = row.getAttribute('data-report') || '';
+    const error = row.getAttribute('data-error') || '';
+    const title = pane.querySelector('[data-inspector-id]');
+    const reportEl = pane.querySelector('[data-inspector-report]');
+    const errorEl = pane.querySelector('[data-inspector-error]');
+    const open = pane.querySelector('[data-inspector-open]');
+    const tail = pane.querySelector('[data-inspector-tail]');
+    if (title) title.textContent = id || 'Nothing selected';
+    if (reportEl) reportEl.textContent = report || 'No report.md yet';
+    if (errorEl) {
+      errorEl.textContent = error;
+      errorEl.hidden = !error;
+    }
+    if (open) {
+      open.href = href || '#';
+      open.hidden = !href;
+    }
+    if (tail) {
+      const url = row.getAttribute('data-transcript-url') || '';
+      tail.textContent = url ? 'Loading transcript…' : 'No transcript lines yet.';
+      if (url) {
+        try {
+          const response = await fetch(url, { credentials: 'same-origin' });
+          const payload = await response.json();
+          tail.textContent = payload.body || 'No transcript lines yet.';
+        } catch (_) {
+          tail.textContent = 'Transcript unavailable.';
+        }
+      }
+    }
+  };
+  document.querySelectorAll('.run-table tbody tr[data-run-id]').forEach((row, index) => {
+    row.addEventListener('click', (event) => {
+      if (event.target.closest('a, button')) return;
+      fillInspector(row);
+    });
+    if (index === 0) fillInspector(row);
+  });
+
+  if (menu) {
+    menu.addEventListener('click', async (event) => {
+      const btn = event.target.closest('[data-ppm-action]');
+      if (!btn || !menuTarget) return;
+      const action = btn.getAttribute('data-ppm-action');
+      const id = menuTarget.getAttribute('data-run-id') || menuTarget.getAttribute('data-copy-id') || '';
+      const href = menuTarget.getAttribute('data-href') || (id ? ('/run/' + id) : '');
+      const transcript = transcriptUrl(menuTarget);
+      menu.hidden = true;
+      if (action === 'copy-id') return copyText(id);
+      if (action === 'copy-url') return copyText(href ? (location.origin + href) : location.href);
+      if (action === 'open' && href) { location.href = href; return; }
+      if (action === 'search-aicx' && id) { location.href = '/aicx?q=' + encodeURIComponent(id); return; }
+      if (action === 'copy-transcript' && transcript) {
+        try {
+          const response = await fetch(transcript, { credentials: 'same-origin' });
+          const payload = await response.json();
+          await copyText(payload.body || '');
+        } catch (_) {}
+      }
+    });
+  }
+})();"#
+}
+
 /// A raw-HTML route rendered inside the shared operator chrome.
 ///
 /// The route owns its canvas (`body_html`), its own `<style>` additions
@@ -226,15 +535,17 @@ pub fn render_document(document: &ServerDocument<'_>) -> String {
         .to_html()
     });
     format!(
-        "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>{title}</title>\n<script>{head_script}</script>\n<style>{tokens}</style>\n<style>{fonts}</style>\n<style>{main}</style>\n{head_html}\n</head>\n<body>\n{frame}\n<script>{control_script}</script>\n{tail_html}\n</body>\n</html>\n",
+        "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>{title}</title>\n<script>{head_script}</script>\n<script>{operator_head}</script>\n<style>{tokens}</style>\n<style>{fonts}</style>\n<style>{main}</style>\n{head_html}\n</head>\n<body>\n{frame}\n<script>{control_script}</script>\n<script>{operator_desk}</script>\n{tail_html}\n</body>\n</html>\n",
         title = escape_text(document.title),
         head_script = theme_head_script(),
+        operator_head = operator_head_script(),
         tokens = STYLE_TOKENS,
         fonts = STYLE_FONTS,
         main = STYLE_MAIN,
         head_html = document.head_html,
         frame = frame,
         control_script = theme_control_script(),
+        operator_desk = operator_desk_script(),
         tail_html = document.tail_html,
     )
 }
@@ -332,7 +643,10 @@ mod tests {
         let button_end = live[button_start..].find("</button>").expect("close") + button_start;
         let button = &live[button_start..button_end];
         assert!(button.contains("light"), "dark active must offer light");
-        assert!(!button.contains(">dark<"), "the button must not name the active theme");
+        assert!(
+            !button.contains(">dark<"),
+            "the button must not name the active theme"
+        );
 
         // And the destination keeps flipping at runtime.
         let script = theme_control_script();
@@ -376,7 +690,10 @@ mod tests {
             ("surface (light)", "#f5f0e3"),
             ("surfaceRaised (light)", "#fcfaf2"),
             ("ink (light)", "#2e2b26"),
-            ("amber (light, increased variant — see tokens.css)", "#945705"),
+            (
+                "amber (light, increased variant — see tokens.css)",
+                "#945705",
+            ),
             ("stroke (light)", "#c7bdad"),
             ("surface (dark, increased)", "#12120f"),
             ("ink (dark, increased)", "#faf5eb"),
@@ -435,7 +752,10 @@ mod tests {
             ("radial-gradient", "no decorative glow on an operator desk"),
             ("linear-gradient", "no decorative glow on an operator desk"),
             ("backdrop-filter", "no gratuitous blur"),
-            ("rgba(255, 255, 255", "nested surfaces must be theme-aware, not white alpha"),
+            (
+                "rgba(255, 255, 255",
+                "nested surfaces must be theme-aware, not white alpha",
+            ),
         ] {
             assert!(
                 !css.contains(banned),
@@ -446,7 +766,7 @@ mod tests {
         assert!(css.contains("var(--stroke-width) solid var(--border-subtle)"));
     }
 
-    /// Status, "Open scaffold", and the theme toggle sit in one actions row.
+    /// Status, Fleet/Project, and the theme toggle sit in one actions row.
     /// They must share one chip plane (radius, stroke, fill, padding). A
     /// capsule status next to 8px controls — or a UA-styled `<button>` next
     /// to an `<a>` — is the split the Founder marked on the live navbar.
@@ -463,7 +783,8 @@ mod tests {
         let cluster = &css[start..end];
 
         assert!(
-            cluster.contains(".server-status-pill,\n.server-navbar-action,\n.server-theme-toggle {"),
+            cluster
+                .contains(".server-status-pill,\n.server-navbar-action,\n.server-theme-toggle {"),
             "the three siblings must be one rule, not three restyles"
         );
         assert!(
@@ -527,14 +848,40 @@ mod tests {
             body_html: "",
             tail_html: "",
         });
-        assert!(html.contains("#21211f"), "the native surface reaches the document");
+        assert!(
+            html.contains("#21211f"),
+            "the native surface reaches the document"
+        );
         assert!(html.contains("--focus-ring: var(--accent);"));
-        assert_eq!(count(&html, STYLE_TOKENS), 1, "one token sheet, not a copy per route");
-        assert_eq!(count(&html, STYLE_MAIN), 1, "one main sheet, not a copy per route");
+        assert_eq!(
+            count(&html, STYLE_TOKENS),
+            1,
+            "one token sheet, not a copy per route"
+        );
+        assert_eq!(
+            count(&html, STYLE_MAIN),
+            1,
+            "one main sheet, not a copy per route"
+        );
     }
 
     /// One theme contract for every route: the raw-HTML document and the Leptos
     /// shell must ship the same pre-paint restore and the same control script.
+    #[test]
+    fn operator_desk_keeps_plan_cards_out_of_run_transcripts() {
+        let script = operator_desk_script();
+        assert!(script.contains("getAttribute('data-ppm') !== 'run'"));
+        assert!(script.contains("data-focus-repo"));
+        assert!(script.contains("vc-focus-refresh"));
+        assert!(script.contains("data-search-hit"));
+        assert!(script.contains("data-rail-filter"));
+        assert!(script.contains("overview-inspector"));
+        assert!(
+            !script.contains("data-copy-id') || (id ? ('/api/control/runs/'"),
+            "plan copy-id must not invent a run transcript URL"
+        );
+    }
+
     #[test]
     fn every_route_shares_one_theme_contract() {
         let html = render_document(&ServerDocument {
@@ -547,9 +894,88 @@ mod tests {
         });
 
         let live = live_layer(&html);
-        assert_eq!(count(&live, "server-theme-toggle"), 2, "one toggle, one script hook");
-        assert_eq!(count(&live, "loct-theme"), 2, "one storage key, read once and written once");
+        assert_eq!(
+            count(&live, "server-theme-toggle"),
+            2,
+            "one toggle, one script hook"
+        );
+        assert_eq!(
+            count(&live, "loct-theme"),
+            2,
+            "one storage key, read once and written once"
+        );
         assert!(theme_head_script().contains("localStorage.getItem('loct-theme')"));
         assert!(theme_control_script().contains("localStorage.setItem('loct-theme', next)"));
+    }
+
+    #[test]
+    fn sidebar_is_five_primary_views_and_rail_keeps_catalog_routes() {
+        let overview = live_layer(&render_document(&ServerDocument {
+            title: "t",
+            active: ServerSection::Overview,
+            status: "ok",
+            head_html: "",
+            body_html: "",
+            tail_html: "",
+        }));
+        let workspaces = live_layer(&render_document(&ServerDocument {
+            title: "t",
+            active: ServerSection::Workspaces,
+            status: "ok",
+            head_html: "",
+            body_html: "",
+            tail_html: "",
+        }));
+        let aicx = live_layer(&render_document(&ServerDocument {
+            title: "t",
+            active: ServerSection::Structure,
+            status: "ok",
+            head_html: "",
+            body_html: "",
+            tail_html: "",
+        }));
+
+        let sidebar = {
+            let start = overview.find("class=\"server-sidebar\"").expect("sidebar");
+            let end = overview[start..].find("</aside>").expect("aside") + start;
+            &overview[start..end]
+        };
+        assert_eq!(
+            count(sidebar, "class=\"server-nav-link"),
+            5,
+            "primary nav is five views"
+        );
+        assert!(sidebar.contains("href=\"/\" class=\"server-nav-link is-active\""));
+        assert!(sidebar.contains("href=\"/transcripts\" class=\"server-nav-link\""));
+        assert!(sidebar.contains("href=\"/structure\" class=\"server-nav-link\""));
+        assert!(sidebar.contains("href=\"/scaffold\" class=\"server-nav-link\""));
+        assert!(sidebar.contains("href=\"/frame\" class=\"server-nav-link\""));
+        assert!(sidebar.contains("<strong>Plans</strong>"));
+        assert!(!sidebar.contains("Plans / Scaffold"));
+        assert!(!sidebar.contains(">01<"));
+        assert!(!sidebar.contains("Open scaffold"));
+        assert!(!sidebar.contains("href=\"/workspaces\" class=\"server-nav-link"));
+        assert!(sidebar.contains("href=\"/workspaces\" class=\"server-rail-link\""));
+        assert!(sidebar.contains("href=\"/sessions\" class=\"server-rail-link\""));
+        assert!(sidebar.contains("href=\"/agents\" class=\"server-rail-link\""));
+        assert!(sidebar.contains("href=\"/runs\" class=\"server-rail-link\""));
+        assert!(sidebar.contains("href=\"/lifecycle\" class=\"server-rail-link\""));
+        assert!(sidebar.contains("href=\"/activity\" class=\"server-rail-link\""));
+        assert!(sidebar.contains("href=\"/guide\" class=\"server-rail-link\""));
+
+        assert!(!overview.contains("href=\"/aicx\" class=\"server-navbar-action\""));
+        assert!(!overview.contains("Open scaffold"));
+
+        assert!(workspaces.contains("href=\"/\" class=\"server-nav-link is-active\""));
+        assert!(workspaces.contains("href=\"/workspaces\" class=\"server-rail-link is-active\""));
+        assert!(aicx.contains("href=\"/structure\" class=\"server-nav-link is-active\""));
+        assert_eq!(count(&overview, "class=\"server-mobile-nav\""), 1);
+        let mobile_start = overview
+            .find("class=\"server-mobile-nav\"")
+            .expect("mobile");
+        let mobile_end =
+            overview[mobile_start..].find("</nav>").expect("mobile end") + mobile_start;
+        let mobile = &overview[mobile_start..mobile_end];
+        assert_eq!(count(mobile, "class=\"server-nav-link"), 5);
     }
 }

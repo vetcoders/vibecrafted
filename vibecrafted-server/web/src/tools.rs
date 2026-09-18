@@ -20,7 +20,10 @@
 //!   origin: no cookies, no `fetch` to `/api/*`, no form posts, no frames. Its
 //!   own scripts and the sibling assets Loctree writes next to it are allowed
 //!   explicitly, so the interactive graph keeps working. Nothing in this module
-//!   ever gives generated HTML control-plane authority.
+//!   ever gives generated HTML control-plane authority. `POST /api/structure/report`
+//!   is the operator generate door: local-peer gated, cwd a known control-plane
+//!   workspace/run root, `loct report --output .loctree/report.html`. Tabs never
+//!   spawn this.
 //!
 //!   The document is served at the directory-style URL `/structure/report/`
 //!   (`/structure/report` redirects there) because Loctree writes it for the
@@ -35,16 +38,19 @@
 
 #[cfg(feature = "ssr")]
 pub mod api {
+    use std::collections::BTreeSet;
     use std::net::SocketAddr;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
     use axum::Json;
+    use axum::body::to_bytes;
     use axum::extract::{ConnectInfo, Query, Request, State};
     use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
     use axum::response::{IntoResponse, Response};
     use control_core::ControlPlane;
     use leptos::config::LeptosOptions;
+    use serde::Deserialize;
     use serde_json::{Value, json};
 
     /// Query size the AICX CLI is asked to search. Long free text is a paste,
@@ -59,6 +65,8 @@ pub mod api {
     const MAX_ASSET_BYTES: u64 = 8 * 1024 * 1024;
     const MATCH_SNIPPET_CHARS: usize = 360;
     const MAX_MATCHES_PER_ITEM: usize = 3;
+    const DEFAULT_LOCT_TIMEOUT_SECONDS: f64 = 60.0;
+    const MAX_GENERATE_BODY_BYTES: usize = 8 * 1024;
 
     // ------------------------------------------------------------------
     // Access boundary
@@ -309,7 +317,12 @@ pub mod api {
         };
         let project = match query.get("project").map(String::as_str) {
             None => None,
-            Some(raw) if raw.trim().is_empty() => None,
+            Some(raw) if raw.trim().is_empty() => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "project is required; use owner/repo or omit the parameter for all-projects search",
+                );
+            }
             Some(raw) => match valid_project(raw) {
                 Some(project) => Some(project.to_string()),
                 None => {
@@ -353,6 +366,7 @@ pub mod api {
                             Json(json!({
                                 "schema": "vibecrafted.aicx-search.v1",
                                 "query": term,
+                                "scope": if project.is_some() { "project" } else { "global" },
                                 "project": project,
                                 "count": items.len(),
                                 "items": items,
@@ -626,6 +640,185 @@ pub mod api {
             ],
         )
             .into_response()
+    }
+
+    fn loct_timeout() -> Duration {
+        std::env::var("VC_LOCT_TIMEOUT_SECONDS")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<f64>().ok())
+            .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+            .map(Duration::from_secs_f64)
+            .unwrap_or(Duration::from_secs_f64(DEFAULT_LOCT_TIMEOUT_SECONDS))
+    }
+
+    fn loct_binary() -> String {
+        std::env::var("VC_LOCT_BIN")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "loct".to_string())
+    }
+
+    #[derive(Debug, Default, Deserialize)]
+    struct GenerateReportBody {
+        #[serde(default)]
+        root: Option<String>,
+    }
+
+    fn known_generate_roots(plane: &ControlPlane) -> Vec<PathBuf> {
+        let mut roots = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut push = |raw: &str| {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return;
+            }
+            if seen.insert(trimmed.to_string()) {
+                roots.push(PathBuf::from(trimmed));
+            }
+        };
+        if let Ok(projection) = plane.load_workspace_projection()
+            && let Some(catalog) = projection.catalog
+        {
+            if let Some(selected) = catalog.selected_workspace_id.as_deref()
+                && let Some(workspace) = catalog
+                    .workspaces
+                    .iter()
+                    .find(|workspace| workspace.workspace_id == selected)
+            {
+                push(&workspace.canonical_root);
+            }
+            for workspace in &catalog.workspaces {
+                push(&workspace.canonical_root);
+            }
+        }
+        let view = plane.read_state_view();
+        for run in view
+            .active_runs
+            .iter()
+            .chain(view.stalled_runs.iter())
+            .chain(view.recent_runs.iter())
+        {
+            push(&run.root);
+        }
+        roots
+    }
+
+    fn authorize_generate_root(
+        requested: Option<&str>,
+        plane: &ControlPlane,
+    ) -> Result<PathBuf, (StatusCode, &'static str)> {
+        let known = known_generate_roots(plane);
+        if known.is_empty() {
+            return Err((
+                StatusCode::NOT_FOUND,
+                "no control-plane workspace root is known",
+            ));
+        }
+        let candidate = match requested.map(str::trim).filter(|value| !value.is_empty()) {
+            None => known[0].clone(),
+            Some(raw) => PathBuf::from(raw),
+        };
+        if !candidate.is_absolute() {
+            return Err((StatusCode::BAD_REQUEST, "root must be an absolute path"));
+        }
+        let Ok(canonical) = std::fs::canonicalize(&candidate) else {
+            return Err((StatusCode::BAD_REQUEST, "root is not a directory"));
+        };
+        if !canonical.is_dir() {
+            return Err((StatusCode::BAD_REQUEST, "root is not a directory"));
+        }
+        let allowed = known
+            .iter()
+            .any(|root| std::fs::canonicalize(root).ok().as_ref() == Some(&canonical));
+        if !allowed {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "root is not a control-plane workspace",
+            ));
+        }
+        Ok(canonical)
+    }
+
+    /// `POST /api/structure/report` — generate `<root>/.loctree/report.html`
+    /// with `loct report` in a control-plane-known workspace. Local-peer only.
+    /// Tabs never start this process.
+    pub async fn loctree_generate(
+        State(options): State<LeptosOptions>,
+        request: Request,
+    ) -> Response {
+        if let Err(reason) = local_peer_access(peer_of(&request), options.site_addr) {
+            return json_error(StatusCode::FORBIDDEN, reason);
+        }
+        let bytes = match to_bytes(request.into_body(), MAX_GENERATE_BODY_BYTES).await {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                return json_error(StatusCode::BAD_REQUEST, "body could not be read");
+            }
+        };
+        let body = if bytes.is_empty() {
+            GenerateReportBody::default()
+        } else {
+            match serde_json::from_slice::<GenerateReportBody>(&bytes) {
+                Ok(body) => body,
+                Err(_) => {
+                    return json_error(
+                        StatusCode::BAD_REQUEST,
+                        "body must be JSON with an optional root",
+                    );
+                }
+            }
+        };
+        let plane = ControlPlane::from_env();
+        let root = match authorize_generate_root(body.root.as_deref(), &plane) {
+            Ok(root) => root,
+            Err((status, error)) => return json_error(status, error),
+        };
+
+        let mut command = tokio::process::Command::new(loct_binary());
+        command.args(["report", "--output", ".loctree/report.html", "."]);
+        command.current_dir(&root);
+        command.env("LOCT_OPEN_BROWSER", "0");
+        command.stdin(std::process::Stdio::null());
+        command.kill_on_drop(true);
+        let output = tokio::time::timeout(loct_timeout(), command.output()).await;
+        match output {
+            Ok(Ok(result)) if result.status.success() => {
+                let report = root.join(".loctree/report.html");
+                let regular = std::fs::symlink_metadata(&report)
+                    .map(|meta| meta.is_file() && !meta.file_type().is_symlink())
+                    .unwrap_or(false);
+                if !regular {
+                    return json_error(
+                        StatusCode::BAD_GATEWAY,
+                        "loct report did not write a regular .loctree/report.html",
+                    );
+                }
+                (
+                    [(header::CACHE_CONTROL, "no-store")],
+                    Json(json!({
+                        "schema": "vibecrafted.loctree-report.v1",
+                        "root": root.display().to_string(),
+                        "report": report.display().to_string(),
+                        "href": "/structure/report/",
+                    })),
+                )
+                    .into_response()
+            }
+            Ok(Ok(result)) => {
+                let detail = String::from_utf8_lossy(&result.stderr);
+                let line = detail
+                    .lines()
+                    .rev()
+                    .find(|line| !line.trim().is_empty())
+                    .unwrap_or("loct report failed");
+                json_error(StatusCode::BAD_GATEWAY, &truncate_chars(line.trim(), 240))
+            }
+            Ok(Err(_)) => json_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the Loctree executable is not available to vc-server",
+            ),
+            Err(_) => json_error(StatusCode::GATEWAY_TIMEOUT, "loct report timed out"),
+        }
     }
 
     /// `GET /structure/report/`

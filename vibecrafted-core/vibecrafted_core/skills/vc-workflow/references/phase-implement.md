@@ -34,6 +34,7 @@ Grep/rg is for local detail only — after structural mapping.
 Each agent plan should include relevant sections from:
 
 1. **CONTEXT.md** (Examination):
+
    - Critical files relevant to agent's scope
    - Risk map for files agent will touch
    - Existing symbols to reuse

@@ -589,6 +589,7 @@ def test_doctor_run_includes_server_supervision_finding(monkeypatch) -> None:
     monkeypatch.setattr(doctor, "_packaged_asset_findings", list)
     monkeypatch.setattr(doctor, "_launcher_shim_findings", list)
     monkeypatch.setattr(doctor, "_vc_frame_launcher_findings", list)
+    monkeypatch.setattr(doctor, "_vc_frame_generation_split_findings", list)
     monkeypatch.setattr(doctor, "_codex_mcp_config_findings", list)
     monkeypatch.setattr(doctor, "_server_supervision_findings", lambda: [expected])
     monkeypatch.setattr(doctor, "_vc_frame_delivery_findings", list)

@@ -877,3 +877,64 @@ def test_periodic_refresh_replays_for_new_plugins_within_five_seconds(
     assert delivered >= 2
     threading.Event().wait(0.03)
     assert len(calls) == delivered
+
+
+def test_publisher_deduplicates_unchanged_payload(tmp_path: Path) -> None:
+    binary = tmp_path / "vc-frame"
+    binary.touch()
+    pipe_calls: list[list[str]] = []
+
+    def runner(
+        argv: list[str],
+        *,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        del timeout
+        if "list-sessions" in argv:
+            return subprocess.CompletedProcess(
+                argv, 0, stdout="live-session [Created now]\n", stderr=""
+            )
+        pipe_calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    publisher = SettlementHistoryPublisher(
+        control_plane_root=tmp_path / "control_plane",
+        runner=runner,
+        env={"VIBECRAFTED_VC_FRAME_BIN": str(binary)},
+    )
+    write_generation(publisher.root)
+    snapshot = projected_snapshot()
+    publisher.stage(snapshot)
+
+    report1 = publisher.flush()
+    assert report1.delivered_sessions == ("live-session",)
+    assert len(pipe_calls) == 1
+
+    # Re-stage identical snapshot and flush: pipe should be skipped (deduplicated!)
+    publisher.stage(snapshot)
+    report2 = publisher.flush()
+    assert report2.delivered_sessions == ("live-session",)
+    assert len(pipe_calls) == 1
+
+
+def test_publisher_default_runner_socket_discovery_idle(tmp_path: Path) -> None:
+    binary = tmp_path / "vc-frame"
+    binary.touch()
+    sockets_root = tmp_path / "sockets"
+    sock_dir = sockets_root / "contract_version_2"
+    sock_dir.mkdir(parents=True)
+
+    publisher = SettlementHistoryPublisher(
+        control_plane_root=tmp_path / "control_plane",
+        env={
+            "VIBECRAFTED_VC_FRAME_BIN": str(binary),
+            "VC_FRAME_SOCKET_DIR": str(sockets_root),
+        },
+    )
+    write_generation(publisher.root)
+    publisher.stage(projected_snapshot())
+
+    report = publisher.flush()
+    assert report.delivered_sessions == ()
+    assert report.reason == "no eligible vc-frame plugin sessions"
+    assert report.pending is True

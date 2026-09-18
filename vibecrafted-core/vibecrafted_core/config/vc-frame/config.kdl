@@ -60,10 +60,12 @@ simplified_ui true
 // ─── Shell & Display ────────────────────────────────────────────────────────────
 default_shell "zsh"
 // compact chowal rail SESSIONS z nowego default.kdl (2026-07-07)
-// The native default and dashboard aliases resolve to the one shipped,
-// regular file: layouts/operator.kdl.  Runtime Packs reject symlinks, so do
-// not point this at an unmaterialized built-in `vibecrafted` layout.
-default_layout "operator"
+// The first product session is the frame host: layouts/host.kdl (product
+// projection of vc-frame's vibecrafted-host). Workspaces open as guests of
+// that host so session switch uses activate_session_request, not a client
+// reattach. Start here stays on layouts/operator.kdl. Runtime Packs reject
+// symlinks, so this names a regular file — not an unmaterialized builtin.
+default_layout "host"
 copy_command "pbcopy"
 mouse_mode true
 // Rail hover chrome. Defaults in vc-frame are already true; pin so product
@@ -101,6 +103,13 @@ plugins {
     status-bar location="zellij:status-bar"
     compact-bar location="zellij:compact-bar"
     session-manager location="zellij:session-manager"
+    frame-host location="zellij:session-manager" {
+        session_canvas true
+        session_canvas_kind "session-manager"
+        rail true
+        frame_host true
+        pane_title "Sessions"
+    }
     welcome-screen location="zellij:session-manager" {
         welcome_screen true
     }

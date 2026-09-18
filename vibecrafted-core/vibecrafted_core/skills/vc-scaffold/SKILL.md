@@ -181,7 +181,7 @@ Living Tree etiquette (verbatim) · Loctree-first · recovery hint · branch+com
 Alongside the briefs, render **one `DRIVER.md`** co-located with `briefs/`. It is the single
 self-sufficient artifact a human operator (or a cold fleet) drives the whole plan from **when the
 in-thread loop dies**. NOT optional, NOT a re-skin of the atlas — it is the executable hand-off.
-It MUST contain all five:
+It MUST contain all six:
 
 1. **Full absolute paths** — every plan artifact, brief, orient evidence, and input/fixture, as
    copy-pasteable absolute paths.
@@ -189,10 +189,12 @@ It MUST contain all five:
    the next; why a pair is **SEQUENCE** (shared file domain → Living Tree conflict) vs **PARALLEL**
    (disjoint domains → safe concurrent); and where every **⛔ operator-button STOP** sits (push/merge,
    product decisions). A graph without `why` is a diagram, not a driver.
-3. **Ready handoff** — exactly one plan-level validation block for the canonical
-   `<plan-id>.dispatch.toml` (doctor + dry-run), followed by the `/vc-ship` A→Z handoff. `/vc-ship`
-   owns start and resume; the DAG owns cut order and allowed parallelism. Do not turn DRIVER into a
-   per-cut launcher list and do not teach manual `vibecrafted workflow ... --prompt` sequencing.
+3. **Ready handoff** — run `vibecrafted scaffold-doctor --plan <root> --repo <git-root>` first
+   (REFUSE = no handoff), then exactly one plan-level validation block for the canonical
+   `<plan-id>.dispatch.toml` (`vibecrafted dispatch … --doctor` + dry-run), followed by the `/vc-ship`
+   A→Z handoff. `/vc-ship` owns start and resume; the DAG owns cut order and allowed parallelism. Do
+   not turn DRIVER into a per-cut launcher list and do not teach manual `vibecrafted workflow ... --prompt`
+   sequencing.
 4. **The state alphabet + the `[ ]→[x]` rule, reproduced verbatim** (mirrors Measurement):
    `[ ]` todo · `[~]` running · `[?]` done-unverified · `[!]` blocked · `[x]` verifier-green.
    **Only a delivery-verifier flips `[~]→[x]`; an agent's claim NEVER reaches `[x]` on its own.**
@@ -200,6 +202,16 @@ It MUST contain all five:
    without re-running the verifier. That promotion-without-proof is the single failure mode that
    wrecks an operator run ("się zajebiemy"). Encode it where the dispatcher's eyes are.
 5. **Live status snapshot** + `dou-index = |[x]| / total`.
+6. **Reception matrix (Odbiór) — R12, Founder 2026-09-15.** A section
+   `## Odbiór (matryca wyników)` with one row per cut
+   (`cut | commit | dowód (Operator) | Worker | Operator | Founder`) and the signature line
+   **`Zatwierdzono przez: Worker [ ] Operator [ ] Founder [ ]`**. Every box starts `[ ]` — an
+   untouched `[ ]` is a NON-DELIVERY indicator, not a formatting nit. Worker flips its own boxes
+   as part of delivery (the supervisor refuses to verify a cut whose Acceptance boxes are still
+   `[ ]`); the flip is a claim, never proof — verifiers still decide. Operator flips only after
+   running the verifiers itself. **Founder `[x]` may only exist alongside
+   `acceptance/founder.json` in the plan root; an agent never signs for the Founder** —
+   scaffold-doctor R12 refuses a plan with a forged Founder signature or no matrix at all.
 
 ### 5.6 manifest.json (HARD-GATE — canonical artifact inventory)
 
@@ -288,17 +300,24 @@ twenty questions mid-scaffold. Refine WITH the operator on the served artifacts.
 `/brainstorming`'s visual-companion (proven HTML mockup/diagram generators). The server-review tab
 must be multi-tab + editable from day one, not a static dump.
 
-**scaffold-doctor (the gate, machine-checked):** a deterministic validator in
-`vibecrafted-server/control-core` that loads the same typed `manifest.json` used by the server and
-refuses the scaffold→implement baton until: the manifest identity matches its canonical plan root;
-all declared required artifacts exist; IDs and paths are unique; dependencies resolve; editable
-paths are non-symlinked and remain inside the plan root; briefs on disk are declared; and the atlas
-has a wave atlas + dependency graph; every cut has a `briefs/<wave>-<slot>_<slug>.md` with all 12
-sections; acceptance bullets are atomic + verifier-backed; a design doc exists for every cut flagged
-`needs_design`; **a `DRIVER.md` exists and carries all five (full paths · why-annotated graph ·
-ready commands · the `[ ]→[x]` rule verbatim · status snapshot)**. The gate is **machine-checked, not
-agent-promised** — it is the same artifact-as-truth gate the async runtime uses between every
-read-write cadence handoff.
+**scaffold-doctor (the gate, machine-checked):** run the product verb before any
+scaffold→implement handoff — do not treat the validator as an external server-only tool:
+
+```bash
+vibecrafted scaffold-doctor --plan <root> --repo <git-root>
+```
+
+REFUSE (exit 1) means no handoff. The verb locates the generation (or locally built)
+`scaffold-doctor` binary and loads the same typed `manifest.json` the server uses. It refuses
+until: the manifest identity matches its canonical plan root; all declared required artifacts
+exist; IDs and paths are unique; dependencies resolve; editable paths are non-symlinked and remain
+inside the plan root; briefs on disk are declared; and the atlas has a wave atlas + dependency
+graph; every cut has a `briefs/<wave>-<slot>_<slug>.md` with all 12 sections; acceptance bullets are
+atomic + verifier-backed; a design doc exists for every cut flagged `needs_design`; **a `DRIVER.md`
+exists and carries all six (full paths · why-annotated graph · ready commands · the `[ ]→[x]` rule
+verbatim · status snapshot · the R12 reception matrix with an unforged Founder box)**. The gate is
+**machine-checked, not agent-promised** — it is the
+same artifact-as-truth gate the async runtime uses between every read-write cadence handoff.
 
 ## Measurement (the armor)
 
@@ -317,8 +336,14 @@ it triggers a recovery-vector** (fallback/failover/handsoff). Full alphabet + ma
 - **A brief for every cut — no exceptions.** Per-cut briefs are the hard-gate (Phase 5). A plan
   whose cuts lack briefs is a shell; the scaffold-doctor refuses to hand it off.
 - **A DRIVER.md — no exceptions (Phase 5.5).** The operator hand-off driver (full paths · why-annotated
-  graph · ready commands · the `[ ]→[x]` rule verbatim · status snapshot) is part of the scaffold-doctor
-  gate. A plan a human can't drive from one file when the loop dies is not handoff-ready.
+  graph · ready commands · the `[ ]→[x]` rule verbatim · status snapshot · the Odbiór reception matrix)
+  is part of the scaffold-doctor gate. A plan a human can't drive from one file when the loop dies is
+  not handoff-ready.
+- **Every requirement starts `[ ]` and three signatures close a plan (R12, Founder 2026-09-15).**
+  Acceptance bullets and matrix boxes all start `[ ]`; the worker flips its own boxes as part of
+  delivery, the supervisor refuses to verify a cut with unflipped Acceptance boxes, and no flip is
+  believed — verifiers decide. `Founder [x]` without `acceptance/founder.json` is a forged
+  signature and scaffold-doctor refuses the plan.
 - **Durable artifacts NEVER go to `/tmp`.** `/tmp` is ephemeral scratch only — it is wiped, untracked,
   and invisible to the operator's tooling and sync. Every plan, brief, DRIVER, tracker, journal, report,
   and design doc lands in the **canonical plan root**:

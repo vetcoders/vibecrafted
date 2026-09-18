@@ -181,7 +181,7 @@ etykieta Living Tree (verbatim) · Loctree-first · podpowiedź recovery · bran
 Obok briefów wyrenderuj **jeden `DRIVER.md`** współlokowany z `briefs/`. To jeden
 samowystarczalny artefakt, z którego ludzki operator (albo zimna flota) prowadzi cały plan, **gdy
 pętla w wątku umiera**. NIE opcjonalny, NIE re-skin atlasu — to wykonywalne przekazanie.
-MUSI zawierać wszystkie pięć:
+MUSI zawierać wszystkie sześć:
 
 1. **Pełne ścieżki absolutne** — każdy artefakt planu, brief, evidence z orient oraz input/fixture, jako
    gotowe-do-wklejenia ścieżki absolutne.
@@ -189,10 +189,11 @@ MUSI zawierać wszystkie pięć:
    następne; dlaczego para jest **SEQUENCE** (współdzielona domena plików → konflikt Living Tree) vs **PARALLEL**
    (rozłączne domeny → bezpieczne współbieżnie); i gdzie siedzi każdy **⛔ operator-button STOP** (push/merge,
    decyzje produktowe). Graf bez `why` to diagram, nie driver.
-3. **Gotowe przekazanie** — dokładnie jeden blok walidacji poziomu planu dla kanonicznego
-   `<plan-id>.dispatch.toml` (doctor + dry-run), a potem przekazanie A→Z do `/vc-ship`. `/vc-ship`
-   jest właścicielem startu i resume; DAG jest właścicielem kolejności cięć i dozwolonej
-   równoległości. Nie zamieniaj DRIVER-a w listę launcherów per cięcie i nie ucz ręcznego
+3. **Gotowe przekazanie** — najpierw uruchom `vibecrafted scaffold-doctor --plan <root> --repo <git-root>`
+   (REFUSE = brak handoffu), potem dokładnie jeden blok walidacji poziomu planu dla kanonicznego
+   `<plan-id>.dispatch.toml` (`vibecrafted dispatch … --doctor` + dry-run), a potem przekazanie A→Z
+   do `/vc-ship`. `/vc-ship` jest właścicielem startu i resume; DAG jest właścicielem kolejności cięć
+   i dozwolonej równoległości. Nie zamieniaj DRIVER-a w listę launcherów per cięcie i nie ucz ręcznego
    sekwencjonowania `vibecrafted workflow ... --prompt`.
 4. **Alfabet stanów + reguła `[ ]→[x]`, odtworzone verbatim** (lustro Pomiaru):
    `[ ]` todo · `[~]` running · `[?]` done-unverified · `[!]` blocked · `[x]` verifier-green.
@@ -201,8 +202,16 @@ MUSI zawierać wszystkie pięć:
    bez ponownego uruchomienia verifiera. Ta promocja-bez-dowodu to jedyny tryb porażki, który
    wykłada przebieg operatora („się zajebiemy"). Zakoduj to tam, gdzie są oczy dispatchera.
 5. **Snapshot statusu na żywo** + `dou-index = |[x]| / total`.
-
-### 5.6 manifest.json (HARD-GATE — kanoniczny inwentarz artefaktów)
+6. **Matryca odbioru (Odbiór) — R12, Founder 2026-09-15.** Sekcja
+   `## Odbiór (matryca wyników)` z jednym wierszem na cięcie
+   (`cut | commit | dowód (Operator) | Worker | Operator | Founder`) i linią podpisów
+   **`Zatwierdzono przez: Worker [ ] Operator [ ] Founder [ ]`**. Każde pole startuje jako `[ ]` —
+   nietknięte `[ ]` to wskaźnik NIEDOWIEZIENIA, nie usterka formatowania. Worker przerzuca własne
+   pola w ramach dostawy (supervisor odmawia weryfikacji cięcia z nieprzerzuconymi polami
+   Acceptance); przerzucenie to twierdzenie, nigdy dowód — decydują verifiery. Operator przerzuca
+   dopiero po własnym uruchomieniu verifierów. **`Founder [x]` może istnieć wyłącznie obok
+   `acceptance/founder.json` w root planu; agent nigdy nie podpisuje za Foundera** —
+   scaffold-doctor R12 odrzuca plan ze sfałszowanym podpisem Foundera albo bez matrycy.
 
 Utwórz jeden root planu pod
 `~/.vibecrafted/artifacts/<org>/<repo>/<YYYY_MMDD>/plans/<plan_id>/` i zapisz w nim obowiązkowy
@@ -286,18 +295,25 @@ dwadzieścia pytań w trakcie scaffoldu. Dopracowujesz Z operatorem na zaserwowa
 visual-companion z `/brainstorming` (sprawdzone generatory mockupów/diagramów HTML). Zakładka server-review
 musi być wielozakładkowa + edytowalna od pierwszego dnia, nie statyczny zrzut.
 
-**scaffold-doctor (bramka, sprawdzana maszynowo):** deterministyczny walidator w
-`vibecrafted-server/control-core`, który ładuje ten sam typowany `manifest.json` co server i odmawia
-przekazania batonu scaffold→implement, dopóki: tożsamość manifestu nie zgadza się z kanonicznym rootem
-planu; wszystkie wymagane artefakty nie istnieją; ID i ścieżki nie są unikalne; zależności się nie
-rozwiązują; edytowalne ścieżki są symlinkami lub wychodzą poza root; briefy na dysku nie są zadeklarowane;
-oraz master-dispatch
-nie ma wave atlasu + grafu zależności; każde cięcie nie ma `briefs/<wave>-<slot>_<slug>.md` z wszystkimi 12
-sekcjami; bullety acceptance nie są atomowe + poparte verifierem; nie istnieje design doc dla każdego cięcia oznaczonego
-`needs_design`; **nie istnieje `DRIVER.md` niosący wszystkie pięć (pełne ścieżki · graf z adnotacją why ·
-gotowe komendy · reguła `[ ]→[x]` verbatim · snapshot statusu)**. Bramka jest **sprawdzana maszynowo, nie
-obiecywana przez agenta** — to ta sama bramka artefakt-jako-prawda, której async runtime używa między każdym
-przekazaniem cadence read-write.
+**scaffold-doctor (bramka, sprawdzana maszynowo):** uruchom verba produktu przed każdym
+przekazaniem scaffold→implement — nie opisuj walidatora jako zewnętrznego narzędzia serwera:
+
+```bash
+vibecrafted scaffold-doctor --plan <root> --repo <git-root>
+```
+
+REFUSE (exit 1) = brak handoffu. Verb odnajduje binarkę `scaffold-doctor` (generacja albo lokalny
+build) i ładuje ten sam typowany `manifest.json` co server. Odmawia, dopóki: tożsamość manifestu nie
+zgadza się z kanonicznym rootem planu; wszystkie wymagane artefakty nie istnieją; ID i ścieżki nie
+są unikalne; zależności się nie rozwiązują; edytowalne ścieżki są symlinkami lub wychodzą poza root;
+briefy na dysku nie są zadeklarowane; oraz master-dispatch nie ma wave atlasu + grafu zależności;
+każde cięcie nie ma `briefs/<wave>-<slot>_<slug>.md` z wszystkimi 12 sekcjami; bullety acceptance nie
+są atomowe + poparte verifierem; nie istnieje design doc dla każdego cięcia oznaczonego
+`needs_design`; **nie istnieje `DRIVER.md` niosący wszystkie sześć (pełne ścieżki · graf z adnotacją
+why · gotowe komendy · reguła `[ ]→[x]` verbatim · snapshot statusu · matryca odbioru R12 z
+niesfałszowanym polem Foundera)**. Bramka jest **sprawdzana
+maszynowo, nie obiecywana przez agenta** — to ta sama bramka artefakt-jako-prawda, której async
+runtime używa między każdym przekazaniem cadence read-write.
 
 ## Pomiar (pancerz)
 
@@ -316,8 +332,14 @@ to wyzwala recovery-vector** (fallback/failover/handsoff). Pełen alfabet + mark
 - **Brief na każde cięcie — bez wyjątków.** Briefy per cięcie to hard-gate (Faza 5). Plan,
   którego cięcia nie mają briefów, to wydmuszka; scaffold-doctor odmawia przekazania.
 - **DRIVER.md — bez wyjątków (Faza 5.5).** Driver przekazania operatora (pełne ścieżki · graf z adnotacją
-  why · gotowe komendy · reguła `[ ]→[x]` verbatim · snapshot statusu) jest częścią bramki scaffold-doctor.
-  Plan, którego człowiek nie poprowadzi z jednego pliku, gdy pętla umrze, nie jest gotowy do przekazania.
+  why · gotowe komendy · reguła `[ ]→[x]` verbatim · snapshot statusu · matryca odbioru) jest częścią
+  bramki scaffold-doctor. Plan, którego człowiek nie poprowadzi z jednego pliku, gdy pętla umrze, nie
+  jest gotowy do przekazania.
+- **Każde wymaganie startuje `[ ]`, a plan zamykają trzy podpisy (R12, Founder 2026-09-15).**
+  Bullety Acceptance i pola matrycy startują jako `[ ]`; worker przerzuca własne pola w ramach
+  dostawy, supervisor odmawia weryfikacji cięcia z nieprzerzuconymi polami, a żadnemu przerzuceniu
+  się nie wierzy — decydują verifiery. `Founder [x]` bez `acceptance/founder.json` to sfałszowany
+  podpis i scaffold-doctor odrzuca plan.
 - **Trwałe artefakty NIGDY nie idą do `/tmp`.** `/tmp` to tylko ulotny scratch — jest wymazywany, nieśledzony
   i niewidoczny dla tooling-u i synca operatora. Każdy plan, brief, DRIVER, tracker, journal, raport
   i design doc ląduje w **kanonicznym root planu**:

@@ -1241,12 +1241,14 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     assert "copyItem(at:" not in delegate
     assert "writeLauncher(" not in delegate
     assert 'appendingPathComponent("active.json")' not in delegate
-    # PATH composes: the caller's tools win and the signed generation remains a
-    # fallback. A hard-coded system-only PATH strips Homebrew/~/.local/bin/
-    # ~/.cargo/bin from spawned agent CLIs, so `#!/usr/bin/env` shebangs exit 127.
+    # PATH composes guest-not-landlord: the generation's canonical bin is
+    # prepended so pinned runtime tools resolve deterministically, and every
+    # inherited user entry (Homebrew, ~/.local/bin, ~/.cargo/bin) survives
+    # behind it. A hard-coded system-only PATH strips those tools from spawned
+    # agent CLIs, so `#!/usr/bin/env` shebangs exit 127.
     assert 'environment["PATH"] = composedPath(' in delegate
     assert 'environment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"' not in delegate
-    assert 'return (entries + [generationBin]).joined(separator: ":")' in delegate
+    assert 'return ([generationBin] + entries).joined(separator: ":")' in delegate
     assert '["server", "service", "reconcile"]' in delegate
     assert "shell-agent" not in delegate
     assert 'name = "vc-start"' in cargo
@@ -1256,10 +1258,11 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     assert 'Command::new("/bin/bash")' in launcher
     assert "fn host_agent_search_path(" in launcher
     assert '"/opt/homebrew/bin"' in launcher
-    # vc-start composes: the PATH AppDelegate hands it (the Founder's
-    # Homebrew/npm/cargo/nvm entries first, generation fallback last) survives,
-    # sanitized rather than amputated — a closed allowlist here re-created the
-    # exit-127 shebang failures the composed PATH fixed one process earlier.
+    # vc-start composes: the PATH AppDelegate hands it (the generation's
+    # canonical bin first, the Founder's Homebrew/npm/cargo/nvm entries
+    # surviving behind it) survives, sanitized rather than amputated — a closed
+    # allowlist here re-created the exit-127 shebang failures the composed PATH
+    # fixed one process earlier.
     assert 'let inherited_path = env::var("PATH").ok();' in launcher
     assert "inherited_path.as_deref()" in launcher
     assert "!entry.starts_with('/')" in launcher
@@ -1932,10 +1935,14 @@ def test_app_launch_contract_rejects_noncanonical_product_entry(
     )
 
 
-def test_launch_environment_is_fresh_closed_and_resolves_writable_runtime_home(
+def test_launch_environment_is_the_users_environment_with_pins_overlaid(
     tmp_path: Path,
     macho_executable: Path,
 ) -> None:
+    """Guest, not landlord: the child environment is the user's own
+    environment with the deny-list scrubbed and Vibecrafted pins overlaid;
+    the user's PATH survives behind the bundle's canonical bin."""
+
     app = tmp_path / "Vibecrafted.app"
     _app_fixture(app, macho_executable)
     runtime_home = tmp_path / "data/runtime"
@@ -1944,24 +1951,29 @@ def test_launch_environment_is_fresh_closed_and_resolves_writable_runtime_home(
         "HOME": str(tmp_path),
         "USER": "operator",
         "LANG": "pl_PL.UTF-8",
-        "PATH": "/attacker/bin",
+        "PATH": "/opt/homebrew/bin:/usr/bin",
+        "SSH_AUTH_SOCK": "/tmp/probe.sock",
+        "GITHUB_TOKEN": "user-owned-flows-through",
+        "PYTHONPATH": "/foreign/runtime/site",
         "VIBECRAFTED_RUNTIME_HOME": str(runtime_home),
-        "VIBECRAFTED_ROOT": "/attacker/root",
-        "VIBECRAFTED_TOOLS_HOME": "/attacker/tools",
-        "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
-        "VC_FRAME_BIN": "/attacker/vc-frame",
     }
 
     child = contract.build_launch_environment(app, host_environment=host)
 
+    resolved = app.resolve()
     assert child == {
         "HOME": str(tmp_path),
         "USER": "operator",
         "LANG": "pl_PL.UTF-8",
-        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+        "PATH": (
+            f"{resolved / 'Contents/Resources/runtime/bin'}:"
+            "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        ),
+        "SSH_AUTH_SOCK": "/tmp/probe.sock",
+        "GITHUB_TOKEN": "user-owned-flows-through",
         "VIBECRAFTED_RUNTIME_HOME": str(runtime_home),
-        "VIBECRAFTED_APP_ROOT": str(app.resolve()),
-        "VIBECRAFTED_VC_FRAME_BIN": str(app.resolve() / "Contents/Helpers/vc-frame"),
+        "VIBECRAFTED_APP_ROOT": str(resolved),
+        "VIBECRAFTED_VC_FRAME_BIN": str(resolved / "Contents/Helpers/vc-frame"),
     }
 
 
@@ -4025,9 +4037,9 @@ def test_terminal_policy_uses_operator_toml_and_primary_shell_chain() -> None:
     installer = (REPO_ROOT / "scripts/vetcoders_install.py").read_text(encoding="utf-8")
 
     assert 'family = "Spot Mono"' in terminal
-    assert "size = 18.5" in terminal
-    assert "x = -1" in terminal
-    assert "y = 2" in terminal
+    assert "size = 19.5" in terminal
+    assert "x = -3" in terminal
+    assert "y = -8" in terminal
     assert 'style = { shape = "Underline", blinking = "On" }' in terminal
     assert 'cyan    = "#7dc4e4"' in dark
     assert 'cyan    = "#56949f"' in light

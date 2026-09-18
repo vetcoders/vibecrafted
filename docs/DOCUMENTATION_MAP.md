@@ -2,15 +2,14 @@
 
 This is the spine for keeping Vibecrafted docs honest.
 
-If a document disagrees with the live command deck, the command deck wins. If a
-skill doc disagrees with the live launcher, the live launcher wins. If a roadmap
-claims something is done but `doctor`, `help`, or a real run cannot prove it, the
-roadmap is aspirational.
+If a document disagrees with the live command deck, the command deck wins. If a skill doc disagrees with the live
+launcher, the live launcher wins. If a roadmap claims something is done but `doctor`, `help`, or a real run cannot prove
+it, the roadmap is aspirational.
 
 ## Current Product Truth
 
-Vibecrafted is the release engine for AI-built repos. It sits after agents have
-already produced code and before real users have to trust the result.
+Vibecrafted is the release engine for AI-built repos. It sits after agents have already produced code and before real
+users have to trust the result.
 
 The product has six working layers:
 
@@ -20,7 +19,6 @@ The product has six working layers:
 | Operator runbook      | `docs/RUNBOOK.md` — terminal-first: cold start, dispatch, supervision, recovery                               |
 | Install and support   | `docs/INSTALL.md` (channel matrix + status), `docs/DOCKER.md`, `make help`, `make help-dev`                   |
 | Release cut           | `docs/RELEASE_KICKOFF.md` (identity), `docs/RELEASE_CHECKLIST.md` (4.1.0 DMG command sequence)                |
-| Next release          | `docs/ROADMAP_4.1.1.md` — planned shared, digestible `vc-init pack` for every provider                        |
 | Package-manager stage | `packaging/` (Homebrew formula + cask; winget skipped — no native Windows build)                              |
 | Install (public docs) | `docs/public/getting-started/`: `install.md` · `build-from-source.md` · `first-run.md` · `update.md`          |
 | Command deck          | `scripts/vibecrafted`, `docs/WORKFLOWS.md`, `docs/SKILLS.md`                                                  |
@@ -55,8 +53,7 @@ Compatibility aliases may be mentioned once, never taught as the primary path:
 
 - `vibecrafted justdo` -> `vibecrafted implement`
 - `vc-justdo` -> `vc-implement`
-- `vc-<skill>` wrappers -> installed shell shortcuts for people who already live
-  in the operator shell
+- `vc-<skill>` wrappers -> installed shell shortcuts for people who already live in the operator shell
 
 Agent-mode grammar also exists and is intentionally power-user material:
 
@@ -65,8 +62,7 @@ vibecrafted implement codex .vibecrafted/plans/my-plan.md
 vibecrafted observe claude --last
 ```
 
-Keep it in `help --all`, runtime docs, or `vc-agents` docs. Do not make it the
-first path a founder sees.
+Keep it in `help --all`, runtime docs, or `vc-agents` docs. Do not make it the first path a founder sees.
 
 ## Runtime Truth
 
@@ -86,12 +82,11 @@ Current runtime is not a future scaffold. It is active.
 | Run observability ownership             | Server/VOC canonical browsing; terminal triage is manual compatibility — see `docs/runtime/TRIAGE_AND_SESSIONS.md` |
 | Tools home vs checkout                  | Daily CLI runs staged `vibecrafted-current`, not floating git HEAD                                                 |
 
-When docs need to discuss what is planned, say "planned" or "partial." Do not
-leave old design language that says a live directory is reserved for later.
+When docs need to discuss what is planned, say "planned" or "partial." Do not leave old design language that says a live
+directory is reserved for later.
 
-**Install discipline:** `git push` / merge alone does not refresh the staged
-tools home. After runtime wire changes, `make install` (or the install path you
-actually use) must stamp `VERSION` to the intended `+g<sha>`.
+**Install discipline:** `git push` / merge alone does not refresh the staged tools home. After runtime wire changes,
+`make install` (or the install path you actually use) must stamp `VERSION` to the intended `+g<sha>`.
 
 ## Skill Runtime Split
 
@@ -106,8 +101,7 @@ Skill-loading and runtime invocation are different things.
 | `$vc-operator`                             | Current agent conducts a multi-wave plan                     |
 | `vibecrafted dispatch <file.toml>`         | Live deterministic supervisor path                           |
 
-Do not document `vibecrafted operator <agent>` as a live public command unless
-the launcher exposes it again.
+Do not document `vibecrafted operator <agent>` as a live public command unless the launcher exposes it again.
 
 ## Sweep Ledger
 
@@ -142,9 +136,7 @@ while checkout already had triage wire and tools home lagged one commit.
 | `docs/runtime/EXECUTION_SURFACES.md`         | Checkout override ≠ staged daily driver                                                                |
 | `docs/DOCUMENTATION_MAP.md`                  | This ledger entry + runtime truth rows                                                                 |
 
-Not in this pass (deliberate): skill-body rewrites, `docs/pl/*` mirror, product
-marketing pages, implementing the research-generator session-rail code fix
-(docs name the gap; code change is separate).
+Not in this pass (deliberate): skill-body rewrites, `docs/pl/*` mirror, product marketing pages, implementing the
+research-generator session-rail code fix (docs name the gap; code change is separate).
 
-This file is not a replacement for those docs. It is the map that keeps them
-from drifting into separate religions.
+This file is not a replacement for those docs. It is the map that keeps them from drifting into separate religions.

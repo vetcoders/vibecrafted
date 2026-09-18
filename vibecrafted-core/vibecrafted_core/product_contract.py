@@ -216,6 +216,10 @@ _WALKAROUND_CHECKS = frozenset(
         "one_outer_writer",
     }
 )
+# Declared v1 manifest environment (schema-locked const): this is what the
+# installed Swift app executes today. The python composition below no longer
+# uses the allow-list — it is guest-not-landlord (see _LAUNCH_ENV_DENYLIST).
+# The app-side flip and the manifest schema bump are the W1-02 twin cut.
 _LAUNCH_INHERITED_ENV = (
     "HOME",
     "USER",
@@ -229,6 +233,22 @@ _LAUNCH_INHERITED_ENV = (
     "SHELL",
 )
 _LAUNCH_SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+_LAUNCH_RUNTIME_BIN = "Contents/Resources/runtime/bin"
+# Launch composition starts from the user's full environment — the product is
+# a guest in the user's shell, not a landlord (AGENTS.md). This deny-list is
+# the only scrub, and every entry names why it must not cross into the child.
+_LAUNCH_ENV_DENYLIST = frozenset(
+    {
+        # Repoints python children at a foreign runtime's or test harness's
+        # module tree; the launched product must import its own generation.
+        "PYTHONPATH",
+        # Relocates the interpreter's stdlib and breaks any bundled python.
+        "PYTHONHOME",
+        # macOS framework-python breadcrumb pinning children to the invoking
+        # interpreter's launcher instead of their own resolution.
+        "__PYVENV_LAUNCHER__",
+    }
+)
 _WALKAROUND_TEMP_PARENT = Path("/tmp")
 _LAUNCH_TERMINAL = "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
 _LAUNCH_FRAME = "Contents/Helpers/vc-frame"
@@ -811,10 +831,34 @@ def _public_key_spki_sha256(public_key: Path) -> str:
     return hashlib.sha256(result.stdout).hexdigest()
 
 
+def _capture_stat_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    """Stable identity for one captured file.
+
+    Windows ``fstat`` and ``lstat`` disagree on ``st_ctime_ns`` (birth vs
+    change time). POSIX still includes ctime.
+    """
+    identity = (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+    )
+    if sys.platform != "win32":
+        return (*identity, metadata.st_ctime_ns)
+    return identity
+
+
 def _capture_proof_artifact(path: Path, *, context: str) -> _CapturedProofArtifact:
     absolute_path = Path(os.path.abspath(path))
     resolved = os.path.realpath(absolute_path)
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_BINARY", 0)
+    )
     try:
         descriptor = os.open(absolute_path, flags)
     except OSError as exc:
@@ -834,44 +878,12 @@ def _capture_proof_artifact(path: Path, *, context: str) -> _CapturedProofArtifa
         resolved_after = os.path.realpath(absolute_path)
         if len(payload) > _MAX_SIGNED_PAYLOAD_BYTES:
             _fail(E_SIZE, f"{context} exceeds the 64 MiB signed-payload limit")
-        if (
-            (
-                before.st_dev,
-                before.st_ino,
-                before.st_mode,
-                before.st_nlink,
-                before.st_size,
-                before.st_mtime_ns,
-                before.st_ctime_ns,
-            )
-            != (
-                after.st_dev,
-                after.st_ino,
-                after.st_mode,
-                after.st_nlink,
-                after.st_size,
-                after.st_mtime_ns,
-                after.st_ctime_ns,
-            )
-            or resolved_after != resolved
-            or (
-                after.st_dev,
-                after.st_ino,
-                after.st_mode,
-                after.st_nlink,
-                after.st_size,
-                after.st_mtime_ns,
-                after.st_ctime_ns,
-            )
-            != (
-                path_after.st_dev,
-                path_after.st_ino,
-                path_after.st_mode,
-                path_after.st_nlink,
-                path_after.st_size,
-                path_after.st_mtime_ns,
-                path_after.st_ctime_ns,
-            )
+        if _capture_stat_identity(before) != _capture_stat_identity(after):
+            _fail(E_PROOF, f"{context} changed while it was captured")
+        if resolved_after != resolved:
+            _fail(E_PROOF, f"{context} changed while it was captured")
+        if sys.platform != "win32" and (
+            _capture_stat_identity(after) != _capture_stat_identity(path_after)
         ):
             _fail(E_PROOF, f"{context} changed while it was captured")
         return _CapturedProofArtifact(
@@ -933,6 +945,11 @@ def _verify_release_signature(
 
 
 def _release_openssl() -> str:
+    if sys.platform == "win32":
+        found = shutil.which("openssl")
+        if not found:
+            _fail(E_PROOF, "fixed system OpenSSL verifier is unavailable")
+        return found
     openssl = Path("/usr/bin/openssl")
     if not openssl.is_file() or openssl.is_symlink() or not os.access(openssl, os.X_OK):
         _fail(E_PROOF, "fixed system OpenSSL verifier is unavailable")
@@ -1625,12 +1642,40 @@ def _validate_launch_contract(
     return raw
 
 
+def _guest_environment(host: Mapping[str, str]) -> dict[str, str]:
+    """The user's full environment minus `_LAUNCH_ENV_DENYLIST` — the launched
+    product is a guest in the user's shell (SSH agent, tokens and tools flow
+    through), never a landlord that strips it."""
+
+    return {
+        name: value for name, value in host.items() if name not in _LAUNCH_ENV_DENYLIST
+    }
+
+
+def _launch_child_path(app: Path, host_path: str | None) -> str:
+    """Child PATH: the bundle's canonical bin first, the user's own absolute
+    PATH entries next, the system set as a floor. The user's PATH survives
+    whole; our binaries still win the name collisions we own. Empty and
+    relative entries are implicit current-directory lookups and are dropped."""
+
+    ordered: list[str] = []
+    for entry in (
+        str(app / _LAUNCH_RUNTIME_BIN),
+        *(host_path or "").split(os.pathsep),
+        *_LAUNCH_SYSTEM_PATH.split(os.pathsep),
+    ):
+        if entry.startswith("/") and entry not in ordered:
+            ordered.append(entry)
+    return os.pathsep.join(ordered)
+
+
 def build_launch_environment(
     app_path: str | Path,
     *,
     host_environment: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
-    """Verify the product and build its closed child environment."""
+    """Verify the product and build its child environment: the user's own
+    environment as the base, Vibecrafted pins overlaid on top."""
     raw_app = Path(app_path)
     if raw_app.is_symlink():
         _fail(E_PATH, "app bundle root must not be a symlink")
@@ -1672,10 +1717,10 @@ def build_launch_environment(
         raise
     except (OSError, ValueError) as exc:
         _fail(E_PATH, f"VIBECRAFTED_RUNTIME_HOME cannot be created or written: {exc}")
-    child = {name: host[name] for name in _LAUNCH_INHERITED_ENV if host.get(name)}
+    child = _guest_environment(host)
     child.update(
         {
-            "PATH": _LAUNCH_SYSTEM_PATH,
+            "PATH": _launch_child_path(app, host.get("PATH")),
             "VIBECRAFTED_RUNTIME_HOME": str(runtime_home),
             "VIBECRAFTED_APP_ROOT": str(app),
             "VIBECRAFTED_VC_FRAME_BIN": str(app / _LAUNCH_FRAME),

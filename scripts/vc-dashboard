@@ -40,10 +40,10 @@ osc_progress_pct() { printf '\e]9;4;1;%d\a' "$1"; }
 osc_link() {
     local url="$1" text="$2" id="${3:-}"
     if [[ -n "$id" ]]; then
-        # shellcheck disable=SC1003
+        # shellcheck disable=SC1003  # \e\\ is the OSC 8 string terminator, not an escaped quote
         printf '\e]8;id=%s;%s\e\\%s\e]8;;\e\\' "$id" "$url" "$text"
     else
-        # shellcheck disable=SC1003
+        # shellcheck disable=SC1003  # \e\\ is the OSC 8 string terminator, not an escaped quote
         printf '\e]8;;%s\e\\%s\e]8;;\e\\' "$url" "$text"
     fi
 }

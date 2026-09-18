@@ -23,6 +23,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- CLI: `vibecrafted observe <agent>` is a live watch by default. It prints
+  the run status and a short rendered transcript backlog, then follows
+  appended transcript events (rendered through the agent's stream parser)
+  until the run turns terminal — exit 0 on a success state, 1 on a terminal
+  failure; Ctrl-C detaches and never touches the run. `--tail [N]` and
+  `--head [N]` are the bounded one-shot reads (N defaults to 40),
+  `--interval SECONDS` sets the watch poll cadence (default 1.0), and
+  `--json` emits one `vibecrafted.observe-event.v1` line per rendered event
+  between `begin`/`terminal` markers (`vibecrafted.observe-watch.v1`).
 - Linux source install no longer pretends to be a native Runtime Pack. A
   checkout without `libexec/vc-terminal` keeps the product wrapper and
   refuses pack publication; `--runtime-pack-file` still requires the host.
@@ -51,15 +60,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   the owner named, never a guessed port. Configured consoles open in a
   `service`-scoped tab on their own origin.
 - Server web: Scaffold inspector endpoint links open outside the studio
-  document (`target="_blank"`). The studio's global navigation carries the
-  full route vocabulary (Workspaces, Sessions, Agent Manager, Runs, Control,
-  Activity, Structure, Scaffold) and stays reachable on narrow viewports as a
-  scrollable row; the artifact index remains the second, document-level
-  navigation.
-- Server web: navigation separates **Agent Manager** (`/agents`, provider and
-  launcher catalog) from **Live runs** (`/runs`); **Sessions** lists the
-  canonical run transcripts joined by logical session identity. Sidebar and
-  mobile numbering agree (01–10).
+  document (`target="_blank"`). Global navigation is five views — Overview,
+  Transcripts, Structure, Plans, Frame. Workspaces, Sessions, Agents, Live
+  runs, Control, Activity and Guide stay in the Overview rail (same URLs).
+  AICX search sits on Structure. The artifact index remains the second,
+  document-level navigation.
+- Server web: **Agent Manager** (`/agents`) stays distinct from **Live runs**
+  (`/runs`); **Sessions** lists canonical run transcripts joined by logical
+  session identity. They are Overview-rail catalogs, not extra primary views.
 - Server web: `/structure/report` serves the canonical Loctree report under a
   Content-Security-Policy `sandbox` (opaque origin, no `fetch`/forms/frames)
   with its sibling assets on `/structure/report/{asset}`, so the interactive
@@ -75,6 +83,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - Configuration owner: `vibecrafted_core.server_config.load_tool_destinations`
   validates the optional `[tools]` table of `config.toml` with the same
   contract the App applies.
+- Server web: `GET /api/control/transcripts` streams each canonical
+  `transcript.human.log` from the start (no 256 KiB search window) and
+  paginates matching results (`offset`, `limit`, `has_more`, `total`),
+  including the unfiltered listing. The transcripts page loads pages of 50
+  and re-applies Fleet/Project focus after each fetch. The live run page
+  still shows a tail preview. Overview no longer links a guessed AICX port;
+  `/aicx` remains the deep-link search door and Structure hosts the same
+  form. `POST /api/structure/report` runs `loct report`
+  in a known control-plane workspace (local-peer gated; proven against a real
+  `loct` binary). Plan cards expose `data-focus-repo` and PPM infers a
+  transcript URL only for `data-ppm="run"`.
+- macOS App: when `[tools.vc-frame]` names a loopback `http` origin,
+  AppDelegate starts `vc-frame web` on that host:port while connecting the
+  deck. Tabs still never start the service; no port is guessed.
 
 See `docs/runtime/NATIVE_CONSOLE_TABS.md`.
 

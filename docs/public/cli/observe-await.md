@@ -18,8 +18,10 @@ not require `vc-server` for wake delivery.
 ## The two verbs
 
 ```bash
-vibecrafted observe <agent> --last            # last report/transcript
-vibecrafted observe <agent> --run-id <id>     # a specific run
+vibecrafted observe <agent> --last            # watch the last run live
+vibecrafted observe <agent> --run-id <id>     # watch a specific run live
+vibecrafted observe <agent> --run-id <id> --tail 30   # one-shot: last 30 lines
+vibecrafted observe <agent> --run-id <id> --head 30   # one-shot: first 30 lines
 vibecrafted await <agent> --last              # wait for the last run
 vibecrafted await <agent> --run-id <id>       # wait for a specific run
 ```
@@ -32,8 +34,19 @@ vibecrafted implement codex --prompt "Ship <task>"
 vibecrafted await codex --run-id impl-<timestamp>-<id>
 ```
 
-`observe` is a one-shot read (server projection when `vc-server` is up). It
-never creates an await monitor. `await` connects to the one dispatcher Unix
+Bare `observe` is a live watch — the default mode. It prints the run status
+and a short rendered backlog, then follows appended transcript events
+(rendered through the agent's stream parser, so per-token streams coalesce
+into sentences) until the run turns terminal. Exit code is 0 when the run
+terminates in a success state, 1 on a terminal failure; Ctrl-C detaches and
+never touches the run. `--interval SECONDS` sets the poll cadence (default
+1.0); `--watch` names the default explicitly. `--tail [N]` and `--head [N]`
+are the bounded one-shot reads (N defaults to 40). With `--json`, one-shot
+reads add a `transcript_tail`/`transcript_head` array to the observation
+payload, and the watch emits one JSON event per rendered line
+(`vibecrafted.observe-event.v1`) between `begin` and `terminal` markers
+(`vibecrafted.observe-watch.v1`). `observe` never creates an await monitor.
+`await` connects to the one dispatcher Unix
 stream for that run id. Twenty CLI clients still share that one socket:
 heartbeats and the terminal line fan out to every connected awaiter, and a
 late client receives the last event replay while the dispatcher is up. Files
@@ -108,7 +121,7 @@ vibecrafted await codex --run-id impl-<timestamp>-<id>
 cat ~/.vibecrafted/control_plane/runs/impl-<timestamp>-<id>.json
 
 # 3. report delivered and non-empty
-vibecrafted observe codex --run-id impl-<timestamp>-<id>
+vibecrafted observe codex --run-id impl-<timestamp>-<id> --tail
 ```
 
 Failure signatures worth knowing:

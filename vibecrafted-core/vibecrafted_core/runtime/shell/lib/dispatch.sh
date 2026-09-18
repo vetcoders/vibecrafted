@@ -376,19 +376,6 @@ _vetcoders_skill_dispatch() {
   _vetcoders_no_deck_report "$skill"
 }
 
-_vetcoders_command_dispatch() {
-  local command_name="$1"
-  local deck_command="$2"
-  shift 2 || true
-  local deck_bin
-  deck_bin="$(_vetcoders_resolve_deck_bin)"
-  if [ -n "$deck_bin" ] && [ -x "$deck_bin" ]; then
-    "$deck_bin" "$deck_command" "$@"
-    return
-  fi
-  _vetcoders_no_deck_report "$command_name"
-}
-
 # Shell dotfiles commonly alias vc/vc-* (old container templates did); zsh
 # refuses to define a function whose name is an active alias. Drop any such
 # alias before defining the canonical functions.
@@ -706,7 +693,7 @@ repo-full() {
   [[ -z "$default_branch" ]] && default_branch="$(git remote show "$default_remote" 2>/dev/null | sed -n '/HEAD branch/s/.*: //p' | head -n 1)"
   [[ -z "$default_branch" ]] && default_branch="unknown"
 
-  # shellcheck disable=SC1083 # @{u} is git upstream ref syntax, not shell braces
+  # @{u} is git upstream ref syntax, not shell braces
   if git rev-parse '@{u}' >/dev/null 2>&1; then
     if read -r upstream_ahead upstream_behind <<< "$(git rev-list --left-right --count HEAD...'@{u}' 2>/dev/null)" && [[ "$upstream_ahead" =~ ^[0-9]+$ && "$upstream_behind" =~ ^[0-9]+$ ]]; then
       upstream_status="known"
@@ -926,6 +913,7 @@ vc-start() {
   # One parser, one owner: the create-only workspace contract in dashboard.sh
   # (root → name → live inventory → exclusive create → enter / VC Terminal).
   _vetcoders_start_prepare_arguments "$@" || return $?
+  # shellcheck disable=SC2154  # set by _vetcoders_start_prepare_arguments (dashboard.sh) just above
   _vetcoders_start_entry "${_vetcoders_start_frame_argv[@]}"
 }
 

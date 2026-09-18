@@ -439,6 +439,8 @@ def test_extract_tokens_does_not_let_zero_footer_mask_junie_json() -> None:
         "cache_write": None,
         "output": 563,
         "total": 51162,
+        # one provider usage event; the zero footer is not evidence
+        "events": 1,
     }
 
 

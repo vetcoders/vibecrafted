@@ -41,7 +41,11 @@ from __future__ import annotations
 
 import argparse
 import errno
-import fcntl
+
+try:
+    import fcntl
+except ImportError:  # native Windows — flock-shaped portable_lock
+    from . import portable_lock as fcntl
 import hashlib
 import json
 import os
@@ -2167,7 +2171,7 @@ def _probe_triage_run(binary: str, runner: Callable[..., Any]) -> _Probe:
     """
     try:
         proc = runner([binary, "triage-run", "--help"])
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 - an unusable binary means the capability is unsupported
         return _Probe(supported=False)
     if getattr(proc, "returncode", 1) != 0:
         return _Probe(supported=False)
@@ -2406,7 +2410,7 @@ def triage_finished_run(
     meta = Path(meta_path)
     try:
         payload = read_run_meta(meta)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - unreadable meta is the result; triage stays fail-open
         # No meta means no receipt to write to either; report and stop.
         return TriageOutcome(OUTCOME_SKIPPED, reason=f"no_meta: {exc}")
 
@@ -2845,7 +2849,7 @@ def _run_triage(
             )
         else:
             proc = runner(argv)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - an invoke failure becomes an error outcome
         return _error(f"invoke_error: {type(exc).__name__}: {exc}")
 
     returncode = getattr(proc, "returncode", 1)

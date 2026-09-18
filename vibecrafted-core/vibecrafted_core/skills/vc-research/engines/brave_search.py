@@ -60,7 +60,7 @@ def search(query: str, count: int = 8, lang: str | None = None) -> dict:
         if resp.status >= 400:
             return {"error": f"HTTP {resp.status}: {resp.reason}"}
         return json.loads(body)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 - network or JSON failure is returned to the research lane as data
         return {"error": str(e)}
     finally:
         conn.close()

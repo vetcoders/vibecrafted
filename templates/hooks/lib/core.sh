@@ -27,7 +27,7 @@ husky_repo_root() {
 
 HUSKY_REPO_ROOT="$(husky_repo_root)"
 HUSKY_DIR="$HUSKY_REPO_ROOT/.husky"
-HUSKY_LIB_DIR="$HUSKY_DIR/lib"
+# shellcheck disable=SC2034  # read by secrets.sh after sourcing
 HUSKY_SCRIPTS_DIR="$HUSKY_DIR/scripts"
 HUSKY_WARNS_DIR="$HUSKY_DIR/warns"
 HUSKY_LOCAL_HOOK_DIR_BASE="$HUSKY_DIR/local"
@@ -39,7 +39,6 @@ HUSKY_LOCAL_HOOK_DIR_BASE="$HUSKY_DIR/local"
 husky_load_config() {
   local config="$HUSKY_DIR/config.env"
   if [ -f "$config" ]; then
-    # shellcheck disable=SC1090
     set -a
     . "$config"
     set +a
@@ -188,7 +187,7 @@ husky_warns_rotate() {
   # shellcheck disable=SC2012  # hook names are alphanumeric+hyphen — ls is safe and faster than find -printf
   count="$(ls -1t "$dir"/"${hook}"-*.log 2>/dev/null | wc -l | tr -d ' ')"
   if [ "$count" -gt "$HUSKY_WARN_RETENTION" ]; then
-    # shellcheck disable=SC2012
+    # shellcheck disable=SC2012  # newest-first by mtime; hook log names are hyphenated alphanumerics
     ls -1t "$dir"/"${hook}"-*.log 2>/dev/null \
       | tail -n +$((HUSKY_WARN_RETENTION + 1)) \
       | while IFS= read -r old; do
@@ -224,7 +223,7 @@ husky_warns_print_backlog() {
     return 0
   fi
   husky_info "Pending warns for $hook (latest):"
-  # shellcheck disable=SC2012
+  # shellcheck disable=SC2012  # newest-first by mtime; hook log names are hyphenated alphanumerics
   ls -1t "$dir"/"${hook}"-*.log 2>/dev/null | head -3 | while IFS= read -r f; do
     local sig
     sig="$(grep '^signature=' "$f" | head -1 | cut -d= -f2-)"
@@ -264,6 +263,7 @@ husky_run_step() {
     STEP_LAST_FAILED=0
     return 0
   fi
+  # shellcheck disable=SC2034  # caller-visible step status, see the husky_run_step header
   STEP_LAST_FAILED=1
   STEP_FAILURE_COUNT=$((STEP_FAILURE_COUNT + 1))
   if husky_warn_mode_active; then
@@ -301,6 +301,7 @@ husky_run_strict_step() {
     STEP_LAST_FAILED=0
     return 0
   fi
+  # shellcheck disable=SC2034  # caller-visible step status, see the husky_run_step header
   STEP_LAST_FAILED=1
   STEP_FAILURE_COUNT=$((STEP_FAILURE_COUNT + 1))
   if [ -n "${HUSKY_STRICT_FAILED_FILE:-}" ]; then

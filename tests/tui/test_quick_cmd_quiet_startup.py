@@ -1,4 +1,4 @@
-"""Quick cmd wrapper starts a quiet prompt; help stays on request."""
+"""Quick cmd wrapper is a one-shot quiet composer; help stays on request."""
 
 from __future__ import annotations
 
@@ -27,6 +27,7 @@ def test_quick_cmd_wrapper_exports_quiet_start_and_prints_no_banner(
     probe.chmod(0o755)
     result = subprocess.run(
         ["bash", str(WRAPPER)],
+        input=":\n",
         capture_output=True,
         text=True,
         env={
@@ -45,6 +46,79 @@ def test_quick_cmd_wrapper_exports_quiet_start_and_prints_no_banner(
     assert "op@" not in result.stdout
     assert "Explore commands" not in result.stdout
     assert "Vibecrafted --help" not in result.stdout
+
+
+def test_quick_cmd_wrapper_closes_own_pane_by_id_after_the_command(
+    tmp_path: Path,
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    frame = bin_dir / "vc-frame"
+    log = tmp_path / "frame.log"
+    frame.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{log}"\nexit 0\n')
+    frame.chmod(0o755)
+    probe = tmp_path / "probe-shell"
+    probe.write_text("#!/bin/sh\nexit 0\n")
+    probe.chmod(0o755)
+    result = subprocess.run(
+        ["bash", str(WRAPPER)],
+        input="true\n",
+        capture_output=True,
+        text=True,
+        env={
+            "HOME": str(tmp_path),
+            "USER": "op",
+            "SHELL": str(probe),
+            "PATH": f"{bin_dir}:/usr/bin:/bin",
+            "VC_FRAME_PANE_ID": "terminal_18",
+        },
+        cwd=tmp_path,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    recorded = log.read_text(encoding="utf-8")
+    assert "action close-pane --pane-id terminal_18" in recorded
+    assert "action close-pane\n" not in recorded
+
+
+def test_quick_cmd_wrapper_does_not_close_focus_when_pane_id_is_absent(
+    tmp_path: Path,
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    frame = bin_dir / "vc-frame"
+    log = tmp_path / "frame.log"
+    frame.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{log}"\nexit 0\n')
+    frame.chmod(0o755)
+    probe = tmp_path / "probe-shell"
+    probe.write_text("#!/bin/sh\nexit 0\n")
+    probe.chmod(0o755)
+    result = subprocess.run(
+        ["bash", str(WRAPPER)],
+        input="true\n",
+        capture_output=True,
+        text=True,
+        env={
+            "HOME": str(tmp_path),
+            "USER": "op",
+            "SHELL": str(probe),
+            "PATH": f"{bin_dir}:/usr/bin:/bin",
+        },
+        cwd=tmp_path,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert not log.exists()
+
+
+def test_quick_cmd_wrapper_is_one_shot_not_an_exec_login_shell() -> None:
+    text = WRAPPER.read_text(encoding="utf-8")
+    assert "VIBECRAFTED_QUIET_START=1" in text
+    assert "close-pane --pane-id" in text
+    assert 'exec "${SHELL:-/bin/zsh}" -l' not in text
+    assert "action close-pane\n" not in text
 
 
 def test_product_profile_skips_help_banner_when_quiet_start_is_set(

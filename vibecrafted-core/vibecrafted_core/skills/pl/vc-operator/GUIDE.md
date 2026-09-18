@@ -159,6 +159,7 @@ Playwright w obu motywach + update README/GUIDELINES + wpis do backlogu zamknię
    ```
 
    Statusy trackera poza `[ ]` / `[x]`: poprzedzaj adnotacjami, gdy trzeba.
+
    - `- [ ] 🔄 ...` — aktualnie odpalane / await w locie
    - `- [ ] ⚠ ...` — dispatch odzyskiwania odpalony (sparowany z id odzyskiwanego promptu)
    - `- [x] ↻ ...` — wylądowało przez dispatch odzyskiwania, nie oryginalny

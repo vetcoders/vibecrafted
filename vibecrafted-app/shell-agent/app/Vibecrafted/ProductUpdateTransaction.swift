@@ -532,16 +532,6 @@ func productUpdateContentIdentityToken(at app: URL) -> String? {
   }
 }
 
-func productUpdateObservePackPublication(
-  handoff: ProductUpdateHandoffRecord,
-  runtimeHome: URL
-) -> ProductUpdatePackPublicationState {
-  productUpdateDerivePackPublication(
-    productUpdateObserveInstallerPublication(runtimeHome: runtimeHome),
-    priorGeneration: handoff.installedGeneration,
-    candidateGeneration: handoff.candidateGeneration)
-}
-
 func productUpdateObserveRuntimeEvidence(
   handoff: ProductUpdateHandoffRecord,
   runningApp: URL,

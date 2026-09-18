@@ -48,6 +48,28 @@ def _write_exec(path: Path, body: str) -> None:
     path.chmod(0o755)
 
 
+def _provider_stub(name: str) -> str:
+    """Installed-CLI probe reads --version/--help; spawn never executes these."""
+    help_markers = {
+        "claude": "--resume --fork-session --print",
+        "codex": "exec resume fork",
+        "grok": "--resume --fork-session --prompt-file",
+        "cursor-agent": "--resume --print --output-format",
+        "agy": "--continue --conversation --print",
+        "junie": "--resume --session-id",
+    }
+    markers = help_markers.get(name, "")
+    return (
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'case "${1:-}" in\n'
+        f"  --version|-V) printf '%s\\n' '{name} 0.0.0-test'; exit 0 ;;\n"
+        f"  --help|-h) printf 'Usage: {name} {markers}\\n'; exit 0 ;;\n"
+        "esac\n"
+        "exit 0\n"
+    )
+
+
 def _git_repo(path: Path) -> Path:
     path.mkdir(parents=True)
     subprocess.run(["git", "init", "-q"], cwd=path, check=True)
@@ -196,6 +218,19 @@ class _World:
     def provider_stdin(self, binary: str) -> str:
         return Path(f"{self.provider_argv_prefix}.{binary}.stdin").read_text()
 
+    def launch_tokens(self) -> list[str]:
+        import shlex
+
+        return shlex.split(shlex.split(self.command(), comments=True)[-1])
+
+    def admission(self) -> dict:
+        tokens = self.launch_tokens()
+        return json.loads(
+            Path(tokens[tokens.index("--admission-file") + 1]).read_text(
+                encoding="utf-8"
+            )
+        )
+
 
 @pytest.fixture
 def world(tmp_path: Path) -> _World:
@@ -256,8 +291,6 @@ def test_claude_fork_by_session_from_outside_git_with_repo(world: _World) -> Non
         "claude-fable-5-1",
         "--permissions",
         "accept-edits",
-        "-p",
-        "try the other approach",
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
@@ -302,8 +335,91 @@ def test_grok_fork_never_restores_code_or_moves_to_a_worktree(world: _World) -> 
     assert "--restore-code" not in argv and "--restore-code" not in inner
     assert "--worktree" not in argv and "--worktree" not in inner
     pane = world.pane()
+    assert "new-pane" in pane
     assert "--floating" in pane
     assert "--direction" not in pane
+    assert "--near-current-pane" in pane
+    tokens = world.launch_tokens()
+    assert "interactive-launch" in tokens
+    assert tokens[tokens.index("--continuity") + 1] == "bare-fork"
+    assert tokens[tokens.index("--parent-session") + 1] == OTHER_SESSION
+    joined = " ".join(tokens)
+    assert "--restore-code" not in joined
+    assert "--worktree" not in joined
+    admission = world.admission()
+    assert admission["agent"] == "grok"
+    assert admission["skill"] == "fork"
+
+
+def test_claude_fork_right_placement_uses_direction_right(world: _World) -> None:
+    result = world.fork(
+        "claude",
+        "--session",
+        OTHER_SESSION,
+        "--repo",
+        str(world.repo),
+        "--placement",
+        "right",
+    )
+
+    assert result.returncode == 0, result.stderr
+    pane = world.pane()
+    assert "new-pane" in pane
+    assert "--near-current-pane" in pane
+    assert "--direction" in pane
+    assert pane[pane.index("--direction") + 1] == "right"
+    assert "--floating" not in pane
+    assert "pane:      right" in result.stdout
+
+
+def test_unknown_fork_placement_is_refused_before_spawn(world: _World) -> None:
+    result = world.fork(
+        "claude",
+        "--session",
+        OTHER_SESSION,
+        "--repo",
+        str(world.repo),
+        "--placement",
+        "bottom",
+    )
+    assert result.returncode == 2
+    assert "Unknown fork placement" in result.stderr
+    assert not world.capture.exists()
+
+
+def test_frame_pane_refusal_does_not_replace_the_source_session(
+    world: _World,
+) -> None:
+    _write_exec(
+        world.bin / "vc-frame",
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'if [[ "${1:-}" == "ls" || "${1:-}" == "list-sessions" ]]; then\n'
+        '  printf "operator-test (attached)\\n"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [[ " $* " == *" new-pane "* ]]; then\n'
+        "  printf 'no current pane in this guest context\\n' >&2\n"
+        "  exit 1\n"
+        "fi\n"
+        '{ printf "%s\\n" "$@"; } > "$CAPTURE_FILE"\n',
+    )
+    result = world.fork(
+        "claude",
+        "--session",
+        OTHER_SESSION,
+        "--repo",
+        str(world.repo),
+        "--placement",
+        "right",
+    )
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "no replacement session or tab was created" in result.stderr
+    assert "new-tab" not in result.stdout + result.stderr
+    if world.capture.exists():
+        captured = " ".join(world.pane())
+        assert "new-tab" not in captured
+        assert "new-pane" not in captured
 
 
 def test_codex_fork_uses_native_fork_subcommand_with_inline_repo(world: _World) -> None:
@@ -360,7 +476,6 @@ def test_run_id_resolves_the_recorded_provider_session_and_its_repository(
     # 4a09425a: the receipt names the SOURCE; the child's identity is pending.
     assert f"source-session: {PROVIDER_SESSION}" in result.stdout
     assert f"source:    {RUN_ID}" in result.stdout
-    # No explicit --repo: the run's recorded repository, not the caller's cwd.
     pane = world.pane()
     assert pane[pane.index("--cwd") + 1] == str(world.repo.resolve())
     assert str(world.outside.resolve()) not in pane

@@ -97,11 +97,12 @@ session treats that as a decision, not a failure.
 
 ## Destinations
 
-| Destination         | Contract used                                                                                                                                                                                                                                                                                                                                                                | When unavailable                                                                                                                                                                           |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Loctree Report      | `/structure/report` on the connected runtime (redirects to the directory-style `/structure/report/`). The server serves `<root>/.loctree/report.html` of a canonical run root under a CSP `sandbox` (opaque origin, no `fetch`, no forms) with its sibling assets on `/structure/report/{asset}` and an in-memory Web Storage stand-in; the App adds an ephemeral data store | no runtime → menu item disabled with reason; no report → tab shows "Server returned HTTP 404" and the server names `loct report --output .loctree/report.html`                             |
-| AICX Dashboard      | `aicx dashboard` output at `~/.aicx/aicx-dashboard.html` (or `$AICX_HOME`), loaded with read access to that one file, non-persistent data store                                                                                                                                                                                                                              | file missing → reason names the path and `aicx dashboard`                                                                                                                                  |
-| Slack Agent Console | `[tools.slack-console] url` in `~/.config/vibecrafted/config.toml` (the operator-owned file that also holds `[server]`; `XDG_CONFIG_HOME` honoured). Opens in a `service`-scoped tab on that URL's origin                                                                                                                                                                    | not configured → reason names the owner (`vc-slack-agent` portal `/console`, `make portal-preview` :4300 or its deploy) and the file; invalid table → reason quotes the contract violation |
+| Destination         | Contract used                                                                                                                                                                                                                                                                                                                                                                                                                                  | When unavailable                                                                                                                                                                           |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Loctree Report      | `/structure/report` on the connected runtime (redirects to the directory-style `/structure/report/`). The server serves `<root>/.loctree/report.html` of a canonical run root under a CSP `sandbox` (opaque origin, no `fetch`, no forms) with its sibling assets on `/structure/report/{asset}` and an in-memory Web Storage stand-in; the App adds an ephemeral data store                                                                   | no runtime → menu item disabled with reason; no report → tab shows "Server returned HTTP 404" and the server names `loct report --output .loctree/report.html`                             |
+| AICX Dashboard      | `aicx dashboard` output at `~/.aicx/aicx-dashboard.html` (or `$AICX_HOME`), loaded with read access to that one file, non-persistent data store                                                                                                                                                                                                                                                                                                | file missing → reason names the path and `aicx dashboard`                                                                                                                                  |
+| Slack Agent Console | `[tools.slack-console] url` in `~/.config/vibecrafted/config.toml` (the operator-owned file that also holds `[server]`; `XDG_CONFIG_HOME` honoured). Opens in a `service`-scoped tab on that URL's origin                                                                                                                                                                                                                                      | not configured → reason names the owner (`vc-slack-agent` portal `/console`, `make portal-preview` :4300 or its deploy) and the file; invalid table → reason quotes the contract violation |
+| Frame               | `[tools.vc-frame] url` in the same `config.toml`. This is the zellij web client (`vc-frame web`) for the host multiplexer session (`/tmp/vc-frame-<uid>`). On connect, AppDelegate may start `vc-frame web --ip <host> --port <port>` using that URL when it is loopback `http`; the App then embeds the origin as a native tab. `vc-start` / `vc-frame` remains the whole-host attach. Tabs never start the web server and no port is guessed | not configured → reason names `vc-frame web` and the file; invalid table → reason quotes the contract violation                                                                            |
 
 `View ▸ Open in Tab` and `View ▸ Open in Browser` list the catalog. Local
 documents use Reveal in Finder for the external action, through the typed
@@ -121,16 +122,25 @@ public_url = "http://127.0.0.1:3024"
 
 [tools.slack-console]
 url = "http://100.82.232.70:4300/console"   # what `make portal-preview` (or the deploy) serves
+
+[tools.vc-frame]
+url = "http://127.0.0.1:8082/"              # what `vc-frame web` actually bound; never guessed
 ```
 
 `vibecrafted_core.server_config.load_tool_destinations` and the App's
 `ToolDestinationConfiguration` apply one contract: known keys only
-(`slack-console`), one `url` per key, `http(s)` with a host, no credentials,
+(`slack-console`, `vc-frame`), one `url` per key, `http(s)` with a host, no credentials,
 query or fragment. An empty `url` means "not configured". The tab is scoped to
 that URL's origin: same-origin navigation stays, foreign http(s) leaves through
 the system browser, the runtime endpoint has no influence on it, and it shares
 nothing with the console's website data store. ATS applies as for the runtime:
 cleartext `http` is admitted for loopback / local-network IP literals only.
+
+When `[tools.vc-frame]` names a loopback `http` origin, AppDelegate starts
+`vc-frame web` bound to that host and port as part of connecting the deck.
+A remote or HTTPS URL is still openable as a tab; the App never binds a
+listener for it. Closing the Frame tab does not stop the web client or any
+headless worker.
 
 ### Server-side boundaries the tabs rely on
 
@@ -151,7 +161,9 @@ cleartext `http` is admitted for loopback / local-network IP literals only.
   never granted. Assets are regular files in the
   report's directory with a known extension; symlinks and traversal are
   refused. The document keeps its interactive graph and holds no control-plane
-  authority.
+  authority. `POST /api/structure/report` is the generate door (local peer,
+  cwd a known control-plane workspace/run root, `loct report --output
+.loctree/report.html`); tabs never spawn it.
 - `/api/aicx/search` and `/api/aicx/reference`: the AICX corpus is private to
   the host. Both routes require a verified local peer — loopback, or the same
   interface the listener is bound to (a tailnet bind reached from this

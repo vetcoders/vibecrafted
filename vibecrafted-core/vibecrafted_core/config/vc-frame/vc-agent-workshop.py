@@ -2,8 +2,8 @@
 """Agent Workspaces dashboard and interactive Agent launcher.
 
 This is deliberately a terminal surface, not a second control plane.  vc-frame
-owns the panes, Vibecrafted owns the launch command, and the User chooses which
-interactive Agent is born in the current workspace.
+owns the panes and tabs, Vibecrafted owns the launch command, and the User
+chooses which project's live Frame session receives a new Agent tab.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -119,8 +120,9 @@ from vibecrafted_core.spawn import (
     resolve_provider_policy,
     runtime_policy_capabilities,
 )
+from vibecrafted_core.workspace_catalog import resolve_operator_place_session
 
-AGENTS = ("agy", "claude", "codex", "cursor", "grok", "junie")
+AGENTS = ("agy", "claude", "codex", "cursor", "grok", "junie", "kimi")
 LAUNCH_MODES = ("init", "resume", "partner", "operator")
 MODE_PROMPTS = {"partner": "/vc-partner", "operator": "/vc-operator"}
 RUNTIME_HELP = {
@@ -146,6 +148,7 @@ _AGENT_BINARIES = {
     "cursor-agent": "cursor",
     "grok": "grok",
     "junie": "junie",
+    "kimi": "kimi",
 }
 PRESENCE_SCOPE = "this session"
 PRESENCE_REFRESH_SECONDS = 15.0
@@ -221,19 +224,73 @@ def launch_argv(
     return command
 
 
+def current_frame_session(*, env: Mapping[str, str] | None = None) -> str:
+    """Name of the Frame session hosting this pane, if the runtime exported one."""
+    environ = env if env is not None else os.environ
+    for key in (
+        "VC_FRAME_SESSION_NAME",
+        "ZELLIJ_SESSION_NAME",
+        "VIBECRAFTED_FRAME_SESSION",
+    ):
+        value = str(environ.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def destination_session_for_workspace(
+    workspace: str | os.PathLike[str],
+    *,
+    env: Mapping[str, str] | None = None,
+) -> str:
+    """Canonical human place-session for the selected project checkout.
+
+    This is the workspace catalog place-session, not a worker host and not
+    the current Frame seat. An empty result is an error, never a cue to
+    omit ``--session``.
+    """
+    name = str(resolve_operator_place_session(root=workspace, env=env) or "").strip()
+    if not name:
+        raise ValueError("could not resolve a Frame session for that project")
+    return name
+
+
+def require_live_destination(session: str, live_names: list[str]) -> None:
+    """Refuse to launch when the destination session is not live.
+
+    Missing or wrong context must not fall back to the current session.
+    """
+    dest = str(session or "").strip()
+    if not dest:
+        raise ValueError("could not resolve a Frame session for that project")
+    if dest not in live_names:
+        raise ValueError(
+            f"No live Frame session for that project (expected {dest!r}). "
+            "Open the project first."
+        )
+
+
 def launch_pane_argv(
     title: str,
     workspace: str | os.PathLike[str],
     command: list[str],
+    *,
+    session: str,
 ) -> list[str]:
-    """Open a tiled, durable pane beside the workshop — never a nested float."""
+    """Open a new tab in the selected project's live Frame session.
+
+    cwd does not route the workspace. ``--session`` is required so a launch
+    from project A into project B cannot land beside the source workshop.
+    """
+    dest = str(session or "").strip()
+    if not dest:
+        raise ValueError("destination Frame session is missing")
     return [
         "vc-frame",
+        "--session",
+        dest,
         "action",
-        "new-pane",
-        "--direction",
-        "right",
-        "--near-current-pane",
+        "new-tab",
         "--name",
         title,
         "--cwd",
@@ -241,6 +298,14 @@ def launch_pane_argv(
         "--",
         *command,
     ]
+
+
+def attach_session_argv(session: str) -> list[str]:
+    """Switch the attached client to the destination session's rail."""
+    dest = str(session or "").strip()
+    if not dest:
+        raise ValueError("destination Frame session is missing")
+    return ["vc-frame", "attach", dest]
 
 
 def mode_capabilities(
@@ -335,17 +400,24 @@ def public_reason(reason: str) -> str:
         return "Parent sessions are unavailable right now"
     if "workspace does not exist" in low:
         return "That project folder does not exist"
+    # Host VM unavailability is not a provider limit.  The token "canonical"
+    # in "no canonical VM entrypoint" used to fall through to the provider
+    # bucket and lie; keep this branch ahead of that gate.
+    if "no canonical vm" in low or "docker/colima" in low:
+        return "VM runtime is not available on this host"
     if any(
         token in low
         for token in (
-            "canonical",
             "child-usage",
             "child-attributable",
-            "admission",
             "usage side channel",
             "monotonic usage",
         )
     ):
+        if "coming" in low or "h2b" in low:
+            return "Not available yet"
+        return "Needs live usage metering; only claude today"
+    if any(token in low for token in ("canonical", "admission")):
         if "coming" in low or "h2b" in low:
             return "Not available yet"
         return "Not available for this provider"
@@ -361,8 +433,16 @@ def public_reason(reason: str) -> str:
         return "Starts without earlier memory"
     if "git/dispatch manage_worktrees" in low:
         return "Separate working copies are not available here"
-    if "no canonical vm" in low or "docker/colima" in low:
-        return "Not available yet"
+    if "no live frame session" in low:
+        return (
+            text
+            if len(text) <= 96
+            else ("No live Frame session for that project. Open it first.")
+        )
+    if "could not resolve a frame session" in low:
+        return "Could not resolve a Frame session for that project"
+    if "destination frame session is missing" in low:
+        return "Could not resolve a Frame session for that project"
     if len(text) > 72:
         return "Not available"
     return text
@@ -535,20 +615,23 @@ def current_agent_presence() -> AgentPresence:
 
 
 def session_names_from_listing(text: str) -> list[str]:
-    """Parse `vc-frame list-sessions --no-formatting` into session names."""
+    """Parse `vc-frame list-sessions --no-formatting` into live session names."""
     names: list[str] = []
     for line in text.splitlines():
         raw = line.strip()
         if not raw:
             continue
+        if "EXITED" in raw.upper():
+            continue
         name = raw.split(" [", 1)[0].strip()
+        name = name.split(" (", 1)[0].strip()
         if name and name not in names:
             names.append(name)
     return names
 
 
-def list_other_sessions() -> tuple[list[str], str]:
-    """On-demand Frame session names. Never polled from the redraw loop."""
+def list_live_frame_sessions() -> tuple[list[str], str]:
+    """Live Frame session names. Destination routing never guesses this list."""
     try:
         result = subprocess.run(
             ["vc-frame", "list-sessions", "--no-formatting"],
@@ -560,17 +643,22 @@ def list_other_sessions() -> tuple[list[str], str]:
     except FileNotFoundError:
         return [], "vc-frame is not available in this Runtime Pack"
     except subprocess.TimeoutExpired:
-        return [], "other sessions — unavailable"
+        return [], "Frame sessions are unavailable"
     if result.returncode != 0:
         return [], (
-            result.stderr or result.stdout or "other sessions — unavailable"
+            result.stderr or result.stdout or "Frame sessions are unavailable"
         ).strip()
-    names = session_names_from_listing(result.stdout)
-    current = (
-        os.environ.get("ZELLIJ_SESSION_NAME")
-        or os.environ.get("VIBECRAFTED_FRAME_SESSION")
-        or ""
-    ).strip()
+    return session_names_from_listing(result.stdout), ""
+
+
+def list_other_sessions() -> tuple[list[str], str]:
+    """On-demand Frame session names. Never polled from the redraw loop."""
+    names, error = list_live_frame_sessions()
+    if error:
+        if error == "Frame sessions are unavailable":
+            return [], "other sessions — unavailable"
+        return [], error
+    current = current_frame_session()
     if current:
         names = [name for name in names if name != current]
     return names, ""
@@ -663,18 +751,29 @@ def _dim_unavailable_choices(
     available: tuple[bool, ...],
     selected: int,
     end_col: int,
+    base: int = 0,
 ) -> None:
-    """Redraw disabled choice tokens with terminal-native dim styling."""
+    """Paint unavailable tokens dim and the selected token bold.
+
+    Selection is bold letters and nothing else; ``base`` carries the row's
+    focus underline so every token on a focused row keeps it (Founder,
+    2026-09-15: no reverse-video blocks, the rail already carries the
+    selected/active semantics).
+    """
     tokens = _choice_tokens(choices, selected=selected, available=available)
     # The base line clips the *whole* token sequence.  Slice that same rendered
-    # sequence before applying dim attributes so a trailing disabled token cannot
-    # overwrite its ellipsis or drift relative to a selected bullet.
+    # sequence before applying token attributes so a trailing disabled token
+    # cannot overwrite its ellipsis or drift relative to the selected token.
     visible = _clip(" ".join(tokens), end_col - col)
     offset = 0
-    for token, enabled in zip(tokens, available, strict=True):
+    for index, (token, enabled) in enumerate(zip(tokens, available, strict=True)):
         fragment = visible[offset : offset + len(token)]
+        if not fragment:
+            break
         if not enabled:
-            _safe_addstr(window, row, col + offset, fragment, curses.A_DIM)
+            _safe_addstr(window, row, col + offset, fragment, curses.A_DIM | base)
+        elif index == selected:
+            _safe_addstr(window, row, col + offset, fragment, curses.A_BOLD | base)
         offset += len(token) + 1
 
 
@@ -684,14 +783,9 @@ def _choice_tokens(
     selected: int,
     available: tuple[bool, ...] | None = None,
 ) -> tuple[str, ...]:
-    """Advanced rows keep one marker; the provider row uses reverse video."""
-    enabled = available or tuple(True for _ in choices)
-    return tuple(
-        f"• {choice}"
-        if index == selected and enabled[index]
-        else (choice if enabled[index] else f"× {choice}")
-        for index, choice in enumerate(choices)
-    )
+    """Bare labels. Selection is reverse video; unavailable is dim."""
+    _ = (selected, available)
+    return tuple(choices)
 
 
 def _provider_available(agent: str) -> bool:
@@ -919,6 +1013,9 @@ class Workshop:
 
     def _draw_providers(self, row: int, col: int, width: int) -> None:
         x = col
+        # Focused picker row: constant underline.  Selected provider: bold
+        # letters, nothing else.  Never a reverse-video block.
+        base = curses.A_UNDERLINE if self.row == 0 else 0
         for index, name in enumerate(AGENTS):
             token = f" {name} "
             if x + len(token) >= col + width:
@@ -926,11 +1023,11 @@ class Workshop:
                 x = col
             available = _provider_available(name)
             if index == self.agent and available:
-                attr = curses.A_REVERSE | curses.A_BOLD
+                attr = curses.A_BOLD | base
             elif available:
-                attr = curses.A_BOLD
+                attr = base
             else:
-                attr = curses.A_DIM
+                attr = curses.A_DIM | base
             _safe_addstr(self.window, row, x, token, attr)
             self.mouse_targets.append((row, x, x + len(token), index, "provider"))
             x += len(token) + 1
@@ -939,7 +1036,7 @@ class Workshop:
         height, width = self.window.getmaxyx()
         compact = height < 16 or width < 52
         left = 1 if compact else max(1, (width - min(width - 2, 84)) // 2)
-        top = 0 if compact else max(1, (height - (18 if self.advanced else 10)) // 2)
+        top = 0 if compact else max(1, (height - (19 if self.advanced else 11)) // 2)
         inner = max(12, width - left - 2)
         _safe_addstr(self.window, top, left, "New agent", curses.A_BOLD)
         _safe_addstr(
@@ -951,7 +1048,7 @@ class Workshop:
         )
         self._draw_providers(top + 3, left, inner)
         path_row = top + 5
-        path_attr = curses.A_REVERSE if self.row == 1 else 0
+        path_attr = curses.A_UNDERLINE if self.row == 1 else 0
         _safe_addstr(
             self.window,
             path_row,
@@ -959,7 +1056,13 @@ class Workshop:
             _clip(f"Project  {self.path}", inner),
             path_attr,
         )
-        cursor = path_row + 2
+        toggle = "▾ Advanced options" if self.advanced else "▸ Advanced options"
+        toggle_row = path_row + 2
+        _safe_addstr(self.window, toggle_row, left, _clip(toggle, inner), curses.A_BOLD)
+        self.mouse_targets.append(
+            (toggle_row, left, left + min(len(toggle), inner), 0, "advanced")
+        )
+        cursor = toggle_row + 1
         if self.advanced and not compact:
             provider = AGENTS[self.agent]
             capabilities = runtime_policy_capabilities(provider)
@@ -1020,9 +1123,10 @@ class Workshop:
                 line = label + " ".join(
                     _choice_tokens(choices, selected=selected, available=available)
                 )
-                attr = curses.A_REVERSE if self.row == offset + 2 else 0
+                focused = self.row == offset + 2
+                base = curses.A_UNDERLINE if focused else 0
                 _safe_addstr(
-                    self.window, cursor + offset, left, _clip(line, inner), attr
+                    self.window, cursor + offset, left, _clip(line, inner), base
                 )
                 _dim_unavailable_choices(
                     self.window,
@@ -1032,13 +1136,14 @@ class Workshop:
                     available,
                     selected,
                     left + inner,
+                    base=base,
                 )
             _safe_addstr(
                 self.window,
                 cursor + 4,
                 left,
                 _clip(f"Parent    {self.continuity_parent or '(none)'}", inner),
-                curses.A_REVERSE if self.row == 6 else 0,
+                curses.A_UNDERLINE if self.row == 6 else 0,
             )
             runtime_help = RUNTIME_HELP[RUNTIME_POLICIES[self.runtime]]
             help_text = public_reason(runtime_help[0]) or runtime_help[0]
@@ -1075,7 +1180,7 @@ class Workshop:
                 )
             cursor += 9
         launch_label = "[ Launch ]"
-        launch_attr = curses.A_REVERSE | curses.A_BOLD
+        launch_attr = curses.A_BOLD
         _safe_addstr(self.window, cursor, left, launch_label, launch_attr)
         self.mouse_targets.append((cursor, left, left + len(launch_label), 0, "launch"))
         hint = (
@@ -1113,8 +1218,12 @@ class Workshop:
                 raise SystemExit(0)
             self.mode = "home"
             return
-        if key in (ord("a"), ord("A")) and self.row == 0:
+        editing_parent = self.advanced and self.row == 6
+        editing_path = self.row == 1
+        if key in (ord("a"), ord("A")) and not editing_path and not editing_parent:
             self.advanced = not self.advanced
+            if not self.advanced:
+                self.row = min(self.row, 1)
             return
         rows = 7 if self.advanced else 2
         if key == curses.KEY_UP:
@@ -1321,6 +1430,11 @@ class Workshop:
             if kind == "launch":
                 self.launch()
                 return
+            if kind == "advanced":
+                self.advanced = not self.advanced
+                if not self.advanced:
+                    self.row = min(self.row, 1)
+                return
 
     def open_launcher(self) -> None:
         """Inline compose view in this pane. Never spawn a nested floating form."""
@@ -1424,7 +1538,21 @@ class Workshop:
             f"{AGENTS[self.agent]} · "
             f"{LAUNCH_MODES[self.launch_mode]} · {workspace.name}"
         )
-        pane = launch_pane_argv(title, workspace, argv)
+        try:
+            destination = destination_session_for_workspace(workspace)
+        except ValueError as exc:
+            self.error = public_reason(str(exc)) or str(exc)
+            return
+        live, listing_error = list_live_frame_sessions()
+        if listing_error:
+            self.error = listing_error
+            return
+        try:
+            require_live_destination(destination, live)
+            pane = launch_pane_argv(title, workspace, argv, session=destination)
+        except ValueError as exc:
+            self.error = public_reason(str(exc)) or str(exc)
+            return
         try:
             result = subprocess.run(pane, check=False, capture_output=True, text=True)
         except FileNotFoundError:
@@ -1432,9 +1560,28 @@ class Workshop:
             return
         if result.returncode != 0:
             self.error = (
-                result.stderr or result.stdout or "cannot open a pane for that Agent"
+                result.stderr or result.stdout or "cannot open a tab for that Agent"
             ).strip()
             return
+        current = current_frame_session()
+        if current != destination:
+            try:
+                attached = subprocess.run(
+                    attach_session_argv(destination),
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+            except FileNotFoundError:
+                self.error = "vc-frame is not available in this Runtime Pack"
+                return
+            if attached.returncode != 0:
+                self.error = (
+                    attached.stderr
+                    or attached.stdout
+                    or f"Agent opened in {destination}, but that session could not be shown"
+                ).strip()
+                return
         self.mode = "home"
         self.presence_schedule.last_at = None
         self.presence_schedule.request()

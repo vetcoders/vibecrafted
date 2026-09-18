@@ -4,7 +4,6 @@
 import SwiftUI
 
 enum CommandDeckMetrics {
-  static let chromePadding: CGFloat = 12
   static let chromeSpacing: CGFloat = 10
   static let overlayPadding: CGFloat = 28
   static let overlayMaxWidth: CGFloat = 420

@@ -179,6 +179,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   private var productUpdate: ProductUpdateCoordinator?
   private var productUpdatePanel: NSWindow?
   private var productUpdateStartupAdoption: ProductUpdateHandoffAdoption = .none
+  /// Long-lived `vc-frame web` started from the App when `[tools.vc-frame]`
+  /// names a loopback origin. Tabs never own this process; closing a tab does
+  /// not stop it, and workers are not in this process group.
+  private var frameWebProcess: Process?
   let eventObserver = EventObserver()
 
   func showMainWindowIfNeeded() {
@@ -210,6 +214,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
         fputs("Vibecrafted bootstrap failed: \(error)\n", stderr)
         exit(EXIT_FAILURE)
       }
+    }
+
+    if !claimUserAppInstanceOrHandoff() {
+      return
     }
 
     installLifecycleSignalHandlers()
@@ -405,7 +413,34 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       }
       self.reconcileControlPlaneEye(install: install, environment: environment)
       self.inspectConfigurationAtLaunch()
+      self.ensureFrameWebClient(install: install, environment: environment)
       self.refreshServerStatus()
+  }
+
+  /// Start `vc-frame web` on the operator-named loopback origin.
+  ///
+  /// The port is never guessed: `[tools.vc-frame]` must already name the bind.
+  /// Native tabs still never spawn a service; this is the App's connect path.
+  /// Closing Frame does not terminate this process or any headless worker.
+  private func ensureFrameWebClient(install: CanonicalRuntimeInstall, environment: [String: String]) {
+    guard let destination = ToolDestination.named("vc-frame") else { return }
+    guard case .available(let url, .service) = tabs.resolve(destination),
+      let bind = FrameWebLaunch.bind(url: url)
+    else { return }
+    if let running = frameWebProcess, running.isRunning { return }
+    let process = Process()
+    process.executableURL = install.frame
+    process.arguments = bind.startArguments
+    process.environment = environment
+    process.standardInput = FileHandle.nullDevice
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = FileHandle.nullDevice
+    do {
+      try process.run()
+      frameWebProcess = process
+    } catch {
+      frameWebProcess = nil
+    }
   }
 
   /// Read-only configuration check at launch.
@@ -765,19 +800,36 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   /// The environment every generation-owned subprocess inherits: the tray's
   /// caretaker poll, the service actions and the workspace terminal all run
   /// with exactly this, so they can never address different roots.
+  ///
+  /// Guest, not landlord: the base is the user's own environment — the app is
+  /// launched from Finder/Dock, so this is the launchd user-session env, not a
+  /// login shell; `SSH_AUTH_SOCK`, the user's PATH and every user variable
+  /// flow through. Only the explicit deny-list below is scrubbed, then the
+  /// Vibecrafted pins overlay the result.
   private func composeRuntimeEnvironment(install: CanonicalRuntimeInstall) -> [String: String] {
     let host = ProcessInfo.processInfo.environment
-    let inherited = [
-      "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "COLORTERM", "TMPDIR",
-      "SHELL",
+    // The only variables scrubbed from the inherited environment, each with
+    // the reason it must not cross into the child. Everything else survives.
+    let denied: [String] = [
+      // Repoints python children at a foreign runtime's or test harness's
+      // module tree; the launched product must import its own generation.
+      "PYTHONPATH",
+      // Relocates the interpreter's stdlib and breaks any bundled python.
+      "PYTHONHOME",
+      // macOS framework-python breadcrumb pinning children to the invoking
+      // interpreter's launcher instead of their own resolution.
+      "__PYVENV_LAUNCHER__",
     ]
-    var environment = Dictionary(
-      uniqueKeysWithValues: inherited.compactMap { key in host[key].map { (key, $0) } })
+    var environment = host
+    for name in denied {
+      environment.removeValue(forKey: name)
+    }
     // The workspace terminal spawns agent CLIs (codex, gh, claude, loct) whose
-    // `#!/usr/bin/env` shebangs resolve against exactly this PATH. Amputating the
-    // caller's PATH down to the system set hides Homebrew, ~/.local/bin and
-    // ~/.cargo/bin, so those tools die with exit 127. Keep the host PATH first;
-    // the signed generation is a fallback, not a shadow of user-owned tools.
+    // `#!/usr/bin/env` shebangs resolve against exactly this PATH. The
+    // inherited PATH is never replaced: the generation's canonical bin is
+    // prepended so the runtime's own pinned tools resolve deterministically,
+    // and every user entry (Homebrew, ~/.local/bin, ~/.cargo/bin) survives
+    // behind it.
     environment["PATH"] = composedPath(
       generation: install.root, inherited: host["PATH"])
     environment["PYTHONNOUSERSITE"] = "1"
@@ -1343,13 +1395,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     return stdout
   }
 
-  /// Inherited PATH first, then the signed generation fallback; use the minimal
-  /// system set only when the caller carried no PATH at all.
+  /// The generation's canonical bin is prepended to the inherited PATH so the
+  /// runtime's own pinned tools resolve deterministically; every user entry
+  /// survives behind it, and the minimal system set is the floor only when the
+  /// caller carried no PATH at all.
   private func composedPath(generation: URL, inherited: String?) -> String {
     let generationBin = generation.appendingPathComponent("bin").path
     let head = (inherited ?? "").isEmpty ? "/usr/bin:/bin:/usr/sbin:/sbin" : inherited!
     let entries = head.split(separator: ":").map(String.init).filter { $0 != generationBin }
-    return (entries + [generationBin]).joined(separator: ":")
+    return ([generationBin] + entries).joined(separator: ":")
   }
 
   /// Surface a launch failure where the operator can actually see it: the unified
@@ -1365,6 +1419,63 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     alert.informativeText = message
     alert.addButton(withTitle: "OK")
     alert.runModal()
+  }
+
+  /// Process-wide single user-instance ownership. A later launch of a
+  /// displaced updater capture must activate `/Applications/Vibecrafted.app`
+  /// instead of installing a second menu icon. Special CLI flags are handled
+  /// before this runs. Never kills another process and never deletes backups.
+  @discardableResult
+  private func claimUserAppInstanceOrHandoff() -> Bool {
+    let identifier = Bundle.main.bundleIdentifier ?? AppInstanceOwnership.productBundleIdentifier
+    let selfPid = Int32(getpid())
+    let selfURL = Bundle.main.bundleURL
+    let peers = NSRunningApplication.runningApplications(withBundleIdentifier: identifier)
+      .compactMap { app -> AppInstancePeer? in
+        guard app.processIdentifier != selfPid, let url = app.bundleURL else { return nil }
+        return AppInstancePeer(pid: app.processIdentifier, bundleURL: url)
+      }
+    let lockURL = AppInstanceOwnership.lockFileURL(
+      bundleIdentifier: identifier, home: FileManager.default.homeDirectoryForCurrentUser)
+    let parsed = (try? String(contentsOf: lockURL, encoding: .utf8))
+      .flatMap(AppInstanceOwnership.parseLockRecord)
+    var live = Set(peers.map(\.pid))
+    live.insert(selfPid)
+    if let pid = parsed?.pid, kill(pid_t(pid), 0) == 0 {
+      live.insert(pid)
+    }
+    let decision = AppInstanceOwnership.decide(
+      AppInstanceContext(
+        selfPid: selfPid,
+        selfBundleURL: selfURL,
+        arguments: ProcessInfo.processInfo.arguments,
+        peers: peers,
+        lockOwnerPid: parsed?.pid,
+        livePids: live))
+    switch decision {
+    case .becomeOwner:
+      persistInstanceLock(lockURL, pid: Int32(selfPid), bundleURL: selfURL)
+      lifecycleLog("instance owner pid=\(selfPid) path=\(selfURL.path)")
+      return true
+    case .activateExisting(let pid, let url):
+      lifecycleLog("instance handoff pid=\(pid) path=\(url.path)")
+      if let other = NSRunningApplication(processIdentifier: pid) {
+        other.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        exit(EXIT_SUCCESS)
+      }
+      persistInstanceLock(lockURL, pid: Int32(selfPid), bundleURL: selfURL)
+      lifecycleLog("instance owner after stale peer pid=\(selfPid) path=\(selfURL.path)")
+      return true
+    }
+  }
+
+  /// Best-effort owner record. The installer owns Application Support layout;
+  /// this host never creates that directory (unified-app contract).
+  private func persistInstanceLock(_ lockURL: URL, pid: Int32, bundleURL: URL) {
+    let parent = lockURL.deletingLastPathComponent()
+    guard FileManager.default.fileExists(atPath: parent.path) else { return }
+    try? AppInstanceOwnership.lockRecord(pid: pid, bundleURL: bundleURL)
+      .write(to: lockURL, atomically: true, encoding: .utf8)
   }
 
   // MARK: - Main Menu

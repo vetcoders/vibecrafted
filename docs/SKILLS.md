@@ -65,11 +65,11 @@ commands are rejected with an action-first migration hint.
 
 ## Distinct launchers (not aliases)
 
-| Launcher    | Skill id    | Matrix cell               | Notes                                                                                                            |
-| ----------- | ----------- | ------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `implement` | `implement` | Ship-cycle WRITE stage    | Structured e2e delivery with followup + marbles.                                                                 |
-| `justdo`    | `justdo`    | Additional skill launcher | Standalone Just Do posture; task type from the prompt. ADR-0001. Run-id prefix `just-` (implement uses `impl-`). |
+| Launcher    | Skill id    | Matrix cell               | Notes                                                                                                  |
+| ----------- | ----------- | ------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `implement` | `implement` | Ship-cycle WRITE stage    | Structured e2e delivery with followup + marbles.                                                       |
+| `justdo`    | `justdo`    | Additional skill launcher | Standalone Just Do posture; task type from the prompt. Run-id prefix `just-` (implement uses `impl-`). |
 
-Do **not** treat `justdo` as a rename of `implement`. See [Delegation Matrix](../vibecrafted-core/vibecrafted_core/skills/DELEGATION_MATRIX.md) and [ADR-0001](./adr/0001-vc-justdo-standalone.md).
+Do **not** treat `justdo` as a rename of `implement`. See [Delegation Matrix](../vibecrafted-core/vibecrafted_core/skills/DELEGATION_MATRIX.md).
 
 The framework-level chaining map lives in [WORKFLOWS](./WORKFLOWS.md).

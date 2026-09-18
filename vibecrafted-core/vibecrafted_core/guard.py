@@ -16,6 +16,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+META_SKILLS = frozenset({"trust", "guard", "init"})
+REMEDIATION_TASKS = frozenset({"repair", "admission"})
+REMEDIATION_REASON_MIN = 8
+REMEDIATION_REASON_MAX = 500
+
 from . import control_plane, trust
 from .settlement import TrustReceiptV1
 
@@ -73,7 +78,7 @@ GATE_INVENTORY: tuple[dict[str, str], ...] = (
     {
         "id": "trust-block-dispatch",
         "path": "vibecrafted_core.guard.enforce_continuation",
-        "enforces": "refuse workflow continuation when HEAD (or line) has trust verdict block",
+        "enforces": "refuse workflow continuation when HEAD (or line) has trust verdict block; authorized remediation is launch-time only and never rewrites the journal",
         "phase": "dispatch",
         "mode": "hard",
     },
@@ -84,6 +89,7 @@ COVERAGE_GAPS: tuple[str, ...] = (
     "commit-msg-diff-gate remains advisory until operator elevates it to hard.",
     "PATH/install drift (source green, installed deck stale) is not yet a guard gate.",
     "Trust block refuse covers HEAD-by-default; per-branch line policy is opt-in via --sha.",
+    "Authorized remediation is a public-launcher override with reason+task; it does not disable VIBECRAFTED_GUARD or rewrite the trust journal.",
 )
 
 
@@ -97,10 +103,95 @@ class GuardDecision:
     blocking_sha: str = ""
     blocking_verdict: str = ""
     journal: str = ""
+    remediation_authorized: bool = False
+    remediation_reason: str = ""
+    remediation_task: str = ""
 
     def to_payload(self) -> dict[str, Any]:
         """Serialize this decision to a plain dict for JSON output."""
         return asdict(self)
+
+
+class GuardRefusal(ValueError):
+    """Launch-time refusal that carries the full guard decision for receipts."""
+
+    def __init__(self, decision: GuardDecision) -> None:
+        super().__init__(decision.remedium or "vc-guard refused continuation")
+        self.decision = decision
+
+
+def _flag_enabled(value: Any) -> bool:
+    """Parse a public boolean flag without treating the string 'false' as true."""
+    if value is True:
+        return True
+    if value is False or value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def parse_remediation_flags(
+    *,
+    remediating: Any = False,
+    reason: Any = "",
+    task: Any = "",
+) -> tuple[bool, str, str]:
+    """Validate the public remediation trio. Raises ValueError on incomplete/invalid input."""
+    requested = _flag_enabled(remediating)
+    cleaned_reason = str(reason or "").strip()
+    cleaned_task = str(task or "").strip().lower()
+    extras = bool(cleaned_reason or cleaned_task)
+    if not requested and not extras:
+        return False, "", ""
+    if not requested:
+        raise ValueError(
+            "vc-guard: --remediation-reason/--remediation-task require "
+            "--remediate-trust-block"
+        )
+    if not cleaned_reason:
+        raise ValueError(
+            "vc-guard: --remediate-trust-block requires --remediation-reason"
+        )
+    if len(cleaned_reason) < REMEDIATION_REASON_MIN:
+        raise ValueError(
+            "vc-guard: --remediation-reason must be at least "
+            f"{REMEDIATION_REASON_MIN} characters"
+        )
+    if len(cleaned_reason) > REMEDIATION_REASON_MAX:
+        raise ValueError(
+            "vc-guard: --remediation-reason exceeds "
+            f"{REMEDIATION_REASON_MAX} characters"
+        )
+    if any(ord(char) < 32 for char in cleaned_reason):
+        raise ValueError("vc-guard: --remediation-reason must be printable text")
+    if cleaned_task not in REMEDIATION_TASKS:
+        allowed = "|".join(sorted(REMEDIATION_TASKS))
+        raise ValueError(f"vc-guard: --remediation-task must be one of {allowed}")
+    return True, cleaned_reason, cleaned_task
+
+
+def launch_disclosure(decision: GuardDecision) -> dict[str, Any]:
+    """Receipt projection that discloses a BLOCK override without implying PASS."""
+    if not (
+        decision.remediation_authorized
+        or decision.blocking_verdict == "block"
+        or decision.reason.startswith("remediation_")
+        or decision.reason == "trust_block"
+    ):
+        return {}
+    payload: dict[str, Any] = {
+        "blocking_verdict": decision.blocking_verdict,
+        "blocking_sha": decision.blocking_sha,
+        "continuation": (
+            "authorized_remediation" if decision.remediation_authorized else "refused"
+        ),
+        "reason": decision.reason,
+        "trust_verdict_unchanged": True,
+    }
+    if decision.remediation_reason:
+        payload["remediation_reason"] = decision.remediation_reason
+    if decision.remediation_task:
+        payload["remediation_task"] = decision.remediation_task
+    return payload
 
 
 @dataclass(frozen=True)
@@ -563,6 +654,9 @@ def enforce_continuation(
     journal: Path | None = None,
     sha: str = "",
     skill: str = "",
+    remediating: Any = False,
+    remediation_reason: str = "",
+    remediation_task: str = "",
 ) -> GuardDecision:
     """Refuse continuation when trust has recorded block for the target commit.
 
@@ -570,20 +664,64 @@ def enforce_continuation(
     unreadable journals only when an explicit block cannot be ruled out? —
     No: missing journal means no trust block yet → allow (trust is opt-in
     judge; guard only acts on recorded block).
+
+    Authorized remediation is a launch-time continuation override. It never
+    rewrites the journal, never reports PASS, and still records the BLOCK
+    sha/verdict on the decision and launch receipt.
     """
+    try:
+        requested, cleaned_reason, cleaned_task = parse_remediation_flags(
+            remediating=remediating,
+            reason=remediation_reason,
+            task=remediation_task,
+        )
+    except ValueError as exc:
+        return GuardDecision(
+            allowed=False,
+            reason="remediation_flags_invalid",
+            remedium=str(exc),
+            journal=str(journal or trust.default_journal_path()),
+        )
+
+    resolved_journal = (journal or trust.default_journal_path()).expanduser()
     # Guard must never refuse its own inventory / trust workflows circularly
-    # in a way that prevents remediation. trust and guard themselves always pass.
-    if skill in {"trust", "guard", "init"}:
+    # in a way that prevents read-only audit. Those skills stay exempt.
+    # They do not accept a remediation override — that would look like PASS.
+    if skill in META_SKILLS:
+        if requested:
+            return GuardDecision(
+                allowed=False,
+                reason="remediation_not_applicable",
+                remedium=(
+                    "vc-guard: --remediate-trust-block is a launch override for "
+                    "repair/admission; trust/guard/init remain read-only audit "
+                    "and stay blocked from rewriting the verdict"
+                ),
+                journal=str(resolved_journal),
+                remediation_reason=cleaned_reason,
+                remediation_task=cleaned_task,
+            )
         return GuardDecision(
             allowed=True,
             reason="meta_skill_exempt",
             remedium="",
-            journal=str(journal or trust.default_journal_path()),
+            journal=str(resolved_journal),
         )
 
     resolved_repo = _repo_root(repo)
-    resolved_journal = (journal or trust.default_journal_path()).expanduser()
     if not resolved_journal.is_file():
+        if requested:
+            return GuardDecision(
+                allowed=False,
+                reason="remediation_not_applicable",
+                remedium=(
+                    "vc-guard: --remediate-trust-block requires a recorded trust "
+                    "block; no journal is present"
+                ),
+                journal=str(resolved_journal),
+                remediation_reason=cleaned_reason,
+                remediation_task=cleaned_task,
+            )
         return GuardDecision(
             allowed=True,
             reason="no_trust_journal",
@@ -593,6 +731,18 @@ def enforce_continuation(
 
     record = latest_trust_verdict(repo=resolved_repo, journal=resolved_journal, sha=sha)
     if record is None:
+        if requested:
+            return GuardDecision(
+                allowed=False,
+                reason="remediation_not_applicable",
+                remedium=(
+                    "vc-guard: --remediate-trust-block requires a recorded trust "
+                    "block for this HEAD; none exists"
+                ),
+                journal=str(resolved_journal),
+                remediation_reason=cleaned_reason,
+                remediation_task=cleaned_task,
+            )
         return GuardDecision(
             allowed=True,
             reason="no_trust_verdict_for_target",
@@ -603,6 +753,20 @@ def enforce_continuation(
     verdict = str(record.get("verdict") or "")
     blocking_sha = str(record.get("sha") or "")
     if verdict != "block":
+        if requested:
+            return GuardDecision(
+                allowed=False,
+                reason="remediation_not_applicable",
+                remedium=(
+                    "vc-guard: --remediate-trust-block is refused when the latest "
+                    f"trust verdict is {verdict or 'empty'}, not block"
+                ),
+                blocking_sha=blocking_sha,
+                blocking_verdict=verdict,
+                journal=str(resolved_journal),
+                remediation_reason=cleaned_reason,
+                remediation_task=cleaned_task,
+            )
         return GuardDecision(
             allowed=True,
             reason=f"trust_verdict_{verdict or 'empty'}",
@@ -618,6 +782,18 @@ def enforce_continuation(
         for item in claims[:6]:
             if isinstance(item, Mapping):
                 claim_lines.append(f"  - {item.get('claim')}: {item.get('evidence')}")
+    if requested:
+        return GuardDecision(
+            allowed=True,
+            reason="authorized_trust_block_remediation",
+            remedium="",
+            blocking_sha=blocking_sha,
+            blocking_verdict="block",
+            journal=str(resolved_journal),
+            remediation_authorized=True,
+            remediation_reason=cleaned_reason,
+            remediation_task=cleaned_task,
+        )
     remedium = (
         f"vc-guard: refuse continuation — trust recorded block on {blocking_sha[:12]}.\n"
         f"Remedium:\n"
@@ -626,6 +802,9 @@ def enforce_continuation(
         f"  3. Commit the fix with legal Authored-By matching the executor.\n"
         f"  4. Re-run: python -m vibecrafted_core.trust inspect <new-sha>\n"
         f"  5. Explicitly note a new verdict (pass/pass-with-gaps) — never imply pass.\n"
+        f"  Authorized continuation (does not rewrite this BLOCK):\n"
+        f"     vibecrafted <skill> <agent> --remediate-trust-block "
+        f"--remediation-task repair|admission --remediation-reason TEXT\n"
         f"Blocked claims:\n"
         + ("\n".join(claim_lines) if claim_lines else "  (see journal)")
     )

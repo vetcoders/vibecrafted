@@ -16,11 +16,67 @@ from typing import Any
 from vibecrafted_core.workflow import reserve_run_id
 
 from .doctor import diagnose_file
-from .model import STATE_VERIFIED, Dispatch
+from .model import BASE_CUT_PREFIX, STATE_VERIFIED, Cut, Dispatch, classify_base
 from .receipts import DispatchReceiptStore, ReceiptContractError
 from .schema import render_cell_prompt
 from .supervisor import DispatchResult, cleanup_settled_run, run_dispatch
 from .worktrees import canonical_artifact_root
+
+# Verbs agents keep inventing for this CLI (observed in the wild: a planning
+# session instructed `vibecrafted dispatch preflight <toml>` / `dispatch launch
+# <toml>`, neither of which exists). Treating such a token as a TOML path
+# yields a misleading "unreadable file" — refuse it loudly with the pilot
+# instead. The canonical surface stays exactly four forms; no aliases.
+_HALLUCINATED_VERBS = {
+    "check",
+    "doctor",
+    "dry-run",
+    "dryrun",
+    "launch",
+    "plan",
+    "preflight",
+    "resume",
+    "run",
+    "start",
+    "status",
+    "validate",
+    "verify",
+}
+
+_PILOT = """canonical dispatch invocations:
+  vibecrafted dispatch <plan.toml> --doctor            # validate only
+  vibecrafted dispatch <plan.toml> --dry-run [--json]  # render prompts, launch nothing
+  vibecrafted dispatch <plan.toml>                     # launch the plan
+  vibecrafted dispatch <plan.toml> --resume <run-id>   # resume a recorded run"""
+
+
+def _refuse_hallucinated_verb(argv: Sequence[str]) -> str:
+    """Return a refusal message when argv starts with an invented subcommand."""
+    positionals = [token for token in argv if not token.startswith("-")]
+    if not positionals or positionals[0].lower() not in _HALLUCINATED_VERBS:
+        return ""
+    if Path(positionals[0]).expanduser().exists():
+        # A real file that happens to share a verb's name is still a plan.
+        return ""
+    verb = positionals[0]
+    plan = positionals[1] if len(positionals) > 1 else "<plan.toml>"
+    corrections = {
+        "preflight": f"vibecrafted dispatch {plan} --doctor && vibecrafted dispatch {plan} --dry-run",
+        "doctor": f"vibecrafted dispatch {plan} --doctor",
+        "check": f"vibecrafted dispatch {plan} --doctor",
+        "validate": f"vibecrafted dispatch {plan} --doctor",
+        "verify": f"vibecrafted dispatch {plan} --doctor",
+        "dry-run": f"vibecrafted dispatch {plan} --dry-run",
+        "dryrun": f"vibecrafted dispatch {plan} --dry-run",
+        "resume": f"vibecrafted dispatch {plan} --resume <run-id>",
+    }
+    suggestion = corrections.get(verb.lower(), f"vibecrafted dispatch {plan}")
+    return (
+        f"unknown dispatch subcommand {verb!r} — this CLI takes a plan path,"
+        " not verbs.\n"
+        f"did you mean: {suggestion}\n"
+        f"{_PILOT}"
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -60,6 +116,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Parse argv and run doctor / dry-run / full dispatch; return the process exit code."""
+    raw_argv: Sequence[str] = sys.argv[1:] if argv is None else argv
+    refusal = _refuse_hallucinated_verb(raw_argv)
+    if refusal:
+        print(refusal, file=sys.stderr)
+        return 2
     parser = _build_parser()
     args = parser.parse_args(argv)
     source = Path(args.dispatch_file).expanduser()
@@ -205,6 +266,7 @@ def _dry_run(
         "run_id": run_id or "",
         "cuts": [cut.id for cut in dispatch.cuts],
         "prompts": prompt_paths,
+        "bases": {cut.id: _dry_run_base(dispatch, cut) for cut in dispatch.cuts},
         "artifacts": {
             "dry_run_dir": str(dry_run_dir),
             "tracker": str(dry_run_dir / "tracker.md"),
@@ -218,6 +280,31 @@ def _dry_run(
         encoding="utf-8",
     )
     return payload
+
+
+def _dry_run_base(dispatch: Dispatch, cut: Cut) -> dict[str, str]:
+    """Show one cut's resolved base the way a launch would see it.
+
+    ``cut:<id>`` bases resolve only after the dependency settles, so a
+    dry-run reports them as pending instead of guessing a commit.
+    """
+    kind = classify_base(cut.base)
+    if kind == "plan":
+        return {
+            "base_ref": "",
+            "base_sha": str(dispatch.meta.baseline.get("head") or ""),
+            "base_source": "plan",
+        }
+    if kind == "cut":
+        target = cut.base[len(BASE_CUT_PREFIX) :].strip()
+        return {
+            "base_ref": cut.base,
+            "base_sha": f"<pending: {target}>",
+            "base_source": "cut",
+        }
+    ref = cut.base if kind == "sha" else f"refs/heads/{cut.base}"
+    resolved = _git(dispatch.meta.repo, ["rev-parse", "--verify", f"{ref}^{{commit}}"])
+    return {"base_ref": cut.base, "base_sha": resolved, "base_source": kind}
 
 
 def _write_dry_run_tracker(
