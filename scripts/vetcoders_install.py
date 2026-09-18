@@ -745,6 +745,26 @@ SHADOWED_SKILL_VIEW_RUNTIMES = ("claude", "codex")
 # standard install must keep their views or the /vc-* deck goes dark.
 STANDARD_VIEW_RUNTIMES = [*SYMLINK_TARGETS, *SHADOWED_SKILL_VIEW_RUNTIMES]
 
+# A real directory (not a symlink) sitting at ~/.<runtime>/skills/<vc-skill> is
+# an artifact of a pre-3.x installer that materialized copies instead of views.
+# The vc-* name alone never proves ownership, and content markers only prove it
+# for skills generated after those tokens existed — measured against the real
+# June-2026 copies recovered from ~/.junie/skills, not one carried a marker.
+#
+# What every one of them does carry is a file history: every byte in the copy
+# exists as a blob in the Vibecrafted git history. So the bundle ships a
+# manifest of what we have actually released per skill — the sha256 of every
+# SKILL.md, and for every relative path under a real skill directory the git
+# blob id of every version of that file we ever committed. A copy is claimed as
+# ours only when its SKILL.md is a release we shipped AND every file it holds
+# is, byte for byte, a version of that same file we shipped. A path we shipped
+# is not enough: a name says nothing about content, and an operator's own
+# `scripts/await.sh` would otherwise inherit ours.
+# Regenerate with `scripts/gen_skill_provenance.py`.
+SKILL_PROVENANCE_FILE = "SKILL_PROVENANCE.json"
+SKILL_PROVENANCE_SCHEMA = "vibecrafted.skill-provenance.v3"
+SHADOW_QUARANTINE_PREFIX = "shadowed-views-"
+
 # ---------------------------------------------------------------------------
 # Install state
 # ---------------------------------------------------------------------------
@@ -847,6 +867,24 @@ def _doctor_action_items(findings: Sequence[DoctorFinding]) -> list[str]:
         actions.append("enable tracking and restore: run the installer once")
     if any(finding.component.startswith("orphan:") for finding in issues):
         actions.append("clean bundle leftovers: re-run the installer")
+    if any(
+        finding.component.startswith("shadow-dir:")
+        or (finding.component.startswith("symlink:") and "is a COPY" in finding.message)
+        for finding in issues
+    ):
+        actions.append(
+            "reconcile stale runtime skill copies: "
+            "`vibecrafted update --force` (plain `update` stops at "
+            '"up to date" when the version already matches; unproven '
+            "copies are only reported, never removed)"
+        )
+    if any(finding.component.startswith("skill-root:") for finding in issues):
+        actions.append(
+            "a runtime skill root is a link, so it is audited by nobody: "
+            "inspect it yourself (`ls -l ~/.<runtime>/skills`) and replace it "
+            "with a real directory if you want that runtime reconciled — "
+            "the installer never removes anything behind such a link"
+        )
     if not actions:
         actions.append("review the warnings above, then re-run `vibecrafted doctor`")
     return actions
@@ -1708,6 +1746,383 @@ def collect_orphaned_skills(
                 orphans.append((rt, entry))
 
     return orphans
+
+
+@dataclass(frozen=True)
+class ShadowedSkillDir:
+    """One real-directory skill copy shadowing the canonical `.agents` view.
+
+    `classification` is one of `managed_identical` (byte-identical to the store
+    copy), `managed_stale` (differs, but provenance is proven) or `unknown`
+    (provenance cannot be proven — never removed automatically).
+    """
+
+    runtime: str
+    skill: str
+    path: Path
+    classification: str
+    detail: str
+
+    @property
+    def is_managed(self) -> bool:
+        """True when provenance is proven and reconciliation may remove the copy."""
+        return self.classification in ("managed_identical", "managed_stale")
+
+
+def _skill_fingerprint_ignored(rel_parts: tuple[str, ...]) -> bool:
+    """True for editor/interpreter litter that must not decide skill-copy identity."""
+    if any(part == "__pycache__" for part in rel_parts):
+        return True
+    name = rel_parts[-1]
+    return name == ".DS_Store" or name.endswith(".pyc")
+
+
+def _skill_tree_fingerprint(root: Path) -> dict[str, str]:
+    """Map each path under `root` to a content digest, ignoring editor litter.
+
+    Directory symlinks are recorded by their raw target and never descended
+    into, so a looping link inside a skill copy cannot hang the walk.
+    """
+    fingerprint: dict[str, str] = {}
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames[:] = sorted(name for name in dirnames if name != "__pycache__")
+        base = Path(dirpath)
+        for name in [*dirnames, *sorted(filenames)]:
+            path = base / name
+            rel_parts = path.relative_to(root).parts
+            if _skill_fingerprint_ignored(rel_parts):
+                continue
+            rel = "/".join(rel_parts)
+            if path.is_symlink():
+                fingerprint[rel] = f"link:{os.readlink(path)}"
+            elif path.is_dir():
+                fingerprint[rel] = "dir"
+            elif path.is_file():
+                try:
+                    fingerprint[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+                except OSError:
+                    fingerprint[rel] = "unreadable"
+    return fingerprint
+
+
+def _skill_copy_entries(root: Path) -> list[tuple[str, Path]]:
+    """Every non-directory entry under `root`, as `(relative path, path)`.
+
+    Editor litter is skipped exactly as in `_skill_tree_fingerprint`, and a
+    symlink is listed but never descended into: a link inside a copy is content
+    that has to be provable like any other entry, and following it could walk
+    out of the copy or loop forever.
+    """
+    found: list[tuple[str, Path]] = []
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        base = Path(dirpath)
+        descend: list[str] = []
+        for name in sorted(dirnames):
+            if name == "__pycache__":
+                continue
+            path = base / name
+            if path.is_symlink():
+                found.append(("/".join(path.relative_to(root).parts), path))
+            else:
+                descend.append(name)
+        dirnames[:] = descend
+        for name in sorted(filenames):
+            path = base / name
+            rel_parts = path.relative_to(root).parts
+            if _skill_fingerprint_ignored(rel_parts):
+                continue
+            found.append(("/".join(rel_parts), path))
+    return sorted(found)
+
+
+def _git_blob_id(data: bytes) -> str:
+    """The git blob id of `data` — sha1 over git's own object header.
+
+    This is what lets the manifest carry blob ids straight out of
+    `git log --raw` and still be checkable on a machine with no git, no
+    repository and no network: `git hash-object` is this one line.
+    """
+    # sha1 is not a choice here: a git blob id IS sha1 over that header, so
+    # this is an identifier in someone else's format, never a signature of
+    # ours. `usedforsecurity=False` says so to OpenSSL (and keeps it working
+    # under FIPS); the rule is silenced by id on this line alone.
+    return hashlib.sha1(  # nosemgrep: python.lang.security.insecure-hash-algorithms.insecure-hash-algorithm-sha1
+        b"blob %d\0" % len(data) + data, usedforsecurity=False
+    ).hexdigest()
+
+
+def _skill_md_sha256(skill_dir: Path) -> str | None:
+    """sha256 of `skill_dir`'s SKILL.md, or None when it cannot be read."""
+    try:
+        return hashlib.sha256((skill_dir / "SKILL.md").read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+@dataclass(frozen=True)
+class SkillProvenance:
+    """What Vibecrafted has ever released for one skill.
+
+    `sha256` holds every SKILL.md digest ever shipped. `files` maps each
+    relative path under a real skill directory to the git blob id of every
+    version of that file we ever committed — the bytes, not just the name.
+    """
+
+    sha256: frozenset[str] = frozenset()
+    files: Mapping[str, frozenset[str]] = field(default_factory=dict)
+
+
+def _string_set(value: object) -> frozenset[str]:
+    """Coerce an untrusted manifest list into a set of strings."""
+    if not isinstance(value, list):
+        return frozenset()
+    return frozenset(item for item in value if isinstance(item, str))
+
+
+def _released_files(value: object) -> dict[str, frozenset[str]]:
+    """Coerce an untrusted manifest object into `relpath → blob id set`."""
+    if not isinstance(value, dict):
+        return {}
+    return {
+        name: _string_set(ids)
+        for name, ids in value.items()
+        if isinstance(name, str) and isinstance(ids, list)
+    }
+
+
+def unproven_skill_copy_reason(copy_dir: Path, released: SkillProvenance) -> str | None:
+    """Why `copy_dir` is not a Vibecrafted release, or None when it is one.
+
+    One proof, used for both a copy shadowing a view and an orphan whose name
+    has left the bundle, because both decisions are the same decision: may the
+    installer delete this directory?
+
+    Two conditions, and the second is the one that costs work. The SKILL.md has
+    to hash into the set of releases we shipped — a hash we never shipped means
+    its owner edited it. And every entry in the copy has to be a plain file
+    whose bytes are a version of that same file we committed. Matching the path
+    alone would claim an operator's own `scripts/await.sh` on the strength of
+    its name; a symlink or anything else that is not a regular file is not a
+    shape we ship inside a materialized copy, so it withdraws the claim too.
+    """
+    digest = _skill_md_sha256(copy_dir)
+    if not digest:
+        return "SKILL.md is missing or unreadable"
+    if digest not in released.sha256:
+        return "SKILL.md is not a Vibecrafted release; its owner edited it"
+    for rel, path in _skill_copy_entries(copy_dir):
+        if path.is_symlink():
+            return f"{rel!r} is a symlink, which a release never ships as a copy"
+        if not path.is_file():
+            return f"{rel!r} is not a regular file"
+        known = released.files.get(rel)
+        if not known:
+            return f"{rel!r} was never shipped with this skill"
+        try:
+            blob = _git_blob_id(path.read_bytes())
+        except OSError:
+            return f"{rel!r} cannot be read"
+        if blob not in known:
+            return f"{rel!r} differs from every version Vibecrafted shipped"
+    return None
+
+
+def load_skill_provenance(store_path: Path) -> dict[str, SkillProvenance]:
+    """Read the shipped release manifest: skill name → `SkillProvenance`.
+
+    A missing, unreadable, corrupt or foreign-schema manifest yields an empty
+    map — including a manifest of an older schema, whose entries carry weaker
+    evidence than this version requires and would therefore claim copies it
+    cannot vouch for. The proof only ever *adds* certainty, so its absence must
+    degrade to "no proof", never to an installer traceback on someone's machine.
+    """
+    try:
+        data = json.loads(
+            (store_path / SKILL_PROVENANCE_FILE).read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict) or data.get("schema") != SKILL_PROVENANCE_SCHEMA:
+        return {}
+    skills = data.get("skills")
+    if not isinstance(skills, dict):
+        return {}
+    manifest: dict[str, SkillProvenance] = {}
+    for name, entry in skills.items():
+        if not isinstance(name, str) or not isinstance(entry, dict):
+            continue
+        manifest[name] = SkillProvenance(
+            _string_set(entry.get("sha256")), _released_files(entry.get("files"))
+        )
+    return manifest
+
+
+def _path_is_symlink_free(path: Path) -> bool:
+    """True when neither `path` nor any ancestor below the home dir is a pointer.
+
+    A pointer ancestor turns a per-runtime skill dir into a window onto another
+    tree — `ln -s ~/.vibecrafted/skills ~/.junie/skills` is the obvious manual
+    workaround for the junie gap — and `shutil.rmtree` follows it. A Windows
+    directory junction does exactly the same thing while reporting
+    `is_symlink() == False`, so the walk asks `_is_owned_pointer`, which knows
+    both. Only the operator-owned span between `$HOME` and the entry is
+    inspected; the system path above `$HOME` is not ours to judge.
+    """
+    home = Path.home()
+    current = path
+    for _ in range(64):
+        if _is_owned_pointer(current):
+            return False
+        parent = current.parent
+        if parent == current or current == home:
+            return True
+        current = parent
+    return False
+
+
+def shadow_candidate_runtimes() -> list[str]:
+    """Agent runtimes whose skill dir may hold a copy shadowing the `.agents` view."""
+    return [rt for rt in AGENT_RUNTIMES if rt not in SYMLINK_TARGETS]
+
+
+def _runtime_skills_root_in_store(runtime: str, store_path: Path) -> bool:
+    """True when `<runtime>`'s skills root is, or lies inside, the skill store."""
+    rt_resolved = runtime_skills_dir(runtime).resolve(strict=False)
+    store_resolved = store_path.resolve(strict=False)
+    return rt_resolved == store_resolved or store_resolved in rt_resolved.parents
+
+
+def runtime_skills_root_problem(runtime: str, store_path: Path) -> str | None:
+    """Short reason why `<runtime>`'s skills root is not ours to judge, else None.
+
+    Two shapes disqualify a root, and neither is visible in the path itself.
+    `ln -s ~/.vibecrafted/skills ~/.junie/skills` — the obvious manual
+    workaround for the junie gap — makes the root resolve into the canonical
+    store, so comparing the store with itself would classify every skill as an
+    identical copy and a view written there would be a symlink inside the store
+    aimed at its own sibling. `~/.junie/skills -> ~/notes` (or a Windows
+    junction doing the same) makes every entry under it part of a tree the
+    operator keeps for another purpose, and `shutil.rmtree` follows the pointer.
+
+    Detection skips such a root either way. The value of saying so out loud is
+    that the skip is otherwise indistinguishable from a clean host: the
+    installer reports nothing, removes nothing, and the operator has no way to
+    tell that the directory was never looked at.
+
+    None means an ordinary directory (or nothing yet) under `$HOME` — the one
+    shape the installer owns.
+    """
+    rt_skills = runtime_skills_dir(runtime)
+    # The store case first: it is the more specific diagnosis, and a root
+    # linked into the store fails the pointer check as well.
+    if _runtime_skills_root_in_store(runtime, store_path):
+        return (
+            f"resolves into the canonical skill store "
+            f"({rt_skills.resolve(strict=False)})"
+        )
+    if not _path_is_symlink_free(rt_skills):
+        return f"is reached through a link into {rt_skills.resolve(strict=False)}"
+    return None
+
+
+def collect_shadowed_skill_dirs(
+    store_path: Path,
+    skill_names: Sequence[str],
+    runtimes: Sequence[str] | None = None,
+) -> list[ShadowedSkillDir]:
+    """Find real-directory copies of bundled skills inside per-runtime skill dirs.
+
+    Pure detection: the canonical `.agents` view is never a candidate, symlinked
+    views belong to `prune_shadowed_skill_views`, and provenance is derived from
+    content only — either the copy is byte-identical to the store copy, or the
+    shipped `SKILL_PROVENANCE_FILE` proves its SKILL.md and the bytes of every
+    file in it against what Vibecrafted has released.
+
+    A real *file* under a skill name is reported too, always as `unknown`. It is
+    never something we shipped — a view is a link and a legacy copy is a
+    directory — so it is someone's own note, and the one thing to do with it is
+    say where it is. Doctor was silent about it while the view writer stood
+    ready to remove it.
+
+    A runtime whose skill dir is reached through a symlink, or which resolves
+    into the store itself, is skipped outright: comparing the store with itself
+    would classify every skill as an identical copy, and removing it would take
+    the canonical store with it. The skip stays silent here — detection is
+    pure — and `runtime_skills_root_problem` is what the writer and doctor
+    report so the skip is not mistaken for a clean host.
+    """
+    candidates = (
+        shadow_candidate_runtimes()
+        if runtimes is None
+        else list(dict.fromkeys(runtimes))
+    )
+    shadows: list[ShadowedSkillDir] = []
+    provenance = load_skill_provenance(store_path)
+
+    for runtime in candidates:
+        if runtime in SYMLINK_TARGETS:
+            continue
+        rt_skills = runtime_skills_dir(runtime)
+        if not rt_skills.is_dir():
+            continue
+        if runtime_skills_root_problem(runtime, store_path) is not None:
+            continue
+        for skill_name in skill_names:
+            shadow = rt_skills / skill_name
+            if shadow.is_symlink():
+                continue
+            if shadow.is_file():
+                shadows.append(
+                    ShadowedSkillDir(
+                        runtime,
+                        skill_name,
+                        shadow,
+                        "unknown",
+                        "regular file, kept: a skill view is a link and a "
+                        "legacy copy is a directory, so this is your own file",
+                    )
+                )
+                continue
+            if not shadow.is_dir():
+                continue
+            expected = store_path / skill_name
+            if not expected.is_dir():
+                # Nothing canonical to defer to; orphan pruning owns this name.
+                continue
+            if shadow.resolve(strict=False) == expected.resolve(strict=False):
+                # Not a copy at all — the store copy seen through a link.
+                continue
+            if _skill_tree_fingerprint(shadow) == _skill_tree_fingerprint(expected):
+                shadows.append(
+                    ShadowedSkillDir(
+                        runtime,
+                        skill_name,
+                        shadow,
+                        "managed_identical",
+                        f"identical copy of {expected}",
+                    )
+                )
+                continue
+            unproven = unproven_skill_copy_reason(
+                shadow, provenance.get(skill_name, SkillProvenance())
+            )
+            if unproven is not None:
+                shadows.append(
+                    ShadowedSkillDir(runtime, skill_name, shadow, "unknown", unproven)
+                )
+                continue
+            shadows.append(
+                ShadowedSkillDir(
+                    runtime,
+                    skill_name,
+                    shadow,
+                    "managed_stale",
+                    f"differs from {expected}; SKILL.md matches a historical "
+                    f"Vibecrafted release and every file in it is byte for byte "
+                    f"a version we shipped",
+                )
+            )
+    return shadows
 
 
 def create_backup(
@@ -10370,6 +10785,42 @@ def layout_status(store_path: Path) -> dict[str, Any]:
     }
 
 
+def unremovable_orphan_reason(
+    store_path: Path,
+    location: str,
+    entry: Path,
+    provenance: Mapping[str, SkillProvenance],
+) -> str | None:
+    """Why a real orphan directory must stay, or None when it may be removed.
+
+    A name leaving the bundle says nothing about who wrote the directory still
+    carrying it. `vc-canvas` is a skill we retired; it is also a name an
+    operator could put their own work under, and this code used to `rmtree` it
+    either way — with `ask_yn` defaulting to yes and returning the default in a
+    non-interactive install, so a piped install answered for them.
+
+    So the same proof decides here as for a shadowing copy, which is the same
+    question in a different place: may the installer delete this directory? The
+    manifest covers retired skills for free, because it is built from all of
+    history rather than from the current bundle. Plus the two rails
+    reconciliation uses: never follow a symlink out of the tree, and never let a
+    runtime entry route a removal into the canonical store.
+    """
+    if not _path_is_symlink_free(entry):
+        return (
+            "it is reached through a symlink, so removing it would delete another tree"
+        )
+    resolved = entry.resolve(strict=False)
+    store_resolved = store_path.resolve(strict=False)
+    if location != "store" and (
+        resolved == store_resolved or store_resolved in resolved.parents
+    ):
+        return f"it resolves into the canonical store ({resolved})"
+    return unproven_skill_copy_reason(
+        entry, provenance.get(entry.name, SkillProvenance())
+    )
+
+
 def prune_orphaned_skills(
     store_path: Path,
     runtimes: list[str],
@@ -10378,7 +10829,15 @@ def prune_orphaned_skills(
     orphaned_entries: list[tuple[str, Path]] | None = None,
     interactive: bool = True,
 ) -> int:
-    """Remove vc-* skills from store and runtime dirs that are no longer in the bundle."""
+    """Remove vc-* skills from store and runtime dirs that are no longer in the bundle.
+
+    A pointer or a stray file is removed as before — a view we wrote, or the
+    remains of one. A real *directory* has to prove it came from Vibecrafted
+    first, exactly as a shadowing copy does, and is quarantined under
+    `shadowed-views-<timestamp>/<location>/<skill>` before it goes. One that
+    cannot is kept, reported with the command to move it aside, and never
+    offered for removal at the prompt.
+    """
     orphans = orphaned_entries or collect_orphaned_skills(
         store_path, runtimes, current_bundle
     )
@@ -10386,28 +10845,62 @@ def prune_orphaned_skills(
     if not orphans:
         return 0
 
-    print(bold("Orphaned skills detected (no longer in bundle):"))
+    provenance = load_skill_provenance(store_path)
+    removable: list[tuple[str, Path]] = []
+    kept: list[tuple[str, Path, str]] = []
     for location, entry in orphans:
-        kind = "symlink" if entry.is_symlink() else "dir"
+        if _is_owned_pointer(entry) or entry.is_file():
+            removable.append((location, entry))
+            continue
+        reason = unremovable_orphan_reason(store_path, location, entry, provenance)
+        if reason is None:
+            removable.append((location, entry))
+        else:
+            kept.append((location, entry, reason))
+
+    print(bold("Orphaned skills detected (no longer in bundle):"))
+    for location, entry in removable:
+        kind = "symlink" if _is_owned_pointer(entry) else "dir"
         print(f"  {yellow(f'[{kind}]')} {location}/{entry.name}")
+    for location, entry, reason in kept:
+        print(
+            f"  {WARN} Keeping {location}/{entry.name}: {reason}; move it aside "
+            f"yourself if it is stale: mv {shlex_quote(str(entry))} "
+            f"{shlex_quote(str(entry) + '.bak')}"
+        )
     print()
+
+    if not removable:
+        return 0
 
     if interactive and not ask_yn("Remove orphaned skills?", default=True):
         print(dim("  Keeping orphaned skills."))
         print()
         return 0
 
+    quarantine_root = _backup_root(store_path) / (
+        SHADOW_QUARANTINE_PREFIX + datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    )
     removed = 0
-    for location, entry in orphans:
+    for location, entry in removable:
+        is_pointer = _is_owned_pointer(entry)
         if dry_run:
+            if not is_pointer and entry.is_dir():
+                print(
+                    f"  {dim('quarantine')} {entry} -> "
+                    f"{quarantine_root / location / entry.name}"
+                )
             print(f"  {dim('rm')} {entry}")
             removed += 1
-        else:
-            if entry.is_symlink() or entry.is_file():
-                entry.unlink(missing_ok=True)
-            elif entry.is_dir():
-                shutil.rmtree(entry)
-            removed += 1
+            continue
+        if is_pointer:
+            _remove_view_pointer(entry)
+        elif entry.is_file():
+            entry.unlink(missing_ok=True)
+        elif entry.is_dir():
+            _copy_path_to_backup(entry, quarantine_root / location / entry.name)
+            shutil.rmtree(entry)
+        removed += 1
 
     if removed:
         print(f"  {OK} Removed {removed} orphaned entries")
@@ -10520,21 +11013,161 @@ def create_symlink(target: Path, link: Path, dry_run: bool = False) -> None:
     link.symlink_to(target)
 
 
+def _remove_view_pointer(path: Path) -> None:
+    """Remove a symlink or a Windows junction — never what it points at.
+
+    `shutil.rmtree` is not one of the options. A junction is `is_dir()` and not
+    `is_symlink()`, so a stale one used to land in the writer's `rmtree` branch;
+    on Windows `rmtree` raises on a junction, and an install that hits one dies
+    with a traceback instead of relinking a view. `os.unlink` is what removes a
+    symlink and `os.rmdir` is what removes a junction, and neither descends.
+    """
+    if path.is_symlink():
+        path.unlink()
+        return
+    path.rmdir()
+
+
 def create_skill_view_symlink(target: Path, link: Path, dry_run: bool = False) -> None:
-    """Create an agent skill view, replacing stale legacy store views."""
+    """Create an agent skill view, replacing stale legacy store views.
+
+    Nothing real at `link` is ever removed — not a directory and not a file. By
+    the time the writer runs, `reconcile_shadowed_skill_dirs` has quarantined
+    every copy whose Vibecrafted provenance it could prove, so whatever is left
+    is something nobody could prove: an operator's own skill parked under a
+    `vc-*` name, or a plain file that happens to carry one. A file needs the
+    same protection as a directory and gets less attention: reconciliation only
+    ever looks at directories, and it skips a runtime whose skills dir is
+    reached through a symlink — so `~/.grok/skills -> ~/notes` with a note
+    called `vc-research` in it was, until now, a note the installer deleted.
+
+    Only a pointer gives way, and it is removed as a pointer — see
+    `_remove_view_pointer`, which never reaches the tree on the far side. A
+    dangling one counts: it is still an entry in the way. A pointer that
+    already resolves to `target` is left exactly as it is:
+    unlinking and relinking it would be a no-op at best, and at worst — when the
+    runtime skill dir is itself a link into the store — a removal inside the
+    store.
+    """
     if target == link:
         if dry_run:
             print(f"  {dim('same-path')} {target}")
         return
+    # `exists()` follows the link, so a pointer aimed at something gone reads
+    # as absent — and then `symlink_to` raises FileExistsError on the entry that
+    # is demonstrably still there. A dangling junction is the realistic one: it
+    # survives the generation its target lived in.
+    present = link.exists() or _is_owned_pointer(link)
+    if present and link.resolve(strict=False) == target.resolve(strict=False):
+        if dry_run:
+            print(f"  {dim('same-path')} {link} -> {target}")
+        return
+    if present and not _is_owned_pointer(link):
+        kind = "directory" if link.is_dir() else "file"
+        print(
+            f"  {WARN} Keeping real {kind} {link}; "
+            "run `vibecrafted doctor` to see why it could not be reconciled"
+        )
+        return
     if dry_run:
         print(f"  {dim('ln -s')} {target} -> {link}")
         return
-    if link.exists() or link.is_symlink():
-        if link.is_symlink() or link.is_file():
-            link.unlink()
-        elif link.is_dir():
-            shutil.rmtree(link)
+    if present:
+        _remove_view_pointer(link)
     link.symlink_to(target)
+
+
+def _write_skill_views(
+    runtimes: Sequence[str],
+    store_path: Path,
+    skills_dir: Path,
+    skill_names: Sequence[str],
+    dry_run: bool = False,
+    styled: bool = True,
+) -> None:
+    """Write the `vc-*` views of `skill_names` into each runtime's skill dir.
+
+    A runtime whose skills root is reached through a link is named rather than
+    handled silently: shadow detection skipped it, so nothing under it was
+    inspected and nothing there will be removed, and without this line that
+    outcome is indistinguishable from a clean host.
+
+    A root that resolves into the store gets nothing written into it at all.
+    Every view there would be a symlink inside the canonical store pointing at
+    its own sibling — litter in the one directory that has to stay exactly what
+    we shipped — and the root-rule copy would write `RULE.md` files into it on
+    every run. The skills are already readable through that root: it *is* the
+    store, so `~/.junie/skills/vc-x` already resolves to `~/.vibecrafted/skills/vc-x`
+    without a view.
+    """
+    for runtime in runtimes:
+        rt_skills = runtime_skills_dir(runtime)
+        problem = runtime_skills_root_problem(runtime, store_path)
+        if problem is not None:
+            print(
+                f"  {WARN} {runtime} skill root {rt_skills} {problem}; "
+                "shadows there are not inspected and nothing is removed"
+            )
+            if _runtime_skills_root_in_store(runtime, store_path):
+                print(
+                    f"  {dim('skip') if styled else 'skip'} {runtime}: "
+                    "the store already answers as this runtime's skill dir, "
+                    "so no view is written into it"
+                )
+                continue
+        if not dry_run:
+            rt_skills.mkdir(parents=True, exist_ok=True)
+        print(f"  {cyan(runtime) if styled else runtime} -> {rt_skills}")
+        for rule in sync_skill_root_rules(skills_dir, rt_skills, dry_run=dry_run):
+            print(f"    {dim('->') if styled else '->'} {rule}")
+        for name in skill_names:
+            create_skill_view_symlink(
+                store_path / name, rt_skills / name, dry_run=dry_run
+            )
+
+
+def link_and_reconcile_skill_views(
+    all_runtimes: Sequence[str],
+    store_path: Path,
+    skills_dir: Path,
+    skill_names: Sequence[str],
+    dry_run: bool = False,
+    styled: bool = True,
+) -> None:
+    """Link every runtime view, quarantining proven copies on the way.
+
+    The order is load-bearing in both directions. Reconciliation has to run
+    before the writer, because the writer keeps any real directory it finds and
+    would leave a stale copy shadowing the view forever. But reconciliation also
+    refuses to remove a copy until `~/.agents/skills/<skill>` actually points at
+    the store — it is the fallback the runtime reads once the copy is gone, and
+    removing a copy without it would take the skill away entirely.
+
+    On a first-ever install nothing has written that canonical view yet, so
+    reconciliation would keep every copy, and the next plain `vibecrafted
+    update` stops at "up to date" without ever running again: the runtime would
+    keep loading June-2026 copies until the next release. So the canonical view
+    is written first, then shadows are reconciled, then the remaining runtimes
+    are linked. Relinking a runtime twice would be harmless anyway — the writer
+    skips a link that already resolves to its target — but there is no need.
+
+    `view_runtimes` carries the whole selection into reconciliation, because
+    `agents` need not be in it at all: an advanced or `--tool` install can pick
+    `claude` alone, and then the canonical view will never exist. A copy in a
+    runtime this pass is about to link is still safe to quarantine — the view
+    lands a moment later, in the call below.
+    """
+    canonical = [rt for rt in all_runtimes if rt in SYMLINK_TARGETS]
+    rest = [rt for rt in all_runtimes if rt not in SYMLINK_TARGETS]
+    _write_skill_views(
+        canonical, store_path, skills_dir, skill_names, dry_run=dry_run, styled=styled
+    )
+    reconcile_shadowed_skill_dirs(
+        store_path, skill_names, dry_run=dry_run, view_runtimes=list(all_runtimes)
+    )
+    _write_skill_views(
+        rest, store_path, skills_dir, skill_names, dry_run=dry_run, styled=styled
+    )
 
 
 def prune_shadowed_skill_views(
@@ -10543,9 +11176,29 @@ def prune_shadowed_skill_views(
     active_runtimes: list[str],
     dry_run: bool = False,
 ) -> list[Path]:
-    """Remove managed runtime views shadowed by the canonical .agents view."""
+    """Remove managed runtime views shadowed by the canonical .agents view.
+
+    A pointer-free root is a precondition, and it is checked per runtime rather
+    than per entry. `~/.codex/skills -> ~/.claude/skills` on a host where only
+    `claude` is active makes every one of claude's live views visible under the
+    inactive `codex` name — same inode, same managed target — and each one would
+    be unlinked as codex's leftover. The runtime whose views these are was never
+    consulted, because the pruner only ever looked at the entry in front of it.
+
+    `runtime_skills_root_problem` is the same gate shadow detection uses, so a
+    root reached through a link and a root resolving into the store are both out
+    of scope here for the same reason: what is under it belongs to something
+    else, and the only pointer we may remove is one we can prove we wrote at a
+    path we own.
+    """
     removed: list[Path] = []
     canonical_root = runtime_skills_dir("agents")
+    prunable = [
+        runtime
+        for runtime in SHADOWED_SKILL_VIEW_RUNTIMES
+        if runtime not in active_runtimes
+        and runtime_skills_root_problem(runtime, store_path) is None
+    ]
     for skill_name in skill_names:
         expected = store_path / skill_name
         canonical = canonical_root / skill_name
@@ -10553,9 +11206,7 @@ def prune_shadowed_skill_views(
             strict=False
         ) != expected.resolve(strict=False):
             continue
-        for runtime in SHADOWED_SKILL_VIEW_RUNTIMES:
-            if runtime in active_runtimes:
-                continue
+        for runtime in prunable:
             shadow = runtime_skills_dir(runtime) / skill_name
             if not shadow.is_symlink():
                 continue
@@ -10572,6 +11223,110 @@ def prune_shadowed_skill_views(
                 shadow.unlink()
             removed.append(shadow)
     return removed
+
+
+def reconcile_shadowed_skill_dirs(
+    store_path: Path,
+    skill_names: Sequence[str],
+    shadows: Sequence[ShadowedSkillDir] | None = None,
+    dry_run: bool = False,
+    view_runtimes: Sequence[str] = (),
+) -> tuple[list[ShadowedSkillDir], list[ShadowedSkillDir]]:
+    """Quarantine and remove proven-managed real-directory skill copies.
+
+    Every runtime is in scope, the ones that carry a managed view included.
+    They used to be skipped on the grounds that `create_skill_view_symlink`
+    would `rmtree` the directory on its way to writing the link — which is to
+    say, the unproven copies in `~/.claude/skills` and `~/.codex/skills` were
+    deleted without a backup while the proven ones elsewhere were carefully
+    quarantined first. The writer no longer removes a real directory at all, so
+    reconciliation owns the decision everywhere and runs before it — after the
+    canonical `agents` view has been linked, which is the precondition below.
+
+    Returns `(reconciled, kept)`. A copy is removed only when provenance is
+    proven, it is a real path that no symlink leads into and that lies outside
+    the store, and the skill will still be readable afterwards — otherwise it is
+    kept and reported. Nothing is ever removed before it has been copied aside.
+
+    "Still readable" is the canonical `~/.agents/skills/<skill>` view pointing
+    at the store, *or* the copy's own runtime being one of `view_runtimes`: the
+    caller links those immediately after this returns, so the copy is replaced
+    by a view rather than simply taken away. Without that second half, an
+    advanced or `--tool` selection that leaves `agents` out could never
+    reconcile anything — the precondition would be unmeetable by construction,
+    and every proven copy would be stranded on the host forever.
+    """
+    detected = (
+        list(shadows)
+        if shadows is not None
+        else collect_shadowed_skill_dirs(store_path, skill_names)
+    )
+    reconciled: list[ShadowedSkillDir] = []
+    kept: list[ShadowedSkillDir] = []
+    if not detected:
+        return reconciled, kept
+
+    canonical_root = runtime_skills_dir("agents")
+    quarantine_root = _backup_root(store_path) / (
+        SHADOW_QUARANTINE_PREFIX + datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    )
+
+    for shadow in detected:
+        if not shadow.is_managed:
+            kept.append(shadow)
+            print(
+                f"  {WARN} Unproven skill copy kept: {shadow.path} "
+                f"({shadow.detail}); move it aside yourself if it is stale: "
+                f"mv {shlex_quote(str(shadow.path))} {shlex_quote(str(shadow.path) + '.bak')}"
+            )
+            continue
+        # Independent of detection, because `shadows=` may be supplied by a
+        # caller: nothing inside the store is ever removed, and a symlinked
+        # ancestor makes `shutil.rmtree` delete whatever the link points at.
+        resolved = shadow.path.resolve(strict=False)
+        store_resolved = store_path.resolve(strict=False)
+        if resolved == store_resolved or store_resolved in resolved.parents:
+            kept.append(shadow)
+            print(
+                f"  {WARN} Keeping {shadow.path}: it resolves into the "
+                f"canonical store ({resolved})"
+            )
+            continue
+        if not _path_is_symlink_free(shadow.path):
+            kept.append(shadow)
+            print(
+                f"  {WARN} Keeping {shadow.path}: reached through a symlink, "
+                "so removing it would delete another tree"
+            )
+            continue
+        canonical = canonical_root / shadow.skill
+        expected = store_path / shadow.skill
+        canonical_linked = canonical.is_symlink() and canonical.resolve(
+            strict=False
+        ) == expected.resolve(strict=False)
+        if not canonical_linked and shadow.runtime not in view_runtimes:
+            kept.append(shadow)
+            print(
+                f"  {WARN} Keeping {shadow.path}: canonical view {canonical} "
+                f"is not linked to the store and no view is being written for "
+                f"{shadow.runtime} in this run"
+            )
+            continue
+
+        destination = quarantine_root / shadow.runtime / shadow.skill
+        if dry_run:
+            print(f"  {dim('quarantine')} {shadow.path} -> {destination}")
+            print(f"  {dim('rm -r')} {shadow.path}")
+            reconciled.append(shadow)
+            continue
+        _copy_path_to_backup(shadow.path, destination)
+        shutil.rmtree(shadow.path)
+        print(f"  {dim('reconciled shadow dir')} {shadow.path} -> {destination}")
+        reconciled.append(shadow)
+
+    if reconciled and not dry_run:
+        print(f"  {dim('quarantined copies kept in')} {quarantine_root}")
+    return reconciled, kept
 
 
 def _copy_managed_launcher(src: Path, dst: Path) -> bool:
@@ -12567,7 +13322,10 @@ def run_doctor(store_path: Path, state: InstallState) -> list[DoctorFinding]:
                     DoctorFinding(
                         "fail",
                         f"symlink:{runtime}/{skill_name}",
-                        "is a COPY, not a symlink — stale drift risk",
+                        "is a COPY, not a symlink — stale drift risk; "
+                        "`vibecrafted update --force` reconciles it, and "
+                        f"shadow-dir:{runtime}/{skill_name} says whether it "
+                        "can be proven",
                     )
                 )
             else:
@@ -12580,6 +13338,71 @@ def run_doctor(store_path: Path, state: InstallState) -> list[DoctorFinding]:
                         else "missing — deck dark for this CLI; rerun 'vibecrafted update'",
                     )
                 )
+
+    # 4a. Real-directory skill copies. A pre-3.x installer materialized copies
+    # into dirs such as ~/.junie/skills; they survive next to the canonical
+    # .agents view and go stale invisibly.
+    #
+    # Runtimes that carry a managed view used to be excluded here, on the
+    # grounds that section 4 already names them. It does — as
+    # `symlink:<rt>/<skill>` "is a COPY", which says nothing about whether the
+    # copy can be proven, and so leaves the operator without the one fact that
+    # decides what happens next. Both reports now run: section 4 keeps the
+    # missing-view contract, and this one supplies the provenance class.
+    shadow_runtimes = list(shadow_candidate_runtimes())
+    shadowed_dirs = collect_shadowed_skill_dirs(
+        store_path, state.skills, shadow_runtimes
+    )
+    # A runtime whose skills root is a link, or which resolves into the store,
+    # was skipped by the collector above. Say so: the alternative is an audit
+    # that looked at nothing and reported the same "no stale skill copies" as a
+    # host that is genuinely clean.
+    # `exists()` follows the link, so a root aimed at something gone reads as
+    # absent while still being an entry the installer would write through.
+    linked_roots = {
+        runtime: problem
+        for runtime in shadow_runtimes
+        if (
+            runtime_skills_dir(runtime).exists()
+            or _is_owned_pointer(runtime_skills_dir(runtime))
+        )
+        and (problem := runtime_skills_root_problem(runtime, store_path)) is not None
+    }
+    for runtime, problem in linked_roots.items():
+        rt_skills = runtime_skills_dir(runtime)
+        findings.append(
+            DoctorFinding(
+                "warn",
+                f"skill-root:{runtime}",
+                f"{rt_skills} {problem} — skill copies under it are not "
+                f"inspected and nothing there is ever removed; check it "
+                f"yourself (`ls -l {rt_skills}`) and point it at a real "
+                f"directory if you want this runtime audited",
+            )
+        )
+    shadow_runtimes = [rt for rt in shadow_runtimes if rt not in linked_roots]
+    for shadow in shadowed_dirs:
+        if shadow.is_managed:
+            action = "`vibecrafted update --force` quarantines and removes it"
+        else:
+            action = "left untouched — move it aside yourself if it is stale"
+        findings.append(
+            DoctorFinding(
+                "warn",
+                f"shadow-dir:{shadow.runtime}/{shadow.skill}",
+                f"{shadow.path} is a real directory shadowing the canonical "
+                f".agents view [{shadow.classification}: {shadow.detail}] — {action}",
+            )
+        )
+    if shadow_runtimes and not shadowed_dirs:
+        findings.append(
+            DoctorFinding(
+                "ok",
+                "shadow-dirs",
+                "no stale skill copies in "
+                + ", ".join(f"~/.{rt}/skills" for rt in shadow_runtimes),
+            )
+        )
 
     # 4b. Agent slash-command views. These are separate from skills and used by
     # provider-native command palettes such as ~/.codex/commands and
@@ -13697,17 +14520,9 @@ def _cmd_install_verbose(args: argparse.Namespace, repo_root: Path) -> int:
 
     # --- Execute: symlink views ---
     print(bold("Linking agent views..."))
-    for rt in all_runtimes:
-        rt_skills = Path.home() / f".{rt}" / "skills"
-        if not dry_run:
-            rt_skills.mkdir(parents=True, exist_ok=True)
-        print(f"  {cyan(rt)} -> {rt_skills}")
-        for rule in sync_skill_root_rules(skills_dir, rt_skills, dry_run=dry_run):
-            print(f"    {dim('->')} {rule}")
-        for name in selected_skills:
-            default = store_path / name
-            link = rt_skills / name
-            create_skill_view_symlink(default, link, dry_run=dry_run)
+    link_and_reconcile_skill_views(
+        all_runtimes, store_path, skills_dir, selected_skills, dry_run=dry_run
+    )
     for shadow in prune_shadowed_skill_views(
         store_path, selected_skills, all_runtimes, dry_run=dry_run
     ):
@@ -14212,17 +15027,14 @@ def _cmd_install_compact(args: argparse.Namespace, repo_root: Path) -> int:
 
         # Symlink views
         print("Linking agent views:")
-        for rt in all_runtimes:
-            rt_skills = Path.home() / f".{rt}" / "skills"
-            if not dry_run:
-                rt_skills.mkdir(parents=True, exist_ok=True)
-            print(f"  {rt} -> {rt_skills}")
-            for rule in sync_skill_root_rules(skills_dir, rt_skills, dry_run=dry_run):
-                print(f"    -> {rule}")
-            for name in selected_skills:
-                default = store_path / name
-                link = rt_skills / name
-                create_skill_view_symlink(default, link, dry_run=dry_run)
+        link_and_reconcile_skill_views(
+            all_runtimes,
+            store_path,
+            skills_dir,
+            selected_skills,
+            dry_run=dry_run,
+            styled=False,
+        )
         for shadow in prune_shadowed_skill_views(
             store_path, selected_skills, all_runtimes, dry_run=dry_run
         ):
@@ -14244,7 +15056,7 @@ def _cmd_install_compact(args: argparse.Namespace, repo_root: Path) -> int:
             " \u00b7 ".join(agent_names) if agent_names else "none detected",
         )
 
-        # Prune (logged only)
+        # Prune orphans: pointers and proven copies go (quarantined first); unproven ones are kept
         prune_orphaned_skills(
             store_path,
             all_runtimes,
