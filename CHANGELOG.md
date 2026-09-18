@@ -59,6 +59,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   rather than unlinked and rewritten, which is what kept a runtime skills dir
   symlinked into the store from having the store copy removed under it.
 
+- Orphan pruning follows the same provenance contract as shadow
+  reconciliation. A `vc-*` directory whose name has left the bundle was
+  `shutil.rmtree`d on sight — and `ask_yn` defaults to yes and returns that
+  default when stdin is not a TTY, so a piped install answered the prompt for
+  the operator. `vc-canvas` is a skill we retired; it is also a name someone
+  could park their own work under. A real orphan directory now has to prove the
+  same thing a shadowing copy proves (`SKILL.md` sha256 plus every file's blob
+  id, which covers retired skills because the manifest is built from all of
+  history), is quarantined under the same
+  `shadowed-views-<timestamp>/<location>/<skill>` layout before removal, and is
+  otherwise kept with a `mv` hint and never offered at the prompt. The two
+  reconciliation rails apply here too: never follow a symlink out of the tree,
+  and never let a runtime entry route a removal into the store. Pointers and
+  stray files are still removed as leftovers of views we wrote.
+
 - Reconciliation no longer needs the canonical `agents` view specifically. It
   needs the skill to remain readable once the copy is gone, which is satisfied
   either by `~/.agents/skills/<skill>` pointing at the store or by the copy's
