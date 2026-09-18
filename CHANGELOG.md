@@ -59,6 +59,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   rather than unlinked and rewritten, which is what kept a runtime skills dir
   symlinked into the store from having the store copy removed under it.
 
+- Reconciliation no longer needs the canonical `agents` view specifically. It
+  needs the skill to remain readable once the copy is gone, which is satisfied
+  either by `~/.agents/skills/<skill>` pointing at the store or by the copy's
+  own runtime being one the same pass is about to link. An advanced or `--tool`
+  selection can omit `agents` altogether, and then the old precondition was
+  unmeetable by construction: every proven copy stayed on the host for good.
+
 - Doctor now sees a real **file** sitting where a skill view belongs — an
   operator's own note at `~/.grok/skills/vc-research`, say. Detection only ever
   examined directories, so that file was invisible to every audit while the
