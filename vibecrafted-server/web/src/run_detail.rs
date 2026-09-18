@@ -506,6 +506,10 @@ fn transcript_panel(run_id: String, preview: TranscriptPreview) -> impl IntoView
                 </div>
                 <span data-transcript-state>{format!("live · {state}")}</span>
             </div>
+            <p class="server-console-links">
+                <button type="button" class="server-console-link" data-copy=preview.body.clone()>"Copy transcript"</button>
+                <button type="button" class="server-console-link" data-copy=format!("/run/{run_id}")>"Copy link"</button>
+            </p>
             <p class="control-empty" data-transcript-empty hidden={preview.available && !empty}>
                 {if preview.available {
                     "The human transcript exists but is empty."
@@ -734,7 +738,7 @@ fn lifecycle_body(run_id: String, lifecycle: LifecycleDetailView) -> impl IntoVi
             </div>
             <p>
                 "This id is a lifecycle baton relay, not a worker snapshot — "
-                "stage state below, full nested truth behind the JSON link."
+                "stage state below, full nested JSON behind the JSON link."
             </p>
             <dl class="run-detail-grid">
                 {fact("workflow", lifecycle.workflow)}

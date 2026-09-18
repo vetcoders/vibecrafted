@@ -104,6 +104,17 @@ def test_tool_destinations_are_optional_and_share_the_config_owner(
     # The [server] owner is unaffected by the sibling table.
     assert load_server_config(path).port == 3025
 
+    path.write_text(
+        "[server]\nport = 3025\n\n"
+        '[tools.slack-console]\nurl = "http://100.82.232.70:4300/console"\n\n'
+        '[tools.vc-frame]\nurl = "http://127.0.0.1:8082/"\n',
+        encoding="utf-8",
+    )
+    assert load_tool_destinations(path) == {
+        "slack-console": "http://100.82.232.70:4300/console",
+        "vc-frame": "http://127.0.0.1:8082/",
+    }
+
     # An explicitly empty url reads as "not configured", not as an error.
     path.write_text('[tools.slack-console]\nurl = ""\n', encoding="utf-8")
     assert load_tool_destinations(path) == {}

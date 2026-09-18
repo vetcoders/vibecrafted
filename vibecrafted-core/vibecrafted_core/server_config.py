@@ -23,7 +23,10 @@ DEFAULT_PORT = 3024
 #: an absent table means "not configured", which the App reports as such.
 #: - ``slack-console``: the vc-slack operator console (``/console`` route of
 #:   the vc-slack-agent portal; ``make portal-preview`` serves it, or a deploy).
-TOOL_DESTINATION_KEYS: tuple[str, ...] = ("slack-console",)
+#: - ``vc-frame``: the product multiplexer web client (``vc-frame web`` / zellij
+#:   web server). The App embeds that origin as a native tab; it never guesses
+#:   a port and never starts the service from a tab.
+TOOL_DESTINATION_KEYS: tuple[str, ...] = ("slack-console", "vc-frame")
 
 
 class ServerConfigError(ValueError):

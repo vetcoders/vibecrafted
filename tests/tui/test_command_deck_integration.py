@@ -66,6 +66,8 @@ def test_single_native_host_source_contract() -> None:
     # permanently-unavailable stub; generated documents are isolated.
     destinations = (APP / "CommandDeck/ToolDestinations.swift").read_text()
     assert '.configuredService(key: "slack-console"' in destinations
+    assert '.configuredService(key: "vc-frame"' in destinations
+    assert 'knownKeys: Set<String> = ["slack-console", "vc-frame"]' in destinations
     assert "vibecrafted/config.toml" in destinations
     assert "target: .unavailable(reason:" not in destinations
     assert (
