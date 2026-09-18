@@ -23,6 +23,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- CLI: `vibecrafted observe <agent>` is a live watch by default. It prints
+  the run status and a short rendered transcript backlog, then follows
+  appended transcript events (rendered through the agent's stream parser)
+  until the run turns terminal — exit 0 on a success state, 1 on a terminal
+  failure; Ctrl-C detaches and never touches the run. `--tail [N]` and
+  `--head [N]` are the bounded one-shot reads (N defaults to 40),
+  `--interval SECONDS` sets the watch poll cadence (default 1.0), and
+  `--json` emits one `vibecrafted.observe-event.v1` line per rendered event
+  between `begin`/`terminal` markers (`vibecrafted.observe-watch.v1`).
 - Linux source install no longer pretends to be a native Runtime Pack. A
   checkout without `libexec/vc-terminal` keeps the product wrapper and
   refuses pack publication; `--runtime-pack-file` still requires the host.
