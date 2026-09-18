@@ -24,7 +24,7 @@ from .lifecycle_runner import (
 )
 from .repo_selection import RepoSelectionError, add_repo_arguments, select_repository
 
-SUPPORTED_AGENTS = {"claude", "codex", "gemini", "agy", "junie", "grok", "cursor"}
+SUPPORTED_AGENTS = {"claude", "codex", "gemini", "agy", "junie", "grok", "cursor", "kimi"}
 
 DEFAULT_SHIP_PROMPT = (
     "Run the full Vibecrafted lifecycle for this repository. Load Context Atlas, "
