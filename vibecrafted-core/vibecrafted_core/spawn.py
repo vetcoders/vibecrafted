@@ -87,11 +87,14 @@ _INHERITED_CONTINUITY_ENV = (
     "AICX_CONTINUITY_FILE",
     "CLAUDE_CODE_SESSION_ID",
     "CODEX_SESSION_ID",
+    "GROK_SESSION_ID",
+    "VIBECRAFTED_AGENT_SESSION_ID",
     "VIBECRAFTED_OPERATOR_SESSION_ID",
     "VIBECRAFTED_PARENT_RUN_ID",
     "VIBECRAFTED_PARENT_SESSION_ID",
     "VIBECRAFTED_RESUME_CONTEXT",
     "VIBECRAFTED_RESUME_META",
+    "VIBECRAFTED_SESSION_ID",
     "VIBECRAFTED_LOOP_STATE_FILE",
     "VIBECRAFTED_LOOP_NR",
     "SPAWN_LOOP_NR",
@@ -128,6 +131,167 @@ _LAUNCHER_ROLE = {
         "operator supplied one below."
     ),
 }
+
+UNKNOWN_NATIVE_IDENTITY = "unknown"
+_AGENT_CONTEXT_SCHEMA = "vibecrafted.agent-context.v1"
+_RESUME_CONTEXT_IS_NOT_NATIVE = (
+    "Resume delta: unfinished-work / settlement context is not a native "
+    "provider-conversation resume. Native resume requires a proven native "
+    "session ID; recovering context alone must not claim one."
+)
+_SESSION_FIELDS_DISJOINT = (
+    "Parent session ID and native child session ID are disjoint fields. "
+    "Do not copy a parent ID onto a child. Unknown stays unknown until the "
+    "provider proves an ID."
+)
+_MANDATE_NO_GRANT = (
+    "This prompt delivers identity and task context. It does not grant extra "
+    "permissions, credentials, or provider authority."
+)
+
+
+def _honest_identity(value: object) -> str:
+    """Return a concrete identifier, or the honest unknown sentinel."""
+    text = str(value or "").strip()
+    return text if text else UNKNOWN_NATIVE_IDENTITY
+
+
+def disjoint_session_identities(
+    *,
+    parent_session_id: str = "",
+    native_child_session_id: str = "",
+) -> tuple[str, str]:
+    """Keep parent and native child IDs as separate fields.
+
+    A missing native ID stays empty (unknown). A child field equal to the
+    parent is treated as unproven, not as inherited identity.
+    """
+    parent = str(parent_session_id or "").strip()
+    native = str(native_child_session_id or "").strip()
+    if native and parent and native == parent:
+        native = ""
+    return parent, native
+
+
+def _panel_identity(admission: Mapping[str, Any] | None = None) -> str:
+    if admission:
+        for key in ("panel_id", "pane_id", "destination_panel", "vc_frame_pane_id"):
+            text = str(admission.get(key) or "").strip()
+            if text:
+                return text
+    for key in ("VC_FRAME_PANE_ID", "ZELLIJ_PANE_ID"):
+        text = str(os.environ.get(key) or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _workspace_identity_for_prompt(
+    root: str | os.PathLike[str],
+    admission: Mapping[str, Any] | None = None,
+) -> str:
+    if admission:
+        existing = str(admission.get("workspace_id") or "").strip()
+        if existing:
+            return existing
+    try:
+        from .workspace_catalog import resolve_run_workspace_identity
+
+        identity = resolve_run_workspace_identity(
+            root=root, env={}, create_if_missing=True
+        )
+        return str(identity.workspace_id)
+    except Exception:  # noqa: BLE001 - unknown is honest; launch still proceeds
+        return ""
+
+
+def agent_context_contract(
+    *,
+    skill: str,
+    root: str | os.PathLike[str],
+    admission: Mapping[str, Any] | None = None,
+    parent_session_id: str = "",
+    resume_block: str = "",
+) -> dict[str, Any]:
+    """Shared VC identity payload for init/partner/operator/resume (and fork).
+
+    Team/launcher role never replaces the real provider or model. Unknown
+    native identity stays unknown. Resume context is a delta, not a native
+    conversation resume.
+    """
+    record = dict(admission or {})
+    launcher = str(skill or record.get("skill") or "init").strip() or "init"
+    role = _LAUNCHER_ROLE.get(
+        launcher,
+        "interactive launcher. Follow the role named above; do not invent a mission.",
+    )
+    parent, native = disjoint_session_identities(
+        parent_session_id=parent_session_id
+        or str(record.get("parent_session_id") or ""),
+        native_child_session_id=str(record.get("agent_session_id") or ""),
+    )
+    provider = str(record.get("agent") or record.get("provider") or "").strip()
+    model = str(
+        record.get("model_effective") or record.get("model_requested") or ""
+    ).strip()
+    run_id = str(record.get("run_id") or "").strip()
+    workspace_id = _workspace_identity_for_prompt(root, record)
+    panel_id = _panel_identity(record)
+    source_snapshot = str(record.get("source_snapshot") or "").strip()
+    native_resume = bool(native) and launcher == "resume"
+    return {
+        "schema": _AGENT_CONTEXT_SCHEMA,
+        "launcher": launcher,
+        "vc_role": launcher,
+        "mandate": role,
+        "provider": provider,
+        "model": model,
+        "run_id": run_id,
+        "workspace_id": workspace_id,
+        "panel_id": panel_id,
+        "parent_session_id": parent,
+        "native_child_session_id": native,
+        "native_identity_status": "proven" if native else "unknown",
+        "native_conversation_resume": native_resume,
+        "resume_delta": resume_block,
+        "source_snapshot": source_snapshot,
+        "root": str(root),
+    }
+
+
+def render_agent_context_block(contract: Mapping[str, Any]) -> list[str]:
+    """Prefill lines for the shared identity contract. Never interpolates secrets."""
+    provider = _honest_identity(contract.get("provider"))
+    model = _honest_identity(contract.get("model"))
+    if model == UNKNOWN_NATIVE_IDENTITY:
+        model = "provider_default"
+    lines = [
+        "VC identity (delivered to this agent):",
+        f"- VC role: {contract.get('vc_role') or contract.get('launcher') or UNKNOWN_NATIVE_IDENTITY}",
+        f"- Mandate: {contract.get('mandate') or _LAUNCHER_ROLE.get('init', '')}",
+        f"- {_MANDATE_NO_GRANT}",
+        f"- Provider: {provider} (team/launcher role does not replace provider or model)",
+        f"- Model: {model}",
+        f"- Task/run: {_honest_identity(contract.get('run_id'))}",
+        f"- Workspace: {_honest_identity(contract.get('workspace_id'))}",
+        f"- Panel: {_honest_identity(contract.get('panel_id'))}",
+        f"- Parent session ID: {_honest_identity(contract.get('parent_session_id'))}",
+        (
+            "- Native child session ID: "
+            f"{_honest_identity(contract.get('native_child_session_id'))}"
+        ),
+        f"- {_SESSION_FIELDS_DISJOINT}",
+        f"- {_RESUME_CONTEXT_IS_NOT_NATIVE}",
+    ]
+    snapshot = str(contract.get("source_snapshot") or "").strip()
+    if snapshot:
+        lines.append(
+            f"- Sources: plan-source `{snapshot}` plus skill files named below."
+        )
+    else:
+        lines.append("- Sources: skill files named below and this private task file.")
+    lines.append("")
+    return lines
 
 
 def legacy_slash_interactive_prompt(skill: str, source: str) -> str:
@@ -167,12 +331,15 @@ def compose_interactive_task_prompt(
     source: str,
     root: str | os.PathLike[str],
     resume_block: str | None = None,
+    admission: Mapping[str, Any] | None = None,
+    parent_session_id: str = "",
 ) -> str:
     """Build the private ``prompt.md`` body for interactive init/operator/partner/resume/fork.
 
     Explicit role, canonical skill files when they exist, preserved extra,
-    and the existing ``init_resume_block`` projection. Empty extra is not a
-    license to invent work. Does not wrap headless ``_runtime_prompt``.
+    the shared VC identity contract, and the existing ``init_resume_block``
+    projection. Empty extra is not a license to invent work. Does not wrap
+    headless ``_runtime_prompt``.
     """
     launcher = str(skill or "init").strip() or "init"
     extra = source if isinstance(source, str) else str(source or "")
@@ -211,6 +378,13 @@ def compose_interactive_task_prompt(
         launcher,
         "interactive launcher. Follow the role named above; do not invent a mission.",
     )
+    contract = agent_context_contract(
+        skill=launcher,
+        root=root,
+        admission=admission,
+        parent_session_id=parent_session_id,
+        resume_block=resume_block or "",
+    )
     lines = [
         "You are in an interactive Vibecrafted session.",
         "",
@@ -218,6 +392,7 @@ def compose_interactive_task_prompt(
         f"Launcher: {launcher}",
         f"Role: {role}",
         "",
+        *render_agent_context_block(contract),
         "This private task file is the complete orientation payload. Do not assume",
         "provider-specific slash commands execute from Markdown. Read the skill",
         "files named below (when present) instead of treating `/vc-*` tokens as",
@@ -835,6 +1010,8 @@ def _fresh_child_environment(
             "CLAUDE_CODE_SESSION_ID",
             "GROK_SESSION_ID",
             "VIBECRAFTED_AGENT_SESSION_ID",
+            "VIBECRAFTED_SESSION_ID",
+            "VIBECRAFTED_PARENT_SESSION_ID",
         ):
             child.pop(name, None)
     if policy.mode == "fresh":
@@ -1400,7 +1577,7 @@ def interactive_workspace_command(
 
         session_selection = resolve_session_selection(
             provider,
-            native_session or parent_session_id,
+            native_session,
             root,
             selection=session_selection,
         )
@@ -1543,10 +1720,25 @@ def interactive_workspace_command(
         "source_path": source_file,
         "source_origin": "file" if source_file else "inline",
         "parent_run_id": parent_run_id or os.environ.get("VIBECRAFTED_RUN_ID", ""),
+        "parent_session_id": parent_session_id,
         "agent_session_id": native_session,
+        "native_child_session_id": native_session,
+        "native_identity_status": "proven" if native_session else "unknown",
+        "panel_id": _panel_identity(None),
         "session_selection": session_selection or {},
         **worktree_receipt,
     }
+    bound_parent, bound_native = disjoint_session_identities(
+        parent_session_id=parent_session_id,
+        native_child_session_id=native_session,
+    )
+    admission["parent_session_id"] = bound_parent
+    admission["agent_session_id"] = bound_native
+    admission["native_child_session_id"] = bound_native
+    admission["native_identity_status"] = "proven" if bound_native else "unknown"
+    workspace_id = _workspace_identity_for_prompt(spec.root, admission)
+    if workspace_id:
+        admission["workspace_id"] = workspace_id
     if parent:
         admission["baseline_sha"] = parent.get("baseline_sha", "")
         admission["runtime_class"] = parent.get("runtime_class", "living-tree")
@@ -2094,7 +2286,17 @@ def launch_interactive_workspace(
         )
     quota = resolve_quota_policy(token_budget, runtime=runtime)
     child_env = _fresh_child_environment(os.environ.copy(), continuity_policy)
-    native_session = str(admission.get("agent_session_id") or "")
+    parent_id, proven_native = disjoint_session_identities(
+        parent_session_id=str(
+            continuity_policy.parent_provider_session_id
+            or admission.get("parent_session_id")
+            or parent_session_id
+            or ""
+        ),
+        native_child_session_id=str(admission.get("agent_session_id") or ""),
+    )
+    native_session = proven_native
+    # Requested --session-id is not a native acknowledgement.
     provider_session_id = native_session or str(uuid.uuid4())
     command = interactive_policy_command(
         provider,
@@ -2113,7 +2315,10 @@ def launch_interactive_workspace(
         # the task-file pointer would only carry the shell's synthetic /vc-fork
         # marker. Codex drops it after its acknowledged thread/fork below.
         command.pop()
-    native_session = str(admission.get("agent_session_id") or "")
+    _, native_session = disjoint_session_identities(
+        parent_session_id=parent_id,
+        native_child_session_id=str(admission.get("agent_session_id") or ""),
+    )
     if native_session:
         if provider == "claude":
             if "--session-id" in command:
@@ -2163,17 +2368,26 @@ def launch_interactive_workspace(
     # A requested ID is not a provider acknowledgement. Codex fork does not
     # even accept our generated ID; process admission must not invent one.
     native_fork = continuity_policy.mode == "bare-fork"
-    launch.receipt["provider_session_id"] = "" if native_fork else provider_session_id
-    launch.receipt["agent_session_id"] = "" if native_fork else provider_session_id
+    launch.receipt["parent_session_id"] = parent_id
+    launch.receipt["native_child_session_id"] = native_session
+    launch.receipt["native_identity_status"] = (
+        "pending" if native_fork else ("proven" if native_session else "unknown")
+    )
     if native_fork:
+        launch.receipt["provider_session_id"] = ""
+        launch.receipt["agent_session_id"] = ""
         launch.receipt.update(
             native_fork=True,
             fork_source_session_id=continuity_policy.parent_provider_session_id,
-            native_identity_status="pending",
             provider_session_requested=(
                 provider_session_id if "--session-id" in command else ""
             ),
         )
+    else:
+        launch.receipt["provider_session_id"] = provider_session_id
+        launch.receipt["agent_session_id"] = native_session
+        if not native_session:
+            launch.receipt["provider_session_requested"] = provider_session_id
     launch.receipt["status"] = "prepared"
     if capability.supported and provider == "claude":
         try:
@@ -2206,6 +2420,8 @@ def launch_interactive_workspace(
             "VIBECRAFTED_CONTINUITY_LINEAGE_ID": continuity_policy.lineage_id,
         }
     )
+    if parent_id:
+        child_env["VIBECRAFTED_PARENT_SESSION_ID"] = parent_id
     if native_fork and provider == "codex":
         from .continuity.native_fork import confirm_codex_native_fork
 
@@ -2552,6 +2768,14 @@ def _launch_supervised_interactive_workspace(
         "state": "reserved",
         "protocol": "operator-protocol-jsonl-v1",
     }
+    parent_id, proven_native = disjoint_session_identities(
+        parent_session_id=str(
+            continuity_policy.parent_provider_session_id
+            or admission.get("parent_session_id")
+            or ""
+        ),
+        native_child_session_id=str(admission.get("agent_session_id") or ""),
+    )
     child_receipt = {
         **launch.receipt,
         **admission,
@@ -2562,6 +2786,11 @@ def _launch_supervised_interactive_workspace(
         "prompt_role": str(admission.get("skill") or "init"),
         "operator_policy": operator_policy.as_dict(),
         "supervision": dict(relation),
+        "parent_session_id": parent_id,
+        "native_child_session_id": proven_native,
+        "agent_session_id": proven_native,
+        "native_identity_status": "proven" if proven_native else "unknown",
+        "provider_session_requested": child_session_id,
     }
     operator_receipt = {
         **launch.receipt,
@@ -5622,6 +5851,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     skill=str(admission["skill"]),
                     source=source.decode("utf-8"),
                     root=admission["root"],
+                    admission=admission,
+                    parent_session_id=str(
+                        getattr(args, "parent_session", "")
+                        or admission.get("parent_session_id")
+                        or ""
+                    ),
                 )
                 # Exclusive execution claim: reopening a view cannot run the provider twice.
                 claim_fd = os.open(
