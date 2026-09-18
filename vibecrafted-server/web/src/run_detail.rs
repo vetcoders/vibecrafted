@@ -147,78 +147,116 @@ fn load_run_detail(run_id: &str) -> RunDetailData {
 }
 
 #[cfg(feature = "ssr")]
+#[derive(Clone, Default)]
+pub(crate) struct TranscriptMatch {
+    pub(crate) available: bool,
+    pub(crate) truncated: bool,
+    pub(crate) matched: bool,
+    pub(crate) snippet: String,
+}
+
+#[cfg(feature = "ssr")]
+fn strip_terminal_escapes(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\u{1b}' {
+            output.push(ch);
+            continue;
+        }
+
+        match chars.next() {
+            Some('[') => {
+                for code in chars.by_ref() {
+                    if ('@'..='~').contains(&code) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                let mut escaped = false;
+                for code in chars.by_ref() {
+                    if code == '\u{7}' || (escaped && code == '\\') {
+                        break;
+                    }
+                    escaped = code == '\u{1b}';
+                }
+            }
+            Some(_) | None => {}
+        }
+    }
+    output
+}
+
+/// Open `runtime_runs/<id>/transcript.human.log` under the control-plane home.
+/// Symlinks, traversal, and non-files are refused.
+#[cfg(feature = "ssr")]
+fn confined_human_transcript(
+    plane: &control_core::ControlPlane,
+    run_id: &str,
+) -> Option<(std::fs::File, u64)> {
+    use std::fs::{self, File};
+
+    if !is_safe_run_id(run_id) {
+        return None;
+    }
+    let runtime_root = plane.control_plane_home().join("runtime_runs");
+    let canonical_root = fs::canonicalize(&runtime_root).ok()?;
+    let candidate = runtime_root.join(run_id).join("transcript.human.log");
+    let metadata = fs::symlink_metadata(&candidate).ok()?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return None;
+    }
+    let canonical_candidate = fs::canonicalize(&candidate).ok()?;
+    if !canonical_candidate.starts_with(&canonical_root) {
+        return None;
+    }
+    let file = File::open(&canonical_candidate).ok()?;
+    Some((file, metadata.len()))
+}
+
+#[cfg(feature = "ssr")]
+pub(crate) fn snippet_for(body: &str, query: &str) -> String {
+    const LIMIT: usize = 160;
+    let haystack = body.trim();
+    if haystack.is_empty() {
+        return String::new();
+    }
+    if query.is_empty() {
+        return haystack.chars().take(LIMIT).collect();
+    }
+    let lower = haystack.to_ascii_lowercase();
+    let needle = query.to_ascii_lowercase();
+    let Some(at) = lower.find(&needle) else {
+        return haystack.chars().take(LIMIT).collect();
+    };
+    let start = at.saturating_sub(24);
+    haystack
+        .chars()
+        .skip(start)
+        .take(LIMIT)
+        .collect::<String>()
+        .replace('\n', " ")
+}
+
+#[cfg(feature = "ssr")]
 pub(crate) fn load_human_transcript(
     plane: &control_core::ControlPlane,
     run_id: &str,
 ) -> TranscriptPreview {
-    use std::fs::{self, File};
     use std::io::{Read, Seek, SeekFrom};
 
     const MAX_BYTES: u64 = 48 * 1024;
     const MAX_LINES: usize = 160;
 
-    fn strip_terminal_escapes(input: &str) -> String {
-        let mut output = String::with_capacity(input.len());
-        let mut chars = input.chars().peekable();
-        while let Some(ch) = chars.next() {
-            if ch != '\u{1b}' {
-                output.push(ch);
-                continue;
-            }
-
-            match chars.next() {
-                Some('[') => {
-                    for code in chars.by_ref() {
-                        if ('@'..='~').contains(&code) {
-                            break;
-                        }
-                    }
-                }
-                Some(']') => {
-                    let mut escaped = false;
-                    for code in chars.by_ref() {
-                        if code == '\u{7}' || (escaped && code == '\\') {
-                            break;
-                        }
-                        escaped = code == '\u{1b}';
-                    }
-                }
-                Some(_) | None => {}
-            }
-        }
-        output
-    }
-
-    if !is_safe_run_id(run_id) {
-        return TranscriptPreview::default();
-    }
-
-    let runtime_root = plane.control_plane_home().join("runtime_runs");
-    let Ok(canonical_root) = fs::canonicalize(&runtime_root) else {
+    let Some((mut file, len)) = confined_human_transcript(plane, run_id) else {
         return TranscriptPreview::default();
     };
-    let candidate = runtime_root.join(run_id).join("transcript.human.log");
-    let Ok(metadata) = fs::symlink_metadata(&candidate) else {
-        return TranscriptPreview::default();
-    };
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return TranscriptPreview::default();
-    }
-    let Ok(canonical_candidate) = fs::canonicalize(&candidate) else {
-        return TranscriptPreview::default();
-    };
-    if !canonical_candidate.starts_with(&canonical_root) {
-        return TranscriptPreview::default();
-    }
-
-    let start = metadata.len().saturating_sub(MAX_BYTES);
-    let Ok(mut file) = File::open(&canonical_candidate) else {
-        return TranscriptPreview::default();
-    };
+    let start = len.saturating_sub(MAX_BYTES);
     if file.seek(SeekFrom::Start(start)).is_err() {
         return TranscriptPreview::default();
     }
-    let mut bytes = Vec::with_capacity((metadata.len() - start) as usize);
+    let mut bytes = Vec::with_capacity((len - start) as usize);
     if file.read_to_end(&mut bytes).is_err() {
         return TranscriptPreview::default();
     }
@@ -235,6 +273,49 @@ pub(crate) fn load_human_transcript(
         body: strip_terminal_escapes(&lines[line_start..].join("\n")),
         available: true,
         truncated: start > 0 || line_start > 0,
+    }
+}
+
+/// Search the canonical human log from the start, capped, so a needle that
+/// lives only in the head of a long transcript is still found. The live run
+/// page keeps the tail preview; this path is for `/api/control/transcripts`.
+#[cfg(feature = "ssr")]
+pub(crate) fn match_human_transcript(
+    plane: &control_core::ControlPlane,
+    run_id: &str,
+    needle: &str,
+) -> TranscriptMatch {
+    use std::io::Read;
+
+    const SEARCH_MAX_BYTES: u64 = 256 * 1024;
+
+    if needle.trim().is_empty() {
+        let preview = load_human_transcript(plane, run_id);
+        return TranscriptMatch {
+            available: preview.available,
+            truncated: preview.truncated,
+            matched: preview.available,
+            snippet: snippet_for(&preview.body, ""),
+        };
+    }
+
+    let Some((file, len)) = confined_human_transcript(plane, run_id) else {
+        return TranscriptMatch::default();
+    };
+    let mut limited = file.take(SEARCH_MAX_BYTES);
+    let mut bytes = Vec::new();
+    if limited.read_to_end(&mut bytes).is_err() {
+        return TranscriptMatch::default();
+    }
+    let stripped = strip_terminal_escapes(&String::from_utf8_lossy(&bytes));
+    let matched = stripped
+        .to_ascii_lowercase()
+        .contains(&needle.to_ascii_lowercase());
+    TranscriptMatch {
+        available: true,
+        truncated: len > SEARCH_MAX_BYTES,
+        matched,
+        snippet: snippet_for(&stripped, needle),
     }
 }
 
@@ -782,7 +863,7 @@ mod tests {
     use leptos::prelude::*;
     use serde_json::{Value, json};
 
-    use super::{load_run_detail_from, run_detail_view};
+    use super::{load_run_detail_from, match_human_transcript, run_detail_view};
     use crate::theme::provide_theme_context;
 
     fn temp_home() -> PathBuf {
@@ -936,6 +1017,36 @@ mod tests {
         assert!(html.contains(&format!("/api/control/runs/{run_id}/transcript")));
         assert!(html.contains("setInterval(refreshTranscript, 2000)"));
         assert!(html.contains("data-transcript-output"));
+
+        fs::remove_dir_all(home).ok();
+    }
+
+    #[test]
+    fn transcript_search_reads_the_capped_head_not_only_the_tail() {
+        let home = temp_home();
+        let run_id = "impl-260809-120000-head";
+        let runs_dir = home.join("control_plane/runs");
+        let transcript_dir = home.join("control_plane/runtime_runs").join(run_id);
+        fs::create_dir_all(&runs_dir).expect("runs dir");
+        fs::create_dir_all(&transcript_dir).expect("transcript dir");
+        write_snapshot(&runs_dir, run_id, "/tmp/repo/reports/final.md");
+        let mut transcript = String::from("HEAD-NEEDLE-unique\n");
+        for line in 0..250 {
+            transcript.push_str(&format!("pad-{line:03} {}\n", "x".repeat(280)));
+        }
+        fs::write(transcript_dir.join("transcript.human.log"), &transcript)
+            .expect("human transcript");
+
+        let plane = ControlPlane::new(home.clone());
+        let tail = super::load_human_transcript(&plane, run_id);
+        assert!(tail.available);
+        assert!(tail.truncated);
+        assert!(!tail.body.contains("HEAD-NEEDLE-unique"));
+
+        let hit = match_human_transcript(&plane, run_id, "HEAD-NEEDLE-unique");
+        assert!(hit.available);
+        assert!(hit.matched);
+        assert!(hit.snippet.contains("HEAD-NEEDLE-unique"));
 
         fs::remove_dir_all(home).ok();
     }

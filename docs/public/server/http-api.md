@@ -24,6 +24,7 @@ revalidate qualified process identity; only that writer may issue a receipted
 | GET    | `/api/control/runs/{run_id}`         | One run by id, or a `404` JSON body.                                     |
 | GET    | `/api/control/runs/{run_id}/observe` | Versioned one-shot observation; never arms a monitor.                    |
 | GET    | `/api/control/runs/{run_id}/await`   | Shared blocking subscription for the run.                                |
+| GET    | `/api/control/transcripts?q=`        | Host-wide human-log search. Results (not snapshots) are capped; each file is read from the start. |
 | GET    | `/api/control/lifecycle`             | Lifecycle run summaries, newest-first.                                   |
 | GET    | `/api/control/lifecycle/{run_id}`    | Full nested lifecycle state with per-run and per-stage axes.             |
 | GET    | `/api/control/events`                | Server-Sent Events stream of the control-plane event log.                |
@@ -134,6 +135,9 @@ curl -s http://127.0.0.1:3024/api/control/runs | python3 -m json.tool | head
 
 # one run (404 JSON when unknown)
 curl -s http://127.0.0.1:3024/api/control/runs/impl-20260730-a1b2
+
+# search human transcripts (needle may live only in the head of a long log)
+curl -s "http://127.0.0.1:3024/api/control/transcripts?q=needle"
 
 # lifecycle list, then one lifecycle run in full
 curl -s http://127.0.0.1:3024/api/control/lifecycle

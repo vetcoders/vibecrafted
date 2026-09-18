@@ -1114,23 +1114,44 @@ fn transcripts_search_script() -> &'static str {
   const status = document.getElementById('transcript-search-status');
   const list = document.getElementById('transcript-search-results');
   if (!form || !q || !status || !list) return;
+  const text = (value) => (value == null ? '' : String(value));
   const render = (items) => {
     list.replaceChildren();
     for (const item of items || []) {
+      const id = text(item.run_id);
       const row = document.createElement('article');
       row.className = 'control-run-row';
       row.setAttribute('data-ppm', 'run');
-      row.setAttribute('data-run-id', item.run_id || '');
-      row.setAttribute('data-href', '/run/' + (item.run_id || ''));
-      row.setAttribute('data-focus-root', item.root || '');
-      const id = item.run_id || '';
-      row.innerHTML = '<div class="control-run-primary"><a class="control-run-id" href="/run/'
-        + encodeURIComponent(id) + '">' + id
-        + '</a><span class="control-run-root">' + (item.agent || '') + ' · ' + (item.skill || '')
-        + '</span></div><div class="control-run-meta"><span>' + (item.updated_at || '')
-        + '</span><span>' + (item.snippet || '') + '</span><button type="button" class="control-copy" data-copy="'
-        + id + '">Copy</button><a class="control-run-open" href="/run/'
-        + encodeURIComponent(id) + '">Open transcript →</a></div>';
+      row.setAttribute('data-run-id', id);
+      row.setAttribute('data-href', '/run/' + encodeURIComponent(id));
+      row.setAttribute('data-focus-root', text(item.root));
+      const primary = document.createElement('div');
+      primary.className = 'control-run-primary';
+      const link = document.createElement('a');
+      link.className = 'control-run-id';
+      link.href = '/run/' + encodeURIComponent(id);
+      link.textContent = id;
+      const root = document.createElement('span');
+      root.className = 'control-run-root';
+      root.textContent = text(item.agent) + ' · ' + text(item.skill);
+      primary.append(link, root);
+      const meta = document.createElement('div');
+      meta.className = 'control-run-meta';
+      const updated = document.createElement('span');
+      updated.textContent = text(item.updated_at);
+      const snippet = document.createElement('span');
+      snippet.textContent = text(item.snippet);
+      const copy = document.createElement('button');
+      copy.type = 'button';
+      copy.className = 'control-copy';
+      copy.setAttribute('data-copy', id);
+      copy.textContent = 'Copy';
+      const open = document.createElement('a');
+      open.className = 'control-run-open';
+      open.href = '/run/' + encodeURIComponent(id);
+      open.textContent = 'Open transcript →';
+      meta.append(updated, snippet, copy, open);
+      row.append(primary, meta);
       list.append(row);
     }
   };
@@ -1165,7 +1186,7 @@ pub fn TranscriptsPage() -> impl IntoView {
         <Meta name="description" content="Every human transcript on this host, searchable in the browser." />
         <ServerFrame active=ServerSection::Transcripts status="transcripts".to_string()>
             <div class="server-console-shell route-page-shell">
-                {route_header("Runtime", "Transcripts", "Every canonical transcript.human.log on this host. Search filters the tails; each row opens the run in the browser.")}
+                {route_header("Runtime", "Transcripts", "Every canonical transcript.human.log on this host. Search reads each log from the start (byte-capped); each row opens the run in the browser.")}
                 <section class="control-panel control-panel-wide" aria-label="Transcript search">
                     <form id="transcript-search-form" class="server-console-links">
                         <input id="transcript-search-query" name="q" type="search" maxlength="512" placeholder="Search transcripts" />
@@ -1187,22 +1208,17 @@ pub fn FramePage() -> impl IntoView {
         <Meta name="description" content="Embedded vc-frame session (zellij web client)." />
         <ServerFrame active=ServerSection::Frame status="frame".to_string()>
             <div class="server-console-shell route-page-shell">
-                {route_header("Session", "Frame", "The product multiplexer lives in vc-frame. The App embeds its web client when [tools.vc-frame] is set; this page is the browser door to the same session.")}
+                {route_header("Session", "Frame", "The product multiplexer lives in vc-frame. Name its web client once; the App starts that origin and embeds it as a native tab. This page is the browser door to the same contract.")}
                 <section class="control-panel control-panel-wide" aria-label="Frame session">
                     <div class="control-panel-head"><h2>"vc-frame web"</h2><span>"host session"</span></div>
                     <p class="route-page-description">
-                        "Start the web client on this host, then name it once in config. The App opens it as a native tab; this page copies the same contract."
+                        "Name the served origin in config. Vibecrafted.app starts `vc-frame web` on that host:port and opens it as a native tab. Tabs never start the service. Closing a tab does not kill the host session."
                     </p>
                     <ol class="operator-guide-list">
                         <li><strong>"Host session"</strong><span>"`vc-start` / `vc-frame` attaches the whole-host multiplexer (`/tmp/vc-frame-<uid>`). That session outlives any tab."</span></li>
-                        <li><strong>"Web client"</strong><span>"`vc-frame web` — long-lived zellij web server on the same socket namespace. Tabs never start this service."</span></li>
-                        <li>
-                            <strong>"Name it"</strong>
-                            <span>
-                                "`[tools.vc-frame] url = \"http://127.0.0.1:<port>/\"` in `~/.config/vibecrafted/config.toml`. No guessed port."
-                            </span>
-                        </li>
-                        <li><strong>"Embed"</strong><span>"Vibecrafted.app → View → Open in Tab → Frame loads that origin as a native tab. Closing the tab does not kill the host session."</span></li>
+                        <li><strong>"Name the origin"</strong><span>"`[tools.vc-frame] url = \"http://127.0.0.1:<port>/\"` in `~/.config/vibecrafted/config.toml`. No guessed port — the App binds exactly that loopback http origin."</span></li>
+                        <li><strong>"Web client"</strong><span>"The App starts `vc-frame web --ip <host> --port <port>` on connect when that table is set. Browser-only operators start `vc-frame web` themselves."</span></li>
+                        <li><strong>"Embed"</strong><span>"Vibecrafted.app → View → Open in Tab → Frame loads that origin as a native tab. Closing the tab detaches the view; workers keep running."</span></li>
                     </ol>
                     <p class="server-console-links">
                         <button type="button" class="server-console-link server-console-link-primary" data-copy="vc-frame web">"Copy start command"</button>
@@ -1821,9 +1837,13 @@ mod tests {
         });
         assert!(transcripts.contains("id=\"transcript-search-form\""));
         assert!(transcripts.contains("/api/control/transcripts"));
+        assert!(!transcripts.contains("row.innerHTML"));
+        assert!(transcripts.contains("snippet.textContent"));
         assert!(frame.contains("vc-frame web"));
         assert!(frame.contains("[tools.vc-frame]"));
         assert!(frame.contains("Open in Tab"));
+        assert!(frame.contains("--ip"));
+        assert!(frame.contains("Tabs never start"));
     }
 
     #[test]
