@@ -1,5 +1,8 @@
 use crate::catalog::CatalogState;
 use crate::config::{AppConfig, path_display, resolve_destination_repo_from_env};
+use crate::home::{
+    HomeCounts, HomeNavigation, HomeRow, HomeSurface, project_home, wrap_transcript_words,
+};
 use crate::launch::{
     Environment, LaunchCommand, LaunchKind, LaunchOutcome, LaunchRequest, PermissionPolicy,
     Presentation, SandboxChoice, build_launch_command,
@@ -134,6 +137,8 @@ pub struct PaneScroll {
     pub timeline: u16,
     pub observe_list: u16,
     pub observe_transcript: u16,
+    pub home_list: u16,
+    pub home_transcript: u16,
     pub controls_actions: u16,
     pub controls_artifacts: u16,
     pub controls_timeline: u16,
@@ -157,6 +162,8 @@ impl InteractionState {
             PaneId::MonitorTimeline => &mut self.scroll.timeline,
             PaneId::ObserveList => &mut self.scroll.observe_list,
             PaneId::ObserveTranscript => &mut self.scroll.observe_transcript,
+            PaneId::HomeList => &mut self.scroll.home_list,
+            PaneId::HomeTranscript => &mut self.scroll.home_transcript,
             PaneId::ControlsActions => &mut self.scroll.controls_actions,
             PaneId::ControlsArtifacts => &mut self.scroll.controls_artifacts,
             PaneId::ControlsTimeline => &mut self.scroll.controls_timeline,
@@ -176,6 +183,8 @@ impl InteractionState {
             PaneId::MonitorTimeline => self.scroll.timeline,
             PaneId::ObserveList => self.scroll.observe_list,
             PaneId::ObserveTranscript => self.scroll.observe_transcript,
+            PaneId::HomeList => self.scroll.home_list,
+            PaneId::HomeTranscript => self.scroll.home_transcript,
             PaneId::ControlsActions => self.scroll.controls_actions,
             PaneId::ControlsArtifacts => self.scroll.controls_artifacts,
             PaneId::ControlsTimeline => self.scroll.controls_timeline,
@@ -830,6 +839,161 @@ impl App {
             env: self.launch_env(),
             stdin: None,
         })
+    }
+
+    pub fn home_rows(&self) -> Vec<HomeRow> {
+        project_home(&self.state, self.observe.home.scope, &self.config.repo)
+    }
+
+    pub fn home_counts(&self) -> HomeCounts {
+        HomeCounts::from_rows(&self.home_rows())
+    }
+
+    pub fn selected_home_row(&self) -> Option<HomeRow> {
+        let rows = self.home_rows();
+        rows.get(self.observe.home.selected.min(rows.len().saturating_sub(1)))
+            .cloned()
+    }
+
+    pub fn move_home_selection(&mut self, delta: isize) {
+        let count = self.home_rows().len() as isize;
+        if count == 0 {
+            self.observe.home.selected = 0;
+            return;
+        }
+        let mut index = self.observe.home.selected as isize + delta;
+        while index < 0 {
+            index += count;
+        }
+        self.observe.home.selected = (index % count) as usize;
+    }
+
+    pub fn toggle_home_scope(&mut self) {
+        self.observe.home.scope = self.observe.home.scope.next();
+        let rows = self.home_rows();
+        if self.observe.home.selected >= rows.len() {
+            self.observe.home.selected = rows.len().saturating_sub(1);
+        }
+        let counts = HomeCounts::from_rows(&rows);
+        self.append_status(format!(
+            "[{}] attention {}  work {}  history {}",
+            self.observe.home.scope.label(),
+            counts.attention,
+            counts.work,
+            counts.history
+        ));
+    }
+
+    /// Open the selected Home row. A known panel becomes an in-console
+    /// conversation. A missing target is an error. Neither path launches.
+    pub fn open_selected_home_row(&mut self) {
+        let Some(row) = self.selected_home_row() else {
+            self.append_status("no agent on Home");
+            return;
+        };
+        match row.panel.clone() {
+            Some(panel) => {
+                let nav = HomeNavigation::ToPanel {
+                    run_id: row.run_id.clone(),
+                    panel: panel.clone(),
+                };
+                self.observe.home.navigations.push(nav.clone());
+                self.observe.home.surface = HomeSurface::Conversation;
+                self.observe.home.conversation_run_id = Some(row.run_id.clone());
+                if let Some(index) = self
+                    .observe
+                    .runs
+                    .iter()
+                    .position(|run| run.run_id == row.run_id)
+                {
+                    self.observe.selected = index;
+                    self.refresh_observe_transcript();
+                } else if let Some(index) = self
+                    .runs
+                    .iter()
+                    .position(|run| run.snapshot.run_id == row.run_id)
+                {
+                    self.selected = index;
+                }
+                self.append_status(nav.status_line());
+            }
+            None => {
+                let reason = format!("no existing panel for {} · not launching", row.agent);
+                let nav = HomeNavigation::MissingTarget {
+                    run_id: row.run_id.clone(),
+                    reason: reason.clone(),
+                };
+                self.observe.home.navigations.push(nav);
+                self.show_error(
+                    "no existing panel",
+                    vec![
+                        reason,
+                        "Home opens an existing conversation only.".to_string(),
+                    ],
+                );
+            }
+        }
+    }
+
+    pub fn return_home(&mut self) {
+        self.observe.home.surface = HomeSurface::Landing;
+        self.observe.home.conversation_run_id = None;
+        self.focus = LaunchFocus::Browse;
+        self.append_status("returned to Home");
+    }
+
+    pub fn home_conversation_lines(&self, width: usize) -> Vec<String> {
+        let mut lines = Vec::new();
+        if let Some(row) = self
+            .observe
+            .home
+            .conversation_run_id
+            .as_deref()
+            .and_then(|run_id| {
+                self.home_rows()
+                    .into_iter()
+                    .find(|row| row.run_id == run_id)
+            })
+        {
+            lines.extend(wrap_transcript_words(
+                &format!(
+                    "Home · conversation  {}  {}",
+                    row.agent,
+                    row.panel
+                        .as_deref()
+                        .map(|panel| format!("panel:{panel}"))
+                        .unwrap_or_else(|| "no panel".to_string())
+                ),
+                width,
+            ));
+            if let Some(body) = self.home_conversation_transcript() {
+                lines.extend(wrap_transcript_words(&body, width));
+            }
+        } else {
+            lines.extend(wrap_transcript_words(
+                "Select an agent on Home to open an existing conversation.",
+                width,
+            ));
+        }
+        lines
+    }
+
+    fn home_conversation_transcript(&self) -> Option<String> {
+        let loaded = self.observe.transcript.trim();
+        if !loaded.is_empty() && !loaded.starts_with("loading transcript") {
+            return Some(self.observe.transcript.clone());
+        }
+        let run_id = self.observe.home.conversation_run_id.as_deref()?;
+        let path = self
+            .state
+            .runs
+            .iter()
+            .find(|snapshot| snapshot.run_id == run_id)
+            .and_then(|snapshot| snapshot.latest_transcript.as_deref())?;
+        std::fs::read_to_string(path)
+            .ok()
+            .map(|body| body.trim_end().to_string())
+            .filter(|body| !body.is_empty())
     }
 
     pub fn refresh_memory(&mut self) {

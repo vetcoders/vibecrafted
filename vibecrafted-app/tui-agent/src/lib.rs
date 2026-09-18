@@ -1,6 +1,7 @@
 pub mod app;
 pub mod catalog;
 pub mod config;
+pub mod home;
 pub mod launch;
 pub mod layout;
 pub mod memory;
@@ -165,6 +166,7 @@ struct ArtifactChange {
 pub use app::{App, AppTab, DeepAction, DispatchFocus, LaunchFocus, QueueScope};
 pub use catalog::{CatalogState, LauncherCatalog};
 pub use config::{AppConfig, CliOptions, build_config, parse_args};
+pub use home::{HomeBand, HomeCounts, HomeNavigation, HomeScope, HomeState, HomeSurface};
 pub use launch::{
     Admission, Confirmation, DeclarationAudit, Environment, LaunchCommand, LaunchExpectation,
     LaunchKind, LaunchOutcome, LaunchReceipt, LauncherRun, PermissionPolicy, Presentation,
@@ -680,11 +682,24 @@ fn handle_key(
             _ => {}
         },
         LaunchFocus::Browse => match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => return Ok(InputOutcome::Quit),
+            KeyCode::Char('q') => return Ok(InputOutcome::Quit),
+            KeyCode::Esc
+                if app.config.view.is_home()
+                    && app.observe.home.surface == crate::home::HomeSurface::Conversation =>
+            {
+                app.return_home();
+            }
+            KeyCode::Esc => return Ok(InputOutcome::Quit),
             KeyCode::Char('?') => app.focus = LaunchFocus::Help,
             KeyCode::Tab => app.next_tab(),
             KeyCode::BackTab => app.previous_tab(),
             KeyCode::Up | KeyCode::Char('k') => match app.active_tab() {
+                AppTab::Monitor
+                    if app.config.view.is_home()
+                        && app.observe.home.surface == crate::home::HomeSurface::Landing =>
+                {
+                    app.move_home_selection(-1);
+                }
                 AppTab::Monitor if app.config.view == crate::observe::ConsoleView::Observe => {
                     app.move_observe_selection(-1);
                 }
@@ -694,6 +709,12 @@ fn handle_key(
                 AppTab::MissionControl => app.move_mission_focus(-1),
             },
             KeyCode::Down | KeyCode::Char('j') => match app.active_tab() {
+                AppTab::Monitor
+                    if app.config.view.is_home()
+                        && app.observe.home.surface == crate::home::HomeSurface::Landing =>
+                {
+                    app.move_home_selection(1);
+                }
                 AppTab::Monitor if app.config.view == crate::observe::ConsoleView::Observe => {
                     app.move_observe_selection(1);
                 }
@@ -751,7 +772,9 @@ fn handle_key(
                 app.dispatch_selected = DispatchFocus::Model as usize;
                 app.focus = LaunchFocus::EditModel;
             }
+            KeyCode::Char('f') if app.config.view.is_home() => app.toggle_home_scope(),
             KeyCode::Char('f') => app.toggle_filter(),
+            KeyCode::Char('H') if app.config.view.is_home() => app.return_home(),
             KeyCode::Char('o')
                 if app.config.view == crate::observe::ConsoleView::Observe
                     && app.active_tab() == AppTab::Monitor =>
@@ -799,6 +822,11 @@ fn handle_key(
             }
             KeyCode::Char('g') => app.begin_repo_edit(),
             KeyCode::Enter => match app.active_tab() {
+                AppTab::Monitor if app.config.view.is_home() => {
+                    if app.observe.home.surface == crate::home::HomeSurface::Landing {
+                        app.open_selected_home_row();
+                    }
+                }
                 AppTab::Monitor => {
                     if app.config.view == crate::observe::ConsoleView::Observe {
                         outcome = switch_to_selected_observe_session(app)?;
@@ -903,6 +931,10 @@ fn scroll_hit(
         app.move_observe_selection(delta.into());
         return;
     }
+    if matches!(hit, crate::layout::HitTarget::HomeList { .. }) {
+        app.move_home_selection(delta.into());
+        return;
+    }
     if matches!(hit, crate::layout::HitTarget::MonitorList { .. }) {
         app.move_selection(delta.into());
         return;
@@ -942,6 +974,16 @@ fn click_hit(app: &mut App, hit: crate::layout::HitTarget) -> anyhow::Result<Inp
             let row = usize::from(inner_row.saturating_add(app.interaction.scroll.deck));
             if row < DispatchFocus::COUNT {
                 app.dispatch_selected = row;
+            }
+        }
+        HitTarget::HomeList { inner_row } => {
+            let visual = home_visual_index(app, usize::from(inner_row));
+            if let Some(index) = visual {
+                if index == app.observe.home.selected {
+                    app.open_selected_home_row();
+                } else {
+                    app.observe.home.selected = index;
+                }
             }
         }
         HitTarget::ObserveList { inner_row } => {
@@ -988,7 +1030,11 @@ fn pane_rect(
         PaneId, controls_layout, dispatch_layout, mission_layout, monitor_layout, mux_panel_height,
         observe_layout, polarize_panel_height, root_layout,
     };
-    let body = root_layout(area).body;
+    let body = if app.config.view.is_home() {
+        crate::layout::home_root_layout(area).body
+    } else {
+        root_layout(area).body
+    };
     match pane {
         PaneId::DispatchDeck => Some(dispatch_layout(body).deck),
         PaneId::DispatchPlaybook => Some(dispatch_layout(body).playbook),
@@ -1019,6 +1065,8 @@ fn pane_rect(
         ),
         PaneId::ObserveList => Some(observe_layout(body).list),
         PaneId::ObserveTranscript => Some(observe_layout(body).transcript),
+        PaneId::HomeList => Some(crate::layout::home_layout(body, area.width).list),
+        PaneId::HomeTranscript => Some(crate::layout::home_layout(body, area.width).transcript),
         PaneId::ControlsActions => Some(controls_layout(body).actions),
         PaneId::ControlsArtifacts => Some(controls_layout(body).artifacts),
         PaneId::ControlsTimeline => Some(controls_layout(body).timeline),
@@ -1038,6 +1086,8 @@ fn pane_content_len(app: &App, pane: crate::layout::PaneId, view_width: u16) -> 
         PaneId::MonitorTimeline | PaneId::ControlsTimeline => app.event_lines().len(),
         PaneId::ObserveList => app.observe.runs.len(),
         PaneId::ObserveTranscript => app.observe.transcript.lines().count().saturating_add(6),
+        PaneId::HomeList => crate::ui::home_board_line_count(app),
+        PaneId::HomeTranscript => app.home_conversation_lines(view_width as usize).len(),
         PaneId::ControlsActions => app.deep_control_lines().len(),
         PaneId::Mission(0) => app
             .mission_control
@@ -1052,6 +1102,10 @@ fn pane_content_len(app: &App, pane: crate::layout::PaneId, view_width: u16) -> 
         PaneId::Mission(6) => app.mission_control.action_queue.len(),
         PaneId::Mission(_) => 0,
     }
+}
+
+fn home_visual_index(app: &App, inner_row: usize) -> Option<usize> {
+    crate::ui::home_row_index_at(app, inner_row)
 }
 
 fn switch_to_selected_observe_session(app: &mut App) -> anyhow::Result<InputOutcome> {
@@ -1623,6 +1677,80 @@ mod tests {
 
     fn dispatch_area() -> ratatui::layout::Rect {
         ratatui::layout::Rect::new(0, 0, 120, 40)
+    }
+
+    #[test]
+    fn handle_key_home_opens_existing_panel_without_launch_and_returns() {
+        let mut app = sample_app();
+        app.config.view = crate::observe::ConsoleView::Home;
+        app.state.runs = vec![sample_run("work-1", "claude", "pane-2").snapshot, {
+            let mut missing = sample_run("ask-beta", "grok", "").snapshot;
+            missing.operator_session = None;
+            missing
+                .extra
+                .insert("needs_attention".into(), serde_json::Value::Bool(true));
+            missing
+        }];
+        app.state.retained_runs = app.state.runs.clone();
+        let (tx, rx) = std::sync::mpsc::channel::<BackgroundMessage>();
+        let work_at = app
+            .home_rows()
+            .iter()
+            .position(|row| row.run_id == "work-1")
+            .expect("work row");
+        app.observe.home.selected = work_at;
+
+        handle_key(&mut app, key(KeyCode::Enter), &tx).unwrap();
+        assert_eq!(
+            app.observe.home.surface,
+            crate::home::HomeSurface::Conversation
+        );
+        assert!(app.status_line.contains("navigate existing panel pane-2"));
+        assert!(app.status_line.contains("no launch"));
+        assert!(rx.try_recv().is_err(), "Home must not enqueue a launch");
+
+        handle_key(&mut app, key(KeyCode::Esc), &tx).unwrap();
+        assert_eq!(app.observe.home.surface, crate::home::HomeSurface::Landing);
+        assert!(app.status_line.contains("returned to Home"));
+
+        let missing_at = app
+            .home_rows()
+            .iter()
+            .position(|row| row.run_id == "ask-beta")
+            .expect("missing-panel row");
+        app.observe.home.selected = missing_at;
+        handle_key(&mut app, key(KeyCode::Enter), &tx).unwrap();
+        assert_eq!(app.focus, LaunchFocus::Error);
+        assert!(app.error_title.contains("no existing panel"));
+        assert!(rx.try_recv().is_err(), "missing panel must not launch");
+    }
+
+    #[test]
+    fn handle_key_home_toggles_global_local_scope() {
+        let mut app = sample_app();
+        app.config.view = crate::observe::ConsoleView::Home;
+        app.config.repo = std::path::PathBuf::from("/tmp/ws-alpha");
+        app.state.runs = vec![
+            {
+                let mut run = sample_run("work-1", "claude", "pane-2").snapshot;
+                run.root = Some("/tmp/ws-alpha".into());
+                run
+            },
+            {
+                let mut run = sample_run("ask-beta", "grok", "").snapshot;
+                run.root = Some("/tmp/ws-beta".into());
+                run.operator_session = None;
+                run.state = Some("unknown".into());
+                run
+            },
+        ];
+        app.state.retained_runs = app.state.runs.clone();
+        let (tx, _rx) = std::sync::mpsc::channel::<BackgroundMessage>();
+        assert_eq!(app.home_rows().len(), 2);
+        handle_key(&mut app, key(KeyCode::Char('f')), &tx).unwrap();
+        assert_eq!(app.observe.home.scope, crate::home::HomeScope::Local);
+        assert_eq!(app.home_rows().len(), 1);
+        assert!(app.status_line.contains("[Local]"));
     }
 
     #[test]
