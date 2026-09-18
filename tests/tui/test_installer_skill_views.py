@@ -217,7 +217,7 @@ def test_stale_managed_copy_is_quarantined_and_removed(
     ]
 
     reconciled, kept = installer.reconcile_shadowed_skill_dirs(
-        store, ["vc-x"], ["agents", "claude", "codex"], shadows=detected
+        store, ["vc-x"], shadows=detected
     )
 
     assert [d.path for d in reconciled] == [shadow]
@@ -261,7 +261,7 @@ def test_identical_managed_copy_is_quarantined_and_removed(
     (shadow / "references" / "notes.md").write_text("ref\n", encoding="utf-8")
 
     reconciled, kept = installer.reconcile_shadowed_skill_dirs(
-        store, ["vc-x"], ["agents"], shadows=detected
+        store, ["vc-x"], shadows=detected
     )
 
     assert [d.path for d in reconciled] == [shadow]
@@ -287,7 +287,7 @@ def test_copy_without_provenance_is_reported_but_never_removed(
     assert not detected[0].is_managed
 
     reconciled, kept = installer.reconcile_shadowed_skill_dirs(
-        store, ["vc-x"], ["agents"], shadows=detected
+        store, ["vc-x"], shadows=detected
     )
 
     assert reconciled == []
@@ -309,7 +309,7 @@ def test_missing_runtime_skills_dir_yields_no_findings(
     canonical = _canonical_view(home, store, "vc-x")
 
     assert installer.collect_shadowed_skill_dirs(store, ["vc-x"]) == []
-    assert installer.reconcile_shadowed_skill_dirs(store, ["vc-x"], ["agents"]) == (
+    assert installer.reconcile_shadowed_skill_dirs(store, ["vc-x"]) == (
         [],
         [],
     )
@@ -337,26 +337,37 @@ def test_canonical_agents_view_is_never_a_shadow_candidate(
     assert canonical.is_dir()
 
 
-def test_active_view_runtime_is_left_to_the_symlink_writer(
+def test_a_runtime_with_a_managed_view_is_reconciled_like_any_other(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """create_skill_view_symlink already rmtree's a dir before linking; the
-    reconciler must not double-handle runtimes that are active view targets."""
+    """`claude` and `codex` carry a managed view, so they used to be skipped
+    here on the grounds that the symlink writer would rmtree the directory
+    anyway — which quarantined the proven copies and silently deleted the
+    unproven ones. The writer no longer removes anything; this owns both."""
     home = tmp_path / "home"
     crafted_home = tmp_path / "crafted"
     store = tmp_path / "store"
     _pin_home(monkeypatch, home, crafted_home)
     _store_skill(store, "vc-x", "canonical body\n")
     _canonical_view(home, store, "vc-x")
-    shadow = _junie_copy(home, "vc-x", SKILL_MD + "june 2026 body\n")
-    _prove(store, "vc-x", shadow)
+    claude = home / ".claude" / "skills" / "vc-x"
+    claude.mkdir(parents=True)
+    (claude / "SKILL.md").write_text(SKILL_MD + "june 2026 body\n", encoding="utf-8")
+    _prove(store, "vc-x", claude)
 
-    reconciled, kept = installer.reconcile_shadowed_skill_dirs(
-        store, ["vc-x"], ["agents", "junie"]
-    )
+    detected = installer.collect_shadowed_skill_dirs(store, ["vc-x"])
+    assert [(d.runtime, d.classification) for d in detected] == [
+        ("claude", "managed_stale")
+    ]
 
-    assert (reconciled, kept) == ([], [])
-    assert shadow.is_dir()
+    reconciled, kept = installer.reconcile_shadowed_skill_dirs(store, ["vc-x"])
+
+    assert [d.path for d in reconciled] == [claude]
+    assert kept == []
+    assert not claude.exists()
+    assert (
+        _quarantine_dirs(crafted_home)[0] / "claude" / "vc-x" / "SKILL.md"
+    ).is_file()
 
 
 def test_reconcile_keeps_copy_when_canonical_view_is_not_linked(
@@ -370,9 +381,7 @@ def test_reconcile_keeps_copy_when_canonical_view_is_not_linked(
     shadow = _junie_copy(home, "vc-x", SKILL_MD + "june 2026 body\n")
     _prove(store, "vc-x", shadow)
 
-    reconciled, kept = installer.reconcile_shadowed_skill_dirs(
-        store, ["vc-x"], ["agents"]
-    )
+    reconciled, kept = installer.reconcile_shadowed_skill_dirs(store, ["vc-x"])
 
     assert reconciled == []
     assert [d.path for d in kept] == [shadow]
@@ -390,7 +399,7 @@ def test_reconcile_dry_run_touches_nothing(tmp_path: Path, monkeypatch) -> None:
     _prove(store, "vc-x", shadow)
 
     reconciled, kept = installer.reconcile_shadowed_skill_dirs(
-        store, ["vc-x"], ["agents"], dry_run=True
+        store, ["vc-x"], dry_run=True
     )
 
     assert [d.path for d in reconciled] == [shadow]
@@ -465,7 +474,7 @@ def test_historical_release_hash_proves_a_stale_copy(
     assert "matches a historical Vibecrafted release" in detected[0].detail
 
     reconciled, kept = installer.reconcile_shadowed_skill_dirs(
-        store, ["vc-x"], ["agents"], shadows=detected
+        store, ["vc-x"], shadows=detected
     )
 
     assert [d.path for d in reconciled] == [shadow]
@@ -497,7 +506,7 @@ def test_hand_edited_skill_md_absent_from_the_manifest_stays_unknown(
     assert "not a Vibecrafted release" in detected[0].detail
 
     reconciled, kept = installer.reconcile_shadowed_skill_dirs(
-        store, ["vc-x"], ["agents"], shadows=detected
+        store, ["vc-x"], shadows=detected
     )
 
     assert reconciled == []
@@ -529,7 +538,7 @@ def test_a_file_we_never_shipped_withdraws_the_whole_claim(
     assert "'references/my-notes.md' was never shipped" in detected[0].detail
 
     reconciled, kept = installer.reconcile_shadowed_skill_dirs(
-        store, ["vc-x"], ["agents"], shadows=detected
+        store, ["vc-x"], shadows=detected
     )
 
     assert reconciled == []
@@ -587,6 +596,98 @@ def test_manifest_that_is_absent_corrupt_or_v1_proves_nothing(
 
 
 # ---------------------------------------------------------------------------
+# The view writer never removes a real directory
+# ---------------------------------------------------------------------------
+
+
+def _install_pass(store: Path, names: list[str], runtimes: list[str]) -> None:
+    """The two steps an install performs over the runtime skill dirs, in order."""
+    installer.reconcile_shadowed_skill_dirs(store, names)
+    for runtime in runtimes:
+        rt_skills = installer.runtime_skills_dir(runtime)
+        rt_skills.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            installer.create_skill_view_symlink(store / name, rt_skills / name)
+
+
+def test_an_unproven_copy_in_an_active_runtime_survives_an_install_pass(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """The operator's own skill under a vc-* name lives in ~/.claude/skills,
+    which the installer writes views into. It used to be rmtree'd there without
+    a quarantine copy, on the very run that was supposed to be careful."""
+    home = tmp_path / "home"
+    crafted_home = tmp_path / "crafted"
+    store = tmp_path / "store"
+    _pin_home(monkeypatch, home, crafted_home)
+    _store_skill(store, "vc-x", "canonical body\n")
+    mine = home / ".claude" / "skills" / "vc-x"
+    mine.mkdir(parents=True)
+    (mine / "SKILL.md").write_text("# my own vc-x skill\n", encoding="utf-8")
+
+    _install_pass(store, ["vc-x"], ["agents", "claude"])
+
+    assert not mine.is_symlink()
+    assert (mine / "SKILL.md").read_text(encoding="utf-8") == "# my own vc-x skill\n"
+    assert _quarantine_dirs(crafted_home) == []
+    assert "Keeping real directory" in capsys.readouterr().out
+    # The canonical view is still written.
+    assert (home / ".agents" / "skills" / "vc-x").is_symlink()
+
+
+def test_a_proven_copy_in_an_active_runtime_is_quarantined_then_linked(
+    tmp_path: Path, monkeypatch
+) -> None:
+    home = tmp_path / "home"
+    crafted_home = tmp_path / "crafted"
+    store = tmp_path / "store"
+    _pin_home(monkeypatch, home, crafted_home)
+    _store_skill(store, "vc-x", "canonical body\n")
+    _canonical_view(home, store, "vc-x")
+    claude = home / ".claude" / "skills" / "vc-x"
+    claude.mkdir(parents=True)
+    (claude / "SKILL.md").write_text(SKILL_MD + "june 2026 body\n", encoding="utf-8")
+    _prove(store, "vc-x", claude)
+
+    _install_pass(store, ["vc-x"], ["agents", "claude"])
+
+    assert claude.is_symlink()
+    assert claude.resolve() == (store / "vc-x").resolve()
+    quarantined = _quarantine_dirs(crafted_home)
+    assert (
+        (quarantined[0] / "claude" / "vc-x" / "SKILL.md")
+        .read_text(encoding="utf-8")
+        .endswith("june 2026 body\n")
+    )
+
+
+def test_a_skills_root_linked_into_the_store_leaves_the_store_intact(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`ln -s ~/.vibecrafted/skills ~/.junie/skills` is the manual workaround
+    for the junie gap. Every link the writer would create inside it resolves
+    back onto the store copy it points at, so writing one means removing the
+    store copy first."""
+    home = tmp_path / "home"
+    crafted_home = tmp_path / "crafted"
+    store = tmp_path / "store"
+    _pin_home(monkeypatch, home, crafted_home)
+    _store_skill(store, "vc-x", "canonical body\n")
+    (store / "vc-x" / "references").mkdir()
+    (store / "vc-x" / "references" / "notes.md").write_text("ref\n", encoding="utf-8")
+    junie = home / ".junie"
+    junie.mkdir(parents=True)
+    (junie / "skills").symlink_to(store)
+
+    _install_pass(store, ["vc-x"], ["agents", "junie"])
+
+    assert (store / "vc-x" / "SKILL.md").is_file()
+    assert (store / "vc-x" / "references" / "notes.md").read_text() == "ref\n"
+    assert not (store / "vc-x").is_symlink()
+    assert _quarantine_dirs(crafted_home) == []
+
+
+# ---------------------------------------------------------------------------
 # Symlinked runtime skill dirs must never route a removal into the store
 # ---------------------------------------------------------------------------
 
@@ -620,7 +721,7 @@ def test_symlinked_runtime_skills_dir_is_never_a_shadow_candidate(
         "forced by a caller",
     )
     reconciled, kept = installer.reconcile_shadowed_skill_dirs(
-        store, ["vc-x"], ["agents"], shadows=[forced]
+        store, ["vc-x"], shadows=[forced]
     )
 
     assert reconciled == []
@@ -664,7 +765,7 @@ def test_a_windows_junction_counts_as_a_symlinked_ancestor(
         "junie", "vc-x", shadow, "managed_stale", "forced by a caller"
     )
     reconciled, kept = installer.reconcile_shadowed_skill_dirs(
-        store, ["vc-x"], ["agents"], shadows=[forced]
+        store, ["vc-x"], shadows=[forced]
     )
 
     assert reconciled == []
