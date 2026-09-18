@@ -3174,6 +3174,10 @@ a.control-run-id:focus-visible {
   text-decoration: none;
 }
 
+.inspector-open[hidden] {
+  display: none;
+}
+
 .inspector-tail {
   margin: 0;
   max-height: 14rem;
