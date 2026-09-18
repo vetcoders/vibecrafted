@@ -104,6 +104,11 @@ path = "tests/scaffold_shell_http.rs"
 required-features = ["ssr"]
 
 [[test]]
+name = "control_transcripts_http"
+path = "tests/control_transcripts_http.rs"
+required-features = ["ssr"]
+
+[[test]]
 name = "tools_report_http"
 path = "tests/tools_report_http.rs"
 required-features = ["ssr"]

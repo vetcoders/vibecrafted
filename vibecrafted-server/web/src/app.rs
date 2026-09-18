@@ -86,6 +86,7 @@ struct DashboardRun {
     mode: String,
     root: String,
     latest_report: String,
+    latest_transcript: String,
     updated_at: String,
     /// Settlement tui cell when Python wrote one (`f`/`x`/`n`), else empty.
     settlement_tui: String,
@@ -166,6 +167,7 @@ fn load_dashboard_data_from(
             mode: run.mode,
             root: run.root,
             latest_report: run.latest_report,
+            latest_transcript: run.latest_transcript,
             updated_at: run.updated_at,
             settlement_tui,
             last_error: run.last_error,
@@ -495,8 +497,8 @@ fn refresh_client_dashboard() {
 #[cfg(not(feature = "ssr"))]
 fn dashboard_loading() -> impl IntoView {
     view! {
-        <ServerFrame active=ServerSection::Overview status="loading control plane".to_string()>
-            <p class="control-empty">"Loading control plane…"</p>
+        <ServerFrame active=ServerSection::Overview status="loading".to_string()>
+            <p class="control-empty">"Loading…"</p>
         </ServerFrame>
     }
 }
@@ -575,12 +577,27 @@ fn run_cards(runs: Vec<DashboardRun>) -> impl IntoView {
             };
             // Civilized console link: every run id opens its observability page.
             let detail_href = format!("/run/{}", run.run_id);
-
+            let transcript_url = format!("/api/control/runs/{}/transcript", run.run_id);
+            let run_id = run.run_id.clone();
+            let root = run.root.clone();
+            let run_id_attr = run_id.clone();
+            let run_id_copy = run_id.clone();
+            let root_attr = root.clone();
+            let href_attr = detail_href.clone();
+            let href_link = detail_href.clone();
+            let href_copy = detail_href.clone();
             view! {
-                <article class="control-run-row">
+                <article
+                    class="control-run-row"
+                    data-ppm="run"
+                    data-run-id=run_id_attr
+                    data-href=href_attr
+                    data-focus-root=root_attr
+                    data-transcript-url=transcript_url
+                >
                     <div class="control-run-primary">
-                        <a class="control-run-id" href=detail_href.clone()>{run.run_id}</a>
-                        <span class="control-run-root">{run.root}</span>
+                        <a class="control-run-id" href=href_link data-copy=run_id_copy>{run_id}</a>
+                        <span class="control-run-root">{root}</span>
                     </div>
                     <div class="control-run-tags">
                         <span class="control-badge">{run.state}</span>
@@ -594,6 +611,7 @@ fn run_cards(runs: Vec<DashboardRun>) -> impl IntoView {
                         <span>{run.updated_at}</span>
                         <span>{report_label}</span>
                         <span class="control-run-error">{run.last_error}</span>
+                        <button type="button" class="control-copy" data-copy=href_copy>"Copy"</button>
                         <a class="control-run-open" href=detail_href>"Open transcript →"</a>
                     </div>
                 </article>
@@ -725,7 +743,7 @@ fn settlement_board(settlement: DashboardSettlement) -> impl IntoView {
             data-total-settled=settlement.total_settled
         >
             <div class="operator-summary-title">
-                <span class="mono-cap">"runtime truth"</span>
+                <span class="mono-cap">"Settlement"</span>
                 <strong>{settlement.scope.clone()}</strong>
             </div>
             <dl class="operator-summary-cells">
@@ -760,7 +778,8 @@ pub fn shell(_options: leptos::config::LeptosOptions) -> impl IntoView {
     use leptos_meta::MetaTags;
 
     use crate::chrome::{
-        STYLE_FONTS, STYLE_MAIN, STYLE_TOKENS, theme_control_script, theme_head_script,
+        STYLE_FONTS, STYLE_MAIN, STYLE_TOKENS, operator_desk_script, operator_head_script,
+        theme_control_script, theme_head_script,
     };
 
     view! {
@@ -771,6 +790,7 @@ pub fn shell(_options: leptos::config::LeptosOptions) -> impl IntoView {
                 <meta name="viewport" content="width=device-width, initial-scale=1"/>
                 <MetaTags/>
                 <script inner_html=theme_head_script()></script>
+                <script inner_html=operator_head_script()></script>
                 <style>{STYLE_TOKENS}</style>
                 <style>{STYLE_FONTS}</style>
                 <style>{STYLE_MAIN}</style>
@@ -778,6 +798,7 @@ pub fn shell(_options: leptos::config::LeptosOptions) -> impl IntoView {
             <body>
                 <App/>
                 <script inner_html=theme_control_script()></script>
+                <script inner_html=operator_desk_script()></script>
             </body>
         </html>
     }
@@ -797,10 +818,12 @@ pub fn App() -> impl IntoView {
                 <Route path=path!("/sessions") view=SessionsPage />
                 <Route path=path!("/agents") view=AgentManagerPage />
                 <Route path=path!("/runs") view=RunsPage />
+                <Route path=path!("/transcripts") view=TranscriptsPage />
                 <Route path=path!("/lifecycle") view=LifecyclePage />
                 <Route path=path!("/activity") view=ActivityPage />
                 <Route path=path!("/structure") view=StructurePage />
                 <Route path=path!("/aicx") view=AicxPage />
+                <Route path=path!("/frame") view=FramePage />
                 <Route path=path!("/guide") view=GuidePage />
                 <Route path=path!("/run/:run_id") view=RunDetailPage />
             </Routes>
@@ -819,8 +842,9 @@ fn aicx_page_script() -> &'static str {
   const status = document.getElementById('aicx-search-status');
   const results = document.getElementById('aicx-search-results');
   if (!form || !q || !status || !results) return;
-  form.addEventListener('submit', async (event) => {
-    event.preventDefault();
+  const initial = new URLSearchParams(location.search).get('q') || '';
+  if (initial.trim() && !q.value) q.value = initial.trim();
+  const runSearch = async () => {
     const query = q.value.trim();
     if (!query) return;
     status.textContent = 'Searching AICX…';
@@ -854,7 +878,12 @@ fn aicx_page_script() -> &'static str {
     } catch (error) {
       status.textContent = 'AICX unavailable: ' + error.message;
     }
+  };
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    runSearch();
   });
+  if (q.value.trim()) runSearch();
 })();"#
 }
 
@@ -885,8 +914,8 @@ pub fn AicxPage() -> impl IntoView {
 #[component]
 pub fn ConsolePage() -> impl IntoView {
     view! {
-        <Title text="vc-server - control plane" />
-        <Meta name="description" content="Vibecrafted control-plane dashboard." />
+        <Title text="Overview - vc-server" />
+        <Meta name="description" content="Vibecrafted operator overview." />
         <Meta name="theme-color" content="#21211f" />
         <Link rel="preload" as_="font" type_="font/woff2" href="/fonts/inter-var-latin.woff2" crossorigin="anonymous" />
         <Link rel="preload" as_="font" type_="font/woff2" href="/fonts/jetbrains-mono-var-latin.woff2" crossorigin="anonymous" />
@@ -895,125 +924,85 @@ pub fn ConsolePage() -> impl IntoView {
 }
 
 fn console_dashboard(dashboard: DashboardData) -> impl IntoView {
-    // Forgotten-gem filters: quarantine smoke/terminal/stale-marbles noise and
-    // non-actionable lifecycle rows before they hit the operator hero.
     let active_runs = operator_active_runs(dashboard.active_runs);
-    let action_runs = operator_action_runs(dashboard.lifecycle_runs);
+    let stalled_runs = dashboard.stalled_runs;
+    let recent_runs = dashboard.recent_runs;
+    let generated_at = dashboard.generated_at.clone();
     let loctree_report = dashboard.loctree_report;
 
     let active_count = active_runs.len();
-    let stalled_count = dashboard.stalled_runs.len();
-    let recent_count = dashboard.recent_runs.len();
-    let warning_count = dashboard.warnings.len();
-    let action_count = action_runs.len();
-    let workspace_count = dashboard.workspaces.len();
-    let workspace_status = dashboard.workspace_status;
+    let stalled_count = stalled_runs.len();
+    let recent_count = recent_runs.len();
     let server_status = dashboard.server_status;
-
-    let settlement = dashboard.settlement;
+    let selected_root = dashboard
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.selected)
+        .map(|workspace| workspace.root.clone())
+        .unwrap_or_default();
     let has_loctree_report = !loctree_report.is_empty();
+    let loctree_note = if has_loctree_report {
+        "Loctree report available"
+    } else {
+        "Loctree empty"
+    };
+    let settlement = dashboard.settlement;
 
     view! {
         <ServerFrame
             active=ServerSection::Overview
             status=format!("{server_status} · {active_count} live")
         >
-            <div class="server-console-shell">
-                <section class="server-console-hero" id="now">
-                    <div class="server-console-grid">
-                        <div class="server-console-copy">
-                            <p class="section-eyebrow">"Operator workspace"</p>
-                            <h1>"Control plane"</h1>
-                            <p>
-                                "Live runs, lifecycle decisions, transcripts and scaffold artifacts, read from the running control plane."
-                            </p>
-                            <p class="server-console-links">
-                                <a class="server-console-link server-console-link-primary" href="/runs">
-                                    "Inspect live runs"
-                                </a>
-                                <a class="server-console-link" href="/workspaces">
-                                    "Workspaces"
-                                </a>
-                                <a class="server-console-link" href="/sessions">
-                                    "Sessions"
-                                </a>
-                                <a class="server-console-link" href="/lifecycle">
-                                    "Lifecycle decisions"
-                                </a>
-                                <a class="server-console-link" href="/scaffold">
-                                    "Open scaffold studio"
-                                </a>
-                                <a
-                                    class="server-console-link"
-                                    href="http://127.0.0.1:8033/?q=vibecrafted+server&sort=oldest"
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                >
-                                    "AICX context ↗"
-                                </a>
-                            </p>
-                        </div>
-
-                        <aside class="server-console-panel" aria-label="Console status preview">
-                            <div class="server-console-panel-head">
-                                <span class="mono-cap">"Right now"</span>
-                                <span class="server-console-panel-state">"live projection"</span>
-                            </div>
-                            <dl class="operator-now-cells">
-                                <a class="operator-summary-cell" href="/runs">
-                                    <dt>"alive"</dt>
-                                    <dd>{active_count}</dd>
-                                </a>
-                                <a class="operator-summary-cell" href="/lifecycle">
-                                    <dt>"next"</dt>
-                                    <dd>{action_count}</dd>
-                                </a>
-                                <a class="operator-summary-cell" href="/activity">
-                                    <dt>"warnings"</dt>
-                                    <dd>{warning_count}</dd>
-                                </a>
-                                <a class="operator-summary-cell" href="/runs">
-                                    <dt>"stalled"</dt>
-                                    <dd>{stalled_count}</dd>
-                                </a>
-                                <a class="operator-summary-cell" href="/runs">
-                                    <dt>"recent"</dt>
-                                    <dd>{recent_count}</dd>
-                                </a>
-                                <a class="operator-summary-cell" href="/workspaces">
-                                    <dt>"workspaces"</dt>
-                                    <dd>{workspace_count}</dd>
-                                </a>
-                            </dl>
-                            <p class="control-plane-meta">
-                                <span>"workspace data"</span><span>{workspace_status}</span>
-                            </p>
-                        </aside>
+            <div class="server-console-shell overview-desk">
+                <div
+                    id="vc-focus-context"
+                    data-selected-workspace-root=selected_root
+                    hidden
+                ></div>
+                <header class="overview-head">
+                    <div class="overview-head-copy">
+                        <h1>"Overview"</h1>
+                        <p class="overview-generated">{format!("Generated {generated_at}")}</p>
                     </div>
-                </section>
+                    <dl class="overview-head-stats">
+                        <div><dt>"live"</dt><dd>{active_count}</dd></div>
+                        <div><dt>"failures"</dt><dd>{stalled_count}</dd></div>
+                        <div><dt>"recent"</dt><dd>{recent_count}</dd></div>
+                    </dl>
+                    <p class="overview-head-actions">
+                        <a class="server-navbar-action" href="/transcripts">"Transcripts"</a>
+                        <a class="server-navbar-action" href="/aicx">"AICX"</a>
+                        <a class="server-navbar-action" href="/structure">"Loctree"</a>
+                        <a class="server-navbar-action" href="/frame">"Frame"</a>
+                    </p>
+                </header>
 
                 <div class="settlement-board-wrap">
                     {settlement_board(settlement)}
                 </div>
 
-                <section class="control-panel control-panel-wide overview-structure" aria-label="Structure">
-                    <div class="control-panel-head">
-                        <h2>"Structure"</h2>
-                        <span>"Loctree + scaffold"</span>
-                    </div>
-                    <div class="structure-links">
-                        <a class="server-console-link" href="/structure">"Inspect structure"</a>
-                        <a class="server-console-link" href="/scaffold">"Open scaffold review"</a>
-                    </div>
-                    <p class="control-empty" hidden=has_loctree_report>
-                        "No Loctree report is known for the roots in the canonical state view."
-                    </p>
+                <section class="overview-band" aria-label="Active dispatches">
+                    <div class="control-panel-head"><h2>"Active dispatches"</h2><span>{active_count}</span></div>
+                    <p class="control-empty" hidden={active_count != 0}>"None."</p>
+                    <div class="control-run-list">{run_cards(active_runs)}</div>
                 </section>
-
-                <footer class="server-console-footer">
-                    <span>"Vibecrafted · Vetcoders · LibraxisAI"</span>
-                    <span>"control-plane truth · operator-safe reads"</span>
-                </footer>
+                <section class="overview-band" aria-label="Failures">
+                    <div class="control-panel-head"><h2>"Failures"</h2><span>{stalled_count}</span></div>
+                    <p class="control-empty" hidden={stalled_count != 0}>"None."</p>
+                    <div class="control-run-list">{run_cards(stalled_runs)}</div>
+                </section>
+                <section class="overview-band" aria-label="Recent">
+                    <div class="control-panel-head"><h2>"Recent"</h2><span>{recent_count}</span></div>
+                    <p class="control-empty" hidden={recent_count != 0}>"None."</p>
+                    <div class="control-run-list">{run_cards(recent_runs)}</div>
+                </section>
+                <p class="overview-structure-line" aria-label="Structure">
+                    <a href="/structure">"Structure"</a>
+                    " · "
+                    {loctree_note}
+                    " · "
+                    <a href="/scaffold">"Plans"</a>
+                </p>
             </div>
         </ServerFrame>
     }
@@ -1035,14 +1024,31 @@ fn route_header(
     }
 }
 
+fn git_repo_name(root: &str) -> String {
+    root.trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
 fn workspace_cards(workspaces: Vec<DashboardWorkspace>) -> impl IntoView {
     workspaces
         .into_iter()
         .map(|workspace| {
             let selection = workspace.selected.then_some("selected");
             let workspace_id_attr = workspace.workspace_id.clone();
+            let root = workspace.root.clone();
+            let selected = workspace.selected;
+            let repo = git_repo_name(&root);
             view! {
-                <article class="workspace-card" data-workspace-id=workspace_id_attr>
+                <article
+                    class="workspace-card"
+                    data-workspace-id=workspace_id_attr
+                    data-focus-root=root.clone()
+                    data-focus-repo=repo
+                    data-selected=selected.then_some("1")
+                >
                     <div class="control-run-primary">
                         <strong class="workspace-title">{workspace.title}</strong>
                         <code class="control-run-root">{workspace.root}</code>
@@ -1101,6 +1107,151 @@ fn session_cards(sessions: Vec<DashboardSession>) -> impl IntoView {
             }
         })
         .collect_view()
+}
+
+fn transcripts_search_script() -> &'static str {
+    r#"(() => {
+  const form = document.getElementById('transcript-search-form');
+  const q = document.getElementById('transcript-search-query');
+  const status = document.getElementById('transcript-search-status');
+  const list = document.getElementById('transcript-search-results');
+  const more = document.getElementById('transcript-search-more');
+  if (!form || !q || !status || !list || !more) return;
+  const LIMIT = 50;
+  let offset = 0;
+  let accumulated = [];
+  const text = (value) => (value == null ? '' : String(value));
+  const render = (items) => {
+    list.replaceChildren();
+    for (const item of items || []) {
+      const id = text(item.run_id);
+      const row = document.createElement('article');
+      row.className = 'control-run-row';
+      row.setAttribute('data-ppm', 'run');
+      row.setAttribute('data-run-id', id);
+      row.setAttribute('data-href', '/run/' + encodeURIComponent(id));
+      row.setAttribute('data-focus-root', text(item.root));
+      row.setAttribute('data-transcript-url', '/api/control/runs/' + encodeURIComponent(id) + '/transcript');
+      const primary = document.createElement('div');
+      primary.className = 'control-run-primary';
+      const link = document.createElement('a');
+      link.className = 'control-run-id';
+      link.href = '/run/' + encodeURIComponent(id);
+      link.textContent = id;
+      const root = document.createElement('span');
+      root.className = 'control-run-root';
+      root.textContent = text(item.agent) + ' · ' + text(item.skill);
+      primary.append(link, root);
+      const meta = document.createElement('div');
+      meta.className = 'control-run-meta';
+      const updated = document.createElement('span');
+      updated.textContent = text(item.updated_at);
+      const snippet = document.createElement('span');
+      snippet.textContent = text(item.snippet);
+      const copy = document.createElement('button');
+      copy.type = 'button';
+      copy.className = 'control-copy';
+      copy.setAttribute('data-copy', id);
+      copy.textContent = 'Copy';
+      const open = document.createElement('a');
+      open.className = 'control-run-open';
+      open.href = '/run/' + encodeURIComponent(id);
+      open.textContent = 'Open transcript →';
+      meta.append(updated, snippet, copy, open);
+      row.append(primary, meta);
+      list.append(row);
+    }
+  };
+  const search = async (reset) => {
+    const query = q.value.trim();
+    if (reset) {
+      offset = 0;
+      accumulated = [];
+    }
+    status.textContent = query ? 'Searching…' : 'Listing transcripts…';
+    const params = new URLSearchParams();
+    if (query) params.set('q', query);
+    params.set('offset', String(offset));
+    params.set('limit', String(LIMIT));
+    try {
+      const response = await fetch('/api/control/transcripts?' + params.toString(), { credentials: 'same-origin' });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || ('HTTP ' + response.status));
+      const items = payload.items || [];
+      accumulated = reset ? items : accumulated.concat(items);
+      offset = (payload.offset || 0) + items.length;
+      const total = payload.total || accumulated.length;
+      status.textContent = total ? (accumulated.length + ' of ' + total + ' transcript(s)') : 'No transcripts.';
+      more.hidden = !payload.has_more;
+      render(accumulated);
+      document.documentElement.dispatchEvent(new Event('vc-focus-refresh'));
+    } catch (error) {
+      status.textContent = 'Search unavailable: ' + error.message;
+      more.hidden = true;
+    }
+  };
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    search(true);
+  });
+  more.addEventListener('click', () => search(false));
+  search(true);
+})();"#
+}
+
+#[component]
+pub fn TranscriptsPage() -> impl IntoView {
+    view! {
+        <Title text="transcripts - vc-server" />
+        <Meta name="description" content="Every human transcript on this host, searchable in the browser." />
+        <ServerFrame active=ServerSection::Transcripts status="transcripts".to_string()>
+            <div class="server-console-shell route-page-shell">
+                {route_header("Runtime", "Transcripts", "Every canonical transcript.human.log on this host. Search streams each log from the start; pages of 50 keep the whole corpus reachable.")}
+                <section class="control-panel control-panel-wide" aria-label="Transcript search">
+                    <form id="transcript-search-form" class="server-console-links">
+                        <input id="transcript-search-query" name="q" type="search" maxlength="512" placeholder="Search transcripts" />
+                        <button class="server-console-link server-console-link-primary" type="submit">"Search"</button>
+                    </form>
+                    <p id="transcript-search-status" class="control-empty">"Loading transcripts…"</p>
+                    <div id="transcript-search-results" class="control-run-list"></div>
+                    <p class="server-console-links">
+                        <button id="transcript-search-more" class="server-console-link" type="button" hidden>"Load more"</button>
+                    </p>
+                    <script inner_html=transcripts_search_script()></script>
+                </section>
+            </div>
+        </ServerFrame>
+    }
+}
+
+#[component]
+pub fn FramePage() -> impl IntoView {
+    view! {
+        <Title text="frame - vc-server" />
+        <Meta name="description" content="Embedded vc-frame session (zellij web client)." />
+        <ServerFrame active=ServerSection::Frame status="frame".to_string()>
+            <div class="server-console-shell route-page-shell">
+                {route_header("Session", "Frame", "The product multiplexer lives in vc-frame. Name its web client once; the App starts that origin and embeds it as a native tab. This page is the browser door to the same contract.")}
+                <section class="control-panel control-panel-wide" aria-label="Frame session">
+                    <div class="control-panel-head"><h2>"vc-frame web"</h2><span>"host session"</span></div>
+                    <p class="route-page-description">
+                        "Name the served origin in config. Vibecrafted.app starts `vc-frame web` on that host:port and opens it as a native tab. Tabs never start the service. Closing a tab does not kill the host session."
+                    </p>
+                    <ol class="operator-guide-list">
+                        <li><strong>"Host session"</strong><span>"`vc-start` / `vc-frame` attaches the whole-host multiplexer (`/tmp/vc-frame-<uid>`). That session outlives any tab."</span></li>
+                        <li><strong>"Name the origin"</strong><span>"`[tools.vc-frame] url = \"http://127.0.0.1:<port>/\"` in `~/.config/vibecrafted/config.toml`. No guessed port — the App binds exactly that loopback http origin."</span></li>
+                        <li><strong>"Web client"</strong><span>"The App starts `vc-frame web --ip <host> --port <port>` on connect when that table is set. Browser-only operators start `vc-frame web` themselves."</span></li>
+                        <li><strong>"Embed"</strong><span>"Vibecrafted.app → View → Open in Tab → Frame loads that origin as a native tab. Closing the tab detaches the view; workers keep running."</span></li>
+                    </ol>
+                    <p class="server-console-links">
+                        <button type="button" class="server-console-link server-console-link-primary" data-copy="vc-frame web">"Copy start command"</button>
+                        <button type="button" class="server-console-link" data-copy="[tools.vc-frame]\nurl = \"http://127.0.0.1:8082/\"">"Copy config snippet"</button>
+                        <a class="server-console-link" href="/transcripts">"Transcripts"</a>
+                    </p>
+                </section>
+            </div>
+        </ServerFrame>
+    }
 }
 
 #[component]
@@ -1251,7 +1402,7 @@ fn runs_dashboard(dashboard: DashboardData) -> impl IntoView {
                     <div class="control-run-list">{run_cards(stalled)}</div>
                 </section>
                 <section class="control-panel control-panel-wide" aria-label="Recent state view">
-                    <div class="control-panel-head"><h2>"Recent truth"</h2><span>{recent_count}</span></div>
+                    <div class="control-panel-head"><h2>"Recent"</h2><span>{recent_count}</span></div>
                     {(available && recent_count == 0).then(|| view! { <p class="control-empty">"No recent settled runs."</p> })}
                     <div class="control-run-list">{run_cards(recent)}</div>
                 </section>
@@ -1275,7 +1426,7 @@ fn lifecycle_dashboard(dashboard: DashboardData) -> impl IntoView {
     view! {
         <ServerFrame active=ServerSection::Lifecycle status=format!("{count} next")>
             <div class="server-console-shell route-page-shell">
-                {route_header("Control plane", "Lifecycle", "Open a baton to inspect its current stage, next agent, controls, and delivery state.")}
+                {route_header("Control", "Lifecycle", "Open a baton to inspect its current stage, next agent, controls, and delivery state.")}
                 <section class="control-panel control-panel-wide" aria-label="Action plan">
                     <div class="control-panel-head"><h2>"Action plan"</h2><span>{count}</span></div>
                     <p class="control-empty" hidden={count != 0}>"No lifecycle baton currently needs an operator action."</p>
@@ -1331,30 +1482,81 @@ pub fn StructurePage() -> impl IntoView {
 fn structure_dashboard(dashboard: DashboardData) -> impl IntoView {
     let report = dashboard.loctree_report;
     let has_report = !report.is_empty();
+    let selected_root = dashboard
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.selected)
+        .map(|workspace| workspace.root.clone())
+        .unwrap_or_default();
     view! {
         <ServerFrame active=ServerSection::Structure status="structural evidence".to_string()>
             <div class="server-console-shell route-page-shell">
-                {route_header("Repository", "Structure", "Structural evidence is shown as runtime truth. Local filesystem paths are never emitted as broken browser links.")}
+                <div
+                    id="vc-focus-context"
+                    data-selected-workspace-root=selected_root
+                    hidden
+                ></div>
+                {route_header("Repository", "Structure", "Loctree report for the selected workspace. Generate it here; tabs never start this process. Local filesystem paths are never emitted as broken browser links.")}
                 <section class="control-panel control-panel-wide" aria-label="Structural evidence">
                     <div class="control-panel-head"><h2>"Latest Loctree report"</h2><span>{if has_report { "available" } else { "not found" }}</span></div>
                     <p class="run-detail-artifact-path" hidden={!has_report}>{report}</p>
                     <p class="server-console-links" hidden={!has_report}>
                         <a class="server-console-link server-console-link-primary" href="/structure/report" target="_blank" rel="noopener noreferrer">"Open Loctree report ↗"</a>
                     </p>
-                    <p class="control-empty" hidden=has_report>"No Loctree report is known for the roots in the canonical state view. Generate one with `loct report --output .loctree/report.html` in the workspace root."</p>
+                    <p class="control-empty" hidden=has_report>"No Loctree report is known for the roots in the canonical state view."</p>
+                    <p class="server-console-links">
+                        <button id="loctree-generate" class="server-console-link server-console-link-primary" type="button">"Generate Loctree report"</button>
+                    </p>
+                    <p id="loctree-generate-status" class="control-empty"></p>
                     <p class="control-plane-meta" hidden={!has_report}>"The report opens sandboxed: its scripts run, but it holds no control-plane authority."</p>
                     <p class="server-console-links"><a class="server-console-link server-console-link-primary" href="/scaffold">"Open scaffold studio"</a><a class="server-console-link" href="/aicx">"Search intent (AICX)"</a></p>
+                    <script inner_html=loctree_generate_script()></script>
                 </section>
             </div>
         </ServerFrame>
     }
 }
 
+fn loctree_generate_script() -> &'static str {
+    r#"(() => {
+  const btn = document.getElementById('loctree-generate');
+  const status = document.getElementById('loctree-generate-status');
+  if (!btn || !status) return;
+  btn.addEventListener('click', async () => {
+    let root = '';
+    try { root = localStorage.getItem('vc-focus-root') || ''; } catch (_) {}
+    const ctx = document.getElementById('vc-focus-context');
+    const live = ctx && ctx.getAttribute('data-selected-workspace-root');
+    if (live) root = live;
+    status.textContent = 'Generating…';
+    btn.disabled = true;
+    try {
+      const response = await fetch('/api/structure/report', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(root ? { root } : {}),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || ('HTTP ' + response.status));
+      if (payload.href) {
+        location.href = payload.href;
+        return;
+      }
+      location.reload();
+    } catch (error) {
+      status.textContent = 'Generate failed: ' + error.message;
+      btn.disabled = false;
+    }
+  });
+})();"#
+}
+
 #[component]
 pub fn GuidePage() -> impl IntoView {
     view! {
         <Title text="guide - vc-server" />
-        <Meta name="description" content="Truthful operator paths for Vibecrafted server." />
+        <Meta name="description" content="Operator paths for Vibecrafted server." />
         <ServerFrame active=ServerSection::Guide status="operator guide".to_string()>
             <div class="server-console-shell route-page-shell">
                 {route_header("Guide", "From workspace to delivery", "The server is a projection of canonical state. It does not create a second scheduler or claim actions that have no server transition.")}
@@ -1365,7 +1567,7 @@ pub fn GuidePage() -> impl IntoView {
                         <li><strong>"Sessions"</strong><span>"Inspect the logical session and its real runtime attachment."</span></li>
                         <li><strong>"Agent Manager"</strong><span>"Open live and historical runs from the control-plane projection."</span></li>
                         <li><strong>"Plans"</strong><span>"Review exactly one active Scaffold document in the studio shell."</span></li>
-                        <li><strong>"Dispatch"</strong><span>"Use the validated scaffold dispatch artifact through /vc-ship. This server intentionally exposes no fake launch button while a canonical server action endpoint is absent."</span></li>
+                        <li><strong>"Dispatch"</strong><span>"Open a `.dispatch.toml` artifact in Plans and use Dispatch. The server runs `vibecrafted dispatch` on that file."</span></li>
                     </ol>
                 </section>
                 <p class="server-console-links">
@@ -1409,11 +1611,11 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{
-        ActivityPage, ConsolePage, DashboardData, DashboardRun, DashboardSession,
-        DashboardSessionRun, LifecyclePage, RunsPage, SessionsPage, StructurePage, WorkspacesPage,
-        console_dashboard, decode_dashboard_embed, encode_dashboard_embed,
-        load_dashboard_data_from, operator_active_runs, run_cards, session_cards,
-        unique_runtime_labels, workspaces_dashboard,
+        ActivityPage, AicxPage, ConsolePage, DashboardData, DashboardRun, DashboardSession,
+        DashboardSessionRun, FramePage, LifecyclePage, RunsPage, SessionsPage, StructurePage,
+        TranscriptsPage, WorkspacesPage, console_dashboard, decode_dashboard_embed,
+        encode_dashboard_embed, git_repo_name, load_dashboard_data_from, operator_active_runs, run_cards,
+        session_cards, unique_runtime_labels, workspaces_dashboard,
     };
     use crate::control::api::{control_routes, state_payload};
     use crate::theme::provide_theme_context;
@@ -1631,7 +1833,10 @@ mod tests {
         assert!(html.contains("failed"));
         assert!(html.contains("attention"));
         assert!(html.contains("aria-label=\"Switch to light theme\""));
-        assert!(html.contains("http://127.0.0.1:8033/"));
+        assert!(html.contains("href=\"/aicx\""));
+        assert!(!html.contains("http://127.0.0.1:8033/"));
+        assert!(!html.contains("AICX desk"));
+        assert!(!html.contains("Choose the truth"));
         assert!(html.contains("Vibecrafted server navigation"));
         assert!(html.contains("server-sidebar"));
         assert!(html.contains("href=\"/runs\""));
@@ -1692,9 +1897,43 @@ mod tests {
         assert!(activity.contains("Runtime context"));
         assert!(activity.contains("Warnings"));
         assert!(structure.contains("Latest Loctree report"));
+        assert!(structure.contains("id=\"loctree-generate\""));
+        assert!(structure.contains("/api/structure/report"));
         assert!(!structure.contains("href=\"/Volumes/"));
         assert!(card.contains("href=\"/run/impl-live-agent\""));
         assert!(card.contains("Open transcript"));
+        assert!(card.contains("data-ppm=\"run\""));
+        assert!(card.contains("control-copy"));
+    }
+
+    #[test]
+    fn transcripts_and_frame_pages_name_their_doors() {
+        let owner = Owner::new();
+        let (transcripts, frame, aicx) = owner.with(|| {
+            leptos_meta::provide_meta_context();
+            provide_theme_context();
+            (
+                TranscriptsPage().to_html(),
+                FramePage().to_html(),
+                AicxPage().to_html(),
+            )
+        });
+        assert!(transcripts.contains("id=\"transcript-search-form\""));
+        assert!(transcripts.contains("/api/control/transcripts"));
+        assert!(transcripts.contains("id=\"transcript-search-more\""));
+        assert!(transcripts.contains("has_more"));
+        assert!(transcripts.contains("vc-focus-refresh"));
+        assert!(!transcripts.contains("row.innerHTML"));
+        assert!(transcripts.contains("snippet.textContent"));
+        assert!(frame.contains("vc-frame web"));
+        assert!(frame.contains("[tools.vc-frame]"));
+        assert!(frame.contains("Open in Tab"));
+        assert!(frame.contains("--ip"));
+        assert!(frame.contains("Tabs never start"));
+        assert!(aicx.contains("id=\"aicx-search-form\""));
+        assert!(aicx.contains("/api/aicx/search"));
+        assert!(aicx.contains("location.search"));
+        assert!(aicx.contains("Search AICX"));
     }
 
     #[test]
@@ -1726,6 +1965,13 @@ mod tests {
             unique_runtime_labels(["vc-frame", "vc-frame", "vc-terminal", ""]),
             "vc-frame, vc-terminal"
         );
+    }
+
+    #[test]
+    fn git_repo_name_uses_the_last_path_segment() {
+        assert_eq!(git_repo_name("/work/vibecrafted"), "vibecrafted");
+        assert_eq!(git_repo_name("/work/vibecrafted/"), "vibecrafted");
+        assert_eq!(git_repo_name("vibecrafted"), "vibecrafted");
     }
 
     #[test]
@@ -1821,7 +2067,10 @@ mod tests {
         assert!(html.contains("id=\"vc-dashboard-data\""));
         assert!(html.contains("type=\"application/json\""));
         assert!(!html.contains("Loading control plane"));
-        assert!(html.contains("Control plane"));
+        assert!(html.contains("Overview"));
+        assert!(html.contains("href=\"/transcripts\""));
+        assert!(html.contains("href=\"/frame\""));
+        assert!(!html.contains("Control plane"));
     }
 
     #[tokio::test]
