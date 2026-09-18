@@ -1184,6 +1184,7 @@ fn transcripts_search_script() -> &'static str {
       status.textContent = total ? (accumulated.length + ' of ' + total + ' transcript(s)') : 'No transcripts.';
       more.hidden = !payload.has_more;
       render(accumulated);
+      document.documentElement.dispatchEvent(new Event('vc-focus-refresh'));
     } catch (error) {
       status.textContent = 'Search unavailable: ' + error.message;
       more.hidden = true;
@@ -1610,7 +1611,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{
-        ActivityPage, ConsolePage, DashboardData, DashboardRun, DashboardSession,
+        ActivityPage, AicxPage, ConsolePage, DashboardData, DashboardRun, DashboardSession,
         DashboardSessionRun, FramePage, LifecyclePage, RunsPage, SessionsPage, StructurePage,
         TranscriptsPage, WorkspacesPage, console_dashboard, decode_dashboard_embed,
         encode_dashboard_embed, git_repo_name, load_dashboard_data_from, operator_active_runs, run_cards,
@@ -1908,15 +1909,20 @@ mod tests {
     #[test]
     fn transcripts_and_frame_pages_name_their_doors() {
         let owner = Owner::new();
-        let (transcripts, frame) = owner.with(|| {
+        let (transcripts, frame, aicx) = owner.with(|| {
             leptos_meta::provide_meta_context();
             provide_theme_context();
-            (TranscriptsPage().to_html(), FramePage().to_html())
+            (
+                TranscriptsPage().to_html(),
+                FramePage().to_html(),
+                AicxPage().to_html(),
+            )
         });
         assert!(transcripts.contains("id=\"transcript-search-form\""));
         assert!(transcripts.contains("/api/control/transcripts"));
         assert!(transcripts.contains("id=\"transcript-search-more\""));
         assert!(transcripts.contains("has_more"));
+        assert!(transcripts.contains("vc-focus-refresh"));
         assert!(!transcripts.contains("row.innerHTML"));
         assert!(transcripts.contains("snippet.textContent"));
         assert!(frame.contains("vc-frame web"));
@@ -1924,6 +1930,10 @@ mod tests {
         assert!(frame.contains("Open in Tab"));
         assert!(frame.contains("--ip"));
         assert!(frame.contains("Tabs never start"));
+        assert!(aicx.contains("id=\"aicx-search-form\""));
+        assert!(aicx.contains("/api/aicx/search"));
+        assert!(aicx.contains("location.search"));
+        assert!(aicx.contains("Search AICX"));
     }
 
     #[test]
