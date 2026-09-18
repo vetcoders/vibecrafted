@@ -66,6 +66,8 @@ def test_single_native_host_source_contract() -> None:
     # permanently-unavailable stub; generated documents are isolated.
     destinations = (APP / "CommandDeck/ToolDestinations.swift").read_text()
     assert '.configuredService(key: "slack-console"' in destinations
+    assert '.configuredService(key: "vc-frame"' in destinations
+    assert 'knownKeys: Set<String> = ["slack-console", "vc-frame"]' in destinations
     assert "vibecrafted/config.toml" in destinations
     assert "target: .unavailable(reason:" not in destinations
     assert (
@@ -117,6 +119,13 @@ def test_single_native_host_source_contract() -> None:
     assert "self.confirmedStopRoot == install.root" in delegate
     assert "deriveServerMenuState(caretakerData: self.lastCaretakerData" in delegate
     assert "It does not stop terminal sessions or agents." in delegate
+    assert "ensureFrameWebClient" in delegate
+    assert "FrameWebLaunch.bind" in delegate
+    assert "FrameWebLaunch" not in coordinator
+    assert "Process(" not in coordinator
+    frame_launch = (APP / "CommandDeck/FrameWebLaunch.swift").read_text()
+    assert '["web", "--ip", host, "--port", String(port)]' in frame_launch
+    assert "no default port is invented" in frame_launch
     for name in [
         "CanvasViewController",
         "InspectorViewController",

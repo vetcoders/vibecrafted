@@ -24,13 +24,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Router;
 use axum::body::{Body, to_bytes};
+use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode, header};
-use axum::routing::get;
+use axum::routing::{get, post};
 use leptos::config::{Env, LeptosOptions};
-use serde_json::json;
+use serde_json::{Value, json};
 use tower::ServiceExt;
 use vibecrafted_server_web::tools::api::{
-    loctree_report, loctree_report_asset, loctree_report_redirect,
+    loctree_generate, loctree_report, loctree_report_asset, loctree_report_redirect,
 };
 
 struct Fixture {
@@ -121,6 +122,9 @@ impl Fixture {
         // owner of process-wide environment for its lifetime.
         unsafe {
             std::env::set_var("VIBECRAFTED_HOME", &home);
+            std::env::set_var("HOME", &loct_home);
+            std::env::set_var("XDG_CACHE_HOME", loct_home.join(".cache"));
+            std::env::remove_var("VC_LOCT_BIN");
         }
         Some(Self { home, report_dir })
     }
@@ -145,15 +149,34 @@ fn router() -> Router {
         .route("/structure/report", get(loctree_report_redirect))
         .route("/structure/report/", get(loctree_report))
         .route("/structure/report/{asset}", get(loctree_report_asset))
+        .route("/api/structure/report", post(loctree_generate))
         .with_state(opts)
 }
 
 async fn call(app: &Router, uri: &str) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
-    let request = Request::builder()
+    call_with_peer(app, "GET", uri, None, "").await
+}
+
+async fn call_with_peer(
+    app: &Router,
+    method: &str,
+    uri: &str,
+    peer: Option<&str>,
+    body: &str,
+) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+    let mut builder = Request::builder()
+        .method(method)
         .uri(uri)
-        .header(header::HOST, "127.0.0.1:3024")
-        .body(Body::empty())
-        .expect("request");
+        .header(header::HOST, "127.0.0.1:3024");
+    if method == "POST" {
+        builder = builder.header(header::CONTENT_TYPE, "application/json");
+    }
+    let mut request = builder.body(Body::from(body.to_string())).expect("request");
+    if let Some(peer) = peer {
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(peer.parse::<SocketAddr>().expect("peer")));
+    }
     let response = app.clone().oneshot(request).await.expect("response");
     let status = response.status();
     let headers = response.headers().clone();
@@ -285,4 +308,34 @@ async fn a_real_loctree_report_is_served_whole() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     let (status, _, _) = call(&app, "/structure/report/context-atlas%2Fmanifest.md").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, _, body) = call_with_peer(&app, "POST", "/api/structure/report", None, "{}").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(String::from_utf8_lossy(&body).contains("private to this host"));
+
+    fs::remove_file(fixture.report_dir.join("report.html")).expect("remove report");
+    let (status, _, _) = call(&app, "/structure/report/").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, _, body) = call_with_peer(
+        &app,
+        "POST",
+        "/api/structure/report",
+        Some("127.0.0.1:5000"),
+        "{}",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let payload: Value = serde_json::from_slice(&body).expect("generate json");
+    assert_eq!(payload["schema"], "vibecrafted.loctree-report.v1");
+    assert_eq!(payload["href"], "/structure/report/");
+    assert!(
+        fixture.report_dir.join("report.html").is_file(),
+        "POST must run real loct report"
+    );
+
+    let (status, _, body) = call(&app, "/structure/report/").await;
+    assert_eq!(status, StatusCode::OK);
+    let html = String::from_utf8(body).expect("utf8 regenerated");
+    assert!(html.contains("<title>Loctree Report</title>"));
 }

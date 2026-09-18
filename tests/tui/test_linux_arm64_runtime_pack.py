@@ -136,6 +136,8 @@ def test_linux_builder_uses_pinned_public_inputs_for_arm64_and_x64() -> None:
     foundations = (REPO_ROOT / "scripts/stage-runtime-foundations.sh").read_text(
         encoding="utf-8"
     )
+    assert 'rm -rf "$WORK/loctree"' in foundations
+    assert 'rm -rf "$WORK/aicx"' in foundations
     assert "@loctree/aicx-linux-x64-gnu" in foundations
     assert "@loctree/loctree-linux-x64-gnu" in foundations
     # The candidate stager is the newer npm-integrity iteration: published

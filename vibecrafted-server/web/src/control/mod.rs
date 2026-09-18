@@ -30,6 +30,11 @@
 //!   one ephemeral monitor per canonical control-plane home plus run id.
 //! * `GET /api/control/runs/{run_id}/transcript` — bounded, no-store tail of
 //!   the canonical `transcript.human.log` used by the live run detail view.
+//! * `GET /api/control/transcripts?q=` — host-wide search over those human
+//!   logs. Snapshots are scanned newest-first; matching results are paginated
+//!   (`offset`, `limit`, `has_more`, `total`). Each file is streamed from the
+//!   start so a needle past any previous byte cap is still found. The live
+//!   run page keeps the tail preview.
 //! * `GET /api/control/lifecycle` — lifecycle run summaries, newest-first.
 //! * `GET /api/control/lifecycle/{run_id}` — full nested lifecycle state with
 //!   projected per-run and per-stage axes (shape of `write_lifecycle_report`).
@@ -66,13 +71,13 @@ pub mod api {
 
     use axum::Json;
     use axum::Router;
-    use axum::extract::Path;
+    use axum::extract::{Path, Query};
     use axum::http::{StatusCode, header};
     use axum::response::IntoResponse;
     use axum::routing::get;
     use chrono::{DateTime, Utc};
     use control_core::{ControlPlane, Event, RunStatus, SettlementBoard, is_safe_run_id};
-    use serde::Serialize;
+    use serde::{Deserialize, Serialize};
     use serde_json::json;
 
     use super::caretaker::caretaker;
@@ -106,6 +111,7 @@ pub mod api {
                 get(await_run_observation),
             )
             .route("/api/control/runs/{run_id}/transcript", get(transcript))
+            .route("/api/control/transcripts", get(transcripts))
             .route("/api/control/runs/{run_id}", get(run))
             .route("/api/control/lifecycle", get(lifecycle))
             .route("/api/control/lifecycle/{run_id}", get(lifecycle_run))
@@ -250,6 +256,67 @@ pub mod api {
                 "body": preview.body,
                 "available": preview.available,
                 "truncated": preview.truncated,
+            })),
+        )
+            .into_response()
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct TranscriptSearchQuery {
+        q: Option<String>,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    }
+
+    /// Host-wide human-transcript search. Snapshots are scanned newest-first;
+    /// matching results are paginated. Each log is streamed from the start so
+    /// a needle that lives only past a previous byte cap is still found.
+    async fn transcripts(Query(query): Query<TranscriptSearchQuery>) -> impl IntoResponse {
+        const DEFAULT_LIMIT: usize = 50;
+        const MAX_LIMIT: usize = 200;
+        let plane = ControlPlane::from_env();
+        let needle = query.q.as_deref().unwrap_or("").trim().to_string();
+        let needle_l = needle.to_ascii_lowercase();
+        let offset = query.offset.unwrap_or(0);
+        let limit = query.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+        let mut items = Vec::new();
+        let mut total = 0_usize;
+        for run in plane.load_snapshots() {
+            let hit = crate::run_detail::match_human_transcript(&plane, &run.run_id, &needle);
+            if !hit.available {
+                continue;
+            }
+            let meta_hit = !needle.is_empty()
+                && (run.run_id.to_ascii_lowercase().contains(&needle_l)
+                    || run.agent.to_ascii_lowercase().contains(&needle_l)
+                    || run.skill.to_ascii_lowercase().contains(&needle_l));
+            if !needle.is_empty() && !hit.matched && !meta_hit {
+                continue;
+            }
+            if total >= offset && items.len() < limit {
+                items.push(json!({
+                    "run_id": run.run_id,
+                    "agent": run.agent,
+                    "skill": run.skill,
+                    "root": run.root,
+                    "updated_at": run.updated_at,
+                    "available": hit.available,
+                    "truncated": hit.truncated,
+                    "snippet": hit.snippet,
+                }));
+            }
+            total += 1;
+        }
+        (
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(json!({
+                "count": items.len(),
+                "total": total,
+                "offset": offset,
+                "limit": limit,
+                "has_more": offset + items.len() < total,
+                "q": needle,
+                "items": items,
             })),
         )
             .into_response()
