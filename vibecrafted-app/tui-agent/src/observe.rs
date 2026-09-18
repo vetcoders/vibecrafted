@@ -16,6 +16,9 @@ pub const DEFAULT_SERVER: &str = "http://127.0.0.1:3024";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConsoleView {
+    /// Shared Home / Dashboard: attention → work → history, then an
+    /// existing conversation. This is the product landing surface.
+    Home,
     Observe,
     Full,
 }
@@ -69,10 +72,15 @@ impl TranscriptView {
 impl ConsoleView {
     pub fn parse(raw: &str) -> anyhow::Result<Self> {
         match raw {
+            "home" | "dashboard" => Ok(Self::Home),
             "observe" | "live" => Ok(Self::Observe),
             "full" | "classic" => Ok(Self::Full),
-            other => anyhow::bail!("unknown --view {other} (observe|full)"),
+            other => anyhow::bail!("unknown --view {other} (home|observe|full)"),
         }
+    }
+
+    pub fn is_home(self) -> bool {
+        matches!(self, Self::Home)
     }
 }
 
@@ -97,6 +105,9 @@ pub struct ObserveState {
     pub transcript_generation: u64,
     /// A transcript read not yet handed to the worker.
     pub transcript_request: Option<crate::refresh::TranscriptJob>,
+    /// Shared Home landing / conversation. Nested here so existing App
+    /// literals keep compiling: ObserveState already defaults.
+    pub home: crate::home::HomeState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
