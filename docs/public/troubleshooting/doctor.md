@@ -80,6 +80,8 @@ The skip described above is real, and it is now reported rather than silent. Doc
 
 A root that resolves **into the store** additionally gets no views written into it. Every view there would be a symlink inside the canonical store aimed at its own sibling, and the root-rule sync would copy `*_RULE.md` into the store on every run — litter in the one directory that has to stay exactly what was published. Nothing is lost by skipping it: that root _is_ the store, so `~/.junie/skills/vc-x` already resolves to `~/.vibecrafted/skills/vc-x` with no view in between.
 
+The pruner that removes **managed symlink views** from a runtime left out of the install now requires the same pointer-free root. `~/.codex/skills -> ~/.claude/skills` on a claude-only host shows every one of claude's live views under the inactive `codex` name — same inode, same managed target — and each one was unlinked as codex's leftover, taking the active runtime's deck with it. The check is per runtime, not per entry, because the entry in front of the pruner is indistinguishable from a view it wrote itself.
+
 Launcher audits are scoped by **ownership, not naming**: doctor judges only the launchers Vibecrafted publishes itself (the installer's wrappers and Python entrypoints, the legacy packs, and the provider-published `vc-slack`). Another product that shares `~/.local/bin` and the `vc-` prefix — and legitimately links into its own checkout — keeps its own installation contract and is left alone.
 
 This is the same audit that gates publication of a new generation: what fails a publish also fails doctor afterward.
