@@ -751,17 +751,18 @@ STANDARD_VIEW_RUNTIMES = [*SYMLINK_TARGETS, *SHADOWED_SKILL_VIEW_RUNTIMES]
 # for skills generated after those tokens existed — measured against the real
 # June-2026 copies recovered from ~/.junie/skills, not one carried a marker.
 #
-# What every one of them does carry is a file history: their SKILL.md exists
-# byte for byte as a blob in the Vibecrafted git history, and so does every
-# other file path in the copy. So the bundle ships a manifest of what we have
-# ever released per skill — the sha256 of every SKILL.md, and every relative
-# file path that ever lived under a vc-<name>/ directory. A copy is claimed as
-# ours only when BOTH match: its SKILL.md is a release we shipped and it holds
-# no file we never shipped. A SKILL.md whose hash is absent from history was
-# edited by its owner, which makes the whole directory custom content.
+# What every one of them does carry is a file history: every byte in the copy
+# exists as a blob in the Vibecrafted git history. So the bundle ships a
+# manifest of what we have actually released per skill — the sha256 of every
+# SKILL.md, and for every relative path under a real skill directory the git
+# blob id of every version of that file we ever committed. A copy is claimed as
+# ours only when its SKILL.md is a release we shipped AND every file it holds
+# is, byte for byte, a version of that same file we shipped. A path we shipped
+# is not enough: a name says nothing about content, and an operator's own
+# `scripts/await.sh` would otherwise inherit ours.
 # Regenerate with `scripts/gen_skill_provenance.py`.
 SKILL_PROVENANCE_FILE = "SKILL_PROVENANCE.json"
-SKILL_PROVENANCE_SCHEMA = "vibecrafted.skill-provenance.v2"
+SKILL_PROVENANCE_SCHEMA = "vibecrafted.skill-provenance.v3"
 SHADOW_QUARANTINE_PREFIX = "shadowed-views-"
 
 # ---------------------------------------------------------------------------
@@ -1793,15 +1794,15 @@ def _skill_tree_fingerprint(root: Path) -> dict[str, str]:
     return fingerprint
 
 
-def _skill_copy_relative_files(root: Path) -> list[str]:
-    """Sorted relative paths of every non-directory entry under `root`.
+def _skill_copy_entries(root: Path) -> list[tuple[str, Path]]:
+    """Every non-directory entry under `root`, as `(relative path, path)`.
 
     Editor litter is skipped exactly as in `_skill_tree_fingerprint`, and a
     symlink is listed but never descended into: a link inside a copy is content
-    that has to be provable like any other file, and following it could walk
+    that has to be provable like any other entry, and following it could walk
     out of the copy or loop forever.
     """
-    found: list[str] = []
+    found: list[tuple[str, Path]] = []
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         base = Path(dirpath)
         descend: list[str] = []
@@ -1810,16 +1811,33 @@ def _skill_copy_relative_files(root: Path) -> list[str]:
                 continue
             path = base / name
             if path.is_symlink():
-                found.append("/".join(path.relative_to(root).parts))
+                found.append(("/".join(path.relative_to(root).parts), path))
             else:
                 descend.append(name)
         dirnames[:] = descend
         for name in sorted(filenames):
-            rel_parts = (base / name).relative_to(root).parts
+            path = base / name
+            rel_parts = path.relative_to(root).parts
             if _skill_fingerprint_ignored(rel_parts):
                 continue
-            found.append("/".join(rel_parts))
+            found.append(("/".join(rel_parts), path))
     return sorted(found)
+
+
+def _git_blob_id(data: bytes) -> str:
+    """The git blob id of `data` — sha1 over git's own object header.
+
+    This is what lets the manifest carry blob ids straight out of
+    `git log --raw` and still be checkable on a machine with no git, no
+    repository and no network: `git hash-object` is this one line.
+    """
+    # sha1 is not a choice here: a git blob id IS sha1 over that header, so
+    # this is an identifier in someone else's format, never a signature of
+    # ours. `usedforsecurity=False` says so to OpenSSL (and keeps it working
+    # under FIPS); the rule is silenced by id on this line alone.
+    return hashlib.sha1(  # nosemgrep: python.lang.security.insecure-hash-algorithms.insecure-hash-algorithm-sha1
+        b"blob %d\0" % len(data) + data, usedforsecurity=False
+    ).hexdigest()
 
 
 def _skill_md_sha256(skill_dir: Path) -> str | None:
@@ -1834,12 +1852,13 @@ def _skill_md_sha256(skill_dir: Path) -> str | None:
 class SkillProvenance:
     """What Vibecrafted has ever released for one skill.
 
-    `sha256` holds every SKILL.md digest ever shipped; `paths` holds every
-    relative file path that ever lived under a `vc-<name>/` directory.
+    `sha256` holds every SKILL.md digest ever shipped. `files` maps each
+    relative path under a real skill directory to the git blob id of every
+    version of that file we ever committed — the bytes, not just the name.
     """
 
     sha256: frozenset[str] = frozenset()
-    paths: frozenset[str] = frozenset()
+    files: Mapping[str, frozenset[str]] = field(default_factory=dict)
 
 
 def _string_set(value: object) -> frozenset[str]:
@@ -1849,14 +1868,62 @@ def _string_set(value: object) -> frozenset[str]:
     return frozenset(item for item in value if isinstance(item, str))
 
 
+def _released_files(value: object) -> dict[str, frozenset[str]]:
+    """Coerce an untrusted manifest object into `relpath → blob id set`."""
+    if not isinstance(value, dict):
+        return {}
+    return {
+        name: _string_set(ids)
+        for name, ids in value.items()
+        if isinstance(name, str) and isinstance(ids, list)
+    }
+
+
+def unproven_skill_copy_reason(copy_dir: Path, released: SkillProvenance) -> str | None:
+    """Why `copy_dir` is not a Vibecrafted release, or None when it is one.
+
+    One proof, used for both a copy shadowing a view and an orphan whose name
+    has left the bundle, because both decisions are the same decision: may the
+    installer delete this directory?
+
+    Two conditions, and the second is the one that costs work. The SKILL.md has
+    to hash into the set of releases we shipped — a hash we never shipped means
+    its owner edited it. And every entry in the copy has to be a plain file
+    whose bytes are a version of that same file we committed. Matching the path
+    alone would claim an operator's own `scripts/await.sh` on the strength of
+    its name; a symlink or anything else that is not a regular file is not a
+    shape we ship inside a materialized copy, so it withdraws the claim too.
+    """
+    digest = _skill_md_sha256(copy_dir)
+    if not digest:
+        return "SKILL.md is missing or unreadable"
+    if digest not in released.sha256:
+        return "SKILL.md is not a Vibecrafted release; its owner edited it"
+    for rel, path in _skill_copy_entries(copy_dir):
+        if path.is_symlink():
+            return f"{rel!r} is a symlink, which a release never ships as a copy"
+        if not path.is_file():
+            return f"{rel!r} is not a regular file"
+        known = released.files.get(rel)
+        if not known:
+            return f"{rel!r} was never shipped with this skill"
+        try:
+            blob = _git_blob_id(path.read_bytes())
+        except OSError:
+            return f"{rel!r} cannot be read"
+        if blob not in known:
+            return f"{rel!r} differs from every version Vibecrafted shipped"
+    return None
+
+
 def load_skill_provenance(store_path: Path) -> dict[str, SkillProvenance]:
     """Read the shipped release manifest: skill name → `SkillProvenance`.
 
     A missing, unreadable, corrupt or foreign-schema manifest yields an empty
-    map — including a manifest of an older schema, whose entries carry no path
-    history and would therefore claim copies this version cannot vouch for.
-    The proof only ever *adds* certainty, so its absence must degrade to "no
-    proof", never to an installer traceback on someone's machine.
+    map — including a manifest of an older schema, whose entries carry weaker
+    evidence than this version requires and would therefore claim copies it
+    cannot vouch for. The proof only ever *adds* certainty, so its absence must
+    degrade to "no proof", never to an installer traceback on someone's machine.
     """
     try:
         data = json.loads(
@@ -1874,7 +1941,7 @@ def load_skill_provenance(store_path: Path) -> dict[str, SkillProvenance]:
         if not isinstance(name, str) or not isinstance(entry, dict):
             continue
         manifest[name] = SkillProvenance(
-            _string_set(entry.get("sha256")), _string_set(entry.get("paths"))
+            _string_set(entry.get("sha256")), _released_files(entry.get("files"))
         )
     return manifest
 
@@ -1965,42 +2032,12 @@ def collect_shadowed_skill_dirs(
                     )
                 )
                 continue
-            released = provenance.get(skill_name, SkillProvenance())
-            digest = _skill_md_sha256(shadow)
-            if not digest or digest not in released.sha256:
-                shadows.append(
-                    ShadowedSkillDir(
-                        runtime,
-                        skill_name,
-                        shadow,
-                        "unknown",
-                        "real directory whose SKILL.md is not a Vibecrafted "
-                        "release; its owner edited it",
-                    )
-                )
-                continue
-            # The SKILL.md alone is not the directory. An operator who dropped
-            # their own reference, script or note next to a shipped SKILL.md
-            # would lose it, so a single path we never released withdraws the
-            # whole claim.
-            foreign = next(
-                (
-                    rel
-                    for rel in _skill_copy_relative_files(shadow)
-                    if rel not in released.paths
-                ),
-                None,
+            unproven = unproven_skill_copy_reason(
+                shadow, provenance.get(skill_name, SkillProvenance())
             )
-            if foreign is not None:
+            if unproven is not None:
                 shadows.append(
-                    ShadowedSkillDir(
-                        runtime,
-                        skill_name,
-                        shadow,
-                        "unknown",
-                        f"SKILL.md matches a Vibecrafted release, but "
-                        f"{foreign!r} was never shipped with this skill",
-                    )
+                    ShadowedSkillDir(runtime, skill_name, shadow, "unknown", unproven)
                 )
                 continue
             shadows.append(
@@ -2010,8 +2047,8 @@ def collect_shadowed_skill_dirs(
                     shadow,
                     "managed_stale",
                     f"differs from {expected}; SKILL.md matches a historical "
-                    f"Vibecrafted release (sha256 {digest[:12]}) and every file "
-                    f"path is one we shipped",
+                    f"Vibecrafted release and every file in it is byte for byte "
+                    f"a version we shipped",
                 )
             )
     return shadows

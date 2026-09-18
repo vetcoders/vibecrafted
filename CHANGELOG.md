@@ -59,6 +59,32 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   rather than unlinked and rewritten, which is what kept a runtime skills dir
   symlinked into the store from having the store copy removed under it.
 
+- Skill-copy provenance proves **bytes, not names**. `SKILL_PROVENANCE.json`
+  (schema `vibecrafted.skill-provenance.v3`) now records, per skill, the sha256
+  of every `SKILL.md` released and — for every relative path under a directory
+  that has actually held a `SKILL.md` — the git blob id of every version of
+  that file ever committed. A copy is claimed only when its `SKILL.md` is a
+  release and every entry in it is a plain file whose bytes are a version we
+  shipped at that path. A path was never evidence on its own: an operator's own
+  edited `scripts/await.sh`, sitting at a path the bundle does ship, was
+  claimed by name and would have gone into the quarantine. The installer
+  recomputes a blob id locally as `sha1(b"blob <len>\0" + data)`, so nothing
+  needs git, a repository or a network.
+
+  Path scope is fixed in the same cut: `runtime/vc-marbles/` never held a
+  `SKILL.md`, so its files are not `vc-marbles`' files and no longer widen what
+  the installer may delete (13 such paths dropped). And because we have shipped
+  a file as a symlink (`skills/vc-agents/shell/vetcoders.zsh -> vetcoders.sh`)
+  that a copying installer dereferences, the manifest records the target's blob
+  ids under the link's path too — without which the largest recovered copy is
+  unprovable for one file out of 54.
+
+  `--check` now compares the whole rendered document instead of hunting for
+  missing entries, so an unsorted or duplicated manifest fails as well, and it
+  is wired into the Makefile `check` target — the doc called it a CI gate
+  before anything ran it. Manifest: 35 skills, 971 `SKILL.md` hashes, 366
+  paths, 2517 blob ids, 224 KB.
+
 - A stale junction standing where a skill view belongs is now removed as a
   pointer (`os.rmdir`) instead of through `shutil.rmtree`. A junction reports
   `is_dir()` and not `is_symlink()`, so it reached the writer's `rmtree`

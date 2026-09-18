@@ -33,29 +33,37 @@ Installers before 3.x materialized **real directory copies** of `vc-*` skills in
 
 Doctor now reports one `shadow-dir:<runtime>/<skill>` warning per copy, with the exact path and its provenance class:
 
-| Class               | Meaning                                                                                                                        | What install/update does                                   |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------- |
-| `managed_identical` | File tree and content hashes match the store copy of that skill                                                                | Copied into a quarantine dir, then removed                 |
-| `managed_stale`     | Content differs, but the release history proves every byte and every path: a `SKILL.md` Vibecrafted shipped, and no other file | Copied into a quarantine dir, then removed                 |
-| `unknown`           | A real `vc-*` directory whose Vibecrafted provenance cannot be proven                                                          | **Never touched** — reported with a manual `mv` suggestion |
+| Class               | What is proven                                                                                                                                                                                             | What install/update does                                   |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| `managed_identical` | The copy's file tree and content hashes match the store copy of that skill                                                                                                                                 | Copied into a quarantine dir, then removed                 |
+| `managed_stale`     | The copy's `SKILL.md` bytes are a release we shipped (sha256), and every file in it is byte for byte a version we shipped at that same path (git blob id), under a directory that really held a `SKILL.md` | Copied into a quarantine dir, then removed                 |
+| `unknown`           | Anything less — an edited file, a path we never shipped, a symlink, or a `SKILL.md` we never released                                                                                                      | **Never touched** — reported with a manual `mv` suggestion |
 
 Reconciliation happens during install and update, so the fix doctor names is `vibecrafted update --force`: a plain `vibecrafted update` prints `up to date` and returns without reinstalling once the installed version already matches the channel, and the reconciliation never runs.
 
 Provenance is proven from content, never from the `vc-` name: your own skill parked under a `vc-*` name is reported and left alone. Two proofs are tried, in order:
 
 1. **Identical tree** — the copy's file tree and content hashes match the store copy of that skill. Nothing can be lost: the store holds the same bytes, and the copy is quarantined before it is removed.
-2. **Release history** — `SKILL_PROVENANCE.json`, shipped inside the skill store, records per skill the sha256 of every `SKILL.md` Vibecrafted has ever released _and_ every relative file path that has ever lived under that skill's directory in the repository history. The copy is claimed only when **both** hold: its `SKILL.md` is one of those releases, and every file it carries (editor litter aside) sits at a path we have shipped. A `SKILL.md` whose hash is absent was edited by its owner, and one unexpected file — your own note or script next to a shipped `SKILL.md` — withdraws the whole claim and names that path in the warning. This is the proof that reaches the real June-2026 copies: four of them still carry files the current bundle dropped, and every one of those paths is in the history.
+2. **Release history** — `SKILL_PROVENANCE.json`, shipped inside the skill store, records per skill the sha256 of every `SKILL.md` Vibecrafted has ever released, and for every relative path under a real skill directory the **git blob id of every version of that file we ever committed**. The copy is claimed only when both halves hold: its `SKILL.md` hashes into the released set, and every entry in it is a plain file whose bytes are one of the versions we shipped at that exact path. Editor litter (`__pycache__/`, `*.pyc`, `.DS_Store`) is skipped.
 
-A missing, corrupt or older-schema manifest disables that second proof only; the identical-tree proof still applies, and everything else is reported as `unknown`.
+   A path is deliberately not evidence on its own. A name says nothing about content, so your own edited `scripts/await.sh` sitting at a path we do ship is `unknown`, and the warning names the file. A symlink inside the copy is `unknown` too: a materialized copy is files, and a link points somewhere nobody can vouch for.
+
+   "Real skill directory" is just as deliberate. Only a directory that has ever held a `SKILL.md`, under a root where one has actually lived, counts. `runtime/vc-marbles/` never held one, so `orchestrator/commands/help.md` is not a `vc-marbles` file and does not widen what the installer may delete — while the identically-named path under `skills/vc-marbles/` is, because that root did.
+
+   One shape needs naming: we have shipped a file as a _symlink_ (`skills/vc-agents/shell/vetcoders.zsh -> vetcoders.sh`), and an installer that copies a tree dereferences it, so the copy holds the target's bytes under the link's name. Those bytes are still ours, so the manifest records the target's blob ids under the link's path as well. Without that, the largest real copy on the affected host is unprovable for one file out of 54.
+
+A missing, corrupt or older-schema manifest disables that second proof only; the identical-tree proof still applies, and everything else is reported as `unknown`. An older schema counts as missing: v1 recorded `SKILL.md` hashes alone and v2 added bare paths, and neither can say whether a file's bytes are ours.
 
 Maintainers regenerate the manifest from the repository history after editing, adding or removing any skill file:
 
 ```bash
 scripts/gen_skill_provenance.py            # merge history + working tree into the manifest
-scripts/gen_skill_provenance.py --check     # CI gate: fails when a current SKILL.md or path is unrecorded
+scripts/gen_skill_provenance.py --check     # gate: fails when the committed manifest is not what a regeneration renders
 ```
 
-The merge is additive and idempotent, so regenerating in a shallow clone never shrinks the proof set.
+`--check` runs inside `make check`, so an unrecorded file fails Portable Checks rather than shipping a bundle that cannot prove its own skills. It compares the whole rendered document (`generated_at` aside), so an unsorted or duplicated entry fails too, not only a missing one.
+
+The merge is additive and idempotent, so regenerating in a shallow clone never shrinks the proof set — which is also why a well-formed entry for a skill this clone cannot see is kept rather than flagged: that is how a retired skill's proof survives.
 
 A runtime skill directory reached through a symlink or a Windows directory junction, or that resolves into the skill store, is skipped entirely (a junction reports `is_symlink() == False` while `rmtree` still walks through it): comparing the store with itself would classify every skill as an identical copy, and removing it would take the canonical store with it. Runtimes that carry a managed view (`agents`, `claude`, `codex`, plus anything the manifest recorded) are audited by the symlink checks instead of `shadow-dir:`, so nothing is double-reported — a real directory there is reported as `symlink:<runtime>/<skill>` "is a COPY, not a symlink". Reconciliation itself covers **every** runtime, those included, and runs before install writes the views. Quarantined copies land in `~/.vibecrafted/backups/installer/shadowed-views-<timestamp>/<runtime>/<skill>` and are never removed by the installer; the canonical `~/.agents/skills` view is never modified by this reconciliation.
 
