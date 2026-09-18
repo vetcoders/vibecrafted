@@ -127,6 +127,12 @@ impl RefreshSource for CanonicalRefreshSource {
     }
 
     fn control_plane(&mut self, state_root: &Path) -> io::Result<ControlPlaneState> {
+        if let Ok(raw) = std::env::var("VOC_SOURCE_DELAY_MS")
+            && let Ok(delay_ms) = raw.parse::<u64>()
+            && delay_ms > 0
+        {
+            thread::sleep(Duration::from_millis(delay_ms));
+        }
         ControlPlaneState::load(state_root)
     }
 

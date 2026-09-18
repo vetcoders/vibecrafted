@@ -1,8 +1,9 @@
 use crate::app::{App, AppTab, LaunchFocus, wrap_operator_line};
+use crate::home::{HomeBand, HomeSurface};
 use crate::launch;
 use crate::layout::{
-    PaneId, controls_layout, dispatch_layout, mission_layout, monitor_layout, mux_panel_height,
-    observe_layout, polarize_panel_height,
+    PaneId, controls_layout, dispatch_layout, home_layout, home_root_layout, mission_layout,
+    monitor_layout, mux_panel_height, observe_layout, polarize_panel_height,
 };
 use crate::mission_control::{
     ActionPriority, ActionQueueItem, ActionQueueKind, ActiveDispatch, AgentStatsRow, DataQuality,
@@ -16,21 +17,25 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs, Wrap};
 
 pub fn draw(frame: &mut Frame, app: &App) {
-    let root = frame.area();
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Length(3),
-            Constraint::Min(12),
-            Constraint::Length(3),
-        ])
-        .split(root);
+    if app.config.view.is_home() {
+        draw_home_shell(frame, app);
+    } else {
+        let root = frame.area();
+        let layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(2),
+                Constraint::Length(3),
+                Constraint::Min(12),
+                Constraint::Length(3),
+            ])
+            .split(root);
 
-    draw_header(frame, layout[0], app);
-    draw_tabs(frame, layout[1], app);
-    draw_body(frame, layout[2], app);
-    draw_footer(frame, layout[3], app);
+        draw_header(frame, layout[0], app);
+        draw_tabs(frame, layout[1], app);
+        draw_body(frame, layout[2], app);
+        draw_footer(frame, layout[3], app);
+    }
 
     match app.focus {
         LaunchFocus::Help => draw_help_overlay(frame, app),
@@ -246,6 +251,171 @@ fn draw_observe(frame: &mut Frame, area: Rect, app: &App) {
 
 fn return_empty_scope_message(scope: &str) -> String {
     format!("no {scope} runs in canonical control plane")
+}
+
+fn draw_home_shell(frame: &mut Frame, app: &App) {
+    let root = home_root_layout(frame.area());
+    draw_home_header(frame, root.header, app);
+    match app.observe.home.surface {
+        HomeSurface::Landing => draw_home_board(frame, root.body, app),
+        HomeSurface::Conversation => draw_home_conversation(frame, root.body, app),
+    }
+    draw_home_footer(frame, root.footer, app);
+}
+
+fn draw_home_header(frame: &mut Frame, area: Rect, app: &App) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Length(1)])
+        .split(area);
+    let counts = app.home_counts();
+    let title = Line::from(vec![
+        Span::styled("Home", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw("  "),
+        Span::styled(
+            format!("[{}]", app.observe.home.scope.label()),
+            Style::default().fg(Color::Cyan),
+        ),
+        Span::raw("  "),
+        Span::styled(app.status_summary(), Style::default().fg(Color::Gray)),
+    ]);
+    frame.render_widget(Paragraph::new(title), rows[0]);
+    frame.render_widget(
+        Paragraph::new(format!(
+            "attention {}  work {}  history {}  cost — if unknown",
+            counts.attention, counts.work, counts.history
+        ))
+        .style(Style::default().fg(Color::DarkGray)),
+        rows[1],
+    );
+}
+
+fn home_board_lines(app: &App) -> Vec<(Option<usize>, String, Style)> {
+    let rows = app.home_rows();
+    let mut lines = Vec::new();
+    for band in [HomeBand::Attention, HomeBand::Work, HomeBand::History] {
+        lines.push((
+            None,
+            band.title().to_string(),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+        let members = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.band == band)
+            .collect::<Vec<_>>();
+        if members.is_empty() {
+            lines.push((
+                None,
+                "  —".to_string(),
+                Style::default().fg(Color::DarkGray),
+            ));
+            continue;
+        }
+        for (index, row) in members {
+            let selected = index == app.observe.home.selected;
+            let style = if selected {
+                Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+            } else if band == HomeBand::Attention {
+                Style::default().fg(Color::Yellow)
+            } else if band == HomeBand::Work {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default()
+            };
+            lines.push((Some(index), format!("  {}", row.list_line(72)), style));
+        }
+    }
+    lines
+}
+
+pub(crate) fn home_board_line_count(app: &App) -> usize {
+    home_board_lines(app).len()
+}
+
+pub(crate) fn home_row_index_at(app: &App, inner_row: usize) -> Option<usize> {
+    home_board_lines(app)
+        .into_iter()
+        .skip(inner_row)
+        .find_map(|(index, _, _)| index)
+}
+
+fn draw_home_board(frame: &mut Frame, area: Rect, app: &App) {
+    let skip = usize::from(app.interaction.scroll.home_list);
+    let items = home_board_lines(app)
+        .into_iter()
+        .skip(skip)
+        .map(|(_, text, style)| ListItem::new(Line::from(Span::styled(text, style))))
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        List::new(items).block(Block::default().borders(Borders::ALL).title(Span::styled(
+            " Needs attention · In progress · History ",
+            Style::default().add_modifier(Modifier::BOLD),
+        ))),
+        area,
+    );
+}
+
+fn draw_home_conversation(frame: &mut Frame, area: Rect, app: &App) {
+    let columns = home_layout(area, frame.area().width);
+    if columns.list.width > 0 {
+        draw_home_board(frame, columns.list, app);
+    }
+    let width = usize::from(columns.transcript.width.saturating_sub(2).max(8));
+    let lines = app
+        .home_conversation_lines(width)
+        .into_iter()
+        .map(Line::from)
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(lines)
+            .scroll((app.interaction.scroll.home_transcript, 0))
+            .block(Block::default().borders(Borders::ALL).title(Span::styled(
+                " Conversation · Esc returns Home ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ))),
+        columns.transcript,
+    );
+}
+
+fn draw_home_footer(frame: &mut Frame, area: Rect, app: &App) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(area);
+    let hint = match (app.observe.home.surface, app.focus) {
+        (_, LaunchFocus::Error) => "Error: Enter/Esc closes · Home did not launch",
+        (HomeSurface::Conversation, _) => {
+            "Conversation: Esc/H returns Home  no launch  transcript wraps at the pane width"
+        }
+        (HomeSurface::Landing, _) => {
+            "Home: ↑/↓ agent  Enter opens existing panel  f Global/Local  H Home  q quit"
+        }
+    };
+    frame.render_widget(
+        Paragraph::new(hint).style(Style::default().fg(Color::Cyan)),
+        rows[0],
+    );
+    frame.render_widget(
+        Paragraph::new("Shared console · one Home · existing conversations only")
+            .style(Style::default().fg(Color::DarkGray)),
+        rows[1],
+    );
+    let status = if app.status_line.is_empty() {
+        format!("state root: {}", app.config.state_root.to_string_lossy())
+    } else {
+        app.status_line.clone()
+    };
+    frame.render_widget(
+        Paragraph::new(status).style(Style::default().fg(Color::Gray)),
+        rows[2],
+    );
 }
 
 fn draw_memory_overlay(frame: &mut Frame, app: &App) {
@@ -1894,6 +2064,120 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>()
+    }
+
+    fn render_home_size(app: &App, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut out = String::new();
+        for y in 0..height {
+            for x in 0..width {
+                out.push_str(buffer[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    fn home_fixture_app() -> App {
+        let mut app = sample_app();
+        app.config.view = crate::observe::ConsoleView::Home;
+        app.config.repo = std::path::PathBuf::from("/tmp/ws-alpha");
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut ask = sample_run("ask-1", "kimi", "pane-1");
+        ask.snapshot.root = Some("/tmp/ws-alpha".into());
+        ask.snapshot.state = Some("waiting".into());
+        ask.kind = RunKind::Unknown;
+        ask.snapshot.extra.insert(
+            "attention_reason".into(),
+            serde_json::Value::String("waiting on operator".into()),
+        );
+        ask.snapshot
+            .extra
+            .insert("panel".into(), serde_json::Value::String("pane-1".into()));
+        let mut work = sample_run("work-1", "claude", "pane-2");
+        work.snapshot.root = Some("/tmp/ws-alpha".into());
+        work.snapshot.updated_at = Some(now.clone());
+        work.snapshot.last_heartbeat = Some(now);
+        let mut hist = sample_run("hist-1", "cursor", "pane-old");
+        hist.snapshot.root = Some("/tmp/ws-alpha".into());
+        hist.snapshot.state = Some("completed".into());
+        hist.kind = RunKind::Completed;
+        hist.snapshot
+            .extra
+            .insert("exit_code".into(), serde_json::Value::from(0));
+        let mut missing = sample_run("ask-beta", "grok", "");
+        missing.snapshot.root = Some("/tmp/ws-beta".into());
+        missing.snapshot.operator_session = None;
+        missing.snapshot.state = Some("unknown".into());
+        missing.kind = RunKind::Unknown;
+        app.state.runs = vec![
+            ask.snapshot.clone(),
+            work.snapshot.clone(),
+            hist.snapshot.clone(),
+            missing.snapshot.clone(),
+        ];
+        app.state.retained_runs = app.state.runs.clone();
+        app.runs = vec![ask, work, hist, missing];
+        app
+    }
+
+    #[test]
+    fn home_board_exposes_attention_separates_history_and_keeps_unknown_cost() {
+        let app = home_fixture_app();
+        let wide = render_home_size(&app, 80, 24);
+        assert!(wide.contains("Needs attention"), "{wide}");
+        assert!(wide.contains("In progress"), "{wide}");
+        assert!(wide.contains("History"), "{wide}");
+        assert!(wide.contains("[Global]"), "{wide}");
+        assert!(
+            wide.contains("waiting on operator") || wide.contains("waiting on operat"),
+            "{wide}"
+        );
+        assert!(!wide.contains("cost 0"), "{wide}");
+        let compact = render_home_size(&app, 40, 20);
+        assert!(compact.contains("Needs attention"), "{compact}");
+        assert!(compact.contains("History"), "{compact}");
+    }
+
+    #[test]
+    fn home_conversation_keeps_words_inside_a_forty_column_pty() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("work-1.log");
+        std::fs::write(
+            &transcript,
+            "claude is implementing the shared home console without wrapping mid-word\n",
+        )
+        .unwrap();
+        let mut app = home_fixture_app();
+        if let Some(run) = app.state.runs.iter_mut().find(|run| run.run_id == "work-1") {
+            run.latest_transcript = Some(transcript.display().to_string());
+        }
+        app.observe.home.surface = HomeSurface::Conversation;
+        app.observe.home.conversation_run_id = Some("work-1".into());
+        let compact = render_home_size(&app, 40, 20);
+        assert!(compact.contains("Conversation"), "{compact}");
+        assert!(
+            compact.contains("implementing") && compact.contains("wrapping"),
+            "{compact}"
+        );
+        for line in compact.lines() {
+            assert!(
+                line.chars().count() <= 40,
+                "wide line ({}): {line}",
+                line.chars().count()
+            );
+            assert!(
+                !line.contains("implementi") || line.contains("implementing"),
+                "{line}"
+            );
+            assert!(
+                !line.contains("wrappin") || line.contains("wrapping"),
+                "{line}"
+            );
+        }
     }
 
     #[test]
