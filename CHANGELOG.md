@@ -59,6 +59,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   rather than unlinked and rewritten, which is what kept a runtime skills dir
   symlinked into the store from having the store copy removed under it.
 
+- Install now links the canonical `~/.agents/skills` view _before_ reconciling
+  skill-copy shadows, and the remaining runtime views after. Reconciliation
+  refuses to remove a copy until that view points at the store, so on a
+  first-ever install — where nothing has written it yet — every copy was kept,
+  and the next plain `vibecrafted update` stops at "up to date" without
+  retrying: the runtime would have gone on loading June-2026 copies until the
+  following release. One pass now links, reconciles and links.
+
 - Doctor's fix for a `shadow-dir:` finding is now `vibecrafted update --force`.
   It used to say `vibecrafted update`, which on a host already on the latest
   version prints `up to date` and returns before the reconciliation runs — the

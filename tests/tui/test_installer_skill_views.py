@@ -606,13 +606,71 @@ def test_manifest_that_is_absent_corrupt_or_v1_proves_nothing(
 
 
 def _install_pass(store: Path, names: list[str], runtimes: list[str]) -> None:
-    """The two steps an install performs over the runtime skill dirs, in order."""
-    installer.reconcile_shadowed_skill_dirs(store, names)
-    for runtime in runtimes:
-        rt_skills = installer.runtime_skills_dir(runtime)
-        rt_skills.mkdir(parents=True, exist_ok=True)
-        for name in names:
-            installer.create_skill_view_symlink(store / name, rt_skills / name)
+    """Exactly what an install does over the runtime skill dirs, in order."""
+    installer.link_and_reconcile_skill_views(runtimes, store, store, names)
+
+
+def test_a_first_install_links_and_reconciles_in_one_pass(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Reconciliation refuses to remove a copy before ~/.agents/skills/<skill>
+    points at the store, so it has to run after that view is written and before
+    the rest. Get it wrong and a first install keeps every copy — and the next
+    plain `vibecrafted update` stops at "up to date" without ever retrying."""
+    home = tmp_path / "home"
+    crafted_home = tmp_path / "crafted"
+    store = tmp_path / "store"
+    _pin_home(monkeypatch, home, crafted_home)
+    _store_skill(store, "vc-x", "canonical body\n")
+    shadow = _junie_copy(home, "vc-x", SKILL_MD + "june 2026 body\n")
+    _prove(store, "vc-x", shadow)
+    # No canonical view exists yet: this is a first-ever install.
+    assert not (home / ".agents").exists()
+
+    _install_pass(store, ["vc-x"], ["agents", "junie"])
+
+    # The real directory is gone and the view has taken its place — same path.
+    assert shadow.is_symlink()
+    quarantined = _quarantine_dirs(crafted_home)
+    assert (
+        (quarantined[0] / "junie" / "vc-x" / "SKILL.md")
+        .read_text(encoding="utf-8")
+        .endswith("june 2026 body\n")
+    )
+    for runtime in ("agents", "junie"):
+        view = home / f".{runtime}" / "skills" / "vc-x"
+        assert view.is_symlink(), runtime
+        assert view.resolve() == (store / "vc-x").resolve(), runtime
+
+
+def test_the_canonical_view_is_written_before_shadows_are_reconciled(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The guard against someone reordering the three steps back."""
+    home = tmp_path / "home"
+    crafted_home = tmp_path / "crafted"
+    store = tmp_path / "store"
+    _pin_home(monkeypatch, home, crafted_home)
+    _store_skill(store, "vc-x", "canonical body\n")
+    shadow = _junie_copy(home, "vc-x", SKILL_MD + "june 2026 body\n")
+    _prove(store, "vc-x", shadow)
+    seen: list[str] = []
+    real_reconcile = installer.reconcile_shadowed_skill_dirs
+
+    def spy(*args, **kwargs):
+        canonical = home / ".agents" / "skills" / "vc-x"
+        seen.append(
+            "canonical-linked" if canonical.is_symlink() else "canonical-absent"
+        )
+        return real_reconcile(*args, **kwargs)
+
+    monkeypatch.setattr(installer, "reconcile_shadowed_skill_dirs", spy)
+
+    installer.link_and_reconcile_skill_views(
+        ["agents", "junie"], store, store, ["vc-x"]
+    )
+
+    assert seen == ["canonical-linked"]
 
 
 def test_an_unproven_copy_in_an_active_runtime_survives_an_install_pass(
