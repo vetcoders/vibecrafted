@@ -698,6 +698,35 @@ def test_an_unproven_copy_in_an_active_runtime_survives_an_install_pass(
     assert (home / ".agents" / "skills" / "vc-x").is_symlink()
 
 
+def test_a_real_file_under_a_skill_name_survives_an_install_pass(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """A file gets less protection than a directory, not more: detection only
+    considers directories, and it skips a runtime whose skills dir is reached
+    through a symlink. `~/.grok/skills -> ~/notes` with a note named
+    `vc-research` in it was a note the writer unlinked."""
+    home = tmp_path / "home"
+    crafted_home = tmp_path / "crafted"
+    store = tmp_path / "store"
+    _pin_home(monkeypatch, home, crafted_home)
+    _store_skill(store, "vc-research", "canonical body\n")
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    note = notes / "vc-research"
+    note.write_text("my own notes on research\n", encoding="utf-8")
+    grok = home / ".grok"
+    grok.mkdir(parents=True)
+    (grok / "skills").symlink_to(notes)
+
+    _install_pass(store, ["vc-research"], ["agents", "grok"])
+
+    assert note.is_file()
+    assert not note.is_symlink()
+    assert note.read_text(encoding="utf-8") == "my own notes on research\n"
+    assert "Keeping real file" in capsys.readouterr().out
+    assert (home / ".agents" / "skills" / "vc-research").is_symlink()
+
+
 def test_a_proven_copy_in_an_active_runtime_is_quarantined_then_linked(
     tmp_path: Path, monkeypatch
 ) -> None:
