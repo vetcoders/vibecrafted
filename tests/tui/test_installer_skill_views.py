@@ -463,7 +463,8 @@ def test_doctor_reports_stale_real_directory_shadow(
     assert finding.level == "warn"
     assert str(shadow) in finding.message
     assert "managed_stale" in finding.message
-    # Runtimes that section 4 already owns must not be double-reported.
+    # A runtime with no copy in it produces no shadow-dir finding at all — the
+    # audit reports what is there, not every runtime it looked at.
     assert "shadow-dir:claude/vc-x" not in indexed
     assert "`vibecrafted update --force`" in finding.message
     # A plain `vibecrafted update` returns at "up to date" once the installed
@@ -1038,6 +1039,64 @@ def test_a_skills_root_linked_into_the_store_leaves_the_store_intact(
     assert (store / "vc-x" / "references" / "notes.md").read_text() == "ref\n"
     assert not (store / "vc-x").is_symlink()
     assert _quarantine_dirs(crafted_home) == []
+
+
+def test_doctor_gives_a_copy_in_a_recorded_runtime_the_reconciling_action(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A real dir in ~/.claude/skills was reported only as `symlink:` COPY, and
+    the action list then said plain `vibecrafted update` — a no-op on a host
+    already at the latest version. Nothing told the operator whether the copy
+    could be proven, either."""
+    home = tmp_path / "home"
+    crafted_home = home / ".vibecrafted"
+    store = crafted_home / "skills"
+    _pin_home(monkeypatch, home, crafted_home)
+    _store_skill(store, "vc-x", "canonical body\n")
+    _canonical_view(home, store, "vc-x")
+    copy = home / ".claude" / "skills" / "vc-x"
+    copy.mkdir(parents=True)
+    (copy / "SKILL.md").write_text(SKILL_MD + "june 2026 body\n", encoding="utf-8")
+    _prove(store, "vc-x", copy)
+
+    state = installer.InstallState(
+        framework_version="4.3.1", skills=["vc-x"], runtimes=["agents", "claude"]
+    )
+    state.save(store)
+    monkeypatch.setattr(installer, "FOUNDATIONS", [])
+
+    findings = installer.run_doctor(store, state)
+    indexed = {finding.component: finding for finding in findings}
+
+    # Section 4 still owns the view contract...
+    assert indexed["symlink:claude/vc-x"].level == "fail"
+    assert "is a COPY" in indexed["symlink:claude/vc-x"].message
+    assert "--force" in indexed["symlink:claude/vc-x"].message
+    # ...and the provenance class is reported alongside it.
+    shadow = indexed["shadow-dir:claude/vc-x"]
+    assert shadow.level == "warn"
+    assert "managed_stale" in shadow.message
+    assert "quarantines and removes it" in shadow.message
+
+    actions = installer._doctor_action_items(findings)
+    assert any("vibecrafted update --force" in action for action in actions), actions
+
+
+def test_a_copy_finding_alone_still_asks_for_force(tmp_path: Path, monkeypatch) -> None:
+    """Even with the provenance manifest gone, the COPY finding must route to
+    the command that reconciles rather than to the one that says "up to date"."""
+    findings = [
+        installer.DoctorFinding(
+            "fail",
+            "symlink:claude/vc-x",
+            "is a COPY, not a symlink — stale drift risk; "
+            "`vibecrafted update --force` reconciles it",
+        )
+    ]
+
+    actions = installer._doctor_action_items(findings)
+
+    assert any("vibecrafted update --force" in action for action in actions), actions
 
 
 # ---------------------------------------------------------------------------
