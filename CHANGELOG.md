@@ -75,6 +75,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - Configuration owner: `vibecrafted_core.server_config.load_tool_destinations`
   validates the optional `[tools]` table of `config.toml` with the same
   contract the App applies.
+- Server web: `GET /api/control/transcripts` searches canonical
+  `transcript.human.log` files from the start (byte-capped) and caps matching
+  **results**, so a needle that lives only in the head of a long log is found.
+  The transcripts page renders snippets with `textContent` (no `innerHTML`).
+- macOS App: when `[tools.vc-frame]` names a loopback `http` origin,
+  AppDelegate starts `vc-frame web` on that host:port while connecting the
+  deck. Tabs still never start the service; no port is guessed.
 
 See `docs/runtime/NATIVE_CONSOLE_TABS.md`.
 

@@ -30,6 +30,11 @@
 //!   one ephemeral monitor per canonical control-plane home plus run id.
 //! * `GET /api/control/runs/{run_id}/transcript` — bounded, no-store tail of
 //!   the canonical `transcript.human.log` used by the live run detail view.
+//! * `GET /api/control/transcripts?q=` — host-wide search over those human
+//!   logs. Snapshots are scanned newest-first; **results** are capped. Each
+//!   file is read from the start up to a byte cap so a needle that lives only
+//!   in the head of a long log is still found. The live run page keeps the
+//!   tail preview.
 //! * `GET /api/control/lifecycle` — lifecycle run summaries, newest-first.
 //! * `GET /api/control/lifecycle/{run_id}` — full nested lifecycle state with
 //!   projected per-run and per-stage axes (shape of `write_lifecycle_report`).
@@ -261,52 +266,29 @@ pub mod api {
         q: Option<String>,
     }
 
-    fn snippet_for(body: &str, query: &str) -> String {
-        const LIMIT: usize = 160;
-        let haystack = body.trim();
-        if haystack.is_empty() {
-            return String::new();
-        }
-        if query.is_empty() {
-            return haystack.chars().take(LIMIT).collect();
-        }
-        let lower = haystack.to_ascii_lowercase();
-        let needle = query.to_ascii_lowercase();
-        let Some(at) = lower.find(&needle) else {
-            return haystack.chars().take(LIMIT).collect();
-        };
-        let start = at.saturating_sub(24);
-        haystack
-            .chars()
-            .skip(start)
-            .take(LIMIT)
-            .collect::<String>()
-            .replace('\n', " ")
-    }
-
-    /// Every human transcript tail on this host, optionally filtered by `q`.
+    /// Host-wide human-transcript search. Snapshots are scanned newest-first;
+    /// matching **results** are capped. Each log is read from the start (byte
+    /// capped) so a needle that lives only in the head of a long file is found.
     async fn transcripts(Query(query): Query<TranscriptSearchQuery>) -> impl IntoResponse {
+        const RESULT_CAP: usize = 200;
         let plane = ControlPlane::from_env();
-        let needle = query
-            .q
-            .as_deref()
-            .unwrap_or("")
-            .trim()
-            .to_string();
+        let needle = query.q.as_deref().unwrap_or("").trim().to_string();
+        let needle_l = needle.to_ascii_lowercase();
         let mut items = Vec::new();
-        for run in plane.load_snapshots().into_iter().take(200) {
-            let preview = crate::run_detail::load_human_transcript(&plane, &run.run_id);
-            if !preview.available {
+        for run in plane.load_snapshots() {
+            if items.len() >= RESULT_CAP {
+                break;
+            }
+            let hit =
+                crate::run_detail::match_human_transcript(&plane, &run.run_id, &needle);
+            if !hit.available {
                 continue;
             }
-            if !needle.is_empty()
-                && !preview
-                    .body
-                    .to_ascii_lowercase()
-                    .contains(&needle.to_ascii_lowercase())
-                && !run.run_id.to_ascii_lowercase().contains(&needle.to_ascii_lowercase())
-                && !run.agent.to_ascii_lowercase().contains(&needle.to_ascii_lowercase())
-            {
+            let meta_hit = !needle.is_empty()
+                && (run.run_id.to_ascii_lowercase().contains(&needle_l)
+                    || run.agent.to_ascii_lowercase().contains(&needle_l)
+                    || run.skill.to_ascii_lowercase().contains(&needle_l));
+            if !needle.is_empty() && !hit.matched && !meta_hit {
                 continue;
             }
             items.push(json!({
@@ -315,17 +297,20 @@ pub mod api {
                 "skill": run.skill,
                 "root": run.root,
                 "updated_at": run.updated_at,
-                "available": preview.available,
-                "truncated": preview.truncated,
-                "snippet": snippet_for(&preview.body, &needle),
+                "available": hit.available,
+                "truncated": hit.truncated,
+                "snippet": hit.snippet,
             }));
         }
-        Json(json!({
-            "count": items.len(),
-            "q": needle,
-            "items": items,
-        }))
-        .into_response()
+        (
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(json!({
+                "count": items.len(),
+                "q": needle,
+                "items": items,
+            })),
+        )
+            .into_response()
     }
 
     /// Lifecycle run summaries, newest-first by `state.json` mtime.

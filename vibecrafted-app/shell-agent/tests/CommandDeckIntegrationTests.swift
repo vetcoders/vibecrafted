@@ -321,6 +321,14 @@ struct CommandDeckIntegrationTests {
       frameURL.absoluteString == "http://127.0.0.1:8082/",
       frameOrigin == WebRuntimeOrigin(url: URL(string: "http://127.0.0.1:8082/")!)!
     else { throw Failure(message: "Configured Frame did not resolve to a service scope on its own origin") }
+    guard FrameWebLaunch.bind(url: frameURL)?.startArguments == ["web", "--ip", "127.0.0.1", "--port", "8082"]
+    else { throw Failure(message: "Configured Frame bind did not take host and port from the named URL") }
+    try require(FrameWebLaunch.bind(url: URL(string: "https://127.0.0.1:8082/")!) == nil,
+      "HTTPS Frame origins must not be started by the App")
+    try require(FrameWebLaunch.bind(url: URL(string: "http://100.82.232.70:8082/")!) == nil,
+      "Remote Frame origins must not be started by the App")
+    try require(FrameWebLaunch.bind(url: URL(string: "http://127.0.0.1:9090/")!)?.port == 9090,
+      "A non-default Frame port must come from the named URL, never a guessed 8082")
     for invalid in [
       "[tools.slack-console]\nurl = \"ftp://x/console\"\n",
       "[tools.slack-console]\nurl = \"http://u:p@x/console\"\n",
