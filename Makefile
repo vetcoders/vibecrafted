@@ -684,6 +684,7 @@ restore:
 
 check:
 	@$(PYTHON) scripts/check_shell.py
+	@$(PYTHON) scripts/gen_skill_provenance.py --check
 	@echo "Check complete."
 
 iterm-plugin:

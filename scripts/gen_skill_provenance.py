@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the historical release manifest for `vc-*` skills.
+"""Generate the release manifest for `vc-*` skills: what we have actually shipped.
 
 WHY A MANIFEST AND NOT A MARKER
 -------------------------------
@@ -10,18 +10,35 @@ the `vc-` name alone never proves that.
 
 Content markers prove provenance only for skills generated after those tokens
 existed. Measured against the real June-2026 copies recovered from
-`~/.junie/skills`, *none* carried any marker — yet every one of their files is
-still present, byte for byte or at least path for path, in this repository's
-history. So the soundest offline proof is what we have actually released:
+`~/.junie/skills`, *none* carried any marker — yet every byte of them is still
+in this repository's history. So the soundest offline proof is what we have
+actually released:
 
 * the sha256 of every `SKILL.md` ever committed for the skill, and
-* every relative file path that ever lived under a `vc-<name>/` directory.
+* for every relative path under a real skill directory, the git blob id of
+  every version of that file we ever committed.
 
-The installer claims a copy only when both hold: a `SKILL.md` it recognizes as
-one of its own releases, and not one file path it never shipped. A `SKILL.md`
-whose hash is absent was edited by its owner, and a foreign file next to a
-shipped `SKILL.md` is the operator's own work — either way the directory is
-custom content and stays untouched.
+A path is not evidence on its own — a name says nothing about content, and an
+operator's own `scripts/await.sh` must not inherit ours. So the manifest carries
+bytes: the blob ids come straight out of `git log --raw`, and the installer
+recomputes one locally as `sha1(b"blob <len>\\0" + data)` with no git, no
+repository and no network in reach.
+
+WHAT COUNTS AS A SKILL DIRECTORY
+--------------------------------
+Only a directory that has ever held a `SKILL.md`, under a root where one has
+ever lived. Both halves matter. `runtime/vc-marbles/` never held a `SKILL.md`,
+so `runtime/vc-marbles/orchestrator/commands/help.md` is not a file of the
+`vc-marbles` skill and must not widen its allow-list; `skills/vc-marbles/` did,
+so the identically-named path under *that* root is.
+
+One case needs saying out loud. We have shipped a `SKILL.md`-adjacent file as a
+*symlink* — `skills/vc-agents/shell/vetcoders.zsh -> vetcoders.sh`. An installer
+that copies a tree dereferences it, so the copy holds the target's bytes under
+the link's name. That is still our byte, so for a path we shipped as a symlink
+the manifest also records the blob ids of what it pointed at, resolved inside
+the same skill. Without this the largest real copy on the affected host
+(`vc-agents`, 54 files) is unprovable for one file out of 54.
 
 Properties the installer depends on:
 
@@ -34,8 +51,9 @@ Properties the installer depends on:
 Usage:
     scripts/gen_skill_provenance.py [--repo <dir>] [--manifest <path>] [--check]
 
-`--check` writes nothing and exits 1 when the manifest would change, which is
-the regeneration gate for CI and for `tests/tui/test_installer_skill_views.py`.
+`--check` writes nothing and exits 1 when the committed manifest is not exactly
+what a regeneration would render, `generated_at` aside. It is wired into the
+Makefile `check` target, so an unrecorded file fails Portable Checks.
 
 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
 """
@@ -45,17 +63,19 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import posixpath
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
-SCHEMA = "vibecrafted.skill-provenance.v2"
+SCHEMA = "vibecrafted.skill-provenance.v3"
 STORE_RELATIVE = Path("vibecrafted-core/vibecrafted_core/skills")
 MANIFEST_NAME = "SKILL_PROVENANCE.json"
 SKILL_FILE = "SKILL.md"
 NULL_OID = "0" * 40
+SYMLINK_MODE = "120000"
 
 
 @dataclass
@@ -63,17 +83,68 @@ class SkillRecord:
     """Everything Vibecrafted has ever released for one skill."""
 
     sha256: set[str] = field(default_factory=set)
-    paths: set[str] = field(default_factory=set)
+    files: dict[str, set[str]] = field(default_factory=dict)
+
+    def add_file(self, rel: str, *oids: str) -> None:
+        """Record blob ids for one relative path."""
+        self.files.setdefault(rel, set()).update(
+            oid for oid in oids if oid != NULL_OID and len(oid) == 40
+        )
 
 
-def _git(repo: Path, *args: str) -> str:
-    """Run a read-only git command in `repo` and return stdout."""
+def _git(repo: Path, *args: str) -> bytes:
+    """Run a read-only git command in `repo` and return raw stdout."""
     return subprocess.run(
         ["git", "-C", str(repo), *args],
         check=True,
         capture_output=True,
-        text=True,
     ).stdout
+
+
+def _raw_entries(
+    repo: Path, pathspecs: list[str]
+) -> list[tuple[str, str, str, str, str]]:
+    """`(src mode, dst mode, src oid, dst oid, path)` for every change to `pathspecs`.
+
+    Both sides of each change are taken. A blob introduced on a branch whose tip
+    has since been deleted can survive only as the *pre-image* of a later
+    commit, and such a blob is exactly the kind of stale copy still sitting in an
+    operator's runtime dir.
+
+    `-z` is what keeps the paths honest: without it git quotes anything outside
+    ASCII, and the localized `pl/` mirror is full of them.
+    """
+    if not pathspecs:
+        return []
+    out = _git(
+        repo,
+        "log",
+        "--all",
+        "--raw",
+        "--no-abbrev",
+        "--no-renames",
+        "-z",
+        "--format=",
+        "--",
+        *pathspecs,
+    ).decode("utf-8", "surrogateescape")
+    chunks = out.split("\0")
+    entries: list[tuple[str, str, str, str, str]] = []
+    index = 0
+    while index < len(chunks):
+        meta = chunks[index]
+        if not meta.startswith(":"):
+            index += 1
+            continue
+        if index + 1 >= len(chunks):
+            break
+        path = chunks[index + 1]
+        index += 2
+        fields = meta.lstrip(":").split()
+        if len(fields) < 5 or not path:
+            continue
+        entries.append((fields[0], fields[1], fields[2], fields[3], path))
+    return entries
 
 
 def _skill_name(path: str) -> str | None:
@@ -81,9 +152,7 @@ def _skill_name(path: str) -> str | None:
 
     The localized `pl/` mirror of a skill ships the same skill under the same
     name, so `skills/pl/vc-init/SKILL.md` and `skills/vc-init/SKILL.md` both
-    count as `vc-init`. Historical prefixes (`skills/`, `skills/foundations/`,
-    `skills/experimental/`, `vibecrafted-core/...`) need no special casing —
-    only the two trailing components decide.
+    count as `vc-init`.
     """
     parts = path.split("/")
     if len(parts) < 2 or parts[-1] != SKILL_FILE:
@@ -105,109 +174,62 @@ def _ignored_path(rel: str) -> bool:
     )
 
 
-def _skill_relative_path(path: str) -> tuple[str, str] | None:
-    """Split a repo path into `(skill name, path relative to the skill dir)`.
+def collect_skill_roots(repo: Path) -> dict[str, set[str]]:
+    """Map skill name → every directory that has ever held its `SKILL.md`.
 
-    The *first* `vc-*` component that is not the last one names the skill: a
-    `vc-*` directory nested inside a skill belongs to the outer skill's tree,
-    and a `vc-*` file (`bin/vc-review`, `assets/vc-terminal.svg`) is not a
-    skill directory at all.
+    This is what makes a `vc-*` directory a skill directory. Anything else that
+    merely carries the name — `runtime/vc-marbles/`, `bin/vc-review` — is not
+    one, and its files are not that skill's files.
     """
-    parts = path.split("/")
-    for index, part in enumerate(parts[:-1]):
-        if part.startswith("vc-"):
-            return part, "/".join(parts[index + 1 :])
-    return None
-
-
-def collect_history_oids(repo: Path) -> dict[str, set[str]]:
-    """Map skill name → git blob oids of every `SKILL.md` ever committed for it.
-
-    Both sides of each change are taken. A blob introduced on a branch whose tip
-    has since been deleted can survive only as the *pre-image* of a later
-    commit, and such a blob is exactly the kind of stale copy still sitting in an
-    operator's runtime dir.
-    """
-    raw = _git(
-        repo,
-        "log",
-        "--all",
-        "--raw",
-        "--no-abbrev",
-        "--no-renames",
-        "--format=",
-        "--",
-        f"*/vc-*/{SKILL_FILE}",
-        f"vc-*/{SKILL_FILE}",
-    )
-    oids: dict[str, set[str]] = {}
-    for line in raw.splitlines():
-        if not line.startswith(":") or "\t" not in line:
-            continue
-        meta, _, path = line.partition("\t")
-        fields = meta.split()
-        if len(fields) < 5:
-            continue
+    roots: dict[str, set[str]] = {}
+    for *_modes, path in _raw_entries(
+        repo, [f"*/vc-*/{SKILL_FILE}", f"vc-*/{SKILL_FILE}"]
+    ):
         name = _skill_name(path)
         if name is None:
             continue
-        for oid in (fields[2], fields[3]):
+        roots.setdefault(name, set()).add("/".join(path.split("/")[:-2]))
+    return roots
+
+
+def collect_history_oids(repo: Path) -> dict[str, set[str]]:
+    """Map skill name → git blob oids of every `SKILL.md` ever committed for it."""
+    oids: dict[str, set[str]] = {}
+    for _smode, _dmode, src, dst, path in _raw_entries(
+        repo, [f"*/vc-*/{SKILL_FILE}", f"vc-*/{SKILL_FILE}"]
+    ):
+        name = _skill_name(path)
+        if name is None:
+            continue
+        for oid in (src, dst):
             if oid != NULL_OID and len(oid) == 40:
                 oids.setdefault(name, set()).add(oid)
     return oids
 
 
-def collect_history_paths(repo: Path, names: set[str]) -> dict[str, set[str]]:
-    """Map skill name → every relative file path ever committed under it.
-
-    `-z` is what keeps this honest: without it git quotes any path outside
-    ASCII, and the localized `pl/` mirror is full of them. Only names in
-    `names` are recorded, which is the set of directories that have ever held a
-    `SKILL.md` — that, and not the `vc-` prefix, is what makes a directory a
-    skill, so `vc-frame/` and friends stay out of the manifest.
-    """
-    raw = _git(
-        repo,
-        "log",
-        "--all",
-        "--name-only",
-        "-z",
-        "--no-renames",
-        "--format=",
-        "--",
-        "*/vc-*/*",
-        "vc-*/*",
-    )
-    paths: dict[str, set[str]] = {}
-    for entry in raw.split("\0"):
-        if not entry:
-            continue
-        split = _skill_relative_path(entry)
-        if split is None:
-            continue
-        name, rel = split
-        if name not in names or _ignored_path(rel):
-            continue
-        paths.setdefault(name, set()).add(rel)
-    return paths
-
-
 def hash_blobs(repo: Path, oids: set[str]) -> dict[str, str]:
-    """Map each git blob oid to the sha256 of its contents.
+    """Map each git blob oid to the sha256 of its contents."""
+    return {
+        oid: hashlib.sha256(body).hexdigest()
+        for oid, body in _read_blobs(repo, oids).items()
+    }
+
+
+def _read_blobs(repo: Path, oids: set[str]) -> dict[str, bytes]:
+    """Read the contents of `oids`.
 
     One `git cat-file --batch` process reads them all; spawning a process per
     blob would turn a thousand-blob history into a minute of fork overhead.
     """
     if not oids:
         return {}
-    ordered = sorted(oids)
     proc = subprocess.run(
         ["git", "-C", str(repo), "cat-file", "--batch"],
-        input=("\n".join(ordered) + "\n").encode(),
+        input=("\n".join(sorted(oids)) + "\n").encode(),
         check=True,
         stdout=subprocess.PIPE,
     )
-    digests: dict[str, str] = {}
+    bodies: dict[str, bytes] = {}
     buf = proc.stdout
     pos = 0
     while pos < len(buf):
@@ -220,39 +242,117 @@ def hash_blobs(repo: Path, oids: set[str]) -> dict[str, str]:
             # "<oid> missing" — a promisor/partial clone can lack the object.
             continue
         oid, size = header[0], int(header[2])
-        digests[oid] = hashlib.sha256(buf[pos : pos + size]).hexdigest()
+        bodies[oid] = buf[pos : pos + size]
         pos += size + 1  # trailing newline after the payload
-    return digests
+    return bodies
+
+
+def collect_history_files(
+    repo: Path, roots: dict[str, set[str]]
+) -> dict[str, dict[str, set[str]]]:
+    """Map skill name → relative path → blob ids ever committed at that path.
+
+    Only paths under one of that skill's own historical roots count, and a path
+    we shipped as a symlink also gets the blob ids of what it pointed at: an
+    installer that copies a tree dereferences the link, so the copy holds the
+    target's bytes under the link's name, and those bytes are still ours.
+    """
+    owners = {(root, name) for name, group in roots.items() for root in group}
+    pathspecs = sorted(
+        {
+            f"{root}/vc-*/*" if root else "vc-*/*"
+            for group in roots.values()
+            for root in group
+        }
+    )
+    files: dict[str, dict[str, set[str]]] = {}
+    links: dict[tuple[str, str], set[str]] = {}
+    for smode, dmode, src, dst, path in _raw_entries(repo, pathspecs):
+        split = _owning_skill(path, owners)
+        if split is None:
+            continue
+        name, rel = split
+        if _ignored_path(rel):
+            continue
+        record = files.setdefault(name, {}).setdefault(rel, set())
+        record.update(oid for oid in (src, dst) if oid != NULL_OID and len(oid) == 40)
+        for mode, oid in ((smode, src), (dmode, dst)):
+            if mode == SYMLINK_MODE and oid != NULL_OID:
+                links.setdefault((name, rel), set()).add(oid)
+
+    targets = _read_blobs(repo, {oid for group in links.values() for oid in group})
+    for (name, rel), oids in links.items():
+        for oid in oids:
+            body = targets.get(oid)
+            if body is None:
+                continue
+            resolved = posixpath.normpath(
+                posixpath.join(posixpath.dirname(rel), body.decode("utf-8", "replace"))
+            )
+            if resolved.startswith("..") or resolved not in files.get(name, {}):
+                continue
+            files[name][rel] |= files[name][resolved]
+    return files
+
+
+def _owning_skill(path: str, owners: set[tuple[str, str]]) -> tuple[str, str] | None:
+    """Split `path` into `(skill name, path inside the skill dir)`, or None.
+
+    The first `vc-*` component decides, and only if the directory above it is a
+    root where that skill has actually lived. A nested `vc-*` directory inside a
+    skill belongs to the outer skill's tree; a `vc-*` file is not a directory at
+    all.
+    """
+    parts = path.split("/")
+    for index, part in enumerate(parts[:-1]):
+        if not part.startswith("vc-"):
+            continue
+        if ("/".join(parts[:index]), part) in owners:
+            return part, "/".join(parts[index + 1 :])
+        return None
+    return None
 
 
 def collect_worktree(store: Path) -> dict[str, SkillRecord]:
-    """Read the CURRENT store: SKILL.md hashes plus every file path under a skill.
+    """Read the CURRENT store: SKILL.md hashes plus every file's blob id.
 
     The working tree is not history yet: an edit committed in the same change as
     a regeneration must already be provable, or the very release that ships the
     manifest would fail its own freshness gate.
     """
     records: dict[str, SkillRecord] = {}
+    roots: set[tuple[str, str]] = set()
     if not store.is_dir():
         return records
     for skill_md in sorted(store.glob(f"**/{SKILL_FILE}")):
-        name = _skill_name(skill_md.relative_to(store).as_posix())
+        rel = skill_md.relative_to(store).as_posix()
+        name = _skill_name(rel)
         if name is None:
             continue
         records.setdefault(name, SkillRecord()).sha256.add(
             hashlib.sha256(skill_md.read_bytes()).hexdigest()
         )
+        roots.add(("/".join(rel.split("/")[:-2]), name))
     for path in sorted(store.glob("**/*")):
         if path.is_dir() and not path.is_symlink():
             continue
-        split = _skill_relative_path(path.relative_to(store).as_posix())
+        split = _owning_skill(path.relative_to(store).as_posix(), roots)
         if split is None:
             continue
         name, rel = split
-        if name not in records or _ignored_path(rel):
+        if _ignored_path(rel) or path.is_symlink() or not path.is_file():
             continue
-        records[name].paths.add(rel)
+        records[name].add_file(rel, _git_blob_id(path.read_bytes()))
     return records
+
+
+def _git_blob_id(data: bytes) -> str:
+    """The git blob id of `data`, computed without git."""
+    # A git blob id IS sha1 over that header — an identifier in git's format,
+    # not a signature of ours. See the twin in scripts/vetcoders_install.py.
+    return hashlib.sha1(  # nosemgrep: python.lang.security.insecure-hash-algorithms.insecure-hash-algorithm-sha1
+        b"blob %d\0" % len(data) + data, usedforsecurity=False
+    ).hexdigest()
 
 
 def load_manifest(path: Path) -> dict[str, SkillRecord]:
@@ -261,9 +361,9 @@ def load_manifest(path: Path) -> dict[str, SkillRecord]:
     The schema is checked here for the same reason the installer checks it: the
     merge is additive, so carrying entries over from a document this version
     does not understand would preserve them forever without ever being able to
-    say what they mean. A v1 manifest recorded hashes and no path history, and
-    an entry with half a proof cannot prove anything — it is regenerated from
-    the repository, not salvaged.
+    say what they mean. Earlier schemas recorded weaker evidence — v1 hashes
+    only, v2 hashes and bare paths — and half a proof is not one, so those are
+    regenerated from the repository rather than salvaged.
     """
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -278,9 +378,13 @@ def load_manifest(path: Path) -> dict[str, SkillRecord]:
     for name, entry in skills.items():
         if not isinstance(name, str) or not isinstance(entry, dict):
             continue
-        merged[name] = SkillRecord(
-            _string_set(entry.get("sha256")), _string_set(entry.get("paths"))
-        )
+        record = SkillRecord(_string_set(entry.get("sha256")))
+        files = entry.get("files")
+        if isinstance(files, dict):
+            for rel, oids in files.items():
+                if isinstance(rel, str):
+                    record.add_file(rel, *_string_set(oids))
+        merged[name] = record
     return merged
 
 
@@ -299,7 +403,10 @@ def render_manifest(skills: dict[str, SkillRecord], generated_at: str) -> str:
         "skills": {
             name: {
                 "sha256": sorted(skills[name].sha256),
-                "paths": sorted(skills[name].paths),
+                "files": {
+                    rel: sorted(skills[name].files[rel])
+                    for rel in sorted(skills[name].files)
+                },
             }
             for name in sorted(skills)
         },
@@ -318,29 +425,31 @@ def build(repo: Path, manifest_path: Path, store: Path) -> dict[str, SkillRecord
             digest = digests.get(oid)
             if digest:
                 record.sha256.add(digest)
-    worktree = collect_worktree(store)
-    for name, group in collect_history_paths(repo, set(oids) | set(worktree)).items():
-        merged.setdefault(name, SkillRecord()).paths.update(group)
-    for name, record in worktree.items():
-        target = merged.setdefault(name, SkillRecord())
-        target.sha256.update(record.sha256)
-        target.paths.update(record.paths)
+    for name, group in collect_history_files(repo, collect_skill_roots(repo)).items():
+        record = merged.setdefault(name, SkillRecord())
+        for rel, blobs in group.items():
+            record.add_file(rel, *blobs)
+    for name, worktree in collect_worktree(store).items():
+        record = merged.setdefault(name, SkillRecord())
+        record.sha256.update(worktree.sha256)
+        for rel, blobs in worktree.files.items():
+            record.add_file(rel, *blobs)
     return merged
 
 
-def _missing(
-    merged: dict[str, SkillRecord], existing: dict[str, SkillRecord]
-) -> dict[str, list[str]]:
-    """Entries present in `merged` that the committed manifest does not carry."""
-    gaps: dict[str, list[str]] = {}
-    for name, record in merged.items():
-        known = existing.get(name, SkillRecord())
-        absent = sorted(record.sha256 - known.sha256) + sorted(
-            record.paths - known.paths
-        )
-        if absent:
-            gaps[name] = absent
-    return gaps
+def _without_timestamp(text: str) -> str:
+    """The manifest's bytes with `generated_at` neutralized.
+
+    `generated_at` is provenance of the run, not of the bytes, and must never
+    fail a check on its own.
+    """
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return text
+    if isinstance(data, dict):
+        data["generated_at"] = ""
+    return json.dumps(data, indent=2, sort_keys=False) + "\n"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -370,16 +479,19 @@ def main(argv: list[str] | None = None) -> int:
     manifest_path = args.manifest or (store / MANIFEST_NAME)
 
     merged = build(repo, manifest_path, store)
-    existing = load_manifest(manifest_path)
+    rendered = render_manifest(merged, date.today().isoformat())
     if args.check:
-        # Only the proof sets gate freshness; `generated_at` is provenance of
-        # the run, not of the bytes, and must never fail a check on its own.
-        missing = _missing(merged, existing)
-        if missing:
-            print(f"{manifest_path} is out of date; missing entries:", file=sys.stderr)
-            for name, entries in sorted(missing.items()):
-                print(f"  {name}: {', '.join(entries)}", file=sys.stderr)
+        # The whole rendered document is the contract, not just "are all the
+        # hashes there": an unsorted, duplicated or foreign entry is drift too,
+        # and a check that only looked for missing entries would pass it.
+        try:
+            on_disk = manifest_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"{manifest_path}: {exc}", file=sys.stderr)
+            return 1
+        if _without_timestamp(on_disk) != _without_timestamp(rendered):
             print(
+                f"{manifest_path} is not what a regeneration renders.\n"
                 "Regenerate with: scripts/gen_skill_provenance.py",
                 file=sys.stderr,
             )
@@ -388,12 +500,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest_path.write_text(
-        render_manifest(merged, date.today().isoformat()), encoding="utf-8"
-    )
+    manifest_path.write_text(rendered, encoding="utf-8")
     hashes = sum(len(record.sha256) for record in merged.values())
-    paths = sum(len(record.paths) for record in merged.values())
-    print(f"{manifest_path}: {len(merged)} skills, {hashes} hashes, {paths} paths")
+    paths = sum(len(record.files) for record in merged.values())
+    blobs = sum(len(ids) for record in merged.values() for ids in record.files.values())
+    print(
+        f"{manifest_path}: {len(merged)} skills, {hashes} SKILL.md hashes, "
+        f"{paths} paths, {blobs} blob ids"
+    )
     return 0
 
 
