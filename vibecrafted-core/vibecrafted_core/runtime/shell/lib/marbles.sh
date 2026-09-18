@@ -825,7 +825,7 @@ vc-resume() {
   fi
   local tool="${1:-}"
   [[ -n "$tool" ]] || {
-    echo "Usage: vc-resume <claude|codex|agy|junie|grok|cursor> [<session_id>] [prompt ...] | --session <session_id> [--prompt <text>] [--file <path>]" >&2
+    echo "Usage: vc-resume <claude|codex|agy|junie|grok|cursor|kimi> [<session_id>] [prompt ...] | --session <session_id> [--prompt <text>] [--file <path>]" >&2
     echo "  Without --session: NEW interactive session + AICX project intentions (last ${VIBECRAFTED_RESUME_AICX_HOURS:-96}h). Never native attach." >&2
     return 1
   }
@@ -833,7 +833,7 @@ vc-resume() {
     _vetcoders_parse_contract "$@" || return 1
     tool="$(_vetcoders_agent_for_session "$_vetcoders_contract_session")" || {
       echo "Could not infer agent for session: $_vetcoders_contract_session" >&2
-      echo "Usage: vc-resume <claude|codex|agy|junie|grok|cursor> --session $_vetcoders_contract_session" >&2
+      echo "Usage: vc-resume <claude|codex|agy|junie|grok|cursor|kimi> --session $_vetcoders_contract_session" >&2
       return 1
     }
   else
