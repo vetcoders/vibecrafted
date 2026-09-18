@@ -11176,9 +11176,29 @@ def prune_shadowed_skill_views(
     active_runtimes: list[str],
     dry_run: bool = False,
 ) -> list[Path]:
-    """Remove managed runtime views shadowed by the canonical .agents view."""
+    """Remove managed runtime views shadowed by the canonical .agents view.
+
+    A pointer-free root is a precondition, and it is checked per runtime rather
+    than per entry. `~/.codex/skills -> ~/.claude/skills` on a host where only
+    `claude` is active makes every one of claude's live views visible under the
+    inactive `codex` name — same inode, same managed target — and each one would
+    be unlinked as codex's leftover. The runtime whose views these are was never
+    consulted, because the pruner only ever looked at the entry in front of it.
+
+    `runtime_skills_root_problem` is the same gate shadow detection uses, so a
+    root reached through a link and a root resolving into the store are both out
+    of scope here for the same reason: what is under it belongs to something
+    else, and the only pointer we may remove is one we can prove we wrote at a
+    path we own.
+    """
     removed: list[Path] = []
     canonical_root = runtime_skills_dir("agents")
+    prunable = [
+        runtime
+        for runtime in SHADOWED_SKILL_VIEW_RUNTIMES
+        if runtime not in active_runtimes
+        and runtime_skills_root_problem(runtime, store_path) is None
+    ]
     for skill_name in skill_names:
         expected = store_path / skill_name
         canonical = canonical_root / skill_name
@@ -11186,9 +11206,7 @@ def prune_shadowed_skill_views(
             strict=False
         ) != expected.resolve(strict=False):
             continue
-        for runtime in SHADOWED_SKILL_VIEW_RUNTIMES:
-            if runtime in active_runtimes:
-                continue
+        for runtime in prunable:
             shadow = runtime_skills_dir(runtime) / skill_name
             if not shadow.is_symlink():
                 continue
