@@ -10827,6 +10827,21 @@ def create_symlink(target: Path, link: Path, dry_run: bool = False) -> None:
     link.symlink_to(target)
 
 
+def _remove_view_pointer(path: Path) -> None:
+    """Remove a symlink or a Windows junction — never what it points at.
+
+    `shutil.rmtree` is not one of the options. A junction is `is_dir()` and not
+    `is_symlink()`, so a stale one used to land in the writer's `rmtree` branch;
+    on Windows `rmtree` raises on a junction, and an install that hits one dies
+    with a traceback instead of relinking a view. `os.unlink` is what removes a
+    symlink and `os.rmdir` is what removes a junction, and neither descends.
+    """
+    if path.is_symlink():
+        path.unlink()
+        return
+    path.rmdir()
+
+
 def create_skill_view_symlink(target: Path, link: Path, dry_run: bool = False) -> None:
     """Create an agent skill view, replacing stale legacy store views.
 
@@ -10840,10 +10855,12 @@ def create_skill_view_symlink(target: Path, link: Path, dry_run: bool = False) -
     reached through a symlink — so `~/.grok/skills -> ~/notes` with a note
     called `vc-research` in it was, until now, a note the installer deleted.
 
-    Only a pointer gives way. One that already resolves to `target` is left
-    exactly as it is: unlinking and relinking it would be a no-op at best, and
-    at worst — when the runtime skill dir is itself a link into the store — a
-    removal inside the store.
+    Only a pointer gives way, and it is unlinked as a pointer — see
+    `_remove_view_pointer`, which never reaches the tree on the far side. A
+    pointer that already resolves to `target` is left exactly as it is:
+    unlinking and relinking it would be a no-op at best, and at worst — when the
+    runtime skill dir is itself a link into the store — a removal inside the
+    store.
     """
     if target == link:
         if dry_run:
@@ -10865,10 +10882,7 @@ def create_skill_view_symlink(target: Path, link: Path, dry_run: bool = False) -
         print(f"  {dim('ln -s')} {target} -> {link}")
         return
     if present:
-        if link.is_symlink() or link.is_file():
-            link.unlink()
-        elif link.is_dir():
-            shutil.rmtree(link)
+        _remove_view_pointer(link)
     link.symlink_to(target)
 
 
