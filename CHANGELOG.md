@@ -59,6 +59,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   rather than unlinked and rewritten, which is what kept a runtime skills dir
   symlinked into the store from having the store copy removed under it.
 
+- Doctor now sees a real **file** sitting where a skill view belongs — an
+  operator's own note at `~/.grok/skills/vc-research`, say. Detection only ever
+  examined directories, so that file was invisible to every audit while the
+  view writer stood ready to remove it. It is reported as `unknown` with
+  "regular file, kept" and never touched: a view is a link and a legacy copy is
+  a directory, so a file there is nobody's but yours.
+
+- The view writer no longer trips over a **dangling** pointer. `exists()`
+  follows a link, so one aimed at something gone read as absent, and
+  `symlink_to` then raised `FileExistsError` on the entry that was plainly
+  still there. A junction outliving the generation it pointed into is the
+  realistic case; it is now removed as a pointer, like any other.
+
 - Skill-copy provenance proves **bytes, not names**. `SKILL_PROVENANCE.json`
   (schema `vibecrafted.skill-provenance.v3`) now records, per skill, the sha256
   of every `SKILL.md` released and — for every relative path under a directory

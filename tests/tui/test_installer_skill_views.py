@@ -887,6 +887,83 @@ def test_a_stale_junction_view_is_replaced_without_rmtree(
     assert (store / "vc-x" / "SKILL.md").is_file()
 
 
+def test_a_dangling_junction_is_removed_instead_of_crashing_the_writer(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`exists()` follows a pointer, so one aimed at something gone reads as
+    absent — and `symlink_to` then raises FileExistsError on the entry that is
+    still very much there. A junction outliving its generation is the case."""
+    home = tmp_path / "home"
+    crafted_home = tmp_path / "crafted"
+    store = tmp_path / "store"
+    _pin_home(monkeypatch, home, crafted_home)
+    _store_skill(store, "vc-x", "canonical body\n")
+    stale = home / ".claude" / "skills" / "vc-x"
+    stale.parent.mkdir(parents=True)
+    stale.mkdir()
+
+    real_is_junction = getattr(Path, "is_junction", None)
+    monkeypatch.setattr(
+        Path,
+        "is_junction",
+        lambda self: self == stale or bool(real_is_junction and real_is_junction(self)),
+        raising=False,
+    )
+    # A junction whose target is gone: a pointer that `exists()` denies.
+    monkeypatch.setattr(Path, "exists", lambda self, **_: self != stale)
+
+    assert not stale.exists()
+    assert installer._is_owned_pointer(stale)
+
+    installer.create_skill_view_symlink(store / "vc-x", stale)
+
+    assert stale.is_symlink()
+    assert stale.resolve() == (store / "vc-x").resolve()
+
+
+def test_a_real_file_under_a_skill_name_is_reported_not_ignored(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Detection only ever looked at directories, so the operator's own note at
+    `~/.grok/skills/vc-research` was invisible to doctor while the view writer
+    stood ready to remove it."""
+    home = tmp_path / "home"
+    crafted_home = home / ".vibecrafted"
+    store = crafted_home / "skills"
+    _pin_home(monkeypatch, home, crafted_home)
+    _store_skill(store, "vc-x", "canonical body\n")
+    _canonical_view(home, store, "vc-x")
+    note = home / ".junie" / "skills" / "vc-x"
+    note.parent.mkdir(parents=True)
+    note.write_text("my own note\n", encoding="utf-8")
+
+    detected = installer.collect_shadowed_skill_dirs(store, ["vc-x"])
+    assert [(d.runtime, d.classification) for d in detected] == [("junie", "unknown")]
+    assert "regular file, kept" in detected[0].detail
+    assert not detected[0].is_managed
+
+    reconciled, kept = installer.reconcile_shadowed_skill_dirs(
+        store, ["vc-x"], shadows=detected
+    )
+
+    assert reconciled == []
+    assert [d.path for d in kept] == [note]
+    assert note.read_text(encoding="utf-8") == "my own note\n"
+
+    state = installer.InstallState(
+        framework_version="4.3.1", skills=["vc-x"], runtimes=["agents"]
+    )
+    state.save(store)
+    monkeypatch.setattr(installer, "FOUNDATIONS", [])
+
+    findings = installer.run_doctor(store, state)
+    finding = {f.component: f for f in findings}["shadow-dir:junie/vc-x"]
+
+    assert finding.level == "warn"
+    assert "regular file, kept" in finding.message
+    assert "move it aside yourself" in finding.message or "mv " in finding.message
+
+
 def test_a_skills_root_linked_into_the_store_leaves_the_store_intact(
     tmp_path: Path, monkeypatch
 ) -> None:
