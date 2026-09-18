@@ -36,6 +36,7 @@ from .control_plane import (
 )
 from .events import append_event
 from .execution_controls import PERMISSION_POLICIES, ExecutionControls
+from .failure_attribution import attribute_failure
 from .model_overrides import _with_model_override
 from .package_resources import skills_path
 from .report_contract import (
@@ -55,7 +56,13 @@ from .runtime_transcript import (
     write_runtime_transcript_manifest,
 )
 from .settlement import BareMarkdownError, require_bound_markdown
-from .telemetry import estimate_cost_usd
+from .telemetry import (
+    build_run_telemetry,
+    coerce_exit_code,
+    parent_session_ids,
+    usage_record,
+)
+from .telemetry import tokens_total as _tokens_total
 
 EventCallback = Callable[[dict[str, Any]], None]
 
@@ -4195,28 +4202,13 @@ def _extract_session(text: str) -> str:
     return ""
 
 
-def _tokens_total(
-    input_tokens: int, cached_input_tokens: int, output_tokens: int
-) -> int:
-    """Sum usage without double-counting provider-specific cache shapes.
-
-    Claude/Codex: ``input`` already includes cache hits (cached ≤ input).
-    Junie-style: ``input`` is non-cached only and ``cached`` is additive
-    (cached can exceed input). Detect by comparing magnitudes.
-    """
-    inp = max(0, int(input_tokens or 0))
-    cached = max(0, int(cached_input_tokens or 0))
-    out = max(0, int(output_tokens or 0))
-    if cached and cached > inp:
-        return inp + cached + out
-    return inp + out
-
-
 def _extract_tokens(text: str) -> dict[str, int | None]:
     """Parse token usage from combined transcript/report text.
 
     Prefers the authoritative run-closure footer, then JSON usage fields,
     then per-event ``tokens: N in / N out`` lines, in that priority order.
+    ``events`` counts the provider usage evidence found; 0 means the text
+    carries none (a seeded ``tokens_input: 0`` template is not evidence).
     """
     clean = _clean_text(text)
     found = TOKEN_PATTERN.findall(clean)
@@ -4244,6 +4236,9 @@ def _extract_tokens(text: str) -> dict[str, int | None]:
                 "cache_write": cache_write_tokens,
                 "output": output_tokens,
                 "total": total_tokens,
+                # A zero footer is a seeded template or a pre-telemetry close,
+                # not a provider measurement.
+                "events": 1 if total_tokens else 0,
             }
     if any(json_tokens.values()):
         return {
@@ -4258,6 +4253,10 @@ def _extract_tokens(text: str) -> dict[str, int | None]:
                 json_tokens["cached_input"],
                 json_tokens["output"],
             ),
+            "events": max(
+                len(JSON_TOKEN_PATTERNS["input"].findall(clean)),
+                len(JSON_TOKEN_PATTERNS["output"].findall(clean)),
+            ),
         }
     if not found:
         return {
@@ -4266,6 +4265,7 @@ def _extract_tokens(text: str) -> dict[str, int | None]:
             "cache_write": None,
             "output": 0,
             "total": 0,
+            "events": 0,
         }
     input_tokens = cached_tokens = output_tokens = 0
     for raw_in, raw_cached, raw_out in found:
@@ -4278,6 +4278,7 @@ def _extract_tokens(text: str) -> dict[str, int | None]:
         "cache_write": None,
         "output": output_tokens,
         "total": _tokens_total(input_tokens, cached_tokens, output_tokens),
+        "events": len(found),
     }
 
 
@@ -4764,9 +4765,18 @@ def _footer(marker: str, payload: dict[str, object]) -> str:
 
 
 def _normalize_markdown_artifact(
-    path: Path, payload: dict[str, object], *, fallback_body: str = ""
+    path: Path,
+    payload: dict[str, object],
+    *,
+    fallback_body: str = "",
+    extra_frontmatter: Mapping[str, str] | None = None,
 ) -> None:
-    """Stamp/refresh frontmatter and append the run-closure footer on a markdown artifact."""
+    """Stamp/refresh frontmatter and append the run-closure footer on a markdown artifact.
+
+    ``extra_frontmatter`` carries run-close telemetry for the report only; the
+    transcript never gets it, so a re-close cannot mistake its own failure
+    summary for a provider line.
+    """
     text = _read_text(path)
     if not text and fallback_body:
         text = fallback_body
@@ -4812,6 +4822,7 @@ def _normalize_markdown_artifact(
         frontmatter_update["cost_source"] = payload.get("cost_source")
     else:
         frontmatter.pop("cost_source", None)
+    frontmatter_update.update(extra_frontmatter or {})
     frontmatter.update(frontmatter_update)
     marker = str(payload.get("run_id") or "unknown")
     new_text = _render_frontmatter(frontmatter) + body.rstrip() + "\n"
@@ -4848,13 +4859,18 @@ def finalize_artifacts(
     report_text = _read_text(report) if str(report) else ""
     combined_text = f"{transcript_text}\n{report_text}"
 
-    session_id = payload.get("session_id") or _extract_session(combined_text)
+    recorded_session = str(payload.get("session_id") or "")
+    session_id = recorded_session or _extract_session(combined_text)
     tokens = _extract_tokens(combined_text)
-    tokens_input = int(tokens["input"] or 0)
-    tokens_cached_input = int(tokens["cached_input"] or 0)
-    tokens_cache_write = tokens["cache_write"]
-    tokens_output = int(tokens["output"] or 0)
-    tokens_total = int(tokens["total"] or 0)
+    usage = usage_record(
+        int(tokens.get("events") or 0),
+        tokens_input=int(tokens["input"] or 0),
+        tokens_cached_input=int(tokens["cached_input"] or 0),
+        tokens_cache_write=tokens["cache_write"],
+        tokens_output=int(tokens["output"] or 0),
+        source="transcript",
+    )
+    flat_tokens = usage.flat()
     cost = _extract_cost(combined_text)
     completed_at = (
         payload.get("completed_at") or dt.datetime.now(dt.timezone.utc).isoformat()
@@ -4869,35 +4885,34 @@ def finalize_artifacts(
 
     payload["session_id"] = session_id or payload.get("session_id") or ""
     payload["model"] = _resolve_model(payload, combined_text)
-    cost_source = "provider_reported" if cost is not None else None
-    if cost is None:
-        cost, cost_source = estimate_cost_usd(
-            payload["model"],
-            tokens_input=tokens_input,
-            tokens_cached_input=tokens_cached_input,
-            tokens_output=tokens_output,
-        )
+    telemetry = build_run_telemetry(
+        usage=usage,
+        model=str(payload["model"] or ""),
+        reported_cost=cost,
+        reported_cost_source="provider_reported" if cost is not None else None,
+        session_candidate=str(payload["session_id"]),
+        session_source="meta" if recorded_session else "transcript",
+        parents=parent_session_ids(
+            extra={
+                key: payload.get(key)
+                for key in (
+                    "runtime_session_id",
+                    "vibecrafted_session_id",
+                    "parent_provider_session_id",
+                    "fork_source_session_id",
+                )
+            }
+        ),
+        failure=None,
+    )
     payload["duration_s"] = _resolve_duration(payload, str(completed_at))
-    payload["tokens_input"] = tokens_input
-    payload["tokens_cached_input"] = tokens_cached_input
-    if tokens_cache_write is not None:
-        payload["tokens_cache_write"] = tokens_cache_write
-    else:
+    if "tokens_cache_write" not in flat_tokens:
         payload.pop("tokens_cache_write", None)
-    payload["tokens_output"] = tokens_output
-    payload["tokens_total"] = tokens_total
-    token_usage: dict[str, int] = {
-        "input": tokens_input,
-        "cached_input": tokens_cached_input,
-        "output": tokens_output,
-        "total": tokens_total,
+    payload.pop("failure", None)
+    payload.update(telemetry.meta_fields())
+    payload["token_usage"] = {
+        key.removeprefix("tokens_"): value for key, value in flat_tokens.items()
     }
-    if tokens_cache_write is not None:
-        token_usage["cache_write"] = int(tokens_cache_write)
-    payload["token_usage"] = token_usage
-    payload["cost_usd"] = cost
-    if cost_source:
-        payload["cost_source"] = cost_source
     payload["resume_hint"] = resume_hint
     payload["artifact_contract"] = "vibecrafted.agent-artifact.v1"
     payload["date"] = payload.get("date") or artifact_time
@@ -4960,19 +4975,12 @@ def finalize_artifacts(
     payload["artifact_footer"] = {
         "run_id": payload.get("run_id", "unknown"),
         "session_id": payload.get("session_id") or "",
-        "tokens_input": tokens_input,
-        "tokens_cached_input": tokens_cached_input,
-        "tokens_output": tokens_output,
-        "tokens_total": tokens_total,
-        "cost_usd": cost,
+        **flat_tokens,
+        **telemetry.cost.flat(),
         "resume_hint": resume_hint,
     }
     if payload.get("model_requested"):
         payload["artifact_footer"]["model_requested"] = payload.get("model_requested")
-    if tokens_cache_write is not None:
-        payload["artifact_footer"]["tokens_cache_write"] = tokens_cache_write
-    if payload.get("cost_source"):
-        payload["artifact_footer"]["cost_source"] = payload.get("cost_source")
     payload.setdefault("completed_at", completed_at)
     payload["updated_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
 
@@ -4985,17 +4993,8 @@ def finalize_artifacts(
         _leave_compat_link(meta, target_meta)
     meta = target_meta
 
-    footer_payload = {
-        **payload,
-        "tokens_input": tokens_input,
-        "tokens_cached_input": tokens_cached_input,
-        "tokens_output": tokens_output,
-        "tokens_total": tokens_total,
-        "cost_usd": cost,
-    }
-    if tokens_cache_write is not None:
-        footer_payload["tokens_cache_write"] = tokens_cache_write
-    else:
+    footer_payload = {**payload, **flat_tokens, **telemetry.cost.flat()}
+    if "tokens_cache_write" not in flat_tokens:
         footer_payload.pop("tokens_cache_write", None)
 
     if str(transcript):
@@ -5003,6 +5002,24 @@ def finalize_artifacts(
         write_runtime_transcript_manifest(
             transcript,
             run_id=str(payload.get("run_id") or ""),
+        )
+    report_frontmatter = telemetry.frontmatter_fields()
+    # Attribute against the transcript as it now sits on disk (moved and
+    # normalized), so the evidence line number is the one a reader will open.
+    failure = (
+        None
+        if str(payload.get("status") or "") == "stopped"
+        else attribute_failure(
+            transcript if str(transcript) else None,
+            coerce_exit_code(payload.get("exit_code")),
+            agent=str(payload.get("agent") or ""),
+        )
+    )
+    if failure is not None:
+        payload["failure"] = failure.as_dict()
+        report_frontmatter.update(failure.frontmatter())
+        meta.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
         )
     if (
         str(report)
@@ -5019,7 +5036,9 @@ def finalize_artifacts(
             model=str(payload.get("model") or ""),
             claim_digest=launcher_claim_digest,
         )
-        _normalize_markdown_artifact(report, footer_payload)
+        _normalize_markdown_artifact(
+            report, footer_payload, extra_frontmatter=report_frontmatter
+        )
     return meta
 
 

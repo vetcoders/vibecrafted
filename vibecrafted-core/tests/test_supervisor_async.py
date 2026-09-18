@@ -841,13 +841,17 @@ def test_async_supervisor_salvages_grok_report_from_streaming_json(
     assert "Transport channel" not in out
     assert "None" not in out
     assert "session_id: grok-session" in out
-    assert "tokens_input: 0" in out
-    assert "tokens_output: 0" in out
+    # grok emitted no usage event: tokens are unknown, never a fictional 0
+    # (W3-01; this assertion used to pin the fake zero).
+    assert "tokens_input: unknown" in out
+    assert "tokens_output: unknown" in out
+    assert "tokens_input: 0" not in out
     assert "cost_usd: unknown" in out
     report_text = report.read_text(encoding="utf-8")
     assert "fallback_report: true" in report_text
-    assert "tokens_input: 0" in report_text
-    assert "tokens_output: 0" in report_text
+    assert "tokens_input: unknown" in report_text
+    assert "tokens_output: unknown" in report_text
+    assert "tokens_input: 0" not in report_text
     assert "cost_usd: unknown" in report_text
     assert "Ok." in report_text
     assert "thinking" not in report_text
