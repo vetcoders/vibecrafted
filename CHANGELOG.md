@@ -18,22 +18,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   `shadow-dir:<runtime>/<skill>` warning per copy with its exact path and
   provenance class, and install/update quarantine the copy under
   `~/.vibecrafted/backups/installer/shadowed-views-<timestamp>/` before
-  removing it. Provenance is proven from content, never from the `vc-` name,
-  by three independent proofs: the copy is byte-identical to the store copy of
-  that skill; or its `SKILL.md` carries a Vibecrafted-only generator marker
-  that the store copy of the **same** skill also carries; or its `SKILL.md`
-  sha256 appears in `SKILL_PROVENANCE.json`, a new manifest shipped inside the
-  skill store that records the hash of every `SKILL.md` Vibecrafted has ever
-  released for that skill. The manifest is what reaches the real-world case:
-  the 27 copies recovered from one host predate every marker token and matched
-  none of them, while every one of their `SKILL.md` files is still a blob in
-  the repository history. Markers are now anchored (a frontmatter key inside
-  the leading `---` block, or a line-initial generator comment) instead of
-  matched anywhere in the file, so prose mentioning `dogfooding:` can no longer
-  borrow the store copy's provenance. A missing or corrupt manifest disables
-  that proof alone and never fails an install. Maintainers regenerate with
-  `scripts/gen_skill_provenance.py` (`--check` is the CI freshness gate); the
-  merge is additive and idempotent, so a shallow clone cannot shrink it. A
+  removing it. Provenance is proven from content, never from the `vc-` name.
+  A copy byte-identical to the store copy of that skill is claimed outright —
+  the store holds the same bytes. Anything else has to be proven by
+  `SKILL_PROVENANCE.json`, a new manifest shipped inside the skill store that
+  records, per skill, the sha256 of every `SKILL.md` Vibecrafted has ever
+  released _and_ every relative file path that has ever existed under that
+  skill's directory in the repository history. Both halves must hold: the
+  copy's `SKILL.md` is one of those releases, and every file it carries sits at
+  a path we shipped. A `SKILL.md` absent from the history was edited by its
+  owner, and a single unexpected file — an operator's own note or script next
+  to a shipped `SKILL.md` — withdraws the claim and is named in the warning.
+  That is what reaches the real-world case: the 27 copies recovered from one
+  host carry no generator marker of any kind, four of them still carry files
+  the current bundle has dropped, and every one of those hashes and paths is
+  still in the repository history. A missing, corrupt or older-schema manifest
+  disables that proof alone and never fails an install. Maintainers regenerate
+  with `scripts/gen_skill_provenance.py` (`--check` is the CI freshness gate);
+  the merge is additive and idempotent, so a shallow clone cannot shrink it. A
   `vc-*` directory that proves nothing is classified `unknown` and is only
   reported, never touched. A runtime skill dir that is a symlink, or that
   resolves into the store, is skipped entirely — otherwise
