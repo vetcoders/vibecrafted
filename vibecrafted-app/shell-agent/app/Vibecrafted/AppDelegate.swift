@@ -179,6 +179,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   private var productUpdate: ProductUpdateCoordinator?
   private var productUpdatePanel: NSWindow?
   private var productUpdateStartupAdoption: ProductUpdateHandoffAdoption = .none
+  /// Long-lived `vc-frame web` started from the App when `[tools.vc-frame]`
+  /// names a loopback origin. Tabs never own this process; closing a tab does
+  /// not stop it, and workers are not in this process group.
+  private var frameWebProcess: Process?
   let eventObserver = EventObserver()
 
   func showMainWindowIfNeeded() {
@@ -409,7 +413,34 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       }
       self.reconcileControlPlaneEye(install: install, environment: environment)
       self.inspectConfigurationAtLaunch()
+      self.ensureFrameWebClient(install: install, environment: environment)
       self.refreshServerStatus()
+  }
+
+  /// Start `vc-frame web` on the operator-named loopback origin.
+  ///
+  /// The port is never guessed: `[tools.vc-frame]` must already name the bind.
+  /// Native tabs still never spawn a service; this is the App's connect path.
+  /// Closing Frame does not terminate this process or any headless worker.
+  private func ensureFrameWebClient(install: CanonicalRuntimeInstall, environment: [String: String]) {
+    guard let destination = ToolDestination.named("vc-frame") else { return }
+    guard case .available(let url, .service) = tabs.resolve(destination),
+      let bind = FrameWebLaunch.bind(url: url)
+    else { return }
+    if let running = frameWebProcess, running.isRunning { return }
+    let process = Process()
+    process.executableURL = install.frame
+    process.arguments = bind.startArguments
+    process.environment = environment
+    process.standardInput = FileHandle.nullDevice
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = FileHandle.nullDevice
+    do {
+      try process.run()
+      frameWebProcess = process
+    } catch {
+      frameWebProcess = nil
+    }
   }
 
   /// Read-only configuration check at launch.
