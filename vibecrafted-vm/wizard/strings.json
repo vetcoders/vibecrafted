@@ -241,6 +241,18 @@
     "cancelled": {
       "pl": "Anulowane przez użytkownika",
       "en": "Cancelled by user"
+    },
+    "command_bridge_provider_hint": {
+      "pl": "Command bridge wymaga jednego skonfigurowanego dostawcy (claude/codex/grok/kimi) — przygotowanie hosta pozostaje otwarte.",
+      "en": "Command bridge needs one configured provider (claude/codex/grok/kimi) — host preparation stays open."
+    },
+    "command_bridge_ready": {
+      "pl": "Command bridge: gospodarz przygotowany (jednorazowo, dla wszystkich klientów).",
+      "en": "Command bridge: host prepared (once, for every client)."
+    },
+    "command_bridge_deferred": {
+      "pl": "Command bridge: przygotowanie odroczone",
+      "en": "Command bridge: preparation deferred"
     }
   },
   "errors": {
