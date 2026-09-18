@@ -1878,18 +1878,20 @@ def load_skill_provenance(store_path: Path) -> dict[str, SkillProvenance]:
 
 
 def _path_is_symlink_free(path: Path) -> bool:
-    """True when neither `path` nor any ancestor below the home dir is a symlink.
+    """True when neither `path` nor any ancestor below the home dir is a pointer.
 
-    A symlinked ancestor turns a per-runtime skill dir into a window onto
-    another tree — `ln -s ~/.vibecrafted/skills ~/.junie/skills` is the obvious
-    manual workaround for the junie gap — and `shutil.rmtree` follows it. Only
-    the operator-owned span between `$HOME` and the entry is inspected; the
-    system path above `$HOME` is not ours to judge.
+    A pointer ancestor turns a per-runtime skill dir into a window onto another
+    tree — `ln -s ~/.vibecrafted/skills ~/.junie/skills` is the obvious manual
+    workaround for the junie gap — and `shutil.rmtree` follows it. A Windows
+    directory junction does exactly the same thing while reporting
+    `is_symlink() == False`, so the walk asks `_is_owned_pointer`, which knows
+    both. Only the operator-owned span between `$HOME` and the entry is
+    inspected; the system path above `$HOME` is not ours to judge.
     """
     home = Path.home()
     current = path
     for _ in range(64):
-        if current.is_symlink():
+        if _is_owned_pointer(current):
             return False
         parent = current.parent
         if parent == current or current == home:
