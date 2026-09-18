@@ -25,6 +25,7 @@ from .research_config import (
 from .runtime_paths import agent_tool_search_path, selected_runtime_environment
 from .spawn import _resolve_agent_command, _stdin_command
 from .supervisor_async import AsyncRunHandle, AsyncSupervisor
+from .telemetry import tokens_total as _tokens_total
 
 
 @dataclass(frozen=True)
@@ -237,23 +238,6 @@ def _optional_float(value: object) -> float | None:
         except ValueError:
             return None
     return None
-
-
-def _tokens_total(
-    input_tokens: int, cached_input_tokens: int, output_tokens: int
-) -> int:
-    """Sum usage without double-counting provider-specific cache shapes.
-
-    Claude/Codex: ``input`` already includes cache hits (cached ≤ input).
-    Junie-style: ``input`` is non-cached only and ``cached`` is additive
-    (cached can exceed input). Detect by comparing magnitudes.
-    """
-    inp = max(0, int(input_tokens or 0))
-    cached = max(0, int(cached_input_tokens or 0))
-    out = max(0, int(output_tokens or 0))
-    if cached and cached > inp:
-        return inp + cached + out
-    return inp + out
 
 
 def _child_tokens_total(result: ChildResult) -> int:
@@ -718,10 +702,12 @@ def _child_result_from_meta(label: str, meta_path: Path) -> ChildResult | None:
         exit_code=exit_code,
         artifact_ok=not artifact_errors and exit_code == 0 and report.is_file(),
         artifact_errors=artifact_errors,
-        tokens_input=int(payload.get("tokens_input") or 0),
-        tokens_cached_input=int(payload.get("tokens_cached_input") or 0),
+        # Child meta records "unknown" (not 0) when the provider emitted no
+        # usage; this receipt still sums integers, so unknown counts add 0.
+        tokens_input=_optional_int(payload.get("tokens_input")) or 0,
+        tokens_cached_input=_optional_int(payload.get("tokens_cached_input")) or 0,
         tokens_cache_write=_optional_int(payload.get("tokens_cache_write")),
-        tokens_output=int(payload.get("tokens_output") or 0),
+        tokens_output=_optional_int(payload.get("tokens_output")) or 0,
         cost_usd=_optional_float(payload.get("cost_usd")),
         resume_command=str(payload.get("resume_command") or ""),
         completed_at=str(
