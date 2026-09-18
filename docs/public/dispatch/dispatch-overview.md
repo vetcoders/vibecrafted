@@ -15,13 +15,17 @@ and applies explicit repair and failure policies. Where the
 generic stages, dispatch executes a plan you already decomposed — every cut
 named, every success condition written down before anything launches.
 
-## Running a dispatch line
+## Pilot — the only four invocations
+
+The CLI takes a **plan path plus flags** — there are no subcommands. Verbs
+like `dispatch preflight <plan>` or `dispatch launch <plan>` do not exist and
+are refused with a pointer back to this pilot:
 
 ```bash
-vibecrafted dispatch plan.dispatch.toml
-vibecrafted dispatch plan.dispatch.toml --doctor
-vibecrafted dispatch plan.dispatch.toml --dry-run --json
-vibecrafted dispatch plan.dispatch.toml --resume <run-id>
+vibecrafted dispatch plan.dispatch.toml --doctor            # validate only
+vibecrafted dispatch plan.dispatch.toml --dry-run [--json]  # render prompts, launch nothing
+vibecrafted dispatch plan.dispatch.toml                     # launch the plan
+vibecrafted dispatch plan.dispatch.toml --resume <run-id>   # resume a recorded run
 ```
 
 | Flag                         | Effect                                                                       |
@@ -55,6 +59,13 @@ For each ready `[[cut]]`, the supervisor:
 6. Records a verdict with verifier evidence, appends it to the baton, and
    applies policy: repair rounds on failure, `recovery` jumps when declared,
    and `on_critical_fail` / `on_timeout` behavior.
+
+**Branch canon:** the dispatcher's contract branch for every worker cut is
+`cut/<id>` — receipts, recovery, delivery-head resolution and cleanup key on
+it. Per-agent branch names (`<agent>/workflow/<slug>` and similar) may exist
+only as additional refs; if a worker switched its checkout to one, recovery
+re-adopts the worktree onto `cut/<id>` at the same commit (authenticated by
+SHA ancestry, never by branch name) and leaves the extra ref untouched.
 
 Independent ready cuts overlap. A join waits until every `depends_on` cut
 settles successfully; integrators are exclusive. The baton accumulates one
