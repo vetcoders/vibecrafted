@@ -39,6 +39,8 @@ Doctor now reports one `shadow-dir:<runtime>/<skill>` warning per copy, with the
 | `managed_stale`     | Content differs, but the release history proves every byte and every path: a `SKILL.md` Vibecrafted shipped, and no other file | Copied into a quarantine dir, then removed                 |
 | `unknown`           | A real `vc-*` directory whose Vibecrafted provenance cannot be proven                                                          | **Never touched** — reported with a manual `mv` suggestion |
 
+Reconciliation happens during install and update, so the fix doctor names is `vibecrafted update --force`: a plain `vibecrafted update` prints `up to date` and returns without reinstalling once the installed version already matches the channel, and the reconciliation never runs.
+
 Provenance is proven from content, never from the `vc-` name: your own skill parked under a `vc-*` name is reported and left alone. Two proofs are tried, in order:
 
 1. **Identical tree** — the copy's file tree and content hashes match the store copy of that skill. Nothing can be lost: the store holds the same bytes, and the copy is quarantined before it is removed.

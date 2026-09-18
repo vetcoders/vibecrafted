@@ -231,6 +231,37 @@ def test_generator_merge_is_additive_and_idempotent(history_repo: Path) -> None:
     assert len(merged["vc-x"].sha256) == 4
 
 
+def test_generator_refuses_to_merge_a_foreign_schema(history_repo: Path) -> None:
+    """The merge is additive, so an entry carried over from a document this
+    version cannot read would live in the manifest forever without ever being
+    explainable. v1 recorded hashes and no paths: half a proof is not one."""
+    manifest_path = history_repo / gen.STORE_RELATIVE / gen.MANIFEST_NAME
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    foreign = "b" * 64
+    for schema in ("vibecrafted.skill-provenance.v1", "something.else.v1", None):
+        payload: dict[str, object] = {
+            "skills": {"vc-legacy": {"sha256": [foreign], "paths": ["SKILL.md"]}}
+        }
+        if schema is not None:
+            payload["schema"] = schema
+        manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        assert gen.load_manifest(manifest_path) == {}, schema
+
+        assert gen.main(["--repo", str(history_repo)]) == 0
+        assert "vc-legacy" not in installer.load_skill_provenance(manifest_path.parent)
+
+    # Our own schema is read back and carried over.
+    payload = {
+        "schema": gen.SCHEMA,
+        "skills": {"vc-legacy": {"sha256": [foreign], "paths": ["SKILL.md"]}},
+    }
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    assert gen.load_manifest(manifest_path)["vc-legacy"].sha256 == {foreign}
+    assert gen.main(["--repo", str(history_repo)]) == 0
+    assert "vc-legacy" in installer.load_skill_provenance(manifest_path.parent)
+
+
 def test_generator_check_fails_on_an_unrecorded_skill_md(history_repo: Path) -> None:
     manifest_path = history_repo / gen.STORE_RELATIVE / gen.MANIFEST_NAME
 

@@ -868,8 +868,10 @@ def _doctor_action_items(findings: Sequence[DoctorFinding]) -> list[str]:
         actions.append("clean bundle leftovers: re-run the installer")
     if any(finding.component.startswith("shadow-dir:") for finding in issues):
         actions.append(
-            "reconcile stale runtime skill copies: `vibecrafted update` "
-            "(unproven copies are only reported, never removed)"
+            "reconcile stale runtime skill copies: "
+            "`vibecrafted update --force` (plain `update` stops at "
+            '"up to date" when the version already matches; unproven '
+            "copies are only reported, never removed)"
         )
     if not actions:
         actions.append("review the warnings above, then re-run `vibecrafted doctor`")
@@ -13016,7 +13018,7 @@ def run_doctor(store_path: Path, state: InstallState) -> list[DoctorFinding]:
     )
     for shadow in shadowed_dirs:
         if shadow.is_managed:
-            action = "`vibecrafted update` quarantines and removes it"
+            action = "`vibecrafted update --force` quarantines and removes it"
         else:
             action = "left untouched — move it aside yourself if it is stale"
         findings.append(

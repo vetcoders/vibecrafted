@@ -435,10 +435,15 @@ def test_doctor_reports_stale_real_directory_shadow(
     assert "managed_stale" in finding.message
     # Runtimes that section 4 already owns must not be double-reported.
     assert "shadow-dir:claude/vc-x" not in indexed
+    assert "`vibecrafted update --force`" in finding.message
+    # A plain `vibecrafted update` returns at "up to date" once the installed
+    # version matches the channel, so the reconciliation would never run.
+    actions = installer._doctor_action_items(findings)
     assert any(
         "reconcile stale runtime skill copies" in action
-        for action in installer._doctor_action_items(findings)
-    )
+        and "vibecrafted update --force" in action
+        for action in actions
+    ), actions
 
 
 # ---------------------------------------------------------------------------
