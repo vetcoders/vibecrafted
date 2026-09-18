@@ -59,6 +59,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   rather than unlinked and rewritten, which is what kept a runtime skills dir
   symlinked into the store from having the store copy removed under it.
 
+- A stale junction standing where a skill view belongs is now removed as a
+  pointer (`os.rmdir`) instead of through `shutil.rmtree`. A junction reports
+  `is_dir()` and not `is_symlink()`, so it reached the writer's `rmtree`
+  branch, and `rmtree` raises on a junction on Windows — an install that met
+  one aborted with a traceback instead of relinking the view. `shutil.rmtree`
+  no longer appears in the writer at all, which is also what makes the
+  keep-what-is-real rule above impossible to undo by accident.
+
 - The skill-view writer keeps a real _file_ under a `vc-*` name as well as a
   real directory; it used to remove it. A file had less protection than a
   directory, not more: shadow detection only ever examines directories, and it

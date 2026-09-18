@@ -753,6 +753,45 @@ def test_a_proven_copy_in_an_active_runtime_is_quarantined_then_linked(
     )
 
 
+def test_a_stale_junction_view_is_replaced_without_rmtree(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A junction is `is_dir()` and not `is_symlink()`, so a stale one landed in
+    the writer's `shutil.rmtree` branch — which raises on a junction on Windows
+    and takes the install down with it."""
+    home = tmp_path / "home"
+    crafted_home = tmp_path / "crafted"
+    store = tmp_path / "store"
+    _pin_home(monkeypatch, home, crafted_home)
+    _store_skill(store, "vc-x", "canonical body\n")
+    # An empty real directory stands in for a junction: a reparse point is what
+    # `rmdir` removes and `unlink` refuses, which is the distinction under test.
+    stale = home / ".claude" / "skills" / "vc-x"
+    stale.mkdir(parents=True)
+
+    real_is_junction = getattr(Path, "is_junction", None)
+    monkeypatch.setattr(
+        Path,
+        "is_junction",
+        lambda self: self == stale or bool(real_is_junction and real_is_junction(self)),
+        raising=False,
+    )
+
+    def never(*args, **kwargs):
+        raise AssertionError("rmtree must never touch a view pointer")
+
+    monkeypatch.setattr(installer.shutil, "rmtree", never)
+
+    assert not stale.is_symlink()
+    assert installer._is_owned_pointer(stale)
+
+    installer.create_skill_view_symlink(store / "vc-x", stale)
+
+    assert stale.is_symlink()
+    assert stale.resolve() == (store / "vc-x").resolve()
+    assert (store / "vc-x" / "SKILL.md").is_file()
+
+
 def test_a_skills_root_linked_into_the_store_leaves_the_store_intact(
     tmp_path: Path, monkeypatch
 ) -> None:
