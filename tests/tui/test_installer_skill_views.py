@@ -1336,3 +1336,131 @@ def test_symlinked_shadow_entry_is_left_to_the_view_pruner(
     assert installer.collect_shadowed_skill_dirs(store, ["vc-x"]) == []
     assert link.is_symlink()
     assert (store / "vc-x" / "SKILL.md").is_file()
+
+
+# ---------------------------------------------------------------------------
+# A linked runtime skills root: skipped by detection, but never in silence
+# ---------------------------------------------------------------------------
+
+
+def test_a_skills_root_linked_into_the_store_is_named_by_doctor(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`ln -s ~/.vibecrafted/skills ~/.junie/skills` makes detection skip the
+    runtime, and the skip used to be indistinguishable from a clean host: no
+    finding, and the `shadow-dirs` OK line still listed `~/.junie/skills` among
+    the directories it had cleared."""
+    home = tmp_path / "home"
+    crafted_home = home / ".vibecrafted"
+    store = crafted_home / "skills"
+    _pin_home(monkeypatch, home, crafted_home)
+    _store_skill(store, "vc-x", "canonical body\n")
+    _canonical_view(home, store, "vc-x")
+    junie_skills = home / ".junie" / "skills"
+    junie_skills.parent.mkdir(parents=True)
+    junie_skills.symlink_to(store)
+
+    problem = installer.runtime_skills_root_problem("junie", store)
+    assert problem is not None and "canonical skill store" in problem
+    assert installer.collect_shadowed_skill_dirs(store, ["vc-x"]) == []
+
+    state = installer.InstallState(
+        framework_version="4.3.1", skills=["vc-x"], runtimes=["agents"]
+    )
+    state.save(store)
+    monkeypatch.setattr(installer, "FOUNDATIONS", [])
+
+    findings = installer.run_doctor(store, state)
+    indexed = {finding.component: finding for finding in findings}
+
+    finding = indexed["skill-root:junie"]
+    assert finding.level == "warn"
+    assert str(junie_skills) in finding.message
+    assert "canonical skill store" in finding.message
+    assert "nothing there is ever removed" in finding.message
+    # The OK line must no longer vouch for a root nobody inspected.
+    assert "~/.junie/skills" not in indexed["shadow-dirs"].message
+
+    actions = installer._doctor_action_items(findings)
+    assert any("runtime skill root is a link" in action for action in actions), actions
+
+
+def test_a_skills_root_linked_to_an_unrelated_dir_is_named_by_doctor(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`~/.junie/skills -> ~/notes` is someone else's tree. Detection skips it
+    — correctly, since `rmtree` would follow the pointer — but the operator had
+    no way to learn that the directory was never examined."""
+    home = tmp_path / "home"
+    crafted_home = home / ".vibecrafted"
+    store = crafted_home / "skills"
+    _pin_home(monkeypatch, home, crafted_home)
+    _store_skill(store, "vc-x", "canonical body\n")
+    _canonical_view(home, store, "vc-x")
+    notes = tmp_path / "notes"
+    copy = notes / "vc-x"
+    copy.mkdir(parents=True)
+    (copy / "SKILL.md").write_text(SKILL_MD + "june 2026 body\n", encoding="utf-8")
+    _prove(store, "vc-x", copy)
+    junie_skills = home / ".junie" / "skills"
+    junie_skills.parent.mkdir(parents=True)
+    junie_skills.symlink_to(notes)
+
+    problem = installer.runtime_skills_root_problem("junie", store)
+    assert problem == f"is reached through a link into {notes}"
+    assert installer.collect_shadowed_skill_dirs(store, ["vc-x"]) == []
+
+    state = installer.InstallState(
+        framework_version="4.3.1", skills=["vc-x"], runtimes=["agents"]
+    )
+    state.save(store)
+    monkeypatch.setattr(installer, "FOUNDATIONS", [])
+
+    findings = installer.run_doctor(store, state)
+    indexed = {finding.component: finding for finding in findings}
+
+    finding = indexed["skill-root:junie"]
+    assert finding.level == "warn"
+    assert str(notes) in finding.message
+    # No provenance verdict is invented for a copy that was never inspected.
+    assert "shadow-dir:junie/vc-x" not in indexed
+    assert (copy / "SKILL.md").is_file()
+
+
+def test_the_writer_puts_nothing_inside_a_store_shaped_skills_root(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """With `~/.junie/skills -> <store>`, every view the writer would create is
+    a symlink inside the canonical store aimed at its own sibling, and the
+    root-rule sync would drop `*_RULE.md` copies in there on every run. The
+    store has to stay exactly what we shipped, and the skills are already
+    readable through that root — it *is* the store."""
+    home = tmp_path / "home"
+    crafted_home = tmp_path / "crafted"
+    store = tmp_path / "store"
+    source_skills = tmp_path / "src"
+    _pin_home(monkeypatch, home, crafted_home)
+    _store_skill(store, "vc-x", "canonical body\n")
+    source_skills.mkdir()
+    (source_skills / "VERIFICATION_RULE.md").write_text("rule\n", encoding="utf-8")
+    junie_skills = home / ".junie" / "skills"
+    junie_skills.parent.mkdir(parents=True)
+    junie_skills.symlink_to(store)
+
+    before = sorted(entry.name for entry in store.iterdir())
+    installer.link_and_reconcile_skill_views(
+        ["agents", "junie"], store, source_skills, ["vc-x"]
+    )
+    out = capsys.readouterr().out
+
+    assert sorted(entry.name for entry in store.iterdir()) == before
+    assert not (store / "VERIFICATION_RULE.md").exists()
+    assert [entry for entry in store.rglob("*") if entry.is_symlink()] == []
+    assert (store / "vc-x" / "SKILL.md").is_file()
+    # The canonical runtime is written as always, rule file included.
+    agents_skills = home / ".agents" / "skills"
+    assert (agents_skills / "vc-x").is_symlink()
+    assert (agents_skills / "VERIFICATION_RULE.md").is_file()
+    assert "junie skill root" in out
+    assert "no view is written into it" in out
+    assert _quarantine_dirs(crafted_home) == []

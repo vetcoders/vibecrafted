@@ -7,6 +7,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- A per-runtime skill root that is a **link** is now named instead of silently
+  skipped. Shadow detection has always refused to judge
+  `~/.junie/skills -> ~/notes` (`shutil.rmtree` follows the pointer) or
+  `~/.junie/skills -> ~/.vibecrafted/skills` (the store would compare identical
+  with itself), and the refusal is correct — but it left nothing behind. Doctor
+  reported no finding, install printed no line, and the `shadow-dirs` OK line
+  listed the directory among the ones it had just cleared, so a root nobody had
+  looked at read exactly like a clean host. Doctor now warns once per such root
+  as `skill-root:<runtime>` with the path, what it resolves to and the fact that
+  nothing under it is inspected or removed; the action list asks the operator to
+  check it and replace it with a real directory to get that runtime reconciled;
+  the OK line covers only the roots actually inspected; and install/update print
+  the same fact as they write the views. A root that resolves **into the store**
+  additionally gets no views written into it at all — every view there would be
+  a symlink inside the canonical store aimed at its own sibling, and the
+  root-rule sync would drop `*_RULE.md` copies in the store on every run, while
+  nothing is lost by skipping: that root _is_ the store, so
+  `~/.junie/skills/vc-x` already resolves to `~/.vibecrafted/skills/vc-x`
+  without a view.
+
 - Install, update and doctor now see **real directory copies** of bundled
   skills sitting in per-runtime skill dirs. Installers before 3.x materialized
   copies instead of views, so hosts carried stale `vc-*` directories in

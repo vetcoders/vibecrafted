@@ -878,6 +878,13 @@ def _doctor_action_items(findings: Sequence[DoctorFinding]) -> list[str]:
             '"up to date" when the version already matches; unproven '
             "copies are only reported, never removed)"
         )
+    if any(finding.component.startswith("skill-root:") for finding in issues):
+        actions.append(
+            "a runtime skill root is a link, so it is audited by nobody: "
+            "inspect it yourself (`ls -l ~/.<runtime>/skills`) and replace it "
+            "with a real directory if you want that runtime reconciled — "
+            "the installer never removes anything behind such a link"
+        )
     if not actions:
         actions.append("review the warnings above, then re-run `vibecrafted doctor`")
     return actions
@@ -1978,6 +1985,46 @@ def shadow_candidate_runtimes() -> list[str]:
     return [rt for rt in AGENT_RUNTIMES if rt not in SYMLINK_TARGETS]
 
 
+def _runtime_skills_root_in_store(runtime: str, store_path: Path) -> bool:
+    """True when `<runtime>`'s skills root is, or lies inside, the skill store."""
+    rt_resolved = runtime_skills_dir(runtime).resolve(strict=False)
+    store_resolved = store_path.resolve(strict=False)
+    return rt_resolved == store_resolved or store_resolved in rt_resolved.parents
+
+
+def runtime_skills_root_problem(runtime: str, store_path: Path) -> str | None:
+    """Short reason why `<runtime>`'s skills root is not ours to judge, else None.
+
+    Two shapes disqualify a root, and neither is visible in the path itself.
+    `ln -s ~/.vibecrafted/skills ~/.junie/skills` — the obvious manual
+    workaround for the junie gap — makes the root resolve into the canonical
+    store, so comparing the store with itself would classify every skill as an
+    identical copy and a view written there would be a symlink inside the store
+    aimed at its own sibling. `~/.junie/skills -> ~/notes` (or a Windows
+    junction doing the same) makes every entry under it part of a tree the
+    operator keeps for another purpose, and `shutil.rmtree` follows the pointer.
+
+    Detection skips such a root either way. The value of saying so out loud is
+    that the skip is otherwise indistinguishable from a clean host: the
+    installer reports nothing, removes nothing, and the operator has no way to
+    tell that the directory was never looked at.
+
+    None means an ordinary directory (or nothing yet) under `$HOME` — the one
+    shape the installer owns.
+    """
+    rt_skills = runtime_skills_dir(runtime)
+    # The store case first: it is the more specific diagnosis, and a root
+    # linked into the store fails the pointer check as well.
+    if _runtime_skills_root_in_store(runtime, store_path):
+        return (
+            f"resolves into the canonical skill store "
+            f"({rt_skills.resolve(strict=False)})"
+        )
+    if not _path_is_symlink_free(rt_skills):
+        return f"is reached through a link into {rt_skills.resolve(strict=False)}"
+    return None
+
+
 def collect_shadowed_skill_dirs(
     store_path: Path,
     skill_names: Sequence[str],
@@ -2000,7 +2047,9 @@ def collect_shadowed_skill_dirs(
     A runtime whose skill dir is reached through a symlink, or which resolves
     into the store itself, is skipped outright: comparing the store with itself
     would classify every skill as an identical copy, and removing it would take
-    the canonical store with it.
+    the canonical store with it. The skip stays silent here — detection is
+    pure — and `runtime_skills_root_problem` is what the writer and doctor
+    report so the skip is not mistaken for a clean host.
     """
     candidates = (
         shadow_candidate_runtimes()
@@ -2009,16 +2058,14 @@ def collect_shadowed_skill_dirs(
     )
     shadows: list[ShadowedSkillDir] = []
     provenance = load_skill_provenance(store_path)
-    store_resolved = store_path.resolve(strict=False)
 
     for runtime in candidates:
         if runtime in SYMLINK_TARGETS:
             continue
         rt_skills = runtime_skills_dir(runtime)
-        if not rt_skills.is_dir() or not _path_is_symlink_free(rt_skills):
+        if not rt_skills.is_dir():
             continue
-        rt_resolved = rt_skills.resolve(strict=False)
-        if rt_resolved == store_resolved or store_resolved in rt_resolved.parents:
+        if runtime_skills_root_problem(runtime, store_path) is not None:
             continue
         for skill_name in skill_names:
             shadow = rt_skills / skill_name
@@ -11038,9 +11085,36 @@ def _write_skill_views(
     dry_run: bool = False,
     styled: bool = True,
 ) -> None:
-    """Write the `vc-*` views of `skill_names` into each runtime's skill dir."""
+    """Write the `vc-*` views of `skill_names` into each runtime's skill dir.
+
+    A runtime whose skills root is reached through a link is named rather than
+    handled silently: shadow detection skipped it, so nothing under it was
+    inspected and nothing there will be removed, and without this line that
+    outcome is indistinguishable from a clean host.
+
+    A root that resolves into the store gets nothing written into it at all.
+    Every view there would be a symlink inside the canonical store pointing at
+    its own sibling — litter in the one directory that has to stay exactly what
+    we shipped — and the root-rule copy would write `RULE.md` files into it on
+    every run. The skills are already readable through that root: it *is* the
+    store, so `~/.junie/skills/vc-x` already resolves to `~/.vibecrafted/skills/vc-x`
+    without a view.
+    """
     for runtime in runtimes:
         rt_skills = runtime_skills_dir(runtime)
+        problem = runtime_skills_root_problem(runtime, store_path)
+        if problem is not None:
+            print(
+                f"  {WARN} {runtime} skill root {rt_skills} {problem}; "
+                "shadows there are not inspected and nothing is removed"
+            )
+            if _runtime_skills_root_in_store(runtime, store_path):
+                print(
+                    f"  {dim('skip') if styled else 'skip'} {runtime}: "
+                    "the store already answers as this runtime's skill dir, "
+                    "so no view is written into it"
+                )
+                continue
         if not dry_run:
             rt_skills.mkdir(parents=True, exist_ok=True)
         print(f"  {cyan(runtime) if styled else runtime} -> {rt_skills}")
@@ -13261,6 +13335,34 @@ def run_doctor(store_path: Path, state: InstallState) -> list[DoctorFinding]:
     shadowed_dirs = collect_shadowed_skill_dirs(
         store_path, state.skills, shadow_runtimes
     )
+    # A runtime whose skills root is a link, or which resolves into the store,
+    # was skipped by the collector above. Say so: the alternative is an audit
+    # that looked at nothing and reported the same "no stale skill copies" as a
+    # host that is genuinely clean.
+    # `exists()` follows the link, so a root aimed at something gone reads as
+    # absent while still being an entry the installer would write through.
+    linked_roots = {
+        runtime: problem
+        for runtime in shadow_runtimes
+        if (
+            runtime_skills_dir(runtime).exists()
+            or _is_owned_pointer(runtime_skills_dir(runtime))
+        )
+        and (problem := runtime_skills_root_problem(runtime, store_path)) is not None
+    }
+    for runtime, problem in linked_roots.items():
+        rt_skills = runtime_skills_dir(runtime)
+        findings.append(
+            DoctorFinding(
+                "warn",
+                f"skill-root:{runtime}",
+                f"{rt_skills} {problem} — skill copies under it are not "
+                f"inspected and nothing there is ever removed; check it "
+                f"yourself (`ls -l {rt_skills}`) and point it at a real "
+                f"directory if you want this runtime audited",
+            )
+        )
+    shadow_runtimes = [rt for rt in shadow_runtimes if rt not in linked_roots]
     for shadow in shadowed_dirs:
         if shadow.is_managed:
             action = "`vibecrafted update --force` quarantines and removes it"
