@@ -2256,7 +2256,7 @@ pub mod api {
  * frame's navbar or sidebar. */
 .server-route-document{--bg:var(--surface-page);--panel:var(--surface-card);--panel-lift:var(--surface-elevated);--line:var(--border-subtle);--line-strong:var(--border-active);--text:var(--text-primary);--muted:var(--text-secondary);--accent:var(--amber);--warn:var(--status-warning);--bad:var(--status-danger);height:100%;min-height:0;color:var(--text);font:14px/1.45 var(--font-body)}
 :where(.server-route-document) *{box-sizing:border-box}
-:where(.server-route-document) a{color:inherit}
+:where(.server-route-document) a{color:inherit;cursor:default}
 .plan-library{min-height:100%;height:100%;background:var(--bg);display:flex;flex-direction:column}
 .plan-index-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:12px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
 .plan-index-copy{min-width:0}
@@ -2340,7 +2340,7 @@ pub mod api {
   font:12px/1.2 var(--font-mono);letter-spacing:.02em;
   background:var(--panel-lift);color:var(--muted);white-space:nowrap
 }
-button.render-mode-btn{cursor:pointer;font-weight:500;color:var(--text);background:var(--panel-lift)}
+button.render-mode-btn{cursor:default;font-weight:500;color:var(--text);background:var(--panel-lift)}
 button.render-mode-btn:hover,button.render-mode-btn:focus-visible{border-color:var(--teal);color:var(--text);background:var(--panel-lift)}
 button.render-mode-btn[data-next="rich"]{border-color:color-mix(in srgb,var(--accent) 45%,transparent);color:var(--accent);background:color-mix(in srgb,var(--accent) 10%,transparent)}
 .checkpoint-state{color:var(--warn)}.checkpoint-state:empty{display:none}
@@ -2393,7 +2393,7 @@ button.render-mode-btn[data-next="rich"]{border-color:color-mix(in srgb,var(--ac
  * rendering as a stray [ over a stray ]. nowrap + non-shrinking items keep every
  * state on one line; the table wrap already owns the horizontal scroll, so a
  * squeezed column scrolls visibly instead of hiding or mangling state. */
-button.md-status{display:inline-flex;align-items:center;flex:0 0 auto;gap:6px;margin:0 2px;padding:2px 8px 2px 6px;border:1px solid var(--line);border-radius:999px;background:var(--panel-lift);color:var(--muted);font:11px var(--font-mono);cursor:pointer;vertical-align:middle;line-height:1.3;white-space:nowrap;overflow-wrap:normal;word-break:normal;transition:border-color var(--motion-fast) var(--ease-ui),color var(--motion-fast) var(--ease-ui),background var(--motion-fast) var(--ease-ui)}
+button.md-status{display:inline-flex;align-items:center;flex:0 0 auto;gap:6px;margin:0 2px;padding:2px 8px 2px 6px;border:1px solid var(--line);border-radius:999px;background:var(--panel-lift);color:var(--muted);font:11px var(--font-mono);cursor:default;vertical-align:middle;line-height:1.3;white-space:nowrap;overflow-wrap:normal;word-break:normal;transition:border-color var(--motion-fast) var(--ease-ui),color var(--motion-fast) var(--ease-ui),background var(--motion-fast) var(--ease-ui)}
 button.md-status:hover,button.md-status:focus-visible{border-color:var(--line-strong);color:var(--text);outline:none}
 button.md-status:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px}
 button.md-status .md-status-glyph{flex:0 0 auto;white-space:pre;font-weight:700;letter-spacing:.02em;font-variant-ligatures:none}
@@ -2415,7 +2415,7 @@ button.md-status.md-status-done .md-status-glyph{color:var(--status-success)}
  * and CommandDeckTheme honours reduced motion; the web chip now matches. */
 @media (prefers-contrast: more){button.md-status{border-width:1.5px}}
 @media (prefers-reduced-motion: reduce){button.md-status{transition:none}}
-:where(.server-route-document) button{justify-self:start;margin:12px 16px;border:var(--stroke-width) solid color-mix(in srgb,var(--status-success) 55%,transparent);background:color-mix(in srgb,var(--status-success) 14%,transparent);color:var(--text);border-radius:var(--radius-surface);padding:8px 12px;font-weight:700;cursor:pointer}
+:where(.server-route-document) button{justify-self:start;margin:12px 16px;border:var(--stroke-width) solid color-mix(in srgb,var(--status-success) 55%,transparent);background:color-mix(in srgb,var(--status-success) 14%,transparent);color:var(--text);border-radius:var(--radius-surface);padding:8px 12px;font-weight:700;cursor:default}
 /* Save sits in the form's bottom auto-row (not floating in the black void). */
 .artifact-panel .save-artifact-btn{
   margin:0;padding:8px 14px;justify-self:start;align-self:center;
@@ -3182,6 +3182,19 @@ button.md-status.md-status-done .md-status-glyph{color:var(--status-success)}
                     "button.md-status:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px}"
                 ),
                 "the tracker chip must re-declare the ring it suppressed"
+            );
+        }
+
+        #[test]
+        fn studio_clickable_links_keep_the_arrow_cursor() {
+            let css = editor_css();
+            assert!(
+                !css.contains("cursor:pointer"),
+                "the studio must not transform the pointer into a hand"
+            );
+            assert!(
+                css.contains(":where(.server-route-document) a{color:inherit;cursor:default}"),
+                "studio links inherit the native arrow"
             );
         }
 

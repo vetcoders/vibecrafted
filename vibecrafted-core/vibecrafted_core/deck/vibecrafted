@@ -1591,6 +1591,15 @@ _server_runtime_dir() {
 _server_launcher_path() {
   local supervisor_bin="${1:-}"
   local candidate=""
+  local declared="${VIBECRAFTED_DECLARED_LAUNCHER:-}"
+  # The LaunchAgent binds the public wrapper digest. A generation-first PATH
+  # can resolve vc-server-supervisor next to the inner deck; hashing that
+  # sibling `vibecrafted` against the LaunchAgent is the false mismatch
+  # restart then dumps on the Founder. Prefer the declared public wrapper.
+  if [[ "$declared" == /* && -x "$declared" ]]; then
+    _realpath_quiet "$declared"
+    return 0
+  fi
   if [[ -n "$supervisor_bin" ]]; then
     candidate="$(dirname "$supervisor_bin")/vibecrafted"
     [[ -x "$candidate" ]] || return 1
