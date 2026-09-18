@@ -313,7 +313,9 @@ async fn populated_plan_renders_studio_inside_the_shared_frame() {
         1,
         "one active document"
     );
-    assert!(html.contains(r#"class="artifact-panel" id="tracker" data-render-mode="rich" hidden"#));
+    assert!(html.contains(
+        r#"class="artifact-panel" id="tracker" data-role="tracker" data-render-mode="rich" hidden"#
+    ));
     // Artifact index lives inside the canvas, after the global sidebar.
     let sidebar_end = html.find("</aside>").expect("global sidebar end");
     let tabs = html
