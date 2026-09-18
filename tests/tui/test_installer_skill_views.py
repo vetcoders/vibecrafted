@@ -109,6 +109,37 @@ def test_prune_shadowed_skill_views_preserves_explicit_runtime(
     assert codex.is_symlink()
 
 
+def test_prune_leaves_an_active_runtimes_views_behind_an_aliased_root(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`~/.codex/skills -> ~/.claude/skills` on a claude-only host shows every
+    one of claude's live views under the inactive `codex` name — same inode,
+    same managed target — and the pruner unlinked them as codex's leftovers.
+    The runtime whose views these actually are was never consulted."""
+    home = tmp_path / "home"
+    store = tmp_path / "store"
+    skill = store / "vc-scaffold"
+    skill.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+
+    canonical = home / ".agents" / "skills" / "vc-scaffold"
+    canonical.parent.mkdir(parents=True)
+    canonical.symlink_to(skill)
+    claude_skills = home / ".claude" / "skills"
+    claude_skills.mkdir(parents=True)
+    claude_view = claude_skills / "vc-scaffold"
+    claude_view.symlink_to(skill)
+    codex = home / ".codex"
+    codex.mkdir()
+    (codex / "skills").symlink_to(claude_skills)
+
+    removed = installer.prune_shadowed_skill_views(store, ["vc-scaffold"], ["claude"])
+
+    assert removed == []
+    assert claude_view.is_symlink()
+    assert claude_view.resolve() == skill.resolve()
+
+
 # ---------------------------------------------------------------------------
 # Real-directory skill shadows in per-runtime views (junie regression, 2026-09)
 # ---------------------------------------------------------------------------

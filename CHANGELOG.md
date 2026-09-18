@@ -7,6 +7,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- Pruning the **managed symlink views** of a runtime left out of the install now
+  requires that runtime's skills root to be pointer-free. With
+  `~/.codex/skills -> ~/.claude/skills` on a host where only `claude` is active,
+  every one of claude's live views was visible under the inactive `codex` name —
+  same inode, same managed target — and each one was unlinked as codex's
+  leftover, blanking the deck of the runtime that was actually installed. The
+  precondition is checked per runtime rather than per entry, because the entry
+  in front of the pruner is indistinguishable from a view it wrote itself; it is
+  the same gate shadow detection uses, so a root resolving into the store is out
+  of scope for the same reason.
+
 - A per-runtime skill root that is a **link** is now named instead of silently
   skipped. Shadow detection has always refused to judge
   `~/.junie/skills -> ~/notes` (`shutil.rmtree` follows the pointer) or
