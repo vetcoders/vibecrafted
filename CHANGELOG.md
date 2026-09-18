@@ -20,6 +20,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   one was visible in the other and `clear()` emptied both); the behaviour is
   pinned by an executable probe evaluated from the crate's tests and by the
   real-browser acceptance script.
+- Lint: `ruff format --check .` no longer refuses a push over Python fences
+  in Markdown. ruff 0.16 includes `*.md` by default; docs stay on prettier.
 
 ### Changed
 

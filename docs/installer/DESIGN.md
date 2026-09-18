@@ -438,8 +438,9 @@ The user can always check it if something went wrong.
 In the argument parser, add:
 
 ```python
-p_install.add_argument("--compact", action="store_true",
-    help="Compact output — one screen, details to log")
+p_install.add_argument(
+    "--compact", action="store_true", help="Compact output — one screen, details to log"
+)
 ```
 
 ### 2. Create a log redirect mechanism
@@ -447,10 +448,12 @@ p_install.add_argument("--compact", action="store_true",
 ```python
 import io
 
+
 class TeeLogger:
     """Captures print output to a log file while optionally suppressing stdout."""
+
     def __init__(self, log_path, quiet=False):
-        self.log = open(log_path, 'w')
+        self.log = open(log_path, "w")
         self.quiet = quiet
         self.stdout = sys.stdout
 

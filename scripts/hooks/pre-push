@@ -49,6 +49,8 @@ fi
 
 if [ ${#PY_FILES[@]} -gt 0 ]; then
     echo "▸ ruff (full, check-only)"
+    # Pass explicit *.py paths. ruff 0.16+ includes Markdown by default and
+    # would format-check fenced examples in docs (that is a prettier lane).
     if command -v uvx >/dev/null 2>&1; then
         uvx ruff check "${PY_FILES[@]}"
         uvx ruff format --check "${PY_FILES[@]}"
