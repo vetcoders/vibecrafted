@@ -740,6 +740,7 @@ def test_whole_pack_including_frame_never_exceeds_the_character_cap(
     """Header, notices, links and the instruction are inside the 18k budget."""
     assert MAX_PACK_CHARS == 18_000
     repo = make_checkout(tmp_path / "vibecrafted", "vetcoders/vibecrafted")
+    stamp = dt.datetime(2026, 9, 13, 12, 0, tzinfo=dt.timezone.utc)
     pack = assemble_resume_continuity_pack(
         agent="claude",
         root=repo,
@@ -747,6 +748,7 @@ def test_whole_pack_including_frame_never_exceeds_the_character_cap(
         context_file=tmp_path / "pack.md",
         meta_file=tmp_path / "pack.meta.json",
         chain=_oversized_chain(repo),
+        now=stamp,
     )
 
     body = pack.context_file.read_text(encoding="utf-8")
@@ -777,6 +779,7 @@ def test_an_oversized_pack_still_carries_content_not_only_a_pointer(
     tmp_path: Path,
 ) -> None:
     repo = make_checkout(tmp_path / "vibecrafted", "vetcoders/vibecrafted")
+    stamp = dt.datetime(2026, 9, 13, 12, 0, tzinfo=dt.timezone.utc)
     pack = assemble_resume_continuity_pack(
         agent="claude",
         root=repo,
@@ -784,6 +787,7 @@ def test_an_oversized_pack_still_carries_content_not_only_a_pointer(
         context_file=tmp_path / "pack.md",
         meta_file=tmp_path / "pack.meta.json",
         chain=_oversized_chain(repo),
+        now=stamp,
     )
     body = pack.body
 
@@ -822,6 +826,7 @@ def test_the_budget_leaves_room_for_evidence_under_a_huge_mission(
 ) -> None:
     """A large mission must not starve the catalog and continuity sections."""
     repo = make_checkout(tmp_path / "vibecrafted", "vetcoders/vibecrafted")
+    stamp = dt.datetime(2026, 9, 13, 12, 0, tzinfo=dt.timezone.utc)
     pack = assemble_resume_continuity_pack(
         agent="claude",
         root=repo,
@@ -829,6 +834,7 @@ def test_the_budget_leaves_room_for_evidence_under_a_huge_mission(
         context_file=tmp_path / "pack.md",
         meta_file=tmp_path / "pack.meta.json",
         chain=_oversized_chain(repo),
+        now=stamp,
     )
     assert "## Session catalog (evidence, not a picker)" in pack.body
     assert "## Continuity (supplementary context)" in pack.body
