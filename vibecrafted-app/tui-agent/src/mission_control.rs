@@ -10,6 +10,8 @@ use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
+use control_core::{RUN_STALL_SECONDS, is_final_state};
+
 use crate::polarize::{PolarizeBand, PolarizeIntent};
 use crate::state::{ControlPlaneState, RunKind, RunSnapshot, classify_run};
 
@@ -29,10 +31,7 @@ const STATS_WINDOW_DAYS: i64 = 30;
 /// failures should be reasoned about from the wider per-agent panel.
 const FAILURE_WINDOW_HOURS: i64 = 24;
 
-/// Active-dispatch ETA is computed from heartbeat-vs-start. Anything older
-/// than this is considered stalled in the dashboard and contributes an
-/// `ActionQueue` entry instead of an `ActiveDispatch` entry.
-const STALL_AFTER_MINUTES: i64 = 15;
+/// Active-dispatch ETA uses the same stall window as `compute_view`.
 
 const DISK_WARN_FREE_PERCENT: f64 = 15.0;
 const DISK_BLOCKED_FREE_PERCENT: f64 = 5.0;
@@ -193,27 +192,13 @@ fn parse_settlement_verdict(raw: &str) -> Option<SettlementCell> {
 
 /// Mirrors control-core `is_unsettled_settlement_terminal` / Python `_is_terminal`.
 fn is_unsettled_settlement_terminal(run: &RunSnapshot) -> bool {
-    const TERMINAL_STATES: &[&str] = &[
-        "report_validated",
-        "completed",
-        "closed",
-        "converged",
-        "stopped",
-        "blocked",
-        "failed",
-        "report_missing",
-        "report_invalid",
-        "contract_failed",
-        "recovery_required",
-        "timed_out",
-        "gc",
-        "ghost",
-        "stalled",
-        "killed_by_operator",
-        "process_dead",
-    ];
     let state = run.display_state().to_ascii_lowercase();
-    if TERMINAL_STATES.contains(&state.as_str()) {
+    if is_final_state(&state)
+        || matches!(
+            state.as_str(),
+            "stalled" | "killed_by_operator" | "process_dead"
+        )
+    {
         return true;
     }
     let liveness = run
@@ -549,6 +534,8 @@ fn collect_meta_records(
     artifact_root: &Path,
     now: DateTime<Utc>,
 ) -> (Vec<MetaRecord>, DataQuality) {
+    // Historical stats only. Live run state for this dashboard comes from
+    // `ControlPlaneState` (`compute_view`), never from these files.
     let mut quality = DataQuality::default();
     let mut records = Vec::new();
     if !artifact_root.exists() {
@@ -821,7 +808,8 @@ fn compute_eta_label(last_heartbeat: Option<&str>, now: DateTime<Utc>) -> String
     };
     let lag = now.signed_duration_since(heartbeat);
     let lag_minutes = lag.num_minutes();
-    if lag_minutes >= STALL_AFTER_MINUTES {
+    let stall_after_minutes = (RUN_STALL_SECONDS / 60).max(1);
+    if lag_minutes >= stall_after_minutes {
         format!("stalled {}m", lag_minutes)
     } else if lag_minutes <= 0 {
         "fresh".to_string()

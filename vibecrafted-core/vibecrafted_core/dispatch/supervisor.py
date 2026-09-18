@@ -629,6 +629,9 @@ class DispatchSupervisor:
             baton = self._baton_from_verdicts(verdicts)
             result = self._build_result(baton, line_broken)
             return result
+        except KeyboardInterrupt:
+            self._mark_supervisor_interrupt("KeyboardInterrupt")
+            raise
         except Exception as exc:  # noqa: BLE001
             label = (
                 "dispatch substrate failure"
@@ -647,6 +650,30 @@ class DispatchSupervisor:
                 self._write_final_artifacts(final_result)
             finally:
                 self._release_mutation_claim()
+
+    def _mark_supervisor_interrupt(self, reason: str) -> None:
+        """Persist Ctrl-C as interrupted receipts, not leftover `active`."""
+        inflight = {"launching", "active", "reported"}
+        try:
+            self._receipt_store.request_stop(scheduler_error=reason)
+        except Exception:  # noqa: BLE001, S110 — interrupt must still re-raise
+            pass
+        for cut in self.dispatch.cuts:
+            try:
+                current = str(self._receipt_store.cut(cut.id).get("state") or "")
+            except Exception:  # noqa: BLE001, S112 — best-effort per cut
+                continue
+            if current in inflight or current in {"queued"}:
+                try:
+                    self._receipt_store.update(
+                        cut.id,
+                        "stopped",
+                        acceptance="interrupted",
+                        unresolved_surfaces=[reason],
+                    )
+                except Exception:  # noqa: BLE001, S112 — best-effort per cut
+                    continue
+                self._set_state(cut.id, STATE_PENDING, "stopped: supervisor interrupt")
 
     def _acquire_mutation_claim(self) -> None:
         """Acquire the dispatch envelope's full mutation scope before any spawn."""

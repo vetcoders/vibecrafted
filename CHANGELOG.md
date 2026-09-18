@@ -7,6 +7,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- Run-state readers now share one derivation: events + snapshot + liveness at
+  read (`compute_view` / `project_lifecycle_read`). A lifecycle `state.json`
+  stuck on `launching` with no live owner is `abandoned` with age, never
+  `Operator: approve_transition`. voc, web Control/Lifecycle, run detail, and
+  `observe` consume that overlay. When vc-server is down, `observe` shells
+  `control-observe` (same crate as voc) and stamps `source`; without that
+  binary it admits `control_core_observe_unavailable` instead of inventing a
+  second Python classifier. Ctrl-C on a dispatch supervisor marks receipts
+  `stopped`/`interrupted`, and a worktree refuse names the owning `run_id`
+  plus a ready `--resume` command.
+
 - Pruning the **managed symlink views** of a runtime left out of the install now
   requires that runtime's skills root to be pointer-free. With
   `~/.codex/skills -> ~/.claude/skills` on a host where only `claude` is active,
