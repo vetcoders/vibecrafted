@@ -248,15 +248,15 @@ fn assert_shared_chrome(state: &str, content_type: &str, html: &str) {
             r#"href="/scaffold" class="server-nav-link is-active""#
         ),
         2,
-        "{state}: Plans / Scaffold active in sidebar + mobile nav"
+        "{state}: Plans active in sidebar + mobile nav"
     );
     assert!(
         html.contains(r#"href="/" aria-label="Vibecrafted server overview""#),
         "{state}: Home"
     );
     assert!(
-        html.contains(r#"href="/runs" class="server-nav-link""#),
-        "{state}: global routes"
+        html.contains(r#"href="/transcripts" class="server-nav-link""#),
+        "{state}: five primary views stay in chrome"
     );
     assert!(
         html.contains(r#"class="server-theme-toggle""#),
@@ -480,7 +480,11 @@ impl Drop for PythonEnvGuard {
     }
 }
 
-async fn post_json(app: &axum::Router, uri: &str, payload: serde_json::Value) -> (StatusCode, String) {
+async fn post_json(
+    app: &axum::Router,
+    uri: &str,
+    payload: serde_json::Value,
+) -> (StatusCode, String) {
     let response = app
         .clone()
         .oneshot(

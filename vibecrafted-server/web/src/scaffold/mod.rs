@@ -2710,7 +2710,7 @@ button.md-status.md-status-done .md-status-glyph{color:var(--status-success)}
 
         /// One shared canvas: every scaffold HTML state is a route page inside
         /// `chrome::ServerFrame` — one navbar, one global sidebar, one `<main>`,
-        /// Plans / Scaffold active, Home reachable, no second chrome vocabulary.
+        /// Plans active, Home reachable, no second chrome vocabulary.
         fn assert_shared_server_frame(html: &str, state: &str) {
             assert!(
                 html.starts_with("<!DOCTYPE html>"),
@@ -2752,7 +2752,7 @@ button.md-status.md-status-done .md-status-glyph{color:var(--status-success)}
                     r#"href="/scaffold" class="server-nav-link is-active""#
                 ),
                 2,
-                "{state}: Plans / Scaffold active in sidebar and mobile nav"
+                "{state}: Plans active in sidebar and mobile nav"
             );
             assert!(
                 html.contains(r#"href="/" aria-label="Vibecrafted server overview""#),
