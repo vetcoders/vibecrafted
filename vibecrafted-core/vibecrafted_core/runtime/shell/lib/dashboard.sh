@@ -975,8 +975,11 @@ _vetcoders_start_session_inventory_state() {
     return 0
   }
   listing="$(_vetcoders_start_frame_env "$vc_frame_bin" list-sessions --no-formatting 2>&1)" || rc=$?
+  _vetcoders_start_cached_live_hosts=""
+  _vetcoders_start_inventory_cache_valid=0
   if ((rc != 0)); then
     if [[ "$listing" == *"No active vc-frame sessions found."* ]]; then
+      _vetcoders_start_inventory_cache_valid=1
       printf 'missing\n'
       return 0
     fi
@@ -998,14 +1001,17 @@ _vetcoders_start_session_inventory_state() {
         ;;
     esac
     name="${line%% \[Created *}"
+    if [[ "$line" != *"(EXITED"* ]]; then
+      _vetcoders_start_cached_live_hosts+="${name}"$'\n'
+    fi
     [[ "$name" == "$session_name" ]] || continue
     if [[ "$line" == *"(EXITED"* ]]; then
       found="dead"
     else
       found="live"
-      break
     fi
   done <<<"$listing"
+  _vetcoders_start_inventory_cache_valid=1
   printf '%s\n' "$found"
 }
 
@@ -1016,14 +1022,23 @@ _vetcoders_start_session_inventory_state() {
 _vetcoders_start_live_inventory_hosts() {
   local vc_frame_bin="" listing="" rc=0 line="" name=""
   _vetcoders_start_inventory_error=""
+  # Reuse the listing start_entry already paid for. A second unattached
+  # list-sessions per outside door was extra RPC against whatever socket
+  # start_frame_env pins (including ambient Darwin when SOCKET_DIR leaks).
+  if [[ "${_vetcoders_start_inventory_cache_valid:-0}" == 1 ]]; then
+    printf '%s' "${_vetcoders_start_cached_live_hosts}"
+    return 0
+  fi
   vc_frame_bin="$(_vetcoders_vc_frame_bin 2>/dev/null)" || {
     _vetcoders_start_inventory_error="the selected vc-frame engine is unavailable"
     printf 'vc-start: %s\n' "$_vetcoders_start_inventory_error" >&2
     return 2
   }
   listing="$(_vetcoders_start_frame_env "$vc_frame_bin" list-sessions --no-formatting 2>&1)" || rc=$?
+  _vetcoders_start_cached_live_hosts=""
   if ((rc != 0)); then
     if [[ "$listing" == *"No active vc-frame sessions found."* ]]; then
+      _vetcoders_start_inventory_cache_valid=1
       return 0
     fi
     _vetcoders_start_inventory_error="list-sessions exited ${rc}${listing:+: ${listing%%$'\n'*}}"
@@ -1044,8 +1059,10 @@ _vetcoders_start_live_inventory_hosts() {
     name="${line%% \[Created *}"
     if [[ "$line" != *"(EXITED"* ]]; then
       printf '%s\n' "$name"
+      _vetcoders_start_cached_live_hosts+="${name}"$'\n'
     fi
   done <<<"$listing"
+  _vetcoders_start_inventory_cache_valid=1
   return 0
 }
 
@@ -1331,9 +1348,12 @@ _vetcoders_start_host_has_unique_client() {
   local host="${1:-}" vc_frame_bin="${2:-}" listing="" query_status=0
   local header_seen=0 rows=0 line=""
   [[ -n "$host" && -n "$vc_frame_bin" ]] || return 1
-  listing="$(env -u VC_FRAME -u VC_FRAME_PANE_ID -u VC_FRAME_SESSION_NAME \
-    -u ZELLIJ -u ZELLIJ_PANE_ID -u ZELLIJ_SESSION_NAME \
-    "$vc_frame_bin" --session "$host" action list-clients 2>/dev/null)" || query_status=$?
+  # Pin both socket vars through start_frame_env. Bare `env -u` attach
+  # markers still inherit ambient ZELLIJ_SOCKET_DIR (pytest workers and
+  # the Darwin default `/tmp/vc-frame-$UID`), so list-clients would hit
+  # the live Founder engine instead of the product socket.
+  listing="$(_vetcoders_start_frame_env "$vc_frame_bin" --session "$host" \
+    action list-clients 2>/dev/null)" || query_status=$?
   ((query_status == 0)) || return 1
   while IFS= read -r line; do
     line="$(printf '%s' "$line" | _vetcoders_strip_ansi)"
@@ -1356,9 +1376,8 @@ _vetcoders_start_host_has_unique_client() {
 _vetcoders_start_resolve_host_tab() {
   local host="${1:-}" vc_frame_bin="${2:-}" raw="" python_bin=""
   [[ -n "$host" && -n "$vc_frame_bin" ]] || return 1
-  raw="$(env -u VC_FRAME -u VC_FRAME_PANE_ID -u VC_FRAME_SESSION_NAME \
-    -u ZELLIJ -u ZELLIJ_PANE_ID -u ZELLIJ_SESSION_NAME \
-    "$vc_frame_bin" --session "$host" action list-tabs --json 2>/dev/null || true)"
+  raw="$(_vetcoders_start_frame_env "$vc_frame_bin" --session "$host" \
+    action list-tabs --json 2>/dev/null || true)"
   [[ -n "$raw" ]] || return 1
   python_bin="$(_vetcoders_internal_python 2>/dev/null || true)"
   [[ -n "$python_bin" ]] || return 1
@@ -1511,9 +1530,8 @@ _vetcoders_start_projection_receipt_ok() {
 _vetcoders_start_host_pane_snapshot() {
   local host="${1:-}" vc_frame_bin="${2:-}"
   [[ -n "$host" && -n "$vc_frame_bin" ]] || return 1
-  env -u VC_FRAME -u VC_FRAME_PANE_ID -u VC_FRAME_SESSION_NAME \
-    -u ZELLIJ -u ZELLIJ_PANE_ID -u ZELLIJ_SESSION_NAME \
-    "$vc_frame_bin" --session "$host" action list-panes --json --command 2>/dev/null
+  _vetcoders_start_frame_env "$vc_frame_bin" --session "$host" \
+    action list-panes --json --command 2>/dev/null
 }
 
 # Compare pre/post host list-panes. Prints unchanged | unknown.
@@ -1620,12 +1638,6 @@ _vetcoders_start_create_guest_and_project() {
   [[ -n "$host" && "$host" != "$session_name" ]] || return 4
   tab="$(_vetcoders_start_resolve_host_tab "$host" "$vc_frame_bin" 2>/dev/null || true)"
 
-  _vetcoders_product_entry_prepare "$root" || return $?
-  if [[ -n "${VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS:-}" ]]; then
-    printf 'vc-start: product preparation failed; the workspace was not created.\n' >&2
-    return "$VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS"
-  fi
-
   layout_file="$(_vetcoders_operator_layout_file 2>/dev/null || true)"
   _vetcoders_start_create_workspace_session "$vc_frame_bin" "$session_name" "$layout_file" guest || rc=$?
   if ((rc == 3)); then
@@ -1638,6 +1650,10 @@ _vetcoders_start_create_guest_and_project() {
 
   printf 'vc-start: created workspace %s for %s\n' \
     "$(_vetcoders_shell_quote "$session_name")" "$(_vetcoders_shell_quote "$root")"
+
+  if [[ -z "$tab" ]]; then
+    tab="$(_vetcoders_start_resolve_host_tab "$host" "$vc_frame_bin" 2>/dev/null || true)"
+  fi
 
   if ! _vetcoders_start_project_guest_into_host "$vc_frame_bin" "$host" "$session_name" "$tab"; then
     case "${_vetcoders_start_projection_outcome:-indeterminate}" in
@@ -1697,6 +1713,11 @@ _vetcoders_start_inside_host_guest() {
       "$(_vetcoders_shell_quote "$host")" "$(_vetcoders_shell_quote "$session_name")" >&2
     return 4
   fi
+  _vetcoders_product_entry_prepare "$root" || return $?
+  if [[ -n "${VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS:-}" ]]; then
+    printf 'vc-start: product preparation failed; the workspace was not created.\n' >&2
+    return "$VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS"
+  fi
   _vetcoders_start_create_guest_and_project "$session_name" "$root" "$host"
 }
 
@@ -1754,6 +1775,14 @@ _vetcoders_start_maybe_join_outside_live_host() {
   local session_name="${1:-}" root="${2:-}" host="" resolve_rc=0
   [[ -n "$session_name" ]] || return 1
   [[ -z "${VIBECRAFTED_START_CREATED_SESSION:-}" ]] || return 1
+  # start_entry, create_before_terminal and launch_workspace each called
+  # this. Two extra unattached list-sessions per outside start, plus
+  # list-clients without a socket pin when count>1, hit the ambient
+  # Darwin socket when ZELLIJ_SOCKET_DIR leaked from the parent.
+  if [[ -n "${_vetcoders_start_outside_join_tried:-}" ]]; then
+    return 1
+  fi
+  _vetcoders_start_outside_join_tried=1
   if _vetcoders_in_vc_frame; then
     return 1
   fi
