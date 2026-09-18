@@ -867,7 +867,11 @@ def _doctor_action_items(findings: Sequence[DoctorFinding]) -> list[str]:
         actions.append("enable tracking and restore: run the installer once")
     if any(finding.component.startswith("orphan:") for finding in issues):
         actions.append("clean bundle leftovers: re-run the installer")
-    if any(finding.component.startswith("shadow-dir:") for finding in issues):
+    if any(
+        finding.component.startswith("shadow-dir:")
+        or (finding.component.startswith("symlink:") and "is a COPY" in finding.message)
+        for finding in issues
+    ):
         actions.append(
             "reconcile stale runtime skill copies: "
             "`vibecrafted update --force` (plain `update` stops at "
@@ -13226,7 +13230,10 @@ def run_doctor(store_path: Path, state: InstallState) -> list[DoctorFinding]:
                     DoctorFinding(
                         "fail",
                         f"symlink:{runtime}/{skill_name}",
-                        "is a COPY, not a symlink — stale drift risk",
+                        "is a COPY, not a symlink — stale drift risk; "
+                        "`vibecrafted update --force` reconciles it, and "
+                        f"shadow-dir:{runtime}/{skill_name} says whether it "
+                        "can be proven",
                     )
                 )
             else:
@@ -13240,13 +13247,17 @@ def run_doctor(store_path: Path, state: InstallState) -> list[DoctorFinding]:
                     )
                 )
 
-    # 4a. Real-directory skill copies in runtimes that carry no managed view.
-    # A pre-3.x installer materialized copies into dirs such as ~/.junie/skills;
-    # they survive next to the canonical .agents view and go stale invisibly.
-    # Runtimes covered by section 4 are skipped — that check already owns them.
-    shadow_runtimes = [
-        rt for rt in shadow_candidate_runtimes() if rt not in view_runtimes
-    ]
+    # 4a. Real-directory skill copies. A pre-3.x installer materialized copies
+    # into dirs such as ~/.junie/skills; they survive next to the canonical
+    # .agents view and go stale invisibly.
+    #
+    # Runtimes that carry a managed view used to be excluded here, on the
+    # grounds that section 4 already names them. It does — as
+    # `symlink:<rt>/<skill>` "is a COPY", which says nothing about whether the
+    # copy can be proven, and so leaves the operator without the one fact that
+    # decides what happens next. Both reports now run: section 4 keeps the
+    # missing-view contract, and this one supplies the provenance class.
+    shadow_runtimes = list(shadow_candidate_runtimes())
     shadowed_dirs = collect_shadowed_skill_dirs(
         store_path, state.skills, shadow_runtimes
     )

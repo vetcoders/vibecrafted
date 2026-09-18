@@ -59,6 +59,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   rather than unlinked and rewritten, which is what kept a runtime skills dir
   symlinked into the store from having the store copy removed under it.
 
+- A stale copy in a runtime that carries a managed view (`~/.claude/skills`,
+  `~/.codex/skills`) now gets the provenance class and the command that fixes
+  it. Doctor reported it only as `symlink:<rt>/<skill>` "is a COPY", which says
+  nothing about whether the copy can be proven, and the action list then
+  suggested a plain `vibecrafted update` — which stops at "up to date" on a
+  host already at the latest version and never reconciles anything. Shadow
+  detection now runs for those runtimes too, so the `shadow-dir:` finding
+  appears beside the COPY finding, and both name `vibecrafted update --force`.
+
 - Orphan pruning follows the same provenance contract as shadow
   reconciliation. A `vc-*` directory whose name has left the bundle was
   `shutil.rmtree`d on sight — and `ask_yn` defaults to yes and returns that
