@@ -16,8 +16,9 @@
 //!   advertised `launching` for ownerless lifecycle containers.
 //! * `GET /api/control/dashboard` — the exact JSON the Leptos console hydrates
 //!   and client-navigates with (state + lifecycle summaries + loctree report).
-//! * `GET /api/control/runs` — every `runs/<id>.json` snapshot, newest-first.
-//!   Each run serialises optional delivery-proof axes (`execution_state`,
+//! * `GET /api/control/runs` — every derived run (`compute_view` merge),
+//!   newest-first. Same overlay as detail / observe / Control state. Each run
+//!   serialises optional delivery-proof axes (`execution_state`,
 //!   `proof_state`, `delivery_state`) and optional `seal` when present on the
 //!   kernel receipt / snapshot. Absent axes stay absent (never invented from
 //!   `completed`).
@@ -223,14 +224,14 @@ pub mod api {
         Json(payload)
     }
 
-    /// Every `runs/<id>.json` snapshot, newest-first.
+    /// Every derived run, newest-first. Same merge as detail / observe.
     async fn runs() -> impl IntoResponse {
         let plane = ControlPlane::from_env();
-        let snapshots = plane.load_snapshots();
+        let runs = plane.derived_runs(Utc::now());
         Json(json!({
             "control_plane": plane.control_plane_home().display().to_string(),
-            "count": snapshots.len(),
-            "runs": snapshots,
+            "count": runs.len(),
+            "runs": runs,
         }))
     }
 
@@ -267,7 +268,7 @@ pub mod api {
         limit: Option<usize>,
     }
 
-    /// Host-wide human-transcript search. Snapshots are scanned newest-first;
+    /// Host-wide human-transcript search. Derived runs are scanned newest-first;
     /// matching results are paginated. Each log is streamed from the start so
     /// a needle that lives only past a previous byte cap is still found.
     async fn transcripts(Query(query): Query<TranscriptSearchQuery>) -> impl IntoResponse {
@@ -280,7 +281,7 @@ pub mod api {
         let limit = query.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
         let mut items = Vec::new();
         let mut total = 0_usize;
-        for run in plane.load_snapshots() {
+        for run in plane.derived_runs(Utc::now()) {
             let hit = crate::run_detail::match_human_transcript(&plane, &run.run_id, &needle);
             if !hit.available {
                 continue;

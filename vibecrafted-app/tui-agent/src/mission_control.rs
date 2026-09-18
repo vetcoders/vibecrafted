@@ -1,4 +1,4 @@
-use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::Deserialize;
 use serde_json::Value;
 use std::cmp::Ordering;
@@ -15,11 +15,11 @@ use control_core::{RUN_STALL_SECONDS, is_final_state};
 use crate::polarize::{PolarizeBand, PolarizeIntent};
 use crate::state::{ControlPlaneState, RunKind, RunSnapshot, classify_run};
 
-/// Maximum number of `*.meta.json` files we will fold per refresh. Large
-/// artifact roots can hold tens of thousands of files; the dashboard
-/// refresh cadence (~250ms tick) must not stall the operator on disk IO.
-/// Treat the cap as a load-shed marker rather than a hard truth — the
-/// `data_quality.scanned_meta_files == capped` signal warns the operator.
+/// Maximum number of derived snapshots we will fold per refresh. Treat the
+/// cap as a load-shed marker rather than a hard truth — the
+/// `data_quality.capped` signal warns the operator. The
+/// `scanned_meta_files` counter is the derived-run count (name kept to
+/// limit the FFI/blast surface).
 const META_SCAN_CAP: usize = 5_000;
 
 /// Aggregation window for per-agent and per-skill statistics. Wider
@@ -72,7 +72,7 @@ static ORPHAN_COUNT_CACHE: OnceLock<Mutex<HashMap<PathBuf, (Instant, usize)>>> =
 /// Scope is honest: f/x/n uses retained `control_plane/runs/*.json` only.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SettlementBoardCounts {
-    /// Human-readable scope boundary (never claim full meta history).
+    /// Human-readable scope boundary: retained snapshots only.
     pub scope: String,
     pub f: usize,
     pub x: usize,
@@ -92,7 +92,7 @@ pub struct SettlementBoardCounts {
 
 impl SettlementBoardCounts {
     pub const SCOPE_RETAINED_SNAPSHOTS: &'static str =
-        "retained control_plane/runs snapshots (≠ full meta history)";
+        "retained control_plane/runs snapshots";
 
     /// Count settlement axis from retained run snapshots.
     ///
@@ -393,38 +393,25 @@ pub struct DataQuality {
     pub artifact_root_present: bool,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
-struct MetaJson {
-    #[serde(default)]
-    run_id: Option<String>,
-    #[serde(default)]
-    agent: Option<String>,
-    #[serde(default)]
-    skill_code: Option<String>,
-    #[serde(default)]
-    mode: Option<String>,
-    #[serde(default)]
+#[derive(Debug, Clone)]
+struct DerivedRecord {
+    run_id: String,
+    agent: String,
+    skill: String,
     status: Option<String>,
-    #[serde(default)]
     exit_code: Option<i64>,
-    #[serde(default)]
     model: Option<String>,
-    #[serde(default)]
     duration_s: Option<f64>,
-    #[serde(default)]
-    completed_at: Option<String>,
-    #[serde(default)]
-    updated_at: Option<String>,
-    #[serde(default)]
+    completed_at: DateTime<Utc>,
     report: Option<String>,
-    #[serde(default)]
     prompt_id: Option<String>,
+    path: Option<PathBuf>,
 }
 
 impl MissionControlState {
     /// Build the mission-control view from real local sources. Caller
-    /// owns the `ControlPlaneState` snapshot for live runs and supplies
-    /// the artifact root where `*.meta.json` history lives.
+    /// owns the `ControlPlaneState` snapshot for live and retained runs.
+    /// The artifact root is only for orphan-markdown / presence signals.
     pub fn build(state: &ControlPlaneState, artifact_root: &Path) -> Self {
         Self::build_with_intents(state, artifact_root, &[])
     }
@@ -474,17 +461,17 @@ impl MissionControlState {
         now: DateTime<Utc>,
         mission_root: Option<&Path>,
     ) -> Self {
-        let (meta_records, mut data_quality) = collect_meta_records(artifact_root, now);
+        let (derived_records, mut data_quality) = collect_derived_records(state, now);
         data_quality.artifact_root = Some(artifact_root.to_path_buf());
         data_quality.artifact_root_present = artifact_root.exists();
 
         let active_dispatches = active_dispatches_from_state(state, now, mission_root);
-        let wave_atlas = wave_atlas_from_meta(&meta_records, state, now);
-        let agent_stats = agent_stats_from_meta(&meta_records, now);
-        let skill_stats = skill_stats_from_meta(&meta_records, now);
-        let failures = failure_board_from_meta(&meta_records, state, now);
+        let wave_atlas = wave_atlas_from_derived(&derived_records, state, now);
+        let agent_stats = agent_stats_from_derived(&derived_records);
+        let skill_stats = skill_stats_from_derived(&derived_records);
+        let failures = failure_board_from_derived(&derived_records, state, now);
         let fleet_health = fleet_health_from_inputs(state, artifact_root, &data_quality);
-        let action_queue = action_queue_from_inputs(state, &failures, &meta_records, intents, now);
+        let action_queue = action_queue_from_inputs(state, &failures, &derived_records, intents, now);
         let mut settlement = SettlementBoardCounts::from_snapshots(
             &state.retained_runs,
             state.canonical_active_count(),
@@ -523,122 +510,127 @@ impl MissionControlState {
     }
 }
 
-#[derive(Debug, Clone)]
-struct MetaRecord {
-    meta: MetaJson,
-    path: PathBuf,
-    completed_at: DateTime<Utc>,
+fn extra_str(snapshot: &RunSnapshot, key: &str) -> Option<String> {
+    snapshot
+        .extra
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
-fn collect_meta_records(
-    artifact_root: &Path,
-    now: DateTime<Utc>,
-) -> (Vec<MetaRecord>, DataQuality) {
-    // Historical stats only. Live run state for this dashboard comes from
-    // `ControlPlaneState` (`compute_view`), never from these files.
-    let mut quality = DataQuality::default();
-    let mut records = Vec::new();
-    if !artifact_root.exists() {
-        return (records, quality);
-    }
-    let window_floor = now - ChronoDuration::days(STATS_WINDOW_DAYS);
-    let mut files = Vec::new();
-    walk_meta_files(artifact_root, &mut files, &window_floor.date_naive());
-    // Most-recent-first so the scan cap keeps the FRESHEST runs (the operator's
-    // live activity), not whatever the directory walk reached first. Without this
-    // the cap was filled in directory order, so new runs in late-sorted dirs fell
-    // off it and the panel went silent about them.
-    files.sort_by_key(|path| {
-        std::cmp::Reverse(fs::metadata(path).and_then(|meta| meta.modified()).ok())
-    });
+fn extra_f64(snapshot: &RunSnapshot, key: &str) -> Option<f64> {
+    snapshot.extra.get(key).and_then(|value| {
+        value
+            .as_f64()
+            .or_else(|| value.as_i64().map(|n| n as f64))
+            .or_else(|| value.as_str()?.trim().parse().ok())
+    })
+}
 
-    for path in files.into_iter().take(META_SCAN_CAP) {
-        let text = match fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(_) => {
-                quality.parse_failures += 1;
-                continue;
-            }
-        };
-        let parsed: MetaJson = match serde_json::from_str(&text) {
-            Ok(value) => value,
-            Err(_) => {
-                quality.parse_failures += 1;
-                continue;
-            }
-        };
+fn extra_i64(snapshot: &RunSnapshot, key: &str) -> Option<i64> {
+    snapshot.extra.get(key).and_then(|value| {
+        value
+            .as_i64()
+            .or_else(|| value.as_u64().map(|n| n as i64))
+            .or_else(|| value.as_str()?.trim().parse().ok())
+    })
+}
+
+fn merge_stat_snapshot(base: RunSnapshot, overlay: &RunSnapshot) -> RunSnapshot {
+    let mut merged = overlay.clone();
+    for (key, value) in &base.extra {
+        merged
+            .extra
+            .entry(key.clone())
+            .or_insert_with(|| value.clone());
+    }
+    if merged.latest_report.is_none() {
+        merged.latest_report = base.latest_report;
+    }
+    merged
+}
+
+fn snapshot_completed_at(snapshot: &RunSnapshot, window_floor: DateTime<Utc>) -> DateTime<Utc> {
+    extra_str(snapshot, "completed_at")
+        .as_deref()
+        .and_then(parse_rfc3339)
+        .or_else(|| snapshot.updated_at.as_deref().and_then(parse_rfc3339))
+        .or_else(|| snapshot.started_at.as_deref().and_then(parse_rfc3339))
+        .unwrap_or(window_floor)
+}
+
+fn derived_record_from_snapshot(snapshot: &RunSnapshot, window_floor: DateTime<Utc>) -> DerivedRecord {
+    DerivedRecord {
+        run_id: snapshot.run_id.clone(),
+        agent: snapshot
+            .agent
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string()),
+        skill: snapshot
+            .skill
+            .clone()
+            .or_else(|| snapshot.mode.clone())
+            .unwrap_or_else(|| "unknown".to_string()),
+        status: snapshot.status.clone().or_else(|| snapshot.state.clone()),
+        exit_code: extra_i64(snapshot, "exit_code"),
+        model: extra_str(snapshot, "model"),
+        duration_s: extra_f64(snapshot, "duration_s"),
+        completed_at: snapshot_completed_at(snapshot, window_floor),
+        report: snapshot.latest_report.clone(),
+        prompt_id: extra_str(snapshot, "prompt_id").or_else(|| extra_str(snapshot, "wave")),
+        path: snapshot
+            .latest_report
+            .as_deref()
+            .map(PathBuf::from)
+            .or_else(|| snapshot.root.as_deref().map(PathBuf::from)),
+    }
+}
+
+fn collect_derived_records(
+    state: &ControlPlaneState,
+    now: DateTime<Utc>,
+) -> (Vec<DerivedRecord>, DataQuality) {
+    let mut quality = DataQuality::default();
+    let window_floor = now - ChronoDuration::days(STATS_WINDOW_DAYS);
+    let mut by_id: HashMap<String, RunSnapshot> = HashMap::new();
+    for snapshot in &state.retained_runs {
+        by_id.insert(snapshot.run_id.clone(), snapshot.clone());
+    }
+    for snapshot in &state.runs {
+        by_id
+            .entry(snapshot.run_id.clone())
+            .and_modify(|existing| *existing = merge_stat_snapshot(existing.clone(), snapshot))
+            .or_insert_with(|| snapshot.clone());
+    }
+    let mut records: Vec<DerivedRecord> = by_id
+        .into_values()
+        .map(|snapshot| derived_record_from_snapshot(&snapshot, window_floor))
+        .filter(|record| record.completed_at >= window_floor)
+        .collect();
+    records.sort_by(|left, right| right.completed_at.cmp(&left.completed_at));
+    if records.len() > META_SCAN_CAP {
+        quality.capped = true;
+        records.truncate(META_SCAN_CAP);
+    }
+    for record in &records {
         quality.scanned_meta_files += 1;
-        if parsed
+        if record
             .model
             .as_deref()
             .map(str::trim)
             .unwrap_or("")
             .is_empty()
-            || parsed.model.as_deref() == Some("unknown")
+            || record.model.as_deref() == Some("unknown")
         {
             quality.missing_model += 1;
         }
-        if parsed.duration_s.is_none() {
+        if record.duration_s.is_none() {
             quality.missing_duration += 1;
         }
-        let completed_at = parsed
-            .completed_at
-            .as_deref()
-            .and_then(parse_rfc3339)
-            .or_else(|| parsed.updated_at.as_deref().and_then(parse_rfc3339))
-            .unwrap_or(window_floor);
-        if completed_at < window_floor {
-            continue;
-        }
-        records.push(MetaRecord {
-            meta: parsed,
-            path,
-            completed_at,
-        });
-    }
-    // If the directory walk produced more than the cap before the take
-    // applied above, mark the data-quality flag so the operator sees
-    // load-shed truth instead of a "5000 runs" claim.
-    if quality.scanned_meta_files >= META_SCAN_CAP {
-        quality.capped = true;
     }
     (records, quality)
-}
-
-fn walk_meta_files(dir: &Path, out: &mut Vec<PathBuf>, window_floor: &NaiveDate) {
-    // Collect ALL in-window meta files — NO cap during the walk. The caller sorts
-    // newest-first and then applies META_SCAN_CAP, so the cap must see the whole
-    // in-window set; capping here (in directory order) hid fresh runs in late-
-    // walked directories. The date-window filter below still bounds the walk.
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Ok(metadata) = entry.file_type() else {
-            continue;
-        };
-        // Refuse to follow symlinks; matches the existing
-        // `safe_artifact_path` posture in `app.rs`.
-        if metadata.is_symlink() {
-            continue;
-        }
-        if metadata.is_dir() {
-            if !directory_within_window(&path, window_floor) {
-                continue;
-            }
-            walk_meta_files(&path, out, window_floor);
-        } else if metadata.is_file()
-            && path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(|name| name.ends_with(".meta.json"))
-                .unwrap_or(false)
-        {
-            out.push(path);
-        }
-    }
 }
 
 fn cached_orphan_markdown_count(artifact_root: &Path) -> usize {
@@ -700,28 +692,6 @@ fn count_orphan_markdown_files(artifact_root: &Path) -> usize {
     let mut count = 0;
     walk(artifact_root, &mut count);
     count
-}
-
-fn directory_within_window(path: &Path, window_floor: &NaiveDate) -> bool {
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        return true;
-    };
-    if name.len() == 8
-        && name.bytes().all(|b| b.is_ascii_digit())
-        && let Ok(date) = NaiveDate::parse_from_str(name, "%Y%m%d")
-    {
-        return date >= *window_floor;
-    }
-    if name.len() == 9 && name.as_bytes().get(4) == Some(&b'_') {
-        let trimmed = name.replace('_', "");
-        if let Ok(date) = NaiveDate::parse_from_str(&trimmed, "%Y%m%d") {
-            return date >= *window_floor;
-        }
-    }
-    // Anything that does not look like a YYYYMMDD/YYYY_MMDD bucket is
-    // walked unconditionally — it might be an org/project node that
-    // hosts the dated buckets below it.
-    true
 }
 
 fn active_dispatches_from_state(
@@ -818,14 +788,14 @@ fn compute_eta_label(last_heartbeat: Option<&str>, now: DateTime<Utc>) -> String
     }
 }
 
-fn wave_atlas_from_meta(
-    records: &[MetaRecord],
+fn wave_atlas_from_derived(
+    records: &[DerivedRecord],
     state: &ControlPlaneState,
     now: DateTime<Utc>,
 ) -> Vec<WaveSegment> {
     let mut groups: BTreeMap<String, WaveAccumulator> = BTreeMap::new();
     for record in records {
-        let Some(wave_id) = derive_wave_id(&record.meta) else {
+        let Some(wave_id) = derive_wave_id(record) else {
             continue;
         };
         let entry = groups.entry(wave_id).or_default();
@@ -833,22 +803,22 @@ fn wave_atlas_from_meta(
         // exit_code and status are two spellings of the same outcome, so
         // each record contributes at most one count; a failure signal from
         // either side wins over completion.
-        let status = record.meta.status.as_deref().map(str::to_ascii_lowercase);
+        let status = record.status.as_deref().map(str::to_ascii_lowercase);
         let status_failed = status
             .as_deref()
             .is_some_and(|status| status.contains("fail") || status.contains("error"));
         let status_completed = status
             .as_deref()
             .is_some_and(|status| status.contains("complete") || status.contains("done"));
-        if matches!(record.meta.exit_code, Some(code) if code != 0) || status_failed {
+        if matches!(record.exit_code, Some(code) if code != 0) || status_failed {
             entry.failed += 1;
-        } else if matches!(record.meta.exit_code, Some(0)) || status_completed {
+        } else if matches!(record.exit_code, Some(0)) || status_completed {
             entry.completed += 1;
         }
     }
     // Live runs contribute to the wave atlas too — an in-progress wave
-    // should show its active dispatches even when no meta.json has been
-    // written yet.
+    // should show its active dispatches even when the snapshot is still
+    // in flight.
     for snapshot in &state.runs {
         let Some(prompt_id) = snapshot
             .extra
@@ -914,37 +884,36 @@ impl WaveAccumulator {
     }
 }
 
-fn derive_wave_id(meta: &MetaJson) -> Option<String> {
-    if let Some(prompt) = meta.prompt_id.as_deref() {
+fn derive_wave_id(record: &DerivedRecord) -> Option<String> {
+    if let Some(prompt) = record.prompt_id.as_deref() {
         return Some(prompt.to_string());
     }
-    if let (Some(skill), Some(run_id)) = (meta.skill_code.as_deref(), meta.run_id.as_deref()) {
-        let prefix = run_id.split('-').next().unwrap_or(run_id);
-        return Some(format!("{skill}/{prefix}"));
+    if record.skill != "unknown" && record.run_id != "unknown" {
+        let prefix = record
+            .run_id
+            .split('-')
+            .next()
+            .unwrap_or(record.run_id.as_str());
+        return Some(format!("{}/{}", record.skill, prefix));
     }
-    meta.skill_code.clone()
+    (record.skill != "unknown").then(|| record.skill.clone())
 }
 
-fn agent_stats_from_meta(records: &[MetaRecord], _now: DateTime<Utc>) -> Vec<AgentStatsRow> {
+fn agent_stats_from_derived(records: &[DerivedRecord]) -> Vec<AgentStatsRow> {
     let mut buckets: HashMap<String, AgentBucket> = HashMap::new();
     for record in records {
-        let agent = record
-            .meta
-            .agent
-            .clone()
-            .unwrap_or_else(|| "unknown".to_string());
-        let bucket = buckets.entry(agent).or_default();
+        let bucket = buckets.entry(record.agent.clone()).or_default();
         bucket.total += 1;
-        match record.meta.exit_code {
+        match record.exit_code {
             Some(0) => bucket.completed += 1,
             Some(code) if code != 0 => bucket.failed += 1,
             _ => {}
         }
-        if let Some(duration) = record.meta.duration_s {
+        if let Some(duration) = record.duration_s {
             bucket.duration_sum_s += duration;
             bucket.duration_count += 1;
         }
-        if let Some(model) = record.meta.model.as_deref()
+        if let Some(model) = record.model.as_deref()
             && !model.is_empty()
             && model != "unknown"
         {
@@ -999,23 +968,17 @@ struct AgentBucket {
     model_known: usize,
 }
 
-fn skill_stats_from_meta(records: &[MetaRecord], _now: DateTime<Utc>) -> Vec<SkillStatsRow> {
+fn skill_stats_from_derived(records: &[DerivedRecord]) -> Vec<SkillStatsRow> {
     let mut buckets: HashMap<String, SkillBucket> = HashMap::new();
     for record in records {
-        let skill = record
-            .meta
-            .skill_code
-            .clone()
-            .or_else(|| record.meta.mode.clone())
-            .unwrap_or_else(|| "unknown".to_string());
-        let bucket = buckets.entry(skill).or_default();
+        let bucket = buckets.entry(record.skill.clone()).or_default();
         bucket.invocations += 1;
-        match record.meta.exit_code {
+        match record.exit_code {
             Some(0) => bucket.completed += 1,
             Some(code) if code != 0 => bucket.failed += 1,
             _ => {}
         }
-        if let Some(duration) = record.meta.duration_s {
+        if let Some(duration) = record.duration_s {
             bucket.duration_sum_s += duration;
             bucket.duration_count += 1;
         }
@@ -1052,8 +1015,8 @@ struct SkillBucket {
     duration_count: usize,
 }
 
-fn failure_board_from_meta(
-    records: &[MetaRecord],
+fn failure_board_from_derived(
+    records: &[DerivedRecord],
     state: &ControlPlaneState,
     now: DateTime<Utc>,
 ) -> Vec<FailureEntry> {
@@ -1065,11 +1028,10 @@ fn failure_board_from_meta(
     let mut seen_run_ids: HashSet<String> = HashSet::new();
 
     for record in records {
-        let is_failure = match record.meta.exit_code {
+        let is_failure = match record.exit_code {
             Some(code) if code != 0 => true,
             Some(_) => false,
             None => record
-                .meta
                 .status
                 .as_deref()
                 .map(|status| {
@@ -1084,11 +1046,7 @@ fn failure_board_from_meta(
         if record.completed_at < cutoff {
             continue;
         }
-        let run_id = record
-            .meta
-            .run_id
-            .clone()
-            .unwrap_or_else(|| "unknown".to_string());
+        let run_id = record.run_id.clone();
         if run_id != "unknown" && !seen_run_ids.insert(run_id.clone()) {
             continue;
         }
@@ -1096,28 +1054,18 @@ fn failure_board_from_meta(
             Some(record.completed_at),
             FailureEntry {
                 run_id,
-                agent: record
-                    .meta
-                    .agent
-                    .clone()
-                    .unwrap_or_else(|| "unknown".to_string()),
-                skill: record
-                    .meta
-                    .skill_code
-                    .clone()
-                    .or_else(|| record.meta.mode.clone())
-                    .unwrap_or_else(|| "unknown".to_string()),
+                agent: record.agent.clone(),
+                skill: record.skill.clone(),
                 reason: record
-                    .meta
                     .status
                     .clone()
-                    .unwrap_or_else(|| match record.meta.exit_code {
+                    .unwrap_or_else(|| match record.exit_code {
                         Some(code) => format!("exit_code {code}"),
                         None => "failed".to_string(),
                     }),
                 occurred_at: Some(record.completed_at.to_rfc3339()),
                 age_label: relative_age(record.completed_at, now),
-                source_path: Some(record.path.clone()),
+                source_path: record.path.clone(),
             },
         ));
     }
@@ -1143,7 +1091,7 @@ fn failure_board_from_meta(
             })
             .or_else(|| snapshot.updated_at.as_deref().and_then(parse_rfc3339))
             .or_else(|| snapshot.started_at.as_deref().and_then(parse_rfc3339));
-        // Same 24h window as the meta loop — without it, long-dead
+        // Same 24h window as the derived-record loop — without it, long-dead
         // garbage-collected snapshots permanently occupy the 20-row board.
         if matches!(timestamp, Some(ts) if ts < cutoff) {
             continue;
@@ -1237,10 +1185,10 @@ fn fleet_health_from_inputs(
     let scan_detail = if data_quality.capped {
         format!("{} scanned (capped)", data_quality.scanned_meta_files)
     } else {
-        format!("{} meta.json scanned", data_quality.scanned_meta_files)
+        format!("{} derived runs scanned", data_quality.scanned_meta_files)
     };
     signals.push(FleetHealthSignal {
-        label: "meta scan".to_string(),
+        label: "derived runs".to_string(),
         status: scan_status,
         detail: scan_detail,
     });
@@ -2408,7 +2356,7 @@ mod unix_probe {
 fn action_queue_from_inputs(
     state: &ControlPlaneState,
     failures: &[FailureEntry],
-    records: &[MetaRecord],
+    records: &[DerivedRecord],
     intents: &[PolarizeIntent],
     now: DateTime<Utc>,
 ) -> Vec<ActionQueueItem> {
@@ -2465,20 +2413,16 @@ fn action_queue_from_inputs(
     // grepping the artifact tree. We cap to keep the queue actionable.
     let mut recent_reports = records
         .iter()
-        .filter(|record| matches!(record.meta.exit_code, Some(0)))
-        .filter(|record| record.meta.report.is_some())
+        .filter(|record| matches!(record.exit_code, Some(0)))
+        .filter(|record| record.report.is_some())
         .filter(|record| now.signed_duration_since(record.completed_at).num_hours() < 12)
         .collect::<Vec<_>>();
     recent_reports.sort_by_key(|record| std::cmp::Reverse(record.completed_at));
     for record in recent_reports.into_iter().take(5) {
         items.push(ActionQueueItem {
             kind: ActionQueueKind::ReportReady,
-            summary: format!(
-                "open report {} ({})",
-                record.meta.run_id.as_deref().unwrap_or("unknown"),
-                record.meta.agent.as_deref().unwrap_or("unknown")
-            ),
-            source_path: record.meta.report.clone().map(PathBuf::from),
+            summary: format!("open report {} ({})", record.run_id, record.agent),
+            source_path: record.report.clone().map(PathBuf::from),
             priority: ActionPriority::Normal,
         });
     }
@@ -2519,10 +2463,9 @@ fn relative_age(ts: DateTime<Utc>, now: DateTime<Utc>) -> String {
     format!("{days}d ago")
 }
 
-/// Default location for canonical artifact metadata. Resolves the
-/// operator's `VIBECRAFTED_HOME` (or `~/.vibecrafted`) and points at the
-/// `artifacts/` subtree where every dispatched skill writes its
-/// `*.meta.json`.
+/// Default location for orphan-markdown and Polarize artifacts. Resolves
+/// the operator's `VIBECRAFTED_HOME` (or `~/.vibecrafted`) and points at
+/// the `artifacts/` subtree. Live run stats come from the control plane.
 pub fn default_artifact_root() -> PathBuf {
     crate::config::default_vibecrafted_home().join("artifacts")
 }
@@ -2550,11 +2493,60 @@ mod tests {
         }
     }
 
-    fn write_meta(path: &Path, contents: &str) {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).unwrap();
+    fn stats_snapshot(
+        run_id: &str,
+        agent: &str,
+        skill: &str,
+        exit_code: Option<i64>,
+        model: Option<&str>,
+        duration_s: Option<f64>,
+        completed_at: &str,
+        prompt_id: Option<&str>,
+        status: Option<&str>,
+        report: Option<&str>,
+    ) -> RunSnapshot {
+        let mut extra = HashMap::new();
+        if let Some(code) = exit_code {
+            extra.insert("exit_code".into(), serde_json::json!(code));
         }
-        fs::write(path, contents).unwrap();
+        if let Some(model) = model {
+            extra.insert("model".into(), serde_json::json!(model));
+        }
+        if let Some(duration) = duration_s {
+            extra.insert("duration_s".into(), serde_json::json!(duration));
+        }
+        extra.insert("completed_at".into(), serde_json::json!(completed_at));
+        if let Some(prompt) = prompt_id {
+            extra.insert("prompt_id".into(), serde_json::json!(prompt));
+        }
+        RunSnapshot {
+            run_id: run_id.to_string(),
+            session_id: None,
+            agent: Some(agent.to_string()),
+            skill: Some(skill.to_string()),
+            mode: None,
+            state: status.map(ToOwned::to_owned),
+            status: status.map(ToOwned::to_owned),
+            started_at: None,
+            updated_at: Some(completed_at.to_string()),
+            last_heartbeat: None,
+            root: None,
+            operator_session: None,
+            latest_report: report.map(ToOwned::to_owned),
+            latest_transcript: None,
+            last_error: None,
+            extra,
+        }
+    }
+
+    fn state_with(root: &Path, runs: Vec<RunSnapshot>) -> ControlPlaneState {
+        ControlPlaneState {
+            root: root.to_path_buf(),
+            retained_runs: runs.clone(),
+            runs,
+            events: Vec::new(),
+            archived_run_ids: Default::default(),
+        }
     }
 
     #[test]
@@ -2580,53 +2572,49 @@ mod tests {
     }
 
     #[test]
-    fn aggregates_per_agent_and_skill_from_meta_json() {
+    fn aggregates_per_agent_and_skill_from_derived_snapshots() {
         let dir = tempdir().unwrap();
         let artifact = dir.path().join("artifacts");
-        let bucket = artifact.join("vetcoders/vc-tui/2026_0519/reports");
-        write_meta(
-            &bucket.join("run-a.meta.json"),
-            r#"{
-                "run_id": "run-a",
-                "agent": "claude",
-                "skill_code": "owne",
-                "exit_code": 0,
-                "model": "claude-opus-4-7",
-                "duration_s": 120.5,
-                "completed_at": "2026-05-19T10:00:00Z",
-                "prompt_id": "wave-1",
-                "report": "/tmp/report-a.md"
-            }"#,
-        );
-        write_meta(
-            &bucket.join("run-b.meta.json"),
-            r#"{
-                "run_id": "run-b",
-                "agent": "claude",
-                "skill_code": "owne",
-                "exit_code": 1,
-                "model": "unknown",
-                "duration_s": null,
-                "completed_at": "2026-05-19T11:00:00Z",
-                "prompt_id": "wave-1"
-            }"#,
-        );
-        write_meta(
-            &bucket.join("run-c.meta.json"),
-            r#"{
-                "run_id": "run-c",
-                "agent": "codex",
-                "skill_code": "marb",
-                "exit_code": 0,
-                "model": "gpt-5-codex",
-                "duration_s": 60.0,
-                "completed_at": "2026-05-19T12:00:00Z",
-                "prompt_id": "wave-2"
-            }"#,
-        );
-
+        let runs = vec![
+            stats_snapshot(
+                "run-a",
+                "claude",
+                "owne",
+                Some(0),
+                Some("claude-opus-4-7"),
+                Some(120.5),
+                "2026-05-19T10:00:00Z",
+                Some("wave-1"),
+                Some("completed"),
+                Some("/tmp/report-a.md"),
+            ),
+            stats_snapshot(
+                "run-b",
+                "claude",
+                "owne",
+                Some(1),
+                Some("unknown"),
+                None,
+                "2026-05-19T11:00:00Z",
+                Some("wave-1"),
+                Some("failed"),
+                None,
+            ),
+            stats_snapshot(
+                "run-c",
+                "codex",
+                "marb",
+                Some(0),
+                Some("gpt-5-codex"),
+                Some(60.0),
+                "2026-05-19T12:00:00Z",
+                Some("wave-2"),
+                Some("completed"),
+                None,
+            ),
+        ];
         let now = ts("2026-05-19T13:00:00Z");
-        let state = empty_state(dir.path());
+        let state = state_with(dir.path(), runs);
         let mission = MissionControlState::build_at(&state, &artifact, now);
 
         assert_eq!(mission.data_quality.scanned_meta_files, 3);
@@ -2676,36 +2664,34 @@ mod tests {
     fn wave_atlas_counts_each_run_once_when_exit_code_and_status_agree() {
         let dir = tempdir().unwrap();
         let artifact = dir.path().join("artifacts");
-        let bucket = artifact.join("vetcoders/vc-tui/2026_0519/reports");
-        // The shape every launcher meta.json actually emits: BOTH the
-        // exit_code and the status field carry the same outcome.
-        write_meta(
-            &bucket.join("run-fail.meta.json"),
-            r#"{
-                "run_id": "run-fail",
-                "agent": "codex",
-                "skill_code": "marb",
-                "exit_code": 1,
-                "status": "failed",
-                "completed_at": "2026-05-19T11:00:00Z",
-                "prompt_id": "wave-dup"
-            }"#,
-        );
-        write_meta(
-            &bucket.join("run-ok.meta.json"),
-            r#"{
-                "run_id": "run-ok",
-                "agent": "claude",
-                "skill_code": "impl",
-                "exit_code": 0,
-                "status": "completed",
-                "completed_at": "2026-05-19T10:00:00Z",
-                "prompt_id": "wave-dup"
-            }"#,
-        );
-
+        let runs = vec![
+            stats_snapshot(
+                "run-fail",
+                "codex",
+                "marb",
+                Some(1),
+                None,
+                None,
+                "2026-05-19T11:00:00Z",
+                Some("wave-dup"),
+                Some("failed"),
+                None,
+            ),
+            stats_snapshot(
+                "run-ok",
+                "claude",
+                "impl",
+                Some(0),
+                None,
+                None,
+                "2026-05-19T10:00:00Z",
+                Some("wave-dup"),
+                Some("completed"),
+                None,
+            ),
+        ];
         let now = ts("2026-05-19T13:00:00Z");
-        let state = empty_state(dir.path());
+        let state = state_with(dir.path(), runs);
         let mission = MissionControlState::build_at(&state, &artifact, now);
 
         let wave = mission
@@ -2728,32 +2714,34 @@ mod tests {
     fn failure_board_buckets_within_24h_window() {
         let dir = tempdir().unwrap();
         let artifact = dir.path().join("artifacts");
-        let bucket = artifact.join("vetcoders/vc-tui/2026_0519/reports");
-        write_meta(
-            &bucket.join("recent-fail.meta.json"),
-            r#"{
-                "run_id": "recent-fail",
-                "agent": "gemini",
-                "skill_code": "rev",
-                "exit_code": 2,
-                "status": "failed",
-                "completed_at": "2026-05-19T12:30:00Z"
-            }"#,
-        );
-        write_meta(
-            &bucket.join("old-fail.meta.json"),
-            r#"{
-                "run_id": "old-fail",
-                "agent": "gemini",
-                "skill_code": "rev",
-                "exit_code": 1,
-                "status": "failed",
-                "completed_at": "2026-05-15T08:00:00Z"
-            }"#,
-        );
-
+        let runs = vec![
+            stats_snapshot(
+                "recent-fail",
+                "gemini",
+                "rev",
+                Some(2),
+                None,
+                None,
+                "2026-05-19T12:30:00Z",
+                None,
+                Some("failed"),
+                None,
+            ),
+            stats_snapshot(
+                "old-fail",
+                "gemini",
+                "rev",
+                Some(1),
+                None,
+                None,
+                "2026-05-15T08:00:00Z",
+                None,
+                Some("failed"),
+                None,
+            ),
+        ];
         let now = ts("2026-05-19T13:00:00Z");
-        let state = empty_state(dir.path());
+        let state = state_with(dir.path(), runs);
         let mission = MissionControlState::build_at(&state, &artifact, now);
         assert_eq!(mission.failures.len(), 1);
         assert_eq!(mission.failures[0].run_id, "recent-fail");
@@ -2852,38 +2840,37 @@ mod tests {
     fn failure_board_keeps_freshest_and_dedups_run_ids() {
         let dir = tempdir().unwrap();
         let artifact = dir.path().join("artifacts");
-        let bucket = artifact.join("vetcoders/vc-tui/2026_0519/reports");
         // 22 failures at 11h old: lexicographic age_label sort ("11h ago" <
         // "2m ago") used to keep exactly these and evict the fresh one.
-        for index in 0..22 {
-            write_meta(
-                &bucket.join(format!("stale-{index}.meta.json")),
-                &format!(
-                    r#"{{
-                        "run_id": "stale-{index}",
-                        "agent": "codex",
-                        "skill_code": "impl",
-                        "exit_code": 1,
-                        "status": "failed",
-                        "completed_at": "2026-05-19T02:00:00Z"
-                    }}"#
-                ),
-            );
-        }
-        write_meta(
-            &bucket.join("fresh-fail.meta.json"),
-            r#"{
-                "run_id": "fresh-fail",
-                "agent": "gemini",
-                "skill_code": "rvew",
-                "exit_code": 2,
-                "status": "failed",
-                "completed_at": "2026-05-19T12:58:00Z"
-            }"#,
-        );
-        // Duplicate of a meta-derived failure arriving via a retained
-        // snapshot must not occupy a second board row.
-        let mut state = empty_state(dir.path());
+        let mut runs: Vec<RunSnapshot> = (0..22)
+            .map(|index| {
+                stats_snapshot(
+                    &format!("stale-{index}"),
+                    "codex",
+                    "impl",
+                    Some(1),
+                    None,
+                    None,
+                    "2026-05-19T02:00:00Z",
+                    None,
+                    Some("failed"),
+                    None,
+                )
+            })
+            .collect();
+        runs.push(stats_snapshot(
+            "fresh-fail",
+            "gemini",
+            "rvew",
+            Some(2),
+            None,
+            None,
+            "2026-05-19T12:58:00Z",
+            None,
+            Some("failed"),
+            None,
+        ));
+        let mut state = state_with(dir.path(), runs);
         state.runs.push(RunSnapshot {
             run_id: "fresh-fail".to_string(),
             session_id: None,
@@ -2917,7 +2904,7 @@ mod tests {
                 .filter(|entry| entry.run_id == "fresh-fail")
                 .count(),
             1,
-            "meta-derived and snapshot-derived rows for one run must dedup"
+            "retained and live overlay rows for one run must dedup"
         );
     }
 
@@ -3086,27 +3073,27 @@ mod tests {
     }
 
     #[test]
-    fn meta_scan_cap_marks_data_quality_capped() {
-        // Real bounds (5000 files) would be slow in CI; we synthesize a
-        // mini run that proves the field is wired into DataQuality.
+    fn derived_scan_counts_snapshots_without_capping_a_small_set() {
         let dir = tempdir().unwrap();
         let artifact = dir.path().join("artifacts");
-        let bucket = artifact.join("vetcoders/vc-tui/2026_0519/reports");
-        for idx in 0..3 {
-            write_meta(
-                &bucket.join(format!("run-{idx}.meta.json")),
-                &format!(
-                    r#"{{
-                        "run_id": "run-{idx}",
-                        "agent": "claude",
-                        "skill_code": "owne",
-                        "exit_code": 0,
-                        "completed_at": "2026-05-19T10:00:00Z"
-                    }}"#
-                ),
-            );
-        }
-        let state = empty_state(dir.path());
+        fs::create_dir_all(&artifact).unwrap();
+        let runs = (0..3)
+            .map(|idx| {
+                stats_snapshot(
+                    &format!("run-{idx}"),
+                    "claude",
+                    "owne",
+                    Some(0),
+                    None,
+                    None,
+                    "2026-05-19T10:00:00Z",
+                    None,
+                    Some("completed"),
+                    None,
+                )
+            })
+            .collect();
+        let state = state_with(dir.path(), runs);
         let mission = MissionControlState::build_at(&state, &artifact, ts("2026-05-19T13:00:00Z"));
         assert_eq!(mission.data_quality.scanned_meta_files, 3);
         assert!(!mission.data_quality.capped);

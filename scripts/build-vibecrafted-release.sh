@@ -860,6 +860,7 @@ materialize_runtime_payload() {
   local server_source="$6"
   local server_site="$7"
   local scaffold_doctor_source="$8"
+  local control_observe_source="$9"
   local canonical_deck python_seed seed_python python_home
 
   log "Materializing the App-independent Runtime Pack payload"
@@ -907,6 +908,7 @@ materialize_runtime_payload() {
   install -m 0755 "$server_source" "$runtime/bin/vc-server"
   install -m 0755 "$server_source" "$runtime/bin/vibecrafted-server-web"
   install -m 0755 "$scaffold_doctor_source" "$runtime/bin/scaffold-doctor"
+  install -m 0755 "$control_observe_source" "$runtime/bin/control-observe"
   install -m 0755 "$terminal_source" "$runtime/libexec/vc-terminal"
   # A Runtime Pack is independently launchable: it cannot borrow the enclosing
   # Vibecrafted.app helper merely to retain Finder/Dock identity.  Materialize
@@ -1093,17 +1095,21 @@ build_product() {
   [[ -x "$server_source" ]] || die "Vibecrafted Server release binary is missing"
   [[ -d "$server_site/pkg" ]] || die "Vibecrafted Server hydrated site is missing"
 
-  log "Building the scaffold-doctor gate binary from control-core"
+  log "Building the scaffold-doctor gate and control-observe binaries from control-core"
   (cd "$SOURCE_ROOT/vibecrafted-server" \
     && CARGO_TARGET_DIR="$server_build_root/vibecrafted-server" \
-      cargo build --release --locked -p control-core --bin scaffold-doctor)
+      cargo build --release --locked -p control-core \
+        --bin scaffold-doctor --bin control-observe)
   local scaffold_doctor_source="$server_build_root/vibecrafted-server/release/scaffold-doctor"
+  local control_observe_source="$server_build_root/vibecrafted-server/release/control-observe"
   [[ -x "$scaffold_doctor_source" ]] || die "scaffold-doctor release binary is missing"
-  chmod 0755 "$scaffold_doctor_source"
+  [[ -x "$control_observe_source" ]] || die "control-observe release binary is missing"
+  chmod 0755 "$scaffold_doctor_source" "$control_observe_source"
 
   materialize_runtime_payload "$RUNTIME_PAYLOAD" \
     "$terminal_source" "$frame_source" "$start_source" "$voc_source" \
-    "$server_source" "$server_site" "$scaffold_doctor_source"
+    "$server_source" "$server_site" "$scaffold_doctor_source" \
+    "$control_observe_source"
   produce_runtime_pack
   [[ "$MODE" == "runtime-pack" ]] && return
 

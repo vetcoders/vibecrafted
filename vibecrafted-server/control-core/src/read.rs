@@ -769,13 +769,17 @@ impl ControlPlane {
         if !is_safe_run_id(target) {
             return None;
         }
-        let view = self.compute_view(now);
-        view.active_runs
+        self.derived_runs(now)
             .into_iter()
-            .chain(view.stalled_runs)
-            .chain(view.recent_runs)
             .find(|run| run.run_id == target)
             .or_else(|| self.lookup_run(target))
+    }
+
+    /// Every derived run, newest-first. Same merge as [`compute_view`],
+    /// without the recent-window projection cap.
+    #[must_use]
+    pub fn derived_runs(&self, now: DateTime<Utc>) -> Vec<RunStatus> {
+        self.merge_derived_runs(now).0
     }
 
     fn lifecycle_run_status(&self, run: &LifecycleRun) -> RunStatus {
@@ -866,6 +870,19 @@ impl ControlPlane {
     /// frontend-self-sufficient path.
     #[must_use]
     pub fn compute_view(&self, now: DateTime<Utc>) -> StateView {
+        let (merged, settlement_counts, mut events) = self.merge_derived_runs(now);
+        if events.len() > crate::model::EVENT_TAIL_LIMIT {
+            let start = events.len() - crate::model::EVENT_TAIL_LIMIT;
+            events.drain(..start);
+        }
+        events.reverse();
+        Self::project_view_with_events(merged, settlement_counts, events)
+    }
+
+    fn merge_derived_runs(
+        &self,
+        now: DateTime<Utc>,
+    ) -> (Vec<RunStatus>, SettlementBoard, Vec<Event>) {
         // Verdict truth is Python's persisted snapshot projection. Raw meta,
         // lock, runtime, marbles, and lifecycle sources below can disagree on
         // process state, but they must never be used to invent a settlement.
@@ -1013,12 +1030,7 @@ impl ControlPlane {
         self.append_discoverable_lifecycle_runs(&mut merged);
 
         sort_recent_first(&mut merged);
-        if events.len() > crate::model::EVENT_TAIL_LIMIT {
-            let start = events.len() - crate::model::EVENT_TAIL_LIMIT;
-            events.drain(..start);
-        }
-        events.reverse();
-        Self::project_view_with_events(merged, settlement_counts, events)
+        (merged, settlement_counts, events)
     }
 
     fn project_view(&self, runs: Vec<RunStatus>, settlement_counts: SettlementBoard) -> StateView {

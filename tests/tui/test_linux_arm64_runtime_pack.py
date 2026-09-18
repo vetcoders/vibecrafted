@@ -125,6 +125,10 @@ def test_linux_builder_uses_pinned_public_inputs_for_arm64_and_x64() -> None:
     assert '"$payload/bin/vibecrafted-server-web"' in assembler
     assert '"$payload/bin/vc-server-supervisor"' in assembler
     assert '"$payload/bin/scaffold-doctor"' in assembler
+    assert '"$payload/bin/control-observe"' in assembler
+    assert "--bin scaffold-doctor --bin control-observe" in assembler or (
+        "--bin scaffold-doctor" in assembler and "--bin control-observe" in assembler
+    )
     assert '"$payload/vibecrafted-mcp/"' in assembler
     assert "install_portable_python" in assembler
     assert "portable_python_load_pin" in assembler

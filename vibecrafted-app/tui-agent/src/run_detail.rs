@@ -3,7 +3,7 @@
 //! The control-plane runtime writes each dispatched run into
 //! `<state_root>/runtime_runs/<run_id>/` with `prompt.md`, `transcript.log`,
 //! and — once the run finishes cleanly — `meta.json` + `report.md`. Mission
-//! Control's snapshot folds the *fleet-wide* `*.meta.json` history; this module
+//! Control folds fleet-wide derived control-plane snapshots; this module
 //! instead reads a *single* run's real artifacts so an operator can drill into
 //! what actually happened in the inspector.
 //!
@@ -44,10 +44,9 @@ pub struct RunDetail {
     pub transcript_path: Option<String>,
 }
 
-/// The subset of `runtime_runs/<id>/meta.json` the inspector needs. This is a
-/// *different* on-disk schema from the artifact `*.meta.json` parsed by
-/// `mission_control::MetaJson` (per-run dispatch meta vs fleet history), so it
-/// gets its own focused deserialize shape rather than overloading that one.
+/// The subset of `runtime_runs/<id>/meta.json` the inspector needs. This is
+/// per-run dispatch meta, not the fleet stats corpus — Mission Control
+/// reads derived control-plane snapshots, so this shape stays local.
 #[derive(Debug, Default, Deserialize)]
 struct RunMetaJson {
     #[serde(default)]

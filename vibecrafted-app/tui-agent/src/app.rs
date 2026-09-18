@@ -397,11 +397,12 @@ pub struct App {
     /// Refreshed when the artifact watcher observes a Polarize path or when
     /// the operator explicitly requests a full refresh.
     pub polarize_intents: Vec<PolarizeIntent>,
-    /// Cached Mission Control view derived from
-    /// `~/.vibecrafted/artifacts/**/*.meta.json` plus live control-plane
-    /// runs. Rebuilt after relevant state/artifact changes so the dashboard
-    /// tab can render without doing IO inside the draw path. The artifact root
-    /// is resolved once via `mission_control::default_artifact_root()`.
+    /// Cached Mission Control view derived from control-plane snapshots
+    /// (`retained_runs` ∪ live `runs`). Rebuilt after relevant state or
+    /// orphan-markdown changes so the dashboard tab can render without doing
+    /// IO inside the draw path. The artifact root is resolved once via
+    /// `mission_control::default_artifact_root()` and only feeds orphans /
+    /// Polarize / presence.
     pub mission_control: MissionControlState,
     /// Selected panel index inside the Mission Control tab (0..7).
     pub mission_focus: usize,

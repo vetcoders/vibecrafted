@@ -923,6 +923,7 @@ def test_runtime_packager_emits_one_closed_root_and_checksum(tmp_path: Path) -> 
         "VERSION",
         "bin/python3",
         "bin/scaffold-doctor",
+        "bin/control-observe",
         "bin/vc-start",
         "bin/vibecrafted",
         "bin/vibecrafted-mcp",

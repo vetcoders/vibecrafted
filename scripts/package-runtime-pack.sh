@@ -83,6 +83,7 @@ fi
 for required in \
   VERSION bin/python3 bin/vibecrafted bin/vc-start bin/vc-terminal bin/vc-frame \
   bin/scaffold-doctor \
+  bin/control-observe \
   libexec/vc-frame libexec/vc-terminal \
   scripts/vibecrafted scripts/vetcoders_install.py \
   scripts/vc-terminal-product-entry.sh \

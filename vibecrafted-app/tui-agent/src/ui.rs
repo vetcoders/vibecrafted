@@ -1049,7 +1049,7 @@ fn draw_mission_control(frame: &mut Frame, area: Rect, app: &App) {
                 "History (30d)",
                 vec![
                     format!(
-                        "{} meta.json scanned",
+                        "{} derived runs scanned",
                         mission.data_quality.scanned_meta_files
                     ),
                     if mission.data_quality.capped {
@@ -1208,7 +1208,7 @@ fn draw_mc_wave_atlas(
                 Style::default().fg(Color::DarkGray),
             )),
             Line::from(""),
-            Line::from("Waves emerge from prompt_id groups in meta.json."),
+            Line::from("Waves emerge from prompt_id groups on derived runs."),
         ]
     } else {
         segments
@@ -1588,14 +1588,14 @@ fn draw_mc_quality_footer(
     }
     if quality.capped {
         lines.push(Line::from(Span::styled(
-            "meta scan capped — older history may not be folded",
+            "derived scan capped — older history may not be folded",
             Style::default().fg(Color::Yellow),
         )));
     }
     if quality.parse_failures > 0 {
         lines.push(Line::from(Span::styled(
             format!(
-                "{} meta.json parse failures skipped",
+                "{} snapshot parse failures skipped",
                 quality.parse_failures
             ),
             Style::default().fg(Color::Yellow),

@@ -612,6 +612,12 @@ fn canonical_run_snapshot(run: CanonicalRunStatus) -> RunSnapshot {
     let mut extra = HashMap::new();
     extra.insert("health".to_string(), Value::String(run.health.clone()));
     extra.insert("source".to_string(), Value::String(run.source.clone()));
+    if !run.completed_at.trim().is_empty() {
+        extra.insert(
+            "completed_at".to_string(),
+            Value::String(run.completed_at.clone()),
+        );
+    }
     if !run.liveness.is_empty() {
         extra.insert("liveness".to_string(), Value::String(run.liveness.clone()));
     }

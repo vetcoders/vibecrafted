@@ -373,7 +373,14 @@ fn stale_launching_lifecycle_without_pid_is_abandoned_not_approve() {
 
     let view = plane.compute_view(Utc::now());
     let derived = plane.derived_run(run_id, Utc::now()).expect("derived run");
+    let listed = plane.derived_runs(Utc::now());
     assert_eq!(derived.state, "abandoned");
+    assert!(
+        listed
+            .iter()
+            .any(|run| run.run_id == run_id && run.state == "abandoned"),
+        "list derivation must show the same abandoned overlay as detail"
+    );
     assert_eq!(
         view.recent_runs
             .iter()
