@@ -1257,6 +1257,7 @@ def test_release_strips_linker_paths_and_pins_frame_source_identity() -> None:
     One shared boundary, no per-binary lists. MEASURED 2026-09-08 on the
     f131b81b candidate: the Runtime Pack step named libexec/vc-terminal and
     libexec/vc-frame and left bin/voc, bin/vc-start, bin/scaffold-doctor,
+    bin/control-observe,
     bin/aicx, bin/aicx-mcp and bin/prview carrying the rustup sysroot and the
     Cargo target directory in linker stabs; the hygiene gate refused the build
     before packaging. Both payloads now pass every Mach-O executable through

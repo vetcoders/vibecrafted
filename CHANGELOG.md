@@ -14,7 +14,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   `observe` consume that overlay. When vc-server is down, `observe` shells
   `control-observe` (same crate as voc) and stamps `source`; without that
   binary it admits `control_core_observe_unavailable` instead of inventing a
-  second Python classifier. Ctrl-C on a dispatch supervisor marks receipts
+  second Python classifier. Runtime Pack install scripts now ship
+  `control-observe` beside `scaffold-doctor`. `/api/control/runs` list and
+  transcript search use the same derived set as detail. Mission Control
+  agent/skill/wave/failure stats read derived control-plane snapshots, not a
+  second `*.meta.json` walk. Ctrl-C on a dispatch supervisor marks receipts
   `stopped`/`interrupted`, and a worktree refuse names the owning `run_id`
   plus a ready `--resume` command.
 

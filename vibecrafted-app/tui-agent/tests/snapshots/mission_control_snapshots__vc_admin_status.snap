@@ -6,9 +6,9 @@ Mission Control
 control plane: [PATH]
 artifact root: [PATH]
 
-== Settlement board (0) ==
-settlement  f=0 x=0 n=0 (+invalid=0) · unclassified=0 · active=0 · stalled=0 · orphans=0 · total_settled=0 · scope: retained control_plane/runs snapshots (≠ full meta history)
-note: f/x/n reads settlement_verdict on retained snapshots only; Python sync_state may also fold meta-derived runs (different scope).
+== Settlement board (3) ==
+settlement  f=0 x=0 n=3 (+invalid=0) · unclassified=0 · active=0 · stalled=0 · orphans=0 · total_settled=3 · scope: retained control_plane/runs snapshots
+note: f/x/n reads settlement_verdict on retained snapshots only.
 
 == Active dispatches (0) ==
 no live dispatches
@@ -30,9 +30,9 @@ marbles                    1         0       1 -
 
 == Fleet health ([N]) ==
 STATUS    SIGNAL             DETAIL
-✓         control-plane      [PATH] (0 runs)
+✓         control-plane      [PATH] (3 runs)
 ✓         artifact-root      [PATH]
-✓         meta scan          3 meta.json scanned
+✓         derived runs       3 derived runs scanned
 !         model parity       1/3 missing model
 !         duration parity    1/3 missing duration_s
 !         disk ~/.vibecra... [DISK]
@@ -51,12 +51,10 @@ STATUS    SIGNAL             DETAIL
 == Failure board 24h (1) ==
 RUN_ID                       AGENT      SKILL              AGE          REASON
 just-002                     codex      marbles            [AGE] ago       failed
-                             source: [PATH]
 
 == Operator action queue (2) ==
 PRIORITY KIND       SUMMARY
 !!       failure    investigate just-002 (codex / marbles)
-                    source: [PATH]
 -        report     open report just-001 (claude)
                     source: /fixture/just-001/report.md
 
@@ -64,7 +62,7 @@ PRIORITY KIND       SUMMARY
 artifact root present: yes
 artifact root: [PATH]
 generated at: [TS]
-scanned meta files: 3
+derived runs scanned: 3
 scan capped: no
 missing model: 1
 missing duration: 1

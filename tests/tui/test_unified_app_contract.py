@@ -4315,7 +4315,7 @@ def test_production_release_receipt_platform_passes_staged_bundled_schema_verifi
 # --- Runtime Pack debug-record boundary --------------------------------------
 #
 # MEASURED 2026-09-08 on the f131b81b release candidate: the Runtime Pack payload
-# carried 31 Mach-O files; bin/voc, bin/vc-start, bin/scaffold-doctor, bin/aicx,
+# carried 31 Mach-O files; bin/voc, bin/vc-start, bin/scaffold-doctor, bin/control-observe, bin/aicx,
 # bin/aicx-mcp and bin/prview reached the hygiene gate naming the rustup sysroot
 # and the Cargo target directory in linker N_OSO stabs, because only
 # libexec/vc-terminal and libexec/vc-frame were ever stripped and cargo's own

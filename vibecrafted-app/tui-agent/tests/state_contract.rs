@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::time::Duration;
 
@@ -1133,63 +1133,65 @@ fn mission_control_tab_is_addressable_and_reachable_via_rotation() {
     assert_eq!(AppTab::from_index(7), AppTab::MissionControl);
 }
 
-/// Mission Control aggregation over a fixture artifact tree: agent and
-/// skill stats hydrate from `*.meta.json`, the wave atlas groups by
-/// `prompt_id`, and the action queue surfaces the freshly completed
-/// report. Mirror of PLAN_23 §4 acceptance for the seven-panel surface.
+/// Mission Control aggregation over derived control-plane snapshots: agent
+/// and skill stats hydrate from retained ∪ live runs, leftover artifact
+/// `*.meta.json` is ignored, the wave atlas groups by `prompt_id`, and the
+/// action queue surfaces the freshly completed report.
 #[test]
-fn mission_control_aggregates_real_meta_json_fixtures() {
+fn mission_control_aggregates_real_derived_snapshots() {
     use voc::mission_control::{ActionQueueKind, MissionControlState};
     let dir = tempdir().unwrap();
     let artifact = dir.path().join("artifacts");
     let bucket = artifact.join("vetcoders/vc-tui/2026_0519/reports");
     fs::create_dir_all(&bucket).unwrap();
-
     fs::write(
-        bucket.join("just-001.meta.json"),
-        r#"{
-            "run_id": "just-001",
-            "agent": "claude",
-            "skill_code": "just",
-            "exit_code": 0,
-            "model": "claude-opus-4-7",
-            "duration_s": 90.0,
-            "completed_at": "2026-05-19T12:30:00Z",
-            "prompt_id": "wave-a",
-            "report": "/tmp/just-001/report.md"
-        }"#,
-    )
-    .unwrap();
-    fs::write(
-        bucket.join("just-002.meta.json"),
-        r#"{
-            "run_id": "just-002",
-            "agent": "codex",
-            "skill_code": "marb",
-            "exit_code": 1,
-            "model": "unknown",
-            "completed_at": "2026-05-19T12:45:00Z",
-            "prompt_id": "wave-a"
-        }"#,
-    )
-    .unwrap();
-    fs::write(
-        bucket.join("just-003.meta.json"),
-        r#"{
-            "run_id": "just-003",
-            "agent": "claude",
-            "skill_code": "just",
-            "exit_code": 0,
-            "model": "claude-opus-4-7",
-            "duration_s": 45.5,
-            "completed_at": "2026-05-19T12:50:00Z",
-            "prompt_id": "wave-b",
-            "report": "/tmp/just-003/report.md"
-        }"#,
+        bucket.join("leftover.meta.json"),
+        r#"{"run_id":"leftover-meta","agent":"gemini","skill_code":"rev","exit_code":2}"#,
     )
     .unwrap();
 
-    let state = ControlPlaneState::empty(dir.path());
+    let runs = vec![
+        derived_stats_snapshot(
+            "just-001",
+            "claude",
+            "just",
+            Some(0),
+            Some("claude-opus-4-7"),
+            Some(90.0),
+            "2026-05-19T12:30:00Z",
+            Some("wave-a"),
+            Some("/tmp/just-001/report.md"),
+        ),
+        derived_stats_snapshot(
+            "just-002",
+            "codex",
+            "marb",
+            Some(1),
+            Some("unknown"),
+            None,
+            "2026-05-19T12:45:00Z",
+            Some("wave-a"),
+            None,
+        ),
+        derived_stats_snapshot(
+            "just-003",
+            "claude",
+            "just",
+            Some(0),
+            Some("claude-opus-4-7"),
+            Some(45.5),
+            "2026-05-19T12:50:00Z",
+            Some("wave-b"),
+            Some("/tmp/just-003/report.md"),
+        ),
+    ];
+    let state = ControlPlaneState {
+        root: dir.path().to_path_buf(),
+        retained_runs: runs.clone(),
+        runs,
+        events: Vec::new(),
+        archived_run_ids: Default::default(),
+    };
     let now = chrono::DateTime::parse_from_rfc3339("2026-05-19T13:00:00Z")
         .unwrap()
         .with_timezone(&chrono::Utc);
@@ -1318,41 +1320,47 @@ fn mission_control_action_queue_includes_polarize_intents_with_band_priority() {
     }
 }
 
-/// Failure board windowing: meta entries older than the 24h cutoff must
-/// be excluded from the failure panel even when their exit_code is
+/// Failure board windowing: derived snapshots older than the 24h cutoff
+/// must be excluded from the failure panel even when their exit_code is
 /// non-zero. Mirrors PLAN_23 §4 "Failure board (24h)".
 #[test]
 fn mission_control_failure_board_respects_24h_window() {
     use voc::mission_control::MissionControlState;
     let dir = tempdir().unwrap();
     let artifact = dir.path().join("artifacts");
-    let bucket = artifact.join("vetcoders/vc-tui/2026_0519/reports");
-    fs::create_dir_all(&bucket).unwrap();
+    fs::create_dir_all(&artifact).unwrap();
 
-    fs::write(
-        bucket.join("old-fail.meta.json"),
-        r#"{
-            "run_id": "old-fail",
-            "agent": "gemini",
-            "skill_code": "rev",
-            "exit_code": 2,
-            "completed_at": "2026-05-15T08:00:00Z"
-        }"#,
-    )
-    .unwrap();
-    fs::write(
-        bucket.join("fresh-fail.meta.json"),
-        r#"{
-            "run_id": "fresh-fail",
-            "agent": "gemini",
-            "skill_code": "rev",
-            "exit_code": 2,
-            "completed_at": "2026-05-19T11:00:00Z"
-        }"#,
-    )
-    .unwrap();
-
-    let state = ControlPlaneState::empty(dir.path());
+    let runs = vec![
+        derived_stats_snapshot(
+            "old-fail",
+            "gemini",
+            "rev",
+            Some(2),
+            None,
+            None,
+            "2026-05-15T08:00:00Z",
+            None,
+            None,
+        ),
+        derived_stats_snapshot(
+            "fresh-fail",
+            "gemini",
+            "rev",
+            Some(2),
+            None,
+            None,
+            "2026-05-19T11:00:00Z",
+            None,
+            None,
+        ),
+    ];
+    let state = ControlPlaneState {
+        root: dir.path().to_path_buf(),
+        retained_runs: runs.clone(),
+        runs,
+        events: Vec::new(),
+        archived_run_ids: Default::default(),
+    };
     let now = chrono::DateTime::parse_from_rfc3339("2026-05-19T13:00:00Z")
         .unwrap()
         .with_timezone(&chrono::Utc);
@@ -1362,11 +1370,10 @@ fn mission_control_failure_board_respects_24h_window() {
     assert_eq!(mission.failures[0].run_id, "fresh-fail");
 }
 
-/// Malformed `*.meta.json` files must be skipped without poisoning the
-/// dashboard, and the count must surface in `data_quality.parse_failures`
-/// so the operator sees the truth instead of a false-success aggregate.
+/// Leftover artifact `*.meta.json` — including broken JSON — must not
+/// feed Mission Control stats. The dashboard reads derived snapshots.
 #[test]
-fn mission_control_skips_malformed_meta_json_without_panic() {
+fn mission_control_ignores_leftover_artifact_meta_json() {
     use voc::mission_control::MissionControlState;
     let dir = tempdir().unwrap();
     let artifact = dir.path().join("artifacts");
@@ -1391,9 +1398,54 @@ fn mission_control_skips_malformed_meta_json_without_panic() {
         .with_timezone(&chrono::Utc);
     let mission = MissionControlState::build_at(&state, &artifact, now);
 
-    assert_eq!(mission.data_quality.scanned_meta_files, 1);
-    assert_eq!(mission.data_quality.parse_failures, 1);
-    assert_eq!(mission.agent_stats.len(), 1);
+    assert_eq!(mission.data_quality.scanned_meta_files, 0);
+    assert_eq!(mission.data_quality.parse_failures, 0);
+    assert!(mission.agent_stats.is_empty());
+}
+
+fn derived_stats_snapshot(
+    run_id: &str,
+    agent: &str,
+    skill: &str,
+    exit_code: Option<i64>,
+    model: Option<&str>,
+    duration_s: Option<f64>,
+    completed_at: &str,
+    prompt_id: Option<&str>,
+    report: Option<&str>,
+) -> RunSnapshot {
+    let mut extra = HashMap::new();
+    if let Some(code) = exit_code {
+        extra.insert("exit_code".into(), serde_json::json!(code));
+    }
+    if let Some(model) = model {
+        extra.insert("model".into(), serde_json::json!(model));
+    }
+    if let Some(duration) = duration_s {
+        extra.insert("duration_s".into(), serde_json::json!(duration));
+    }
+    extra.insert("completed_at".into(), serde_json::json!(completed_at));
+    if let Some(prompt) = prompt_id {
+        extra.insert("prompt_id".into(), serde_json::json!(prompt));
+    }
+    RunSnapshot {
+        run_id: run_id.to_string(),
+        session_id: None,
+        agent: Some(agent.to_string()),
+        skill: Some(skill.to_string()),
+        mode: None,
+        state: None,
+        status: None,
+        started_at: None,
+        updated_at: Some(completed_at.to_string()),
+        last_heartbeat: None,
+        root: None,
+        operator_session: None,
+        latest_report: report.map(ToOwned::to_owned),
+        latest_transcript: None,
+        last_error: None,
+        extra,
+    }
 }
 
 #[test]

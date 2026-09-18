@@ -1024,7 +1024,7 @@ printf '    ↳ steering: %s\n' "$_steering_source"
 # Consume the mtime signal so the next round sees only changes made by this child.
 _consume_ancestor_mtime_signal
 
-if [[ ! "$next_agent" =~ ^(claude|codex|agy|junie|grok|cursor)$ ]]; then
+if [[ ! "$next_agent" =~ ^(claude|codex|agy|junie|grok|cursor|kimi)$ ]]; then
   rm -f "$next_plan_tmp"
   _write_invalid_ancestor_failure "$next" "$next_agent"
   exit 0
