@@ -10869,6 +10869,64 @@ def create_skill_view_symlink(target: Path, link: Path, dry_run: bool = False) -
     link.symlink_to(target)
 
 
+def _write_skill_views(
+    runtimes: Sequence[str],
+    store_path: Path,
+    skills_dir: Path,
+    skill_names: Sequence[str],
+    dry_run: bool = False,
+    styled: bool = True,
+) -> None:
+    """Write the `vc-*` views of `skill_names` into each runtime's skill dir."""
+    for runtime in runtimes:
+        rt_skills = runtime_skills_dir(runtime)
+        if not dry_run:
+            rt_skills.mkdir(parents=True, exist_ok=True)
+        print(f"  {cyan(runtime) if styled else runtime} -> {rt_skills}")
+        for rule in sync_skill_root_rules(skills_dir, rt_skills, dry_run=dry_run):
+            print(f"    {dim('->') if styled else '->'} {rule}")
+        for name in skill_names:
+            create_skill_view_symlink(
+                store_path / name, rt_skills / name, dry_run=dry_run
+            )
+
+
+def link_and_reconcile_skill_views(
+    all_runtimes: Sequence[str],
+    store_path: Path,
+    skills_dir: Path,
+    skill_names: Sequence[str],
+    dry_run: bool = False,
+    styled: bool = True,
+) -> None:
+    """Link every runtime view, quarantining proven copies on the way.
+
+    The order is load-bearing in both directions. Reconciliation has to run
+    before the writer, because the writer keeps any real directory it finds and
+    would leave a stale copy shadowing the view forever. But reconciliation also
+    refuses to remove a copy until `~/.agents/skills/<skill>` actually points at
+    the store — it is the fallback the runtime reads once the copy is gone, and
+    removing a copy without it would take the skill away entirely.
+
+    On a first-ever install nothing has written that canonical view yet, so
+    reconciliation would keep every copy, and the next plain `vibecrafted
+    update` stops at "up to date" without ever running again: the runtime would
+    keep loading June-2026 copies until the next release. So the canonical view
+    is written first, then shadows are reconciled, then the remaining runtimes
+    are linked. Relinking a runtime twice would be harmless anyway — the writer
+    skips a link that already resolves to its target — but there is no need.
+    """
+    canonical = [rt for rt in all_runtimes if rt in SYMLINK_TARGETS]
+    rest = [rt for rt in all_runtimes if rt not in SYMLINK_TARGETS]
+    _write_skill_views(
+        canonical, store_path, skills_dir, skill_names, dry_run=dry_run, styled=styled
+    )
+    reconcile_shadowed_skill_dirs(store_path, skill_names, dry_run=dry_run)
+    _write_skill_views(
+        rest, store_path, skills_dir, skill_names, dry_run=dry_run, styled=styled
+    )
+
+
 def prune_shadowed_skill_views(
     store_path: Path,
     skill_names: list[str],
@@ -10920,7 +10978,8 @@ def reconcile_shadowed_skill_dirs(
     say, the unproven copies in `~/.claude/skills` and `~/.codex/skills` were
     deleted without a backup while the proven ones elsewhere were carefully
     quarantined first. The writer no longer removes a real directory at all, so
-    reconciliation owns the decision everywhere and runs before it.
+    reconciliation owns the decision everywhere and runs before it — after the
+    canonical `agents` view has been linked, which is the precondition below.
 
     Returns `(reconciled, kept)`. A copy is removed only when provenance is
     proven, it is a real path that no symlink leads into and that lies outside
@@ -14155,20 +14214,9 @@ def _cmd_install_verbose(args: argparse.Namespace, repo_root: Path) -> int:
 
     # --- Execute: symlink views ---
     print(bold("Linking agent views..."))
-    # Before the writer, not after: the writer keeps any real directory it
-    # finds, so a proven copy has to be quarantined out of the way first.
-    reconcile_shadowed_skill_dirs(store_path, selected_skills, dry_run=dry_run)
-    for rt in all_runtimes:
-        rt_skills = Path.home() / f".{rt}" / "skills"
-        if not dry_run:
-            rt_skills.mkdir(parents=True, exist_ok=True)
-        print(f"  {cyan(rt)} -> {rt_skills}")
-        for rule in sync_skill_root_rules(skills_dir, rt_skills, dry_run=dry_run):
-            print(f"    {dim('->')} {rule}")
-        for name in selected_skills:
-            default = store_path / name
-            link = rt_skills / name
-            create_skill_view_symlink(default, link, dry_run=dry_run)
+    link_and_reconcile_skill_views(
+        all_runtimes, store_path, skills_dir, selected_skills, dry_run=dry_run
+    )
     for shadow in prune_shadowed_skill_views(
         store_path, selected_skills, all_runtimes, dry_run=dry_run
     ):
@@ -14673,19 +14721,14 @@ def _cmd_install_compact(args: argparse.Namespace, repo_root: Path) -> int:
 
         # Symlink views
         print("Linking agent views:")
-        # Before the writer: it keeps any real directory it finds.
-        reconcile_shadowed_skill_dirs(store_path, selected_skills, dry_run=dry_run)
-        for rt in all_runtimes:
-            rt_skills = Path.home() / f".{rt}" / "skills"
-            if not dry_run:
-                rt_skills.mkdir(parents=True, exist_ok=True)
-            print(f"  {rt} -> {rt_skills}")
-            for rule in sync_skill_root_rules(skills_dir, rt_skills, dry_run=dry_run):
-                print(f"    -> {rule}")
-            for name in selected_skills:
-                default = store_path / name
-                link = rt_skills / name
-                create_skill_view_symlink(default, link, dry_run=dry_run)
+        link_and_reconcile_skill_views(
+            all_runtimes,
+            store_path,
+            skills_dir,
+            selected_skills,
+            dry_run=dry_run,
+            styled=False,
+        )
         for shadow in prune_shadowed_skill_views(
             store_path, selected_skills, all_runtimes, dry_run=dry_run
         ):
