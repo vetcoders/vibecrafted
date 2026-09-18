@@ -628,6 +628,50 @@ def test_symlinked_runtime_skills_dir_is_never_a_shadow_candidate(
     assert (store / "vc-x" / "SKILL.md").is_file()
 
 
+def test_a_windows_junction_counts_as_a_symlinked_ancestor(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A junction is a symlink that lies: `is_symlink()` is False for it, while
+    `shutil.rmtree` still walks through it. On Windows it is what a per-runtime
+    skill dir pointing at the store looks like."""
+    home = tmp_path / "home"
+    crafted_home = tmp_path / "crafted"
+    store = tmp_path / "store"
+    _pin_home(monkeypatch, home, crafted_home)
+    _store_skill(store, "vc-x", "canonical body\n")
+    _canonical_view(home, store, "vc-x")
+    shadow = _junie_copy(home, "vc-x", SKILL_MD + "june 2026 body\n")
+    _prove(store, "vc-x", shadow)
+    junction = home / ".junie"
+
+    real_is_junction = getattr(Path, "is_junction", None)
+    monkeypatch.setattr(
+        Path,
+        "is_junction",
+        lambda self: (
+            self == junction or bool(real_is_junction and real_is_junction(self))
+        ),
+        raising=False,
+    )
+
+    assert not junction.is_symlink()
+    assert installer._is_owned_pointer(junction)
+    assert not installer._path_is_symlink_free(shadow)
+    assert installer.collect_shadowed_skill_dirs(store, ["vc-x"]) == []
+
+    # And a caller who hands the reconciler that path is refused too.
+    forced = installer.ShadowedSkillDir(
+        "junie", "vc-x", shadow, "managed_stale", "forced by a caller"
+    )
+    reconciled, kept = installer.reconcile_shadowed_skill_dirs(
+        store, ["vc-x"], ["agents"], shadows=[forced]
+    )
+
+    assert reconciled == []
+    assert [d.path for d in kept] == [shadow]
+    assert shadow.is_dir()
+
+
 def test_symlinked_runtime_home_resolving_into_the_store_is_skipped(
     tmp_path: Path, monkeypatch
 ) -> None:
