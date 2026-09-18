@@ -702,32 +702,39 @@ def _clip_line(line: str, *, max_chars: int = 500) -> str:
 # rendered lines even at one-token-per-event rates while capping the
 # render-feed cost on huge transcripts.
 RAW_TAIL_LINES = 2000
+# Default one-shot window for ``observe --tail`` / ``--head`` when the count
+# is omitted (the historical observe tail size).
+OBSERVE_WINDOW_LINES = 40
 
 
-def _tail_lines(
-    path: str, *, agent: str = "", max_lines: int = 40
-) -> tuple[list[str], str]:
-    """Return the last ``max_lines`` of a transcript, rendered through the agent's
-    stream parser when ``agent`` is given. Second element is an error code
-    (``""`` on success) rather than a raised exception."""
+def _read_transcript_lines(path: str) -> tuple[list[str] | None, str]:
+    """Read a transcript into raw lines. ``(None, error_code)`` on failure."""
     if not path:
-        return [], "missing_path"
+        return None, "missing_path"
     transcript = Path(path).expanduser()
     try:
         if not transcript.is_file():
-            return [], "missing_file"
+            return None, "missing_file"
         lines = transcript.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError as exc:
-        return [], f"read_error:{type(exc).__name__}"
+        return None, f"read_error:{type(exc).__name__}"
     if not lines:
-        return [], "empty"
-    if not agent:
-        return [_clip_line(line) for line in lines[-max_lines:]], ""
-    tail = lines[-RAW_TAIL_LINES:]
+        return None, "empty"
+    return lines, ""
+
+
+def _render_agent_lines(lines: list[str], agent: str) -> tuple[list[str], bool]:
+    """Render raw transcript lines through the agent's stream parser.
+
+    Returns the rendered lines (coalesced, ANSI-stripped, clipped, blanks
+    dropped) plus whether any JSON event line was seen — so callers can tell
+    "plain text, pass it through raw" apart from "JSON with no renderable
+    events".
+    """
     parser = AgentStreamParser(agent, default_model=resolve_default_model(agent))
     chunks: list[str] = []
     saw_json = False
-    for line in tail:
+    for line in lines:
         if line.lstrip().startswith("{"):
             saw_json = True
         chunks.append(parser.feed_line((line + "\n").encode("utf-8")))
@@ -738,11 +745,47 @@ def _tail_lines(
         clean = rendered_line.strip()
         if clean and ANSI_PATTERN.sub("", clean).strip():
             rendered.append(_clip_line(clean))
+    return rendered, saw_json
+
+
+def _tail_lines(
+    path: str, *, agent: str = "", max_lines: int = 40
+) -> tuple[list[str], str]:
+    """Return the last ``max_lines`` of a transcript, rendered through the agent's
+    stream parser when ``agent`` is given. Second element is an error code
+    (``""`` on success) rather than a raised exception."""
+    lines, error = _read_transcript_lines(path)
+    if lines is None:
+        return [], error
+    if not agent:
+        return [_clip_line(line) for line in lines[-max_lines:]], ""
+    rendered, saw_json = _render_agent_lines(lines[-RAW_TAIL_LINES:], agent)
     if rendered:
         return rendered[-max_lines:], ""
     if saw_json:
         return [], "no_renderable_events"
     return [_clip_line(line) for line in lines[-max_lines:]], ""
+
+
+def _head_lines(
+    path: str, *, agent: str = "", max_lines: int = 40
+) -> tuple[list[str], str]:
+    """Return the first ``max_lines`` of a transcript — the ``_tail_lines``
+    mirror. The agent-aware path renders a bounded raw head window (first
+    ``RAW_TAIL_LINES`` raw lines) and windows to ``max_lines`` only AFTER
+    rendering, so per-token streams still coalesce. Error codes match
+    ``_tail_lines``."""
+    lines, error = _read_transcript_lines(path)
+    if lines is None:
+        return [], error
+    if not agent:
+        return [_clip_line(line) for line in lines[:max_lines]], ""
+    rendered, saw_json = _render_agent_lines(lines[:RAW_TAIL_LINES], agent)
+    if rendered:
+        return rendered[:max_lines], ""
+    if saw_json:
+        return [], "no_renderable_events"
+    return [_clip_line(line) for line in lines[:max_lines]], ""
 
 
 def _run_succeeded(run: dict[str, Any]) -> bool:
@@ -1222,6 +1265,197 @@ def _print_run_status(run: dict[str, Any], *, include_tail: bool = True) -> None
         print(f"transcript_tail: unavailable ({tail_error})")
 
 
+# Backlog rendered lines a watch prints before following (``tail -f`` parity).
+OBSERVE_WATCH_BACKLOG_LINES = 10
+
+
+def _read_new_chunk(path: str, position: int) -> tuple[str, int]:
+    """Read text appended to ``path`` since byte ``position``.
+
+    A missing/unreadable file yields no text and keeps the position; a file
+    that shrank below ``position`` (rotation/truncation) restarts at 0.
+    """
+    if not path:
+        return "", position
+    transcript = Path(path).expanduser()
+    try:
+        size = transcript.stat().st_size
+        if size < position:
+            position = 0
+        if size == position:
+            return "", position
+        with transcript.open("rb") as handle:
+            handle.seek(position)
+            chunk = handle.read()
+    except OSError:
+        return "", position
+    return chunk.decode("utf-8", errors="replace"), position + len(chunk)
+
+
+def _observe_watch(
+    agent: str,
+    run_id: str,
+    observation: dict[str, Any],
+    *,
+    interval: float,
+    json_output: bool,
+) -> int:
+    """Follow a run's transcript until the run turns terminal.
+
+    Prints a short rendered backlog, then streams appended lines through the
+    agent's stream parser (raw pass-through for plain-text transcripts).
+    Terminal truth refreshes from the local control-plane record
+    (``lookup_run``) every interval; the initial server observation seeds it.
+    Ctrl-C detaches — the run continues. Exit 0 when the run terminal state
+    is a success, 1 when it terminally failed.
+    """
+    run = dict(observation.get("run") or {})
+    transcript = str(run.get("latest_transcript") or run.get("transcript") or "")
+    terminal = bool(observation.get("terminal")) or _run_terminal(run)
+    parser: AgentStreamParser | None = None
+    if agent:
+        parser = AgentStreamParser(agent, default_model=resolve_default_model(agent))
+    position = 0
+    carry = ""
+    saw_json = False
+    backlog_done = False
+
+    def emit(line: str) -> None:
+        if json_output:
+            print(
+                json.dumps(
+                    {
+                        "schema": "vibecrafted.observe-event.v1",
+                        "run_id": run_id,
+                        "line": line,
+                    },
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
+        else:
+            print(f"  {line}", flush=True)
+
+    if json_output:
+        print(
+            json.dumps(
+                {
+                    "schema": "vibecrafted.observe-watch.v1",
+                    "event": "begin",
+                    "run_id": run_id,
+                    "agent": agent,
+                    "transcript": transcript,
+                    "terminal": terminal,
+                },
+                ensure_ascii=False,
+            )
+        )
+    else:
+        _print_run_status(run, include_tail=False)
+        print(
+            f"watch:      following {transcript or '(transcript not yet created)'}"
+            f" every {interval:g}s — Ctrl-C detaches, the run continues"
+        )
+
+    def drain() -> None:
+        nonlocal position, carry, saw_json, backlog_done
+        if not transcript:
+            return
+        if not backlog_done:
+            # Mid-stream attach: show the recent backlog, then follow from EOF.
+            # The incremental parser starts here — backlog lines come from a
+            # fresh _tail_lines render, so no partial parser state is needed.
+            backlog_done = True
+            backlog, _error = _tail_lines(
+                transcript, agent=agent, max_lines=OBSERVE_WATCH_BACKLOG_LINES
+            )
+            for line in backlog:
+                emit(line)
+            try:
+                position = Path(transcript).expanduser().stat().st_size
+            except OSError:
+                position = 0
+            return
+        text, position = _read_new_chunk(transcript, position)
+        if not text:
+            return
+        raw_lines = (carry + text).split("\n")
+        carry = raw_lines.pop()  # incomplete trailing line waits for its "\n"
+        if not raw_lines:
+            return
+        if parser is None:
+            for raw in raw_lines:
+                if raw.strip():
+                    emit(_clip_line(raw.strip()))
+            return
+        chunks: list[str] = []
+        for raw in raw_lines:
+            if raw.lstrip().startswith("{"):
+                saw_json = True
+            chunks.append(parser.feed_line((raw + "\n").encode("utf-8")))
+        rendered: list[str] = []
+        for rendered_line in "".join(chunks).splitlines():
+            clean = rendered_line.strip()
+            if clean and ANSI_PATTERN.sub("", clean).strip():
+                rendered.append(_clip_line(clean))
+        if rendered:
+            for line in rendered:
+                emit(line)
+        elif not saw_json:
+            for raw in raw_lines:
+                if raw.strip():
+                    emit(_clip_line(raw.strip()))
+
+    try:
+        while True:
+            drain()
+            if terminal:
+                state = str(run.get("state") or run.get("liveness") or "terminal")
+                if json_output:
+                    print(
+                        json.dumps(
+                            {
+                                "schema": "vibecrafted.observe-watch.v1",
+                                "event": "terminal",
+                                "run_id": run_id,
+                                "state": state,
+                            },
+                            ensure_ascii=False,
+                        )
+                    )
+                else:
+                    print(f"watch:      run {run_id} is terminal ({state}); detached")
+                return 0 if _run_succeeded(run) else 1
+            time.sleep(interval)
+            fresh = lookup_run(run_id)
+            if fresh is None:
+                continue
+            fresh = _apply_live_liveness(fresh)
+            run = dict(fresh or run)
+            terminal = _run_terminal(run)
+            latest = str(run.get("latest_transcript") or run.get("transcript") or "")
+            if latest and latest != transcript:
+                # The run record learned a (different) transcript path: re-attach
+                # from the top of the new file with fresh parser state.
+                transcript = latest
+                position = 0
+                carry = ""
+                saw_json = False
+                backlog_done = False
+                parser = (
+                    AgentStreamParser(agent, default_model=resolve_default_model(agent))
+                    if agent
+                    else None
+                )
+    except KeyboardInterrupt:
+        if not json_output:
+            print(
+                f"watch:      detached from {run_id}; the run continues",
+                file=sys.stderr,
+            )
+        return 0
+
+
 def _print_identity_mixup(kind: str, token: str) -> None:
     """Explain a --run-id/--session mixup in operator language."""
     found = find_run_for_identity_token(token)
@@ -1434,12 +1668,56 @@ def _agent_resume(agent: str, argv: Sequence[str]) -> int:
 
 
 def _agent_observe(agent: str, argv: Sequence[str]) -> int:
-    """Print one vc-server-owned, on-demand run observation."""
+    """Follow one run: a live transcript watch by default, bounded one-shot
+    windows via ``--tail N`` / ``--head N``."""
     parser = argparse.ArgumentParser(prog=f"vibecrafted observe {agent}")
     parser.add_argument("--run-id", default="")
     parser.add_argument("--last", action="store_true")
     parser.add_argument("--json", action="store_true")
+    window = parser.add_mutually_exclusive_group()
+    window.add_argument(
+        "--tail",
+        nargs="?",
+        const=OBSERVE_WINDOW_LINES,
+        default=None,
+        type=int,
+        metavar="N",
+        help=(
+            f"one-shot: print the last N rendered transcript lines "
+            f"(default {OBSERVE_WINDOW_LINES})"
+        ),
+    )
+    window.add_argument(
+        "--head",
+        nargs="?",
+        const=OBSERVE_WINDOW_LINES,
+        default=None,
+        type=int,
+        metavar="N",
+        help=(
+            f"one-shot: print the first N rendered transcript lines "
+            f"(default {OBSERVE_WINDOW_LINES})"
+        ),
+    )
+    window.add_argument(
+        "--watch",
+        action="store_true",
+        help="follow transcript events live until the run is terminal (default)",
+    )
+    parser.add_argument(
+        "--interval",
+        type=float,
+        default=1.0,
+        metavar="SECONDS",
+        help="watch poll interval in seconds (default 1.0)",
+    )
     args = parser.parse_args(list(argv))
+    for name in ("tail", "head"):
+        value = getattr(args, name)
+        if value is not None and value <= 0:
+            parser.error(f"--{name} expects a positive line count")
+    if args.interval <= 0:
+        parser.error("--interval expects a positive number of seconds")
     try:
         run_id = resolve_server_run_id(agent, args.run_id, last=args.last)
         observation = observe_run_from_server(run_id) if run_id else {}
@@ -1450,11 +1728,36 @@ def _agent_observe(agent: str, argv: Sequence[str]) -> int:
     if not isinstance(run, dict):
         print("No run found. Pass --run-id or --last.", file=sys.stderr)
         return 1
-    if args.json:
-        print(json.dumps(observation, ensure_ascii=False, indent=2, sort_keys=True))
+    if args.tail is not None or args.head is not None:
+        which = "tail" if args.tail is not None else "head"
+        count = args.tail if args.tail is not None else args.head
+        transcript = str(run.get("latest_transcript") or run.get("transcript") or "")
+        if which == "tail":
+            lines, window_error = _tail_lines(transcript, agent=agent, max_lines=count)
+        else:
+            lines, window_error = _head_lines(transcript, agent=agent, max_lines=count)
+        if args.json:
+            payload = dict(observation)
+            payload[f"transcript_{which}"] = lines
+            if window_error:
+                payload[f"transcript_{which}_error"] = window_error
+            print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
+        _print_run_status(run, include_tail=False)
+        if lines:
+            print(f"transcript_{which}:")
+            for line in lines:
+                print(f"  {line}")
+        else:
+            print(f"transcript_{which}: unavailable ({window_error})")
         return 0
-    _print_run_status(run)
-    return 0
+    return _observe_watch(
+        agent,
+        run_id,
+        observation,
+        interval=float(args.interval),
+        json_output=bool(args.json),
+    )
 
 
 def _observe_resolved(run_id: str, *, json_output: bool) -> int:
