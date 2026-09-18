@@ -22,6 +22,7 @@ from .model import (
     BASE_CUT_PREFIX,
     CRITICAL_FAIL_POLICIES,
     MATCHER_TYPES,
+    NONCRITICAL_DEP_FAIL_POLICIES,
     READ_MUTATIONS,
     SCHEMA_VERSION,
     TIMEOUT_POLICIES,
@@ -89,7 +90,7 @@ def doctor_dispatch(
             f"{cut.agent}; provider/account availability is not validated"
             for index, cut in enumerate(dispatch.cuts)
             if cut.model
-        )
+        ) + tuple(_bare_interpreter_warnings(dispatch))
         if policy_errors:
             return DispatchDoctorResult(
                 ok=False,
@@ -319,6 +320,12 @@ def _parse_policy(value: Any, errors: list[str]) -> Policy:
         errors.append(
             f"policy.on_critical_fail: unsupported value {on_critical_fail!r}"
         )
+    on_noncritical_dep_fail = _string(raw.get("on_noncritical_dep_fail")) or "continue"
+    if on_noncritical_dep_fail not in NONCRITICAL_DEP_FAIL_POLICIES:
+        errors.append(
+            "policy.on_noncritical_dep_fail: unsupported value"
+            f" {on_noncritical_dep_fail!r}"
+        )
     concurrency = _int(raw.get("concurrency"), 1)
     if concurrency < 1:
         errors.append("policy.concurrency: must be at least 1")
@@ -336,6 +343,7 @@ def _parse_policy(value: Any, errors: list[str]) -> Policy:
         ),
         require_commit=bool(raw.get("require_commit")),
         allow_idempotent_existing=bool(raw.get("allow_idempotent_existing", True)),
+        on_noncritical_dep_fail=on_noncritical_dep_fail,
     )
 
 
@@ -525,6 +533,28 @@ def _doctor_policy_errors(dispatch: Dispatch) -> list[str]:
             "policy.concurrency: shared CARGO_TARGET_DIR is forbidden for concurrent plans; unset CARGO_TARGET_DIR — Vibecrafted assigns $PWD/target per worker"
         )
     return errors
+
+
+# Bare `python3` in a verifier resolves against the supervisor's PATH, not the
+# worker's toolchain. On stock macOS that is 3.9 (no ``tomllib``), which killed
+# a delivered cut on 2026-09-17: the worker ran the same check green under its
+# own 3.13 while supervisor-verify failed purely environmentally.
+_BARE_PYTHON3_RE = re.compile(r"(?<![\w./-])python3(?![.\w-])")
+
+
+def _bare_interpreter_warnings(dispatch: Dispatch) -> list[str]:
+    """Warn on verifier commands that shell out to an unpinned ``python3``."""
+    warnings: list[str] = []
+    for cut_index, cut in enumerate(dispatch.cuts):
+        for verify_index, verify in enumerate(cut.verify):
+            if _BARE_PYTHON3_RE.search(verify.run):
+                warnings.append(
+                    f"cuts[{cut_index}].verify[{verify_index}].run: bare 'python3'"
+                    " resolves to the supervisor host's default interpreter"
+                    " (macOS ships 3.9 without tomllib); pin a version"
+                    " (python3.11+) or invoke the repo toolchain explicitly"
+                )
+    return warnings
 
 
 def _base_reachability_errors(dispatch: Dispatch) -> list[str]:
