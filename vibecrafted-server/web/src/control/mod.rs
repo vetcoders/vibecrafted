@@ -279,8 +279,7 @@ pub mod api {
             if items.len() >= RESULT_CAP {
                 break;
             }
-            let hit =
-                crate::run_detail::match_human_transcript(&plane, &run.run_id, &needle);
+            let hit = crate::run_detail::match_human_transcript(&plane, &run.run_id, &needle);
             if !hit.available {
                 continue;
             }
