@@ -59,6 +59,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   rather than unlinked and rewritten, which is what kept a runtime skills dir
   symlinked into the store from having the store copy removed under it.
 
+- The skill-view writer keeps a real _file_ under a `vc-*` name as well as a
+  real directory; it used to remove it. A file had less protection than a
+  directory, not more: shadow detection only ever examines directories, and it
+  skips a runtime whose skills dir is reached through a symlink — so with
+  `~/.grok/skills -> ~/notes`, a note called `vc-research` was removed by the
+  writer with nothing quarantined and nothing reported.
+
 - Install now links the canonical `~/.agents/skills` view _before_ reconciling
   skill-copy shadows, and the remaining runtime views after. Reconciliation
   refuses to remove a copy until that view points at the store, so on a

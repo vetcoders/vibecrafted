@@ -10830,18 +10830,20 @@ def create_symlink(target: Path, link: Path, dry_run: bool = False) -> None:
 def create_skill_view_symlink(target: Path, link: Path, dry_run: bool = False) -> None:
     """Create an agent skill view, replacing stale legacy store views.
 
-    A real directory at `link` is never removed. By the time the writer runs,
-    `reconcile_shadowed_skill_dirs` has already quarantined every copy whose
-    Vibecrafted provenance it could prove, so whatever real directory is left is
-    one nobody could prove — an operator's own skill parked under a `vc-*` name.
-    Replacing that with a symlink would delete it silently and without a backup,
-    which is the one thing this whole reconciliation exists to avoid. It is kept
-    and named instead; doctor reports it as `shadow-dir:`.
+    Nothing real at `link` is ever removed — not a directory and not a file. By
+    the time the writer runs, `reconcile_shadowed_skill_dirs` has quarantined
+    every copy whose Vibecrafted provenance it could prove, so whatever is left
+    is something nobody could prove: an operator's own skill parked under a
+    `vc-*` name, or a plain file that happens to carry one. A file needs the
+    same protection as a directory and gets less attention: reconciliation only
+    ever looks at directories, and it skips a runtime whose skills dir is
+    reached through a symlink — so `~/.grok/skills -> ~/notes` with a note
+    called `vc-research` in it was, until now, a note the installer deleted.
 
-    Symlinks, junctions and stray files still give way, and a pointer that
-    already resolves to `target` is left exactly as it is: unlinking and
-    relinking it would be a no-op at best, and at worst — when the runtime skill
-    dir is itself a link into the store — a removal inside the store.
+    Only a pointer gives way. One that already resolves to `target` is left
+    exactly as it is: unlinking and relinking it would be a no-op at best, and
+    at worst — when the runtime skill dir is itself a link into the store — a
+    removal inside the store.
     """
     if target == link:
         if dry_run:
@@ -10852,9 +10854,10 @@ def create_skill_view_symlink(target: Path, link: Path, dry_run: bool = False) -
         if dry_run:
             print(f"  {dim('same-path')} {link} -> {target}")
         return
-    if present and link.is_dir() and not _is_owned_pointer(link):
+    if present and not _is_owned_pointer(link):
+        kind = "directory" if link.is_dir() else "file"
         print(
-            f"  {WARN} Keeping real directory {link}; "
+            f"  {WARN} Keeping real {kind} {link}; "
             "run `vibecrafted doctor` to see why it could not be reconciled"
         )
         return
