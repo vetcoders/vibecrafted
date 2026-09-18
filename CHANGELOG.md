@@ -42,8 +42,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   `ln -s ~/.vibecrafted/skills ~/.junie/skills` would make the store compare
   identical with itself and reconciliation would delete it through the link.
   The canonical `~/.agents/skills` view is never modified, runtimes that carry
-  a managed view stay owned by the existing symlink checks, and `--dry-run`
-  mutates nothing.
+  a managed view stay owned by the existing symlink checks for reporting, and
+  `--dry-run` mutates nothing.
+
+- The skill-view writer no longer removes a real directory to make room for a
+  symlink, and reconciliation no longer skips the runtimes that carry a managed
+  view. Those two facts were one bug: `~/.claude/skills` and `~/.codex/skills`
+  were excluded from the careful path — quarantine, then remove — precisely
+  because `create_skill_view_symlink` would `shutil.rmtree` whatever sat there
+  on its way to writing the link. So a copy in `~/.junie/skills` was backed up
+  before removal while the operator's own `vc-*` skill in `~/.claude/skills`
+  was deleted without one, on the very run meant to be careful. Reconciliation
+  now runs before the writer and covers every runtime, and the writer keeps any
+  real directory it still finds with a `Keeping real directory …` line; doctor
+  reports it. A link that already resolves to its target is left untouched
+  rather than unlinked and rewritten, which is what kept a runtime skills dir
+  symlinked into the store from having the store copy removed under it.
 
 - Server web: the Loctree report opens whole in a browser. The document now
   lives at the directory-style `/structure/report/` (`/structure/report`

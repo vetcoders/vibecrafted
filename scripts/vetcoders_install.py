@@ -10826,15 +10826,40 @@ def create_symlink(target: Path, link: Path, dry_run: bool = False) -> None:
 
 
 def create_skill_view_symlink(target: Path, link: Path, dry_run: bool = False) -> None:
-    """Create an agent skill view, replacing stale legacy store views."""
+    """Create an agent skill view, replacing stale legacy store views.
+
+    A real directory at `link` is never removed. By the time the writer runs,
+    `reconcile_shadowed_skill_dirs` has already quarantined every copy whose
+    Vibecrafted provenance it could prove, so whatever real directory is left is
+    one nobody could prove — an operator's own skill parked under a `vc-*` name.
+    Replacing that with a symlink would delete it silently and without a backup,
+    which is the one thing this whole reconciliation exists to avoid. It is kept
+    and named instead; doctor reports it as `shadow-dir:`.
+
+    Symlinks, junctions and stray files still give way, and a pointer that
+    already resolves to `target` is left exactly as it is: unlinking and
+    relinking it would be a no-op at best, and at worst — when the runtime skill
+    dir is itself a link into the store — a removal inside the store.
+    """
     if target == link:
         if dry_run:
             print(f"  {dim('same-path')} {target}")
         return
+    present = link.exists() or link.is_symlink()
+    if present and link.resolve(strict=False) == target.resolve(strict=False):
+        if dry_run:
+            print(f"  {dim('same-path')} {link} -> {target}")
+        return
+    if present and link.is_dir() and not _is_owned_pointer(link):
+        print(
+            f"  {WARN} Keeping real directory {link}; "
+            "run `vibecrafted doctor` to see why it could not be reconciled"
+        )
+        return
     if dry_run:
         print(f"  {dim('ln -s')} {target} -> {link}")
         return
-    if link.exists() or link.is_symlink():
+    if present:
         if link.is_symlink() or link.is_file():
             link.unlink()
         elif link.is_dir():
@@ -10882,18 +10907,24 @@ def prune_shadowed_skill_views(
 def reconcile_shadowed_skill_dirs(
     store_path: Path,
     skill_names: Sequence[str],
-    active_runtimes: Sequence[str],
     shadows: Sequence[ShadowedSkillDir] | None = None,
     dry_run: bool = False,
 ) -> tuple[list[ShadowedSkillDir], list[ShadowedSkillDir]]:
     """Quarantine and remove proven-managed real-directory skill copies.
 
+    Every runtime is in scope, the ones that carry a managed view included.
+    They used to be skipped on the grounds that `create_skill_view_symlink`
+    would `rmtree` the directory on its way to writing the link — which is to
+    say, the unproven copies in `~/.claude/skills` and `~/.codex/skills` were
+    deleted without a backup while the proven ones elsewhere were carefully
+    quarantined first. The writer no longer removes a real directory at all, so
+    reconciliation owns the decision everywhere and runs before it.
+
     Returns `(reconciled, kept)`. A copy is removed only when provenance is
-    proven, its runtime is not an active view target in this run (those are
-    already handled by `create_skill_view_symlink`), it is a real path that no
-    symlink leads into and that lies outside the store, and the canonical
-    `~/.agents/skills/<skill>` view is in place — otherwise it is kept and
-    reported. Nothing is ever removed before it has been copied aside.
+    proven, it is a real path that no symlink leads into and that lies outside
+    the store, and the canonical `~/.agents/skills/<skill>` view is in place —
+    otherwise it is kept and reported. Nothing is ever removed before it has
+    been copied aside.
     """
     detected = (
         list(shadows)
@@ -10911,8 +10942,6 @@ def reconcile_shadowed_skill_dirs(
     )
 
     for shadow in detected:
-        if shadow.runtime in active_runtimes:
-            continue
         if not shadow.is_managed:
             kept.append(shadow)
             print(
@@ -14124,6 +14153,9 @@ def _cmd_install_verbose(args: argparse.Namespace, repo_root: Path) -> int:
 
     # --- Execute: symlink views ---
     print(bold("Linking agent views..."))
+    # Before the writer, not after: the writer keeps any real directory it
+    # finds, so a proven copy has to be quarantined out of the way first.
+    reconcile_shadowed_skill_dirs(store_path, selected_skills, dry_run=dry_run)
     for rt in all_runtimes:
         rt_skills = Path.home() / f".{rt}" / "skills"
         if not dry_run:
@@ -14139,9 +14171,6 @@ def _cmd_install_verbose(args: argparse.Namespace, repo_root: Path) -> int:
         store_path, selected_skills, all_runtimes, dry_run=dry_run
     ):
         print(f"  {dim('removed shadow')} {shadow}")
-    reconcile_shadowed_skill_dirs(
-        store_path, selected_skills, all_runtimes, dry_run=dry_run
-    )
     print()
 
     # --- Execute: agent command surfaces ---
@@ -14642,6 +14671,8 @@ def _cmd_install_compact(args: argparse.Namespace, repo_root: Path) -> int:
 
         # Symlink views
         print("Linking agent views:")
+        # Before the writer: it keeps any real directory it finds.
+        reconcile_shadowed_skill_dirs(store_path, selected_skills, dry_run=dry_run)
         for rt in all_runtimes:
             rt_skills = Path.home() / f".{rt}" / "skills"
             if not dry_run:
@@ -14657,9 +14688,6 @@ def _cmd_install_compact(args: argparse.Namespace, repo_root: Path) -> int:
             store_path, selected_skills, all_runtimes, dry_run=dry_run
         ):
             print(f"  removed shadow: {shadow}")
-        reconcile_shadowed_skill_dirs(
-            store_path, selected_skills, all_runtimes, dry_run=dry_run
-        )
         print()
 
         print("Installing agent commands:")
