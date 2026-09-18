@@ -1,6 +1,9 @@
 #[cfg(feature = "ssr")]
 pub mod api {
     use std::collections::BTreeSet;
+    use std::path::{Component, Path, PathBuf};
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
 
     use axum::extract::{Form, Query};
     use axum::http::{StatusCode, header};
@@ -8,9 +11,9 @@ pub mod api {
     use axum::routing::{get, post};
     use axum::{Json, Router};
     use control_core::{
-        ScaffoldArtifact, ScaffoldArtifactPatch, ScaffoldArtifactStore, ScaffoldCheckpointPatch,
-        ScaffoldDoctorReport, ScaffoldError, ScaffoldPlanSummary, ScaffoldStatusPatch,
-        ScaffoldWorkspace, vibecrafted_home,
+        ScaffoldArtifact, ScaffoldArtifactPatch, ScaffoldArtifactRole, ScaffoldArtifactStore,
+        ScaffoldCheckpointPatch, ScaffoldDoctorReport, ScaffoldError, ScaffoldPlanSummary,
+        ScaffoldStatusPatch, ScaffoldWorkspace, vibecrafted_home,
     };
     use serde::Deserialize;
 
@@ -50,6 +53,15 @@ pub mod api {
     }
 
     #[derive(Debug, Clone, Deserialize)]
+    pub struct DispatchForm {
+        pub org: String,
+        pub repo: String,
+        pub day: String,
+        pub plan_id: String,
+        pub artifact_id: String,
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
     pub struct SaveStatusForm {
         pub org: String,
         pub repo: String,
@@ -84,6 +96,7 @@ pub mod api {
             .route("/api/scaffold/artifact", post(save_artifact))
             .route("/api/scaffold/checkpoint", post(save_checkpoint))
             .route("/api/scaffold/status", post(save_status))
+            .route("/api/scaffold/dispatch", post(dispatch_plan))
     }
 
     async fn editor(Query(mut query): Query<ScaffoldQuery>) -> impl IntoResponse {
@@ -327,6 +340,319 @@ pub mod api {
         }
     }
 
+    const DISPATCH_BOOTSTRAP: &str =
+        "from vibecrafted_core.cli import main; import sys; raise SystemExit(main(sys.argv[1:]))";
+
+    async fn dispatch_plan(headers: axum::http::HeaderMap, body: String) -> impl IntoResponse {
+        let is_json = headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|content_type| content_type.contains("application/json"))
+            .unwrap_or(false);
+        let form: DispatchForm = if is_json {
+            match serde_json::from_str(&body) {
+                Ok(form) => form,
+                Err(error) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({ "error": error.to_string() })),
+                    )
+                        .into_response();
+                }
+            }
+        } else {
+            match serde_urlencoded::from_str(&body) {
+                Ok(form) => form,
+                Err(error) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({ "error": error.to_string() })),
+                    )
+                        .into_response();
+                }
+            }
+        };
+
+        let store = ScaffoldArtifactStore::new(vibecrafted_home());
+        let workspace = match store.workspace(&form.org, &form.repo, &form.day, Some(&form.plan_id))
+        {
+            Ok(workspace) => workspace,
+            Err(error) => return scaffold_error_response(error),
+        };
+        let artifact = match workspace
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.id == form.artifact_id)
+        {
+            Some(artifact) => artifact.clone(),
+            None => {
+                return scaffold_error_response(ScaffoldError::ArtifactNotFound {
+                    id: form.artifact_id,
+                });
+            }
+        };
+        let file = match dispatch_artifact_file(&workspace, &artifact) {
+            Ok(file) => file,
+            Err(error) => return scaffold_error_response(error),
+        };
+        let python = match generation_python() {
+            Ok(python) => python,
+            Err(error) => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({ "error": error })),
+                )
+                    .into_response();
+            }
+        };
+
+        let doctor_python = python.clone();
+        let doctor_file = file.clone();
+        let doctor = tokio::time::timeout(
+            Duration::from_secs(45),
+            tokio::task::spawn_blocking(move || {
+                run_dispatch_door(&doctor_python, &doctor_file, true)
+            }),
+        )
+        .await;
+        let doctor_output = match doctor {
+            Ok(Ok(Ok(output))) => output,
+            Ok(Ok(Err(error))) => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({
+                        "error": format!("vibecrafted dispatch doctor failed to start: {error}")
+                    })),
+                )
+                    .into_response();
+            }
+            Ok(Err(error)) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": format!("vibecrafted dispatch doctor join failed: {error}")
+                    })),
+                )
+                    .into_response();
+            }
+            Err(_) => {
+                return (
+                    StatusCode::GATEWAY_TIMEOUT,
+                    Json(serde_json::json!({
+                        "error": "vibecrafted dispatch doctor timed out"
+                    })),
+                )
+                    .into_response();
+            }
+        };
+        if !doctor_output.status.success() {
+            let detail = [doctor_output.stderr.as_slice(), doctor_output.stdout.as_slice()]
+                .into_iter()
+                .find(|bytes| !bytes.is_empty())
+                .map(|bytes| String::from_utf8_lossy(bytes).trim().to_string())
+                .filter(|text| !text.is_empty())
+                .unwrap_or_else(|| "dispatch doctor refused the plan".to_string());
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": detail,
+                    "door": "vibecrafted dispatch",
+                })),
+            )
+                .into_response();
+        }
+
+        let spawn_python = python.clone();
+        let spawn_file = file.clone();
+        match tokio::task::spawn_blocking(move || {
+            spawn_dispatch_door(&spawn_python, &spawn_file)
+        })
+        .await
+        {
+            Ok(Ok(pid)) => (
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({
+                    "status": "accepted",
+                    "door": "vibecrafted dispatch",
+                    "artifact_id": artifact.id,
+                    "path": file.display().to_string(),
+                    "pid": pid,
+                })),
+            )
+                .into_response(),
+            Ok(Err(error)) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": format!("vibecrafted dispatch failed to start: {error}")
+                })),
+            )
+                .into_response(),
+            Err(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("vibecrafted dispatch join failed: {error}")
+                })),
+            )
+                .into_response(),
+        }
+    }
+
+    fn generation_python() -> Result<PathBuf, String> {
+        let from_env = std::env::var("VIBECRAFTED_PYTHON")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+        let from_root = std::env::var("VIBECRAFTED_RUNTIME_ROOT")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(|root| PathBuf::from(root).join("bin/python3"));
+        let path = from_env.or(from_root).ok_or_else(|| {
+            "generation Python is not available (set VIBECRAFTED_PYTHON or VIBECRAFTED_RUNTIME_ROOT)"
+                .to_string()
+        })?;
+        if !path.is_absolute() {
+            return Err("generation Python must be an absolute path".to_string());
+        }
+        let metadata = std::fs::metadata(&path).map_err(|_| {
+            format!(
+                "generation Python is not available: {}",
+                path.display()
+            )
+        })?;
+        if !metadata.is_file() {
+            return Err(format!(
+                "generation Python is not a file: {}",
+                path.display()
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o111 == 0 {
+                return Err(format!(
+                    "generation Python is not executable: {}",
+                    path.display()
+                ));
+            }
+        }
+        Ok(path)
+    }
+
+    fn dispatch_artifact_file(
+        workspace: &ScaffoldWorkspace,
+        artifact: &ScaffoldArtifact,
+    ) -> Result<PathBuf, ScaffoldError> {
+        if artifact.role != ScaffoldArtifactRole::Dispatch {
+            return Err(ScaffoldError::ReadOnly {
+                message: format!(
+                    "artifact is not a dispatch file: {} ({})",
+                    artifact.id,
+                    artifact.role.as_str()
+                ),
+            });
+        }
+        let relative = Path::new(&artifact.relative_path);
+        if artifact.relative_path.is_empty()
+            || relative.is_absolute()
+            || artifact.relative_path.contains('\\')
+            || !artifact.relative_path.ends_with(".dispatch.toml")
+            || !relative
+                .components()
+                .all(|component| matches!(component, Component::Normal(_)))
+        {
+            return Err(ScaffoldError::UnsafePath {
+                message: "refusing unsafe or non-dispatch scaffold artifact path".into(),
+            });
+        }
+        let declared = PathBuf::from(&artifact.path);
+        if !declared.is_absolute() {
+            return Err(ScaffoldError::UnsafePath {
+                message: "refusing unsafe scaffold dispatch path".into(),
+            });
+        }
+        let plan_root = PathBuf::from(&workspace.plan_root)
+            .canonicalize()
+            .map_err(ScaffoldError::from)?;
+        if dispatch_path_has_symlink(&plan_root, &declared) {
+            return Err(ScaffoldError::UnsafePath {
+                message: "refusing symlinked scaffold dispatch path".into(),
+            });
+        }
+        let file = declared.canonicalize().map_err(ScaffoldError::from)?;
+        if !file.starts_with(&plan_root) {
+            return Err(ScaffoldError::UnsafePath {
+                message: "refusing scaffold dispatch path outside the plan root".into(),
+            });
+        }
+        if !file.is_file() {
+            return Err(ScaffoldError::UnsafePath {
+                message: "refusing missing scaffold dispatch file".into(),
+            });
+        }
+        Ok(file)
+    }
+
+    fn dispatch_path_has_symlink(root: &Path, path: &Path) -> bool {
+        let Ok(relative) = path.strip_prefix(root) else {
+            return true;
+        };
+        let mut cursor = root.to_path_buf();
+        if std::fs::symlink_metadata(&cursor)
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            return true;
+        }
+        for component in relative.components() {
+            cursor.push(component.as_os_str());
+            if std::fs::symlink_metadata(&cursor)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn dispatch_command(python: &Path, file: &Path, doctor: bool) -> Command {
+        let mut command = Command::new(python);
+        command
+            .arg("-c")
+            .arg(DISPATCH_BOOTSTRAP)
+            .arg("dispatch");
+        if doctor {
+            command.arg("--doctor");
+        }
+        command.arg(file);
+        command.env_remove("PYTHONPATH");
+        command.stdin(Stdio::null());
+        command
+    }
+
+    fn run_dispatch_door(
+        python: &Path,
+        file: &Path,
+        doctor: bool,
+    ) -> std::io::Result<std::process::Output> {
+        dispatch_command(python, file, doctor).output()
+    }
+
+    fn spawn_dispatch_door(python: &Path, file: &Path) -> std::io::Result<u32> {
+        let mut command = dispatch_command(python, file, false);
+        command.stdout(Stdio::null());
+        command.stderr(Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let child = command.spawn()?;
+        let pid = child.id();
+        std::mem::forget(child);
+        Ok(pid)
+    }
+
     fn redirect_after_mutation(
         org: &str,
         repo: &str,
@@ -547,6 +873,10 @@ pub mod api {
       <h3>Checkpoint</h3>
       <p class="inspector-hint">Switch artifact to load checkpoint controls.</p>
     </div>
+    <div class="inspector-block" id="inspector-dispatch-slot">
+      <h3>Dispatch</h3>
+      <p class="inspector-hint">Switch to a dispatch artifact to run the real <code>vibecrafted dispatch</code> door.</p>
+    </div>
     <div class="inspector-block">
       <h3>Endpoints</h3>
       <a class="api-link" href="/api/scaffold/artifacts?org={}&repo={}&day={}&plan_id={}" target="_blank" rel="noopener noreferrer">artifact endpoint ↗</a>
@@ -725,7 +1055,7 @@ pub mod api {
             ("", "open")
         };
         format!(
-            r#"<a class="plan-card{}" href="{}" data-search="{}">
+            r#"<a class="plan-card{}" href="{}" data-search="{}" data-ppm="plan" data-copy-id="{}" data-href="{}">
   <span class="plan-number">{:02}</span>
   <div class="plan-card-title">
     <h3>{}</h3>
@@ -740,6 +1070,8 @@ pub mod api {
             state_class,
             escape_attr(&href),
             escape_attr(&search.to_ascii_lowercase()),
+            escape_attr(&plan.plan_id),
+            escape_attr(&href),
             index + 1,
             escape_html(&humanize_plan_id(&plan.plan_id)),
             escape_html(&plan.org),
@@ -968,11 +1300,24 @@ pub mod api {
         };
         let active_class = if active { " is-active" } else { "" };
         let hidden_attr = if active { "" } else { " hidden" };
+        let dispatch_form = if artifact.role == ScaffoldArtifactRole::Dispatch {
+            format!(
+                r#"<form method="post" action="/api/scaffold/dispatch" class="dispatch-form">
+    {}
+    <p class="inspector-hint">Runs the real <code>vibecrafted dispatch</code> door after doctor. Closing this studio does not stop workers.</p>
+    <button type="submit">Dispatch</button>
+    <p class="dispatch-status inspector-meta" aria-live="polite"></p>
+  </form>"#,
+                hidden_context(workspace, artifact)
+            )
+        } else {
+            String::new()
+        };
         // Default view is formatted rich markdown. "Edit" opens the mono
         // source textarea; "Save" persists (if dirty) and returns to rich.
         // Only the active panel is visible (studio shell — one document).
         format!(
-            r#"<article class="artifact-panel{}" id="{}" data-render-mode="rich"{} aria-hidden="{}">
+            r#"<article class="artifact-panel{}" id="{}" data-role="{}" data-render-mode="rich"{} aria-hidden="{}">
   <header class="artifact-head">
     <div>
       <p class="eyebrow">{}</p>
@@ -998,9 +1343,11 @@ pub mod api {
     <input name="note" value="{}" placeholder="checkpoint note">
     <button type="submit">Update checkpoint</button>
   </form>
+  {}
 </article>"#,
             active_class,
             escape_attr(&artifact.id),
+            escape_attr(artifact.role.as_str()),
             hidden_attr,
             if active { "false" } else { "true" },
             artifact.role.as_str(),
@@ -1011,7 +1358,8 @@ pub mod api {
             escape_html(&artifact.content),
             hidden_context(workspace, artifact),
             checked,
-            escape_attr(&artifact.checkpoint.note)
+            escape_attr(&artifact.checkpoint.note),
+            dispatch_form
         )
     }
 
@@ -1773,6 +2121,54 @@ pub mod api {
       }
     }
 
+    var dispatchSlot = document.getElementById("inspector-dispatch-slot");
+    if (dispatchSlot) {
+      var parkedDispatch = dispatchSlot.querySelector("form.dispatch-form");
+      if (parkedDispatch && parkedDispatch.dataset.homePanel) {
+        var dispatchHome = document.getElementById(parkedDispatch.dataset.homePanel);
+        if (dispatchHome) dispatchHome.appendChild(parkedDispatch);
+      }
+      dispatchSlot.innerHTML = "<h3>Dispatch</h3>";
+      var dispatchForm = panel.querySelector("form.dispatch-form");
+      if (dispatchForm) {
+        dispatchForm.dataset.homePanel = panel.id;
+        dispatchSlot.appendChild(dispatchForm);
+        if (dispatchForm.dataset.dispatchBound !== "1") {
+          dispatchForm.dataset.dispatchBound = "1";
+          dispatchForm.addEventListener("submit", function (ev) {
+            ev.preventDefault();
+            var statusEl = dispatchForm.querySelector(".dispatch-status");
+            var payload = {};
+            Array.prototype.slice.call(dispatchForm.querySelectorAll("input[name]")).forEach(function (input) {
+              payload[input.name] = input.value;
+            });
+            if (statusEl) statusEl.textContent = "Doctoring…";
+            fetch("/api/scaffold/dispatch", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "Accept": "application/json" },
+              credentials: "same-origin",
+              body: JSON.stringify(payload)
+            }).then(function (res) {
+              return res.json().then(function (body) { return { res: res, body: body }; });
+            }).then(function (pair) {
+              if (!statusEl) return;
+              if (pair.res.status === 202) {
+                statusEl.textContent = "Accepted. Workers keep running if you close this tab. Watch the tracker.";
+              } else {
+                statusEl.textContent = (pair.body && pair.body.error)
+                  ? pair.body.error
+                  : ("Dispatch refused (" + pair.res.status + ")");
+              }
+            }).catch(function (err) {
+              if (statusEl) statusEl.textContent = "Dispatch unavailable: " + err.message;
+            });
+          });
+        }
+      } else {
+        dispatchSlot.insertAdjacentHTML("beforeend", '<p class="inspector-hint">This artifact is not a dispatch file. Open the dispatch artifact to run <code>vibecrafted dispatch</code>.</p>');
+      }
+    }
+
     bindStats(panel);
     updateStats(panel);
 
@@ -2022,10 +2418,10 @@ button.md-status.md-status-done .md-status-glyph{color:var(--status-success)}
   border-radius:var(--radius-surface);border:var(--stroke-width) solid color-mix(in srgb,var(--status-success) 55%,transparent);background:color-mix(in srgb,var(--status-success) 14%,transparent);color:var(--text);font-weight:700
 }
 .artifact-panel.is-active .editor-form>.save-artifact-btn{margin:8px 16px 12px}
-.checkpoint-form{display:flex;flex-direction:column;align-items:stretch;gap:10px;padding:0;margin:0}
+.checkpoint-form,.dispatch-form{display:flex;flex-direction:column;align-items:stretch;gap:10px;padding:0;margin:0}
 .checkpoint-form label{display:flex;align-items:center;gap:8px;color:var(--text);font-size:13px}
 .checkpoint-form input[name=note]{width:100%;min-width:0;border:1px solid var(--line);background:var(--panel);color:var(--text);border-radius:var(--radius-surface);padding:8px;font:13px var(--font-body)}
-.checkpoint-form button{margin:0;width:100%;justify-self:stretch}
+.checkpoint-form button,.dispatch-form button{margin:0;width:100%;justify-self:stretch}
 /* Right inspector (tools + status) */
 .review-inspector{height:100%;min-height:0;overflow:auto;padding:14px 14px 20px;background:var(--panel);display:flex;flex-direction:column;gap:14px}
 .inspector-head{color:var(--muted);font:10px var(--font-mono);text-transform:uppercase;letter-spacing:.14em;padding-bottom:6px;border-bottom:1px solid var(--line)}
@@ -2827,6 +3223,29 @@ button.md-status.md-status-done .md-status-glyph{color:var(--status-success)}
                 css.contains("border-radius:var(--radius-surface);padding:8px 12px;font-weight:700"),
                 "the commit action takes the deck's 8px radius"
             );
+        }
+
+        #[test]
+        fn dispatch_artifact_ships_the_real_door_form() {
+            let mut workspace = fixture();
+            workspace.artifacts[0].id = "wave".into();
+            workspace.artifacts[0].role = ScaffoldArtifactRole::Dispatch;
+            workspace.artifacts[0].relative_path = "plan.dispatch.toml".into();
+            let html = render_editor(&workspace);
+            assert!(
+                html.contains(r#"data-role="dispatch""#),
+                "dispatch panel must declare its role"
+            );
+            assert!(
+                html.contains(r#"action="/api/scaffold/dispatch""#),
+                "inspector must post the real dispatch door"
+            );
+            assert!(
+                html.contains("vibecrafted dispatch"),
+                "copy must name the product CLI, not a fake launch button"
+            );
+            assert!(html.contains("inspector-dispatch-slot"));
+            assert!(html.contains("Closing this studio does not stop workers"));
         }
 
         /// The repaint must not have touched a single byte of persistence. This

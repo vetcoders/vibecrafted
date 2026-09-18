@@ -15,11 +15,13 @@ pub enum ServerSection {
     Sessions,
     Agents,
     Runs,
+    Transcripts,
     Lifecycle,
     Activity,
     Structure,
     Scaffold,
     Guide,
+    Frame,
 }
 
 impl ServerSection {
@@ -42,7 +44,7 @@ pub fn ServerFrame(active: ServerSection, status: String, children: Children) ->
                         <span class="server-brand-mark" aria-hidden="true">"⌁"</span>
                         <span class="server-brand-copy">
                             <strong>"Vibecrafted server"</strong>
-                            <small>{format!("control plane · {}", env!("VC_SERVER_VERSION"))}</small>
+                            <small>{env!("VC_SERVER_VERSION")}</small>
                         </span>
                     </a>
                     <div class="server-navbar-actions">
@@ -50,6 +52,13 @@ pub fn ServerFrame(active: ServerSection, status: String, children: Children) ->
                             <span class="server-status-dot" aria-hidden="true"></span>
                             {status}
                         </span>
+                        <div class="server-focus-toggle" role="group" aria-label="Focus">
+                            <button type="button" class="server-navbar-action" data-focus-mode="fleet">"Fleet"</button>
+                            <button type="button" class="server-navbar-action" data-focus-mode="project">"Project"</button>
+                        </div>
+                        <a class="server-navbar-action" href="/aicx">"AICX"</a>
+                        <a class="server-navbar-action" href="/structure">"Loctree"</a>
+                        <a class="server-navbar-action" href="/frame">"Frame"</a>
                         <a class="server-navbar-action" href="/scaffold">"Open scaffold"</a>
                         <button
                             type="button"
@@ -81,27 +90,32 @@ pub fn ServerFrame(active: ServerSection, status: String, children: Children) ->
                         <a class=active.nav_class(ServerSection::Runs) href="/runs">
                             <span>"05"</span><strong>"Live runs"</strong>
                         </a>
+                        <a class=active.nav_class(ServerSection::Transcripts) href="/transcripts">
+                            <span>"06"</span><strong>"Transcripts"</strong>
+                        </a>
                         <a class=active.nav_class(ServerSection::Lifecycle) href="/lifecycle">
-                            <span>"06"</span><strong>"Control"</strong>
+                            <span>"07"</span><strong>"Control"</strong>
                         </a>
                         <a class=active.nav_class(ServerSection::Activity) href="/activity">
-                            <span>"07"</span><strong>"Activity"</strong>
+                            <span>"08"</span><strong>"Activity"</strong>
                         </a>
                         <a class=active.nav_class(ServerSection::Structure) href="/structure">
-                            <span>"08"</span><strong>"Structure"</strong>
+                            <span>"09"</span><strong>"Structure"</strong>
                         </a>
                         <a class=active.nav_class(ServerSection::Scaffold) href="/scaffold">
-                            <span>"09"</span><strong>"Plans / Scaffold"</strong>
+                            <span>"10"</span><strong>"Plans / Scaffold"</strong>
+                        </a>
+                        <a class=active.nav_class(ServerSection::Frame) href="/frame">
+                            <span>"11"</span><strong>"Frame"</strong>
                         </a>
                         <a class=active.nav_class(ServerSection::Guide) href="/guide">
-                            <span>"10"</span><strong>"Guide"</strong>
+                            <span>"12"</span><strong>"Guide"</strong>
                         </a>
                     </nav>
                     <div class="server-sidebar-note">
-                        <span class="server-status-dot" aria-hidden="true"></span>
                         <p>
-                            <strong>"Control plane"</strong>
-                            <small>"read-only projection"</small>
+                            <strong>"Focus"</strong>
+                            <small class="server-focus-caption">"Fleet · all workspaces"</small>
                         </p>
                     </div>
                 </aside>
@@ -125,22 +139,29 @@ pub fn ServerFrame(active: ServerSection, status: String, children: Children) ->
                 <a class=active.nav_class(ServerSection::Runs) href="/runs">
                     <span>"05"</span><strong>"Runs"</strong>
                 </a>
-                <a class=active.nav_class(ServerSection::Lifecycle) href="/lifecycle">
-                    <span>"06"</span><strong>"Control"</strong>
+                <a class=active.nav_class(ServerSection::Transcripts) href="/transcripts">
+                    <span>"06"</span><strong>"Logs"</strong>
                 </a>
-                <a class=active.nav_class(ServerSection::Activity) href="/activity">
-                    <span>"07"</span><strong>"Activity"</strong>
+                <a class=active.nav_class(ServerSection::Lifecycle) href="/lifecycle">
+                    <span>"07"</span><strong>"Control"</strong>
                 </a>
                 <a class=active.nav_class(ServerSection::Structure) href="/structure">
-                    <span>"08"</span><strong>"Structure"</strong>
+                    <span>"09"</span><strong>"Loct"</strong>
                 </a>
                 <a class=active.nav_class(ServerSection::Scaffold) href="/scaffold">
-                    <span>"09"</span><strong>"Plans"</strong>
+                    <span>"10"</span><strong>"Plans"</strong>
                 </a>
-                <a class=active.nav_class(ServerSection::Guide) href="/guide">
-                    <span>"10"</span><strong>"Guide"</strong>
+                <a class=active.nav_class(ServerSection::Frame) href="/frame">
+                    <span>"11"</span><strong>"Frame"</strong>
                 </a>
             </nav>
+            <div id="vc-ppm" class="vc-ppm" hidden>
+                <button type="button" data-ppm-action="copy-id">"Copy id"</button>
+                <button type="button" data-ppm-action="copy-url">"Copy link"</button>
+                <button type="button" data-ppm-action="open">"Open"</button>
+                <button type="button" data-ppm-action="copy-transcript">"Copy transcript"</button>
+                <button type="button" data-ppm-action="search-aicx">"Search AICX"</button>
+            </div>
         </div>
     }
 }
@@ -189,6 +210,159 @@ pub fn theme_control_script() -> &'static str {
 })();"#
 }
 
+/// Restores Fleet/Project focus before first paint, same contract as theme.
+#[cfg(feature = "ssr")]
+pub fn operator_head_script() -> &'static str {
+    r#"(() => {
+  try {
+    const saved = localStorage.getItem('vc-focus-mode');
+    document.documentElement.dataset.focus = saved === 'project' ? 'project' : 'fleet';
+  } catch (_) {
+    document.documentElement.dataset.focus = 'fleet';
+  }
+})();"#
+}
+
+/// Focus toggle, copy buttons, and the operator context menu. Shared by the
+/// Leptos shell and every raw-HTML route so Copy / PPM / Fleet·Project exist
+/// on Plans as well as Overview.
+#[cfg(feature = "ssr")]
+pub fn operator_desk_script() -> &'static str {
+    r#"(() => {
+  const FOCUS_KEY = 'vc-focus-mode';
+  const ROOT_KEY = 'vc-focus-root';
+  const html = document.documentElement;
+  const caption = document.querySelector('.server-focus-caption');
+  const menu = document.getElementById('vc-ppm');
+  let menuTarget = null;
+
+  const selectedRoot = () => {
+    const ctx = document.getElementById('vc-focus-context');
+    const live = ctx && ctx.getAttribute('data-selected-workspace-root');
+    if (live) return live;
+    try { return localStorage.getItem(ROOT_KEY) || ''; } catch (_) { return ''; }
+  };
+
+  const applyFocus = (mode) => {
+    const next = mode === 'project' ? 'project' : 'fleet';
+    html.dataset.focus = next;
+    document.querySelectorAll('[data-focus-mode]').forEach((btn) => {
+      btn.classList.toggle('is-active', btn.getAttribute('data-focus-mode') === next);
+    });
+    const root = selectedRoot();
+    try { localStorage.setItem(FOCUS_KEY, next); } catch (_) {}
+    if (caption) {
+      caption.textContent = next === 'project'
+        ? (root ? ('Project · ' + root) : 'Project · pick a workspace')
+        : 'Fleet · all workspaces';
+    }
+    document.querySelectorAll('[data-focus-root]').forEach((el) => {
+      if (next === 'fleet' || !root) {
+        el.hidden = false;
+        return;
+      }
+      el.hidden = (el.getAttribute('data-focus-root') || '') !== root;
+    });
+  };
+
+  const ctx = document.getElementById('vc-focus-context');
+  const ctxRoot = ctx && ctx.getAttribute('data-selected-workspace-root');
+  if (ctxRoot) {
+    try { localStorage.setItem(ROOT_KEY, ctxRoot); } catch (_) {}
+  } else {
+    const selectedCard = document.querySelector('.workspace-card[data-selected="1"][data-focus-root]');
+    if (selectedCard) {
+      try { localStorage.setItem(ROOT_KEY, selectedCard.getAttribute('data-focus-root') || ''); } catch (_) {}
+    }
+  }
+
+  applyFocus(html.dataset.focus);
+  document.querySelectorAll('[data-focus-mode]').forEach((btn) => {
+    btn.addEventListener('click', () => applyFocus(btn.getAttribute('data-focus-mode')));
+  });
+
+  const copyText = async (text) => {
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (_) {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      ta.remove();
+    }
+  };
+
+  document.addEventListener('click', (event) => {
+    const copy = event.target.closest('[data-copy]');
+    if (copy) {
+      event.preventDefault();
+      copyText(copy.getAttribute('data-copy') || copy.textContent || '');
+    }
+    const workspace = event.target.closest('.workspace-card[data-focus-root]');
+    if (workspace) {
+      const root = workspace.getAttribute('data-focus-root') || '';
+      try { localStorage.setItem(ROOT_KEY, root); } catch (_) {}
+      const ctx = document.getElementById('vc-focus-context');
+      if (ctx) ctx.setAttribute('data-selected-workspace-root', root);
+      applyFocus(html.dataset.focus);
+    }
+    if (menu && !event.target.closest('#vc-ppm')) menu.hidden = true;
+  });
+
+  const bindMenu = (target) => {
+    if (!menu || !target) return;
+    menuTarget = target;
+    const id = target.getAttribute('data-run-id') || target.getAttribute('data-copy-id') || '';
+    const href = target.getAttribute('data-href') || (id ? ('/run/' + id) : '');
+    const transcript = target.getAttribute('data-transcript-url') || (id ? ('/api/control/runs/' + id + '/transcript') : '');
+    menu.querySelectorAll('[data-ppm-action]').forEach((btn) => {
+      const action = btn.getAttribute('data-ppm-action');
+      btn.hidden = (action === 'copy-id' && !id)
+        || (action === 'open' && !href)
+        || (action === 'copy-transcript' && !transcript)
+        || (action === 'search-aicx' && !id);
+    });
+    menu.hidden = false;
+    const rect = target.getBoundingClientRect();
+    menu.style.left = Math.min(rect.left + window.scrollX, window.scrollX + window.innerWidth - 220) + 'px';
+    menu.style.top = (rect.bottom + window.scrollY + 4) + 'px';
+  };
+
+  document.addEventListener('contextmenu', (event) => {
+    const row = event.target.closest('[data-ppm]');
+    if (!row) return;
+    event.preventDefault();
+    bindMenu(row);
+  });
+
+  if (menu) {
+    menu.addEventListener('click', async (event) => {
+      const btn = event.target.closest('[data-ppm-action]');
+      if (!btn || !menuTarget) return;
+      const action = btn.getAttribute('data-ppm-action');
+      const id = menuTarget.getAttribute('data-run-id') || menuTarget.getAttribute('data-copy-id') || '';
+      const href = menuTarget.getAttribute('data-href') || (id ? ('/run/' + id) : '');
+      const transcript = menuTarget.getAttribute('data-transcript-url') || (id ? ('/api/control/runs/' + id + '/transcript') : '');
+      menu.hidden = true;
+      if (action === 'copy-id') return copyText(id);
+      if (action === 'copy-url') return copyText(href ? (location.origin + href) : location.href);
+      if (action === 'open' && href) { location.href = href; return; }
+      if (action === 'search-aicx' && id) { location.href = '/aicx?q=' + encodeURIComponent(id); return; }
+      if (action === 'copy-transcript' && transcript) {
+        try {
+          const response = await fetch(transcript, { credentials: 'same-origin' });
+          const payload = await response.json();
+          await copyText(payload.body || '');
+        } catch (_) {}
+      }
+    });
+  }
+})();"#
+}
+
 /// A raw-HTML route rendered inside the shared operator chrome.
 ///
 /// The route owns its canvas (`body_html`), its own `<style>` additions
@@ -226,15 +400,17 @@ pub fn render_document(document: &ServerDocument<'_>) -> String {
         .to_html()
     });
     format!(
-        "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>{title}</title>\n<script>{head_script}</script>\n<style>{tokens}</style>\n<style>{fonts}</style>\n<style>{main}</style>\n{head_html}\n</head>\n<body>\n{frame}\n<script>{control_script}</script>\n{tail_html}\n</body>\n</html>\n",
+        "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>{title}</title>\n<script>{head_script}</script>\n<script>{operator_head}</script>\n<style>{tokens}</style>\n<style>{fonts}</style>\n<style>{main}</style>\n{head_html}\n</head>\n<body>\n{frame}\n<script>{control_script}</script>\n<script>{operator_desk}</script>\n{tail_html}\n</body>\n</html>\n",
         title = escape_text(document.title),
         head_script = theme_head_script(),
+        operator_head = operator_head_script(),
         tokens = STYLE_TOKENS,
         fonts = STYLE_FONTS,
         main = STYLE_MAIN,
         head_html = document.head_html,
         frame = frame,
         control_script = theme_control_script(),
+        operator_desk = operator_desk_script(),
         tail_html = document.tail_html,
     )
 }

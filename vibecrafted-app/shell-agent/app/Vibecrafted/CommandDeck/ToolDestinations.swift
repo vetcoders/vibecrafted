@@ -103,6 +103,12 @@ struct ToolDestination: Identifiable, Equatable, Sendable {
       role: .tool, target: .configuredService(key: "slack-console",
         owner: "vc-slack-agent serves it as the `/console` route of its portal "
           + "(`make portal-preview` on :4300 for LAN/tailnet, or its deploy); Vibecrafted does not host it")),
+    ToolDestination(
+      id: "vc-frame", title: "Frame", symbol: "rectangle.split.3x1",
+      role: .tool, target: .configuredService(key: "vc-frame",
+        owner: "vc-frame web serves the host multiplexer (zellij web client) on the "
+          + "same socket namespace as `vc-start` (`/tmp/vc-frame-<uid>`); Vibecrafted "
+          + "does not guess a port and tabs never start that service")),
   ]
 
   static func named(_ id: String) -> ToolDestination? {
@@ -123,7 +129,7 @@ struct ToolConfigurationError: Error, Equatable, Sendable {
 
 enum ToolDestinationConfiguration {
   /// Keys the App knows how to open. Mirrors `TOOL_DESTINATION_KEYS`.
-  static let knownKeys: Set<String> = ["slack-console"]
+  static let knownKeys: Set<String> = ["slack-console", "vc-frame"]
 
   static func configurationFile(homeDirectory: URL, environment: [String: String]) -> URL {
     let base: URL
@@ -300,7 +306,7 @@ extension ToolDestination {
       case .success(let destinations):
         guard let url = destinations[key] else {
           return .unavailable(reason:
-            "\(title) is not configured. \(owner). Add `[tools.\(key)]` with `url = \"http://host:port/console\"` to \(file) once it is served.")
+            "\(title) is not configured. \(owner). Add `[tools.\(key)]` with `url = \"http://host:port/\"` to \(file) once it is served.")
         }
         guard let origin = WebRuntimeOrigin(url: url) else {
           return .unavailable(reason: "\(title) has a malformed URL in \(file).")

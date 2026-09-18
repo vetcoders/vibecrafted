@@ -66,13 +66,13 @@ pub mod api {
 
     use axum::Json;
     use axum::Router;
-    use axum::extract::Path;
+    use axum::extract::{Path, Query};
     use axum::http::{StatusCode, header};
     use axum::response::IntoResponse;
     use axum::routing::get;
     use chrono::{DateTime, Utc};
     use control_core::{ControlPlane, Event, RunStatus, SettlementBoard, is_safe_run_id};
-    use serde::Serialize;
+    use serde::{Deserialize, Serialize};
     use serde_json::json;
 
     use super::caretaker::caretaker;
@@ -106,6 +106,7 @@ pub mod api {
                 get(await_run_observation),
             )
             .route("/api/control/runs/{run_id}/transcript", get(transcript))
+            .route("/api/control/transcripts", get(transcripts))
             .route("/api/control/runs/{run_id}", get(run))
             .route("/api/control/lifecycle", get(lifecycle))
             .route("/api/control/lifecycle/{run_id}", get(lifecycle_run))
@@ -253,6 +254,78 @@ pub mod api {
             })),
         )
             .into_response()
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct TranscriptSearchQuery {
+        q: Option<String>,
+    }
+
+    fn snippet_for(body: &str, query: &str) -> String {
+        const LIMIT: usize = 160;
+        let haystack = body.trim();
+        if haystack.is_empty() {
+            return String::new();
+        }
+        if query.is_empty() {
+            return haystack.chars().take(LIMIT).collect();
+        }
+        let lower = haystack.to_ascii_lowercase();
+        let needle = query.to_ascii_lowercase();
+        let Some(at) = lower.find(&needle) else {
+            return haystack.chars().take(LIMIT).collect();
+        };
+        let start = at.saturating_sub(24);
+        haystack
+            .chars()
+            .skip(start)
+            .take(LIMIT)
+            .collect::<String>()
+            .replace('\n', " ")
+    }
+
+    /// Every human transcript tail on this host, optionally filtered by `q`.
+    async fn transcripts(Query(query): Query<TranscriptSearchQuery>) -> impl IntoResponse {
+        let plane = ControlPlane::from_env();
+        let needle = query
+            .q
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let mut items = Vec::new();
+        for run in plane.load_snapshots().into_iter().take(200) {
+            let preview = crate::run_detail::load_human_transcript(&plane, &run.run_id);
+            if !preview.available {
+                continue;
+            }
+            if !needle.is_empty()
+                && !preview
+                    .body
+                    .to_ascii_lowercase()
+                    .contains(&needle.to_ascii_lowercase())
+                && !run.run_id.to_ascii_lowercase().contains(&needle.to_ascii_lowercase())
+                && !run.agent.to_ascii_lowercase().contains(&needle.to_ascii_lowercase())
+            {
+                continue;
+            }
+            items.push(json!({
+                "run_id": run.run_id,
+                "agent": run.agent,
+                "skill": run.skill,
+                "root": run.root,
+                "updated_at": run.updated_at,
+                "available": preview.available,
+                "truncated": preview.truncated,
+                "snippet": snippet_for(&preview.body, &needle),
+            }));
+        }
+        Json(json!({
+            "count": items.len(),
+            "q": needle,
+            "items": items,
+        }))
+        .into_response()
     }
 
     /// Lifecycle run summaries, newest-first by `state.json` mtime.

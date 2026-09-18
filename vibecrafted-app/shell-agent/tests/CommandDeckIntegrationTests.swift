@@ -311,6 +311,16 @@ struct CommandDeckIntegrationTests {
     guard case .unavailable(let emptyReason) = slack.resolve(in: configured("[tools.slack-console]\nurl = \"\"\n")),
       emptyReason.contains("not configured")
     else { throw Failure(message: "An empty url was not read as unconfigured") }
+    let frame = ToolDestination.named("vc-frame")!
+    guard case .unavailable(let frameReason) = frame.resolve(in: configured(nil)),
+      frameReason.contains("vc-frame web"), frameReason.contains("[tools.vc-frame]"),
+      frameReason.contains("/fixture/home/.config/vibecrafted/config.toml")
+    else { throw Failure(message: "Unconfigured Frame did not name vc-frame web and the config file") }
+    guard case .available(let frameURL, .service(let frameOrigin)) = frame.resolve(in: configured(
+      "[tools.vc-frame]\nurl = \"http://127.0.0.1:8082/\"\n")),
+      frameURL.absoluteString == "http://127.0.0.1:8082/",
+      frameOrigin == WebRuntimeOrigin(url: URL(string: "http://127.0.0.1:8082/")!)!
+    else { throw Failure(message: "Configured Frame did not resolve to a service scope on its own origin") }
     for invalid in [
       "[tools.slack-console]\nurl = \"ftp://x/console\"\n",
       "[tools.slack-console]\nurl = \"http://u:p@x/console\"\n",
