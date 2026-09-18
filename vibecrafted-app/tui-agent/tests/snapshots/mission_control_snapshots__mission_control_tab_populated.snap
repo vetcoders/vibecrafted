@@ -8,7 +8,7 @@ workspace: repo  |  active 0  stalled 0  |  scope: live  |  Mission Control
 │ Monitor live 0 │ Dispatch workflow/claude │ Controls 4 │ Mission 2|4                                                 │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌Active dispatches─────────────────────┐┌History (30d)─────────────────────────┐┌Mission posture───────────────────────┐
-│2 running                             ││128 derived runs scanned                 ││model parity 40/128                   │
+│2 running                             ││128 derived runs scanned              ││model parity 40/128                   │
 │4 stalled queue items                 ││3 agents · 3 skills                   ││duration parity 2/128                 │
 │                                      ││                                      ││                                      │
 └──────────────────────────────────────┘└──────────────────────────────────────┘└──────────────────────────────────────┘
@@ -31,12 +31,12 @@ workspace: repo  |  active 0  stalled 0  |  scope: live  |  Mission Control
 │? duration parity   0/0 missing durati…││  exit_code 2 · 3h ago               ││! [stall] resume lost-070000-55555 (c…│
 │✓ control-plane     /fixture/state (3 …││✗ lost-070000-55555 codex / workflow ││! [polarize] polarize polr-42 (pass /…│
 │✓ artifact-root     /fixture/artifacts ││  stalled heartbeat · 5h ago         ││- [report] open report just-091500-11…│
-│✓ derived runs     128 derived runs s…││                                     ││                                      │
+│✓ derived runs      128 derived runs s…││                                     ││                                      │
 └───────────────────────────────────────┘└─────────────────────────────────────┘└──────────────────────────────────────┘
 ┌ Mission Control receipt ─────────────────────────────────────────────────────────────────────────────────────────────┐
 │artifact root: /fixture/artifacts                                                                                     │
 │generated at:  2026-06-10T12:00:00+00:00                                                                              │
-│1 snapshot parse failures skipped                                                                                    │
+│1 snapshot parse failures skipped                                                                                     │
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 Mission Control: click a panel  wheel that pane  ↑/↓ focus  r refresh
