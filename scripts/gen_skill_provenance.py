@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the historical `SKILL.md` provenance manifest for `vc-*` skills.
+"""Generate the historical release manifest for `vc-*` skills.
 
 WHY A MANIFEST AND NOT A MARKER
 -------------------------------
@@ -8,15 +8,20 @@ pre-3.x installer that materialized copies instead of views. The installer may
 only remove such a copy when it can *prove* the bytes came from Vibecrafted, and
 the `vc-` name alone never proves that.
 
-Content markers (`MANAGED_SKILL_MARKERS` in `scripts/vetcoders_install.py`) prove
-provenance only for skills generated after those tokens existed. Measured against
-the real June-2026 copies recovered from `~/.junie/skills`, *none* carried any
-marker — yet every one of their `SKILL.md` files is still present, byte for byte,
-as a blob in this repository's history. So the soundest offline proof is the set
-of hashes Vibecrafted has ever shipped for a skill.
+Content markers prove provenance only for skills generated after those tokens
+existed. Measured against the real June-2026 copies recovered from
+`~/.junie/skills`, *none* carried any marker — yet every one of their files is
+still present, byte for byte or at least path for path, in this repository's
+history. So the soundest offline proof is what we have actually released:
 
-This script walks every `vc-*/SKILL.md` blob reachable from any ref, hashes the
-blob contents with sha256, and merges the result into the shipped manifest.
+* the sha256 of every `SKILL.md` ever committed for the skill, and
+* every relative file path that ever lived under a `vc-<name>/` directory.
+
+The installer claims a copy only when both hold: a `SKILL.md` it recognizes as
+one of its own releases, and not one file path it never shipped. A `SKILL.md`
+whose hash is absent was edited by its owner, and a foreign file next to a
+shipped `SKILL.md` is the operator's own work — either way the directory is
+custom content and stays untouched.
 
 Properties the installer depends on:
 
@@ -42,14 +47,23 @@ import hashlib
 import json
 import subprocess
 import sys
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
-SCHEMA = "vibecrafted.skill-provenance.v1"
+SCHEMA = "vibecrafted.skill-provenance.v2"
 STORE_RELATIVE = Path("vibecrafted-core/vibecrafted_core/skills")
 MANIFEST_NAME = "SKILL_PROVENANCE.json"
 SKILL_FILE = "SKILL.md"
 NULL_OID = "0" * 40
+
+
+@dataclass
+class SkillRecord:
+    """Everything Vibecrafted has ever released for one skill."""
+
+    sha256: set[str] = field(default_factory=set)
+    paths: set[str] = field(default_factory=set)
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -76,6 +90,34 @@ def _skill_name(path: str) -> str | None:
         return None
     owner = parts[-2]
     return owner if owner.startswith("vc-") else None
+
+
+def _ignored_path(rel: str) -> bool:
+    """True for editor/interpreter litter that is never part of a release.
+
+    Mirrors `_skill_fingerprint_ignored` in `scripts/vetcoders_install.py`: the
+    installer skips these when auditing a copy, so recording them here would
+    only put unreachable entries in the manifest.
+    """
+    parts = rel.split("/")
+    return (
+        "__pycache__" in parts or parts[-1] == ".DS_Store" or parts[-1].endswith(".pyc")
+    )
+
+
+def _skill_relative_path(path: str) -> tuple[str, str] | None:
+    """Split a repo path into `(skill name, path relative to the skill dir)`.
+
+    The *first* `vc-*` component that is not the last one names the skill: a
+    `vc-*` directory nested inside a skill belongs to the outer skill's tree,
+    and a `vc-*` file (`bin/vc-review`, `assets/vc-terminal.svg`) is not a
+    skill directory at all.
+    """
+    parts = path.split("/")
+    for index, part in enumerate(parts[:-1]):
+        if part.startswith("vc-"):
+            return part, "/".join(parts[index + 1 :])
+    return None
 
 
 def collect_history_oids(repo: Path) -> dict[str, set[str]]:
@@ -115,6 +157,41 @@ def collect_history_oids(repo: Path) -> dict[str, set[str]]:
     return oids
 
 
+def collect_history_paths(repo: Path, names: set[str]) -> dict[str, set[str]]:
+    """Map skill name → every relative file path ever committed under it.
+
+    `-z` is what keeps this honest: without it git quotes any path outside
+    ASCII, and the localized `pl/` mirror is full of them. Only names in
+    `names` are recorded, which is the set of directories that have ever held a
+    `SKILL.md` — that, and not the `vc-` prefix, is what makes a directory a
+    skill, so `vc-frame/` and friends stay out of the manifest.
+    """
+    raw = _git(
+        repo,
+        "log",
+        "--all",
+        "--name-only",
+        "-z",
+        "--no-renames",
+        "--format=",
+        "--",
+        "*/vc-*/*",
+        "vc-*/*",
+    )
+    paths: dict[str, set[str]] = {}
+    for entry in raw.split("\0"):
+        if not entry:
+            continue
+        split = _skill_relative_path(entry)
+        if split is None:
+            continue
+        name, rel = split
+        if name not in names or _ignored_path(rel):
+            continue
+        paths.setdefault(name, set()).add(rel)
+    return paths
+
+
 def hash_blobs(repo: Path, oids: set[str]) -> dict[str, str]:
     """Map each git blob oid to the sha256 of its contents.
 
@@ -148,28 +225,38 @@ def hash_blobs(repo: Path, oids: set[str]) -> dict[str, str]:
     return digests
 
 
-def collect_worktree_hashes(store: Path) -> dict[str, set[str]]:
-    """Map skill name → sha256 of the CURRENT `SKILL.md` under the store dir.
+def collect_worktree(store: Path) -> dict[str, SkillRecord]:
+    """Read the CURRENT store: SKILL.md hashes plus every file path under a skill.
 
     The working tree is not history yet: an edit committed in the same change as
     a regeneration must already be provable, or the very release that ships the
     manifest would fail its own freshness gate.
     """
-    hashes: dict[str, set[str]] = {}
+    records: dict[str, SkillRecord] = {}
     if not store.is_dir():
-        return hashes
+        return records
     for skill_md in sorted(store.glob(f"**/{SKILL_FILE}")):
         name = _skill_name(skill_md.relative_to(store).as_posix())
         if name is None:
             continue
-        hashes.setdefault(name, set()).add(
+        records.setdefault(name, SkillRecord()).sha256.add(
             hashlib.sha256(skill_md.read_bytes()).hexdigest()
         )
-    return hashes
+    for path in sorted(store.glob("**/*")):
+        if path.is_dir() and not path.is_symlink():
+            continue
+        split = _skill_relative_path(path.relative_to(store).as_posix())
+        if split is None:
+            continue
+        name, rel = split
+        if name not in records or _ignored_path(rel):
+            continue
+        records[name].paths.add(rel)
+    return records
 
 
-def load_manifest(path: Path) -> dict[str, set[str]]:
-    """Read the existing manifest's hash sets, tolerating absence or corruption."""
+def load_manifest(path: Path) -> dict[str, SkillRecord]:
+    """Read the existing manifest, tolerating absence or corruption."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -177,37 +264,73 @@ def load_manifest(path: Path) -> dict[str, set[str]]:
     skills = data.get("skills") if isinstance(data, dict) else None
     if not isinstance(skills, dict):
         return {}
-    merged: dict[str, set[str]] = {}
-    for name, hashes in skills.items():
-        if isinstance(name, str) and isinstance(hashes, list):
-            merged[name] = {h for h in hashes if isinstance(h, str)}
+    merged: dict[str, SkillRecord] = {}
+    for name, entry in skills.items():
+        if not isinstance(name, str) or not isinstance(entry, dict):
+            continue
+        merged[name] = SkillRecord(
+            _string_set(entry.get("sha256")), _string_set(entry.get("paths"))
+        )
     return merged
 
 
-def render_manifest(skills: dict[str, set[str]], generated_at: str) -> str:
+def _string_set(value: object) -> set[str]:
+    """Coerce an untrusted manifest list into a set of strings."""
+    if not isinstance(value, list):
+        return set()
+    return {item for item in value if isinstance(item, str)}
+
+
+def render_manifest(skills: dict[str, SkillRecord], generated_at: str) -> str:
     """Serialize the manifest with sorted keys and a trailing newline."""
     payload = {
         "schema": SCHEMA,
         "generated_at": generated_at,
-        "skills": {name: sorted(skills[name]) for name in sorted(skills)},
+        "skills": {
+            name: {
+                "sha256": sorted(skills[name].sha256),
+                "paths": sorted(skills[name].paths),
+            }
+            for name in sorted(skills)
+        },
     }
     return json.dumps(payload, indent=2, sort_keys=False) + "\n"
 
 
-def build(repo: Path, manifest_path: Path, store: Path) -> dict[str, set[str]]:
+def build(repo: Path, manifest_path: Path, store: Path) -> dict[str, SkillRecord]:
     """Union of the existing manifest, git history, and the current store."""
     merged = load_manifest(manifest_path)
     oids = collect_history_oids(repo)
     digests = hash_blobs(repo, {oid for group in oids.values() for oid in group})
     for name, group in oids.items():
-        bucket = merged.setdefault(name, set())
+        record = merged.setdefault(name, SkillRecord())
         for oid in group:
             digest = digests.get(oid)
             if digest:
-                bucket.add(digest)
-    for name, group in collect_worktree_hashes(store).items():
-        merged.setdefault(name, set()).update(group)
+                record.sha256.add(digest)
+    worktree = collect_worktree(store)
+    for name, group in collect_history_paths(repo, set(oids) | set(worktree)).items():
+        merged.setdefault(name, SkillRecord()).paths.update(group)
+    for name, record in worktree.items():
+        target = merged.setdefault(name, SkillRecord())
+        target.sha256.update(record.sha256)
+        target.paths.update(record.paths)
     return merged
+
+
+def _missing(
+    merged: dict[str, SkillRecord], existing: dict[str, SkillRecord]
+) -> dict[str, list[str]]:
+    """Entries present in `merged` that the committed manifest does not carry."""
+    gaps: dict[str, list[str]] = {}
+    for name, record in merged.items():
+        known = existing.get(name, SkillRecord())
+        absent = sorted(record.sha256 - known.sha256) + sorted(
+            record.paths - known.paths
+        )
+        if absent:
+            gaps[name] = absent
+    return gaps
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -239,17 +362,13 @@ def main(argv: list[str] | None = None) -> int:
     merged = build(repo, manifest_path, store)
     existing = load_manifest(manifest_path)
     if args.check:
-        # Only the hash sets gate freshness; `generated_at` is provenance of the
-        # run, not of the bytes, and must never fail a check on its own.
-        missing = {
-            name: sorted(hashes - existing.get(name, set()))
-            for name, hashes in merged.items()
-            if hashes - existing.get(name, set())
-        }
+        # Only the proof sets gate freshness; `generated_at` is provenance of
+        # the run, not of the bytes, and must never fail a check on its own.
+        missing = _missing(merged, existing)
         if missing:
-            print(f"{manifest_path} is out of date; missing hashes:", file=sys.stderr)
-            for name, hashes in sorted(missing.items()):
-                print(f"  {name}: {', '.join(hashes)}", file=sys.stderr)
+            print(f"{manifest_path} is out of date; missing entries:", file=sys.stderr)
+            for name, entries in sorted(missing.items()):
+                print(f"  {name}: {', '.join(entries)}", file=sys.stderr)
             print(
                 "Regenerate with: scripts/gen_skill_provenance.py",
                 file=sys.stderr,
@@ -262,8 +381,9 @@ def main(argv: list[str] | None = None) -> int:
     manifest_path.write_text(
         render_manifest(merged, date.today().isoformat()), encoding="utf-8"
     )
-    total = sum(len(hashes) for hashes in merged.values())
-    print(f"{manifest_path}: {len(merged)} skills, {total} hashes")
+    hashes = sum(len(record.sha256) for record in merged.values())
+    paths = sum(len(record.paths) for record in merged.values())
+    print(f"{manifest_path}: {len(merged)} skills, {hashes} hashes, {paths} paths")
     return 0
 
 
