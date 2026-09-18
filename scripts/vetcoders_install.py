@@ -10734,6 +10734,42 @@ def layout_status(store_path: Path) -> dict[str, Any]:
     }
 
 
+def unremovable_orphan_reason(
+    store_path: Path,
+    location: str,
+    entry: Path,
+    provenance: Mapping[str, SkillProvenance],
+) -> str | None:
+    """Why a real orphan directory must stay, or None when it may be removed.
+
+    A name leaving the bundle says nothing about who wrote the directory still
+    carrying it. `vc-canvas` is a skill we retired; it is also a name an
+    operator could put their own work under, and this code used to `rmtree` it
+    either way — with `ask_yn` defaulting to yes and returning the default in a
+    non-interactive install, so a piped install answered for them.
+
+    So the same proof decides here as for a shadowing copy, which is the same
+    question in a different place: may the installer delete this directory? The
+    manifest covers retired skills for free, because it is built from all of
+    history rather than from the current bundle. Plus the two rails
+    reconciliation uses: never follow a symlink out of the tree, and never let a
+    runtime entry route a removal into the canonical store.
+    """
+    if not _path_is_symlink_free(entry):
+        return (
+            "it is reached through a symlink, so removing it would delete another tree"
+        )
+    resolved = entry.resolve(strict=False)
+    store_resolved = store_path.resolve(strict=False)
+    if location != "store" and (
+        resolved == store_resolved or store_resolved in resolved.parents
+    ):
+        return f"it resolves into the canonical store ({resolved})"
+    return unproven_skill_copy_reason(
+        entry, provenance.get(entry.name, SkillProvenance())
+    )
+
+
 def prune_orphaned_skills(
     store_path: Path,
     runtimes: list[str],
@@ -10742,7 +10778,15 @@ def prune_orphaned_skills(
     orphaned_entries: list[tuple[str, Path]] | None = None,
     interactive: bool = True,
 ) -> int:
-    """Remove vc-* skills from store and runtime dirs that are no longer in the bundle."""
+    """Remove vc-* skills from store and runtime dirs that are no longer in the bundle.
+
+    A pointer or a stray file is removed as before — a view we wrote, or the
+    remains of one. A real *directory* has to prove it came from Vibecrafted
+    first, exactly as a shadowing copy does, and is quarantined under
+    `shadowed-views-<timestamp>/<location>/<skill>` before it goes. One that
+    cannot is kept, reported with the command to move it aside, and never
+    offered for removal at the prompt.
+    """
     orphans = orphaned_entries or collect_orphaned_skills(
         store_path, runtimes, current_bundle
     )
@@ -10750,28 +10794,62 @@ def prune_orphaned_skills(
     if not orphans:
         return 0
 
-    print(bold("Orphaned skills detected (no longer in bundle):"))
+    provenance = load_skill_provenance(store_path)
+    removable: list[tuple[str, Path]] = []
+    kept: list[tuple[str, Path, str]] = []
     for location, entry in orphans:
-        kind = "symlink" if entry.is_symlink() else "dir"
+        if _is_owned_pointer(entry) or entry.is_file():
+            removable.append((location, entry))
+            continue
+        reason = unremovable_orphan_reason(store_path, location, entry, provenance)
+        if reason is None:
+            removable.append((location, entry))
+        else:
+            kept.append((location, entry, reason))
+
+    print(bold("Orphaned skills detected (no longer in bundle):"))
+    for location, entry in removable:
+        kind = "symlink" if _is_owned_pointer(entry) else "dir"
         print(f"  {yellow(f'[{kind}]')} {location}/{entry.name}")
+    for location, entry, reason in kept:
+        print(
+            f"  {WARN} Keeping {location}/{entry.name}: {reason}; move it aside "
+            f"yourself if it is stale: mv {shlex_quote(str(entry))} "
+            f"{shlex_quote(str(entry) + '.bak')}"
+        )
     print()
+
+    if not removable:
+        return 0
 
     if interactive and not ask_yn("Remove orphaned skills?", default=True):
         print(dim("  Keeping orphaned skills."))
         print()
         return 0
 
+    quarantine_root = _backup_root(store_path) / (
+        SHADOW_QUARANTINE_PREFIX + datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    )
     removed = 0
-    for location, entry in orphans:
+    for location, entry in removable:
+        is_pointer = _is_owned_pointer(entry)
         if dry_run:
+            if not is_pointer and entry.is_dir():
+                print(
+                    f"  {dim('quarantine')} {entry} -> "
+                    f"{quarantine_root / location / entry.name}"
+                )
             print(f"  {dim('rm')} {entry}")
             removed += 1
-        else:
-            if entry.is_symlink() or entry.is_file():
-                entry.unlink(missing_ok=True)
-            elif entry.is_dir():
-                shutil.rmtree(entry)
-            removed += 1
+            continue
+        if is_pointer:
+            _remove_view_pointer(entry)
+        elif entry.is_file():
+            entry.unlink(missing_ok=True)
+        elif entry.is_dir():
+            _copy_path_to_backup(entry, quarantine_root / location / entry.name)
+            shutil.rmtree(entry)
+        removed += 1
 
     if removed:
         print(f"  {OK} Removed {removed} orphaned entries")

@@ -1041,6 +1041,124 @@ def test_a_skills_root_linked_into_the_store_leaves_the_store_intact(
 
 
 # ---------------------------------------------------------------------------
+# Orphans: a name leaving the bundle is not a licence to delete the directory
+# ---------------------------------------------------------------------------
+
+
+def test_an_unproven_orphan_survives_a_non_interactive_install(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """`vc-canvas` is a skill we retired. It is also a name an operator can put
+    their own work under, and orphan pruning used to rmtree it either way —
+    with `ask_yn` returning its `default=True` in a non-interactive install, so
+    a piped install answered the prompt for them."""
+    home = tmp_path / "home"
+    crafted_home = tmp_path / "crafted"
+    store = tmp_path / "store"
+    _pin_home(monkeypatch, home, crafted_home)
+    _store_skill(store, "vc-x", "canonical body\n")
+    mine = home / ".junie" / "skills" / "vc-canvas"
+    mine.mkdir(parents=True)
+    (mine / "SKILL.md").write_text("# my own canvas skill\n", encoding="utf-8")
+    (mine / "notes.md").write_text("mine\n", encoding="utf-8")
+
+    removed = installer.prune_orphaned_skills(
+        store, ["junie"], {"vc-x"}, interactive=False
+    )
+
+    assert removed == 0
+    assert (mine / "SKILL.md").read_text(encoding="utf-8") == "# my own canvas skill\n"
+    assert (mine / "notes.md").is_file()
+    assert _quarantine_dirs(crafted_home) == []
+    out = capsys.readouterr().out
+    assert "Keeping junie/vc-canvas" in out
+    assert "not a Vibecrafted release" in out
+
+
+def test_a_proven_retired_copy_is_quarantined_then_removed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The manifest is built from all of history, so a skill that has left the
+    bundle is still provable — and worth removing, once it is safely aside."""
+    home = tmp_path / "home"
+    crafted_home = tmp_path / "crafted"
+    store = tmp_path / "store"
+    _pin_home(monkeypatch, home, crafted_home)
+    _store_skill(store, "vc-x", "canonical body\n")
+    retired = home / ".junie" / "skills" / "vc-canvas"
+    retired.mkdir(parents=True)
+    (retired / "SKILL.md").write_text(SKILL_MD + "retired body\n", encoding="utf-8")
+    _prove(store, "vc-canvas", retired)
+
+    removed = installer.prune_orphaned_skills(
+        store, ["junie"], {"vc-x"}, interactive=False
+    )
+
+    assert removed == 1
+    assert not retired.exists()
+    quarantined = _quarantine_dirs(crafted_home)
+    assert (
+        (quarantined[0] / "junie" / "vc-canvas" / "SKILL.md")
+        .read_text(encoding="utf-8")
+        .endswith("retired body\n")
+    )
+
+
+def test_an_orphan_symlink_is_still_removed_as_a_pointer(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A view we wrote is ours to remove, and nothing is quarantined for it."""
+    home = tmp_path / "home"
+    crafted_home = tmp_path / "crafted"
+    store = tmp_path / "store"
+    _pin_home(monkeypatch, home, crafted_home)
+    _store_skill(store, "vc-x", "canonical body\n")
+    gone = store / "vc-canvas"
+    gone.mkdir()
+    (gone / "SKILL.md").write_text("retired\n", encoding="utf-8")
+    view = home / ".junie" / "skills" / "vc-canvas"
+    view.parent.mkdir(parents=True)
+    view.symlink_to(gone)
+
+    removed = installer.prune_orphaned_skills(
+        store,
+        ["junie"],
+        {"vc-x"},
+        orphaned_entries=[("junie", view)],
+        interactive=False,
+    )
+
+    assert removed == 1
+    assert not view.is_symlink()
+    assert (gone / "SKILL.md").is_file(), "the target is not ours to delete here"
+    assert _quarantine_dirs(crafted_home) == []
+
+
+def test_an_orphan_reached_through_a_symlink_is_refused(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    home = tmp_path / "home"
+    crafted_home = tmp_path / "crafted"
+    store = tmp_path / "store"
+    _pin_home(monkeypatch, home, crafted_home)
+    _store_skill(store, "vc-x", "canonical body\n")
+    elsewhere = tmp_path / "notes"
+    (elsewhere / "vc-canvas").mkdir(parents=True)
+    (elsewhere / "vc-canvas" / "SKILL.md").write_text("mine\n", encoding="utf-8")
+    junie = home / ".junie"
+    junie.mkdir(parents=True)
+    (junie / "skills").symlink_to(elsewhere)
+
+    removed = installer.prune_orphaned_skills(
+        store, ["junie"], {"vc-x"}, interactive=False
+    )
+
+    assert removed == 0
+    assert (elsewhere / "vc-canvas" / "SKILL.md").is_file()
+    assert "reached through a symlink" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
 # Symlinked runtime skill dirs must never route a removal into the store
 # ---------------------------------------------------------------------------
 
