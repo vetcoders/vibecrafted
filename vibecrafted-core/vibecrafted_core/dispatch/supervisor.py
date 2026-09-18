@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import signal
 import subprocess
 import threading
@@ -214,6 +215,17 @@ def workflow_cell_launcher(
         base_dir = Path(root)
         # Model and exact brief bytes were admitted together by parse_dispatch.
         source = cut.source_text if cut.source_text is not None else cut.prompt
+        # The execution runtime is the cut's durable declaration, stamped with
+        # the geometry — never re-derived from transient fields at launch
+        # time. It must reach normalize_launch_spec INSIDE the payload: the
+        # Living Tree guard (base must equal HEAD) runs during admission, and
+        # a worktree cut whose worker already committed has HEAD ahead of the
+        # pinned baseline by design (field crash 2026-09-17: repair relaunch
+        # died on that guard because runtime_class was patched in only after
+        # normalization).
+        runtime_class = cut.runtime_class or (
+            "local-worktrees" if cut.runtime_branch else "living-tree"
+        )
         spec = normalize_launch_spec(
             {
                 "agent": cut.agent,
@@ -223,6 +235,7 @@ def workflow_cell_launcher(
                 "base": cut.baseline_sha,
                 "runtime": "headless",
                 "model": cut.model,
+                "runtime_class": runtime_class,
             },
             base_dir,
         )
@@ -234,7 +247,11 @@ def workflow_cell_launcher(
             source_digest=cut.source_digest
             or hashlib.sha256(source.encode("utf-8")).hexdigest(),
             model_source=cut.model_source,
-            runtime_class="local-worktrees" if cut.runtime_branch else "living-tree",
+            runtime_class=runtime_class,
+            # The dispatcher already owns this cut's prepared checkout (root IS
+            # the worktree); worktree=False stops launch_workflow from cutting
+            # a second, nested checkout for the same cell.
+            worktree=False,
         )
         runtime_env = {
             "VIBECRAFTED_DISPATCH_CUT_ID": cut.id,
@@ -475,8 +492,23 @@ class DispatchSupervisor:
                         cut_id for cut_id, verdict in verdicts.items() if verdict.ok
                     }
                     completed_bad = set(verdicts) - completed_ok
+                    # A failed `critical = false` cut was declared expendable
+                    # by the plan: with the (default) fail-open policy it
+                    # resolves its dependents' edges instead of stopping them.
+                    # The dependent still sees the failure in its baton.
+                    by_id = {cut.id: cut for cut in self.dispatch.cuts}
+                    tolerated_bad = (
+                        {
+                            cut_id
+                            for cut_id in completed_bad
+                            if not by_id[cut_id].critical
+                        }
+                        if self.policy.on_noncritical_dep_fail == "continue"
+                        else set()
+                    )
+                    blocking_bad = completed_bad - tolerated_bad
                     for cut_id, cut in list(pending.items()):
-                        failed_dependencies = set(cut.depends_on) & completed_bad
+                        failed_dependencies = set(cut.depends_on) & blocking_bad
                         if failed_dependencies:
                             verdict = Verdict(
                                 cut_id=cut.id,
@@ -500,8 +532,19 @@ class DispatchSupervisor:
                             )
                             made_progress = True
                             continue
-                        if not set(cut.depends_on).issubset(completed_ok):
+                        if not set(cut.depends_on).issubset(
+                            completed_ok | tolerated_bad
+                        ):
                             continue
+                        missing_deliveries = sorted(set(cut.depends_on) & tolerated_bad)
+                        if missing_deliveries:
+                            self._journal(
+                                f"[{cut.id}] launching despite failed non-critical"
+                                f" dependencies: {', '.join(missing_deliveries)}"
+                                " (critical = false,"
+                                " policy on_noncritical_dep_fail = continue);"
+                                " their failures ride along in the baton"
+                            )
                         if line_broken or not free_slots:
                             continue
                         if cut.integrator and active:
@@ -806,7 +849,10 @@ class DispatchSupervisor:
         )
         if recovering_active or recovering_owned_progress:
             geometry = recovered_geometry
-            self.worktrees.recover_active(geometry)
+            self.worktrees.recover_active(
+                geometry,
+                delivered_sha=str(previous.get("delivered_commit_sha") or ""),
+            )
             if recovering_owned_progress:
                 self._mark_resume_owned_progress(cut, previous)
         else:
@@ -818,9 +864,14 @@ class DispatchSupervisor:
             )
         self._geometries[cut.id] = geometry
         recovered = recovering_active or recovering_owned_progress
+        # Integrators run in the main checkout on the live branch; every other
+        # cut owns a linked worktree. This is the cut's durable execution
+        # runtime — repair/resume relaunches inherit it from here (D1).
+        runtime_class = "living-tree" if cut.integrator else "local-worktrees"
         self._receipt_store.update(
             cut.id,
             scheduler_slot=cut.scheduler_slot,
+            runtime_class=runtime_class,
             worktree_path=geometry.worktree_path,
             target_path=geometry.target_path,
             artifact_path=geometry.artifact_path,
@@ -840,6 +891,7 @@ class DispatchSupervisor:
             cut,
             runtime_root=geometry.worktree_path,
             runtime_branch=geometry.branch,
+            runtime_class=runtime_class,
             baseline_sha=geometry.baseline_sha,
             target_path=geometry.target_path,
             artifact_path=geometry.artifact_path,
@@ -863,9 +915,21 @@ class DispatchSupervisor:
             return self._prefer_live_head(
                 str(self.dispatch.meta.baseline.get("head") or self._git_head())
             )
+        # A failed non-critical dependency (fail-open policy) delivers no
+        # baseline; its edge is resolved by the scheduler, so it must not
+        # poison the SHA arithmetic here either.
+        delivered_deps = [
+            dependency
+            for dependency in cut.depends_on
+            if dependency in verdicts and verdicts[dependency].ok
+        ]
+        if not delivered_deps and self.policy.on_noncritical_dep_fail == "continue":
+            return self._prefer_live_head(
+                str(self.dispatch.meta.baseline.get("head") or self._git_head())
+            )
         dependency_commits = [
             verdicts[dependency].commit
-            for dependency in cut.depends_on
+            for dependency in delivered_deps
             if verdicts[dependency].commit
         ]
         if not dependency_commits:
@@ -882,7 +946,7 @@ class DispatchSupervisor:
         by_id = {planned.id: planned for planned in self.dispatch.cuts}
         non_integrated = [
             dependency
-            for dependency in cut.depends_on
+            for dependency in delivered_deps
             if not by_id[dependency].integrator
         ]
         if non_integrated:
@@ -891,7 +955,7 @@ class DispatchSupervisor:
             )
         declared_integrated = [
             str(self._receipt_store.cut(dependency).get("integrated_sha") or "")
-            for dependency in cut.depends_on
+            for dependency in delivered_deps
         ]
         if any(not commit for commit in declared_integrated):
             raise WorktreeContractError(
@@ -1110,7 +1174,10 @@ class DispatchSupervisor:
             model=cut.model,
             model_source=cut.model_source,
             baseline_sha=cut.baseline_sha,
-            runtime_class="local-worktrees" if cut.runtime_branch else "living-tree",
+            # Durable declaration first (D1); the transient-branch fallback
+            # only covers pre-stamp cuts from legacy receipts.
+            runtime_class=cut.runtime_class
+            or ("local-worktrees" if cut.runtime_branch else "living-tree"),
         )
         recovered = recover_launch_receipt(spec, env=env)
         if not recovered or not recovered.get("accepted"):
@@ -1889,6 +1956,8 @@ class DispatchSupervisor:
             )
         for failure in verdict.failures:
             self._journal(f"[{cut.id}] verifier failure: {failure}")
+        if not verdict.ok:
+            self._journal_verifier_interpreters(cut, verdict, verifier_env)
         if verdict.ok:
             self._receipt_store.update(
                 cut.id,
@@ -1896,6 +1965,58 @@ class DispatchSupervisor:
                 gates=[evidence.to_dict() for evidence in verdict.verifiers],
             )
         return verdict
+
+    def _journal_verifier_interpreters(
+        self, cut: Cut, verdict: Verdict, extra_env: dict[str, str] | None
+    ) -> None:
+        """Journal which binary each failed verifier's leading command resolved to.
+
+        A red verify can be purely environmental: the supervisor shell's PATH
+        resolved a different interpreter than the worker's (field incident
+        2026-09-17: bare ``python3`` hit the macOS system 3.9 without
+        ``tomllib`` and killed a delivered cut). Recording ``path`` and
+        ``--version`` per failed command makes that diagnosis one journal
+        read instead of a manual ``which -a`` session.
+        """
+        from .verify import sanitize_env
+
+        probe_env = sanitize_env(extra=extra_env)
+        probed: set[str] = set()
+        for evidence in verdict.verifiers:
+            if evidence.ok:
+                continue
+            try:
+                head = shlex.split(evidence.command)[0]
+            except (ValueError, IndexError):
+                continue
+            if not head or head in probed:
+                continue
+            probed.add(head)
+            quoted = shlex.quote(head)
+            try:
+                probe = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        f"command -v {quoted} && {quoted} --version 2>&1 | head -n 1",
+                    ],
+                    env=probe_env,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            resolved = " | ".join(
+                line.strip()
+                for line in (probe.stdout + probe.stderr).splitlines()
+                if line.strip()
+            )
+            self._journal(
+                f"[{cut.id}] verifier interpreter:"
+                f" {head} -> {resolved or 'not found on verifier PATH'}"
+            )
 
     def _acceptance_flip_failures(self, cut: Cut) -> list[str]:
         """Refuse to verify a cut whose brief still carries unflipped `[ ]` boxes.

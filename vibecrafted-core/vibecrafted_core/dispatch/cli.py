@@ -22,6 +22,62 @@ from .schema import render_cell_prompt
 from .supervisor import DispatchResult, cleanup_settled_run, run_dispatch
 from .worktrees import canonical_artifact_root
 
+# Verbs agents keep inventing for this CLI (observed in the wild: a planning
+# session instructed `vibecrafted dispatch preflight <toml>` / `dispatch launch
+# <toml>`, neither of which exists). Treating such a token as a TOML path
+# yields a misleading "unreadable file" — refuse it loudly with the pilot
+# instead. The canonical surface stays exactly four forms; no aliases.
+_HALLUCINATED_VERBS = {
+    "check",
+    "doctor",
+    "dry-run",
+    "dryrun",
+    "launch",
+    "plan",
+    "preflight",
+    "resume",
+    "run",
+    "start",
+    "status",
+    "validate",
+    "verify",
+}
+
+_PILOT = """canonical dispatch invocations:
+  vibecrafted dispatch <plan.toml> --doctor            # validate only
+  vibecrafted dispatch <plan.toml> --dry-run [--json]  # render prompts, launch nothing
+  vibecrafted dispatch <plan.toml>                     # launch the plan
+  vibecrafted dispatch <plan.toml> --resume <run-id>   # resume a recorded run"""
+
+
+def _refuse_hallucinated_verb(argv: Sequence[str]) -> str:
+    """Return a refusal message when argv starts with an invented subcommand."""
+    positionals = [token for token in argv if not token.startswith("-")]
+    if not positionals or positionals[0].lower() not in _HALLUCINATED_VERBS:
+        return ""
+    if Path(positionals[0]).expanduser().exists():
+        # A real file that happens to share a verb's name is still a plan.
+        return ""
+    verb = positionals[0]
+    plan = positionals[1] if len(positionals) > 1 else "<plan.toml>"
+    corrections = {
+        "preflight": f"vibecrafted dispatch {plan} --doctor && vibecrafted dispatch {plan} --dry-run",
+        "doctor": f"vibecrafted dispatch {plan} --doctor",
+        "check": f"vibecrafted dispatch {plan} --doctor",
+        "validate": f"vibecrafted dispatch {plan} --doctor",
+        "verify": f"vibecrafted dispatch {plan} --doctor",
+        "dry-run": f"vibecrafted dispatch {plan} --dry-run",
+        "dryrun": f"vibecrafted dispatch {plan} --dry-run",
+        "resume": f"vibecrafted dispatch {plan} --resume <run-id>",
+    }
+    suggestion = corrections.get(verb.lower(), f"vibecrafted dispatch {plan}")
+    return (
+        f"unknown dispatch subcommand {verb!r} — this CLI takes a plan path,"
+        " not verbs.\n"
+        f"did you mean: {suggestion}\n"
+        f"{_PILOT}"
+    )
+
 
 def _build_parser() -> argparse.ArgumentParser:
     """Build the argument parser for the ``vibecrafted dispatch`` subcommand."""
@@ -60,6 +116,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Parse argv and run doctor / dry-run / full dispatch; return the process exit code."""
+    raw_argv: Sequence[str] = sys.argv[1:] if argv is None else argv
+    refusal = _refuse_hallucinated_verb(raw_argv)
+    if refusal:
+        print(refusal, file=sys.stderr)
+        return 2
     parser = _build_parser()
     args = parser.parse_args(argv)
     source = Path(args.dispatch_file).expanduser()
