@@ -64,7 +64,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   Transcripts, Structure, Plans, Frame. Workspaces, Sessions, Agents, Live
   runs, Control, Activity and Guide stay in the Overview rail (same URLs).
   AICX search sits on Structure. The artifact index remains the second,
-  document-level navigation.
+  document-level navigation. Clickable links keep the arrow cursor; the
+  web pointing-hand (`cursor: pointer`) is gone.
+- macOS App: Repair Runtime on a healthy config reconciles the LaunchAgent
+  instead of offering a Runtime Pack reinstall. Restart that fails because
+  the launcher hash drifted from the LaunchAgent offers reconcile, not only
+  OK. The service CLI keeps `--launcher` on `VIBECRAFTED_DECLARED_LAUNCHER`
+  when the supervisor is generation-private.
 - Server web: **Agent Manager** (`/agents`) stays distinct from **Live runs**
   (`/runs`); **Sessions** lists canonical run transcripts joined by logical
   session identity. They are Overview-rail catalogs, not extra primary views.

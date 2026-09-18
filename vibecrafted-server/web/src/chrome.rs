@@ -805,6 +805,25 @@ mod tests {
         );
     }
 
+    /// The operator desk is a native surface: clickable links keep the
+    /// arrow. `cursor: pointer` is the web pointing-hand.
+    #[test]
+    fn console_clickable_links_keep_the_arrow_cursor() {
+        let css = console_css();
+        assert!(
+            !css.contains("cursor: pointer"),
+            "the desk must not transform the pointer into a hand"
+        );
+        assert!(
+            css.contains(".server-app-shell a,\n.server-app-shell button,"),
+            "one owner must pin the arrow on every clickable link and control"
+        );
+        assert!(
+            css.contains(".overview-structure-line a {\n  cursor: default;\n}"),
+            "the Overview Structure/Plans line is a link row, not a hand"
+        );
+    }
+
     /// Focus had seven separate `outline: none` suppressions and signalled
     /// itself with a border tint, which is not a focus indicator. One owner now.
     #[test]

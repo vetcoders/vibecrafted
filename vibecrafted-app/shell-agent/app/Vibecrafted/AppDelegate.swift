@@ -1107,17 +1107,25 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   /// one. Recovery ownership stays with the supervisor; this asks once,
   /// observes the answer and reports it.
   private func reconcileControlPlaneEye(
-    install: CanonicalRuntimeInstall, environment: [String: String]
+    install: CanonicalRuntimeInstall,
+    environment: [String: String],
+    completion: (@MainActor (Result<Void, String>) -> Void)? = nil
   ) {
     // One reconcile at a time: overlapping calls would race the supervisor's
     // install lease against itself.
+    func finish(_ result: Result<Void, String>) {
+      completion?(result)
+    }
     guard eyeReconcileProcess?.isRunning != true else {
       lifecycleLog("service reconcile already in flight; not starting a second")
+      finish(.failure("LaunchAgent reconcile is already running."))
       return
     }
     let deck = install.root.appendingPathComponent("bin/vibecrafted")
     guard FileManager.default.isExecutableFile(atPath: deck.path) else {
-      surfaceRuntimeAdvisory("The installed service owner is missing: \(deck.path)")
+      let message = "The installed service owner is missing: \(deck.path)"
+      surfaceRuntimeAdvisory(message)
+      finish(.failure(message))
       return
     }
     let epoch = runtimeResolveEpoch
@@ -1130,22 +1138,29 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
         [weak self] result in
         guard let self else { return }
         self.eyeReconcileProcess = nil
-        guard epoch == self.runtimeResolveEpoch else { return }
+        guard epoch == self.runtimeResolveEpoch else {
+          finish(.failure("Runtime identity changed while reconciling the LaunchAgent."))
+          return
+        }
         guard result.clean, result.terminationStatus == 0 else {
           let detail = boundedResolverDiagnostic(stdout: result.stdout, stderr: result.stderr)
-          self.surfaceRuntimeAdvisory(
-            "The shared VC Server service could not be reconciled" + detail)
+          let message = "The shared VC Server service could not be reconciled" + detail
+          self.surfaceRuntimeAdvisory(message)
           self.renderServerStatus()
+          finish(.failure(message))
           return
         }
         self.runtimeAdvisory = nil
         lifecycleLog("shared service reconciled on \(install.root.lastPathComponent)")
         self.renderServerStatus()
+        finish(.success(()))
       }
       eyeReconcileProcess = process
     } catch {
-      surfaceRuntimeAdvisory(
-        "The shared VC Server service could not be reconciled: \(error.localizedDescription)")
+      let message =
+        "The shared VC Server service could not be reconciled: \(error.localizedDescription)"
+      surfaceRuntimeAdvisory(message)
+      finish(.failure(message))
     }
   }
 
@@ -1668,22 +1683,64 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     updateDeckPresentation()
     runConfigRepair(plan: true) { [weak self] outcome in
       guard let self else { return }
-      self.repairInFlight = false
-      self.updateDeckPresentation()
       switch outcome {
       case .repairable(let envelope), .conflict(let envelope), .repaired(let envelope):
+        self.repairInFlight = false
+        self.updateDeckPresentation()
         self.lastConfigRepair = envelope
         self.offerConfigurationRepair(envelope)
       case .healthy(let envelope):
         self.lastConfigRepair = envelope
-        self.offerRuntimePackReinstall(
-          configuration: "Configuration already matches the installed generation.")
+        self.reconcileLaunchAgentThenOfferReinstallIfNeeded(
+          note: "Configuration already matches the installed generation.")
       case .absent(let reason):
+        self.repairInFlight = false
+        self.updateDeckPresentation()
         self.offerRuntimePackReinstall(configuration: reason)
       case .unusable(let reason):
+        self.repairInFlight = false
+        self.updateDeckPresentation()
         self.offerRuntimePackReinstall(
           configuration: "Configuration could not be inspected: \(reason)")
       }
+    }
+  }
+
+  /// Config is already right. Restart still fails when the public launcher's
+  /// hash drifted from the installed LaunchAgent. Reconcile rewrites that
+  /// identity; pack reinstall stays a named last resort.
+  private func reconcileLaunchAgentThenOfferReinstallIfNeeded(note: String) {
+    guard let install = canonicalInstall, let environment = canonicalRuntimeEnvironment else {
+      repairInFlight = false
+      updateDeckPresentation()
+      offerRuntimePackReinstall(configuration: note)
+      return
+    }
+    reconcileControlPlaneEye(install: install, environment: environment) { [weak self] result in
+      guard let self else { return }
+      self.repairInFlight = false
+      self.updateDeckPresentation()
+      switch result {
+      case .success:
+        self.presentHealthyRepairResult(note: note)
+      case .failure(let detail):
+        self.offerRuntimePackReinstall(configuration: note + "\n\n" + detail)
+      }
+    }
+  }
+
+  private func presentHealthyRepairResult(note: String) {
+    let alert = NSAlert()
+    alert.alertStyle = .informational
+    alert.messageText = "Vibecrafted LaunchAgent"
+    alert.informativeText =
+      note
+      + "\n\nThe LaunchAgent now matches the current launcher. Restart uses that identity. "
+      + "Reinstalling the Runtime Pack is a separate, named action."
+    alert.addButton(withTitle: "OK")
+    alert.addButton(withTitle: "Reinstall Runtime…")
+    if alert.runModal() == .alertSecondButtonReturn {
+      offerRuntimePackReinstall(configuration: note)
     }
   }
 
@@ -1995,12 +2052,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
             data: result.stderr.isEmpty ? result.stdout : result.stderr, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             ?? "Canonical service owner exited \(result.terminationStatus)"
-          let alert = NSAlert()
-          alert.alertStyle = .critical
-          alert.messageText = "Vibecrafted could not \(action.rawValue) VC Server"
-          alert.informativeText = detail
-          alert.addButton(withTitle: "OK")
-          alert.runModal()
+          if detail.contains("launcher hash differs from the installed LaunchAgent") {
+            self.offerReconcileAfterServiceHashMismatch(action: action, detail: detail)
+          } else {
+            let alert = NSAlert()
+            alert.alertStyle = .critical
+            alert.messageText = "Vibecrafted could not \(action.rawValue) VC Server"
+            alert.informativeText = detail
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+          }
         }
         self.refreshServerStatus()
       }
@@ -2018,6 +2079,34 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       alert.messageText = "Vibecrafted could not \(action.rawValue) VC Server"
       alert.informativeText = error.localizedDescription
       alert.runModal()
+    }
+  }
+
+  /// Restart cannot rewrite the LaunchAgent. Hash drift is a reconcile job.
+  private func offerReconcileAfterServiceHashMismatch(
+    action: ServerLifecycleAction, detail: String
+  ) {
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = "Vibecrafted could not \(action.rawValue) VC Server"
+    alert.informativeText =
+      detail
+      + "\n\nRestart cannot rewrite the LaunchAgent. Reconcile updates it to the current launcher."
+    alert.addButton(withTitle: "OK")
+    alert.addButton(withTitle: "Reconcile LaunchAgent")
+    guard alert.runModal() == .alertSecondButtonReturn else { return }
+    guard let install = canonicalInstall, let environment = canonicalRuntimeEnvironment else {
+      return
+    }
+    repairInFlight = true
+    updateDeckPresentation()
+    reconcileControlPlaneEye(install: install, environment: environment) { [weak self] result in
+      guard let self else { return }
+      self.repairInFlight = false
+      self.updateDeckPresentation()
+      if case .failure(let message) = result {
+        self.offerRuntimePackReinstall(configuration: message)
+      }
     }
   }
 

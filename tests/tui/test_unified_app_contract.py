@@ -1222,6 +1222,16 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     assert "MainActor.assumeIsolated { completion(result) }" in native_runner
     assert "process.terminationHandler = nil" in native_runner
     assert "durable transaction will recover or report its lease state" in delegate
+    repair = delegate[
+        delegate.index("@objc private func repairRuntime()") : delegate.index(
+            "private func offerConfigurationRepair"
+        )
+    ]
+    assert "reconcileLaunchAgentThenOfferReinstallIfNeeded" in repair
+    assert "Configuration already matches the installed generation." in repair
+    assert "presentHealthyRepairResult" in repair
+    assert "offerReconcileAfterServiceHashMismatch" in delegate
+    assert "launcher hash differs from the installed LaunchAgent" in delegate
     reinstall = delegate[
         delegate.index("private func offerRuntimePackReinstall") : delegate.index(
             "@objc private func openConsoleFromStatusItem"

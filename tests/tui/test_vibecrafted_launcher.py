@@ -3921,6 +3921,65 @@ def test_server_service_prefers_declared_public_identity_over_generation_path(
     )
 
 
+def test_server_service_keeps_declared_launcher_when_supervisor_is_generation_private(
+    tmp_path: Path,
+) -> None:
+    """App PATH prepends generation bin. Public `vc-server-supervisor` may be
+    absent; hashing the inner deck against the LaunchAgent is then a false
+    mismatch. `--launcher` must stay the declared public wrapper."""
+    home = tmp_path / "home"
+    public_bin = home / ".local" / "bin"
+    generation_bin = tmp_path / "generation" / "bin"
+    launcher_copy = tmp_path / "vibecrafted-deck"
+    capture_file = tmp_path / "supervisor-args.txt"
+
+    public_bin.mkdir(parents=True)
+    generation_bin.mkdir(parents=True)
+    _write_trimmed_launcher(launcher_copy)
+
+    public_launcher = public_bin / "vibecrafted"
+    public_launcher.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    public_launcher.chmod(0o755)
+
+    generation_launcher = generation_bin / "vibecrafted"
+    generation_launcher.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    generation_launcher.chmod(0o755)
+    generation_supervisor = generation_bin / "vc-server-supervisor"
+    generation_supervisor.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'printf "%s\\n" "$@" > "$CAPTURE_FILE"\n',
+        encoding="utf-8",
+    )
+    generation_supervisor.chmod(0o755)
+
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "PATH": f"{generation_bin}:{public_bin}:/usr/bin:/bin",
+        "CAPTURE_FILE": str(capture_file),
+        "VIBECRAFTED_DECLARED_LAUNCHER": str(public_launcher),
+    }
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'source "{launcher_copy}"; _server_supervisor_cli service restart',
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = capture_file.read_text(encoding="utf-8").split()
+    assert payload[payload.index("--launcher") + 1] == str(public_launcher.resolve())
+    assert payload[payload.index("--supervisor-bin") + 1] == str(
+        generation_supervisor.resolve()
+    )
+
+
 def test_server_service_preserves_high_installer_lease_fd_through_launcher(
     tmp_path: Path,
 ) -> None:

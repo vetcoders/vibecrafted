@@ -1442,7 +1442,7 @@ button:hover > .icon-box {
   color: var(--text-primary);
   font-family: var(--font-mono);
   font-size: var(--text-sm);
-  cursor: pointer;
+  cursor: default;
   transition:
     border-color var(--motion-fast) var(--ease-ui),
     color var(--motion-fast) var(--ease-ui),
@@ -2013,6 +2013,17 @@ a.control-run-id:focus-visible {
   font-size: 14px;
 }
 
+/* Native desk: every clickable link keeps the arrow, never the web hand. */
+.server-app-shell a,
+.server-app-shell button,
+.server-app-shell summary,
+.server-app-shell [role="button"],
+.server-app-shell [role="link"],
+.server-app-shell [role="menuitem"],
+.run-table tbody tr {
+  cursor: default;
+}
+
 .server-navbar {
   position: relative;
   z-index: 40;
@@ -2113,7 +2124,7 @@ a.control-run-id:focus-visible {
 .server-navbar-action,
 .server-theme-toggle {
   color: var(--text-primary);
-  cursor: pointer;
+  cursor: default;
   transition:
     background var(--motion-fast) var(--ease-ui),
     border-color var(--motion-fast) var(--ease-ui),
@@ -2242,7 +2253,7 @@ a.control-run-id:focus-visible {
   color: var(--text-muted);
   font: 11px/1 var(--font-body);
   text-decoration: none;
-  cursor: pointer;
+  cursor: default;
 }
 
 .server-rail-link:hover,
@@ -2529,7 +2540,7 @@ a.control-run-id:focus-visible {
   margin-bottom: 10px;
   color: var(--text-muted);
   font: 550 11px/1.4 var(--font-mono);
-  cursor: pointer;
+  cursor: default;
 }
 
 .workspace-history[open] > summary {
@@ -3141,7 +3152,7 @@ a.control-run-id:focus-visible {
 }
 
 .run-table tbody tr {
-  cursor: pointer;
+  cursor: default;
 }
 
 .run-table tbody tr:hover,
@@ -3195,6 +3206,10 @@ a.control-run-id:focus-visible {
   font: 12px / 1.4 var(--font-body);
 }
 
+.overview-structure-line a {
+  cursor: default;
+}
+
 .control-copy {
   display: inline-flex;
   align-items: center;
@@ -3206,7 +3221,7 @@ a.control-run-id:focus-visible {
   background: var(--surface-elevated);
   color: var(--text-primary);
   font: 550 11px / 1 var(--font-body);
-  cursor: pointer;
+  cursor: default;
 }
 
 .vc-ppm {
@@ -3234,7 +3249,7 @@ a.control-run-id:focus-visible {
   color: var(--text-primary);
   font: 550 12px / 1.2 var(--font-body);
   text-align: left;
-  cursor: pointer;
+  cursor: default;
 }
 
 .vc-ppm button:hover,
