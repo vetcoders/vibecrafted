@@ -745,38 +745,23 @@ SHADOWED_SKILL_VIEW_RUNTIMES = ("claude", "codex")
 # standard install must keep their views or the /vc-* deck goes dark.
 STANDARD_VIEW_RUNTIMES = [*SYMLINK_TARGETS, *SHADOWED_SKILL_VIEW_RUNTIMES]
 
-# Provenance tokens only the Vibecrafted skill bundle emits. A real directory
-# (not a symlink) sitting at ~/.<runtime>/skills/<vc-skill> is an artifact of a
-# pre-3.x installer that materialized copies instead of views; the vc-* name
-# alone never proves ownership, so a shadow is claimed as managed only when its
-# SKILL.md carries at least one token that the canonical store copy of the SAME
-# skill also carries. Operator-authored skills under a vc-* name stay untouched.
+# A real directory (not a symlink) sitting at ~/.<runtime>/skills/<vc-skill> is
+# an artifact of a pre-3.x installer that materialized copies instead of views.
+# The vc-* name alone never proves ownership, and content markers only prove it
+# for skills generated after those tokens existed — measured against the real
+# June-2026 copies recovered from ~/.junie/skills, not one carried a marker.
 #
-# A marker must be anchored, never merely present. `dogfooding:` is a plain
-# English word followed by a colon: an operator-authored skill whose prose says
-# "notes on dogfooding: ..." would otherwise share a token with the store copy
-# (247 of 268 shipped SKILL.md files carry the field) and be claimed as ours.
-# So frontmatter fields count only as keys inside the leading `---` block, and
-# the generator's HTML comment counts only at the start of a line.
-MANAGED_SKILL_FRONTMATTER_MARKERS = (
-    "loctree_value:",
-    "aicx_value:",
-    "dogfooding:",
-)
-MANAGED_SKILL_BODY_MARKERS = ("<!-- fleet-imperative:",)
-MANAGED_SKILL_MARKERS = (
-    *MANAGED_SKILL_BODY_MARKERS,
-    *MANAGED_SKILL_FRONTMATTER_MARKERS,
-)
-# Markers only prove provenance for skills generated after those tokens existed.
-# Measured against the real June-2026 copies recovered from ~/.junie/skills, not
-# one carried a marker — yet every one of their SKILL.md files still exists, byte
-# for byte, as a blob in the Vibecrafted git history. So the bundle also ships a
-# manifest of the sha256 of every SKILL.md Vibecrafted has ever released per
-# skill; a shadow whose SKILL.md hashes into that set came from us, whatever its
-# age. Regenerate with `scripts/gen_skill_provenance.py`.
+# What every one of them does carry is a file history: their SKILL.md exists
+# byte for byte as a blob in the Vibecrafted git history, and so does every
+# other file path in the copy. So the bundle ships a manifest of what we have
+# ever released per skill — the sha256 of every SKILL.md, and every relative
+# file path that ever lived under a vc-<name>/ directory. A copy is claimed as
+# ours only when BOTH match: its SKILL.md is a release we shipped and it holds
+# no file we never shipped. A SKILL.md whose hash is absent from history was
+# edited by its owner, which makes the whole directory custom content.
+# Regenerate with `scripts/gen_skill_provenance.py`.
 SKILL_PROVENANCE_FILE = "SKILL_PROVENANCE.json"
-SKILL_PROVENANCE_SCHEMA = "vibecrafted.skill-provenance.v1"
+SKILL_PROVENANCE_SCHEMA = "vibecrafted.skill-provenance.v2"
 SHADOW_QUARANTINE_PREFIX = "shadowed-views-"
 
 # ---------------------------------------------------------------------------
@@ -1806,35 +1791,33 @@ def _skill_tree_fingerprint(root: Path) -> dict[str, str]:
     return fingerprint
 
 
-def _managed_skill_marker_tokens(skill_dir: Path) -> set[str]:
-    """Vibecrafted-only generator tokens present in `skill_dir`'s SKILL.md.
+def _skill_copy_relative_files(root: Path) -> list[str]:
+    """Sorted relative paths of every non-directory entry under `root`.
 
-    Anchored, not substring: a frontmatter marker counts only as a key inside
-    the leading `---` block and a body marker only at the start of a line, so
-    prose that happens to contain the word cannot fake provenance.
+    Editor litter is skipped exactly as in `_skill_tree_fingerprint`, and a
+    symlink is listed but never descended into: a link inside a copy is content
+    that has to be provable like any other file, and following it could walk
+    out of the copy or loop forever.
     """
-    try:
-        text = (skill_dir / "SKILL.md").read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return set()
-    lines = text.splitlines()
-    frontmatter: list[str] = []
-    if lines and lines[0].strip() == "---":
-        for line in lines[1:]:
-            if line.strip() in ("---", "..."):
-                break
-            frontmatter.append(line)
-    found = {
-        marker
-        for marker in MANAGED_SKILL_FRONTMATTER_MARKERS
-        if any(line.startswith(marker) for line in frontmatter)
-    }
-    found |= {
-        marker
-        for marker in MANAGED_SKILL_BODY_MARKERS
-        if any(line.startswith(marker) for line in lines)
-    }
-    return found
+    found: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        base = Path(dirpath)
+        descend: list[str] = []
+        for name in sorted(dirnames):
+            if name == "__pycache__":
+                continue
+            path = base / name
+            if path.is_symlink():
+                found.append("/".join(path.relative_to(root).parts))
+            else:
+                descend.append(name)
+        dirnames[:] = descend
+        for name in sorted(filenames):
+            rel_parts = (base / name).relative_to(root).parts
+            if _skill_fingerprint_ignored(rel_parts):
+                continue
+            found.append("/".join(rel_parts))
+    return sorted(found)
 
 
 def _skill_md_sha256(skill_dir: Path) -> str | None:
@@ -1845,12 +1828,33 @@ def _skill_md_sha256(skill_dir: Path) -> str | None:
         return None
 
 
-def load_skill_provenance(store_path: Path) -> dict[str, frozenset[str]]:
-    """Read the shipped historical-release manifest: skill name → sha256 set.
+@dataclass(frozen=True)
+class SkillProvenance:
+    """What Vibecrafted has ever released for one skill.
+
+    `sha256` holds every SKILL.md digest ever shipped; `paths` holds every
+    relative file path that ever lived under a `vc-<name>/` directory.
+    """
+
+    sha256: frozenset[str] = frozenset()
+    paths: frozenset[str] = frozenset()
+
+
+def _string_set(value: object) -> frozenset[str]:
+    """Coerce an untrusted manifest list into a set of strings."""
+    if not isinstance(value, list):
+        return frozenset()
+    return frozenset(item for item in value if isinstance(item, str))
+
+
+def load_skill_provenance(store_path: Path) -> dict[str, SkillProvenance]:
+    """Read the shipped release manifest: skill name → `SkillProvenance`.
 
     A missing, unreadable, corrupt or foreign-schema manifest yields an empty
-    map. This proof only ever *adds* certainty, so its absence must degrade to
-    "no proof" — never to an installer traceback on someone's machine.
+    map — including a manifest of an older schema, whose entries carry no path
+    history and would therefore claim copies this version cannot vouch for.
+    The proof only ever *adds* certainty, so its absence must degrade to "no
+    proof", never to an installer traceback on someone's machine.
     """
     try:
         data = json.loads(
@@ -1863,10 +1867,13 @@ def load_skill_provenance(store_path: Path) -> dict[str, frozenset[str]]:
     skills = data.get("skills")
     if not isinstance(skills, dict):
         return {}
-    manifest: dict[str, frozenset[str]] = {}
-    for name, hashes in skills.items():
-        if isinstance(name, str) and isinstance(hashes, list):
-            manifest[name] = frozenset(h for h in hashes if isinstance(h, str))
+    manifest: dict[str, SkillProvenance] = {}
+    for name, entry in skills.items():
+        if not isinstance(name, str) or not isinstance(entry, dict):
+            continue
+        manifest[name] = SkillProvenance(
+            _string_set(entry.get("sha256")), _string_set(entry.get("paths"))
+        )
     return manifest
 
 
@@ -1905,8 +1912,9 @@ def collect_shadowed_skill_dirs(
 
     Pure detection: the canonical `.agents` view is never a candidate, symlinked
     views belong to `prune_shadowed_skill_views`, and provenance is derived from
-    content only — store fingerprint, then anchored `MANAGED_SKILL_MARKERS`
-    shared with the store copy, then the shipped `SKILL_PROVENANCE_FILE`.
+    content only — either the copy is byte-identical to the store copy, or the
+    shipped `SKILL_PROVENANCE_FILE` proves both its SKILL.md and every file path
+    it holds against what Vibecrafted has released.
 
     A runtime whose skill dir is reached through a symlink, or which resolves
     into the store itself, is skipped outright: comparing the store with itself
@@ -1953,31 +1961,41 @@ def collect_shadowed_skill_dirs(
                     )
                 )
                 continue
-            shared_markers = sorted(
-                _managed_skill_marker_tokens(shadow)
-                & _managed_skill_marker_tokens(expected)
-            )
-            if shared_markers:
+            released = provenance.get(skill_name, SkillProvenance())
+            digest = _skill_md_sha256(shadow)
+            if not digest or digest not in released.sha256:
                 shadows.append(
                     ShadowedSkillDir(
                         runtime,
                         skill_name,
                         shadow,
-                        "managed_stale",
-                        f"differs from {expected}; managed marker {shared_markers[0]!r}",
+                        "unknown",
+                        "real directory whose SKILL.md is not a Vibecrafted "
+                        "release; its owner edited it",
                     )
                 )
                 continue
-            digest = _skill_md_sha256(shadow)
-            if digest and digest in provenance.get(skill_name, frozenset()):
+            # The SKILL.md alone is not the directory. An operator who dropped
+            # their own reference, script or note next to a shipped SKILL.md
+            # would lose it, so a single path we never released withdraws the
+            # whole claim.
+            foreign = next(
+                (
+                    rel
+                    for rel in _skill_copy_relative_files(shadow)
+                    if rel not in released.paths
+                ),
+                None,
+            )
+            if foreign is not None:
                 shadows.append(
                     ShadowedSkillDir(
                         runtime,
                         skill_name,
                         shadow,
-                        "managed_stale",
-                        f"differs from {expected}; SKILL.md matches a historical "
-                        f"Vibecrafted release (sha256 {digest[:12]})",
+                        "unknown",
+                        f"SKILL.md matches a Vibecrafted release, but "
+                        f"{foreign!r} was never shipped with this skill",
                     )
                 )
                 continue
@@ -1986,8 +2004,10 @@ def collect_shadowed_skill_dirs(
                     runtime,
                     skill_name,
                     shadow,
-                    "unknown",
-                    "real directory with no provable Vibecrafted provenance",
+                    "managed_stale",
+                    f"differs from {expected}; SKILL.md matches a historical "
+                    f"Vibecrafted release (sha256 {digest[:12]}) and every file "
+                    f"path is one we shipped",
                 )
             )
     return shadows
