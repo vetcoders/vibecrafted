@@ -1571,6 +1571,18 @@ def select_plan_model(
     return "", "provider_default"
 
 
+def _identity_base_hint(requested_repo: str, base: str) -> str:
+    """Name the identity/remote resolution that made ``--base`` unavailable."""
+    identity = requested_repo or "the selected identity"
+    return (
+        f"--base {base} is unknown to the source of '{identity}': "
+        "a repository identity resolves --base from the refreshed remote, "
+        "never from your local checkout. "
+        "Push the commit to the remote, or pass --root /path/to/checkout "
+        "to use this host's working tree."
+    )
+
+
 def normalize_launch_spec(
     payload: dict[str, Any], source_dir: str | Path
 ) -> WorkflowLaunchSpec:
@@ -1753,16 +1765,21 @@ def normalize_launch_spec(
                     candidates.append(candidate)
                 except ValueError:
                     pass
-            if len(candidates) > 1 or (
-                not candidates and not re.fullmatch(r"[0-9a-fA-F]{4,40}", base)
-            ):
+            if len(candidates) > 1:
                 raise ValueError(
-                    "remote --base missing or ambiguous; use refs/heads/ or refs/tags/"
+                    "remote --base is ambiguous; use refs/heads/ or refs/tags/"
                 )
+            if not candidates and not re.fullmatch(r"[0-9a-fA-F]{4,40}", base):
+                raise ValueError(_identity_base_hint(requested_repo, base))
             effective_base = candidates[0] if candidates else base
-    resolved_ref, baseline_sha = (
-        resolve_repository_base(root, effective_base) if top else ("", "")
-    )
+    try:
+        resolved_ref, baseline_sha = (
+            resolve_repository_base(root, effective_base) if top else ("", "")
+        )
+    except ValueError as exc:
+        if repo_kind == "identity":
+            raise ValueError(_identity_base_hint(requested_repo, base)) from exc
+        raise
     if repo_kind == "identity" and baseline_sha:
         advertised = subprocess.run(
             [
@@ -1782,7 +1799,9 @@ def normalize_launch_spec(
         )
         if advertised.returncode or not advertised.stdout.strip():
             raise ValueError(
-                "remote --base commit is not reachable from the refreshed source branches or tags; cached local objects are not a source baseline"
+                _identity_base_hint(requested_repo, base)
+                + "; the commit is not reachable from any refreshed source branch "
+                "or tag, so cached local objects are not a source baseline"
             )
     if payload.get("base") and not top:
         raise ValueError("--base requires a Git repository")
