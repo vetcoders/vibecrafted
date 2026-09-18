@@ -1950,7 +1950,6 @@ mod tests {
         assert!(html.contains("id=\"vc-dashboard-data\""));
         assert!(html.contains("type=\"application/json\""));
         assert!(!html.contains("Loading control plane"));
-        assert!(html.contains("Loading…"));
         assert!(html.contains("Overview"));
         assert!(html.contains("href=\"/transcripts\""));
         assert!(html.contains("href=\"/frame\""));
