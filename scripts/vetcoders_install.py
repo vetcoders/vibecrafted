@@ -1984,8 +1984,14 @@ def collect_shadowed_skill_dirs(
     Pure detection: the canonical `.agents` view is never a candidate, symlinked
     views belong to `prune_shadowed_skill_views`, and provenance is derived from
     content only — either the copy is byte-identical to the store copy, or the
-    shipped `SKILL_PROVENANCE_FILE` proves both its SKILL.md and every file path
-    it holds against what Vibecrafted has released.
+    shipped `SKILL_PROVENANCE_FILE` proves its SKILL.md and the bytes of every
+    file in it against what Vibecrafted has released.
+
+    A real *file* under a skill name is reported too, always as `unknown`. It is
+    never something we shipped — a view is a link and a legacy copy is a
+    directory — so it is someone's own note, and the one thing to do with it is
+    say where it is. Doctor was silent about it while the view writer stood
+    ready to remove it.
 
     A runtime whose skill dir is reached through a symlink, or which resolves
     into the store itself, is skipped outright: comparing the store with itself
@@ -2012,7 +2018,21 @@ def collect_shadowed_skill_dirs(
             continue
         for skill_name in skill_names:
             shadow = rt_skills / skill_name
-            if shadow.is_symlink() or not shadow.is_dir():
+            if shadow.is_symlink():
+                continue
+            if shadow.is_file():
+                shadows.append(
+                    ShadowedSkillDir(
+                        runtime,
+                        skill_name,
+                        shadow,
+                        "unknown",
+                        "regular file, kept: a skill view is a link and a "
+                        "legacy copy is a directory, so this is your own file",
+                    )
+                )
+                continue
+            if not shadow.is_dir():
                 continue
             expected = store_path / skill_name
             if not expected.is_dir():
@@ -10892,9 +10912,10 @@ def create_skill_view_symlink(target: Path, link: Path, dry_run: bool = False) -
     reached through a symlink — so `~/.grok/skills -> ~/notes` with a note
     called `vc-research` in it was, until now, a note the installer deleted.
 
-    Only a pointer gives way, and it is unlinked as a pointer — see
+    Only a pointer gives way, and it is removed as a pointer — see
     `_remove_view_pointer`, which never reaches the tree on the far side. A
-    pointer that already resolves to `target` is left exactly as it is:
+    dangling one counts: it is still an entry in the way. A pointer that
+    already resolves to `target` is left exactly as it is:
     unlinking and relinking it would be a no-op at best, and at worst — when the
     runtime skill dir is itself a link into the store — a removal inside the
     store.
@@ -10903,7 +10924,11 @@ def create_skill_view_symlink(target: Path, link: Path, dry_run: bool = False) -
         if dry_run:
             print(f"  {dim('same-path')} {target}")
         return
-    present = link.exists() or link.is_symlink()
+    # `exists()` follows the link, so a pointer aimed at something gone reads
+    # as absent — and then `symlink_to` raises FileExistsError on the entry that
+    # is demonstrably still there. A dangling junction is the realistic one: it
+    # survives the generation its target lived in.
+    present = link.exists() or _is_owned_pointer(link)
     if present and link.resolve(strict=False) == target.resolve(strict=False):
         if dry_run:
             print(f"  {dim('same-path')} {link} -> {target}")
