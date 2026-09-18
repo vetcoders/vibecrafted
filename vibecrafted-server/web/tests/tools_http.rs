@@ -16,12 +16,13 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode, header};
-use axum::routing::get;
+use axum::routing::{get, post};
 use leptos::config::{Env, LeptosOptions};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 use vibecrafted_server_web::tools::api::{
-    aicx_reference, aicx_search, loctree_report, loctree_report_asset, loctree_report_redirect,
+    aicx_reference, aicx_search, loctree_generate, loctree_report, loctree_report_asset,
+    loctree_report_redirect,
 };
 
 struct Fixture {
@@ -32,6 +33,9 @@ struct Fixture {
     aicx_mode: PathBuf,
     aicx_argv: PathBuf,
     aicx_payload: PathBuf,
+    loct_mode: PathBuf,
+    loct_argv: PathBuf,
+    loct_cwd: PathBuf,
 }
 
 impl Fixture {
@@ -114,6 +118,25 @@ impl Fixture {
         permissions.set_mode(0o755);
         fs::set_permissions(&script, permissions).expect("script exec");
 
+        let loct_mode = home.join("loct-mode");
+        let loct_argv = home.join("loct-argv");
+        let loct_cwd = home.join("loct-cwd");
+        fs::write(&loct_mode, "ok").expect("loct mode");
+        let loct_script = home.join("loct.sh");
+        fs::write(
+            &loct_script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{argv}'\npwd > '{cwd}'\nmode=$(cat '{mode}')\ncase \"$mode\" in\n  ok)\n    mkdir -p .loctree\n    printf '%s\\n' '<!DOCTYPE html><html><head><title>Generated</title></head><body>ok</body></html>' > .loctree/report.html\n    exit 0\n    ;;\n  fail) echo 'loct: refused' >&2; exit 2 ;;\n  hang) exec /bin/sleep 30 ;;\nesac\nexit 9\n",
+                argv = loct_argv.display(),
+                cwd = loct_cwd.display(),
+                mode = loct_mode.display()
+            ),
+        )
+        .expect("loct script");
+        let mut loct_permissions = fs::metadata(&loct_script).expect("loct meta").permissions();
+        loct_permissions.set_mode(0o755);
+        fs::set_permissions(&loct_script, loct_permissions).expect("loct exec");
+
         // Safety: this integration binary holds one test, so it is the single
         // owner of process-wide environment for its lifetime.
         unsafe {
@@ -122,6 +145,8 @@ impl Fixture {
             std::env::set_var("AICX_HOME", &aicx_home);
             std::env::set_var("VC_AICX_BIN", &script);
             std::env::set_var("VC_AICX_TIMEOUT_SECONDS", "0.3");
+            std::env::set_var("VC_LOCT_BIN", &loct_script);
+            std::env::set_var("VC_LOCT_TIMEOUT_SECONDS", "0.3");
         }
         Self {
             home,
@@ -131,6 +156,9 @@ impl Fixture {
             aicx_mode,
             aicx_argv,
             aicx_payload,
+            loct_mode,
+            loct_argv,
+            loct_cwd,
         }
     }
 
@@ -168,6 +196,7 @@ fn router(bind: &str) -> Router {
         .route("/structure/report", get(loctree_report_redirect))
         .route("/structure/report/", get(loctree_report))
         .route("/structure/report/{asset}", get(loctree_report_asset))
+        .route("/api/structure/report", post(loctree_generate))
         .route("/api/aicx/search", get(aicx_search))
         .route("/api/aicx/reference", get(aicx_reference))
         .with_state(opts)
@@ -182,6 +211,34 @@ async fn call(
         .uri(uri)
         .header(header::HOST, "127.0.0.1:3024")
         .body(Body::empty())
+        .expect("request");
+    if let Some(peer) = peer {
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(peer.parse::<SocketAddr>().expect("peer")));
+    }
+    let response = app.clone().oneshot(request).await.expect("response");
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = to_bytes(response.into_body(), 16 * 1024 * 1024)
+        .await
+        .expect("body")
+        .to_vec();
+    (status, headers, body)
+}
+
+async fn call_post(
+    app: &Router,
+    uri: &str,
+    peer: Option<&str>,
+    body: &str,
+) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header(header::HOST, "127.0.0.1:3024")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
         .expect("request");
     if let Some(peer) = peer {
         request
@@ -464,4 +521,52 @@ async fn tool_surfaces_keep_their_boundaries() {
             "{denied} answered {status}"
         );
     }
+
+    // ---- Loctree generate: local peer, known root, tabs never spawn this.
+    let (status, _, _) = call_post(&app, "/api/structure/report", None, "{}").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "unknown peer fails closed");
+    assert!(
+        !fixture.loct_argv.exists(),
+        "a refused generate must not spawn loct"
+    );
+    let (status, _, body) = call_post(
+        &app,
+        "/api/structure/report",
+        Some("192.168.1.9:4000"),
+        "{}",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(String::from_utf8_lossy(&body).contains("private to this host"));
+    assert!(!fixture.loct_argv.exists());
+
+    let foreign_root = serde_json::json!({ "root": fixture.home }).to_string();
+    let (status, _, _) = call_post(
+        &app,
+        "/api/structure/report",
+        Some("127.0.0.1:5000"),
+        &foreign_root,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(!fixture.loct_argv.exists());
+
+    let (status, _, body) =
+        call_post(&app, "/api/structure/report", Some("127.0.0.1:5000"), "{}").await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let payload: Value = serde_json::from_slice(&body).expect("generate json");
+    assert_eq!(payload["schema"], "vibecrafted.loctree-report.v1");
+    assert_eq!(payload["href"], "/structure/report/");
+    assert_eq!(
+        fs::read_to_string(&fixture.loct_cwd).expect("cwd").trim(),
+        fixture.home.join("repo").to_string_lossy()
+    );
+    let argv = fs::read_to_string(&fixture.loct_argv).expect("argv");
+    assert!(argv.contains("report"), "{argv}");
+    assert!(argv.contains(".loctree/report.html"), "{argv}");
+
+    fs::write(&fixture.loct_mode, "hang").expect("hang");
+    let (status, _, _) =
+        call_post(&app, "/api/structure/report", Some("127.0.0.1:5000"), "{}").await;
+    assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
 }

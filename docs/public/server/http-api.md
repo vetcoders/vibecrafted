@@ -24,7 +24,8 @@ revalidate qualified process identity; only that writer may issue a receipted
 | GET    | `/api/control/runs/{run_id}`         | One run by id, or a `404` JSON body.                                     |
 | GET    | `/api/control/runs/{run_id}/observe` | Versioned one-shot observation; never arms a monitor.                    |
 | GET    | `/api/control/runs/{run_id}/await`   | Shared blocking subscription for the run.                                |
-| GET    | `/api/control/transcripts?q=`        | Host-wide human-log search. Results (not snapshots) are capped; each file is read from the start. |
+| GET    | `/api/control/transcripts?q=`        | Host-wide human-log search. Paginated (`offset`, `limit`, `has_more`, `total`); each file is streamed from the start. |
+| POST   | `/api/structure/report`              | Local-peer: run `loct report --output .loctree/report.html` in a known control-plane workspace root. |
 | GET    | `/api/control/lifecycle`             | Lifecycle run summaries, newest-first.                                   |
 | GET    | `/api/control/lifecycle/{run_id}`    | Full nested lifecycle state with per-run and per-stage axes.             |
 | GET    | `/api/control/events`                | Server-Sent Events stream of the control-plane event log.                |
@@ -136,8 +137,13 @@ curl -s http://127.0.0.1:3024/api/control/runs | python3 -m json.tool | head
 # one run (404 JSON when unknown)
 curl -s http://127.0.0.1:3024/api/control/runs/impl-20260730-a1b2
 
-# search human transcripts (needle may live only in the head of a long log)
-curl -s "http://127.0.0.1:3024/api/control/transcripts?q=needle"
+# search human transcripts (needle may live anywhere in the log; page with offset/limit)
+curl -s "http://127.0.0.1:3024/api/control/transcripts?q=needle&offset=0&limit=50"
+
+# generate a Loctree report for a control-plane-known workspace (local peer only)
+curl -s -X POST http://127.0.0.1:3024/api/structure/report \
+  -H 'content-type: application/json' \
+  -d '{"root":"/absolute/workspace"}'
 
 # lifecycle list, then one lifecycle run in full
 curl -s http://127.0.0.1:3024/api/control/lifecycle

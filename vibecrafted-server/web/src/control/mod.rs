@@ -31,10 +31,10 @@
 //! * `GET /api/control/runs/{run_id}/transcript` — bounded, no-store tail of
 //!   the canonical `transcript.human.log` used by the live run detail view.
 //! * `GET /api/control/transcripts?q=` — host-wide search over those human
-//!   logs. Snapshots are scanned newest-first; **results** are capped. Each
-//!   file is read from the start up to a byte cap so a needle that lives only
-//!   in the head of a long log is still found. The live run page keeps the
-//!   tail preview.
+//!   logs. Snapshots are scanned newest-first; matching results are paginated
+//!   (`offset`, `limit`, `has_more`, `total`). Each file is streamed from the
+//!   start so a needle past any previous byte cap is still found. The live
+//!   run page keeps the tail preview.
 //! * `GET /api/control/lifecycle` — lifecycle run summaries, newest-first.
 //! * `GET /api/control/lifecycle/{run_id}` — full nested lifecycle state with
 //!   projected per-run and per-stage axes (shape of `write_lifecycle_report`).
@@ -264,21 +264,24 @@ pub mod api {
     #[derive(Debug, Deserialize)]
     struct TranscriptSearchQuery {
         q: Option<String>,
+        offset: Option<usize>,
+        limit: Option<usize>,
     }
 
     /// Host-wide human-transcript search. Snapshots are scanned newest-first;
-    /// matching **results** are capped. Each log is read from the start (byte
-    /// capped) so a needle that lives only in the head of a long file is found.
+    /// matching results are paginated. Each log is streamed from the start so
+    /// a needle that lives only past a previous byte cap is still found.
     async fn transcripts(Query(query): Query<TranscriptSearchQuery>) -> impl IntoResponse {
-        const RESULT_CAP: usize = 200;
+        const DEFAULT_LIMIT: usize = 50;
+        const MAX_LIMIT: usize = 200;
         let plane = ControlPlane::from_env();
         let needle = query.q.as_deref().unwrap_or("").trim().to_string();
         let needle_l = needle.to_ascii_lowercase();
+        let offset = query.offset.unwrap_or(0);
+        let limit = query.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
         let mut items = Vec::new();
+        let mut total = 0_usize;
         for run in plane.load_snapshots() {
-            if items.len() >= RESULT_CAP {
-                break;
-            }
             let hit = crate::run_detail::match_human_transcript(&plane, &run.run_id, &needle);
             if !hit.available {
                 continue;
@@ -290,21 +293,28 @@ pub mod api {
             if !needle.is_empty() && !hit.matched && !meta_hit {
                 continue;
             }
-            items.push(json!({
-                "run_id": run.run_id,
-                "agent": run.agent,
-                "skill": run.skill,
-                "root": run.root,
-                "updated_at": run.updated_at,
-                "available": hit.available,
-                "truncated": hit.truncated,
-                "snippet": hit.snippet,
-            }));
+            if total >= offset && items.len() < limit {
+                items.push(json!({
+                    "run_id": run.run_id,
+                    "agent": run.agent,
+                    "skill": run.skill,
+                    "root": run.root,
+                    "updated_at": run.updated_at,
+                    "available": hit.available,
+                    "truncated": hit.truncated,
+                    "snippet": hit.snippet,
+                }));
+            }
+            total += 1;
         }
         (
             [(header::CACHE_CONTROL, "no-store")],
             Json(json!({
                 "count": items.len(),
+                "total": total,
+                "offset": offset,
+                "limit": limit,
+                "has_more": offset + items.len() < total,
                 "q": needle,
                 "items": items,
             })),

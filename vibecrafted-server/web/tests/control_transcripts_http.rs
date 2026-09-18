@@ -1,8 +1,9 @@
 //! HTTP contract for `GET /api/control/transcripts?q=`.
 //!
 //! Search must find a needle that lives only in the *head* of a long human
-//! log (past the live-page 48 KiB / 160-line tail window), and it must not
-//! pre-filter the snapshot list to 200 before matching.
+//! log (past the live-page 48 KiB / 160-line tail window), a needle that lives
+//! only past the old 256 KiB head cap, and a second page of more than 200
+//! matching results.
 
 #![cfg(feature = "ssr")]
 
@@ -92,15 +93,19 @@ fn test_app() -> axum::Router {
 }
 
 async fn get_transcripts(q: &str) -> (StatusCode, Option<String>, Value) {
-    let path = if q.is_empty() {
+    get_transcripts_uri(&if q.is_empty() {
         "/api/control/transcripts".to_string()
     } else {
         format!("/api/control/transcripts?q={q}")
-    };
+    })
+    .await
+}
+
+async fn get_transcripts_uri(uri: &str) -> (StatusCode, Option<String>, Value) {
     let response = test_app()
         .oneshot(
             Request::builder()
-                .uri(path)
+                .uri(uri)
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -155,6 +160,9 @@ async fn transcripts_search_finds_a_head_needle_beyond_the_tail_and_past_200_sna
     assert_eq!(cache_control.as_deref(), Some("no-store"));
     assert_eq!(body["q"], needle);
     assert_eq!(body["count"], 1);
+    assert_eq!(body["total"], 1);
+    assert_eq!(body["offset"], 0);
+    assert_eq!(body["has_more"], false);
     let items = body["items"].as_array().expect("items");
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["run_id"], "run-head-needle");
@@ -167,4 +175,64 @@ async fn transcripts_search_finds_a_head_needle_beyond_the_tail_and_past_200_sna
         !snippet.contains("<script>"),
         "search payload is JSON text, not markup"
     );
+}
+
+fn long_log_with_deep_needle(needle: &str) -> String {
+    let mut body = String::new();
+    while body.len() < 256 * 1024 + 2048 {
+        body.push_str("pad-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n");
+    }
+    body.push_str(needle);
+    body.push('\n');
+    body
+}
+
+#[tokio::test]
+async fn transcripts_search_finds_a_needle_past_the_old_256kib_cap() {
+    let home = TestHome::new();
+    let needle = "DEEP-NEEDLE-unique-transcript-search";
+    home.write_run(
+        "run-deep-needle",
+        "2026-09-18T00:00:00+00:00",
+        &long_log_with_deep_needle(needle),
+    );
+
+    let (status, _, body) = get_transcripts(needle).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["count"], 1);
+    assert_eq!(body["total"], 1);
+    assert_eq!(body["items"][0]["run_id"], "run-deep-needle");
+    assert!(
+        body["items"][0]["snippet"]
+            .as_str()
+            .expect("snippet")
+            .contains(needle)
+    );
+}
+
+#[tokio::test]
+async fn transcripts_search_pages_past_two_hundred_matches() {
+    let home = TestHome::new();
+    let needle = "PAGE-NEEDLE-unique-transcript-search";
+    for index in 0..201 {
+        home.write_run(
+            &format!("run-page-{index:03}"),
+            &format!("2026-09-18T{:02}:{:02}:00+00:00", index / 60, index % 60),
+            &format!("{needle}\n"),
+        );
+    }
+
+    let (status, _, body) = get_transcripts_uri(&format!(
+        "/api/control/transcripts?q={needle}&offset=200&limit=200"
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["total"], 201);
+    assert_eq!(body["offset"], 200);
+    assert_eq!(body["limit"], 200);
+    assert_eq!(body["count"], 1);
+    assert_eq!(body["has_more"], false);
+    let items = body["items"].as_array().expect("items");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["run_id"], "run-page-000");
 }

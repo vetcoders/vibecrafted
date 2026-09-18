@@ -1055,7 +1055,7 @@ pub mod api {
             ("", "open")
         };
         format!(
-            r#"<a class="plan-card{}" href="{}" data-search="{}" data-ppm="plan" data-copy-id="{}" data-href="{}">
+            r#"<a class="plan-card{}" href="{}" data-search="{}" data-ppm="plan" data-copy-id="{}" data-href="{}" data-focus-repo="{}">
   <span class="plan-number">{:02}</span>
   <div class="plan-card-title">
     <h3>{}</h3>
@@ -1072,6 +1072,7 @@ pub mod api {
             escape_attr(&search.to_ascii_lowercase()),
             escape_attr(&plan.plan_id),
             escape_attr(&href),
+            escape_attr(&plan.repo),
             index + 1,
             escape_html(&humanize_plan_id(&plan.plan_id)),
             escape_html(&plan.org),
@@ -1174,6 +1175,7 @@ pub mod api {
         plan_id
             .split(['-', '_'])
             .filter(|part| !part.is_empty())
+            .filter(|part| !part.eq_ignore_ascii_case("truth"))
             .map(|part| {
                 let mut chars = part.chars();
                 match chars.next() {
@@ -1208,11 +1210,12 @@ pub mod api {
     var visible = 0;
     cards.forEach(function (card) {
       var match = !needle || normalize(card.dataset.search).indexOf(needle) !== -1;
-      card.hidden = !match;
+      card.setAttribute("data-search-hit", match ? "1" : "0");
       if (match) visible += 1;
     });
     count.textContent = String(visible);
     empty.hidden = visible !== 0;
+    document.documentElement.dispatchEvent(new Event("vc-focus-refresh"));
   }
 
   search.addEventListener("input", filterPlans);
@@ -3292,7 +3295,11 @@ button.md-status.md-status-done .md-status-glyph{color:var(--status-success)}
 
             assert!(html.contains("<h1>Plans</h1>"));
             assert!(!html.contains("Choose the truth"));
+            assert!(!html.contains("Runtime Truth"));
             assert!(!html.contains("you want to move"));
+            assert!(html.contains("data-ppm=\"plan\""));
+            assert!(html.contains("data-focus-repo=\"vibecrafted\""));
+            assert!(html.contains("vc-focus-refresh"));
             assert!(!html.contains("Plan control room"));
             assert!(html.contains("id=\"plan-search\""));
             assert!(html.contains(".normalize(\"NFD\")"));

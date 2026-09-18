@@ -10,7 +10,7 @@ async fn main() {
 
     use axum::Router;
     use axum::http::StatusCode;
-    use axum::routing::get;
+    use axum::routing::{get, post};
     use leptos::config::{Env, LeptosOptions};
     use leptos::logging::log;
     use leptos_axum::{LeptosRoutes, generate_route_list};
@@ -18,7 +18,8 @@ async fn main() {
     use vibecrafted_server_web::control::api::control_routes;
     use vibecrafted_server_web::scaffold::api::scaffold_routes;
     use vibecrafted_server_web::tools::api::{
-        aicx_reference, aicx_search, loctree_report, loctree_report_asset, loctree_report_redirect,
+        aicx_reference, aicx_search, loctree_generate, loctree_report, loctree_report_asset,
+        loctree_report_redirect,
     };
 
     /// Canonical default bind — matches Makefile `SERVER_ADDR` and
@@ -212,6 +213,7 @@ Examples:
         .route("/structure/report", get(loctree_report_redirect))
         .route("/structure/report/", get(loctree_report))
         .route("/structure/report/{asset}", get(loctree_report_asset))
+        .route("/api/structure/report", post(loctree_generate))
         .route("/api/aicx/search", get(aicx_search))
         .route("/api/aicx/reference", get(aicx_reference))
         .leptos_routes(&leptos_options, routes, {

@@ -354,7 +354,8 @@ async fn populated_plan_renders_studio_inside_the_shared_frame() {
     assert!(!html.contains("you want to move"));
     assert!(html.contains("Shell Plan"));
     assert!(html.contains("Vc Frame F03 0915"));
-    assert!(html.contains("Vc Truth 0916"));
+    assert!(html.contains("Vc 0916"));
+    assert!(!html.contains("Vc Truth 0916"));
     assert!(html.contains(
         r#"href="/scaffold?org=vetcoders&amp;repo=vibecrafted&amp;day=2026_0908&amp;plan_id=shell-plan""#
     ));
