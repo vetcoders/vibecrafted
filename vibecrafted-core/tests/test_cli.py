@@ -960,7 +960,7 @@ def test_root_cli_agent_observe_accepts_receipt_command(monkeypatch, capsys) -> 
         },
     )
 
-    assert cli.main(["codex", "observe", "--run-id", "impl-1"]) == 0
+    assert cli.main(["codex", "observe", "--run-id", "impl-1", "--tail"]) == 0
 
     out = capsys.readouterr().out
     assert "run_id:     impl-1" in out
@@ -981,7 +981,7 @@ def test_root_cli_swarm_observe_accepts_research_receipt(monkeypatch, capsys) ->
         },
     )
 
-    assert cli.main(["swarm", "observe", "--run-id", "rese-1"]) == 0
+    assert cli.main(["swarm", "observe", "--run-id", "rese-1", "--tail"]) == 0
 
     assert "agent:      swarm" in capsys.readouterr().out
 
@@ -1004,7 +1004,7 @@ def test_root_cli_observe_hides_stale_error_after_report_validated(
         },
     )
 
-    assert cli.main(["swarm", "observe", "--run-id", "rese-1"]) == 0
+    assert cli.main(["swarm", "observe", "--run-id", "rese-1", "--tail"]) == 0
 
     out = capsys.readouterr().out
     assert "state:      report_validated" in out
@@ -1032,7 +1032,7 @@ def test_root_cli_agent_observe_prints_transcript_tail(
         },
     )
 
-    assert cli.main(["codex", "observe", "--run-id", "impl-1"]) == 0
+    assert cli.main(["codex", "observe", "--run-id", "impl-1", "--tail"]) == 0
 
     out = capsys.readouterr().out
     assert "state:      stalled" in out
@@ -1065,7 +1065,7 @@ def test_root_cli_agent_observe_renders_json_transcript_tail(
         },
     )
 
-    assert cli.main(["claude", "observe", "--run-id", "impl-1"]) == 0
+    assert cli.main(["claude", "observe", "--run-id", "impl-1", "--tail"]) == 0
 
     out = capsys.readouterr().out
     assert "transcript_tail:" in out
@@ -1098,7 +1098,7 @@ def test_root_cli_agent_observe_recovers_model_when_tail_starts_after_init(
         },
     )
 
-    assert cli.main(["claude", "observe", "--run-id", "impl-1"]) == 0
+    assert cli.main(["claude", "observe", "--run-id", "impl-1", "--tail"]) == 0
 
     out = capsys.readouterr().out
     assert "session: claude-sess model: claude-opus-4-8" in out
@@ -1132,11 +1132,219 @@ def test_root_cli_agent_observe_uses_codex_config_model(
         },
     )
 
-    assert cli.main(["codex", "observe", "--run-id", "impl-1"]) == 0
+    assert cli.main(["codex", "observe", "--run-id", "impl-1", "--tail"]) == 0
 
     out = capsys.readouterr().out
     assert "session: codex-thread model: gpt-5.5" in out
     assert "codex body" in out
+
+
+def test_root_cli_agent_observe_tail_accepts_a_line_count(
+    monkeypatch, capsys, tmp_path: Path
+) -> None:
+    transcript = tmp_path / "transcript.log"
+    transcript.write_text(
+        "\n".join(f"line {idx}" for idx in range(1, 66)) + "\n",
+        encoding="utf-8",
+    )
+    _stub_server_observation(
+        monkeypatch,
+        {
+            "run_id": "impl-1",
+            "state": "process_spawned",
+            "agent": "codex",
+            "skill": "implement",
+            "root": "/repo",
+            "latest_report": "/tmp/report.md",
+            "latest_transcript": str(transcript),
+        },
+    )
+
+    assert cli.main(["codex", "observe", "--run-id", "impl-1", "--tail", "5"]) == 0
+
+    out = capsys.readouterr().out
+    assert "transcript_tail:" in out
+    assert "line 65" in out
+    assert "line 61" in out
+    assert "line 60" not in out
+
+
+def test_root_cli_agent_observe_head_prints_first_lines(
+    monkeypatch, capsys, tmp_path: Path
+) -> None:
+    transcript = tmp_path / "transcript.log"
+    transcript.write_text(
+        "\n".join(f"line {idx}" for idx in range(1, 66)) + "\n",
+        encoding="utf-8",
+    )
+    _stub_server_observation(
+        monkeypatch,
+        {
+            "run_id": "impl-1",
+            "state": "process_spawned",
+            "agent": "codex",
+            "skill": "implement",
+            "root": "/repo",
+            "latest_report": "/tmp/report.md",
+            "latest_transcript": str(transcript),
+        },
+    )
+
+    assert cli.main(["codex", "observe", "--run-id", "impl-1", "--head", "3"]) == 0
+
+    out = capsys.readouterr().out
+    assert "transcript_head:" in out
+    assert "line 1" in out
+    assert "line 2" in out
+    assert "line 3" in out
+    assert "line 4" not in out
+
+
+def test_root_cli_agent_observe_rejects_conflicting_windows(monkeypatch) -> None:
+    _stub_server_observation(monkeypatch, {"run_id": "impl-1"})
+    with pytest.raises(SystemExit):
+        cli.main(
+            ["codex", "observe", "--run-id", "impl-1", "--tail", "5", "--head", "5"]
+        )
+
+
+@pytest.mark.parametrize("flag", ["--tail", "--head"])
+def test_root_cli_agent_observe_rejects_non_positive_window(
+    flag: str, monkeypatch
+) -> None:
+    _stub_server_observation(monkeypatch, {"run_id": "impl-1"})
+    with pytest.raises(SystemExit):
+        cli.main(["codex", "observe", "--run-id", "impl-1", flag, "0"])
+
+
+def test_root_cli_agent_observe_watch_is_default_and_detaches_on_terminal_run(
+    monkeypatch, capsys, tmp_path: Path
+) -> None:
+    transcript = tmp_path / "transcript.log"
+    transcript.write_text("backlog line\n", encoding="utf-8")
+    _stub_server_observation(
+        monkeypatch,
+        {
+            "run_id": "impl-1",
+            "state": "report_validated",
+            "agent": "codex",
+            "skill": "implement",
+            "root": "/repo",
+            "liveness": "terminal",
+            "latest_report": "/tmp/report.md",
+            "latest_transcript": str(transcript),
+        },
+    )
+
+    assert cli.main(["codex", "observe", "--run-id", "impl-1"]) == 0
+
+    out = capsys.readouterr().out
+    assert "watch:      following" in out
+    assert "backlog line" in out
+    assert "watch:      run impl-1 is terminal" in out
+
+
+def test_root_cli_agent_observe_watch_follows_until_lookup_turns_terminal(
+    monkeypatch, capsys, tmp_path: Path
+) -> None:
+    transcript = tmp_path / "transcript.log"
+    transcript.write_text("first line\n", encoding="utf-8")
+    _stub_server_observation(
+        monkeypatch,
+        {
+            "run_id": "impl-1",
+            "state": "process_spawned",
+            "agent": "codex",
+            "skill": "implement",
+            "root": "/repo",
+            "latest_report": "/tmp/report.md",
+            "latest_transcript": str(transcript),
+        },
+    )
+    lookups = {"count": 0}
+
+    def fake_lookup(run_id: str):
+        lookups["count"] += 1
+        if lookups["count"] == 1:
+            with transcript.open("a", encoding="utf-8") as handle:
+                handle.write("second line\n")
+            return {"run_id": run_id, "state": "running"}
+        return {"run_id": run_id, "state": "completed", "exit_code": 0}
+
+    monkeypatch.setattr(cli, "lookup_run", fake_lookup)
+
+    rc = cli.main(
+        ["codex", "observe", "--run-id", "impl-1", "--watch", "--interval", "0.01"]
+    )
+
+    assert rc == 0
+    assert lookups["count"] >= 2
+    out = capsys.readouterr().out
+    assert "first line" in out
+    assert "second line" in out
+    assert "is terminal (completed)" in out
+
+
+def test_root_cli_agent_observe_watch_exits_nonzero_on_terminal_failure(
+    monkeypatch, capsys, tmp_path: Path
+) -> None:
+    transcript = tmp_path / "transcript.log"
+    transcript.write_text("boom\n", encoding="utf-8")
+    _stub_server_observation(
+        monkeypatch,
+        {
+            "run_id": "impl-1",
+            "state": "failed",
+            "agent": "codex",
+            "skill": "implement",
+            "root": "/repo",
+            "liveness": "terminal",
+            "latest_report": "/tmp/report.md",
+            "latest_transcript": str(transcript),
+        },
+    )
+
+    assert cli.main(["codex", "observe", "--run-id", "impl-1"]) == 1
+
+    out = capsys.readouterr().out
+    assert "is terminal (failed)" in out
+
+
+def test_root_cli_agent_observe_watch_json_emits_event_lines(
+    monkeypatch, capsys, tmp_path: Path
+) -> None:
+    transcript = tmp_path / "transcript.log"
+    transcript.write_text("backlog line\n", encoding="utf-8")
+    _stub_server_observation(
+        monkeypatch,
+        {
+            "run_id": "impl-1",
+            "state": "completed",
+            "agent": "codex",
+            "skill": "implement",
+            "root": "/repo",
+            "exit_code": 0,
+            "latest_report": "/tmp/report.md",
+            "latest_transcript": str(transcript),
+        },
+    )
+
+    assert cli.main(["codex", "observe", "--run-id", "impl-1", "--json"]) == 0
+
+    events = [
+        json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+        if line.strip()
+    ]
+    assert events[0]["schema"] == "vibecrafted.observe-watch.v1"
+    assert events[0]["event"] == "begin"
+    assert events[-1]["event"] == "terminal"
+    assert events[-1]["state"] == "completed"
+    assert any(
+        event.get("schema") == "vibecrafted.observe-event.v1"
+        and event.get("line") == "backlog line"
+        for event in events
+    )
 
 
 def test_root_cli_agent_await_accepts_receipt_command(monkeypatch, capsys) -> None:
