@@ -27,7 +27,7 @@ from .run_triage import (
 )
 
 BUCKET_SESSIONS = ("Finalized runs", "Failed runs", "Needs attention")
-PROTECTED_TAB_NAMES = {"Start here", "Agents", "Shell", "voc"}
+PROTECTED_TAB_NAMES = {"Start here", "Agents", "Shell", "Voc"}
 _HEX = frozenset("0123456789abcdefABCDEF")
 
 

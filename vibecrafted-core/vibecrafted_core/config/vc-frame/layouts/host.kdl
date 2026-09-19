@@ -4,7 +4,7 @@
 // activate_session_request instead of a client detach/reattach.
 //
 // Path kept as host.kdl for: default_layout "host" in config.kdl.
-// Start here / Agents / Shell / voc stay on operator.kdl (guest content).
+// Start here / Agents / Shell / Voc stay on operator.kdl (guest content).
 //
 // 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
 layout {

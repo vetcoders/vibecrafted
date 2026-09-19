@@ -2,7 +2,7 @@
 source: tui-agent/tests/mission_control_snapshots.rs
 expression: buffer_text(&buffer)
 ---
-Vibecrafted Operator Console  no live runs loaded
+Vibecrafted operator  Console  no live runs loaded
 workspace: repo  |  active 0  stalled 0  |  scope: live  |  Mission Control
 ┌Surface───────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │ Monitor live 0 │ Dispatch workflow/claude │ Controls 4 │ Mission 2|4                                                 │

@@ -2,7 +2,7 @@
 source: tui-agent/tests/monitor_controls_snapshots.rs
 expression: text
 ---
-Vibecrafted Operator Console  runs: 2 | active 1 | stalled 1
+Vibecrafted operator  Console  runs: 2 | active 1 | stalled 1
 workspace: vibecrafted  |  active 1  stalled 1  |  scope: live  |  Monitor
 ┌Surface───────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │ Monitor live 2 │ Dispatch workflow/claude │ Controls 10 │ Mission 0|0                                                │

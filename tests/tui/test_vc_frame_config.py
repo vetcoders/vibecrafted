@@ -213,7 +213,7 @@ def test_layout_tab_branding_matches_frame_contract() -> None:
             assert 'tab name="Start here"' in payload
             assert 'tab name="Agents"' in payload
             assert 'tab name="Shell"' in payload
-            assert 'tab name="voc"' in payload
+            assert 'tab name="Voc"' in payload
             continue
         assert "𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍." in payload, f"{layout_file.name} missing branded tab name"
 
@@ -229,12 +229,12 @@ def test_marbles_layout_is_operator_centric() -> None:
 
 def test_operator_layout_matches_vibecrafted_standard() -> None:
     """vc-start operator.kdl is the Start here / guest workspace layout:
-    Start here + Agents + Shell + voc, SESSIONS rail on every tab, no strider."""
+    Start here + Agents + Shell + Voc, SESSIONS rail on every tab, no strider."""
     payload = (LAYOUTS_DIR / "operator.kdl").read_text(encoding="utf-8")
     assert 'tab name="Start here"' in payload
     assert 'tab name="Agents"' in payload
     assert 'tab name="Shell"' in payload
-    assert 'tab name="voc"' in payload
+    assert 'tab name="Voc"' in payload
     assert "vc-start-here.py" in payload
     assert "vc-agent-workshop.py" in payload
     assert "pane-python" in payload

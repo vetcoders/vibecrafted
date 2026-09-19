@@ -2,7 +2,7 @@
 source: tui-agent/tests/mission_control_snapshots.rs
 expression: buffer_color_map(&buffer)
 ---
-YYYYYYYYYYYYYYYYYYYYYYYYYYYY..ggggggggggggggggggg.......................................................................
+YYYYYYYYYYYYYYYYYYYYddddddddd..ggggggggggggggggggg......................................................................
 dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg
 gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggYYYYYYYYYYYgggggggggggggggggggggggggggggggggggggggggggggggggg

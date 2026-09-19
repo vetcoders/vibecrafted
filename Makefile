@@ -530,7 +530,12 @@ install-app-binaries:
 			install -m 0755 "$(APP_BUILD_TARGET)/release/$$bin" "$${VIBECRAFTED_RUNTIME_ROOT}/bin/$$bin"; \
 		fi; \
 	done; \
-	echo "[app] installed: $(APP_BINARIES) -> $(BIN_DIR)"
+	rm -f "$(BIN_DIR)/vc-o"; \
+	install -m 0755 "$(APP_BUILD_TARGET)/release/voc" "$(BIN_DIR)/vc-o"; \
+	if [ -n "$${VIBECRAFTED_RUNTIME_ROOT:-}" ] && [ -d "$${VIBECRAFTED_RUNTIME_ROOT}/bin" ]; then \
+		install -m 0755 "$(APP_BUILD_TARGET)/release/voc" "$${VIBECRAFTED_RUNTIME_ROOT}/bin/vc-o"; \
+	fi; \
+	echo "[app] installed: $(APP_BINARIES) vc-o -> $(BIN_DIR)"
 
 skills:
 	@$(PYTHON) $(INSTALLER) install --source "$(SOURCE)" --non-interactive
