@@ -7,7 +7,7 @@ workspace: vibecrafted  |  active 1  stalled 1  |  scope: live  |  Controls
 ┌Surface───────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │ Monitor live 2 │ Dispatch workflow/claude │ Controls 10 │ Mission 0|0                                                │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-┌Run access────────────────────────────┐┌Action deck───────────────────────────┐┌Artifacts─────────────────────────────┐
+┌ Run access ──────────────────────────┐┌ Action deck ─────────────────────────┐┌ Artifacts ───────────────────────────┐
 │implement · codex · vibecrafted       ││10 contextual actions                 ││3 file surfaces                       │
 │active  impl-1                        ││Attach session operator-1             ││reports / transcripts / roots         │
 │                                      ││                                      ││                                      │
