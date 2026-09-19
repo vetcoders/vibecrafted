@@ -358,7 +358,7 @@ _vetcoders_research() {
         printf 'vc-research: gemini CLI is deprecated (dead upstream). Use agy (Google Antigravity CLI) instead.\n' >&2
         return 1
         ;;
-      claude|codex|agy|junie|grok|cursor)
+      claude|codex|agy|junie|grok|cursor|kimi)
         if [[ " ${positional_research_agents[*]:-} " == *" ${1} "* ]]; then
           printf 'vc-research: agent %s given twice.\n' "${1}" >&2
           return 1
@@ -403,7 +403,7 @@ _vetcoders_research() {
         shift
         [[ $# -gt 0 ]] || { echo "Missing value for --synthesizer" >&2; return 1; }
         _vetcoders_has_agent "$1" || {
-          printf 'vc-research --synthesizer expects <claude|codex|agy|junie|grok|cursor>.\n' >&2
+          printf 'vc-research --synthesizer expects <claude|codex|agy|junie|grok|cursor|kimi>.\n' >&2
           return 1
         }
         research_synthesizer="$1"
@@ -475,7 +475,7 @@ _vetcoders_research() {
     while IFS= read -r agent; do
       case "$agent" in
         __source:*) research_agents_source="${agent#__source:}" ;;
-        claude|codex|agy|junie|grok|cursor) research_agents+=("$agent") ;;
+        claude|codex|agy|junie|grok|cursor|kimi) research_agents+=("$agent") ;;
         gemini)
           printf 'vc-research: config selects gemini, but gemini CLI is deprecated (dead upstream).\n' >&2
           printf 'Fix the picking config to use agy (Google Antigravity CLI) - refusing to silently shrink the swarm.\n' >&2

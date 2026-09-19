@@ -387,6 +387,21 @@ pub fn state_health(state: &str, updated_at: &str, now: DateTime<Utc>) -> Health
     }
 }
 
+/// Compact age for operator surfaces (`7d`, `3h`, `12m`).
+#[must_use]
+pub fn age_label(updated: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let delta = now.signed_duration_since(updated);
+    let days = delta.num_days();
+    if days >= 1 {
+        return format!("{days}d");
+    }
+    let hours = delta.num_hours();
+    if hours >= 1 {
+        return format!("{hours}h");
+    }
+    format!("{}m", delta.num_minutes().max(1))
+}
+
 /// Map a skill code to its long name. Mirrors `control_plane._skill_from_code`:
 /// known code → mapped name; unknown non-empty code → the code itself; empty →
 /// `"unknown"`.
@@ -958,6 +973,16 @@ pub struct LifecycleRun {
     pub root: String,
     #[serde(default)]
     pub status: String,
+    /// Optional supervisor pid from `state.json` (often null on abandoned runs).
+    #[serde(default)]
+    pub pid: Option<i64>,
+    #[serde(default)]
+    pub owner_pid: Option<i64>,
+    #[serde(default)]
+    pub launcher_pid: Option<i64>,
+    /// On-disk timestamp when the writer set one; otherwise the reader uses mtime.
+    #[serde(default)]
+    pub updated_at: String,
     #[serde(default)]
     pub await_stages: bool,
     #[serde(default)]
@@ -1051,11 +1076,13 @@ impl LifecycleRun {
         }
         .to_string();
 
+        let status = nonempty_or(&self.status, "unknown");
+        let next_action = lifecycle_next_action(self, &updated_at, Utc::now());
         LifecycleRunSummary {
             schema: self.schema.clone(),
             run_id: self.run_id.clone(),
             workflow: self.workflow.clone(),
-            status: nonempty_or(&self.status, "unknown"),
+            status,
             agent: nonempty_or(&self.agent, "unknown"),
             root: self.root.clone(),
             current_stage: self.current_stage(),
@@ -1069,6 +1096,7 @@ impl LifecycleRun {
             human_controls: self.human_controls.clone(),
             human_controls_count: self.human_controls.len(),
             operator_actions_count: self.operator_actions.len(),
+            next_action,
             state_path: self.state_path.clone(),
             report_path: self.report_path.clone(),
             transcript_path: self.transcript_path.clone(),
@@ -1180,6 +1208,36 @@ impl LifecycleRun {
             .filter(|id| !id.is_empty())
             .unwrap_or_else(|| self.baton.from_stage.clone())
     }
+}
+
+/// Operator next-action sentence for a lifecycle read model.
+///
+/// Abandoned containers never advertise `approve_transition`. The web Control
+/// surface prints this string; it must not invent a second policy.
+#[must_use]
+pub fn lifecycle_next_action(run: &LifecycleRun, updated_at: &str, now: DateTime<Utc>) -> String {
+    if run.status == "abandoned" {
+        let age = parse_iso(updated_at)
+            .map(|updated| age_label(updated, now))
+            .unwrap_or_else(|| "unknown age".to_string());
+        return format!("Abandoned · {age} without owner");
+    }
+    if let Some(control) = run.human_controls.iter().find(|item| !item.is_empty()) {
+        return format!("Operator: {control}");
+    }
+    if !run.baton.next_stage.is_empty() && !run.baton.next_agent.is_empty() {
+        return format!(
+            "Launch {} with {}",
+            run.baton.next_stage, run.baton.next_agent
+        );
+    }
+    if !run.baton.next_stage.is_empty() {
+        return format!("Advance to {}", run.baton.next_stage);
+    }
+    if !run.baton.next_agent.is_empty() {
+        return format!("Hand off to {}", run.baton.next_agent);
+    }
+    "Inspect the latest runtime event".to_string()
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1324,6 +1382,9 @@ pub struct LifecycleRunSummary {
     pub human_controls: Vec<String>,
     pub human_controls_count: usize,
     pub operator_actions_count: usize,
+    /// Derived operator sentence. Empty only when the writer omitted everything.
+    #[serde(default)]
+    pub next_action: String,
     pub state_path: String,
     pub report_path: String,
     pub transcript_path: String,
@@ -1808,6 +1869,10 @@ mod status_thread_tests {
             agent: "claude".into(),
             root: "/tmp/x".into(),
             status: "running".into(),
+            pid: None,
+            owner_pid: None,
+            launcher_pid: None,
+            updated_at: String::new(),
             await_stages: true,
             parent_run_id: None,
             operator_actions: vec![],

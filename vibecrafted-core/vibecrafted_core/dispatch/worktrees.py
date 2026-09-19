@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from dataclasses import asdict, dataclass
@@ -9,11 +10,38 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from ..control_plane import control_plane_home
 from ..runtime_paths import vibecrafted_home
 
 
 class WorktreeContractError(RuntimeError):
     """Raised when a worker checkout cannot satisfy isolation ownership."""
+
+
+def find_worktree_owner(root: str | Path) -> tuple[str, str] | None:
+    """Return ``(dispatch_run_id, cut_id)`` that registered this checkout."""
+    target = Path(root).expanduser()
+    dispatches = control_plane_home() / "dispatches"
+    if not dispatches.is_dir():
+        return None
+    for receipts in dispatches.glob("*/receipts.json"):
+        try:
+            payload = json.loads(receipts.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        run_id = str(payload.get("run_id") or "").strip()
+        cuts = payload.get("cuts")
+        if not run_id or not isinstance(cuts, dict):
+            continue
+        for cut_id, cut in cuts.items():
+            if not isinstance(cut, dict):
+                continue
+            path = str(cut.get("worktree_path") or "").strip()
+            if path and _same_filesystem_location(path, target):
+                return run_id, str(cut_id)
+    return None
 
 
 @dataclass(frozen=True)
@@ -140,8 +168,17 @@ class WorktreeManager:
         self.worktree_root.mkdir(parents=True, exist_ok=True)
         if root.exists():
             if not allow_reuse:
+                owner = find_worktree_owner(root)
+                if owner is not None:
+                    run_id, cut_id = owner
+                    raise WorktreeContractError(
+                        f"refusing existing worktree {root}; owning run {run_id} "
+                        f"cut {cut_id}; resume with: "
+                        f"vibecrafted dispatch <plan.toml> --resume {run_id}"
+                    )
                 raise WorktreeContractError(
-                    f"refusing existing worktree {root}; resume with its owning run id or clean it explicitly"
+                    f"refusing existing worktree {root}; resume with its owning "
+                    "run id or clean it explicitly"
                 )
             self._validate_target(root)
             self._validate_reuse(geometry)

@@ -1414,3 +1414,39 @@ depends_on = ["c1"]
 
     assert result.states["c1"] == STATE_VERIFIED
     assert result.states["c2"] == STATE_FAILED
+
+
+def test_keyboard_interrupt_marks_receipts_interrupted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    dispatch, _reports_dir, artifacts_dir = build_dispatch(
+        tmp_path,
+        """
+[[cuts]]
+id = "c1"
+agent = "claude"
+workflow = "implement"
+prompt = "will be interrupted"
+  [[cuts.verify]]
+  run = "echo ok"
+  expect = { contains = "ok" }
+""",
+    )
+
+    def boom(*_args: object, **_kwargs: object) -> CellRun:
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        run_dispatch(
+            dispatch,
+            launcher=boom,
+            artifacts_dir=artifacts_dir,
+            run_id="kb-int",
+        )
+
+    store = DispatchReceiptStore("kb-int", dispatch.cuts, create=False)
+    cut = store.cut("c1")
+    assert cut["state"] == "stopped"
+    assert cut["acceptance"] == "interrupted"
+    assert store.read().get("scheduler_stop_requested") is True

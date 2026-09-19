@@ -18,7 +18,7 @@ RELEASE_PAGE = "https://github.com/vetcoders/vibecrafted/releases/latest"
 # 2026-08-18; both copies agreed at this digest. See
 # test_windows_entry_point_does_not_drift_between_its_two_copies for why a
 # constant is needed on top of the cross-repo comparison.
-INSTALL_PS1_SHA256 = "a4360410be0d062314a4d08914b68a69231f47afa301ae880114cbc70c6ca7fd"
+INSTALL_PS1_SHA256 = "273cef1b5de9ba57ad133ca37bcce50a82294f29d94a5b09f09f9ba47ad23411"
 
 # Binaries a developer laptop always has and the GitHub macos-15 image does
 # not. Measured 2026-08-18 against actions/runner-images
@@ -1257,6 +1257,7 @@ def test_release_strips_linker_paths_and_pins_frame_source_identity() -> None:
     One shared boundary, no per-binary lists. MEASURED 2026-09-08 on the
     f131b81b candidate: the Runtime Pack step named libexec/vc-terminal and
     libexec/vc-frame and left bin/voc, bin/vc-start, bin/scaffold-doctor,
+    bin/control-observe,
     bin/aicx, bin/aicx-mcp and bin/prview carrying the rustup sysroot and the
     Cargo target directory in linker stabs; the hygiene gate refused the build
     before packaging. Both payloads now pass every Mach-O executable through
