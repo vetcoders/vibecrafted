@@ -2133,7 +2133,10 @@ def test_implement_help_is_the_canonical_autonomous_delivery_surface() -> None:
         "vibecrafted implement <claude|codex|agy|junie|grok|cursor|kimi> [flags]"
         in result.stdout
     )
-    assert "vc-implement <claude|codex|agy|junie|grok|cursor|kimi> [flags]" in result.stdout
+    assert (
+        "vc-implement <claude|codex|agy|junie|grok|cursor|kimi> [flags]"
+        in result.stdout
+    )
     assert "Not the same skill as justdo." in result.stdout
 
 
@@ -2152,7 +2155,9 @@ def test_justdo_help_is_a_distinct_standalone_posture() -> None:
         "vibecrafted justdo <claude|codex|agy|junie|grok|cursor|kimi> [flags]"
         in result.stdout
     )
-    assert "vc-justdo <claude|codex|agy|junie|grok|cursor|kimi> [flags]" in result.stdout
+    assert (
+        "vc-justdo <claude|codex|agy|junie|grok|cursor|kimi> [flags]" in result.stdout
+    )
     assert "Not implement." in result.stdout
 
 
@@ -2342,7 +2347,8 @@ def test_skill_wrapper_help_is_human_readable_without_agent(
     assert skill in result.stdout
     assert description in result.stdout
     assert (
-        f"{wrapper_name} <claude|codex|agy|junie|grok|cursor|kimi> [flags]" in result.stdout
+        f"{wrapper_name} <claude|codex|agy|junie|grok|cursor|kimi> [flags]"
+        in result.stdout
     )
 
 

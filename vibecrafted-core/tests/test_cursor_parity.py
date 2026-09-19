@@ -429,7 +429,9 @@ RUNTIME_SCRIPTS = CORE_ROOT / "vibecrafted_core" / "runtime" / "scripts"
 
 def test_marbles_scripts_accept_cursor() -> None:
     spawn_body = (RUNTIME_SCRIPTS / "marbles_spawn.sh").read_text(encoding="utf-8")
-    assert re.search(r"\^\(claude\|codex\|agy\|junie\|grok\|cursor\|kimi\)\$", spawn_body)
+    assert re.search(
+        r"\^\(claude\|codex\|agy\|junie\|grok\|cursor\|kimi\)\$", spawn_body
+    )
     next_body = (RUNTIME_SCRIPTS / "marbles_next.sh").read_text(encoding="utf-8")
     assert re.search(r"\(claude\|codex\|agy\|junie\|grok\|cursor\|kimi\)", next_body)
 
