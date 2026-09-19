@@ -238,7 +238,7 @@ pub(crate) async fn events_sse(
                         state.high_watermark = state.cursor.clone();
                     }
                     if state.pending.is_empty()
-                        && !(state.cursor.reaches(&state.high_watermark) && !state.caught_up)
+                        && (!state.cursor.reaches(&state.high_watermark) || state.caught_up)
                     {
                         tokio::time::sleep(Duration::from_millis(poll_ms)).await;
                     }

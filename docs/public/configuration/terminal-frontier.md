@@ -19,6 +19,14 @@ The installed terminal uses its own startup files under
 your private login profile. Your other terminal applications keep their existing
 setup.
 
+The isolated default pins Atuin, Starship, zoxide, `HISTFILE`, and `ZDOTDIR` to
+product paths so the two histories never mix. To load your personal home
+environment in that already-started shell, run `personal-shell`. That command
+releases those pins and sources `~/.zshrc`, so personal Atuin config (for
+example `enter_accept`) and keybindings take effect. Typing `source ~/.zshrc`
+alone is not that transition: the product pins stay exported and keep winning.
+`reload` re-reads the product profile.
+
 The profile initializes installed Starship, Atuin, zoxide, zsh-autosuggestions
 and zsh-syntax-highlighting. Atuin uses **Ctrl+R**; ordinary Up-arrow behavior is
 preserved. Zoxide provides `z <directory-name>` after you have visited a directory.
@@ -35,11 +43,12 @@ notices, without command history or tool initialization output. Install missing
 tools through their upstream package or installer. A failed explicit workspace
 launch keeps its error visible and leaves a shell available for the next command.
 
-## Legacy frontier helpers
+## Frontier helpers
 
-The opt-in helper layer below is separate from the installed Terminal profile.
+The helper layer below is separate from the installed Terminal profile and reads
+the same product configuration home, `~/.config/vibecrafted/`.
 
-Frontier config is the lightweight, optional terminal layer that ships with the runtime: a `starship` prompt with repo and runtime context, `atuin` searchable history tuned for project recall, and dormant `vc-frame` dashboard layouts. None of it is required — `vibecrafted` works without any of it — and none of it bulldozes your existing terminal setup.
+Frontier config is the lightweight, optional terminal layer that ships with the runtime: a `starship` prompt with repo and runtime context, `atuin` searchable history tuned for project recall, and dormant `vc-frame` dashboard layouts. None of it is required — `vibecrafted` works without any of it — and none of it touches your own terminal configuration.
 
 ## What it gives you
 
@@ -47,9 +56,8 @@ Frontier config is the lightweight, optional terminal layer that ships with the 
 | --------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | starship  | Prompt showing directory, git branch and dirty state, Python/Node/Rust context, and the active agent and runtime while a spawn is running |
 | atuin     | Fuzzy history with workspace-first filtering, home-scope fallback, preview-enabled recall, noise filtering for trivial commands           |
-| shell     | `atuin-up.zsh` — keyboard Up opens Atuin; mouse wheel stays host scrollback via the Alacritty preset                                      |
-| alacritty | Optional host sidecars (wheel `~Alt`/`Alt` split + primary-shell launcher); never overwrites `~/.config/alacritty`                        |
-| vc-frame  | Repo-owned `config.kdl` and dashboard layouts that stay dormant until you launch them                                                     |
+| shell     | `atuin-up.zsh` — keyboard Up opens Atuin; mouse wheel stays host scrollback via the product terminal policy                               |
+| vc-frame  | Product `config.kdl` and dashboard layouts in `~/.config/vibecrafted/vc-frame/` that stay dormant until you launch them                   |
 
 ## Opt in
 
@@ -59,40 +67,30 @@ make install                    # from a local checkout
 vc-frontier-paths               # inspect the resolved config paths
 ```
 
-Install or refresh the frontier sidecars at any time:
-
-```bash
-vc-frontier-install
-```
-
-The installer places all assets under `$HOME/.config/vetcoders/frontier/` — **not** into your global `$HOME/.config/starship.toml` or `$HOME/.config/vc-frame`. If vc-frame is on your machine, the same command also stages the repo-owned `config.kdl` and dashboard layouts. Nothing activates until you run a dashboard command or point your shell at those files:
+The installer publishes the presets into `~/.config/vibecrafted/` (`starship.toml`, `atuin/config.toml`, `vc-frame/`). Nothing activates until you run a dashboard command:
 
 ```bash
 vibecrafted dashboard
 ```
 
-During a full install, frontier staging runs from the installed runtime generation (the `vibecrafted-current` tree), and a failure there is non-fatal — the install proceeds and prints a warning.
-
 ## Opt out
 
-Frontier is opt-in by construction:
+- Without `starship` or `atuin` installed, no prompt or history preset is applied.
+- An explicit `STARSHIP_CONFIG` or `ATUIN_CONFIG` in your environment wins over the presets.
+- Vibecrafted reads and writes no configuration directory other than `~/.config/vibecrafted/`, so your own prompt and history configuration stays yours.
 
-- Skip `vc-frontier-install` and no frontier files are staged.
-- Staged files are inert until referenced — your shell keeps its own prompt and history config.
-- Removing the layer means deleting `$HOME/.config/vetcoders/frontier/` and any lines you added to your shell config yourself.
-
-If you already run your shell inside a vc-frame session, spawned agents still reuse panes automatically whether or not you install the repo-owned dashboards.
+If you already run your shell inside a vc-frame session, spawned agents still reuse panes automatically whether or not you use the dashboards.
 
 ## Config resolution
 
-The helper layer resolves each artifact **independently**, first match wins:
+The helper layer resolves the Starship and Atuin presets **independently**, first match wins:
 
-1. `$XDG_CONFIG_HOME/vetcoders/frontier/`
-2. `$VIBECRAFTED_HOME/tools/vibecrafted-current/config/`
+1. `~/.config/vibecrafted/`
+2. `${VIBECRAFTED_TOOLS_HOME:-~/.local/share/vibecrafted/tools}/vibecrafted-current/config/`
 3. `$VIBECRAFTED_ROOT/config/`
 4. `<current vibecrafted repo>/config/`
 
-Per-asset resolution means a companion config can override only the vc-frame bits while the runtime still provides the prompt and history defaults — or provide a single layout without shadowing anything else.
+vc-frame config is not searched: it is pinned to `~/.config/vibecrafted/vc-frame/`.
 
 Check what is actually resolved on your machine:
 

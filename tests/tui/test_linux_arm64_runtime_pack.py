@@ -90,9 +90,7 @@ def test_linux_builder_uses_pinned_public_inputs_for_arm64_and_x64() -> None:
     assert "7ab84069c9b7994ce0b705ccedd708aa3a35dcb6" in assembler
     assert "git clone" not in assembler
     assert "VIBECRAFTED_SOURCE_OWNER_REPO" in assembler
-    assert (
-        'export VIBECRAFTED_SOURCE_REVISION="$source_revision"' in assembler
-    )
+    assert 'export VIBECRAFTED_SOURCE_REVISION="$source_revision"' in assembler
     assert 'export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-1.97.0}"' in assembler
     assert 'export CC="${CC:-gcc}"' in assembler
     assert 'export CXX="${CXX:-g++}"' in assembler
@@ -127,7 +125,17 @@ def test_linux_builder_uses_pinned_public_inputs_for_arm64_and_x64() -> None:
     assert '"$payload/bin/vibecrafted-server-web"' in assembler
     assert '"$payload/bin/vc-server-supervisor"' in assembler
     assert '"$payload/bin/scaffold-doctor"' in assembler
+    assert '"$payload/bin/control-observe"' in assembler
+    assert "--bin scaffold-doctor --bin control-observe" in assembler or (
+        "--bin scaffold-doctor" in assembler and "--bin control-observe" in assembler
+    )
     assert '"$payload/vibecrafted-mcp/"' in assembler
+    assert "install_portable_python" in assembler
+    assert "portable_python_load_pin" in assembler
+    assert "scripts/lib/portable-python.sh" in assembler
+    assert "uv python install 3.12.3" not in assembler
+    assert "PORTABLE_PYTHON_BIN" in assembler
+    assert "python3.12" not in assembler
 
     foundations = (REPO_ROOT / "scripts/stage-runtime-foundations.sh").read_text(
         encoding="utf-8"
@@ -136,9 +144,86 @@ def test_linux_builder_uses_pinned_public_inputs_for_arm64_and_x64() -> None:
     assert 'rm -rf "$WORK/aicx"' in foundations
     assert "@loctree/aicx-linux-x64-gnu" in foundations
     assert "@loctree/loctree-linux-x64-gnu" in foundations
-    # The stager stopped cargo-building donors entirely (npm + prebuilt prview).
+    # The candidate stager is the newer npm-integrity iteration: published
+    # tarballs verified by sha512 integrity, no cargo at all. It clears the
+    # donor work trees first so a stale checkout cannot survive into the pack.
+    assert "stage_npm_binaries" in foundations
+    assert 'rm -rf "$WORK/loctree"' in foundations
+    assert 'rm -rf "$WORK/aicx"' in foundations
     assert "cargo build --manifest-path" not in foundations
     assert "cargo install" not in foundations
+
+
+def test_linux_carrier_provisions_wasi_targets_for_the_assembler_toolchain(
+    tmp_path: Path,
+) -> None:
+    """A divergent ambient rustup default must not hide a missing donor target."""
+    workflow = (REPO_ROOT / ".github/workflows/install-linux.yml").read_text(
+        encoding="utf-8"
+    )
+    assembler = (REPO_ROOT / "scripts/build-linux-arm64-runtime-pack.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-1.97.0}"' in assembler
+    assert 'RUSTUP_TOOLCHAIN: "1.97.0"' in workflow
+    assert 'rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal' in workflow
+    assert 'rustup target add --toolchain "$RUSTUP_TOOLCHAIN"' in workflow
+    assert "wasm32-unknown-unknown wasm32-wasip1" in workflow
+    assert 'rustup target list --installed --toolchain "$RUSTUP_TOOLCHAIN"' in workflow
+    assert 'grep -Fx "$target"' in workflow
+    assert "rustup target add wasm32-unknown-unknown wasm32-wasip1" not in workflow
+
+    # Exercise the actual workflow preflight body with an ambient default that
+    # never participates. The fake rustup exposes only the selected toolchain;
+    # omitting WASI must fail here, before any carrier cargo invocation.
+    preflight_start = workflow.index("          rustup toolchain install")
+    preflight_end = workflow.index("          curl -L", preflight_start)
+    preflight = "\n".join(
+        line.removeprefix("          ")
+        for line in workflow[preflight_start:preflight_end].splitlines()
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    calls = tmp_path / "rustup-calls"
+    _executable(
+        fake_bin / "rustup",
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$*" >> "$RUSTUP_CALLS"\n'
+        'case "$1 $2" in\n'
+        '  "toolchain install"|"target add") exit 0 ;;\n'
+        '  "target list")\n'
+        "    echo wasm32-unknown-unknown\n"
+        '    [ "${MISSING_WASI:-0}" = 1 ] || echo wasm32-wasip1\n'
+        "    exit 0 ;;\n"
+        "esac\n"
+        "exit 99\n",
+    )
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "RUSTUP_TOOLCHAIN": "1.97.0",
+        "RUSTUP_CALLS": str(calls),
+    }
+    success = subprocess.run(
+        ["bash", "-c", f"set -euo pipefail\n{preflight}"],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert success.returncode == 0, success.stderr
+    assert "target add --toolchain 1.97.0" in calls.read_text(encoding="utf-8")
+
+    missing = subprocess.run(
+        ["bash", "-c", f"set -euo pipefail\n{preflight}"],
+        env={**env, "MISSING_WASI": "1"},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert missing.returncode != 0
+    assert "FATAL: wasm32-wasip1 missing from 1.97.0" in missing.stderr
 
 
 def test_linux_x86_64_host_expects_carrier_architecture_x64() -> None:

@@ -14,6 +14,11 @@ from pathlib import Path
 import pytest
 import tomllib
 from _runtime_pack_fixture import REPO_ROOT, seed_runtime_pack
+from vibecrafted_core.vc_frame_staging import (
+    resolve_clipboard_command,
+    resolve_pane_shell,
+    substitute_host_commands,
+)
 
 from scripts import vetcoders_install as installer
 
@@ -54,11 +59,38 @@ def roots(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(home / ".local/bin"))
     monkeypatch.setenv("VIBECRAFTED_HOME", str(home / ".vibecrafted"))
     monkeypatch.setenv("VC_FRAME_SOCKET_DIR", str(tmp_path / "frame-sockets"))
+    # e1d7a791: the installer projects the shipped KDL through
+    # vc_frame_staging.substitute_host_commands, which rewrites
+    # `copy_command "pbcopy"` when the host has no pbcopy (a Linux runner gets
+    # an xclip line or a comment). The KDL merge tests edit that very line the
+    # way a user would, so pin the host clipboard to the shipped command with a
+    # hermetic stand-in. It is only looked up on PATH, never executed.
+    host_bin = tmp_path / "host-clipboard-bin"
+    host_bin.mkdir()
+    pbcopy = host_bin / "pbcopy"
+    pbcopy.write_text("#!/bin/sh\ncat >/dev/null\n", encoding="utf-8")
+    pbcopy.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{host_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    assert resolve_clipboard_command() == "pbcopy"
     # Model the external lifecycle boundary only. Filesystem and validators run real.
     monkeypatch.setattr(
         installer, "_teardown_owned_runtime_for_uninstall", lambda *_a, **_k: ()
     )
     return installer._runtime_install_paths()
+
+
+def _host_projection(kdl_text: str) -> str:
+    """Shipped KDL as the installer projects it onto this host (e1d7a791)."""
+    return substitute_host_commands(
+        kdl_text, resolve_pane_shell(), resolve_clipboard_command()
+    )
+
+
+def _user_edit(config: Path, old: bytes, new: bytes) -> None:
+    """Apply a user's edit and prove it landed: a no-op replace proves nothing."""
+    before = config.read_bytes()
+    assert old in before, f"user edit anchor is not in the installed config: {old!r}"
+    config.write_bytes(before.replace(old, new))
 
 
 def _install(payload: Path, capsys, **choice) -> dict:
@@ -329,17 +361,18 @@ def test_non_overlapping_kdl_upgrade_merges_user_preference_and_new_defaults(
         capsys,
     )
     config = roots["product_config"] / "vc-frame/config.kdl"
-    config.write_bytes(
-        config.read_bytes().replace(
-            b'copy_command "pbcopy"',
-            b'copy_command "pbcopy"\ncopy_on_select true',
-        )
+    _user_edit(
+        config,
+        b'copy_command "pbcopy"',
+        b'copy_command "pbcopy"\ncopy_on_select true',
     )
     payload_b = seed_runtime_pack(tmp_path / "pack-b", version="9.9.10+b")
     upgraded = _install(payload_b, capsys)
-    expected = incoming.replace(
-        'copy_command "pbcopy"', 'copy_command "pbcopy"\ncopy_on_select true'
-    ).encode()
+    expected = (
+        _host_projection(incoming)
+        .replace('copy_command "pbcopy"', 'copy_command "pbcopy"\ncopy_on_select true')
+        .encode()
+    )
     assert config.read_bytes() == expected
     assert upgraded["root"] != initial["root"]
     _install(payload_b, capsys)
@@ -371,21 +404,24 @@ def test_kdl_upgrade_merges_user_scalar_with_shipped_nested_keybinds_and_retries
         capsys,
     )
     config = roots["product_config"] / "vc-frame/config.kdl"
-    config.write_bytes(
-        config.read_bytes().replace(
-            reproducer["user_anchor"].encode(),
-            f"{reproducer['user_anchor']}\n{reproducer['user_scalar']}".encode(),
-        )
+    _user_edit(
+        config,
+        reproducer["user_anchor"].encode(),
+        f"{reproducer['user_anchor']}\n{reproducer['user_scalar']}".encode(),
     )
     payload_b = seed_runtime_pack(
         tmp_path / "pack-b", version="9.9.10+b", frame_config=incoming
     )
 
     upgraded = _install(payload_b, capsys)
-    expected = incoming.replace(
-        reproducer["user_anchor"],
-        f"{reproducer['user_anchor']}\n{reproducer['user_scalar']}",
-    ).encode()
+    expected = (
+        _host_projection(incoming)
+        .replace(
+            reproducer["user_anchor"],
+            f"{reproducer['user_anchor']}\n{reproducer['user_scalar']}",
+        )
+        .encode()
+    )
     assert config.read_bytes() == expected
     assert b'bind "Super n" {' in config.read_bytes()
     assert b'bind "Super Shift ." {' in config.read_bytes()
@@ -509,10 +545,10 @@ def test_unsupported_changed_kdl_scalar_syntax_refuses_publication(
     paths, _, result = installed
     product = paths["product_config"]
     config = product / "vc-frame/config.kdl"
-    config.write_bytes(
-        config.read_bytes().replace(
-            b'copy_command "pbcopy"', b'copy_command "pbcopy"; copy_on_select true'
-        )
+    _user_edit(
+        config,
+        b'copy_command "pbcopy"',
+        b'copy_command "pbcopy"; copy_on_select true',
     )
     before = _snapshot(product)
     active = (paths["runtime_home"] / "active.json").read_bytes()
@@ -1006,7 +1042,14 @@ def test_terminal_wrapper_pins_physical_owner_and_preserves_payload_argv(
         assert not result.stdout
 
 
-def _bundle_capture_host(path: Path, python: str) -> None:
+def _bundle_capture_host(path: Path, python: str, *, name: str = "VC Terminal") -> None:
+    """A complete branded bundle whose inner binary reports how it was invoked.
+
+    `name` is a parameter because the donor's own CFBundleName is the exact
+    shape the wrapper has to refuse: the release builder stamps VC Terminal
+    into both payloads' bundles, so anything else at a bundle-shaped path is
+    not this product's Dock identity.
+    """
     path.parent.mkdir(parents=True)
     path.write_text(
         f"#!{python}\nimport json, os, sys\nprint(json.dumps({{'argv':sys.argv[1:], 'host':sys.argv[0]}}))\n",
@@ -1017,20 +1060,22 @@ def _bundle_capture_host(path: Path, python: str) -> None:
     plist.write_text(
         '<?xml version="1.0"?><plist version="1.0"><dict>'
         "<key>CFBundleIdentifier</key><string>io.vetcoders.vc-terminal</string>"
+        "<key>CFBundleExecutable</key><string>alacritty</string>"
+        "<key>CFBundleIconFile</key><string>alacritty.icns</string>"
+        f"<key>CFBundleName</key><string>{name}</string>"
+        f"<key>CFBundleDisplayName</key><string>{name}</string>"
         "</dict></plist>\n",
         encoding="utf-8",
     )
+    icon = path.parents[1] / "Resources/alacritty.icns"
+    icon.parent.mkdir(parents=True, exist_ok=True)
+    icon.write_bytes(b"fixture-icon")
 
 
-def test_terminal_wrapper_execs_product_bundle_host_not_naked_libexec(
-    tmp_path, monkeypatch
-):
+def _terminal_wrapper_generation(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """Generation with the product wrapper on bin and a flat native host."""
     import shutil
 
-    home = tmp_path / "home"
-    entry = home / ".config/vibecrafted/vc-terminal/vc-terminal.toml"
-    entry.parent.mkdir(parents=True)
-    entry.write_text("[general]\n")
     generation = tmp_path / "generation"
     (generation / "bin").mkdir(parents=True)
     (generation / "libexec").mkdir()
@@ -1043,6 +1088,21 @@ def test_terminal_wrapper_execs_product_bundle_host_not_naked_libexec(
     libexec = generation / "libexec/vc-terminal"
     libexec.write_text("#!/bin/sh\nprintf 'libexec-ran\\n'\n")
     libexec.chmod(0o755)
+    return generation, wrapper, libexec
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin",
+    reason=".app is a Darwin identity mechanism; other platforms keep the flat host",
+)
+def test_terminal_wrapper_execs_product_bundle_host_not_naked_libexec(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "home"
+    entry = home / ".config/vibecrafted/vc-terminal/vc-terminal.toml"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("[general]\n")
+    generation, wrapper, _libexec = _terminal_wrapper_generation(tmp_path)
     bundle_host = (
         tmp_path
         / "Vibecrafted.app/Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
@@ -1060,13 +1120,62 @@ def test_terminal_wrapper_execs_product_bundle_host_not_naked_libexec(
 
     generation_bundle = generation / "libexec/vc-terminal.app/Contents/MacOS/alacritty"
     _bundle_capture_host(generation_bundle, sys.executable)
-    monkeypatch.setenv("VIBECRAFTED_TERMINAL_HOST", str(bundle_host))
+    monkeypatch.delenv("VIBECRAFTED_TERMINAL_HOST")
     result = subprocess.run(
         [str(wrapper), "-e", "true"], capture_output=True, text=True, check=False
     )
     assert result.returncode == 0, result.stderr
     capture = json.loads(result.stdout)
     assert capture["host"] == str(generation_bundle)
+
+    # An incomplete bundle must not masquerade as a valid branded host.
+    (generation_bundle.parents[1] / "Resources/alacritty.icns").unlink()
+    result = subprocess.run(
+        [str(wrapper), "-e", "true"], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "libexec-ran\n"
+
+    # Nor may a complete bundle that never received the canonical stamp: the
+    # donor ships its own CFBundleName and the builder overwrites it in both
+    # payloads, so an unstamped bundle is somebody else's app.
+    donor_bundle = tmp_path / "donor/vc-terminal.app/Contents/MacOS/alacritty"
+    _bundle_capture_host(donor_bundle, sys.executable, name="Alacritty")
+    monkeypatch.setenv("VIBECRAFTED_TERMINAL_HOST", str(donor_bundle))
+    result = subprocess.run(
+        [str(wrapper), "-e", "true"], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "libexec-ran\n"
+
+
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason="Darwin is the platform that owns .app selection",
+)
+def test_terminal_wrapper_keeps_flat_native_host_off_darwin(tmp_path, monkeypatch):
+    """Linux and friends run the generation's flat native host, always.
+
+    A Runtime Pack built for Linux carries no bundle, but a polluted
+    environment can still name one, and a shared home can still hold a
+    macOS-shaped tree. Platform, not path shape, decides.
+    """
+    home = tmp_path / "home"
+    entry = home / ".config/vibecrafted/vc-terminal/vc-terminal.toml"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("[general]\n")
+    generation, wrapper, _libexec = _terminal_wrapper_generation(tmp_path)
+    monkeypatch.setenv("HOME", str(home))
+
+    generation_bundle = generation / "libexec/vc-terminal.app/Contents/MacOS/alacritty"
+    _bundle_capture_host(generation_bundle, sys.executable)
+    monkeypatch.setenv("VIBECRAFTED_TERMINAL_HOST", str(generation_bundle))
+
+    result = subprocess.run(
+        [str(wrapper), "-e", "true"], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "libexec-ran\n"
 
 
 # MARK: - Configuration self-repair
@@ -1371,7 +1480,7 @@ def _previous_terminal_policy() -> str:
     return (
         _REPO_TERMINAL_POLICY.read_text(encoding="utf-8")
         .replace(_INCOMING_SHELL, _PREVIOUS_SHELL)
-        .replace("padding = { x = 8, y = 24 }", "padding = { x = 0, y = 0 }")
+        .replace("padding = { x = 0, y = 0 }", "padding = { x = 8, y = 8 }")
     )
 
 
@@ -1412,7 +1521,7 @@ def test_three_way_shell_correction_keeps_user_chrome_and_accepts_new_defaults(
     )
     text = policy.read_text(encoding="utf-8")
     assert _INCOMING_SHELL in text
-    assert "padding = { x = 8, y = 24 }" in text
+    assert "padding = { x = 0, y = 0 }" in text
     assert 'family = "User Mono"' in text
     assert 'background = "#111111"' in text
     assert 'mods = "Control"' in text
@@ -1443,6 +1552,169 @@ def test_disjoint_toml_edits_still_merge(installed, tmp_path, capsys):
     assert "opacity = 0.75" in merged
     assert "history = 60000" in merged
     _resolve(paths, capsys, status="ready")
+
+
+def test_terminal_chrome_and_font_overrides_survive_matching_default_then_retry(
+    tmp_path, roots, capsys
+):
+    """A temporary matching shipped default must not erase user ownership."""
+    base = _REPO_TERMINAL_POLICY.read_text(encoding="utf-8")
+    user = (
+        base.replace("blur = true", "blur = false")
+        .replace("opacity = 0.9", "opacity = 0.75")
+        .replace('decorations = "Transparent"', 'decorations = "Full"')
+        .replace('family = "Spot Mono"', 'family = "Founder Mono"')
+    )
+    first_update = (
+        base.replace("blur = true", "blur = false")
+        .replace("opacity = 0.9", "opacity = 0.85")
+        .replace('decorations = "Transparent"', 'decorations = "None"')
+        .replace('family = "Spot Mono"', 'family = "Shipped Mono"')
+    )
+    second_update = base.replace("opacity = 0.9", "opacity = 0.95").replace(
+        'family = "Spot Mono"', 'family = "Future Mono"'
+    )
+
+    _install(
+        seed_runtime_pack(tmp_path / "pack-a", version="9.9.9+a", terminal_policy=base),
+        capsys,
+    )
+    policy = roots["product_config"] / "terminal-policy.toml"
+    policy.write_text(user, encoding="utf-8")
+
+    _install(
+        seed_runtime_pack(
+            tmp_path / "pack-b", version="9.9.10+b", terminal_policy=first_update
+        ),
+        capsys,
+    )
+    _install(
+        seed_runtime_pack(
+            tmp_path / "pack-c", version="9.9.11+c", terminal_policy=second_update
+        ),
+        capsys,
+    )
+
+    preserved = tomllib.loads(policy.read_text(encoding="utf-8"))
+    assert preserved["window"] == {
+        **preserved["window"],
+        "blur": False,
+        "opacity": 0.75,
+        "decorations": "Full",
+    }
+    assert {
+        preserved["font"][face]["family"] for face in ("normal", "bold", "italic")
+    } == {"Founder Mono"}
+    receipt = json.loads(
+        (roots["runtime_home"] / installer.RUNTIME_INSTALL_RECEIPT).read_text()
+    )
+    overrides = receipt["terminal_policy_user_overrides"][str(policy)]
+    assert {"window.blur", "window.opacity", "window.decorations"} <= set(overrides)
+    assert "Founder Mono" not in json.dumps(receipt)
+    _resolve(roots, capsys, status="ready")
+
+
+# The Founder-stated product chrome. Written as literal expected values rather
+# than read back out of the shipped file, so a silent edit to the default is a
+# failing test and not a self-fulfilling assertion.
+_PRODUCT_WINDOW_DEFAULTS = {
+    "blur": True,
+    "opacity": 0.9,
+    "decorations": "Transparent",
+}
+_PRODUCT_FONT_FAMILY = "Spot Mono"
+
+
+def _installed_policy(roots) -> dict:
+    return tomllib.loads(
+        (roots["product_config"] / "terminal-policy.toml").read_text(encoding="utf-8")
+    )
+
+
+def test_fresh_install_lands_the_product_chrome_and_font(tmp_path, roots, capsys):
+    """A first install must produce the chrome the product promises."""
+    _install(
+        seed_runtime_pack(tmp_path / "pack-a", version="9.9.9+a"),
+        capsys,
+    )
+    policy = _installed_policy(roots)
+    assert {
+        key: policy["window"][key] for key in _PRODUCT_WINDOW_DEFAULTS
+    } == _PRODUCT_WINDOW_DEFAULTS
+    assert {
+        policy["font"][face]["family"] for face in ("normal", "bold", "italic")
+    } == {_PRODUCT_FONT_FAMILY}
+    _resolve(roots, capsys, status="ready")
+
+
+def test_upgrade_keeps_the_product_chrome_when_the_owner_never_touched_it(
+    tmp_path, roots, capsys
+):
+    """Untouched defaults follow the product; they are not frozen on install."""
+    base = _REPO_TERMINAL_POLICY.read_text(encoding="utf-8")
+    shipped_before = base.replace('decorations = "Transparent"', 'decorations = "None"')
+    assert shipped_before != base
+
+    _install(
+        seed_runtime_pack(
+            tmp_path / "pack-a", version="9.9.9+a", terminal_policy=shipped_before
+        ),
+        capsys,
+    )
+    assert _installed_policy(roots)["window"]["decorations"] == "None"
+
+    _install(
+        seed_runtime_pack(
+            tmp_path / "pack-b", version="9.9.10+b", terminal_policy=base
+        ),
+        capsys,
+    )
+    policy = _installed_policy(roots)
+    assert {
+        key: policy["window"][key] for key in _PRODUCT_WINDOW_DEFAULTS
+    } == _PRODUCT_WINDOW_DEFAULTS
+    _resolve(roots, capsys, status="ready")
+
+
+def test_upgrade_of_the_default_keeps_an_explicit_decoration_choice(
+    tmp_path, roots, capsys
+):
+    """The correction to the default must not overwrite a deliberate answer."""
+    base = _REPO_TERMINAL_POLICY.read_text(encoding="utf-8")
+    shipped_before = base.replace('decorations = "Transparent"', 'decorations = "None"')
+
+    _install(
+        seed_runtime_pack(
+            tmp_path / "pack-a", version="9.9.9+a", terminal_policy=shipped_before
+        ),
+        capsys,
+    )
+    policy_path = roots["product_config"] / "terminal-policy.toml"
+    policy_path.write_text(
+        policy_path.read_text(encoding="utf-8").replace(
+            'decorations = "None"', 'decorations = "Full"'
+        ),
+        encoding="utf-8",
+    )
+
+    _install(
+        seed_runtime_pack(
+            tmp_path / "pack-b", version="9.9.10+b", terminal_policy=base
+        ),
+        capsys,
+    )
+    policy = _installed_policy(roots)
+    assert policy["window"]["decorations"] == "Full"
+    # Chrome the owner never answered for still follows the product.
+    assert policy["window"]["blur"] is True
+    assert policy["window"]["opacity"] == 0.9
+    receipt = json.loads(
+        (roots["runtime_home"] / installer.RUNTIME_INSTALL_RECEIPT).read_text()
+    )
+    overrides = receipt["terminal_policy_user_overrides"][str(policy_path)]
+    assert "window.decorations" in overrides
+    assert "Full" not in json.dumps(receipt), "the receipt records identity, not value"
+    _resolve(roots, capsys, status="ready")
 
 
 def test_explicit_shell_preference_stays_a_bound_choice(tmp_path, roots, capsys):
@@ -1507,7 +1779,7 @@ def test_explicit_shell_preference_stays_a_bound_choice(tmp_path, roots, capsys)
             preference_path=str(policy),
         )
         assert _EXPLICIT_FISH_SHELL in policy.read_text(encoding="utf-8")
-        assert "padding = { x = 8, y = 24 }" in policy.read_text(encoding="utf-8")
+        assert "padding = { x = 0, y = 0 }" in policy.read_text(encoding="utf-8")
         _resolve(roots, capsys, status="ready")
 
 
@@ -1965,6 +2237,57 @@ def test_toml_overlay_dotted_raw_keeps_nested_table_path():
     assert "window.opacity" not in after_header
 
 
+def test_toml_merge_keep_current_replaces_top_level_multiline_assignment():
+    """A hash-bound keep-current choice may carry a triple-quoted preference."""
+    previous = 'add_newline = true\nformat = """$directory\n$character"""\n'
+    current = 'add_newline = false\nformat = """$time$fill\n$character"""\n'
+    incoming = (
+        'add_newline = true\nformat = """$directory\n$character"""\n\n'
+        "[python]\ndisabled = true\n"
+    )
+
+    merged = installer._merge_toml_runtime_preferences(
+        previous, current, incoming, choice="keep-current"
+    )
+
+    _assert_toml_tree(
+        merged,
+        {
+            "add_newline": False,
+            "format": "$time$fill\n$character",
+            "python": {"disabled": True},
+        },
+    )
+    assert 'format = """$time$fill\n$character"""' in merged
+
+
+def test_toml_locator_skips_table_and_assignment_looking_multiline_content():
+    text = (
+        'format = """literal payload\n[not-a-table]\nkey = "still literal"\n"""\n'
+        "\n[real]\nvalue = 1\n"
+    )
+
+    location = installer._toml_locate_setting(
+        text.splitlines(keepends=True), "real.value"
+    )
+
+    assert location is not None
+    assert location.kind == "assignment"
+    assert tomllib.loads(text) == {
+        "format": 'literal payload\n[not-a-table]\nkey = "still literal"\n',
+        "real": {"value": 1},
+    }
+
+
+def test_toml_delete_multiline_assignment_removes_empty_table():
+    text = '[custom]\nformat = """line one\nline two"""\n\n[other]\nvalue = 1\n'
+
+    deleted = installer._toml_delete_assignment(text, "custom.format")
+
+    assert "[custom]" not in deleted
+    assert tomllib.loads(deleted) == {"other": {"value": 1}}
+
+
 @pytest.mark.parametrize(
     "previous_form,current_form,incoming_form", _TOML_WINDOW_FORM_TRIPLES
 )
@@ -2168,5 +2491,138 @@ def test_unhashed_previous_starship_keeps_current_on_bound_retry(
         preference_path=str(starship),
     )
     assert starship.read_text(encoding="utf-8") == user
+    selected = (roots["runtime_home"] / "tools/vibecrafted-current").resolve()
+    assert selected.name == "9.9.10+b"
+
+
+def test_missing_starship_seeds_incoming_without_unproven_legacy_baseline(
+    tmp_path, roots, capsys
+):
+    """An absent preference needs no legacy bytes for a three-way merge."""
+    first = seed_runtime_pack(tmp_path / "pack-a", version="9.9.9+a")
+    _install(first, capsys)
+    starship = roots["product_config"] / "starship.toml"
+    starship.unlink()
+    generation = (roots["runtime_home"] / "tools/vibecrafted-current").resolve()
+    manifest_path = generation / installer._RUNTIME_GENERATION_MANIFEST
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["hashes"].pop("config/starship.toml", None)
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    receipt_path = installer._runtime_receipt_path(roots["runtime_home"])
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt.get("config_defaults", {}).pop(str(starship), None)
+    receipt.get("owned_files", {}).pop(str(starship), None)
+    receipt_path.write_text(json.dumps(receipt) + "\n", encoding="utf-8")
+
+    incoming = 'add_newline = true\nformat = "$character"\n'
+    second = seed_runtime_pack(
+        tmp_path / "pack-b",
+        version="9.9.10+b",
+        before_source_seal=lambda root: (root / "config/starship.toml").write_text(
+            incoming, encoding="utf-8"
+        ),
+    )
+
+    _install(second, capsys)
+
+    assert starship.read_text(encoding="utf-8") == incoming
+
+
+def test_present_starship_still_refuses_unproven_legacy_baseline(
+    tmp_path, roots, capsys
+):
+    """Only an absent preference may bypass a legacy baseline digest."""
+    first = seed_runtime_pack(tmp_path / "pack-a", version="9.9.9+a")
+    _install(first, capsys)
+    starship = roots["product_config"] / "starship.toml"
+    generation = (roots["runtime_home"] / "tools/vibecrafted-current").resolve()
+    manifest_path = generation / installer._RUNTIME_GENERATION_MANIFEST
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["hashes"].pop("config/starship.toml", None)
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    receipt_path = installer._runtime_receipt_path(roots["runtime_home"])
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt.get("config_defaults", {}).pop(str(starship), None)
+    receipt.get("owned_files", {}).pop(str(starship), None)
+    receipt_path.write_text(json.dumps(receipt) + "\n", encoding="utf-8")
+
+    second = seed_runtime_pack(tmp_path / "pack-b", version="9.9.10+b")
+    conflict = _install_conflict(second, capsys)
+
+    file_hit = next(
+        item
+        for item in conflict.envelope["files"]
+        if item["path"].endswith("starship.toml")
+    )
+    assert file_hit["reason"] == "previous shipped defaults are unavailable"
+
+
+def test_keep_current_starship_preserves_exact_multiline_bytes_after_success(
+    tmp_path, roots, capsys
+):
+    """Bound keep-current must not overlay Founder starship onto incoming canvas.
+
+    The live 85fb/02ef8bf7 install returned success then rewrote a multiline
+    starship.toml to an incoming-shaped product default (`$time$fill` canvas).
+    Reproduce that post-success rewrite: trusted previous defaults, overlapping
+    format assignment, then keep-current must keep operator spelling. New
+    incoming-only keys may still land (per-setting three-way); the file must
+    not become the product default.
+    """
+    previous = (
+        REPO_ROOT / "tests/tui/fixtures/starship-default-three-row.toml"
+    ).read_text(encoding="utf-8")
+    incoming_starship = (REPO_ROOT / "config/starship.toml").read_text(encoding="utf-8")
+    user = (
+        "add_newline = false\n"
+        'format = """\n'
+        "$directory$git_branch\n"
+        "$character\n"
+        '"""\n'
+        "[character]\nsuccess_symbol = '[λ](bold cyan)'\n"
+    )
+    first = seed_runtime_pack(
+        tmp_path / "pack-a",
+        version="9.9.9+a",
+        before_source_seal=lambda root: (root / "config/starship.toml").write_text(
+            previous, encoding="utf-8"
+        ),
+    )
+    _install(first, capsys)
+    starship = roots["product_config"] / "starship.toml"
+    starship.write_text(user, encoding="utf-8")
+    current_sha = installer._sha256_path(starship)
+    second = seed_runtime_pack(
+        tmp_path / "pack-b",
+        version="9.9.10+b",
+        before_source_seal=lambda root: (root / "config/starship.toml").write_text(
+            incoming_starship, encoding="utf-8"
+        ),
+    )
+    incoming_source = tmp_path / "pack-b/config/starship.toml"
+    incoming_sha = installer._sha256_path(incoming_source)
+    conflict = _install_conflict(second, capsys)
+    file_hit = next(
+        item
+        for item in conflict.envelope["files"]
+        if item["path"].endswith("starship.toml")
+    )
+    assert file_hit["current_sha256"] == current_sha
+    result = _install(
+        second,
+        capsys,
+        resolve_preference="keep-current",
+        preference_current_sha256=file_hit["current_sha256"],
+        preference_incoming_sha256=incoming_sha,
+        preference_path=str(starship),
+    )
+    assert result["schema"] == "vibecrafted.runtime-install-result.v1"
+    kept = starship.read_text(encoding="utf-8")
+    assert "add_newline = false" in kept
+    assert 'format = """\n$directory$git_branch\n$character\n"""' in kept
+    assert "success_symbol = '[λ](bold cyan)'" in kept
+    assert "$time$fill$jobs$cmd_duration" not in kept
+    assert installer._sha256_path(starship) != incoming_sha
+    assert kept != incoming_starship
     selected = (roots["runtime_home"] / "tools/vibecrafted-current").resolve()
     assert selected.name == "9.9.10+b"

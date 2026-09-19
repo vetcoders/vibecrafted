@@ -126,6 +126,89 @@ def test_operator_session_spawn_does_not_shadow_zsh_status(
     assert "launch accepted:" in result.stdout
 
 
+_PROVIDER_FAKES = ("codex", "claude", "agy", "grok", "junie", "cursor-agent", "aicx")
+# Admission probes a provider CLI's surface (`claude --version` / `--help`);
+# that is capability evidence, not a launch.
+_PROVIDER_SURFACE_PROBES = ("--version", "--help")
+
+
+class _ResumeProbe:
+    """What one public resume vector did at every seam the harness owns."""
+
+    def __init__(self, tmp_path: Path) -> None:
+        self.home = tmp_path / "home"
+        self.generation = tmp_path / "generation"
+        self.fake_bin = tmp_path / "bin"
+        self.context_file = tmp_path / "aicx-context.md"
+        self.command_capture = tmp_path / "command.txt"
+        self.tab_capture = tmp_path / "tab.txt"
+        self.attach_capture = tmp_path / "attach.txt"
+        self.aicx_capture = tmp_path / "aicx-called.txt"
+        self.core_argv_capture = tmp_path / "core-argv.bin"
+        self.core_stdin_capture = tmp_path / "core-stdin.txt"
+        self.provider_log = tmp_path / "provider-calls.txt"
+        self.front_door_log = tmp_path / "front-door-calls.txt"
+        self.result = subprocess.CompletedProcess[str]([], -1, "", "")
+
+    @staticmethod
+    def _text(path: Path) -> str:
+        return path.read_text(encoding="utf-8").strip() if path.exists() else ""
+
+    @property
+    def command(self) -> str:
+        """The command the operator tab would host."""
+        return self._text(self.command_capture)
+
+    @property
+    def tab(self) -> str:
+        return self._text(self.tab_capture)
+
+    @property
+    def attach(self) -> str:
+        return self._text(self.attach_capture)
+
+    @property
+    def aicx_called(self) -> bool:
+        return self.aicx_capture.exists()
+
+    @property
+    def core(self) -> tuple[list[str], str] | None:
+        """(argv, stdin) of the tracked core CLI call, if one happened."""
+        if not self.core_argv_capture.exists():
+            return None
+        argv = [
+            item.decode("utf-8")
+            for item in self.core_argv_capture.read_bytes().split(b"\0")
+            if item
+        ]
+        return argv, self.core_stdin_capture.read_text(encoding="utf-8")
+
+    def provider_calls(self) -> list[str]:
+        return self._text(self.provider_log).splitlines()
+
+    def provider_launches(self) -> list[str]:
+        return [
+            call
+            for call in self.provider_calls()
+            if call.partition(" ")[2] not in _PROVIDER_SURFACE_PROBES
+        ]
+
+    def front_door_calls(self) -> list[str]:
+        return self._text(self.front_door_log).splitlines()
+
+    def admission(self) -> dict[str, object]:
+        """The private receipt the admitted handoff names.
+
+        Since 36614036 the tab never hosts an expanded provider command: it
+        carries `spawn interactive-launch ... --admission-file <receipt>`, and
+        the receipt is the authority for agent, identity and input.
+        """
+        tokens = shlex.split(self.command)
+        assert "interactive-launch" in tokens, self.command
+        receipt = Path(tokens[tokens.index("--admission-file") + 1])
+        return json.loads(receipt.read_text(encoding="utf-8"))
+
+
 def _probe_codex_resume_contract(
     tmp_path: Path,
     args: list[str],
@@ -133,29 +216,71 @@ def _probe_codex_resume_contract(
     agent: str = "codex",
     operator_available: bool = True,
     runtime: str | None = "terminal",
-) -> tuple[subprocess.CompletedProcess[str], str, bool]:
-    home = tmp_path / "home"
-    context_file = tmp_path / "aicx-context.md"
-    command_capture = tmp_path / "command.txt"
-    aicx_capture = tmp_path / "aicx-called.txt"
-    home.mkdir(parents=True)
-    context_file.write_text("AICX OVERLAY BODY\n", encoding="utf-8")
+) -> _ResumeProbe:
+    """Run the public resume boundary as the terminal child it now requires.
+
+    A resume without a TTY first opens the product terminal and is decided in
+    the child that terminal starts (`_vetcoders_declaration_escalate_if_needed`,
+    vc_frame.sh). The probe IS that child: the owned boundary is the marker AND
+    the loaded generation's `bin/vibecrafted` front door (a raw marker stopped
+    being a boundary in fcfe87c3/4d49a362). The fixture front door records any
+    call, so a second terminal would be visible.
+
+    The harness owns AICX assembly, Frame preparation/attach, the operator tab
+    and the tracked core CLI (`_vetcoders_run_core_cli`, owner of every
+    explicit-input route since 5b25a6cd/36614036). Provider CLIs are recording
+    fakes that win on PATH, so nothing real can launch.
+    """
+    probe = _ResumeProbe(tmp_path)
+    probe.home.mkdir(parents=True)
+    (probe.generation / "bin").mkdir(parents=True)
+    probe.fake_bin.mkdir()
+    probe.context_file.write_text("AICX OVERLAY BODY\n", encoding="utf-8")
+    front_door = probe.generation / "bin" / "vibecrafted"
+    _write_fake_command(
+        front_door,
+        f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{probe.front_door_log}"\nexit 97\n',
+    )
+    for provider in _PROVIDER_FAKES:
+        _write_fake_command(
+            probe.fake_bin / provider,
+            f'#!/bin/sh\nprintf "{provider} %s\\n" "$*" >> "{probe.provider_log}"\n'
+            "exit 97\n",
+        )
 
     env = os.environ.copy()
     for key in (
         "VIBECRAFTED_OPERATOR_SESSION",
+        "VIBECRAFTED_WORKER_SESSION",
+        "VIBECRAFTED_TERMINAL_ENTRY",
+        "VIBECRAFTED_TERMINAL_ENTRY_OWNER",
+        "VIBECRAFTED_RUN_ID",
+        "VIBECRAFTED_AGENT",
+        "VIBECRAFTED_AGENT_SESSION_ID",
         "VC_FRAME",
         "VC_FRAME_PANE_ID",
         "VC_FRAME_SESSION_NAME",
         "VETCODERS_SPAWN_RUNTIME",
+        "CODEX_THREAD_ID",
+        "CODEX_SESSION_ID",
+        "CLAUDE_CODE_SESSION_ID",
+        "GROK_SESSION_ID",
     ):
         env.pop(key, None)
-    env["HOME"] = str(home)
-    env["VIBECRAFTED_HOME"] = str(home / ".vibecrafted")
+    env["HOME"] = str(probe.home)
+    env["VIBECRAFTED_HOME"] = str(probe.home / ".vibecrafted")
     env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
-    env["TEST_AICX_CONTEXT"] = str(context_file)
-    env["TEST_AICX_CAPTURE"] = str(aicx_capture)
-    env["TEST_COMMAND_CAPTURE"] = str(command_capture)
+    env["VIBECRAFTED_PYTHON"] = sys.executable
+    env["PATH"] = f"{probe.fake_bin}:{env.get('PATH', '')}"
+    env["VIBECRAFTED_TERMINAL_ENTRY"] = "1"
+    env["VIBECRAFTED_TERMINAL_ENTRY_OWNER"] = str(front_door)
+    env["TEST_AICX_CONTEXT"] = str(probe.context_file)
+    env["TEST_AICX_CAPTURE"] = str(probe.aicx_capture)
+    env["TEST_COMMAND_CAPTURE"] = str(probe.command_capture)
+    env["TEST_TAB_CAPTURE"] = str(probe.tab_capture)
+    env["TEST_ATTACH_CAPTURE"] = str(probe.attach_capture)
+    env["TEST_CORE_ARGV"] = str(probe.core_argv_capture)
+    env["TEST_CORE_STDIN"] = str(probe.core_stdin_capture)
     env["TEST_OPERATOR_AVAILABLE"] = "1" if operator_available else ""
     if operator_available:
         # Headless requests only enter the visible-host branch when an operator
@@ -168,20 +293,19 @@ def _probe_codex_resume_contract(
     if args:
         resume_invocation += " " + shlex.join(args)
 
-    result = subprocess.run(
+    probe.result = subprocess.run(
         [
             "bash",
-            "-lc",
+            "--noprofile",
+            "--norc",
+            "-c",
             "\n".join(
                 [
                     f'source "{SHELL_SH}"',
-                    "codex() {",
-                    "  {",
-                    "    printf 'codex'",
-                    "    printf ' %s' \"$@\"",
-                    "    printf '\\n'",
-                    '  } > "$TEST_COMMAND_CAPTURE"',
-                    "}",
+                    # A source checkout has no bin/vibecrafted; bind this shell
+                    # to the fixture generation that owns the front door, as
+                    # tests/tui/test_resume_declared_workspace.py does.
+                    f'_vetcoders_vc_frame_loaded_root="{probe.generation}"',
                     "_vetcoders_aicx_resume_fallback() {",
                     "  printf 'called\\n' > \"$TEST_AICX_CAPTURE\"",
                     "  printf 'SESSION_ID=historical-codex-session\\n'",
@@ -196,13 +320,21 @@ def _probe_codex_resume_contract(
                     "  fi",
                     "}",
                     "_vetcoders_spawn_into_operator_session() {",
+                    '  printf \'%s\\n\' "$1" > "$TEST_TAB_CAPTURE"',
                     '  printf \'%s\\n\' "$2" > "$TEST_COMMAND_CAPTURE"',
                     "}",
-                    "_vetcoders_launch_tracked_resume() {",
-                    (
-                        "  printf 'tracked agent=%s session=[%s] prompt=[%s]\\n'"
-                        ' "$1" "$2" "$3" > "$TEST_COMMAND_CAPTURE"'
-                    ),
+                    # defer-attach: the client may only be handed over once the
+                    # provider tab exists.
+                    "_vetcoders_attach_prepared_vc_frame_session() {",
+                    '  if [[ -s "$TEST_COMMAND_CAPTURE" ]]; then',
+                    "    printf 'after-tab\\n' > \"$TEST_ATTACH_CAPTURE\"",
+                    "  else",
+                    "    printf 'before-tab\\n' > \"$TEST_ATTACH_CAPTURE\"",
+                    "  fi",
+                    "}",
+                    "_vetcoders_run_core_cli() {",
+                    '  printf \'%s\\0\' "$@" > "$TEST_CORE_ARGV"',
+                    '  cat > "$TEST_CORE_STDIN"',
                     "}",
                     resume_invocation,
                 ]
@@ -211,66 +343,101 @@ def _probe_codex_resume_contract(
         check=False,
         cwd=REPO_ROOT,
         env=env,
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=120,
     )
-    command = (
-        command_capture.read_text(encoding="utf-8").strip()
-        if command_capture.exists()
-        else ""
-    )
-    return result, command, aicx_capture.exists()
+    return probe
 
 
-def _assert_command_points_at_aicx_overlay(command: str) -> None:
+def _assert_admission_points_at_aicx_overlay(probe: _ResumeProbe, agent: str) -> None:
     """The resume prompt is a pointer, never the inline payload.
 
     Inlining the overlay put whole continuity packs into agent argv —
     world-readable in `ps`, capped by ARG_MAX, mangled on newlines
-    (prompts.sh). Continuity therefore means: the command names a primary
-    input file, and that file carries the overlay body.
+    (prompts.sh). Since the admitted handoff (36614036) continuity means: the
+    tab command carries only the receipt path, the receipt names the pack as
+    its source file, and the pack bytes are frozen in a private snapshot.
     """
-    match = re.search(r"Primary input file: (\S+)", command)
-    assert match, f"resume command carries no primary-input pointer: {command!r}"
-    pointed = Path(match.group(1))
-    assert pointed.is_file(), f"pointer names a missing file: {pointed}"
-    assert "AICX OVERLAY BODY" in pointed.read_text(encoding="utf-8")
+    assert "AICX OVERLAY BODY" not in probe.command
+    admission = probe.admission()
+    assert admission["agent"] == agent
+    assert admission["skill"] == "resume"
+    assert admission["source_origin"] == "file"
+    assert Path(str(admission["source_path"])).resolve() == probe.context_file.resolve()
+    snapshot = Path(str(admission["source_snapshot"]))
+    assert snapshot.is_file(), f"receipt names a missing snapshot: {snapshot}"
+    assert "AICX OVERLAY BODY" in snapshot.read_text(encoding="utf-8")
+
+
+def _assert_interactive_operator_tab(
+    probe: _ResumeProbe, agent: str
+) -> dict[str, object]:
+    """A bare or session-only resume is a visible PTY session on the operator tab."""
+    result = probe.result
+    assert result.returncode == 0, result.stderr
+    assert probe.core is None, f"interactive resume became a tracked run: {probe.core}"
+    assert probe.tab == agent
+    assert probe.attach == "after-tab"
+    assert not probe.front_door_calls(), "the terminal child opened another terminal"
+    assert not probe.provider_launches(), probe.provider_calls()
+    admission = probe.admission()
+    assert admission["agent"] == agent
+    assert admission["skill"] == "resume"
+    assert admission["presentation"] == "visible"
+    assert admission["requires_pty"] is True
+    return admission
+
+
+def _assert_fresh_tracked_workflow(
+    probe: _ResumeProbe, agent: str, *, stdin: str
+) -> list[str]:
+    """Explicit input without a native identity is a tracked headless workflow.
+
+    marbles.sh fresh route (36614036): never an operator tab, never a session.
+    """
+    assert probe.result.returncode == 0, probe.result.stderr
+    assert probe.command == ""
+    assert probe.provider_calls() == []
+    assert probe.core is not None, "explicit input never reached the tracked core"
+    argv, received = probe.core
+    assert argv[:4] == ["workflow", agent, "--runtime", "headless"], argv
+    assert "resume-session" not in argv
+    assert "--agent-session-id" not in argv
+    assert received == stdin
+    return argv
 
 
 def test_bare_codex_resume_uses_aicx_pack_in_fresh_interactive_session(
     tmp_path: Path,
 ) -> None:
-    result, command, aicx_called = _probe_codex_resume_contract(tmp_path, [])
+    probe = _probe_codex_resume_contract(tmp_path, [])
 
-    assert result.returncode == 0, result.stderr
-    assert aicx_called
-    assert command.startswith("codex ")
-    _assert_command_points_at_aicx_overlay(command)
-    assert "codex exec" not in command
-    assert "codex resume" not in command
-    assert "historical-codex-session" not in command
+    admission = _assert_interactive_operator_tab(probe, "codex")
+    assert probe.aicx_called
+    _assert_admission_points_at_aicx_overlay(probe, "codex")
+    # A fresh session: the pack is continuity transport, never a native attach.
+    assert admission["agent_session_id"] == ""
+    assert admission["session_selection"] == {}
+    assert "historical-codex-session" not in probe.command
+    assert "historical-codex-session" not in json.dumps(admission)
 
 
 def test_default_resume_runtime_keeps_bare_codex_interactive_and_prompt_headless(
     tmp_path: Path,
 ) -> None:
-    bare_result, bare_command, _ = _probe_codex_resume_contract(
-        tmp_path / "bare",
-        [],
-        runtime=None,
-    )
-    prompt_result, prompt_command, _ = _probe_codex_resume_contract(
+    bare = _probe_codex_resume_contract(tmp_path / "bare", [], runtime=None)
+    prompt = _probe_codex_resume_contract(
         tmp_path / "prompt",
         ["--prompt", "carry on"],
         runtime=None,
     )
 
-    assert bare_result.returncode == 0, bare_result.stderr
-    assert bare_command.startswith("codex ")
-    assert "codex exec" not in bare_command
-    assert prompt_result.returncode == 0, prompt_result.stderr
-    assert prompt_command == "tracked agent=codex session=[] prompt=[carry on]"
+    _assert_interactive_operator_tab(bare, "codex")
+    argv = _assert_fresh_tracked_workflow(prompt, "codex", stdin="carry on")
+    assert "--prompt-stdin" in argv
+    assert "carry on" not in argv
 
 
 @pytest.mark.parametrize(
@@ -287,24 +454,25 @@ def test_bare_resume_keeps_aicx_continuity_in_operator_session(
     agent: str,
     headless_flag: str,
 ) -> None:
-    result, command, aicx_called = _probe_codex_resume_contract(
+    probe = _probe_codex_resume_contract(
         tmp_path,
         [],
         agent=agent,
         runtime=None,
     )
 
-    assert result.returncode == 0, result.stderr
-    assert aicx_called
-    assert command.startswith(f"{agent} ")
-    _assert_command_points_at_aicx_overlay(command)
-    assert not command.startswith("tracked ")
-    assert "historical-codex-session" not in command
-    assert "--resume" not in command
-    assert "--conversation" not in command
-    assert "--session-id=" not in command
+    admission = _assert_interactive_operator_tab(probe, agent)
+    assert probe.aicx_called
+    _assert_admission_points_at_aicx_overlay(probe, agent)
+    assert admission["agent_session_id"] == ""
+    assert admission["session_selection"] == {}
+    handoff = probe.command
+    assert "historical-codex-session" not in handoff
+    assert "--resume" not in handoff
+    assert "--conversation" not in handoff
+    assert "--session-id=" not in handoff
     if headless_flag:
-        assert headless_flag not in command
+        assert headless_flag not in handoff
 
 
 @pytest.mark.parametrize("agent", ["claude", "agy", "grok", "junie"])
@@ -312,55 +480,87 @@ def test_explicit_prompt_without_session_never_adopts_aicx_session(
     tmp_path: Path,
     agent: str,
 ) -> None:
-    result, command, aicx_called = _probe_codex_resume_contract(
+    probe = _probe_codex_resume_contract(
         tmp_path,
         ["--prompt", "carry on"],
         agent=agent,
         runtime=None,
     )
 
-    assert result.returncode == 0, result.stderr
-    assert not aicx_called
-    assert command == f"tracked agent={agent} session=[] prompt=[carry on]"
-    assert "historical-codex-session" not in command
+    argv = _assert_fresh_tracked_workflow(probe, agent, stdin="carry on")
+    assert not probe.aicx_called
+    assert "--prompt-stdin" in argv
+    assert "historical-codex-session" not in probe.result.stdout + probe.result.stderr
 
 
 def test_codex_session_only_is_exact_interactive_resume(tmp_path: Path) -> None:
-    result, command, aicx_called = _probe_codex_resume_contract(
-        tmp_path, ["--session", "sess-123"]
-    )
+    probe = _probe_codex_resume_contract(tmp_path, ["--session", "sess-123"])
 
-    assert result.returncode == 0, result.stderr
-    assert not aicx_called
-    assert command == "codex resume sess-123"
+    admission = _assert_interactive_operator_tab(probe, "codex")
+    assert not probe.aicx_called
+    # Exact: the operator's id is the admitted native identity, never re-picked.
+    assert admission["agent_session_id"] == "sess-123"
+    assert admission["source_origin"] == "inline"
+    selection = admission["session_selection"]
+    assert isinstance(selection, dict)
+    assert selection["agent_session_id"] == "sess-123"
+    assert selection["session_selector"] == "sess-123"
+    assert selection["identity_source"] == "explicit_session"
+    assert Path(str(selection["selection_root"])).resolve() == REPO_ROOT.resolve()
 
 
 def test_codex_explicit_prompt_and_file_are_fresh_noninteractive_runs(
     tmp_path: Path,
 ) -> None:
-    prompt_result, prompt_command, prompt_aicx = _probe_codex_resume_contract(
-        tmp_path / "prompt", ["--prompt", "carry on"]
+    # Task resume is noninteractive (591b6dde): explicit input is declared
+    # headless, and the tracked core owns the run.
+    prompt = _probe_codex_resume_contract(
+        tmp_path / "prompt", ["--prompt", "carry on"], runtime="headless"
     )
     input_file = tmp_path / "file" / "input.md"
     input_file.parent.mkdir(parents=True)
     input_file.write_text("FILE INPUT\n", encoding="utf-8")
-    file_result, file_command, file_aicx = _probe_codex_resume_contract(
-        tmp_path / "file", ["--file", str(input_file)]
+    file_probe = _probe_codex_resume_contract(
+        tmp_path / "file", ["--file", str(input_file)], runtime="headless"
     )
 
-    assert prompt_result.returncode == 0, prompt_result.stderr
-    assert file_result.returncode == 0, file_result.stderr
-    assert not prompt_aicx and not file_aicx
-    assert prompt_command.startswith(
-        "codex exec --dangerously-bypass-approvals-and-sandbox "
+    assert not prompt.aicx_called and not file_probe.aicx_called
+    prompt_argv = _assert_fresh_tracked_workflow(prompt, "codex", stdin="carry on")
+    # The prompt rides stdin, never argv.
+    assert "--prompt-stdin" in prompt_argv
+    assert "carry on" not in prompt_argv
+    file_argv = _assert_fresh_tracked_workflow(file_probe, "codex", stdin="")
+    # The file is handed over by its exact path, not inlined.
+    assert Path(file_argv[file_argv.index("--file") + 1]).resolve() == (
+        input_file.resolve()
     )
-    assert "carry on" in prompt_command
-    assert file_command.startswith(
-        "codex exec --dangerously-bypass-approvals-and-sandbox "
+    assert "--prompt-stdin" not in file_argv
+
+    # A declared root is the repository contract: normalized once (physical
+    # path) and forwarded as --repo.
+    declared_root = tmp_path / "declared-repo"
+    declared_root.mkdir()
+    declared = _probe_codex_resume_contract(
+        tmp_path / "declared",
+        ["--prompt", "carry on", "--root", str(declared_root)],
+        runtime="headless",
     )
-    pointer = re.search(r"Primary input file: (\S+)", file_command)
-    assert pointer, f"file input must ride as a pointer: {file_command!r}"
-    assert Path(pointer.group(1)).resolve() == input_file.resolve()
+    declared_argv = _assert_fresh_tracked_workflow(declared, "codex", stdin="carry on")
+    assert declared_argv[declared_argv.index("--repo") + 1] == str(
+        declared_root.resolve()
+    )
+
+    refused = _probe_codex_resume_contract(
+        tmp_path / "terminal", ["--prompt", "carry on"], runtime="terminal"
+    )
+    assert refused.result.returncode == 2
+    assert (
+        "Task resume is noninteractive; use --runtime headless."
+        in refused.result.stderr
+    )
+    assert refused.core is None
+    assert refused.command == ""
+    assert not refused.aicx_called
 
 
 def test_codex_session_with_explicit_file_is_noninteractive_continuation(
@@ -369,44 +569,96 @@ def test_codex_session_with_explicit_file_is_noninteractive_continuation(
     input_file = tmp_path / "input.md"
     input_file.write_text("SESSION FILE INPUT\n", encoding="utf-8")
 
-    result, command, aicx_called = _probe_codex_resume_contract(
+    probe = _probe_codex_resume_contract(
         tmp_path / "probe",
         ["--session", "sess-file-123", "--file", str(input_file)],
+        runtime="headless",
     )
 
-    assert result.returncode == 0, result.stderr
-    assert not aicx_called
-    assert command.startswith("codex exec --dangerously-bypass-approvals-and-sandbox ")
-    assert "resume sess-file-123" in command
-    pointer = re.search(r"Primary input file: (\S+)", command)
-    assert pointer, f"file input must ride as a pointer: {command!r}"
-    assert Path(pointer.group(1)).resolve() == input_file.resolve()
+    assert probe.result.returncode == 0, probe.result.stderr
+    assert not probe.aicx_called
+    assert probe.command == ""
+    assert probe.provider_calls() == []
+    assert probe.core is not None
+    argv, stdin = probe.core
+    # Native continuation of the operator's own session (resume-session,
+    # 5b25a6cd); the file is the prompt, by exact path.
+    assert argv[:5] == [
+        "resume-session",
+        "codex",
+        "--agent-session-id",
+        "sess-file-123",
+        "--prompt-file",
+    ]
+    assert Path(argv[5]).resolve() == input_file.resolve()
+    assert len(argv) == 6
+    assert stdin == ""
+
+    # A declared root is pinned as the repository contract, normalized once.
+    declared_root = tmp_path / "declared-repo"
+    declared_root.mkdir()
+    declared = _probe_codex_resume_contract(
+        tmp_path / "declared",
+        [
+            "--session",
+            "sess-file-123",
+            "--file",
+            str(input_file),
+            "--root",
+            str(declared_root),
+        ],
+        runtime="headless",
+    )
+    assert declared.result.returncode == 0, declared.result.stderr
+    assert declared.core is not None
+    declared_argv, _ = declared.core
+    assert declared_argv[:7] == [
+        "resume-session",
+        "codex",
+        "--agent-session-id",
+        "sess-file-123",
+        "--repo",
+        str(declared_root.resolve()),
+        "--prompt-file",
+    ]
+    assert Path(declared_argv[7]).resolve() == input_file.resolve()
 
 
 def test_codex_positional_resume_compatibility_preserves_mode_contract(
     tmp_path: Path,
 ) -> None:
+    # Spelled without --runtime, as the positional form is typed. Positional
+    # words are not an explicit --prompt to the noninteractive guard
+    # (marbles.sh `Task resume is noninteractive`), so their behaviour under an
+    # explicit `--runtime terminal` is deliberately not pinned here.
     session_id = "019ec264-0b50-7bb2-9336-0aae5c841209"
-    session_result, session_command, _ = _probe_codex_resume_contract(
-        tmp_path / "session", [session_id]
+    session = _probe_codex_resume_contract(
+        tmp_path / "session", [session_id], runtime=None
     )
-    continuation_result, continuation_command, _ = _probe_codex_resume_contract(
-        tmp_path / "continuation", [session_id, "carry", "on"]
+    continuation = _probe_codex_resume_contract(
+        tmp_path / "continuation", [session_id, "carry", "on"], runtime=None
     )
-    prompt_result, prompt_command, prompt_aicx = _probe_codex_resume_contract(
-        tmp_path / "prompt", ["carry", "on"]
+    prompt = _probe_codex_resume_contract(
+        tmp_path / "prompt", ["carry", "on"], runtime=None
     )
 
-    assert session_result.returncode == 0, session_result.stderr
-    assert session_command == f"codex resume {session_id}"
-    assert continuation_result.returncode == 0, continuation_result.stderr
-    assert "codex exec" in continuation_command
-    assert f"resume {session_id}" in continuation_command
-    assert "carry on" in continuation_command
-    assert prompt_result.returncode == 0, prompt_result.stderr
-    assert "codex exec" in prompt_command
-    assert " resume " not in prompt_command
-    assert not prompt_aicx
+    admission = _assert_interactive_operator_tab(session, "codex")
+    assert admission["agent_session_id"] == session_id
+    assert continuation.result.returncode == 0, continuation.result.stderr
+    assert continuation.command == ""
+    assert continuation.core == (
+        [
+            "resume-session",
+            "codex",
+            "--agent-session-id",
+            session_id,
+            "--prompt-stdin",
+        ],
+        "carry on",
+    )
+    prompt_argv = _assert_fresh_tracked_workflow(prompt, "codex", stdin="carry on")
+    assert "--prompt-stdin" in prompt_argv
+    assert not prompt.aicx_called
 
 
 @pytest.mark.parametrize("agent", ["claude", "codex", "agy", "grok", "junie"])
@@ -415,19 +667,30 @@ def test_interactive_resume_fails_without_operator_target_for_every_agent(
     agent: str,
 ) -> None:
     """Provider-neutral: bare interactive resume never silently becomes headless."""
-    result, command, aicx_called = _probe_codex_resume_contract(
+    probe = _probe_codex_resume_contract(
         tmp_path / agent,
         ["--session", "sess-123"],
         agent=agent,
         operator_available=False,
     )
 
+    result = probe.result
     assert result.returncode != 0
-    assert not command
-    assert not aicx_called
-    assert "requires an explicit or detected operator target" in result.stderr
-    assert "refusing to downgrade to a headless run" in result.stderr
-    assert "VIBECRAFTED_OPERATOR_SESSION" in result.stderr
+    assert probe.command == ""
+    assert probe.tab == ""
+    assert probe.attach == ""
+    assert not probe.aicx_called
+    # No downgrade: no tracked headless run, no provider launch, and the
+    # terminal child did not escalate again.
+    assert probe.core is None
+    assert not probe.provider_launches(), probe.provider_calls()
+    assert not probe.front_door_calls()
+    # 36614036 replaced "requires an explicit or detected operator target;
+    # refusing to downgrade to a headless run" with this refusal.
+    assert f"Interactive {agent} resume requires an admitted Frame target" in (
+        result.stderr
+    )
+    assert "no provider was downgraded to headless" in result.stderr
 
 
 BOUND_WORKSPACE_ID = "01a06f41-ebc6-706b-990e-b7ba921310b3"
@@ -659,7 +922,7 @@ def test_public_and_packaged_resume_help_describe_provider_neutral_contract() ->
         assert "native-resumes it with the pack as prompt" not in result.stdout
 
 
-def test_resume_terminal_runtime_routes_headless_codex_into_worker_session(
+def test_resume_terminal_runtime_refuses_task_input_before_any_frame_surface(
     tmp_path: Path,
 ) -> None:
     fake_bin = tmp_path / "bin"
@@ -711,51 +974,28 @@ def test_resume_terminal_runtime_routes_headless_codex_into_worker_session(
                 "--session sess-123 --prompt 'carry on'"
             ),
         ],
-        check=True,
+        check=False,
         cwd=REPO_ROOT,
         env=env,
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
     )
 
-    # Explicit input makes this a non-interactive continuation, so G7 routes it
-    # to the worker column rather than occupying the human operator seat.
-    assert "Resume launched in worker session: worker-session" in result.stdout
-    assert "mode:    headless (G7 workers column)" in result.stdout
+    # Explicit input is a non-interactive continuation and must never occupy
+    # the human operator seat. The G7 worker-column tab that used to host it
+    # was removed in 36614036 (the route became the tracked core
+    # `resume-session`), and 591b6dde refuses a visible runtime for task
+    # resume outright. The guarantee is therefore stronger than before: the
+    # request is refused before ANY Frame surface -- operator or worker -- or
+    # the provider is touched. The headless route itself is pinned by
+    # test_resume_headless_routes_explicit_session_through_tracked_core.
+    assert result.returncode == 2, result.stderr
+    assert "Task resume is noninteractive; use --runtime headless." in result.stderr
     assert "Resume launched in operator session" not in result.stdout
+    assert "Resume launched in worker session" not in result.stdout
+    assert not vc_frame_capture.exists()
     assert not codex_capture.exists()
-    vc_frame_lines = vc_frame_capture.read_text(encoding="utf-8").splitlines()
-    calls: list[list[str]] = []
-    current: list[str] = []
-    for line in vc_frame_lines:
-        if line == "--CALL--":
-            if current:
-                calls.append(current)
-            current = []
-        else:
-            current.append(line)
-    if current:
-        calls.append(current)
-    new_tab_call = next(call for call in calls if call[2:4] == ["action", "new-tab"])
-    assert new_tab_call[:5] == [
-        "--session",
-        "worker-session",
-        "action",
-        "new-tab",
-        "--name",
-    ]
-    # Face tab: the workers column names tabs by agent face, not by verb
-    # (place-named operator rail). The routing assertions above carry the
-    # actual contract — worker session, new tab, non-interactive exec below.
-    assert new_tab_call[5] == "codex"
-    command_script = Path(new_tab_call[-1])
-    command_body = command_script.read_text(encoding="utf-8")
-    # Explicit --prompt means "continue the job": the visible tab must host the
-    # NON-INTERACTIVE `codex exec ... resume`, never the interactive picker
-    # (operator contract 2026-07-21). Bare resume without input keeps the TUI.
-    assert "codex exec" in command_body
-    assert "resume sess-123" in command_body
-    assert "carry on" in command_body
 
 
 def _fake_core_env(
@@ -793,7 +1033,7 @@ def test_resume_headless_routes_explicit_session_through_tracked_core(
     tmp_path: Path,
 ) -> None:
     core_capture = tmp_path / "core.json"
-    env, package = _fake_core_env(tmp_path, core_capture)
+    env, _ = _fake_core_env(tmp_path, core_capture)
 
     result = subprocess.run(
         [
@@ -810,21 +1050,24 @@ def test_resume_headless_routes_explicit_session_through_tracked_core(
         check=True,
         cwd=REPO_ROOT,
         env=env,
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
     )
 
     payload = json.loads(core_capture.read_text(encoding="utf-8"))
+    # Native continuation (marbles.sh, 5b25a6cd): the core resolves the
+    # checkout and its own source, so an undeclared resume names neither
+    # --root nor --source-dir; the prompt rides stdin, never argv. The
+    # declared-root --repo form is pinned by the probe tests above: this fake
+    # core shadows the whole package, including the repo selection that a
+    # declared root runs (prompts.sh _vetcoders_select_repo).
     assert payload["argv"] == [
         "resume-session",
         "codex",
         "--agent-session-id",
         "sess-123",
         "--prompt-stdin",
-        "--root",
-        str(REPO_ROOT),
-        "--source-dir",
-        str(package),
     ]
     assert payload["stdin"] == "carry on"
     assert "MANUAL EXPLICIT RESUME RECEIPT" in result.stdout
@@ -835,7 +1078,7 @@ def test_resume_headless_routes_fresh_input_through_tracked_workflow(
     tmp_path: Path,
 ) -> None:
     core_capture = tmp_path / "core.json"
-    env, package = _fake_core_env(tmp_path, core_capture)
+    env, _ = _fake_core_env(tmp_path, core_capture)
 
     result = subprocess.run(
         [
@@ -851,19 +1094,23 @@ def test_resume_headless_routes_fresh_input_through_tracked_workflow(
         check=True,
         cwd=REPO_ROOT,
         env=env,
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
     )
 
     payload = json.loads(core_capture.read_text(encoding="utf-8"))
     argv = payload["argv"]
-    assert argv[:2] == ["workflow", "codex"]
-    assert argv[argv.index("--runtime") + 1] == "headless"
-    assert argv[argv.index("--root") + 1] == str(REPO_ROOT)
-    assert argv[argv.index("--source-dir") + 1] == str(package)
-    assert argv[argv.index("--mode") + 1] == "resume-new-session"
+    # Fresh input (marbles.sh, 36614036) is a headless core workflow; the
+    # core owns root and source resolution (no --root/--source-dir). The
+    # `--mode resume-new-session` label rode only the retired
+    # _vetcoders_launch_tracked_resume.
+    assert argv[:4] == ["workflow", "codex", "--runtime", "headless"]
     assert "--prompt-stdin" in argv
+    assert "--repo" not in argv and "--root" not in argv
+    assert "--agent-session-id" not in argv
     assert "--file" not in argv
+    assert "carry on" not in argv
     assert payload["prompt_file"] == ""
     assert payload["stdin"] == "carry on"
     assert "MANUAL EXPLICIT RESUME RECEIPT" in result.stdout
@@ -889,7 +1136,6 @@ def test_resume_prompt_never_creates_temp_file_when_core_fails_under_errexit(
             "\n".join(
                 [
                     f'source "{SHELL_SH}"',
-                    "_vetcoders_core_source_dir() { printf '/tmp\\n'; }",
                     "_vetcoders_run_core_cli() { return 7; }",
                     "vc-resume codex --runtime headless --prompt 'secret input'",
                 ]
@@ -927,7 +1173,6 @@ def test_resume_prompt_never_creates_temp_file_when_shell_is_terminated(
             "\n".join(
                 [
                     f'source "{SHELL_SH}"',
-                    "_vetcoders_core_source_dir() { printf '/tmp\\n'; }",
                     '_vetcoders_run_core_cli() { kill -TERM "$$"; }',
                     "vc-resume codex --runtime headless --prompt 'secret input'",
                 ]
@@ -969,12 +1214,21 @@ def test_resume_headless_fails_closed_when_core_is_unavailable(
         check=False,
         cwd=REPO_ROOT,
         env=env,
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
     )
 
     assert result.returncode != 0
-    assert "Tracked resume refused: Vibecrafted core is unavailable." in result.stderr
+    # Nothing was admitted or recorded without the owned core.
+    runs = home / ".vibecrafted" / "control_plane" / "runtime_runs"
+    assert not list(runs.glob("*")), sorted(p.name for p in runs.glob("*"))
+    # The refusal must say why. Its old owner, _vetcoders_launch_tracked_resume
+    # ("Tracked resume refused: Vibecrafted core is unavailable."), left this
+    # route in 5b25a6cd/36614036; any refusal that names the unavailable core
+    # meets the contract. An empty stderr does not.
+    assert "Vibecrafted core" in result.stderr, result.stderr
+    assert "unavailable" in result.stderr, result.stderr
 
 
 def test_tracked_core_resume_survives_parent_process_group_sigkill(
@@ -1183,6 +1437,11 @@ def test_spawn_launch_headless_detaches_into_new_session(tmp_path: Path) -> None
             "bash",
             "-c",
             (
+                # spawn_launch_headless detaches through spawn_python_bin
+                # (util.sh, bfbd1309). Extracted alone, it silently fell back
+                # to `nohup &` in the spawner's session -- the bug under test.
+                f'source "{launcher_sh.with_name("util.sh")}"; '
+                f"export VIBECRAFTED_PYTHON={shlex.quote(sys.executable)}; "
                 "spawn_die(){ echo die >&2; exit 1; }; "
                 f'eval "$(sed -n "/^spawn_launch_headless()/,/^}}/p" "{launcher_sh}")"; '
                 f'spawn_launch_headless "{launcher}" >/dev/null; '
@@ -1249,6 +1508,11 @@ def test_spawn_launch_headless_survives_parent_process_group_sigkill(
             "-c",
             (
                 "set -euo pipefail; "
+                # spawn_launch_headless detaches through spawn_python_bin
+                # (util.sh, bfbd1309). Extracted alone, it silently fell back
+                # to `nohup &` in the spawner's session -- the bug under test.
+                f'source "{launcher_sh.with_name("util.sh")}"; '
+                f"export VIBECRAFTED_PYTHON={shlex.quote(sys.executable)}; "
                 "spawn_die(){ echo die >&2; exit 1; }; "
                 f'eval "$(sed -n "/^spawn_launch_headless()/,/^}}/p" "{launcher_sh}")"; '
                 f'spawn_launch_headless "{launcher}" >/dev/null; '
@@ -1388,6 +1652,10 @@ def test_aicx_resume_fallback_skips_provider_pruned_candidates(
     fake_bin = tmp_path / "bin"
     for d in (home, repo, fake_bin):
         d.mkdir()
+    # Candidates are an exact-project answer: the checkout carries the canonical
+    # origin a real one has. Without it the assembler refuses to guess (see
+    # test_aicx_resume_fallback_refuses_basename_union_without_origin).
+    _git_origin_checkout(repo, "https://github.com/Fixture/repo.git")
 
     now = dt.datetime.now(dt.timezone.utc)
     fresh = now.isoformat().replace("+00:00", "Z")
@@ -1464,7 +1732,7 @@ def test_aicx_resume_fallback_skips_provider_pruned_candidates(
     meta = json.loads(meta_files[0].read_text(encoding="utf-8"))
     assert meta["mode"] == "new_session"
     assert meta["session_id"] == ""
-    pack = next((home / ".vibecrafted" / "tmp").glob("resume-aicx-claude-*.md"))
+    pack = _resume_pack(home, "claude")
     text = pack.read_text(encoding="utf-8")
     assert "prefer native resume" not in text.lower()
     assert "recover previous session" not in text.lower()
@@ -1519,7 +1787,88 @@ def test_aicx_resume_fallback_resolves_cargo_foundation_without_shell_path(
     assert "aicx foundation not found" not in result.stderr
 
 
-def test_aicx_resume_fallback_uses_cross_org_exact_repo_filter(
+def _resume_pack(home: Path, agent: str) -> Path:
+    """The injected pack, not the full retrieval artifact written beside it."""
+    packs = [
+        path
+        for path in (home / ".vibecrafted" / "tmp").glob(f"resume-aicx-{agent}-*.md")
+        if not path.name.endswith(".full.md")
+    ]
+    assert len(packs) == 1, packs
+    return packs[0]
+
+
+def _git_origin_checkout(path: Path, origin: str | None) -> None:
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    if origin is not None:
+        subprocess.run(
+            ["git", "-C", str(path), "remote", "add", "origin", origin], check=True
+        )
+
+
+def _run_resume_fallback(
+    tmp_path: Path, home: Path, fake_bin: Path, agent: str, repo: Path
+) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["VIBECRAFTED_HOME"] = str(home / ".vibecrafted")
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+    return subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                f'source "{SHELL_SH}"\n'
+                f"_vetcoders_aicx_resume_fallback {agent} {shlex.quote(str(repo))}"
+            ),
+        ],
+        check=False,
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
+def test_aicx_resume_fallback_refuses_basename_union_without_origin(
+    tmp_path: Path,
+) -> None:
+    """No canonical owner/repo means no catalog question at all.
+
+    A basename filter (`-p /codescribe`) unions every same-named repository
+    across orgs. The shell entry must reach the assembler (it runs the module,
+    not a script path) and the assembler must say why it asked nothing.
+    """
+    home = tmp_path / "home"
+    repo = tmp_path / "codescribe"
+    fake_bin = tmp_path / "bin"
+    calls = tmp_path / "aicx-calls"
+    for directory in (home, repo, fake_bin):
+        directory.mkdir()
+    _git_origin_checkout(repo, None)
+    _write_fake_command(
+        fake_bin / "aicx",
+        f'#!/bin/bash\nprintf \'%s\\n\' "$*" >> "{calls}"\nexit 1\n',
+    )
+
+    result = _run_resume_fallback(tmp_path, home, fake_bin, "grok", repo)
+
+    assert result.returncode == 0, result.stderr
+    assert "ImportError" not in result.stderr, result.stderr
+    fields = dict(
+        line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+    )
+    assert fields.get("MODE") == "new_session"
+    assert fields.get("EMPTY_KIND") == "unknown_identity"
+    assert not calls.exists(), calls.read_text(encoding="utf-8")
+    pack = _resume_pack(home, "grok")
+    text = pack.read_text(encoding="utf-8")
+    assert "aicx_project_filter: unresolved" in text
+    assert "aicx_project_filter: `/codescribe`" not in text
+
+
+def test_aicx_resume_fallback_uses_canonical_origin_filter(
     tmp_path: Path,
 ) -> None:
     home = tmp_path / "home"
@@ -1528,6 +1877,7 @@ def test_aicx_resume_fallback_uses_cross_org_exact_repo_filter(
     calls = tmp_path / "aicx-calls"
     for directory in (home, repo, fake_bin):
         directory.mkdir()
+    _git_origin_checkout(repo, "https://github.com/Other-Org/codescribe.git")
     _write_fake_command(
         fake_bin / "aicx",
         "#!/bin/bash\n"
@@ -1569,15 +1919,14 @@ def test_aicx_resume_fallback_uses_cross_org_exact_repo_filter(
     assert result.returncode == 0, result.stderr
     invoked = calls.read_text(encoding="utf-8").splitlines()
     continuity = [line for line in invoked if line.startswith("continuity ")]
-    tail = [line for line in invoked if line.startswith("tail ")]
     intents = [line for line in invoked if line.startswith("intents ")]
-    assert continuity, invoked
-    assert any("-p /codescribe" in line for line in continuity)
-    assert len(tail) == 1
-    assert len(intents) == 1
-    assert tail[0].endswith("-p /codescribe")
-    assert intents[0].endswith("-p /codescribe")
-    pack = next((home / ".vibecrafted" / "tmp").glob("resume-aicx-grok-*.md"))
+    assert continuity and intents, invoked
+    # Every project-scoped question names the canonical origin, never the
+    # cross-org basename union (`-p /codescribe`) the old filter used.
+    scoped = [line for line in invoked if " -p " in line]
+    assert all(" -p Other-Org/codescribe " in f"{line} " for line in scoped), invoked
+    assert not any("-p /codescribe" in line for line in invoked), invoked
+    pack = _resume_pack(home, "grok")
     text = pack.read_text(encoding="utf-8")
-    assert "aicx_project_filter: `/codescribe`" in text
+    assert "aicx_project_filter: `Other-Org/codescribe`" in text
     assert "prefer native resume" not in text.lower()

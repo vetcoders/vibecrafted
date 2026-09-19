@@ -150,12 +150,21 @@ def test_vc_frame_config_session_resilience() -> None:
 
 
 def test_native_default_names_the_packaged_operator_layout() -> None:
+    """First product session is the frame host; operator.kdl stays Start here.
+
+    Repointed from default_layout "operator": Start here stays on operator.kdl
+    as guest/workspace content. The native default is layouts/host.kdl.
+    """
     payload = VC_FRAME_CONFIG.read_text(encoding="utf-8")
+    host = LAYOUTS_DIR / "host.kdl"
     operator = LAYOUTS_DIR / "operator.kdl"
 
-    assert 'default_layout "operator"' in payload
+    assert 'default_layout "host"' in payload
+    assert host.is_file()
+    assert not host.is_symlink()
     assert operator.is_file()
     assert not operator.is_symlink()
+    assert 'tab name="Start here"' in operator.read_text(encoding="utf-8")
 
 
 def test_vc_frame_config_has_plugin_aliases() -> None:
@@ -165,6 +174,7 @@ def test_vc_frame_config_has_plugin_aliases() -> None:
     # zellij: URL scheme; vc-frame: is rejected by the 0.45.x parser.
     assert 'compact-bar location="zellij:compact-bar"' in payload
     assert 'session-manager location="zellij:session-manager"' in payload
+    assert 'frame-host location="zellij:session-manager"' in payload
 
 
 def test_all_layouts_keep_sessions_rail_always_visible() -> None:
@@ -203,7 +213,7 @@ def test_layout_tab_branding_matches_frame_contract() -> None:
             assert 'tab name="Start here"' in payload
             assert 'tab name="Agents"' in payload
             assert 'tab name="Shell"' in payload
-            assert 'tab name="voc"' in payload
+            assert 'tab name="Voc"' in payload
             continue
         assert "𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍." in payload, f"{layout_file.name} missing branded tab name"
 
@@ -218,13 +228,13 @@ def test_marbles_layout_is_operator_centric() -> None:
 
 
 def test_operator_layout_matches_vibecrafted_standard() -> None:
-    """vc-start operator.kdl is the native default layout:
-    Start here + Agents + Shell + voc, SESSIONS rail on every tab, no strider."""
+    """vc-start operator.kdl is the Start here / guest workspace layout:
+    Start here + Agents + Shell + Voc, SESSIONS rail on every tab, no strider."""
     payload = (LAYOUTS_DIR / "operator.kdl").read_text(encoding="utf-8")
     assert 'tab name="Start here"' in payload
     assert 'tab name="Agents"' in payload
     assert 'tab name="Shell"' in payload
-    assert 'tab name="voc"' in payload
+    assert 'tab name="Voc"' in payload
     assert "vc-start-here.py" in payload
     assert "vc-agent-workshop.py" in payload
     assert "pane-python" in payload
@@ -236,6 +246,8 @@ def test_operator_layout_matches_vibecrafted_standard() -> None:
     assert "default_tab_template" in payload
     assert "compact-bar" in payload
     assert "status-bar" in payload
+    assert "session_layer" in payload
+    assert 'tab name="Start here" focus=true' in payload
     assert "vibecrafted start" in payload
     # Rejected parallel path (ignore comments).
     active = "\n".join(
@@ -284,3 +296,38 @@ def test_research_layout_synthesis_focused() -> None:
     payload = (LAYOUTS_DIR / "research.kdl").read_text(encoding="utf-8")
     assert 'name="synthesis"' in payload
     assert 'size="55%"' in payload
+
+
+def _layout_declares_frame_host(payload: str) -> bool:
+    return "frame_host true" in payload or 'frame_host "true"' in payload
+
+
+def test_product_layout_declares_frame_host() -> None:
+    """A1: a shipped product layout carries rail frame_host true."""
+    host = LAYOUTS_DIR / "host.kdl"
+    assert host.is_file()
+    assert not host.is_symlink()
+    payload = host.read_text(encoding="utf-8")
+    assert _layout_declares_frame_host(payload)
+    assert "rail true" in payload or 'rail "true"' in payload
+    assert "session-manager" in payload
+    assert 'plugin location="frame-host"' in payload
+    config = VC_FRAME_CONFIG.read_text(encoding="utf-8")
+    assert "frame-host location=" in config
+    assert "frame_host true" in config
+
+
+def test_first_session_is_the_frame_host() -> None:
+    """A2: the first product session uses the host layout (config default)."""
+    payload = VC_FRAME_CONFIG.read_text(encoding="utf-8")
+    assert 'default_layout "host"' in payload
+    host = LAYOUTS_DIR / "host.kdl"
+    assert host.is_file()
+    host_text = host.read_text(encoding="utf-8")
+    assert _layout_declares_frame_host(host_text)
+    # vc-start still creates operator.kdl as kind=host when outside a frame;
+    # that rail must also be a frame host so the first Start here session
+    # switches through activate_session_request.
+    operator = (LAYOUTS_DIR / "operator.kdl").read_text(encoding="utf-8")
+    assert _layout_declares_frame_host(operator)
+    assert "rail true" in operator or 'rail "true"' in operator

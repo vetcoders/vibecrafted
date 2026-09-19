@@ -25,6 +25,9 @@ spawn_frontier_root() {
   return 1
 }
 
+# Installer-owned product config first, then the immutable defaults shipped in
+# the selected generation or source checkout. Product configuration lives only
+# in ~/.config/vibecrafted.
 spawn_frontier_candidates() {
   local script_root candidate seen=""
   script_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." 2>/dev/null && pwd || true)"
@@ -33,7 +36,7 @@ spawn_frontier_candidates() {
   fi
 
   for candidate in \
-    "${XDG_CONFIG_HOME:-$HOME/.config}/vetcoders/frontier" \
+    "$HOME/.config/vibecrafted" \
     "${VIBECRAFTED_TOOLS_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted/tools}/vibecrafted-current/config" \
     "${VIBECRAFTED_ROOT:+$VIBECRAFTED_ROOT/config}" \
     "${SPAWN_ROOT:+$SPAWN_ROOT/config}" \
@@ -67,24 +70,23 @@ spawn_frontier_file() {
 
 spawn_export_frontier_sidecars() {
   local starship_config atuin_config vc_frame_config vc_frame_config_dir
-  local xdg_config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
   starship_config="$(spawn_frontier_file "starship.toml" 2>/dev/null || true)"
   atuin_config="$(spawn_frontier_file "atuin/config.toml" 2>/dev/null || true)"
   vc_frame_config="$(spawn_frontier_file "vc-frame/config.kdl" 2>/dev/null || true)"
 
   # Re-pin the active frontier assets every time so spawned sessions do not
-  # inherit stale shell config from an unrelated install or repo.
+  # inherit stale shell config from an unrelated install or repo. An explicit
+  # STARSHIP_CONFIG / ATUIN_CONFIG wins; private files in the user's own config
+  # directory are never consulted.
   if command -v starship >/dev/null 2>&1 \
     && [[ -n "$starship_config" ]] \
-    && [[ -z "${STARSHIP_CONFIG:-}" ]] \
-    && [[ ! -e "$xdg_config_home/starship.toml" ]]; then
+    && [[ -z "${STARSHIP_CONFIG:-}" ]]; then
     export STARSHIP_CONFIG="$starship_config"
   fi
 
   if command -v atuin >/dev/null 2>&1 \
     && [[ -n "$atuin_config" ]] \
-    && [[ -z "${ATUIN_CONFIG:-}" ]] \
-    && [[ ! -e "$xdg_config_home/atuin/config.toml" ]]; then
+    && [[ -z "${ATUIN_CONFIG:-}" ]]; then
     export ATUIN_CONFIG="$atuin_config"
   fi
 

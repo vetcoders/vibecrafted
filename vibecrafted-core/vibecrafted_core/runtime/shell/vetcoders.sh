@@ -48,7 +48,6 @@ _vetcoders_source_shell_module() {
     printf 'Missing Vibecrafted shell module: %s\n' "$module_file" >&2
     return 1
   }
-  # shellcheck disable=SC1090
   source "$module_file" || return $?
 }
 
@@ -69,7 +68,6 @@ _vetcoders_source_workflow_module() {
     printf 'Missing Vibecrafted workflow shell module: %s\n' "$module_file" >&2
     return 1
   }
-  # shellcheck disable=SC1090
   source "$module_file" || return $?
 }
 

@@ -28,10 +28,14 @@ unset SPAWN_MODEL SPAWN_PROMPT_ID
 """
 
 
-def _bash(script: str) -> subprocess.CompletedProcess[str]:
+def _bash(
+    script: str, *, vibecrafted_home: Path | None = None
+) -> subprocess.CompletedProcess[str]:
     with tempfile.TemporaryDirectory(prefix="vibecrafted-meta-test-") as state_root:
         env = os.environ.copy()
-        env["VIBECRAFTED_HOME"] = str(Path(state_root) / ".vibecrafted")
+        env["VIBECRAFTED_HOME"] = str(
+            vibecrafted_home or Path(state_root) / ".vibecrafted"
+        )
         return subprocess.run(
             ["bash", "-lc", _ENV_SANITIZE + script],
             check=True,
@@ -243,6 +247,12 @@ def test_generated_launcher_walks_full_lifecycle(tmp_path: Path) -> None:
 
 def test_spawn_write_meta_schema_contract_pin(tmp_path: Path) -> None:
     meta = tmp_path / "run.meta.json"
+    # The workspace identity stamp (spawn.write_meta) is best-effort, and the
+    # catalog refuses to persist a pytest tmp_path root unless the catalog home
+    # is itself isolated (workspace_catalog._refuse_operator_catalog_test_root).
+    # A home outside tmp_path made the stamp vanish exactly where the root is a
+    # `pytest-of-*` path (CI: KeyError workspace_id) and appear elsewhere. An
+    # isolated home makes the full schema -- identity included -- deterministic.
     _bash(
         f'''
         set -euo pipefail
@@ -252,7 +262,8 @@ def test_spawn_write_meta_schema_contract_pin(tmp_path: Path) -> None:
         export SPAWN_LOOP_NR=4
         export SPAWN_SKILL_CODE=just
         spawn_write_meta "{meta}" "launching" "claude" "implement" "{tmp_path}" "plan.md" "report.md" "t.log" "l.sh" "gpt-4"
-        '''
+        ''',
+        vibecrafted_home=tmp_path / "isolated-vibecrafted-home" / ".vibecrafted",
     )
 
     data = _load(meta)
@@ -275,6 +286,9 @@ def test_spawn_write_meta_schema_contract_pin(tmp_path: Path) -> None:
     assert data["launcher_pid"] is None
     assert data["liveness"] == "pid_pending"
     assert data["model"] == "gpt-4"
+    # d4e71502: write_meta records the requested model beside the resolved one
+    # (`model_requested or model`), so a plain --model launch carries both.
+    assert data["model_requested"] == "gpt-4"
     assert isinstance(data["created_at"], str)
     assert isinstance(data["updated_at"], str)
     for identity_key in (
@@ -312,6 +326,7 @@ def test_spawn_write_meta_schema_contract_pin(tmp_path: Path) -> None:
         "launcher_pid",
         "liveness",
         "model",
+        "model_requested",
         "workspace_id",
         "workspace_instance_id",
         "workspace_display_label",

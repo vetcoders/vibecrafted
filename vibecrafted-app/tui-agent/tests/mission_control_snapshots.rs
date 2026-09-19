@@ -191,9 +191,9 @@ fn populated_mission_state() -> MissionControlState {
                 detail: "/fixture/artifacts".to_string(),
             },
             FleetHealthSignal {
-                label: "meta scan".to_string(),
+                label: "derived runs".to_string(),
                 status: FleetHealthStatus::Ok,
-                detail: "128 meta.json scanned".to_string(),
+                detail: "128 derived runs scanned".to_string(),
             },
             FleetHealthSignal {
                 label: "model parity".to_string(),
@@ -313,6 +313,8 @@ fn mission_app(state: MissionControlState) -> App {
         observe: Default::default(),
         memory: Default::default(),
         interaction: Default::default(),
+        repo_edit: Default::default(),
+        refresh: Default::default(),
     }
 }
 
@@ -557,9 +559,9 @@ fn mission_control_tab_fleet_health_overflow_snapshot() {
             detail: "/fixture/artifacts".to_string(),
         },
         FleetHealthSignal {
-            label: "meta scan".to_string(),
+            label: "derived runs".to_string(),
             status: FleetHealthStatus::Ok,
-            detail: "128 meta.json scanned".to_string(),
+            detail: "128 derived runs scanned".to_string(),
         },
         FleetHealthSignal {
             label: "model parity".to_string(),
@@ -682,7 +684,7 @@ fn mission_control_tab_survives_narrow_terminals() {
 
 // ─── vc-admin: standalone snapshot renderer e2e ─────────────────────────
 
-fn write_meta(path: &Path, contents: &str) {
+fn write_snapshot(path: &Path, contents: &str) {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).unwrap();
     }
@@ -704,49 +706,59 @@ fn vc_admin_status_renders_all_panels_from_disk_fixtures() {
     let now = chrono::Utc::now();
     let two_hours_ago = (now - chrono::Duration::hours(2)).to_rfc3339();
     let three_hours_ago = (now - chrono::Duration::hours(3)).to_rfc3339();
+    fs::create_dir_all(&artifact_root).unwrap();
+    // Leftover artifact meta must not feed stats; derived snapshots do.
+    write_snapshot(
+        &artifact_root.join("leftover.meta.json"),
+        r#"{"run_id":"leftover-meta","agent":"gemini","exit_code":2}"#,
+    );
 
-    // Dated bucket must sit inside STATS_WINDOW_DAYS (30d) of wall clock, or
-    // directory_within_window prunes the walk and the snapshot goes silent.
-    let bucket_day = now.format("%Y_%m%d").to_string();
-    let bucket = artifact_root.join(format!("vetcoders/vibecrafted/{bucket_day}/reports"));
-    write_meta(
-        &bucket.join("just-001.meta.json"),
+    write_snapshot(
+        &state_root.join("runs/just-001.json"),
         &format!(
             r#"{{
                 "run_id": "just-001",
                 "agent": "claude",
-                "skill_code": "implement",
+                "skill": "implement",
+                "state": "completed",
+                "status": "completed",
+                "updated_at": "{two_hours_ago}",
+                "latest_report": "/fixture/just-001/report.md",
                 "exit_code": 0,
                 "model": "claude-opus-4-7",
                 "duration_s": 120.0,
                 "completed_at": "{two_hours_ago}",
-                "prompt_id": "wave-a",
-                "report": "/fixture/just-001/report.md"
+                "prompt_id": "wave-a"
             }}"#
         ),
     );
-    write_meta(
-        &bucket.join("just-002.meta.json"),
+    write_snapshot(
+        &state_root.join("runs/just-002.json"),
         &format!(
             r#"{{
                 "run_id": "just-002",
                 "agent": "codex",
-                "skill_code": "marbles",
+                "skill": "marbles",
+                "state": "failed",
+                "status": "failed",
+                "updated_at": "{three_hours_ago}",
                 "exit_code": 1,
                 "model": "unknown",
-                "status": "failed",
                 "completed_at": "{three_hours_ago}",
                 "prompt_id": "wave-a"
             }}"#
         ),
     );
-    write_meta(
-        &bucket.join("just-003.meta.json"),
+    write_snapshot(
+        &state_root.join("runs/just-003.json"),
         &format!(
             r#"{{
                 "run_id": "just-003",
                 "agent": "claude",
-                "skill_code": "implement",
+                "skill": "implement",
+                "state": "completed",
+                "status": "completed",
+                "updated_at": "{two_hours_ago}",
                 "exit_code": 0,
                 "model": "claude-opus-4-7",
                 "duration_s": 45.0,

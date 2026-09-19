@@ -107,6 +107,10 @@ def test_product_profile_survives_broken_completion_and_repeated_source(
     broken.mkdir()
     dangling = broken / "_missing_tool"
     dangling.symlink_to(broken / "absent")
+    # A readable sibling in the same foreign directory must keep completing:
+    # one dead link (a Homebrew completion for an app that is gone) may not
+    # take the whole directory's completions down with it.
+    (broken / "_good_tool").write_text("#compdef good_tool\n_arguments '--ok'\n")
     result = subprocess.run(
         [
             "/bin/zsh",
@@ -119,6 +123,8 @@ def test_product_profile_survives_broken_completion_and_repeated_source(
                 '[[ "$before_hooks" == "${precmd_functions[*]}|${preexec_functions[*]}" ]] || exit 11; '
                 "(( $+functions[compdef] )) || exit 12; "
                 '[[ "${fpath[(Ie)$1]}" == 0 ]] || exit 13; '
+                '[[ "${_comps[good_tool]}" == _good_tool ]] || exit 14; '
+                "(( ! $+_comps[missing_tool] )) || exit 15; "
                 'print -r -- "HISTORY=$HISTFILE" "ATUIN=$ATUIN_DATA_DIR" "READY"'
             ),
             "profile-test",
@@ -136,13 +142,257 @@ def test_product_profile_survives_broken_completion_and_repeated_source(
     assert "READY" in result.stdout
     assert f"HISTORY={tmp_path}/.vibecrafted/shell/zsh_history" in result.stdout
     assert f"ATUIN={tmp_path}/.vibecrafted/shell/atuin" in result.stdout
-    assert (
-        "skipped a completion directory"
-        in (tmp_path / ".vibecrafted/shell/startup.log").read_text()
-    )
+    log = (tmp_path / ".vibecrafted/shell/startup.log").read_text()
+    assert "skipped unreadable completion entries: _missing_tool" in log
     assert dangling.is_symlink()
+    (mirror,) = (tmp_path / ".vibecrafted/shell/completion-mirror").iterdir()
+    assert (mirror / "_good_tool").resolve() == (broken / "_good_tool").resolve()
+    assert not (mirror / "_missing_tool").is_symlink()
     assert not (tmp_path / ".zsh_history").exists()
     assert not (tmp_path / ".local/share/atuin").exists()
+
+
+def test_product_shell_keeps_isolated_history_and_zle_parity(tmp_path: Path) -> None:
+    """The product profile supplies usability settings without host dotfiles."""
+    _stage_product_profile(tmp_path)
+    result = _zsh_profile(
+        tmp_path,
+        (
+            'source "$HOME/.config/vibecrafted/vc-terminal/interactive.zsh"; '
+            'print -r -- "HISTORY=$HISTSIZE/$SAVEHIST/$HISTFILE"; '
+            'setopt | grep -E "^(extendedhistory|incappendhistory|sharehistory|histignoredups|histignorealldups|histverify)$"; '
+            'print -r -- "UP=$(bindkey "^[[A")"; '
+            'print -r -- "DOWN=$(bindkey "^[[B")"; '
+            'print -r -- "CTRL_R=$(bindkey "^R")"; '
+            'zstyle -s ":completion:*" matcher-list matcher; print -r -- "MATCHER=$matcher"; '
+            'zstyle -t ":completion:*" menu select; print -r -- "MENU=$?"; '
+            'print -r -- "SUGGEST=$ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE/${ZSH_AUTOSUGGEST_STRATEGY[*]}"; '
+            "print -r -- READY"
+        ),
+        extra_env={"VC_TERMINAL_PLUGIN_PREFIXES": str(tmp_path / "missing-plugins")},
+    )
+    assert result.returncode == 0, result.stderr
+    assert "READY" in result.stdout
+    assert (
+        f"HISTORY=100000/100000/{tmp_path / '.vibecrafted/shell/zsh_history'}"
+        in result.stdout
+    )
+    for option in (
+        "extendedhistory",
+        "incappendhistory",
+        "sharehistory",
+        "histignoredups",
+        "histignorealldups",
+        "histverify",
+    ):
+        assert option in result.stdout
+    assert 'UP="^[[A" up-line-or-beginning-search' in result.stdout
+    assert 'DOWN="^[[B" down-line-or-beginning-search' in result.stdout
+    assert 'CTRL_R="^R" history-incremental-search-backward' in result.stdout
+    assert "MATCHER=m:{a-z}={A-Z}" in result.stdout
+    assert "MENU=0" in result.stdout
+    assert "SUGGEST=fg=244/history completion" in result.stdout
+
+
+def test_product_shell_uses_multiline_safe_atuin_up_binding(tmp_path: Path) -> None:
+    """Atuin replaces only single-line Up; Down/Ctrl-R remain explicit."""
+    _stage_product_profile(tmp_path)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    atuin = bin_dir / "atuin"
+    atuin.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = init ]; then\n'
+        "  cat <<'EOF'\n"
+        "_atuin_search() { :; }\n"
+        "atuin-search() { :; }\n"
+        "atuin-search-viins() { :; }\n"
+        "atuin-search-vicmd() { :; }\n"
+        "EOF\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    atuin.chmod(0o755)
+    result = _zsh_profile(
+        tmp_path,
+        (
+            'source "$HOME/.config/vibecrafted/vc-terminal/interactive.zsh"; '
+            'print -r -- "UP=$(bindkey "^[[A")"; '
+            'print -r -- "UP_APP=$(bindkey "^[OA")"; '
+            'print -r -- "DOWN=$(bindkey "^[[B")"; '
+            'print -r -- "CTRL_R=$(bindkey "^R")"; '
+            "functions _vc_terminal_atuin_up_or_history; "
+            "print -r -- READY"
+        ),
+        path=f"{bin_dir}:/usr/bin:/bin",
+        extra_env={"VC_TERMINAL_PLUGIN_PREFIXES": str(tmp_path / "missing-plugins")},
+    )
+    assert result.returncode == 0, result.stderr
+    assert "READY" in result.stdout
+    assert "_vc_terminal_atuin_up_or_history" in result.stdout
+    assert 'UP="^[[A" _vc_terminal_atuin_up_or_history' in result.stdout
+    assert 'UP_APP="^[OA" _vc_terminal_atuin_up_or_history' in result.stdout
+    assert 'DOWN="^[[B" down-line-or-history' in result.stdout
+    assert 'CTRL_R="^R" atuin-search' in result.stdout
+    assert "[[ $BUFFER == *$'\\n'* ]]" in result.stdout
+    assert "zle up-line-or-history" in result.stdout
+    assert "_atuin_search --shell-up-key-binding" in result.stdout
+
+
+def test_product_shell_pty_routes_single_line_up_to_atuin_but_not_multiline(
+    tmp_path: Path,
+) -> None:
+    """Exercise the actual escape sequences delivered to ZLE in an isolated PTY."""
+    _stage_product_profile(tmp_path)
+    profile = tmp_path / ".config/vibecrafted/vc-terminal/.zshrc"
+    profile.write_text(profile.read_text(encoding="utf-8") + "print -r -- PTY_READY\n")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    atuin = bin_dir / "atuin"
+    atuin.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = init ]; then\n'
+        "  cat <<'EOF'\n"
+        '_atuin_search() { print -r -- "UP:$BUFFER" >> "$HOME/atuin-events"; }\n'
+        'atuin-search() { print -r -- CTRL_R >> "$HOME/atuin-events"; }\n'
+        "zle -N atuin-search\n"
+        "EOF\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    atuin.chmod(0o755)
+    events = tmp_path / "atuin-events"
+    pid, descriptor = pty.fork()
+    if pid == 0:
+        os.chdir(tmp_path)
+        os.execve(
+            "/bin/zsh",
+            ["/bin/zsh", "-li"],
+            {
+                "HOME": str(tmp_path),
+                "PATH": f"{bin_dir}:/usr/bin:/bin",
+                "TERM": "xterm",
+                "ZDOTDIR": str(tmp_path / ".config/vibecrafted/vc-terminal"),
+                "VIBECRAFTED_HOME": str(tmp_path / ".vibecrafted"),
+                "VC_TERMINAL_PLUGIN_PREFIXES": str(tmp_path / "missing-plugins"),
+            },
+        )
+
+    output = bytearray()
+
+    def read_until(predicate, message: str) -> None:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            if select.select([descriptor], [], [], 0.1)[0]:
+                output.extend(os.read(descriptor, 65536))
+        pytest.fail(f"{message}: {output.decode(errors='replace')}")
+
+    try:
+        read_until(lambda: b"PTY_READY" in output, "interactive shell did not start")
+        os.write(descriptor, b"single-line\x1b[A")
+        read_until(events.exists, "single-line Up did not reach Atuin")
+        assert events.read_text().splitlines() == ["UP:single-line"]
+
+        os.write(descriptor, b"\x03one\x16\ntwo\x1b[A")
+        deadline = time.monotonic() + 0.75
+        while time.monotonic() < deadline:
+            if select.select([descriptor], [], [], 0.05)[0]:
+                os.read(descriptor, 65536)
+        assert events.read_text().splitlines() == ["UP:single-line"]
+
+        os.write(descriptor, b"\x12")
+        read_until(
+            lambda: events.exists() and "CTRL_R" in events.read_text(),
+            "Ctrl-R did not reach Atuin",
+        )
+    finally:
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+        os.close(descriptor)
+
+
+def test_product_shell_pty_recalls_history_without_atuin(tmp_path: Path) -> None:
+    """No-Atuin fallback registers widgets that recall history through a PTY."""
+    _stage_product_profile(tmp_path)
+    profile = tmp_path / ".config/vibecrafted/vc-terminal/.zshrc"
+    profile.write_text(
+        profile.read_text(encoding="utf-8")
+        + "precmd() { print -r -- PROMPT_READY; }\nprint -r -- PTY_READY\n"
+    )
+    events = tmp_path / "history-events"
+    pid, descriptor = pty.fork()
+    if pid == 0:
+        os.chdir(tmp_path)
+        os.execve(
+            "/bin/zsh",
+            ["/bin/zsh", "-li"],
+            {
+                "HOME": str(tmp_path),
+                "PATH": "/usr/bin:/bin",
+                "TERM": "xterm",
+                "ZDOTDIR": str(tmp_path / ".config/vibecrafted/vc-terminal"),
+                "VIBECRAFTED_HOME": str(tmp_path / ".vibecrafted"),
+                "VC_TERMINAL_PLUGIN_PREFIXES": str(tmp_path / "missing-plugins"),
+            },
+        )
+
+    output = bytearray()
+
+    def read_until(predicate, message: str) -> None:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            if select.select([descriptor], [], [], 0.1)[0]:
+                output.extend(os.read(descriptor, 65536))
+        pytest.fail(f"{message}: {output.decode(errors='replace')}")
+
+    try:
+        read_until(lambda: b"PTY_READY" in output, "interactive shell did not start")
+        os.write(
+            descriptor,
+            (
+                b'print -r -- first >> "$HOME/history-events"\n'
+                b'print -r -- second >> "$HOME/history-events"\n'
+            ),
+        )
+        read_until(
+            lambda: (
+                events.exists()
+                and events.read_text().splitlines() == ["first", "second"]
+            ),
+            "history commands did not run",
+        )
+        os.write(descriptor, b"\x1b[A\n")
+        read_until(
+            lambda: events.read_text().splitlines() == ["first", "second", "second"],
+            "Up did not recall the most recent history command",
+        )
+        os.write(descriptor, b"\x1b[A\x1b[A\n")
+        read_until(
+            lambda: (
+                events.read_text().splitlines()
+                == ["first", "second", "second", "first"]
+            ),
+            "repeated Up did not reach older product-shell history",
+        )
+        os.write(
+            descriptor,
+            b'\x1b[A\x1b[Bprint -r -- down-cleared >> "$HOME/history-events"\n',
+        )
+        read_until(
+            lambda: (
+                events.read_text().splitlines()
+                == ["first", "second", "second", "first", "down-cleared"]
+            ),
+            "Down did not return from product-shell history selection",
+        )
+    finally:
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+        os.close(descriptor)
 
 
 def test_tab_completes_workspace_option_without_launching_workspace(
@@ -214,6 +464,7 @@ def _stage_product_profile(tmp_path: Path) -> Path:
     shutil.copy2(
         root / "config/vc-terminal/interactive.zsh", product / "interactive.zsh"
     )
+    shutil.copytree(root / "config/vc-terminal/bin", product / "bin")
     shutil.copy2(ENTRY, product / "launch-primary-shell.zsh")
     shutil.copy2(
         root / "config/starship.toml",
@@ -299,8 +550,8 @@ def test_reload_applies_updated_installed_profile_without_duplicating_hooks(
         "path = Path.home() / '.config/vibecrafted/vc-terminal/interactive.zsh'\n"
         "text = path.read_text()\n"
         "text = text.replace(\n"
-        "    \"print -r -- 'navigation'\",\n"
-        "    \"print -r -- 'navigation-reloaded-from-disk'\",\n"
+        "    \"local vc_shell_group='shell'\",\n"
+        "    \"local vc_shell_group='shell-reloaded-from-disk'\",\n"
         "    1,\n"
         ")\n"
         "needle = '_vc_terminal_owned_alias_names='\n"
@@ -329,7 +580,7 @@ def test_reload_applies_updated_installed_profile_without_duplicating_hooks(
             '[[ "$before_hooks" == "${precmd_functions[*]}|${preexec_functions[*]}" ]] || exit 55; '
             "(( $+functions[_vc_terminal_disk_reload_marker] )) || exit 56; "
             "_vc_terminal_disk_reload_marker; "
-            'aliases | grep -q "^navigation-reloaded-from-disk$" || exit 57; '
+            'aliases | grep -q "^shell-reloaded-from-disk$" || exit 57; '
             'print -r -- "CWD=$PWD"; '
             "print -r -- READY"
         ),
@@ -493,7 +744,7 @@ _NEEDS_GENERATION_PYTHON = pytest.mark.skipif(
 def test_product_shell_typed_python3_uses_generation_not_host(
     tmp_path: Path,
 ) -> None:
-    """Door PATH stays Founder's python3; typed python3 execs generation."""
+    """Door PATH stays off generation bin; python3 names exec generation."""
 
     _stage_product_profile(tmp_path)
     hostile_bin = tmp_path / "hostile-bin"
@@ -501,6 +752,9 @@ def test_product_shell_typed_python3_uses_generation_not_host(
     generation_python = tmp_path / "releases" / "4.3.1" / "bin" / "python3"
     generation_python.parent.mkdir(parents=True)
     generation_python.symlink_to(sys.executable)
+    door_python = tmp_path / ".config/vibecrafted/vc-terminal/bin/python3"
+    door_python_before = door_python.stat()
+    door_python_bytes = door_python.read_bytes()
     result = _zsh_profile(
         tmp_path,
         (
@@ -509,6 +763,12 @@ def test_product_shell_typed_python3_uses_generation_not_host(
             'print -r -- "path_python3=$(whence -p python3)"; '
             'print -r -- "PATH=$PATH"; '
             'python3 -c "import sys; print(\\"used=\\" + sys.executable)"; '
+            'command python3 -c "import sys; print(\\"command_used=\\" + sys.executable)"; '
+            '/usr/bin/env python3 -c "import sys; print(\\"env_used=\\" + sys.executable)"; '
+            'script="$HOME/door-shebang.py"; '
+            'printf "#!/usr/bin/env python3\\nimport sys; print(\\"shebang_used=\\" + sys.executable)\\n" > "$script"; '
+            'chmod 755 "$script"; "$script"; '
+            "reload; "
             "print -r -- READY"
         ),
         path=f"{hostile_bin}:/usr/bin:/bin",
@@ -521,16 +781,21 @@ def test_product_shell_typed_python3_uses_generation_not_host(
     assert "READY" in result.stdout
     assert "HOST_PYTHON_SELECTED" not in result.stdout + result.stderr
     assert "kind=python3: function" in result.stdout
-    assert f"path_python3={hostile_bin / 'python3'}" in result.stdout
-    assert str(generation_python.parent) not in result.stdout.split("PATH=", 1)[
-        1
-    ].splitlines()[0].split(":")
-    used = next(
-        line.split("used=", 1)[1]
-        for line in result.stdout.splitlines()
-        if line.startswith("used=")
-    )
-    assert Path(used).resolve() == Path(sys.executable).resolve()
+    assert f"path_python3={door_python}" in result.stdout
+    path_line = result.stdout.split("PATH=", 1)[1].splitlines()[0]
+    assert str(generation_python.parent) not in path_line.split(":")
+    assert str(door_python.parent) in path_line.split(":")
+    for key in ("used=", "command_used=", "env_used=", "shebang_used="):
+        used = next(
+            line.split(key, 1)[1]
+            for line in result.stdout.splitlines()
+            if line.startswith(key)
+        )
+        assert Path(used).resolve() == Path(sys.executable).resolve()
+    door_python_after = door_python.stat()
+    assert door_python.read_bytes() == door_python_bytes
+    assert door_python_after.st_mode == door_python_before.st_mode
+    assert door_python_after.st_mtime_ns == door_python_before.st_mtime_ns
 
 
 def test_product_shell_typed_python3_refuses_host_without_generation(
@@ -546,12 +811,15 @@ def test_product_shell_typed_python3_refuses_host_without_generation(
         (
             'source "$HOME/.config/vibecrafted/vc-terminal/interactive.zsh"; '
             "python3 -c 'print(1)'; "
-            'print -r -- "missing_exit=$?"'
+            'print -r -- "missing_exit=$?"; '
+            "/usr/bin/env python3 -c 'print(1)'; "
+            'print -r -- "env_missing_exit=$?"'
         ),
         path=f"{hostile_bin}:/usr/bin:/bin",
     )
     assert missing.returncode == 0, missing.stderr
     assert "missing_exit=127" in missing.stdout
+    assert "env_missing_exit=127" in missing.stdout
     assert "HOST_PYTHON_SELECTED" not in missing.stdout + missing.stderr
     assert "VIBECRAFTED_PYTHON" in missing.stderr
     assert "3.9.6" in missing.stderr
@@ -587,8 +855,13 @@ def test_two_line_prompt_without_starship_and_with_fake_starship(
     assert "READY" in offline.stdout
     assert "❯" in offline.stdout
     assert "%~" in offline.stdout
-    prompt = offline.stdout.split("PROMPT=", 1)[1]
-    assert "\n" in prompt.split("READY", 1)[0]
+    prompt = offline.stdout.split("PROMPT=", 1)[1].split("READY", 1)[0]
+    assert "\n" in prompt
+    # Same shape and colours as the product starship.toml: bold blue path on
+    # line one, then ❯ green after success and red after a failed command.
+    path_line, entry_line = prompt.rstrip("\n").split("\n", 1)
+    assert "%F{blue}%~" in path_line
+    assert entry_line.startswith("%(?.%F{green}.%F{red})❯")
 
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -646,6 +919,28 @@ def test_offline_startup_keeps_native_shell_without_optional_integrations(
     assert not (tmp_path / ".vibecrafted" / "control_plane").exists()
 
 
+# Every Frame shortcut the product shell defines, mapped to the native vc-frame
+# argv it must forward. Pinned in both directions: no shortcut outside this map
+# (a new destructive one cannot slip in unreviewed) and none missing.
+FRAME_SHORTCUTS = {
+    "vcf-ls": "list-sessions",
+    "vcf-lt": "action list-tabs",
+    "vcf-lp": "action list-panes",
+    "vcf-w": "watch",
+    "vcf-dr": "doctor",
+    "vcf-a": "attach",
+    "vcf-dt": "action detach",
+    "vcf-rn": "action rename-session",
+    "vcf-np": "action new-pane",
+    "vcf-nt": "action new-tab",
+    "vcf-ds": "action dump-screen",
+    "vcf-k": "kill-session",
+    "vcf-ka": "kill-all-sessions",
+    "vcf-d": "delete-session",
+    "vcf-da": "delete-all-sessions",
+}
+
+
 def test_frame_conveniences_forward_native_argv_without_force(
     tmp_path: Path,
 ) -> None:
@@ -656,21 +951,86 @@ def test_frame_conveniences_forward_native_argv_without_force(
     frame = bin_dir / "vc-frame"
     frame.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> {str(captured)!r}\n")
     frame.chmod(0o755)
+    calls = "".join(f"{name} probe-{name}; " for name in FRAME_SHORTCUTS)
     result = _zsh_profile(
         tmp_path,
         (
             'source "$HOME/.config/vibecrafted/vc-terminal/launch-primary-shell.zsh"; '
-            "vcf-lp --help; "
-            "vcf-da --dry-run; "
+            'for vc_fn in ${(k)functions[(I)vcf-*]}; do print -r -- "FN:$vc_fn"; done; '
+            + calls
+            + "vcf-da --dry-run; "
             "print -r -- READY"
         ),
         path=f"{bin_dir}:/usr/bin:/bin",
     )
     assert result.returncode == 0, result.stderr
-    argv = captured.read_text()
-    assert "action list-panes --help" in argv
-    assert "delete-all-sessions --dry-run" in argv
-    assert "--force" not in argv
+    assert "READY" in result.stdout
+    defined = {
+        line[3:] for line in result.stdout.splitlines() if line.startswith("FN:")
+    }
+    assert defined == set(FRAME_SHORTCUTS)
+    argv = captured.read_text().splitlines()
+    assert argv == [
+        *(f"{native} probe-{name}" for name, native in FRAME_SHORTCUTS.items()),
+        "delete-all-sessions --dry-run",
+    ]
+    for line in argv:
+        assert not {"--force", "-f", "--yes", "-y"} & set(line.split()), line
+
+
+def test_aliases_catalog_lists_installed_groups_filters_and_forgets_removed(
+    tmp_path: Path,
+) -> None:
+    _stage_product_profile(tmp_path)
+    frame_file = "$HOME/.config/vibecrafted/shell/aliases/frame.zsh"
+    result = _zsh_profile(
+        tmp_path,
+        (
+            'source "$HOME/.config/vibecrafted/vc-terminal/launch-primary-shell.zsh"; '
+            "print -r -- '== ALL'; aliases; "
+            "print -r -- '== FRAME'; aliases FRAME; "
+            "(( $+functions[vcf-w] )) || exit 61; "
+            # Shrink the installed Frame file to one shortcut: reload must
+            # forget every function the previous load defined from it.
+            "print -rl -- 'vcf-ls() { # list workspaces' "
+            "'  command vc-frame list-sessions \"$@\"' '}' "
+            f'> "{frame_file}"; '
+            "reload; "
+            "(( $+functions[vcf-w] )) && exit 62; "
+            "(( $+functions[vcf-ls] )) || exit 63; "
+            "print -r -- '== RELOADED'; aliases frame; "
+            "print -r -- READY"
+        ),
+    )
+    assert result.returncode == 0, result.stderr
+    everything, rest = result.stdout.split("== ALL", 1)[1].split("== FRAME", 1)
+    filtered, reloaded = rest.split("== RELOADED", 1)
+
+    def rows(block: str, name: str) -> list[str]:
+        return [line for line in block.splitlines() if line.split()[:1] == [name]]
+
+    lines = everything.splitlines()
+    for group in ("navigation", "git", "frame", "shell"):
+        assert group in lines
+    assert "  ── Look (read-only)" in lines
+    assert any(
+        "list panes of the current workspace" in r for r in rows(everything, "vcf-lp")
+    )
+    assert any(
+        "git log --oneline --graph --decorate -20" in r for r in rows(everything, "gl")
+    )
+    assert any(
+        "root of the current Git repository" in r for r in rows(everything, "cdr")
+    )
+    assert rows(everything, "reload")
+
+    filtered_lines = filtered.splitlines()
+    assert "frame" in filtered_lines
+    assert "git" not in filtered_lines and "navigation" not in filtered_lines
+    assert not rows(filtered, "gl")
+
+    assert rows(reloaded, "vcf-ls")
+    assert not rows(reloaded, "vcf-w")
 
 
 def test_interactive_login_zdotdir_loads_product_profile_not_host(
@@ -962,7 +1322,7 @@ class _OwnedFrameSandbox:
         # `opts.layout`, so under an `attach` subcommand that fold is
         # unreachable and the flag is dropped without a word. What answers then
         # is the engine's built-in default layout, whose tabs open command
-        # panes ("Shell", "voc") in place of the single pane asked for here.
+        # panes ("Shell", "Voc") in place of the single pane asked for here.
         # `--layout` is already in `opts` when the attach arm starts the
         # client, so it survives that arm and reaches the new session.
         created = self.run(
@@ -1581,3 +1941,107 @@ def test_real_frame_client_env_updates_no_server_but_a_product_server_does() -> 
     assert not sandbox.teardown_errors, sandbox.teardown_errors
     for name in (legacy_session, product_session):
         assert name not in sandbox.leftover, sandbox.leftover
+
+
+def _stub_vc_start(tmp_path: Path) -> Path:
+    commands = tmp_path / "bin"
+    commands.mkdir(parents=True, exist_ok=True)
+    command = commands / "vc-start"
+    log = tmp_path / "vc-start.argv"
+    command.write_text(
+        f'#!/bin/sh\nprintf \'%s\\n\' "$0" "$@" > {str(log)!r}\nexit 0\n',
+        encoding="utf-8",
+    )
+    command.chmod(0o700)
+    return commands
+
+
+def test_top_level_launch_enters_dashboard_via_vc_start_resume(
+    tmp_path: Path,
+) -> None:
+    commands = _stub_vc_start(tmp_path)
+    result = subprocess.run(
+        ["/bin/bash", str(ENTRY)],
+        input="printf 'SHELL_READY\\n'; exit 0\n",
+        text=True,
+        capture_output=True,
+        env={
+            "PATH": f"{commands}:/usr/bin:/bin",
+            "HOME": str(tmp_path),
+            "ZDOTDIR": str(tmp_path),
+            "TERM": "dumb",
+            "VIBECRAFTED_HOME": str(tmp_path / "state"),
+        },
+        cwd=tmp_path,
+        timeout=15,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "SHELL_READY" in result.stdout
+    recorded = (tmp_path / "vc-start.argv").read_text(encoding="utf-8").splitlines()
+    assert recorded[-1] == "resume"
+
+
+def test_nested_frame_and_quiet_shells_do_not_recursively_attach(
+    tmp_path: Path,
+) -> None:
+    commands = _stub_vc_start(tmp_path)
+    log = tmp_path / "vc-start.argv"
+    nested = subprocess.run(
+        ["/bin/bash", str(ENTRY)],
+        input="printf 'NESTED_READY\\n'; exit 0\n",
+        text=True,
+        capture_output=True,
+        env={
+            "PATH": f"{commands}:/usr/bin:/bin",
+            "HOME": str(tmp_path),
+            "ZDOTDIR": str(tmp_path),
+            "TERM": "dumb",
+            "VC_FRAME_PANE_ID": "pane-1",
+            "VC_FRAME_SESSION_NAME": "already-attached",
+            "VIBECRAFTED_HOME": str(tmp_path / "state"),
+        },
+        cwd=tmp_path,
+        timeout=15,
+        check=False,
+    )
+    assert nested.returncode == 0, nested.stderr
+    assert "NESTED_READY" in nested.stdout
+    assert not log.exists()
+
+    quiet = subprocess.run(
+        ["/bin/bash", str(ENTRY)],
+        input="printf 'QUIET_READY\\n'; exit 0\n",
+        text=True,
+        capture_output=True,
+        env={
+            "PATH": f"{commands}:/usr/bin:/bin",
+            "HOME": str(tmp_path),
+            "ZDOTDIR": str(tmp_path),
+            "TERM": "dumb",
+            "VIBECRAFTED_QUIET_START": "1",
+            "VIBECRAFTED_HOME": str(tmp_path / "state"),
+        },
+        cwd=tmp_path,
+        timeout=15,
+        check=False,
+    )
+    assert quiet.returncode == 0, quiet.stderr
+    assert "QUIET_READY" in quiet.stdout
+    assert not log.exists()
+
+
+def test_sourced_profile_does_not_launch_workspace(tmp_path: Path) -> None:
+    commands = _stub_vc_start(tmp_path)
+    _stage_product_profile(tmp_path)
+    result = _zsh_profile(
+        tmp_path,
+        (
+            'source "$HOME/.config/vibecrafted/vc-terminal/launch-primary-shell.zsh"; '
+            "print -r -- SOURCED_READY"
+        ),
+        path=f"{commands}:/usr/bin:/bin",
+    )
+    assert result.returncode == 0, result.stderr
+    assert "SOURCED_READY" in result.stdout
+    assert not (tmp_path / "vc-start.argv").exists()

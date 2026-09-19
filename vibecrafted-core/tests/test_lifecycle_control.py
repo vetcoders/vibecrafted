@@ -501,6 +501,7 @@ from vibecrafted_core.lifecycle_fleet import (
     mission_cuts,
     record_write_stage_fleet,
     stage_dispatch_run_id,
+    stage_fleet_progress,
 )
 
 from .test_lifecycle_fleet import (
@@ -710,14 +711,28 @@ def test_await_hard_cap_covers_stage_and_fleet_wait_together(
         time.sleep(0.03)
         return {"completed": True, "worker_alive": False, "reason": "ok"}
 
+    fleet_reads: list[float] = []
+
+    def counted_fleet_progress(*args, **kwargs):
+        fleet_reads.append(time.monotonic())
+        return stage_fleet_progress(*args, **kwargs)
+
     monkeypatch.setattr(
         "vibecrafted_core.lifecycle_control.control_plane_await_run", stage_wait
+    )
+    monkeypatch.setattr(
+        "vibecrafted_core.lifecycle_control.stage_fleet_progress",
+        counted_fleet_progress,
     )
     started = time.monotonic()
     payload = await_stage(
         state, idle_seconds=1, interval_seconds=0.01, hard_cap_seconds=0.02
     )
-    assert time.monotonic() - started < 0.05
+    # The stage wait alone spent the whole cap, so the fleet ledger is read
+    # once for the verdict and the fleet wait loop never polls it again.  A
+    # wall-clock budget near the stub sleep measured the runner, not the cap.
+    assert len(fleet_reads) == 1
+    assert time.monotonic() - started < 1
     assert payload["completed"] is False
     assert payload["timed_out"] is True
 

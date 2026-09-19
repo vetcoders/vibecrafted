@@ -12,7 +12,12 @@ HELP_C_RESET  := \033[0m
 
 bindings:
 	@echo "Building vibecrafted-shell-ffi (release)..."
-	@cargo build -p vibecrafted-shell-ffi --release
+	@# cargo's default release strip (rust-objcopy) corrupts the .rustc metadata
+	@# section of proc-macro dylibs when MACOSX_DEPLOYMENT_TARGET is below the SDK
+	@# default on the Xcode-beta toolchain: the dylib signs fine but every consumer
+	@# dies with E0463 "can't find crate". The release pipeline strips payloads
+	@# itself (scripts/lib/macho-signing.sh), so cargo-level strip is redundant.
+	@CARGO_PROFILE_RELEASE_STRIP=false cargo build -p vibecrafted-shell-ffi --release
 	@./scripts/fix-dylib-install-names.sh
 	@echo "Generating Swift bindings..."
 	@cargo run -p vibecrafted-uniffi-bindgen -- generate --library ../target/release/libvibecrafted_shell_ffi.dylib --language swift --out-dir app/Vibecrafted/Bridge/

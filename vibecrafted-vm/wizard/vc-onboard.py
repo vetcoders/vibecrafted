@@ -542,6 +542,47 @@ def build_and_run(state: WizardState) -> int:
     return subprocess.run(exec_cmd, cwd=repo_root, check=False).returncode
 
 
+# ── Command-bridge host preparation (W1-03) ─────────────────────────────────
+
+
+def maybe_record_command_bridge_onboarding(state: WizardState) -> None:
+    """Record one-time command-bridge host readiness when a provider is configured.
+
+    The host is prepared once, not per client: when the runtime core is
+    importable and at least one provider already shows a structural auth
+    signal, the durable completion record is written through
+    ``command_bridge_onboarding.complete``. No provider configured -> a hint,
+    never a false completion. Cancel/interrupt paths never reach this hook.
+    """
+    try:
+        from vibecrafted_core.command_bridge_onboarding import (
+            OnboardingError,
+            complete,
+            configured_providers,
+            status,
+        )
+    except ImportError:
+        return
+
+    try:
+        if status().state != "pending":
+            return
+        if not configured_providers():
+            console.print(
+                f"[dim]{t('actions.command_bridge_provider_hint', state.lang)}[/dim]"
+            )
+            return
+        complete()
+        console.print(
+            f"[green]✓[/green] {t('actions.command_bridge_ready', state.lang)}"
+        )
+    except OnboardingError as exc:
+        console.print(
+            f"[yellow]⚠[/yellow] {t('actions.command_bridge_deferred', state.lang)}: "
+            f"{exc}"
+        )
+
+
 # ── Main ───────────────────────────────────────────────────────────────────
 
 
@@ -578,12 +619,16 @@ def main() -> int:
     )
 
     if action == "save":
+        maybe_record_command_bridge_onboarding(state)
         return 0
     if action == "cancel":
         console.print(f"[yellow]{t('actions.cancelled', state.lang)}[/yellow]")
         return 0
 
-    return build_and_run(state)
+    rc = build_and_run(state)
+    if rc == 0:
+        maybe_record_command_bridge_onboarding(state)
+    return rc
 
 
 if __name__ == "__main__":

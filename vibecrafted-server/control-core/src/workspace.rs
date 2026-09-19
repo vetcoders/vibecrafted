@@ -3,8 +3,14 @@
 //! Python remains the sole writer. This module reads only the exact
 //! `control_plane/workspaces/catalog.json` and `sessions/*.json` contracts; it
 //! does not discover repositories or infer workspace identity from paths.
+//!
+//! An attachment's recorded `state` is attach-time evidence: the writer stamps
+//! `live` when a vc-frame session is bound and nothing downgrades it when that
+//! Frame later exits. Whether a Frame runs *now* is answered only by
+//! [`FrameSessionInventory`], which reads the Frame socket files, and joined
+//! back to the records by [`WorkspaceProjection::live_frame_sessions`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::path::Path;
@@ -17,6 +23,15 @@ const CATALOG_SCHEMA: &str = "vibecrafted.workspace-catalog.v1";
 const WORKSPACE_SCHEMA: &str = "vibecrafted.workspace.v1";
 const SESSION_SCHEMA: &str = "vibecrafted.workspace-session.v1";
 const SESSION_LIMIT: usize = 200;
+const FRAME_RUNTIME: &str = "vc-frame";
+const FRAME_CONTRACT_DIR_PREFIX: &str = "contract_version_";
+/// Distinct socket roots probed per read. The live host records two (the
+/// short `/tmp/vc-frame-$UID` root and the legacy TMPDIR one).
+const FRAME_SOCKET_DIR_LIMIT: usize = 16;
+/// `contract_version_<N>` directories probed per socket root.
+const FRAME_CONTRACT_DIR_LIMIT: usize = 8;
+/// Socket entries read per contract directory.
+const FRAME_SOCKET_ENTRY_LIMIT: usize = 512;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkspaceProjection {
@@ -52,11 +67,175 @@ pub struct WorkspaceSession {
     pub attachments: Vec<RuntimeSessionAttachment>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct AttachmentIdentity {
+    #[serde(default)]
+    pub pid: Option<i64>,
+    #[serde(default)]
+    pub start_token: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct RuntimeSessionAttachment {
     pub runtime: String,
     pub runtime_session_id: String,
+    /// Attach-time evidence (`live` / `dead` / `missing`), never refreshed
+    /// when the runtime exits. See [`FrameSessionInventory`] for liveness.
     pub state: String,
+    /// Frame socket root the session was bound under (`/tmp/vc-frame-$UID`).
+    #[serde(default)]
+    pub socket_dir: String,
+    #[serde(default)]
+    pub updated_at: String,
+    /// Optional owner pid from the canonical process-identity receipt.
+    #[serde(default)]
+    pub owner_pid: Option<i64>,
+    /// Optional start token from the canonical process-identity receipt.
+    #[serde(default)]
+    pub start_token: String,
+    /// Optional nested identity. Same shape as `process_identity_receipt`.
+    #[serde(default)]
+    pub worker_identity: Option<AttachmentIdentity>,
+}
+
+/// Currency of a workspace session relative to independently confirmed runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionCurrency {
+    /// Writer-projected current run bound to this logical session.
+    Current,
+    /// Durable `state=live` with owner/freshness that no current run confirms.
+    Stale,
+    /// Durable `state=live` with no owner/freshness. Missing evidence, not live.
+    Unknown,
+    /// Dead, missing, or detached. Catalog history.
+    Inactive,
+}
+
+/// vc-frame sessions whose server is running right now.
+///
+/// A vc-frame server binds `<socket_dir>/contract_version_<N>/<session name>`
+/// for as long as it runs, and `vc-frame list-sessions` enumerates exactly
+/// those socket files. The inventory reads the same directories and never
+/// connects: every client connection — including a short-lived
+/// `vc-frame list-sessions` subprocess — is announced to all plugins of that
+/// session and re-renders them, so a per-request connect probe would storm
+/// every open Frame. The trade-off is that a socket file left behind by a
+/// crashed server counts as running until the next `list-sessions` removes it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FrameSessionInventory {
+    running: BTreeSet<(String, String)>,
+}
+
+impl FrameSessionInventory {
+    /// One bounded directory read per distinct socket root. Unreadable or
+    /// missing roots contribute nothing; they are not an error, because a
+    /// root with no running server is the normal state after a reboot.
+    pub fn scan<I, S>(socket_dirs: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let roots = socket_dirs
+            .into_iter()
+            .map(|dir| dir.as_ref().trim().to_string())
+            .filter(|dir| !dir.is_empty())
+            .collect::<BTreeSet<_>>();
+        let mut running = BTreeSet::new();
+        for socket_dir in roots.into_iter().take(FRAME_SOCKET_DIR_LIMIT) {
+            let Ok(entries) = fs::read_dir(&socket_dir) else {
+                continue;
+            };
+            let contract_dirs = entries
+                .flatten()
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| name.starts_with(FRAME_CONTRACT_DIR_PREFIX))
+                        && entry.file_type().is_ok_and(|kind| kind.is_dir())
+                })
+                .take(FRAME_CONTRACT_DIR_LIMIT);
+            for contract_dir in contract_dirs {
+                let Ok(sockets) = fs::read_dir(contract_dir.path()) else {
+                    continue;
+                };
+                for socket in sockets.flatten().take(FRAME_SOCKET_ENTRY_LIMIT) {
+                    if !socket.file_type().is_ok_and(|kind| is_socket(&kind)) {
+                        continue;
+                    }
+                    if let Some(name) = socket.file_name().to_str() {
+                        running.insert((socket_dir.clone(), name.to_string()));
+                    }
+                }
+            }
+        }
+        Self { running }
+    }
+
+    /// Inventory from already-known `(socket_dir, session name)` pairs.
+    pub fn from_running<I, D, N>(sessions: I) -> Self
+    where
+        I: IntoIterator<Item = (D, N)>,
+        D: Into<String>,
+        N: Into<String>,
+    {
+        Self {
+            running: sessions
+                .into_iter()
+                .map(|(dir, name)| (dir.into(), name.into()))
+                .collect(),
+        }
+    }
+
+    #[must_use]
+    pub fn is_running(&self, socket_dir: &str, session_name: &str) -> bool {
+        self.running
+            .contains(&(socket_dir.to_string(), session_name.to_string()))
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.running.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.running.is_empty()
+    }
+
+    /// `(socket_dir, session name)` pairs, ordered by root then name.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.running
+            .iter()
+            .map(|(dir, name)| (dir.as_str(), name.as_str()))
+    }
+}
+
+#[cfg(unix)]
+fn is_socket(kind: &fs::FileType) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    kind.is_socket()
+}
+
+#[cfg(not(unix))]
+fn is_socket(_kind: &fs::FileType) -> bool {
+    false
+}
+
+/// A running vc-frame session joined with the logical session that owns it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LiveFrameSession {
+    pub socket_dir: String,
+    /// The vc-frame session name, as `vc-frame list-sessions` prints it.
+    pub runtime_session_id: String,
+    /// `None` when the Frame runs but no session record claims it.
+    pub owner: Option<FrameSessionOwner>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrameSessionOwner {
+    pub session_id: String,
+    pub workspace_id: String,
 }
 
 #[derive(Debug)]
@@ -198,6 +377,153 @@ impl ControlPlane {
     }
 }
 
+impl WorkspaceProjection {
+    /// Socket roots recorded by vc-frame attachments — the only roots a
+    /// liveness probe has to read.
+    #[must_use]
+    pub fn frame_socket_dirs(&self) -> BTreeSet<String> {
+        self.sessions
+            .iter()
+            .flat_map(|session| session.attachments.iter())
+            .filter(|attachment| attachment.runtime == FRAME_RUNTIME)
+            .map(|attachment| attachment.socket_dir.trim().to_string())
+            .filter(|dir| !dir.is_empty())
+            .collect()
+    }
+
+    /// Every running Frame session in `inventory`, joined with the logical
+    /// session that owns it.
+    ///
+    /// Ownership goes to the newest attachment (by `updated_at`) that
+    /// recorded the same socket root and session name as `live`. Older live
+    /// claims on that name — an earlier incarnation, or an earlier session
+    /// bound to the same Frame — are superseded. `dead` and `missing`
+    /// attachments are discovery evidence and never own a Frame. A running
+    /// Frame nobody claims is still reported, with no owner.
+    #[must_use]
+    pub fn live_frame_sessions(&self, inventory: &FrameSessionInventory) -> Vec<LiveFrameSession> {
+        let mut owners: BTreeMap<(String, String), (String, String, FrameSessionOwner)> =
+            BTreeMap::new();
+        for session in &self.sessions {
+            for attachment in &session.attachments {
+                if attachment.runtime != FRAME_RUNTIME
+                    || attachment.state != "live"
+                    || !inventory.is_running(&attachment.socket_dir, &attachment.runtime_session_id)
+                {
+                    continue;
+                }
+                let key = (
+                    attachment.socket_dir.clone(),
+                    attachment.runtime_session_id.clone(),
+                );
+                let rank = (
+                    attachment.updated_at.clone(),
+                    session.updated_at.clone(),
+                    session.session_id.clone(),
+                );
+                if owners
+                    .get(&key)
+                    .is_some_and(|(updated_at, session_at, id)| {
+                        (updated_at, session_at, &id.session_id) >= (&rank.0, &rank.1, &rank.2)
+                    })
+                {
+                    continue;
+                }
+                owners.insert(
+                    key,
+                    (
+                        rank.0,
+                        rank.1,
+                        FrameSessionOwner {
+                            session_id: session.session_id.clone(),
+                            workspace_id: session.workspace_id.clone(),
+                        },
+                    ),
+                );
+            }
+        }
+        inventory
+            .iter()
+            .map(|(socket_dir, name)| LiveFrameSession {
+                socket_dir: socket_dir.to_string(),
+                runtime_session_id: name.to_string(),
+                owner: owners
+                    .remove(&(socket_dir.to_string(), name.to_string()))
+                    .map(|(_, _, owner)| owner),
+            })
+            .collect()
+    }
+}
+
+impl RuntimeSessionAttachment {
+    fn claims_live(&self) -> bool {
+        self.state == "live"
+    }
+
+    /// Owner pid + start token from the canonical identity receipt, if complete.
+    fn owner_freshness(&self) -> Option<(i64, &str)> {
+        if let Some(identity) = &self.worker_identity {
+            let token = identity.start_token.trim();
+            if let Some(pid) = identity.pid {
+                if pid > 0 && !token.is_empty() {
+                    return Some((pid, token));
+                }
+            }
+        }
+        let token = self.start_token.trim();
+        match self.owner_pid {
+            Some(pid) if pid > 0 && !token.is_empty() => Some((pid, token)),
+            _ => None,
+        }
+    }
+}
+
+impl WorkspaceSession {
+    /// Classify this session against independently confirmed current runs.
+    ///
+    /// A durable attachment `state=live` is a receipt, not current truth.
+    /// Current requires a writer-projected current run bound to this session
+    /// id. Missing owner/freshness is unknown; a live receipt with identity
+    /// that no current run confirms is stale.
+    pub fn currency(&self, confirmed_session_ids: &BTreeSet<&str>) -> SessionCurrency {
+        if confirmed_session_ids.contains(self.session_id.as_str()) {
+            return SessionCurrency::Current;
+        }
+        let claimed_live = self
+            .attachments
+            .iter()
+            .any(RuntimeSessionAttachment::claims_live);
+        if !claimed_live {
+            return SessionCurrency::Inactive;
+        }
+        if self
+            .attachments
+            .iter()
+            .any(|attachment| attachment.owner_freshness().is_some())
+        {
+            SessionCurrency::Stale
+        } else {
+            SessionCurrency::Unknown
+        }
+    }
+}
+
+/// Workspace ids independently confirmed current by writer-projected runs.
+///
+/// Catalog `status=active` is durable history. A live attachment string is
+/// not current. Pass session ids from current control-plane runs
+/// (`health=active`, non-terminal) — do not OS-probe per render.
+pub fn current_workspace_ids<'a>(
+    sessions: &'a [WorkspaceSession],
+    confirmed_session_ids: &BTreeSet<&str>,
+) -> BTreeSet<&'a str> {
+    sessions
+        .iter()
+        .filter(|session| session.currency(confirmed_session_ids) == SessionCurrency::Current)
+        .map(|session| session.workspace_id.as_str())
+        .collect()
+}
+
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, WorkspaceProjectionError> {
     let bytes = fs::read(path).map_err(|source| WorkspaceProjectionError::Read {
         path: path.display().to_string(),
@@ -276,14 +602,21 @@ fn canonical_uuid(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_home() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        std::env::temp_dir().join(format!("vc-workspace-projection-{nonce}"))
+        let unique = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "vc-workspace-projection-{}-{nonce}-{unique}",
+            std::process::id()
+        ))
     }
 
     #[test]
@@ -329,6 +662,312 @@ mod tests {
             error
                 .to_string()
                 .contains("unsupported workspace catalog schema")
+        );
+        fs::remove_dir_all(home).ok();
+    }
+
+    /// Short socket root: macOS `sockaddr_un` holds 104 bytes, and the
+    /// default TMPDIR plus `contract_version_N/<name>` already exhausts it.
+    #[cfg(unix)]
+    fn short_socket_root(tag: &str) -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .subsec_nanos();
+        let root =
+            std::path::PathBuf::from(format!("/tmp/vcfs-{tag}-{}-{nonce}", std::process::id()));
+        fs::create_dir_all(root.join("contract_version_2")).expect("socket root");
+        root
+    }
+
+    fn write_session_record(
+        root: &Path,
+        session_id: &str,
+        workspace_id: &str,
+        updated_at: &str,
+        attachments: &str,
+    ) {
+        fs::write(
+            root.join(format!("sessions/{session_id}.json")),
+            format!(
+                r#"{{"schema":"vibecrafted.workspace-session.v1","session_id":"{session_id}","workspace_id":"{workspace_id}","workspace_instance_id":"0198f84e-3333-7abc-8def-1234567890ab","updated_at":"{updated_at}","attachments":{attachments}}}"#
+            ),
+        )
+        .expect("session");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn frame_liveness_comes_from_the_socket_not_the_recorded_attachment_state() {
+        use std::os::unix::net::UnixListener;
+
+        let home = temp_home();
+        let root = home.join("control_plane/workspaces");
+        fs::create_dir_all(root.join("sessions")).expect("workspace dirs");
+        fs::write(
+            root.join("catalog.json"),
+            r#"{"schema":"vibecrafted.workspace-catalog.v1","updated_at":"2026-08-27T10:00:00Z","selected_workspace_id":"0198f84e-1234-7abc-8def-1234567890ab","workspaces":{"0198f84e-1234-7abc-8def-1234567890ab":{"schema":"vibecrafted.workspace.v1","workspace_id":"0198f84e-1234-7abc-8def-1234567890ab","display_label":"Vibecrafted","canonical_root":"/work/vibecrafted","status":"active","updated_at":"2026-08-27T10:00:00Z"}}}"#,
+        )
+        .expect("catalog");
+        let workspace = "0198f84e-1234-7abc-8def-1234567890ab";
+
+        let sockets = short_socket_root("live");
+        let socket_dir = sockets.to_str().expect("utf-8 socket root").to_string();
+        let contract = sockets.join("contract_version_2");
+        let _studio = UnixListener::bind(contract.join("studio")).expect("bind studio");
+        let _services = UnixListener::bind(contract.join("services")).expect("bind services");
+        fs::write(contract.join("plain-file"), "not a socket").expect("plain file");
+        fs::create_dir_all(sockets.join("vc-frame-log")).expect("log dir");
+        let _stray = UnixListener::bind(sockets.join("vc-frame-log/stray")).expect("bind stray");
+
+        let attach = |name: &str, state: &str, updated_at: &str| {
+            format!(
+                r#"[{{"runtime":"vc-frame","runtime_session_id":"{name}","state":"{state}","socket_dir":"{socket_dir}","updated_at":"{updated_at}"}}]"#
+            )
+        };
+        let older_studio = "0198f84e-aaaa-7abc-8def-000000000001";
+        let newer_studio = "0198f84e-aaaa-7abc-8def-000000000002";
+        write_session_record(
+            &root,
+            older_studio,
+            workspace,
+            "2026-09-12T10:00:00+00:00",
+            &attach("studio", "live", "2026-09-12T10:00:00+00:00"),
+        );
+        write_session_record(
+            &root,
+            newer_studio,
+            workspace,
+            "2026-09-12T12:48:14+00:00",
+            &attach("studio", "live", "2026-09-12T12:48:14+00:00"),
+        );
+        // Recorded `live`, but that Frame exited and nothing downgraded it.
+        write_session_record(
+            &root,
+            "0198f84e-aaaa-7abc-8def-000000000003",
+            workspace,
+            "2026-09-13T09:00:00+00:00",
+            &attach("gone", "live", "2026-09-13T09:00:00+00:00"),
+        );
+        // `services` runs; its only record is discovery evidence calling it dead.
+        write_session_record(
+            &root,
+            "0198f84e-aaaa-7abc-8def-000000000004",
+            workspace,
+            "2026-09-13T10:00:00+00:00",
+            &attach("services", "dead", "2026-09-13T10:00:00+00:00"),
+        );
+
+        let projection = ControlPlane::new(&home)
+            .load_workspace_projection()
+            .expect("projection");
+        assert_eq!(
+            projection.frame_socket_dirs(),
+            BTreeSet::from([socket_dir.clone()])
+        );
+
+        let inventory = FrameSessionInventory::scan(projection.frame_socket_dirs());
+        assert_eq!(
+            inventory.iter().collect::<Vec<_>>(),
+            vec![
+                (socket_dir.as_str(), "services"),
+                (socket_dir.as_str(), "studio")
+            ],
+            "only sockets directly under contract_version_* count"
+        );
+        assert!(!inventory.is_running(&socket_dir, "gone"));
+
+        assert_eq!(
+            projection.live_frame_sessions(&inventory),
+            vec![
+                LiveFrameSession {
+                    socket_dir: socket_dir.clone(),
+                    runtime_session_id: "services".into(),
+                    owner: None,
+                },
+                LiveFrameSession {
+                    socket_dir: socket_dir.clone(),
+                    runtime_session_id: "studio".into(),
+                    owner: Some(FrameSessionOwner {
+                        session_id: newer_studio.into(),
+                        workspace_id: workspace.into(),
+                    }),
+                },
+            ]
+        );
+
+        fs::remove_dir_all(home).ok();
+        fs::remove_dir_all(sockets).ok();
+    }
+
+    #[test]
+    fn frame_inventory_of_missing_roots_is_empty_not_an_error() {
+        let inventory = FrameSessionInventory::scan(["", "  ", "/nonexistent/vc-frame-probe"]);
+        assert!(inventory.is_empty());
+        assert_eq!(inventory.len(), 0);
+        assert_eq!(
+            FrameSessionInventory::from_running([("/tmp/vc-frame-1", "a")]).len(),
+            1
+        );
+    }
+
+    fn hex_id(prefix: &str, index: usize) -> String {
+        format!("{prefix}{index:012x}")
+    }
+
+    fn write_session(sessions_dir: &std::path::Path, index: usize, attachments: serde_json::Value) {
+        let session_id = hex_id("0198f84e-1111-7abc-8def-", index);
+        fs::write(
+            sessions_dir.join(format!("{session_id}.json")),
+            serde_json::to_vec(&serde_json::json!({
+                "schema": "vibecrafted.workspace-session.v1",
+                "session_id": session_id,
+                "workspace_id": hex_id("0198f84e-0000-7abc-8def-", index),
+                "workspace_instance_id": hex_id("0198f84e-2222-7abc-8def-", index),
+                "updated_at": "2026-09-14T00:01:00Z",
+                "attachments": attachments
+            }))
+            .expect("session json"),
+        )
+        .expect("session file");
+    }
+
+    #[test]
+    fn current_inventory_requires_confirmed_sessions_not_live_receipts() {
+        let home = temp_home();
+        let root = home.join("control_plane/workspaces");
+        let sessions_dir = root.join("sessions");
+        fs::create_dir_all(&sessions_dir).expect("workspace dirs");
+
+        let mut workspaces = serde_json::Map::new();
+        for index in 0..527 {
+            let workspace_id = hex_id("0198f84e-0000-7abc-8def-", index);
+            workspaces.insert(
+                workspace_id.clone(),
+                serde_json::json!({
+                    "schema": "vibecrafted.workspace.v1",
+                    "workspace_id": workspace_id,
+                    "display_label": format!("Catalog {index}"),
+                    "canonical_root": format!("/work/catalog-{index}"),
+                    "status": "active",
+                    "updated_at": "2026-09-14T00:00:00Z"
+                }),
+            );
+        }
+        fs::write(
+            root.join("catalog.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema": "vibecrafted.workspace-catalog.v1",
+                "updated_at": "2026-09-14T00:00:00Z",
+                "selected_workspace_id": hex_id("0198f84e-0000-7abc-8def-", 0),
+                "workspaces": workspaces
+            }))
+            .expect("catalog json"),
+        )
+        .expect("catalog");
+
+        for index in 0..4 {
+            write_session(
+                &sessions_dir,
+                index,
+                serde_json::json!([{
+                    "runtime": "vc-frame",
+                    "runtime_session_id": format!("frame-{index}"),
+                    "state": "live"
+                }]),
+            );
+        }
+        write_session(
+            &sessions_dir,
+            20,
+            serde_json::json!([{
+                "runtime": "vc-frame",
+                "runtime_session_id": "dead-frame",
+                "state": "dead"
+            }]),
+        );
+        write_session(
+            &sessions_dir,
+            21,
+            serde_json::json!([{
+                "runtime": "vc-frame",
+                "runtime_session_id": "forged-frame",
+                "state": "live",
+                "owner_pid": 999_001,
+                "start_token": "start:forged-not-current",
+                "worker_identity": {
+                    "pid": 999_001,
+                    "start_token": "start:forged-not-current"
+                }
+            }]),
+        );
+        write_session(
+            &sessions_dir,
+            22,
+            serde_json::json!([{
+                "runtime": "vc-frame",
+                "runtime_session_id": "missing-identity-frame",
+                "state": "live"
+            }]),
+        );
+
+        let projection = ControlPlane::new(&home)
+            .load_workspace_projection()
+            .expect("projection");
+        let catalog = projection.catalog.expect("catalog");
+        assert_eq!(catalog.workspaces.len(), 527);
+        assert!(
+            catalog
+                .workspaces
+                .iter()
+                .all(|workspace| workspace.status == "active")
+        );
+
+        let confirmed = (0..4)
+            .map(|index| hex_id("0198f84e-1111-7abc-8def-", index))
+            .collect::<Vec<_>>();
+        let confirmed_refs = confirmed
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let current = current_workspace_ids(&projection.sessions, &confirmed_refs);
+        assert_eq!(
+            current.len(),
+            4,
+            "forged/missing live receipts must not join current inventory"
+        );
+        for index in 0..4 {
+            assert!(current.contains(hex_id("0198f84e-0000-7abc-8def-", index).as_str()));
+        }
+        assert!(!current.contains(hex_id("0198f84e-0000-7abc-8def-", 20).as_str()));
+        assert!(!current.contains(hex_id("0198f84e-0000-7abc-8def-", 21).as_str()));
+        assert!(!current.contains(hex_id("0198f84e-0000-7abc-8def-", 22).as_str()));
+
+        let by_id = projection
+            .sessions
+            .iter()
+            .map(|session| {
+                (
+                    session.session_id.as_str(),
+                    session.currency(&confirmed_refs),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            by_id[hex_id("0198f84e-1111-7abc-8def-", 0).as_str()],
+            SessionCurrency::Current
+        );
+        assert_eq!(
+            by_id[hex_id("0198f84e-1111-7abc-8def-", 20).as_str()],
+            SessionCurrency::Inactive
+        );
+        assert_eq!(
+            by_id[hex_id("0198f84e-1111-7abc-8def-", 21).as_str()],
+            SessionCurrency::Stale
+        );
+        assert_eq!(
+            by_id[hex_id("0198f84e-1111-7abc-8def-", 22).as_str()],
+            SessionCurrency::Unknown
         );
         fs::remove_dir_all(home).ok();
     }

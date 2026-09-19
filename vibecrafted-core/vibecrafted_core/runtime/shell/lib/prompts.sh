@@ -338,6 +338,8 @@ _vetcoders_rewrite_contract_root_argv() {
   shift
   _vetcoders_contract_argv=("$@")
   [[ -n "$normalized_root" ]] || return 0
+  # Nothing to rewrite, and bash 3.2 `set -u` rejects expanding an empty array.
+  (($#)) || return 0
 
   # Pass 1 (read-only): find the ordinal — the Nth argument overall, counting
   # from 1 — of the LAST accepted --root value before --prompt/-p/-- ends the
@@ -439,22 +441,6 @@ _vetcoders_parse_skill_contract() {
   local _parse_status=$?
   unset _vetcoders_contract_allow_model
   return "$_parse_status"
-}
-
-# Explicit operator job text — not a positional tail and not an AICX pack.
-# Bare resume stays interactive; --prompt/--file on resume send a tracked
-# headless worker. Init/operator/partner keep the TTY and append extra text
-# to the seed. Partner never uses this predicate to select a worker lane.
-_vetcoders_argv_has_job_input() {
-  local arg
-  for arg in "$@"; do
-    case "$arg" in
-      -p|--prompt|-f|--file|--prompt-stdin|--prompt=*|--file=*)
-        return 0
-        ;;
-    esac
-  done
-  return 1
 }
 
 _vetcoders_effective_runtime() {

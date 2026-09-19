@@ -15,6 +15,8 @@ pub enum PaneId {
     MonitorTimeline,
     ObserveList,
     ObserveTranscript,
+    HomeList,
+    HomeTranscript,
     ControlsActions,
     ControlsArtifacts,
     ControlsTimeline,
@@ -34,6 +36,8 @@ pub enum HitTarget {
     MonitorTimeline,
     ObserveList { inner_row: u16 },
     ObserveTranscript,
+    HomeList { inner_row: u16 },
+    HomeTranscript,
     ControlsStat(usize),
     ControlsActions { inner_row: u16 },
     ControlsArtifacts,
@@ -208,6 +212,41 @@ pub fn observe_layout(body: Rect) -> ObserveLayout {
     }
 }
 
+/// Home landing is a single stacked board. Conversation at 80+ columns
+/// keeps a list rail; narrower terminals give the transcript the full width
+/// so wrapping stays honest.
+pub fn home_layout(body: Rect, terminal_width: u16) -> ObserveLayout {
+    if terminal_width >= 80 {
+        return observe_layout(body);
+    }
+    ObserveLayout {
+        list: Rect {
+            x: body.x,
+            y: body.y,
+            width: 0,
+            height: 0,
+        },
+        transcript: body,
+    }
+}
+
+pub fn home_root_layout(area: Rect) -> RootLayout {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(8),
+            Constraint::Length(3),
+        ])
+        .split(area);
+    RootLayout {
+        header: rows[0],
+        tabs: Rect::new(0, 0, 0, 0),
+        body: rows[1],
+        footer: rows[2],
+    }
+}
+
 pub fn controls_layout(body: Rect) -> ControlsLayout {
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -308,7 +347,11 @@ pub fn hit_test(
     column: u16,
     row: u16,
 ) -> Option<HitTarget> {
-    let root = root_layout(area);
+    let root = if view == ConsoleView::Home {
+        home_root_layout(area)
+    } else {
+        root_layout(area)
+    };
     if contains(root.tabs, column, row) {
         return tab_index_at(root.tabs, column).map(HitTarget::Tab);
     }
@@ -316,6 +359,18 @@ pub fn hit_test(
         return None;
     }
     match tab {
+        AppTab::Monitor if view == ConsoleView::Home => {
+            let layout = home_layout(root.body, area.width);
+            if contains(layout.list, column, row) {
+                Some(HitTarget::HomeList {
+                    inner_row: inner_row(layout.list, row),
+                })
+            } else if contains(layout.transcript, column, row) {
+                Some(HitTarget::HomeTranscript)
+            } else {
+                None
+            }
+        }
         AppTab::Monitor if view == ConsoleView::Observe => {
             let layout = observe_layout(root.body);
             if contains(layout.list, column, row) {
@@ -395,6 +450,8 @@ pub fn pane_for_hit(hit: HitTarget) -> Option<PaneId> {
         HitTarget::MonitorTimeline => Some(PaneId::MonitorTimeline),
         HitTarget::ObserveList { .. } => Some(PaneId::ObserveList),
         HitTarget::ObserveTranscript => Some(PaneId::ObserveTranscript),
+        HitTarget::HomeList { .. } => Some(PaneId::HomeList),
+        HitTarget::HomeTranscript => Some(PaneId::HomeTranscript),
         HitTarget::ControlsActions { .. } => Some(PaneId::ControlsActions),
         HitTarget::ControlsArtifacts => Some(PaneId::ControlsArtifacts),
         HitTarget::ControlsTimeline => Some(PaneId::ControlsTimeline),

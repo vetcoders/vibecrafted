@@ -5,7 +5,9 @@
 live_config_reload = true
 
 [terminal]
-# A terminal is usable without a Frame workspace. vc-start is explicit.
+# Top-level VC Terminal runs launch-primary-shell, which enters the operator
+# workspace (`vc-start resume`) unless this process is already on a Frame
+# canvas, a Quick cmd / nested login shell, or an explicit product argv.
 # Expand the product path without first loading the user's login profile.
 # The entrypoint sets ZDOTDIR before starting the interactive zsh.
 shell = { program = "/bin/sh", args = ["-c", "exec \"$HOME/.config/vibecrafted/vc-terminal/launch-primary-shell.zsh\""] }
@@ -14,19 +16,26 @@ shell = { program = "/bin/sh", args = ["-c", "exec \"$HOME/.config/vibecrafted/v
 blur = true
 opacity = 0.9
 title = "𝓥𝓲𝓫𝓮𝓬𝓻𝓪𝓯𝓽𝓮𝓭."
+# Founder-stated product chrome (Maciej, 2026-09-15): transparent macOS title
+# controls over the vc-frame chrome, window draggable, rounded corners. The
+# borderless "None" default shipped in c95ef76a was an implementation
+# judgement that removed the traffic lights and the drag handle on a fresh
+# install; a first-time user reported the window could not be moved at all.
 decorations = "Transparent"
 startup_mode = "Maximized"
-# Transparent title controls must not cover terminal or alternate-screen text.
-padding = { x = 8, y = 24 }
+# Zero inset: the Founder's pixel-counted Spot Mono grid (size 19.5, offset
+# -3/-8 below) already clears the transparent title controls.
+padding = { x = 0, y = 0 }
 dynamic_padding = true
 option_as_alt = "Both"
 
 [font]
-size = 18.5
+# Founder's pixel-counted Spot Mono grid (laptop + dragon policy, 2026-09-15).
+size = 19.5
 
 [font.offset]
-x = -1
-y = 2
+x = -3
+y = -8
 
 [font.normal]
 family = "Spot Mono"

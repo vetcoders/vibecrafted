@@ -24,13 +24,13 @@ Answers from the trenches. This is the truth as of April 2026.
 
 - **Can I install 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. without giving it write access to my shell rc files?**
   Yes. You can opt-out of the shell-helper layer during the interactive install. You'll just need to manually source the
-  helper file (`${XDG_CONFIG_HOME:-$HOME/.config}/vetcoders/vc-skills.sh`) if you want the high-level aliases like
+  helper file (`${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/shell/vc-skills.sh`) if you want the high-level aliases like
   `vc-init`.
 
 - **What if I already have a Starship/Atuin config — will 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. overwrite it?**
   No. It detects existing configs and prompts you. It can install the 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. versions alongside yours or skip them
-  entirely. The repo now ships optional vc-frame sidecars too, but they stay opt-in: companion frontier paths can
-  override them per asset, and nothing launches a dashboard unless you ask for it.
+  entirely. Vibecrafted's own presets live only in `~/.config/vibecrafted/`; it never reads or writes your own
+  Starship/Atuin configuration, and nothing launches a dashboard unless you ask for it.
 
 - **How do I move my installation to a custom directory?**
   Set `VIBECRAFTED_HOME` in your environment before running the installer. The installer respects this variable for the
@@ -90,6 +90,7 @@ Answers from the trenches. This is the truth as of April 2026.
   surgical, high-signal context rather than a history dump.
 
 - **How does `vc-followup` decide between P0, P1, and P2 severity?**
+
   - **P0**: Blocker. Code doesn't compile, critical security leak, or core feature is fundamentally broken.
   - **P1**: High Risk. Regression likely, edge cases unhandled, or architectural mismatch.
   - **P2**: Polish/Gap. Missing tests, suboptimal naming, observability gaps, or minor UI jank.
@@ -119,6 +120,7 @@ Answers from the trenches. This is the truth as of April 2026.
   storage allows you to improve your agent's "brain" once and have it apply across all your repos.
 
 - **What is the relationship between `$VIBECRAFTED_ROOT/.vibecrafted/skills/`, `$HOME/.claude/skills/`, and `$HOME/.agents/skills/`?**
+
   - `$VIBECRAFTED_ROOT/.vibecrafted/skills/`: The **Central Store** (Source of Truth).
   - `$HOME/.claude/skills/`, `$HOME/.agents/skills/`: **Symlink Views**. These are portals that let specific agent CLIs find
     the skills. They point back to the Central Store.
@@ -177,6 +179,7 @@ Answers from the trenches. This is the truth as of April 2026.
 ## Workflow
 
 - **What does "Craft, Converge, Ship" actually mean in practice?**
+
   - **Craft**: Research, scaffold, and implement the initial "noise" (rough code).
   - **Converge**: Run Marbles loops to denoise the code, fix bugs, and fill gaps until P0/P1/P2 = 0.
   - **Ship**: Run `vc-dou`, hydrate the product (docs, SEO), and push to market.
@@ -236,6 +239,7 @@ Answers from the trenches. This is the truth as of April 2026.
   hoping didn't scale. Trust it or don't — the code is open, the methodology is documented, the results are measurable.
 
 - **What makes 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. different from AutoGPT/CrewAI/LangChain agents?**
+
   - **AutoGPT**: May be too chaotic; some claims that it lacks structural anchoring.
   - **CrewAI**: Great for roles, but lacks the "denoising" rigor of the Marbles loop.
   - **LangChain**: A library for building tools, not a workflow for shipping products.

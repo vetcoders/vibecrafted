@@ -42,6 +42,25 @@ def _isolate_fixed_runtime_label(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(installer, "_runtime_loaded_service_home", lambda: None)
 
 
+def test_inherited_path_drops_product_shell_python_doors() -> None:
+    """Child env is built from os.environ; product-shell doors must already be gone."""
+
+    from tests.tui.conftest import without_product_shell_path
+
+    dirty = (
+        "/Users/x/.config/vibecrafted/vc-terminal/bin:"
+        "/Users/x/.local/share/vibecrafted/releases/current/bin:"
+        "/usr/bin:/bin"
+    )
+    cleaned = without_product_shell_path(dirty)
+    assert "vc-terminal/bin" not in cleaned
+    assert "share/vibecrafted" not in cleaned
+    assert "/usr/bin" in cleaned.split(":")
+    entries = os.environ.get("PATH", "").split(":")
+    assert not any("vc-terminal/bin" in part.replace("\\", "/") for part in entries)
+    assert not any("share/vibecrafted" in part.replace("\\", "/") for part in entries)
+
+
 def _write_executable(path: Path, body: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body, encoding="utf-8")
@@ -7474,6 +7493,27 @@ def test_sync_skill_root_rules_skips_same_inode_store(tmp_path: Path) -> None:
     assert set(copied) == expected
     for filename in installer.SKILL_ROOT_RULE_FILES:
         assert (store / filename).read_text(encoding="utf-8") == f"{filename}\n"
+
+
+def test_sync_skill_root_rules_projects_delegation_matrix_and_runtime_feedback(
+    tmp_path: Path,
+) -> None:
+    """Regression: vc-agents links ../DELEGATION_MATRIX.md and RUNTIME_FEEDBACK.md
+    ships in the same skills root, yet the projection allowlist named only
+    VERIFICATION_RULE/LIVING_TREE_RULE — installed skill trees kept dead links."""
+    source = tmp_path / "skills"
+    source.mkdir()
+    (source / "DELEGATION_MATRIX.md").write_text("matrix\n", encoding="utf-8")
+    (source / "RUNTIME_FEEDBACK.md").write_text("feedback\n", encoding="utf-8")
+    store = tmp_path / "store"
+    store.mkdir()
+
+    copied = installer.sync_skill_root_rules(source, store, dry_run=False)
+
+    assert (store / "DELEGATION_MATRIX.md").read_text(encoding="utf-8") == "matrix\n"
+    assert (store / "RUNTIME_FEEDBACK.md").read_text(encoding="utf-8") == "feedback\n"
+    assert Path("DELEGATION_MATRIX.md") in copied
+    assert Path("RUNTIME_FEEDBACK.md") in copied
 
 
 def test_rsync_skill_skips_same_inode_dir(tmp_path: Path, monkeypatch) -> None:

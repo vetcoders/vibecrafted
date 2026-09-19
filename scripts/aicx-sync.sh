@@ -2,8 +2,9 @@
 # aicx-sync.sh — Plan 08 (META_22) operator CLI entry.
 #
 # Wraps `python -m vibecrafted_core.aicx_sync` with operator-friendly
-# argument shape + config-file loading. Reads ~/.config/vetcoders/aicx-sync.toml
-# (see config/aicx-sync.toml.example) for endpoint + namespace defaults.
+# argument shape + config loading. Reads the [aicx_sync] table of the one
+# operator config, ${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/config.toml
+# (see config/aicx-sync.toml.example), for store/remote/namespace defaults.
 #
 # Usage:
 #   scripts/aicx-sync.sh dry-run [--remote <host>] [--namespace <ns>]
@@ -14,7 +15,7 @@
 # Defaults (when --remote / --namespace are absent):
 #   local store    -> $HOME/.aicx/store
 #   remote staging -> $HOME/.frontier-vault/<host>/staging
-#   config file    -> $HOME/.config/vetcoders/aicx-sync.toml
+#   config         -> [aicx_sync] in ${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/config.toml
 #
 # Plan 08 contract: dry-run first, then apply. The script *always* refuses
 # to run `apply` without an explicit confirmation flag (or a dry-run run
@@ -31,7 +32,11 @@ REPO_ROOT=$(cd "$HERE/.." && pwd)
 
 DEFAULT_LOCAL_STORE="${HOME}/.aicx/store"
 DEFAULT_REMOTE_STAGING_BASE="${HOME}/.frontier-vault"
-DEFAULT_CONFIG_FILE="${HOME}/.config/vetcoders/aicx-sync.toml"
+CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+DEFAULT_CONFIG_FILE="$CONFIG_HOME/vibecrafted/config.toml"
+CONFIG_SECTION="aicx_sync"
+# Retired standalone file. Named only so the operator learns it is ignored.
+RETIRED_CONFIG_FILE="$CONFIG_HOME/vetcoders/aicx-sync.toml"
 
 usage() {
     cat <<'USAGE'
@@ -47,7 +52,8 @@ Flags:
   --remote <host>      remote host name (read by ~/.scripts/sync-tool.py first)
   --namespace <ns>     AICX namespace to scope (default: all)
   --local <path>       local AICX store (default: ${HOME}/.aicx/store)
-  --config <toml>      config file path (default: ${HOME}/.config/vetcoders/aicx-sync.toml)
+  --config <toml>      file whose [aicx_sync] table is read
+                       (default: ${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/config.toml)
 
 Defaults — dry-run first, then apply.
 
@@ -126,21 +132,27 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# The retired standalone file is never a source of values.
+if [[ -e "$RETIRED_CONFIG_FILE" ]]; then
+    printf 'aicx-sync.sh: %s is no longer read; move its keys into the [%s] table of %s\n' \
+        "$RETIRED_CONFIG_FILE" "$CONFIG_SECTION" "$DEFAULT_CONFIG_FILE" >&2
+fi
+
 # ---- config-file fallbacks ------------------------------------------------
 
 if [[ -z "$LOCAL_STORE" ]]; then
-    LOCAL_STORE=$(toml_get "$CONFIG_FILE" "default" "local_store")
+    LOCAL_STORE=$(toml_get "$CONFIG_FILE" "$CONFIG_SECTION" "local_store")
 fi
 if [[ -z "$LOCAL_STORE" ]]; then
     LOCAL_STORE="$DEFAULT_LOCAL_STORE"
 fi
 
 if [[ -z "$REMOTE_HOST" ]]; then
-    REMOTE_HOST=$(toml_get "$CONFIG_FILE" "default" "remote_host")
+    REMOTE_HOST=$(toml_get "$CONFIG_FILE" "$CONFIG_SECTION" "remote_host")
 fi
 
 if [[ -z "$NAMESPACE" ]]; then
-    NAMESPACE=$(toml_get "$CONFIG_FILE" "default" "namespace")
+    NAMESPACE=$(toml_get "$CONFIG_FILE" "$CONFIG_SECTION" "namespace")
 fi
 
 # Compute remote staging path. The bash wrapper expects the operator's

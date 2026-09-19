@@ -72,7 +72,18 @@ runtime_pack_selection_sha256() {
 
 runtime_pack_selection_size() {
   # BSD and GNU stat disagree; both ship on the platforms that build packs.
-  stat -f %z "$1" 2>/dev/null || stat -c %s "$1" 2>/dev/null
+  # GNU first, and only a number counts: GNU `stat -f` is --file-system and
+  # SUCCEEDS with a filesystem dump, so BSD-first recorded that dump as a size
+  # on Linux (same trap as _stat_uid in install-runtime-pack.sh).
+  local size
+  size="$(stat -c %s "$1" 2>/dev/null || true)"
+  if [[ "$size" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$size"
+    return 0
+  fi
+  size="$(stat -f %z "$1" 2>/dev/null)" || return 1
+  [[ "$size" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$size"
 }
 
 # A relative VIBECRAFTED_RELEASE_DIR is a supported way to put the carrier
@@ -140,8 +151,6 @@ runtime_pack_selection_parse() {
   RUNTIME_PACK_SELECTION_REC_source_revision=""
   RUNTIME_PACK_SELECTION_REC_terminal_revision=""
   RUNTIME_PACK_SELECTION_REC_frame_revision=""
-  RUNTIME_PACK_SELECTION_REC_started_at=""
-  RUNTIME_PACK_SELECTION_REC_completed_at=""
   RUNTIME_PACK_SELECTION_REC_KEYS=""
 
   local lines
@@ -188,8 +197,7 @@ runtime_pack_selection_parse() {
       source_revision) RUNTIME_PACK_SELECTION_REC_source_revision="$value" ;;
       terminal_revision) RUNTIME_PACK_SELECTION_REC_terminal_revision="$value" ;;
       frame_revision) RUNTIME_PACK_SELECTION_REC_frame_revision="$value" ;;
-      started_at) RUNTIME_PACK_SELECTION_REC_started_at="$value" ;;
-      completed_at) RUNTIME_PACK_SELECTION_REC_completed_at="$value" ;;
+      started_at | completed_at) ;; # recorded by the builder; selection never reads them
       *) return 1 ;;
     esac
     index=$((index + 1))
@@ -516,15 +524,13 @@ runtime_pack_selection_publish() {
 #   1 — no record at all (callers may keep their legacy single-archive path)
 #   2 — a record exists but cannot be honoured; the caller MUST fail visibly
 #       rather than fall back to some other archive on disk
+# shellcheck disable=SC2034  # RUNTIME_PACK_SELECTION_* are this function's outputs, read by install-runtime-pack.sh after sourcing
 runtime_pack_selection_read() {
   local repo_root="$1" expected_platform="$2" expected_architecture="$3"
   local file actual_digest actual_size
 
   RUNTIME_PACK_SELECTION_PACK=""
-  RUNTIME_PACK_SELECTION_SHA256=""
   RUNTIME_PACK_SELECTION_VERSION=""
-  RUNTIME_PACK_SELECTION_PLATFORM=""
-  RUNTIME_PACK_SELECTION_ARCHITECTURE=""
   RUNTIME_PACK_SELECTION_SOURCE_REVISION=""
   RUNTIME_PACK_SELECTION_TERMINAL_REVISION=""
   RUNTIME_PACK_SELECTION_FRAME_REVISION=""
@@ -630,10 +636,7 @@ runtime_pack_selection_read() {
   fi
 
   RUNTIME_PACK_SELECTION_PACK="$pack"
-  RUNTIME_PACK_SELECTION_SHA256="$RUNTIME_PACK_SELECTION_REC_sha256"
   RUNTIME_PACK_SELECTION_VERSION="$RUNTIME_PACK_SELECTION_REC_version"
-  RUNTIME_PACK_SELECTION_PLATFORM="$RUNTIME_PACK_SELECTION_REC_platform"
-  RUNTIME_PACK_SELECTION_ARCHITECTURE="$RUNTIME_PACK_SELECTION_REC_architecture"
   RUNTIME_PACK_SELECTION_SOURCE_REVISION="$RUNTIME_PACK_SELECTION_REC_source_revision"
   RUNTIME_PACK_SELECTION_TERMINAL_REVISION="$RUNTIME_PACK_SELECTION_REC_terminal_revision"
   RUNTIME_PACK_SELECTION_FRAME_REVISION="$RUNTIME_PACK_SELECTION_REC_frame_revision"

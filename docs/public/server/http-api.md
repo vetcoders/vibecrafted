@@ -16,19 +16,19 @@ revalidate qualified process identity; only that writer may issue a receipted
 
 ## Endpoints
 
-| Method | Path                                 | Purpose                                                                  |
-| ------ | ------------------------------------ | ------------------------------------------------------------------------ |
-| GET    | `/api/health`                        | Constant-time process readiness. Never scans the control plane.          |
-| GET    | `/api/control/state`                 | Cached state view: active/recent runs, warnings, event tail, settlement. |
-| GET    | `/api/control/runs`                  | Every run snapshot, newest-first.                                        |
-| GET    | `/api/control/runs/{run_id}`         | One run by id, or a `404` JSON body.                                     |
-| GET    | `/api/control/runs/{run_id}/observe` | Versioned one-shot observation; never arms a monitor.                    |
-| GET    | `/api/control/runs/{run_id}/await`   | Shared blocking subscription for the run.                                |
+| Method | Path                                 | Purpose                                                                                                               |
+| ------ | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/api/health`                        | Constant-time process readiness. Never scans the control plane.                                                       |
+| GET    | `/api/control/state`                 | Cached state view: active/recent runs, warnings, event tail, settlement.                                              |
+| GET    | `/api/control/runs`                  | Every run snapshot, newest-first.                                                                                     |
+| GET    | `/api/control/runs/{run_id}`         | One run by id, or a `404` JSON body.                                                                                  |
+| GET    | `/api/control/runs/{run_id}/observe` | Versioned one-shot observation; never arms a monitor.                                                                 |
+| GET    | `/api/control/runs/{run_id}/await`   | Shared blocking subscription for the run.                                                                             |
 | GET    | `/api/control/transcripts?q=`        | Host-wide human-log search. Paginated (`offset`, `limit`, `has_more`, `total`); each file is streamed from the start. |
-| POST   | `/api/structure/report`              | Local-peer: run `loct report --output .loctree/report.html` in a known control-plane workspace root. |
-| GET    | `/api/control/lifecycle`             | Lifecycle run summaries, newest-first.                                   |
-| GET    | `/api/control/lifecycle/{run_id}`    | Full nested lifecycle state with per-run and per-stage axes.             |
-| GET    | `/api/control/events`                | Server-Sent Events stream of the control-plane event log.                |
+| POST   | `/api/structure/report`              | Local-peer: run `loct report --output .loctree/report.html` in a known control-plane workspace root.                  |
+| GET    | `/api/control/lifecycle`             | Lifecycle run summaries, newest-first.                                                                                |
+| GET    | `/api/control/lifecycle/{run_id}`    | Full nested lifecycle state with per-run and per-stage axes.                                                          |
+| GET    | `/api/control/events`                | Server-Sent Events stream of the control-plane event log.                                                             |
 
 Run payloads serialise the delivery-proof axes (`execution_state`,
 `proof_state`, `delivery_state`) and `seal` only when the snapshot or kernel

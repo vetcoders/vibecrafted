@@ -1,14 +1,15 @@
 use crate::app::{App, AppTab, LaunchFocus, wrap_operator_line};
+use crate::home::{HomeBand, HomeSurface};
 use crate::launch;
 use crate::layout::{
-    PaneId, controls_layout, dispatch_layout, mission_layout, monitor_layout, mux_panel_height,
-    observe_layout, polarize_panel_height,
+    PaneId, controls_layout, dispatch_layout, home_layout, home_root_layout, mission_layout,
+    monitor_layout, mux_panel_height, observe_layout, polarize_panel_height,
 };
 use crate::mission_control::{
     ActionPriority, ActionQueueItem, ActionQueueKind, ActiveDispatch, AgentStatsRow, DataQuality,
     FailureEntry, FleetHealthSignal, FleetHealthStatus, SkillStatsRow, WaveSegment, WaveState,
 };
-use crate::observe::{ConsoleView, ObserveHealth};
+use crate::observe::{self, ConsoleView, ObserveHealth};
 use crate::state::RunKind;
 use ratatui::prelude::*;
 use ratatui::style::{Color, Modifier, Style};
@@ -16,26 +17,31 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs, Wrap};
 
 pub fn draw(frame: &mut Frame, app: &App) {
-    let root = frame.area();
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Length(3),
-            Constraint::Min(12),
-            Constraint::Length(3),
-        ])
-        .split(root);
+    if app.config.view.is_home() {
+        draw_home_shell(frame, app);
+    } else {
+        let root = frame.area();
+        let layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(2),
+                Constraint::Length(3),
+                Constraint::Min(12),
+                Constraint::Length(3),
+            ])
+            .split(root);
 
-    draw_header(frame, layout[0], app);
-    draw_tabs(frame, layout[1], app);
-    draw_body(frame, layout[2], app);
-    draw_footer(frame, layout[3], app);
+        draw_header(frame, layout[0], app);
+        draw_tabs(frame, layout[1], app);
+        draw_body(frame, layout[2], app);
+        draw_footer(frame, layout[3], app);
+    }
 
     match app.focus {
         LaunchFocus::Help => draw_help_overlay(frame, app),
         LaunchFocus::EditPrompt => draw_prompt_overlay(frame, app),
         LaunchFocus::EditModel => draw_model_overlay(frame, app),
+        LaunchFocus::EditRepo => draw_repo_overlay(frame, app),
         LaunchFocus::Confirmation => draw_confirmation_overlay(frame, app),
         LaunchFocus::Search => draw_search_overlay(frame, app),
         LaunchFocus::Error => draw_error_overlay(frame, app),
@@ -53,7 +59,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
 
     let title = if app.config.view == ConsoleView::Observe {
         Line::from(vec![
-            Span::styled("voc", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled("Voc", Style::default().add_modifier(Modifier::BOLD)),
             Span::styled(
                 format!("  {}  {}", app.observe.status.label(), app.observe.origin),
                 Style::default().fg(Color::DarkGray),
@@ -64,11 +70,12 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         Line::from(vec![
             Span::styled(
-                "Vibecrafted Operator Console",
+                "Vibecrafted operator",
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             ),
+            Span::styled("  Console", Style::default().fg(Color::DarkGray)),
             Span::raw("  "),
             Span::styled(app.status_summary(), Style::default().fg(Color::Gray)),
         ])
@@ -176,7 +183,10 @@ fn draw_observe(frame: &mut Frame, area: Rect, app: &App) {
         .iter()
         .filter(|run| run.kind_label() == "stalled")
         .count();
-    let title = format!(" Observe · {active} active · {stalled} stalled ");
+    let title = format!(
+        " Observe · {} · {active} active · {stalled} stalled ",
+        app.observe.sort.label()
+    );
     frame.render_widget(
         List::new(items).block(Block::default().borders(Borders::ALL).title(Span::styled(
             title,
@@ -215,7 +225,16 @@ fn draw_observe(frame: &mut Frame, area: Rect, app: &App) {
                 Style::default().fg(Color::DarkGray),
             )));
         } else {
+            let filtering = app.observe.transcript_view == observe::TranscriptView::Human;
             for line in app.observe.transcript.lines() {
+                if filtering
+                    && !app
+                        .observe
+                        .transcript_filter
+                        .shows(observe::transcript_line_class(line))
+                {
+                    continue;
+                }
                 body.push(Line::from(line.to_string()));
             }
         }
@@ -228,12 +247,21 @@ fn draw_observe(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(Color::DarkGray),
         )));
     }
+    let transcript_title = match app.observe.transcript_filter.hidden_label() {
+        Some(hidden) if app.observe.transcript_view == observe::TranscriptView::Human => {
+            format!(
+                " Transcript · {} · {hidden} ",
+                app.observe.transcript_view.label()
+            )
+        }
+        _ => format!(" Transcript · {} ", app.observe.transcript_view.label()),
+    };
     frame.render_widget(
         Paragraph::new(body)
             .wrap(Wrap { trim: false })
             .scroll((app.interaction.scroll.observe_transcript, 0))
             .block(Block::default().borders(Borders::ALL).title(Span::styled(
-                " Transcript ",
+                transcript_title,
                 Style::default().add_modifier(Modifier::BOLD),
             ))),
         columns.transcript,
@@ -242,6 +270,171 @@ fn draw_observe(frame: &mut Frame, area: Rect, app: &App) {
 
 fn return_empty_scope_message(scope: &str) -> String {
     format!("no {scope} runs in canonical control plane")
+}
+
+fn draw_home_shell(frame: &mut Frame, app: &App) {
+    let root = home_root_layout(frame.area());
+    draw_home_header(frame, root.header, app);
+    match app.observe.home.surface {
+        HomeSurface::Landing => draw_home_board(frame, root.body, app),
+        HomeSurface::Conversation => draw_home_conversation(frame, root.body, app),
+    }
+    draw_home_footer(frame, root.footer, app);
+}
+
+fn draw_home_header(frame: &mut Frame, area: Rect, app: &App) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Length(1)])
+        .split(area);
+    let counts = app.home_counts();
+    let title = Line::from(vec![
+        Span::styled("Home", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw("  "),
+        Span::styled(
+            format!("[{}]", app.observe.home.scope.label()),
+            Style::default().fg(Color::Cyan),
+        ),
+        Span::raw("  "),
+        Span::styled(app.status_summary(), Style::default().fg(Color::Gray)),
+    ]);
+    frame.render_widget(Paragraph::new(title), rows[0]);
+    frame.render_widget(
+        Paragraph::new(format!(
+            "attention {}  work {}  history {}  cost — if unknown",
+            counts.attention, counts.work, counts.history
+        ))
+        .style(Style::default().fg(Color::DarkGray)),
+        rows[1],
+    );
+}
+
+fn home_board_lines(app: &App) -> Vec<(Option<usize>, String, Style)> {
+    let rows = app.home_rows();
+    let mut lines = Vec::new();
+    for band in [HomeBand::Attention, HomeBand::Work, HomeBand::History] {
+        lines.push((
+            None,
+            band.title().to_string(),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+        let members = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.band == band)
+            .collect::<Vec<_>>();
+        if members.is_empty() {
+            lines.push((
+                None,
+                "  —".to_string(),
+                Style::default().fg(Color::DarkGray),
+            ));
+            continue;
+        }
+        for (index, row) in members {
+            let selected = index == app.observe.home.selected;
+            let style = if selected {
+                Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+            } else if band == HomeBand::Attention {
+                Style::default().fg(Color::Yellow)
+            } else if band == HomeBand::Work {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default()
+            };
+            lines.push((Some(index), format!("  {}", row.list_line(72)), style));
+        }
+    }
+    lines
+}
+
+pub(crate) fn home_board_line_count(app: &App) -> usize {
+    home_board_lines(app).len()
+}
+
+pub(crate) fn home_row_index_at(app: &App, inner_row: usize) -> Option<usize> {
+    home_board_lines(app)
+        .into_iter()
+        .skip(inner_row)
+        .find_map(|(index, _, _)| index)
+}
+
+fn draw_home_board(frame: &mut Frame, area: Rect, app: &App) {
+    let skip = usize::from(app.interaction.scroll.home_list);
+    let items = home_board_lines(app)
+        .into_iter()
+        .skip(skip)
+        .map(|(_, text, style)| ListItem::new(Line::from(Span::styled(text, style))))
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        List::new(items).block(Block::default().borders(Borders::ALL).title(Span::styled(
+            " Needs attention · In progress · History ",
+            Style::default().add_modifier(Modifier::BOLD),
+        ))),
+        area,
+    );
+}
+
+fn draw_home_conversation(frame: &mut Frame, area: Rect, app: &App) {
+    let columns = home_layout(area, frame.area().width);
+    if columns.list.width > 0 {
+        draw_home_board(frame, columns.list, app);
+    }
+    let width = usize::from(columns.transcript.width.saturating_sub(2).max(8));
+    let lines = app
+        .home_conversation_lines(width)
+        .into_iter()
+        .map(Line::from)
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(lines)
+            .scroll((app.interaction.scroll.home_transcript, 0))
+            .block(Block::default().borders(Borders::ALL).title(Span::styled(
+                " Conversation · Esc returns Home ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ))),
+        columns.transcript,
+    );
+}
+
+fn draw_home_footer(frame: &mut Frame, area: Rect, app: &App) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(area);
+    let hint = match (app.observe.home.surface, app.focus) {
+        (_, LaunchFocus::Error) => "Error: Enter/Esc closes · Home did not launch",
+        (HomeSurface::Conversation, _) => {
+            "Conversation: Esc/H returns Home  no launch  transcript wraps at the pane width"
+        }
+        (HomeSurface::Landing, _) => {
+            "Home: ↑/↓ agent  Enter opens existing panel  f Global/Local  H Home  q quit"
+        }
+    };
+    frame.render_widget(
+        Paragraph::new(hint).style(Style::default().fg(Color::Cyan)),
+        rows[0],
+    );
+    frame.render_widget(
+        Paragraph::new("Shared console · one Home · existing conversations only")
+            .style(Style::default().fg(Color::DarkGray)),
+        rows[1],
+    );
+    let status = if app.status_line.is_empty() {
+        format!("state root: {}", app.config.state_root.to_string_lossy())
+    } else {
+        app.status_line.clone()
+    };
+    frame.render_widget(
+        Paragraph::new(status).style(Style::default().fg(Color::Gray)),
+        rows[2],
+    );
 }
 
 fn draw_memory_overlay(frame: &mut Frame, app: &App) {
@@ -552,11 +745,7 @@ fn draw_dispatch(frame: &mut Frame, area: Rect, app: &App) {
             Block::default()
                 .borders(Borders::ALL)
                 .title("Dispatch playbook")
-                .border_style(if playbook_focused {
-                    Style::default().add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                }),
+                .border_style(pane_border_style(playbook_focused)),
         )
         .scroll((app.interaction.scroll.playbook, 0))
         .wrap(Wrap { trim: false });
@@ -649,6 +838,9 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         (AppTab::Dispatch, LaunchFocus::EditPrompt) => {
             "Dispatch edit: type prompt  Enter newline  Ctrl+S/Esc save"
         }
+        (AppTab::Dispatch, LaunchFocus::EditRepo) => {
+            "Dispatch edit: type repository path  Enter/Ctrl+S apply  Ctrl+U clear  Esc keep current"
+        }
         (_, LaunchFocus::Error) => "Error: Enter/Esc closes the failure details",
         (_, LaunchFocus::Artifact) => "Artifact viewer: Enter/Esc closes the native viewer",
         (AppTab::Dispatch, _) => {
@@ -667,7 +859,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     );
 
     let shortcuts = if app.config.view == ConsoleView::Observe {
-        "Observe: j/k select  m memory  w aicx wizard  r refresh  q quit"
+        "Observe: j/k select  o latest/oldest  t human/raw  u/i/c content/thinking/commands  m memory  w aicx wizard  r refresh  q quit"
     } else {
         "Global: q quit  r refresh  a cycle agent  v cycle runtime  y copy  Ctrl+L clear search  ? help"
     };
@@ -784,11 +976,7 @@ fn draw_launch(frame: &mut Frame, area: Rect, app: &App) {
             Block::default()
                 .borders(Borders::ALL)
                 .title(title)
-                .border_style(if deck_focused {
-                    Style::default().add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                }),
+                .border_style(pane_border_style(deck_focused)),
         )
         .scroll((app.interaction.scroll.deck, 0))
         .wrap(Wrap { trim: false });
@@ -822,11 +1010,7 @@ fn draw_launch_history(frame: &mut Frame, area: Rect, app: &App) {
             Block::default()
                 .borders(Borders::ALL)
                 .title("Launch trail")
-                .border_style(if trail_focused {
-                    Style::default().add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                }),
+                .border_style(pane_border_style(trail_focused)),
         )
         .scroll((app.interaction.scroll.trail, 0))
         .wrap(Wrap { trim: false });
@@ -872,7 +1056,7 @@ fn draw_mission_control(frame: &mut Frame, area: Rect, app: &App) {
                 "History (30d)",
                 vec![
                     format!(
-                        "{} meta.json scanned",
+                        "{} derived runs scanned",
                         mission.data_quality.scanned_meta_files
                     ),
                     if mission.data_quality.capped {
@@ -1031,7 +1215,7 @@ fn draw_mc_wave_atlas(
                 Style::default().fg(Color::DarkGray),
             )),
             Line::from(""),
-            Line::from("Waves emerge from prompt_id groups in meta.json."),
+            Line::from("Waves emerge from prompt_id groups on derived runs."),
         ]
     } else {
         segments
@@ -1411,16 +1595,13 @@ fn draw_mc_quality_footer(
     }
     if quality.capped {
         lines.push(Line::from(Span::styled(
-            "meta scan capped — older history may not be folded",
+            "derived scan capped — older history may not be folded",
             Style::default().fg(Color::Yellow),
         )));
     }
     if quality.parse_failures > 0 {
         lines.push(Line::from(Span::styled(
-            format!(
-                "{} meta.json parse failures skipped",
-                quality.parse_failures
-            ),
+            format!("{} snapshot parse failures skipped", quality.parse_failures),
             Style::default().fg(Color::Yellow),
         )));
     }
@@ -1435,14 +1616,9 @@ fn draw_mc_quality_footer(
 }
 
 fn panel_block(title: &str, focused: bool, accent: Color) -> Block<'_> {
-    let style = if focused {
-        Style::default().fg(accent).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(accent)
-    };
     Block::default()
         .borders(Borders::ALL)
-        .border_style(style)
+        .border_style(pane_border_style(focused))
         .title(Span::styled(
             format!(" {} ", title.trim()),
             Style::default().fg(accent).add_modifier(Modifier::BOLD),
@@ -1472,6 +1648,16 @@ fn format_duration_seconds(seconds: f64) -> String {
     }
 }
 
+fn pane_border_style(focused: bool) -> Style {
+    if focused {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    }
+}
+
 fn draw_stat_strip(
     frame: &mut Frame,
     columns: [Rect; 3],
@@ -1480,17 +1666,16 @@ fn draw_stat_strip(
 ) {
     for (index, ((title, lines, accent), column)) in cards.into_iter().zip(columns).enumerate() {
         let focused = selected == Some(index);
-        let mut border = Style::default().fg(accent);
-        if focused {
-            border = border.add_modifier(Modifier::BOLD | Modifier::REVERSED);
-        }
         let content = lines.into_iter().map(Line::from).collect::<Vec<_>>();
         let panel = Paragraph::new(content)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(title)
-                    .border_style(border),
+                    .title(Span::styled(
+                        format!(" {} ", title.trim()),
+                        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                    ))
+                    .border_style(pane_border_style(focused)),
             )
             .style(Style::default())
             .wrap(Wrap { trim: false });
@@ -1600,6 +1785,30 @@ fn draw_model_overlay(frame: &mut Frame, app: &App) {
         )
         .wrap(Wrap { trim: false });
     frame.render_widget(model, area);
+}
+
+fn draw_repo_overlay(frame: &mut Frame, app: &App) {
+    let area = centered_rect(72, 44, frame.area());
+    frame.render_widget(Clear, area);
+    let border = if app.repo_edit.error.is_some() {
+        Color::Red
+    } else {
+        Color::Cyan
+    };
+    let lines = app
+        .repo_edit_lines()
+        .into_iter()
+        .map(Line::from)
+        .collect::<Vec<_>>();
+    let repo = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Destination repository")
+                .border_style(Style::default().fg(border)),
+        )
+        .wrap(Wrap { trim: false });
+    frame.render_widget(repo, area);
 }
 
 fn draw_confirmation_overlay(frame: &mut Frame, app: &App) {
@@ -1847,6 +2056,8 @@ mod tests {
             observe: Default::default(),
             memory: Default::default(),
             interaction: Default::default(),
+            repo_edit: Default::default(),
+            refresh: Default::default(),
         }
     }
 
@@ -1861,6 +2072,120 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>()
+    }
+
+    fn render_home_size(app: &App, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut out = String::new();
+        for y in 0..height {
+            for x in 0..width {
+                out.push_str(buffer[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    fn home_fixture_app() -> App {
+        let mut app = sample_app();
+        app.config.view = crate::observe::ConsoleView::Home;
+        app.config.repo = std::path::PathBuf::from("/tmp/ws-alpha");
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut ask = sample_run("ask-1", "kimi", "pane-1");
+        ask.snapshot.root = Some("/tmp/ws-alpha".into());
+        ask.snapshot.state = Some("waiting".into());
+        ask.kind = RunKind::Unknown;
+        ask.snapshot.extra.insert(
+            "attention_reason".into(),
+            serde_json::Value::String("waiting on operator".into()),
+        );
+        ask.snapshot
+            .extra
+            .insert("panel".into(), serde_json::Value::String("pane-1".into()));
+        let mut work = sample_run("work-1", "claude", "pane-2");
+        work.snapshot.root = Some("/tmp/ws-alpha".into());
+        work.snapshot.updated_at = Some(now.clone());
+        work.snapshot.last_heartbeat = Some(now);
+        let mut hist = sample_run("hist-1", "cursor", "pane-old");
+        hist.snapshot.root = Some("/tmp/ws-alpha".into());
+        hist.snapshot.state = Some("completed".into());
+        hist.kind = RunKind::Completed;
+        hist.snapshot
+            .extra
+            .insert("exit_code".into(), serde_json::Value::from(0));
+        let mut missing = sample_run("ask-beta", "grok", "");
+        missing.snapshot.root = Some("/tmp/ws-beta".into());
+        missing.snapshot.operator_session = None;
+        missing.snapshot.state = Some("unknown".into());
+        missing.kind = RunKind::Unknown;
+        app.state.runs = vec![
+            ask.snapshot.clone(),
+            work.snapshot.clone(),
+            hist.snapshot.clone(),
+            missing.snapshot.clone(),
+        ];
+        app.state.retained_runs = app.state.runs.clone();
+        app.runs = vec![ask, work, hist, missing];
+        app
+    }
+
+    #[test]
+    fn home_board_exposes_attention_separates_history_and_keeps_unknown_cost() {
+        let app = home_fixture_app();
+        let wide = render_home_size(&app, 80, 24);
+        assert!(wide.contains("Needs attention"), "{wide}");
+        assert!(wide.contains("In progress"), "{wide}");
+        assert!(wide.contains("History"), "{wide}");
+        assert!(wide.contains("[Global]"), "{wide}");
+        assert!(
+            wide.contains("waiting on operator") || wide.contains("waiting on operat"),
+            "{wide}"
+        );
+        assert!(!wide.contains("cost 0"), "{wide}");
+        let compact = render_home_size(&app, 40, 20);
+        assert!(compact.contains("Needs attention"), "{compact}");
+        assert!(compact.contains("History"), "{compact}");
+    }
+
+    #[test]
+    fn home_conversation_keeps_words_inside_a_forty_column_pty() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("work-1.log");
+        std::fs::write(
+            &transcript,
+            "claude is implementing the shared home console without wrapping mid-word\n",
+        )
+        .unwrap();
+        let mut app = home_fixture_app();
+        if let Some(run) = app.state.runs.iter_mut().find(|run| run.run_id == "work-1") {
+            run.latest_transcript = Some(transcript.display().to_string());
+        }
+        app.observe.home.surface = HomeSurface::Conversation;
+        app.observe.home.conversation_run_id = Some("work-1".into());
+        let compact = render_home_size(&app, 40, 20);
+        assert!(compact.contains("Conversation"), "{compact}");
+        assert!(
+            compact.contains("implementing") && compact.contains("wrapping"),
+            "{compact}"
+        );
+        for line in compact.lines() {
+            assert!(
+                line.chars().count() <= 40,
+                "wide line ({}): {line}",
+                line.chars().count()
+            );
+            assert!(
+                !line.contains("implementi") || line.contains("implementing"),
+                "{line}"
+            );
+            assert!(
+                !line.contains("wrappin") || line.contains("wrapping"),
+                "{line}"
+            );
+        }
     }
 
     #[test]
@@ -1899,10 +2224,12 @@ mod tests {
         };
         app.refresh_rendered_runs();
         app.refresh_observe();
+        app.load_requested_transcript();
         assert_eq!(app.observe.runs[app.observe.selected].run_id, "live-run");
         assert!(render_to_string(&app).contains("live transcript only"));
 
         app.toggle_filter();
+        app.load_requested_transcript();
         assert_eq!(app.queue_scope, QueueScope::History);
         assert_eq!(app.observe.runs.len(), 1);
         assert_eq!(app.observe.runs[app.observe.selected].run_id, "history-run");
@@ -1916,6 +2243,108 @@ mod tests {
         assert!(app.observe.transcript_run_id.is_none());
         assert!(app.observe_switch_command().is_none());
         assert!(render_to_string(&app).contains("no history runs in canonical control plane"));
+    }
+
+    #[test]
+    fn observe_sort_preserves_selection_and_renders_control() {
+        use crate::state::ControlPlaneState;
+        use std::collections::HashSet;
+        use std::fs;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let older = dir.path().join("older.log");
+        let newer = dir.path().join("newer.log");
+        fs::write(&older, "older body").unwrap();
+        fs::write(&newer, "newer body").unwrap();
+
+        let mut old_run = sample_run("work-old", "agy", "old-session");
+        old_run.snapshot.started_at = Some("2026-09-13T00:00:00Z".to_string());
+        old_run.snapshot.updated_at = old_run.snapshot.started_at.clone();
+        old_run.snapshot.latest_transcript = Some(older.display().to_string());
+        old_run.age_label = "17h".to_string();
+        let mut new_run = sample_run("work-new", "agy", "new-session");
+        new_run.snapshot.started_at = Some("2026-09-13T02:00:00Z".to_string());
+        new_run.snapshot.updated_at = new_run.snapshot.started_at.clone();
+        new_run.snapshot.latest_transcript = Some(newer.display().to_string());
+        new_run.age_label = "15h".to_string();
+
+        let mut app = sample_app();
+        app.config.view = crate::observe::ConsoleView::Observe;
+        app.queue_scope = QueueScope::All;
+        app.state = ControlPlaneState {
+            root: dir.path().to_path_buf(),
+            retained_runs: vec![old_run.snapshot.clone(), new_run.snapshot.clone()],
+            runs: vec![old_run.snapshot, new_run.snapshot],
+            events: Vec::new(),
+            archived_run_ids: HashSet::new(),
+        };
+        app.refresh_rendered_runs();
+        app.refresh_observe();
+        assert_eq!(app.observe.sort.label(), "latest");
+        assert_eq!(app.observe.runs[0].run_id, "work-new");
+        app.observe.selected = 0;
+        app.toggle_observe_sort();
+        assert_eq!(app.observe.sort.label(), "oldest");
+        assert_eq!(app.observe.runs[app.observe.selected].run_id, "work-new");
+        assert_eq!(app.observe.runs[0].run_id, "work-old");
+        let rendered = render_to_string(&app);
+        assert!(rendered.contains("oldest"));
+        assert!(rendered.contains("Transcript · human"));
+    }
+
+    #[test]
+    fn observe_transcript_defaults_to_human_and_raw_is_selectable() {
+        use crate::state::ControlPlaneState;
+        use std::collections::HashSet;
+        use std::fs;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let transcript = dir.path().join("agy.log");
+        fs::write(
+            &transcript,
+            concat!(
+                r#"{"event":"init","init":{"conversation_id":"c1"}}"#,
+                "\n",
+                r#"{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"hello"}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let mut run = sample_run("agy-run", "agy", "sess");
+        let now = chrono::Utc::now().to_rfc3339();
+        run.snapshot.started_at = Some(now.clone());
+        run.snapshot.updated_at = Some(now.clone());
+        run.snapshot.last_heartbeat = Some(now);
+        run.snapshot.latest_transcript = Some(transcript.display().to_string());
+        let mut app = sample_app();
+        app.config.view = crate::observe::ConsoleView::Observe;
+        app.queue_scope = QueueScope::All;
+        app.state = ControlPlaneState {
+            root: dir.path().to_path_buf(),
+            retained_runs: vec![run.snapshot.clone()],
+            runs: vec![run.snapshot],
+            events: Vec::new(),
+            archived_run_ids: HashSet::new(),
+        };
+        app.refresh_rendered_runs();
+        app.refresh_observe();
+        app.load_requested_transcript();
+        assert_eq!(
+            app.observe.transcript_view,
+            crate::observe::TranscriptView::Human
+        );
+        assert!(app.observe.transcript.contains("assistant: hello"));
+        assert!(!app.observe.transcript.contains("\"event\":\"init\""));
+        app.toggle_observe_transcript_view();
+        assert_eq!(
+            app.observe.transcript_view,
+            crate::observe::TranscriptView::Raw
+        );
+        assert!(app.observe.transcript.contains("\"event\":\"init\""));
+        let rendered = render_to_string(&app);
+        assert!(rendered.contains("Transcript · raw"));
     }
 
     #[test]

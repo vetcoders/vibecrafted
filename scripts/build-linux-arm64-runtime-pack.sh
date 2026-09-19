@@ -108,10 +108,13 @@ install -m 0755 "$server_build/vibecrafted-server/release/vibecrafted-server-web
 (
   cd "$repo_root/vibecrafted-server"
   CARGO_TARGET_DIR="$server_build/vibecrafted-server" \
-    cargo build --release --locked -p control-core --bin scaffold-doctor
+    cargo build --release --locked -p control-core \
+      --bin scaffold-doctor --bin control-observe
 )
 install -m 0755 "$server_build/vibecrafted-server/release/scaffold-doctor" \
   "$payload/bin/scaffold-doctor"
+install -m 0755 "$server_build/vibecrafted-server/release/control-observe" \
+  "$payload/bin/control-observe"
 cp -R "$server_build/vibecrafted-server/site/." "$payload/server/site/"
 rm -rf "$server_build"
 
@@ -137,9 +140,11 @@ python3 "$repo_root/scripts/distribution_manifest.py" carrier \
   --owner-repo vetcoders/vibecrafted --source-revision "$source_revision"
 "$repo_root/scripts/stage-runtime-foundations.sh" "$payload/bin"
 
-uv python install 3.12.3 --install-dir "$work/python-seed" --no-bin
-seed_python="$(find "$work/python-seed" -type f -path '*/bin/python3.12' -print -quit)"
-[[ -n "$seed_python" ]] || die "uv did not produce CPython 3.12.3"
+# shellcheck source=/dev/null
+. "$repo_root/scripts/lib/portable-python.sh"
+mkdir -p "$work/python-seed"
+portable_python_load_pin ""
+seed_python="$(install_portable_python "$work/python-seed")"
 python_home="$(cd "$(dirname "$seed_python")/.." && pwd -P)"
 mkdir -p "$payload/python" "$payload/python-site"
 cp -RL "$python_home/." "$payload/python/"
@@ -149,13 +154,13 @@ uv pip install --python "$seed_python" --target "$payload/python-site" \
   'jsonschema>=4.23,<5' 'PyYAML>=6.0,<7' 'screenscribe==0.1.19' \
   'fastmcp>=2.0,<3'
 rm -rf "$payload/python-site/bin"
-cat > "$payload/bin/python3" <<'EOF'
+cat > "$payload/bin/python3" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-runtime_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+runtime_root="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")/.." && pwd -P)"
 export PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1
-export PYTHONPATH="$runtime_root/vibecrafted-core:$runtime_root/vibecrafted-mcp:$runtime_root/python-site"
-exec "$runtime_root/python/bin/python3.12" "$@"
+export PYTHONPATH="\$runtime_root/vibecrafted-core:\$runtime_root/vibecrafted-mcp:\$runtime_root/python-site"
+exec "\$runtime_root/python/bin/${PORTABLE_PYTHON_BIN}" "\$@"
 EOF
 chmod 0755 "$payload/bin/python3"
 python3 "$repo_root/scripts/render-python-entrypoint-launchers.py" \

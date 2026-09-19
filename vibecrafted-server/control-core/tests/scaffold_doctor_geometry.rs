@@ -1,5 +1,7 @@
 //! C4: scaffold-doctor fails closed on a non-ancestor baseline and on
-//! repo paths named in the plan that are missing from HEAD.
+//! repo paths named in the plan that are missing from HEAD. Files-section
+//! paths suffixed `(new)` / `(nowy)` skip the missing-file check and require
+//! the parent directory to exist on HEAD instead.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -36,7 +38,7 @@ fn frontmatter(role: &str, plan_id: &str) -> String {
 
 fn driver_body(plan_id: &str, extra: &str) -> String {
     format!(
-        "{}# DRIVER\n\n## 1. Pełne ścieżki\n\n| Rzecz | Ścieżka |\n|---|---|\n| Root | /Users/vetcoder/.vibecrafted/artifacts/vetcoders/vibecrafted/2026_0720/plans/{plan_id}/ |\n\n{extra}\n\n## 2. Graf zależności — why\n\n| Krawędź | Why |\n|---|---|\n| A → B | why shared domain |\n\n## 3. Gotowe komendy\n\n```bash\nvibecrafted implement claude --file /Users/vetcoder/.vibecrafted/artifacts/vetcoders/vibecrafted/2026_0720/plans/{plan_id}/briefs/W1-01_cut.md\n```\n\n## 4. Reguła `[ ]→[x]`\n\n`[ ]` todo · `[~]` running · `[?]` done-unverified · `[!]` blocked · `[x]` verifier-green\n**Only a delivery-verifier flips `[~]→[x]`.**\n\n## 5. Snapshot\n\nW1-01 [ ]\ndou-index = 0/1 = 0.00\n",
+        "{}# DRIVER\n\n## 1. Pełne ścieżki\n\n| Rzecz | Ścieżka |\n|---|---|\n| Root | /Users/vetcoder/.vibecrafted/artifacts/vetcoders/vibecrafted/2026_0720/plans/{plan_id}/ |\n\n{extra}\n\n## 2. Graf zależności — why\n\n| Krawędź | Why |\n|---|---|\n| A → B | why shared domain |\n\n## 3. Gotowe komendy\n\n```bash\nvibecrafted implement claude --file /Users/vetcoder/.vibecrafted/artifacts/vetcoders/vibecrafted/2026_0720/plans/{plan_id}/briefs/W1-01_cut.md\n```\n\n## 4. Reguła `[ ]→[x]`\n\n`[ ]` todo · `[~]` running · `[?]` done-unverified · `[!]` blocked · `[x]` verifier-green\n**Only a delivery-verifier flips `[~]→[x]`.**\n\n## 5. Snapshot\n\nW1-01 [ ]\ndou-index = 0/1 = 0.00\n\n## 6. Odbiór (matryca wyników)\n\n| cut | commit | dowód (Operator) | Worker | Operator | Founder |\n|---|---|---|---|---|---|\n| W1-01 | — | — | [ ] | [ ] | [ ] |\n\nZatwierdzono przez: Worker [ ] Operator [ ] Founder [ ]\n",
         frontmatter("driver", plan_id)
     )
 }
@@ -250,6 +252,53 @@ fn named_path_missing_on_head_is_refused() {
             .iter()
             .any(|error| error.path.as_deref() == Some("src/keep.rs")),
         "existing path should not fail: {:?}",
+        report.errors
+    );
+    fs::remove_dir_all(home).ok();
+}
+
+#[test]
+fn named_path_marked_new_skips_missing_file_when_parent_exists() {
+    let home = temp_home("new-ok");
+    let repo = init_geometry_repo(&home);
+    fs::create_dir_all(repo.root.join("tests")).expect("tests dir");
+    fs::write(repo.root.join("tests/keep.py"), "keep\n").expect("tests keep");
+    git(&repo.root, &["add", "tests/keep.py"]);
+    git(&repo.root, &["commit", "-m", "tests parent"]);
+    let plan = write_plan(
+        &home,
+        "plan-new-ok",
+        "",
+        "- `tests/x_new.py` (new)\n- `src/y_new.rs` (nowy)\n- Edit: `src/keep.rs`\n",
+    );
+    let report = doctor_plan_root_in_repo(&plan, Some(&repo.root)).expect("doctor");
+    assert!(
+        report.valid,
+        "marked-new missing file must pass C4 when parent exists, errors={:?}",
+        report.errors
+    );
+    fs::remove_dir_all(home).ok();
+}
+
+#[test]
+fn named_path_marked_new_parent_missing_is_refused() {
+    let home = temp_home("new-parent-missing");
+    let repo = init_geometry_repo(&home);
+    let plan = write_plan(&home, "plan-new-parent", "", "- `docs/x_new.py` (new)\n");
+    let report = doctor_plan_root_in_repo(&plan, Some(&repo.root)).expect("doctor");
+    assert!(!report.valid);
+    assert!(
+        report.errors.iter().any(|error| {
+            error.code == "named_path_parent_missing"
+                && error.path.as_deref() == Some("docs/x_new.py")
+                && error.message.contains("docs")
+        }),
+        "errors={:?}",
+        report.errors
+    );
+    assert!(
+        !codes(&report).contains(&"named_path_missing"),
+        "marked-new path must not emit named_path_missing: {:?}",
         report.errors
     );
     fs::remove_dir_all(home).ok();

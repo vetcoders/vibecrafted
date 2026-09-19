@@ -5,6 +5,7 @@ import fcntl
 import json
 import os
 import subprocess
+import sys
 import textwrap
 import threading
 from pathlib import Path
@@ -111,7 +112,7 @@ def test_core_command_deck_exposes_trust_and_guard_launchers(capsys) -> None:
     trust_out = capsys.readouterr().out
     # Agent alternation mirrors the vc-trust SKILL.md invocation canon
     # (cursor joined the fleet with full parity in 8373c26f).
-    assert "vibecrafted trust <claude|codex|agy|junie|grok|cursor>" in trust_out
+    assert "vibecrafted trust <claude|codex|agy|junie|grok|cursor|kimi>" in trust_out
     assert "version 1.0.0 · READ" in trust_out
 
     assert cli.main(["guard", "--help"]) == 0
@@ -2273,6 +2274,187 @@ def test_launch_workflow_refuses_on_trust_block(tmp_path: Path, monkeypatch) -> 
         assert "vc-guard" in str(exc) or "Remedium" in str(exc) or "block" in str(exc)
     else:
         raise AssertionError("launch_workflow must refuse on trust block")
+
+
+def test_guard_authorized_remediation_preserves_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path)
+    sha = _commit(repo, _unfair_message(), {"r.txt": "r\n"})
+    journal = tmp_path / "journal.jsonl"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "crafted"))
+    trust.note_verdict(
+        repo=repo,
+        journal=journal,
+        sha=sha,
+        verdict="block",
+        claims=[
+            {
+                "claim": "agent fairness",
+                "grade": "strong",
+                "evidence": "subject != Authored-By",
+            }
+        ],
+    )
+
+    blocked = guard.enforce_continuation(repo=repo, journal=journal, sha=sha)
+    assert blocked.allowed is False
+    assert blocked.blocking_verdict == "block"
+
+    with pytest.raises(ValueError, match="--remediation-reason"):
+        guard.parse_remediation_flags(remediating=True, reason="", task="repair")
+    with pytest.raises(ValueError, match="--remediation-task must be one of"):
+        guard.parse_remediation_flags(
+            remediating=True,
+            reason="Founder-authorized repair of the recorded BLOCK",
+            task="workflow",
+        )
+
+    authorized = guard.enforce_continuation(
+        repo=repo,
+        journal=journal,
+        sha=sha,
+        skill="workflow",
+        remediating=True,
+        remediation_reason="Founder-authorized repair of the recorded BLOCK",
+        remediation_task="repair",
+    )
+    assert authorized.allowed is True
+    assert authorized.reason == "authorized_trust_block_remediation"
+    assert authorized.blocking_verdict == "block"
+    assert authorized.blocking_sha == sha or authorized.blocking_sha.startswith(sha[:8])
+    assert authorized.remediation_authorized is True
+    disclosure = guard.launch_disclosure(authorized)
+    assert disclosure["trust_verdict_unchanged"] is True
+    assert disclosure["continuation"] == "authorized_remediation"
+    assert disclosure["remediation_task"] == "repair"
+
+    audit = guard.enforce_continuation(repo=repo, journal=journal, sha=sha)
+    assert audit.allowed is False
+    assert audit.blocking_verdict == "block"
+    assert (
+        guard.main(
+            ["--repo", str(repo), "--journal", str(journal), "check", "--sha", sha]
+        )
+        == 1
+    )
+    latest = guard.latest_trust_verdict(repo=repo, journal=journal, sha=sha)
+    assert latest is not None
+    assert latest["verdict"] == "block"
+
+    missing_block = guard.enforce_continuation(
+        repo=repo,
+        journal=tmp_path / "empty.jsonl",
+        skill="workflow",
+        remediating=True,
+        remediation_reason="Founder-authorized repair of the recorded BLOCK",
+        remediation_task="admission",
+    )
+    assert missing_block.allowed is False
+    assert missing_block.reason == "remediation_not_applicable"
+
+
+def test_launch_workflow_authorized_remediation_records_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path)
+    sha = _commit(repo, _unfair_message(), {"w.txt": "w\n"})
+    journal = tmp_path / "journal.jsonl"
+    crafted = tmp_path / "crafted"
+    crafted.mkdir()
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(crafted))
+    monkeypatch.setenv("VIBECRAFTED_GUARD", "1")
+    monkeypatch.setattr(trust, "default_journal_path", lambda: journal)
+    trust.note_verdict(
+        repo=repo,
+        journal=journal,
+        sha=sha,
+        verdict="block",
+        claims=[
+            {
+                "claim": "agent fairness",
+                "grade": "strong",
+                "evidence": "subject != Authored-By",
+            }
+        ],
+    )
+    real_enforce = guard.enforce_continuation
+
+    def _enforce(**kwargs):
+        kwargs = {**kwargs, "journal": journal, "repo": repo}
+        return real_enforce(**kwargs)
+
+    monkeypatch.setattr(guard, "enforce_continuation", _enforce)
+    monkeypatch.setattr(
+        workflow,
+        "_stdin_command",
+        lambda _agent: [sys.executable, "-c", "pass"],
+    )
+    monkeypatch.setattr(
+        workflow,
+        "_resolve_agent_command",
+        lambda _agent, command, _env: list(command),
+    )
+
+    unrelated = workflow.WorkflowLaunchSpec(
+        skill="implement",
+        agent="codex",
+        mode="prompt",
+        file="",
+        runtime="headless",
+        root=str(repo),
+        prompt="unrelated work without authorization",
+    )
+    try:
+        workflow.launch_workflow(unrelated, source_dir=repo)
+    except ValueError as exc:
+        assert "vc-guard" in str(exc) or "block" in str(exc)
+    else:
+        raise AssertionError("unrelated launch without authorization must stay blocked")
+
+    spec = workflow.WorkflowLaunchSpec(
+        skill="workflow",
+        agent="codex",
+        mode="prompt",
+        file="",
+        runtime="headless",
+        root=str(repo),
+        prompt="authorized repair of guard admission",
+        remediate_trust_block=True,
+        remediation_reason="Founder-authorized repair of the recorded BLOCK",
+        remediation_task="repair",
+    )
+    result = workflow.launch_workflow(spec, source_dir=repo)
+    assert result["accepted"] is True
+    receipt = workflow.machine_launch_receipt(result)
+    assert receipt["guard"]["blocking_verdict"] == "block"
+    assert receipt["guard"]["continuation"] == "authorized_remediation"
+    assert receipt["guard"]["remediation_task"] == "repair"
+    assert "Founder-authorized" in receipt["guard"]["remediation_reason"]
+    assert (
+        receipt["guard"]["blocking_sha"].startswith(sha[:8])
+        or receipt["guard"]["blocking_sha"] == sha
+    )
+    latest = guard.latest_trust_verdict(repo=repo, journal=journal, sha=sha)
+    assert latest is not None
+    assert latest["verdict"] == "block"
+
+
+def test_normalize_launch_spec_refuses_incomplete_remediation(
+    tmp_path: Path,
+) -> None:
+    repo = _init_repo(tmp_path)
+    with pytest.raises(ValueError, match="requires --remediation-reason"):
+        workflow.normalize_launch_spec(
+            {
+                "skill": "workflow",
+                "agent": "cursor",
+                "prompt": "fix admission",
+                "root": str(repo),
+                "remediate_trust_block": True,
+            },
+            repo,
+        )
 
 
 def test_settlement_mapping_closed_pass_f_gaps_n_block_x(tmp_path: Path) -> None:

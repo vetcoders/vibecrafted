@@ -178,6 +178,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   private var terminalRegistrationTimer: Timer?
   private var productUpdate: ProductUpdateCoordinator?
   private var productUpdatePanel: NSWindow?
+  /// The native server status window. Lazily built, never released when closed,
+  /// and re-rendered from `updateDeckPresentation` so an open window tracks the
+  /// same caretaker reading as the tray instead of freezing a modal snapshot.
+  private var serverStatusWindow: NSWindow?
+  private var serverStatusHosting: NSHostingView<ServerStatusView>?
   private var productUpdateStartupAdoption: ProductUpdateHandoffAdoption = .none
   /// Long-lived `vc-frame web` started from the App when `[tools.vc-frame]`
   /// names a loopback origin. Tabs never own this process; closing a tab does
@@ -214,6 +219,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
         fputs("Vibecrafted bootstrap failed: \(error)\n", stderr)
         exit(EXIT_FAILURE)
       }
+    }
+
+    if !claimUserAppInstanceOrHandoff() {
+      return
     }
 
     installLifecycleSignalHandlers()
@@ -731,7 +740,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       return
     }
     do {
-      try registerBundledFonts()
+      // No font registration happens here. The terminal family belongs to the
+      // consuming process: vc-terminal.app declares ATSApplicationFontsPath and
+      // resolves its own bundled Spot Mono. A CTFontManager `.session`
+      // registration made here reached every process in the login session and
+      // outranked the owner's own ~/Library/Fonts copy.
       let specification = try TerminalLauncher.Specification(
         generationRoot: install.root, terminal: install.terminal,
         terminalHost: install.terminalHost, primaryShell: install.primaryShell,
@@ -792,19 +805,36 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   /// The environment every generation-owned subprocess inherits: the tray's
   /// caretaker poll, the service actions and the workspace terminal all run
   /// with exactly this, so they can never address different roots.
+  ///
+  /// Guest, not landlord: the base is the user's own environment — the app is
+  /// launched from Finder/Dock, so this is the launchd user-session env, not a
+  /// login shell; `SSH_AUTH_SOCK`, the user's PATH and every user variable
+  /// flow through. Only the explicit deny-list below is scrubbed, then the
+  /// Vibecrafted pins overlay the result.
   private func composeRuntimeEnvironment(install: CanonicalRuntimeInstall) -> [String: String] {
     let host = ProcessInfo.processInfo.environment
-    let inherited = [
-      "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "COLORTERM", "TMPDIR",
-      "SHELL",
+    // The only variables scrubbed from the inherited environment, each with
+    // the reason it must not cross into the child. Everything else survives.
+    let denied: [String] = [
+      // Repoints python children at a foreign runtime's or test harness's
+      // module tree; the launched product must import its own generation.
+      "PYTHONPATH",
+      // Relocates the interpreter's stdlib and breaks any bundled python.
+      "PYTHONHOME",
+      // macOS framework-python breadcrumb pinning children to the invoking
+      // interpreter's launcher instead of their own resolution.
+      "__PYVENV_LAUNCHER__",
     ]
-    var environment = Dictionary(
-      uniqueKeysWithValues: inherited.compactMap { key in host[key].map { (key, $0) } })
+    var environment = host
+    for name in denied {
+      environment.removeValue(forKey: name)
+    }
     // The workspace terminal spawns agent CLIs (codex, gh, claude, loct) whose
-    // `#!/usr/bin/env` shebangs resolve against exactly this PATH. Amputating the
-    // caller's PATH down to the system set hides Homebrew, ~/.local/bin and
-    // ~/.cargo/bin, so those tools die with exit 127. Keep the host PATH first;
-    // the signed generation is a fallback, not a shadow of user-owned tools.
+    // `#!/usr/bin/env` shebangs resolve against exactly this PATH. The
+    // inherited PATH is never replaced: the generation's canonical bin is
+    // prepended so the runtime's own pinned tools resolve deterministically,
+    // and every user entry (Homebrew, ~/.local/bin, ~/.cargo/bin) survives
+    // behind it.
     environment["PATH"] = composedPath(
       generation: install.root, inherited: host["PATH"])
     environment["PYTHONNOUSERSITE"] = "1"
@@ -1081,18 +1111,30 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   /// so a refused or leased reconcile was indistinguishable from a successful
   /// one. Recovery ownership stays with the supervisor; this asks once,
   /// observes the answer and reports it.
+  private struct ControlPlaneReconcileError: Error, Equatable, Sendable {
+    let message: String
+  }
+
   private func reconcileControlPlaneEye(
-    install: CanonicalRuntimeInstall, environment: [String: String]
+    install: CanonicalRuntimeInstall,
+    environment: [String: String],
+    completion: (@MainActor (Result<Void, ControlPlaneReconcileError>) -> Void)? = nil
   ) {
     // One reconcile at a time: overlapping calls would race the supervisor's
     // install lease against itself.
+    func finish(_ result: Result<Void, ControlPlaneReconcileError>) {
+      completion?(result)
+    }
     guard eyeReconcileProcess?.isRunning != true else {
       lifecycleLog("service reconcile already in flight; not starting a second")
+      finish(.failure(ControlPlaneReconcileError(message: "LaunchAgent reconcile is already running.")))
       return
     }
     let deck = install.root.appendingPathComponent("bin/vibecrafted")
     guard FileManager.default.isExecutableFile(atPath: deck.path) else {
-      surfaceRuntimeAdvisory("The installed service owner is missing: \(deck.path)")
+      let message = "The installed service owner is missing: \(deck.path)"
+      surfaceRuntimeAdvisory(message)
+      finish(.failure(ControlPlaneReconcileError(message: message)))
       return
     }
     let epoch = runtimeResolveEpoch
@@ -1105,22 +1147,29 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
         [weak self] result in
         guard let self else { return }
         self.eyeReconcileProcess = nil
-        guard epoch == self.runtimeResolveEpoch else { return }
+        guard epoch == self.runtimeResolveEpoch else {
+          finish(.failure(ControlPlaneReconcileError(message: "Runtime identity changed while reconciling the LaunchAgent.")))
+          return
+        }
         guard result.clean, result.terminationStatus == 0 else {
           let detail = boundedResolverDiagnostic(stdout: result.stdout, stderr: result.stderr)
-          self.surfaceRuntimeAdvisory(
-            "The shared VC Server service could not be reconciled" + detail)
+          let message = "The shared VC Server service could not be reconciled" + detail
+          self.surfaceRuntimeAdvisory(message)
           self.renderServerStatus()
+          finish(.failure(ControlPlaneReconcileError(message: message)))
           return
         }
         self.runtimeAdvisory = nil
         lifecycleLog("shared service reconciled on \(install.root.lastPathComponent)")
         self.renderServerStatus()
+        finish(.success(()))
       }
       eyeReconcileProcess = process
     } catch {
-      surfaceRuntimeAdvisory(
-        "The shared VC Server service could not be reconciled: \(error.localizedDescription)")
+      let message =
+        "The shared VC Server service could not be reconciled: \(error.localizedDescription)"
+      surfaceRuntimeAdvisory(message)
+      finish(.failure(ControlPlaneReconcileError(message: message)))
     }
   }
 
@@ -1131,34 +1180,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     installLog.error("\(message, privacy: .public)")
     lifecycleLog(message)
     applyRuntimePackMenuState()
-  }
-
-  private func registerBundledFonts() throws {
-    let font = Bundle.main.bundleURL.appendingPathComponent(
-      "Contents/Resources/fonts/SpotMono.ttc")
-    guard FileManager.default.fileExists(atPath: font.path) else {
-      throw NSError(
-        domain: "io.vetcoders.vibecrafted.fonts", code: 1,
-        userInfo: [NSLocalizedDescriptionKey: "bundled SpotMono.ttc is missing"])
-    }
-
-    var registrationError: Unmanaged<CFError>?
-    if !CTFontManagerRegisterFontsForURL(font as CFURL, .session, &registrationError) {
-      let message =
-        registrationError?.takeRetainedValue().localizedDescription
-        ?? "CoreText rejected SpotMono.ttc"
-      // A system-installed Spot Mono can already occupy the session scope.
-      // Accept that case only when CoreText resolves the required family.
-      let descriptor = CTFontDescriptorCreateWithAttributes(
-        [kCTFontFamilyNameAttribute as String: "Spot Mono"] as CFDictionary)
-      guard let match = CTFontDescriptorCreateMatchingFontDescriptor(descriptor, nil),
-        CTFontDescriptorCopyAttribute(match, kCTFontFamilyNameAttribute) as? String == "Spot Mono"
-      else {
-        throw NSError(
-          domain: "io.vetcoders.vibecrafted.fonts", code: 2,
-          userInfo: [NSLocalizedDescriptionKey: message])
-      }
-    }
   }
 
   /// Read the revision tuple this signed bundle ships and record it for the
@@ -1398,13 +1419,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     return stdout
   }
 
-  /// Inherited PATH first, then the signed generation fallback; use the minimal
-  /// system set only when the caller carried no PATH at all.
+  /// The generation's canonical bin is prepended to the inherited PATH so the
+  /// runtime's own pinned tools resolve deterministically; every user entry
+  /// survives behind it, and the minimal system set is the floor only when the
+  /// caller carried no PATH at all.
   private func composedPath(generation: URL, inherited: String?) -> String {
     let generationBin = generation.appendingPathComponent("bin").path
     let head = (inherited ?? "").isEmpty ? "/usr/bin:/bin:/usr/sbin:/sbin" : inherited!
     let entries = head.split(separator: ":").map(String.init).filter { $0 != generationBin }
-    return (entries + [generationBin]).joined(separator: ":")
+    return ([generationBin] + entries).joined(separator: ":")
   }
 
   /// Surface a launch failure where the operator can actually see it: the unified
@@ -1420,6 +1443,63 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     alert.informativeText = message
     alert.addButton(withTitle: "OK")
     alert.runModal()
+  }
+
+  /// Process-wide single user-instance ownership. A later launch of a
+  /// displaced updater capture must activate `/Applications/Vibecrafted.app`
+  /// instead of installing a second menu icon. Special CLI flags are handled
+  /// before this runs. Never kills another process and never deletes backups.
+  @discardableResult
+  private func claimUserAppInstanceOrHandoff() -> Bool {
+    let identifier = Bundle.main.bundleIdentifier ?? AppInstanceOwnership.productBundleIdentifier
+    let selfPid = Int32(getpid())
+    let selfURL = Bundle.main.bundleURL
+    let peers = NSRunningApplication.runningApplications(withBundleIdentifier: identifier)
+      .compactMap { app -> AppInstancePeer? in
+        guard app.processIdentifier != selfPid, let url = app.bundleURL else { return nil }
+        return AppInstancePeer(pid: app.processIdentifier, bundleURL: url)
+      }
+    let lockURL = AppInstanceOwnership.lockFileURL(
+      bundleIdentifier: identifier, home: FileManager.default.homeDirectoryForCurrentUser)
+    let parsed = (try? String(contentsOf: lockURL, encoding: .utf8))
+      .flatMap(AppInstanceOwnership.parseLockRecord)
+    var live = Set(peers.map(\.pid))
+    live.insert(selfPid)
+    if let pid = parsed?.pid, kill(pid_t(pid), 0) == 0 {
+      live.insert(pid)
+    }
+    let decision = AppInstanceOwnership.decide(
+      AppInstanceContext(
+        selfPid: selfPid,
+        selfBundleURL: selfURL,
+        arguments: ProcessInfo.processInfo.arguments,
+        peers: peers,
+        lockOwnerPid: parsed?.pid,
+        livePids: live))
+    switch decision {
+    case .becomeOwner:
+      persistInstanceLock(lockURL, pid: Int32(selfPid), bundleURL: selfURL)
+      lifecycleLog("instance owner pid=\(selfPid) path=\(selfURL.path)")
+      return true
+    case .activateExisting(let pid, let url):
+      lifecycleLog("instance handoff pid=\(pid) path=\(url.path)")
+      if let other = NSRunningApplication(processIdentifier: pid) {
+        other.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        exit(EXIT_SUCCESS)
+      }
+      persistInstanceLock(lockURL, pid: Int32(selfPid), bundleURL: selfURL)
+      lifecycleLog("instance owner after stale peer pid=\(selfPid) path=\(selfURL.path)")
+      return true
+    }
+  }
+
+  /// Best-effort owner record. The installer owns Application Support layout;
+  /// this host never creates that directory (unified-app contract).
+  private func persistInstanceLock(_ lockURL: URL, pid: Int32, bundleURL: URL) {
+    let parent = lockURL.deletingLastPathComponent()
+    guard FileManager.default.fileExists(atPath: parent.path) else { return }
+    try? AppInstanceOwnership.lockRecord(pid: pid, bundleURL: bundleURL)
+      .write(to: lockURL, atomically: true, encoding: .utf8)
   }
 
   // MARK: - Main Menu
@@ -1563,6 +1643,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
         canStopRuntime: actions.contains(.requestStopRuntime),
         canShowDiagnostics: true, canQuitApp: true, runtimeActions: utilities),
       toolTip: "Vibecrafted — \(presentation.phase.rawValue). \(detail). \(runtimePack.header). \(runtimePack.detail)"))
+    // The open server status window consumes the same derivation as the tray,
+    // so a poll, a transition or a repair is reflected there immediately.
+    renderServerStatusWindow()
   }
 
   private func revealNativePath(_ url: URL) {
@@ -1592,7 +1675,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       terminalRevision: signedCarrierRevisions?.terminal,
       frameRevision: signedCarrierRevisions?.frame,
       runtimeHome: install.runtimeHome.path,
-      configHome: install.configHome.path)
+      xdgConfigHome: install.configHome.path)
     NSPasteboard.general.clearContents()
     NSPasteboard.general.setString(blob, forType: .string)
   }
@@ -1612,22 +1695,64 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     updateDeckPresentation()
     runConfigRepair(plan: true) { [weak self] outcome in
       guard let self else { return }
-      self.repairInFlight = false
-      self.updateDeckPresentation()
       switch outcome {
       case .repairable(let envelope), .conflict(let envelope), .repaired(let envelope):
+        self.repairInFlight = false
+        self.updateDeckPresentation()
         self.lastConfigRepair = envelope
         self.offerConfigurationRepair(envelope)
       case .healthy(let envelope):
         self.lastConfigRepair = envelope
-        self.offerRuntimePackReinstall(
-          configuration: "Configuration already matches the installed generation.")
+        self.reconcileLaunchAgentThenOfferReinstallIfNeeded(
+          note: "Configuration already matches the installed generation.")
       case .absent(let reason):
+        self.repairInFlight = false
+        self.updateDeckPresentation()
         self.offerRuntimePackReinstall(configuration: reason)
       case .unusable(let reason):
+        self.repairInFlight = false
+        self.updateDeckPresentation()
         self.offerRuntimePackReinstall(
           configuration: "Configuration could not be inspected: \(reason)")
       }
+    }
+  }
+
+  /// Config is already right. Restart still fails when the public launcher's
+  /// hash drifted from the installed LaunchAgent. Reconcile rewrites that
+  /// identity; pack reinstall stays a named last resort.
+  private func reconcileLaunchAgentThenOfferReinstallIfNeeded(note: String) {
+    guard let install = canonicalInstall, let environment = canonicalRuntimeEnvironment else {
+      repairInFlight = false
+      updateDeckPresentation()
+      offerRuntimePackReinstall(configuration: note)
+      return
+    }
+    reconcileControlPlaneEye(install: install, environment: environment) { [weak self] result in
+      guard let self else { return }
+      self.repairInFlight = false
+      self.updateDeckPresentation()
+      switch result {
+      case .success:
+        self.presentHealthyRepairResult(note: note)
+      case .failure(let detail):
+        self.offerRuntimePackReinstall(configuration: note + "\n\n" + detail.message)
+      }
+    }
+  }
+
+  private func presentHealthyRepairResult(note: String) {
+    let alert = NSAlert()
+    alert.alertStyle = .informational
+    alert.messageText = "Vibecrafted LaunchAgent"
+    alert.informativeText =
+      note
+      + "\n\nThe LaunchAgent now matches the current launcher. Restart uses that identity. "
+      + "Reinstalling the Runtime Pack is a separate, named action."
+    alert.addButton(withTitle: "OK")
+    alert.addButton(withTitle: "Reinstall Runtime…")
+    if alert.runModal() == .alertSecondButtonReturn {
+      offerRuntimePackReinstall(configuration: note)
     }
   }
 
@@ -1939,12 +2064,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
             data: result.stderr.isEmpty ? result.stdout : result.stderr, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             ?? "Canonical service owner exited \(result.terminationStatus)"
-          let alert = NSAlert()
-          alert.alertStyle = .critical
-          alert.messageText = "Vibecrafted could not \(action.rawValue) VC Server"
-          alert.informativeText = detail
-          alert.addButton(withTitle: "OK")
-          alert.runModal()
+          if detail.contains("launcher hash differs from the installed LaunchAgent") {
+            self.offerReconcileAfterServiceHashMismatch(action: action, detail: detail)
+          } else {
+            let alert = NSAlert()
+            alert.alertStyle = .critical
+            alert.messageText = "Vibecrafted could not \(action.rawValue) VC Server"
+            alert.informativeText = detail
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+          }
         }
         self.refreshServerStatus()
       }
@@ -1962,6 +2091,34 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       alert.messageText = "Vibecrafted could not \(action.rawValue) VC Server"
       alert.informativeText = error.localizedDescription
       alert.runModal()
+    }
+  }
+
+  /// Restart cannot rewrite the LaunchAgent. Hash drift is a reconcile job.
+  private func offerReconcileAfterServiceHashMismatch(
+    action: ServerLifecycleAction, detail: String
+  ) {
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = "Vibecrafted could not \(action.rawValue) VC Server"
+    alert.informativeText =
+      detail
+      + "\n\nRestart cannot rewrite the LaunchAgent. Reconcile updates it to the current launcher."
+    alert.addButton(withTitle: "OK")
+    alert.addButton(withTitle: "Reconcile LaunchAgent")
+    guard alert.runModal() == .alertSecondButtonReturn else { return }
+    guard let install = canonicalInstall, let environment = canonicalRuntimeEnvironment else {
+      return
+    }
+    repairInFlight = true
+    updateDeckPresentation()
+    reconcileControlPlaneEye(install: install, environment: environment) { [weak self] result in
+      guard let self else { return }
+      self.repairInFlight = false
+      self.updateDeckPresentation()
+      if case .failure(let reconcileError) = result {
+        self.offerRuntimePackReinstall(configuration: reconcileError.message)
+      }
     }
   }
 
@@ -2039,27 +2196,66 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   }
 
   @objc private func showServerDiagnostics() {
-    let envelope = decodeCaretakerEnvelope(data: lastCaretakerData)
-    let alert = NSAlert()
-    alert.alertStyle = envelope?.verdict?.health == "healthy" ? .informational : .warning
-    alert.messageText = "Vibecrafted Server"
-    var lines = caretakerDiagnosticsLines(data: lastCaretakerData)
-    if let configuration = lastConfigRepair {
-      lines.append("")
-      lines.append("Configuration")
-      lines.append(configRepairSummary(configuration))
+    if serverStatusWindow == nil {
+      // A utility window, not a modal: titled and closable only, never
+      // restorable, and sized by the SwiftUI content it hosts.
+      let window = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 480, height: 420),
+        styleMask: [.titled, .closable],
+        backing: .buffered, defer: false)
+      window.title = "Vibecrafted Server"
+      window.isReleasedWhenClosed = false
+      window.isRestorable = false
+      window.restorationClass = nil
+      let hosting = NSHostingView(rootView: serverStatusRootView())
+      window.contentView = hosting
+      // The window hugs its content and is not user-resizable, so the App owns
+      // the size: fit once here, and let AppKit track the hosting view's
+      // preferred size from then on — a finding appearing or the last error
+      // wrapping grows the panel instead of clipping it.
+      hosting.sizingOptions = [.preferredContentSize]
+      window.setContentSize(hosting.fittingSize)
+      window.center()
+      serverStatusWindow = window
+      serverStatusHosting = hosting
     }
-    if let conflict = lastPreferenceConflict {
-      lines.append("")
-      lines.append("Upgrade conflict")
-      lines.append(preferenceConflictDiagnostics(conflict))
-    }
-    alert.informativeText = lines.joined(separator: "\n")
-    alert.addButton(withTitle: "OK")
-    alert.addButton(withTitle: "Open Console")
-    if alert.runModal() == .alertSecondButtonReturn {
-      showMainWindowIfNeeded()
-    }
+    renderServerStatusWindow()
+    serverStatusWindow?.makeKeyAndOrderFront(nil)
+    NSApp.activate(ignoringOtherApps: true)
+  }
+
+  /// The window renders the same reading as the tray: one caretaker envelope,
+  /// one `deriveServerMenuState` call, plus the persisted configuration and
+  /// upgrade-conflict envelopes. Buttons forward to the exact paths the menu
+  /// items use, so no lifecycle flow exists twice.
+  private func serverStatusRootView() -> ServerStatusView {
+    let state = deriveServerMenuState(
+      caretakerData: lastCaretakerData,
+      actionInFlight: serverActionInFlight,
+      runtimeReady: canonicalInstall != nil)
+    return ServerStatusView(
+      state: state,
+      envelope: decodeCaretakerEnvelope(data: lastCaretakerData),
+      configuration: lastConfigRepair,
+      upgradeConflict: lastPreferenceConflict,
+      canOpenLogs: canonicalInstall != nil
+        && serverUtilityProcess?.isRunning != true
+        && runtimeActionPreflight == nil,
+      onStart: { [weak self] in self?.performServerAction(.start) },
+      onStop: { [weak self] in self?.handle(.requestStopRuntime) },
+      onRestart: { [weak self] in self?.performServerAction(.restart) },
+      onOpenConsole: { [weak self] in self?.showMainWindowIfNeeded() },
+      onOpenLogs: { [weak self] in self?.openServerLogsFromStatusItem() },
+      onRevealPath: { [weak self] path in
+        self?.revealNativePath(URL(fileURLWithPath: path))
+      },
+      onClose: { [weak self] in self?.serverStatusWindow?.close() })
+  }
+
+  private func renderServerStatusWindow() {
+    // Assigning rootView re-runs SwiftUI layout; `.preferredContentSize` on
+    // the hosting view carries any size change to the window.
+    serverStatusHosting?.rootView = serverStatusRootView()
   }
 
   @objc private func showStatusItemHelp() {

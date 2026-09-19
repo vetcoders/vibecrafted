@@ -36,7 +36,11 @@ import ast
 import ctypes
 import difflib
 import errno
-import fcntl
+
+try:
+    import fcntl
+except ImportError:  # native Windows
+    fcntl = None  # type: ignore[assignment]
 import hashlib
 import importlib
 import importlib.util
@@ -59,7 +63,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
@@ -150,6 +154,11 @@ vibecrafted_home = _runtime_paths.vibecrafted_home
 xdg_data_home = _runtime_paths.xdg_data_home
 xdg_config_home = _runtime_paths.xdg_config_home
 classify_vibecrafted_home_child = _runtime_paths.classify_vibecrafted_home_child
+launcher_name = _runtime_paths.launcher_name
+vibecrafted_product_config_home = _runtime_paths.vibecrafted_product_config_home
+is_windows = _runtime_paths.is_windows
+resolve_active_generation = _runtime_paths.resolve_active_generation
+GenerationResolutionError = _runtime_paths.GenerationResolutionError
 stage_distribution_payload = _distribution_manifest.stage_payload
 distribution_path_is_forbidden = _distribution_manifest.path_is_forbidden
 assert_source_payload_matches_provenance = (
@@ -158,6 +167,27 @@ assert_source_payload_matches_provenance = (
 load_source_provenance = _distribution_manifest.load_source_provenance
 resolve_source_provenance = _distribution_manifest.resolve_source_provenance
 DistributionManifestError = _distribution_manifest.ManifestError
+
+
+def _load_portable_lock() -> Any:
+    module_path = (
+        Path(__file__).resolve().parents[1]
+        / "vibecrafted-core"
+        / "vibecrafted_core"
+        / "portable_lock.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "vibecrafted_core.portable_lock", module_path
+    )
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load portable lock from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+if fcntl is None:
+    fcntl = _load_portable_lock()
 
 # ---------------------------------------------------------------------------
 # ANSI helpers
@@ -334,10 +364,13 @@ _ZSH_PLUGIN_SHARE_FILES: dict[str, tuple[str, ...]] = {
     "zsh-autosuggestions": (
         "/opt/homebrew/share/zsh-autosuggestions/zsh-autosuggestions.zsh",
         "/usr/local/share/zsh-autosuggestions/zsh-autosuggestions.zsh",
+        # Debian/Ubuntu apt packages install under /usr/share.
+        "/usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh",
     ),
     "zsh-syntax-highlighting": (
         "/opt/homebrew/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh",
         "/usr/local/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh",
+        "/usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh",
     ),
 }
 
@@ -670,7 +703,12 @@ OPTIONAL_DEPS = [
 
 OLD_SKILL_PREFIX = "vetcoders-"
 OLD_HELPER_NAME = "vetcoders-skills.zsh"
-SKILL_ROOT_RULE_FILES = ("VERIFICATION_RULE.md", "LIVING_TREE_RULE.md")
+SKILL_ROOT_RULE_FILES = (
+    "VERIFICATION_RULE.md",
+    "LIVING_TREE_RULE.md",
+    "DELEGATION_MATRIX.md",
+    "RUNTIME_FEEDBACK.md",
+)
 LOCALIZED_SKILL_RULE_DIRS = ("pl",)
 
 
@@ -706,6 +744,26 @@ SHADOWED_SKILL_VIEW_RUNTIMES = ("claude", "codex")
 # ~/.codex/skills — the canonical .agents view is invisible to them, so the
 # standard install must keep their views or the /vc-* deck goes dark.
 STANDARD_VIEW_RUNTIMES = [*SYMLINK_TARGETS, *SHADOWED_SKILL_VIEW_RUNTIMES]
+
+# A real directory (not a symlink) sitting at ~/.<runtime>/skills/<vc-skill> is
+# an artifact of a pre-3.x installer that materialized copies instead of views.
+# The vc-* name alone never proves ownership, and content markers only prove it
+# for skills generated after those tokens existed — measured against the real
+# June-2026 copies recovered from ~/.junie/skills, not one carried a marker.
+#
+# What every one of them does carry is a file history: every byte in the copy
+# exists as a blob in the Vibecrafted git history. So the bundle ships a
+# manifest of what we have actually released per skill — the sha256 of every
+# SKILL.md, and for every relative path under a real skill directory the git
+# blob id of every version of that file we ever committed. A copy is claimed as
+# ours only when its SKILL.md is a release we shipped AND every file it holds
+# is, byte for byte, a version of that same file we shipped. A path we shipped
+# is not enough: a name says nothing about content, and an operator's own
+# `scripts/await.sh` would otherwise inherit ours.
+# Regenerate with `scripts/gen_skill_provenance.py`.
+SKILL_PROVENANCE_FILE = "SKILL_PROVENANCE.json"
+SKILL_PROVENANCE_SCHEMA = "vibecrafted.skill-provenance.v3"
+SHADOW_QUARANTINE_PREFIX = "shadowed-views-"
 
 # ---------------------------------------------------------------------------
 # Install state
@@ -809,6 +867,24 @@ def _doctor_action_items(findings: Sequence[DoctorFinding]) -> list[str]:
         actions.append("enable tracking and restore: run the installer once")
     if any(finding.component.startswith("orphan:") for finding in issues):
         actions.append("clean bundle leftovers: re-run the installer")
+    if any(
+        finding.component.startswith("shadow-dir:")
+        or (finding.component.startswith("symlink:") and "is a COPY" in finding.message)
+        for finding in issues
+    ):
+        actions.append(
+            "reconcile stale runtime skill copies: "
+            "`vibecrafted update --force` (plain `update` stops at "
+            '"up to date" when the version already matches; unproven '
+            "copies are only reported, never removed)"
+        )
+    if any(finding.component.startswith("skill-root:") for finding in issues):
+        actions.append(
+            "a runtime skill root is a link, so it is audited by nobody: "
+            "inspect it yourself (`ls -l ~/.<runtime>/skills`) and replace it "
+            "with a real directory if you want that runtime reconciled — "
+            "the installer never removes anything behind such a link"
+        )
     if not actions:
         actions.append("review the warnings above, then re-run `vibecrafted doctor`")
     return actions
@@ -1446,11 +1522,21 @@ def _backup_root(store_path: Path) -> Path:
     return vibecrafted_backups_home()
 
 
+def _copy_pointer(src: Path, dst: Path) -> None:
+    """Copy a unix symlink or Windows directory junction without following it."""
+    if sys.platform == "win32" and _is_owned_pointer(src):
+        raw = Path(os.readlink(src))
+        target = raw if raw.is_absolute() else (src.parent / raw)
+        _atomic_junction(target.resolve(strict=False), dst)
+        return
+    dst.symlink_to(os.readlink(src))
+
+
 def _copy_path_to_backup(src: Path, dst: Path) -> None:
-    """Copy `src` (symlink, dir, or file) into the backup tree at `dst`, preserving symlinks."""
+    """Copy `src` (symlink, junction, dir, or file) into the backup tree at `dst`."""
     dst.parent.mkdir(parents=True, exist_ok=True)
-    if src.is_symlink():
-        dst.symlink_to(os.readlink(src))
+    if src.is_symlink() or _is_owned_pointer(src):
+        _copy_pointer(src, dst)
     elif src.is_dir():
         shutil.copytree(src, dst, symlinks=True)
     elif src.is_file():
@@ -1460,14 +1546,11 @@ def _copy_path_to_backup(src: Path, dst: Path) -> None:
 def _restore_path_from_backup(src: Path, dst: Path) -> None:
     """Restore `dst` from a backed-up `src`, replacing whatever currently occupies `dst`."""
     dst.parent.mkdir(parents=True, exist_ok=True)
-    if dst.exists() or dst.is_symlink():
-        if dst.is_symlink() or dst.is_file():
-            dst.unlink()
-        else:
-            shutil.rmtree(dst)
+    if _path_present(dst):
+        _remove_path(dst)
 
-    if src.is_symlink():
-        dst.symlink_to(os.readlink(src))
+    if src.is_symlink() or _is_owned_pointer(src):
+        _copy_pointer(src, dst)
     elif src.is_dir():
         shutil.copytree(src, dst, symlinks=True)
     elif src.is_file():
@@ -1547,8 +1630,8 @@ print(f"Restored {restored} managed paths from {backup_dir}")
 
 
 def _path_present(path: Path) -> bool:
-    """True if `path` exists as a real file/dir or as a (possibly dangling) symlink."""
-    return path.exists() or path.is_symlink()
+    """True if `path` exists as a real file/dir or as a (possibly dangling) pointer."""
+    return path.exists() or path.is_symlink() or _is_owned_pointer(path)
 
 
 def _teardown_backup_records(inventory: Sequence[ManagedPath]) -> list[ManagedPath]:
@@ -1665,6 +1748,383 @@ def collect_orphaned_skills(
     return orphans
 
 
+@dataclass(frozen=True)
+class ShadowedSkillDir:
+    """One real-directory skill copy shadowing the canonical `.agents` view.
+
+    `classification` is one of `managed_identical` (byte-identical to the store
+    copy), `managed_stale` (differs, but provenance is proven) or `unknown`
+    (provenance cannot be proven — never removed automatically).
+    """
+
+    runtime: str
+    skill: str
+    path: Path
+    classification: str
+    detail: str
+
+    @property
+    def is_managed(self) -> bool:
+        """True when provenance is proven and reconciliation may remove the copy."""
+        return self.classification in ("managed_identical", "managed_stale")
+
+
+def _skill_fingerprint_ignored(rel_parts: tuple[str, ...]) -> bool:
+    """True for editor/interpreter litter that must not decide skill-copy identity."""
+    if any(part == "__pycache__" for part in rel_parts):
+        return True
+    name = rel_parts[-1]
+    return name == ".DS_Store" or name.endswith(".pyc")
+
+
+def _skill_tree_fingerprint(root: Path) -> dict[str, str]:
+    """Map each path under `root` to a content digest, ignoring editor litter.
+
+    Directory symlinks are recorded by their raw target and never descended
+    into, so a looping link inside a skill copy cannot hang the walk.
+    """
+    fingerprint: dict[str, str] = {}
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames[:] = sorted(name for name in dirnames if name != "__pycache__")
+        base = Path(dirpath)
+        for name in [*dirnames, *sorted(filenames)]:
+            path = base / name
+            rel_parts = path.relative_to(root).parts
+            if _skill_fingerprint_ignored(rel_parts):
+                continue
+            rel = "/".join(rel_parts)
+            if path.is_symlink():
+                fingerprint[rel] = f"link:{os.readlink(path)}"
+            elif path.is_dir():
+                fingerprint[rel] = "dir"
+            elif path.is_file():
+                try:
+                    fingerprint[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+                except OSError:
+                    fingerprint[rel] = "unreadable"
+    return fingerprint
+
+
+def _skill_copy_entries(root: Path) -> list[tuple[str, Path]]:
+    """Every non-directory entry under `root`, as `(relative path, path)`.
+
+    Editor litter is skipped exactly as in `_skill_tree_fingerprint`, and a
+    symlink is listed but never descended into: a link inside a copy is content
+    that has to be provable like any other entry, and following it could walk
+    out of the copy or loop forever.
+    """
+    found: list[tuple[str, Path]] = []
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        base = Path(dirpath)
+        descend: list[str] = []
+        for name in sorted(dirnames):
+            if name == "__pycache__":
+                continue
+            path = base / name
+            if path.is_symlink():
+                found.append(("/".join(path.relative_to(root).parts), path))
+            else:
+                descend.append(name)
+        dirnames[:] = descend
+        for name in sorted(filenames):
+            path = base / name
+            rel_parts = path.relative_to(root).parts
+            if _skill_fingerprint_ignored(rel_parts):
+                continue
+            found.append(("/".join(rel_parts), path))
+    return sorted(found)
+
+
+def _git_blob_id(data: bytes) -> str:
+    """The git blob id of `data` — sha1 over git's own object header.
+
+    This is what lets the manifest carry blob ids straight out of
+    `git log --raw` and still be checkable on a machine with no git, no
+    repository and no network: `git hash-object` is this one line.
+    """
+    # sha1 is not a choice here: a git blob id IS sha1 over that header, so
+    # this is an identifier in someone else's format, never a signature of
+    # ours. `usedforsecurity=False` says so to OpenSSL (and keeps it working
+    # under FIPS); the rule is silenced by id on this line alone.
+    return hashlib.sha1(  # nosemgrep: python.lang.security.insecure-hash-algorithms.insecure-hash-algorithm-sha1
+        b"blob %d\0" % len(data) + data, usedforsecurity=False
+    ).hexdigest()
+
+
+def _skill_md_sha256(skill_dir: Path) -> str | None:
+    """sha256 of `skill_dir`'s SKILL.md, or None when it cannot be read."""
+    try:
+        return hashlib.sha256((skill_dir / "SKILL.md").read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+@dataclass(frozen=True)
+class SkillProvenance:
+    """What Vibecrafted has ever released for one skill.
+
+    `sha256` holds every SKILL.md digest ever shipped. `files` maps each
+    relative path under a real skill directory to the git blob id of every
+    version of that file we ever committed — the bytes, not just the name.
+    """
+
+    sha256: frozenset[str] = frozenset()
+    files: Mapping[str, frozenset[str]] = field(default_factory=dict)
+
+
+def _string_set(value: object) -> frozenset[str]:
+    """Coerce an untrusted manifest list into a set of strings."""
+    if not isinstance(value, list):
+        return frozenset()
+    return frozenset(item for item in value if isinstance(item, str))
+
+
+def _released_files(value: object) -> dict[str, frozenset[str]]:
+    """Coerce an untrusted manifest object into `relpath → blob id set`."""
+    if not isinstance(value, dict):
+        return {}
+    return {
+        name: _string_set(ids)
+        for name, ids in value.items()
+        if isinstance(name, str) and isinstance(ids, list)
+    }
+
+
+def unproven_skill_copy_reason(copy_dir: Path, released: SkillProvenance) -> str | None:
+    """Why `copy_dir` is not a Vibecrafted release, or None when it is one.
+
+    One proof, used for both a copy shadowing a view and an orphan whose name
+    has left the bundle, because both decisions are the same decision: may the
+    installer delete this directory?
+
+    Two conditions, and the second is the one that costs work. The SKILL.md has
+    to hash into the set of releases we shipped — a hash we never shipped means
+    its owner edited it. And every entry in the copy has to be a plain file
+    whose bytes are a version of that same file we committed. Matching the path
+    alone would claim an operator's own `scripts/await.sh` on the strength of
+    its name; a symlink or anything else that is not a regular file is not a
+    shape we ship inside a materialized copy, so it withdraws the claim too.
+    """
+    digest = _skill_md_sha256(copy_dir)
+    if not digest:
+        return "SKILL.md is missing or unreadable"
+    if digest not in released.sha256:
+        return "SKILL.md is not a Vibecrafted release; its owner edited it"
+    for rel, path in _skill_copy_entries(copy_dir):
+        if path.is_symlink():
+            return f"{rel!r} is a symlink, which a release never ships as a copy"
+        if not path.is_file():
+            return f"{rel!r} is not a regular file"
+        known = released.files.get(rel)
+        if not known:
+            return f"{rel!r} was never shipped with this skill"
+        try:
+            blob = _git_blob_id(path.read_bytes())
+        except OSError:
+            return f"{rel!r} cannot be read"
+        if blob not in known:
+            return f"{rel!r} differs from every version Vibecrafted shipped"
+    return None
+
+
+def load_skill_provenance(store_path: Path) -> dict[str, SkillProvenance]:
+    """Read the shipped release manifest: skill name → `SkillProvenance`.
+
+    A missing, unreadable, corrupt or foreign-schema manifest yields an empty
+    map — including a manifest of an older schema, whose entries carry weaker
+    evidence than this version requires and would therefore claim copies it
+    cannot vouch for. The proof only ever *adds* certainty, so its absence must
+    degrade to "no proof", never to an installer traceback on someone's machine.
+    """
+    try:
+        data = json.loads(
+            (store_path / SKILL_PROVENANCE_FILE).read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict) or data.get("schema") != SKILL_PROVENANCE_SCHEMA:
+        return {}
+    skills = data.get("skills")
+    if not isinstance(skills, dict):
+        return {}
+    manifest: dict[str, SkillProvenance] = {}
+    for name, entry in skills.items():
+        if not isinstance(name, str) or not isinstance(entry, dict):
+            continue
+        manifest[name] = SkillProvenance(
+            _string_set(entry.get("sha256")), _released_files(entry.get("files"))
+        )
+    return manifest
+
+
+def _path_is_symlink_free(path: Path) -> bool:
+    """True when neither `path` nor any ancestor below the home dir is a pointer.
+
+    A pointer ancestor turns a per-runtime skill dir into a window onto another
+    tree — `ln -s ~/.vibecrafted/skills ~/.junie/skills` is the obvious manual
+    workaround for the junie gap — and `shutil.rmtree` follows it. A Windows
+    directory junction does exactly the same thing while reporting
+    `is_symlink() == False`, so the walk asks `_is_owned_pointer`, which knows
+    both. Only the operator-owned span between `$HOME` and the entry is
+    inspected; the system path above `$HOME` is not ours to judge.
+    """
+    home = Path.home()
+    current = path
+    for _ in range(64):
+        if _is_owned_pointer(current):
+            return False
+        parent = current.parent
+        if parent == current or current == home:
+            return True
+        current = parent
+    return False
+
+
+def shadow_candidate_runtimes() -> list[str]:
+    """Agent runtimes whose skill dir may hold a copy shadowing the `.agents` view."""
+    return [rt for rt in AGENT_RUNTIMES if rt not in SYMLINK_TARGETS]
+
+
+def _runtime_skills_root_in_store(runtime: str, store_path: Path) -> bool:
+    """True when `<runtime>`'s skills root is, or lies inside, the skill store."""
+    rt_resolved = runtime_skills_dir(runtime).resolve(strict=False)
+    store_resolved = store_path.resolve(strict=False)
+    return rt_resolved == store_resolved or store_resolved in rt_resolved.parents
+
+
+def runtime_skills_root_problem(runtime: str, store_path: Path) -> str | None:
+    """Short reason why `<runtime>`'s skills root is not ours to judge, else None.
+
+    Two shapes disqualify a root, and neither is visible in the path itself.
+    `ln -s ~/.vibecrafted/skills ~/.junie/skills` — the obvious manual
+    workaround for the junie gap — makes the root resolve into the canonical
+    store, so comparing the store with itself would classify every skill as an
+    identical copy and a view written there would be a symlink inside the store
+    aimed at its own sibling. `~/.junie/skills -> ~/notes` (or a Windows
+    junction doing the same) makes every entry under it part of a tree the
+    operator keeps for another purpose, and `shutil.rmtree` follows the pointer.
+
+    Detection skips such a root either way. The value of saying so out loud is
+    that the skip is otherwise indistinguishable from a clean host: the
+    installer reports nothing, removes nothing, and the operator has no way to
+    tell that the directory was never looked at.
+
+    None means an ordinary directory (or nothing yet) under `$HOME` — the one
+    shape the installer owns.
+    """
+    rt_skills = runtime_skills_dir(runtime)
+    # The store case first: it is the more specific diagnosis, and a root
+    # linked into the store fails the pointer check as well.
+    if _runtime_skills_root_in_store(runtime, store_path):
+        return (
+            f"resolves into the canonical skill store "
+            f"({rt_skills.resolve(strict=False)})"
+        )
+    if not _path_is_symlink_free(rt_skills):
+        return f"is reached through a link into {rt_skills.resolve(strict=False)}"
+    return None
+
+
+def collect_shadowed_skill_dirs(
+    store_path: Path,
+    skill_names: Sequence[str],
+    runtimes: Sequence[str] | None = None,
+) -> list[ShadowedSkillDir]:
+    """Find real-directory copies of bundled skills inside per-runtime skill dirs.
+
+    Pure detection: the canonical `.agents` view is never a candidate, symlinked
+    views belong to `prune_shadowed_skill_views`, and provenance is derived from
+    content only — either the copy is byte-identical to the store copy, or the
+    shipped `SKILL_PROVENANCE_FILE` proves its SKILL.md and the bytes of every
+    file in it against what Vibecrafted has released.
+
+    A real *file* under a skill name is reported too, always as `unknown`. It is
+    never something we shipped — a view is a link and a legacy copy is a
+    directory — so it is someone's own note, and the one thing to do with it is
+    say where it is. Doctor was silent about it while the view writer stood
+    ready to remove it.
+
+    A runtime whose skill dir is reached through a symlink, or which resolves
+    into the store itself, is skipped outright: comparing the store with itself
+    would classify every skill as an identical copy, and removing it would take
+    the canonical store with it. The skip stays silent here — detection is
+    pure — and `runtime_skills_root_problem` is what the writer and doctor
+    report so the skip is not mistaken for a clean host.
+    """
+    candidates = (
+        shadow_candidate_runtimes()
+        if runtimes is None
+        else list(dict.fromkeys(runtimes))
+    )
+    shadows: list[ShadowedSkillDir] = []
+    provenance = load_skill_provenance(store_path)
+
+    for runtime in candidates:
+        if runtime in SYMLINK_TARGETS:
+            continue
+        rt_skills = runtime_skills_dir(runtime)
+        if not rt_skills.is_dir():
+            continue
+        if runtime_skills_root_problem(runtime, store_path) is not None:
+            continue
+        for skill_name in skill_names:
+            shadow = rt_skills / skill_name
+            if shadow.is_symlink():
+                continue
+            if shadow.is_file():
+                shadows.append(
+                    ShadowedSkillDir(
+                        runtime,
+                        skill_name,
+                        shadow,
+                        "unknown",
+                        "regular file, kept: a skill view is a link and a "
+                        "legacy copy is a directory, so this is your own file",
+                    )
+                )
+                continue
+            if not shadow.is_dir():
+                continue
+            expected = store_path / skill_name
+            if not expected.is_dir():
+                # Nothing canonical to defer to; orphan pruning owns this name.
+                continue
+            if shadow.resolve(strict=False) == expected.resolve(strict=False):
+                # Not a copy at all — the store copy seen through a link.
+                continue
+            if _skill_tree_fingerprint(shadow) == _skill_tree_fingerprint(expected):
+                shadows.append(
+                    ShadowedSkillDir(
+                        runtime,
+                        skill_name,
+                        shadow,
+                        "managed_identical",
+                        f"identical copy of {expected}",
+                    )
+                )
+                continue
+            unproven = unproven_skill_copy_reason(
+                shadow, provenance.get(skill_name, SkillProvenance())
+            )
+            if unproven is not None:
+                shadows.append(
+                    ShadowedSkillDir(runtime, skill_name, shadow, "unknown", unproven)
+                )
+                continue
+            shadows.append(
+                ShadowedSkillDir(
+                    runtime,
+                    skill_name,
+                    shadow,
+                    "managed_stale",
+                    f"differs from {expected}; SKILL.md matches a historical "
+                    f"Vibecrafted release and every file in it is byte for byte "
+                    f"a version we shipped",
+                )
+            )
+    return shadows
+
+
 def create_backup(
     store_path: Path,
     runtimes: list[str],
@@ -1721,9 +2181,7 @@ def create_backup(
 
     # Back up helper files from either provided manifest or current helper files.
     if helper_entries is None:
-        helper_paths = [
-            p for p in (_helper_target_path(), _helper_legacy_path()) if p.exists()
-        ]
+        helper_paths = [p for p in (_helper_target_path(),) if p.exists()]
     else:
         helper_paths = []
         for raw_helper in helper_entries:
@@ -1779,19 +2237,16 @@ def create_backup(
 
 
 def _helper_target_path() -> Path:
-    """Canonical shell-helper shim path under XDG config (vetcoders/vc-skills.sh)."""
-    config_dir = xdg_config_home() / "vetcoders"
-    return config_dir / "vc-skills.sh"
+    """Opt-in shell-helper shim in the product shell tree (vibecrafted/shell/vc-skills.sh).
 
-
-def _helper_legacy_path() -> Path:
-    """Legacy compat shell-helper path under XDG config (zsh/vc-skills.zsh)."""
-    config_dir = xdg_config_home() / "zsh"
-    return config_dir / "vc-skills.zsh"
+    Product configuration lives only under ``~/.config/vibecrafted``; no other
+    config directory is a helper location or a fallback.
+    """
+    return xdg_config_home() / "vibecrafted" / "shell" / "vc-skills.sh"
 
 
 def _shell_source_line() -> str:
-    """Source line works in both bash and zsh."""
+    """Retired host-shell source line, kept only so rc cleanup can recognise and strip it."""
     return '[[ -r "${XDG_CONFIG_HOME:-$HOME/.config}/vetcoders/vc-skills.sh" ]] && source "${XDG_CONFIG_HOME:-$HOME/.config}/vetcoders/vc-skills.sh"'
 
 
@@ -1803,14 +2258,11 @@ def _old_zshrc_source_line() -> str:
 def _helper_surface_label(*, zsh_available: bool | None = None) -> str:
     """Human label describing which shell-helper surface (if any) is currently installed."""
     helper_file = _helper_target_path()
-    legacy_file = _helper_legacy_path()
     if zsh_available is None:
         zsh_available = shutil.which("zsh") is not None
 
     if helper_file.exists():
         return "bash + zsh" if zsh_available else "bash only"
-    if legacy_file.exists():
-        return "compat zsh"
     return "not installed"
 
 
@@ -2393,34 +2845,13 @@ def _snapshot_helper_file(path: Path) -> bool:
     return HELPER_SHIM_MARKER in text
 
 
-def _snapshot_legacy_helper_link(path: Path) -> bool:
-    """True if `path` is a symlink pointing at the canonical helper shim target."""
-    if not path.is_symlink():
-        return False
-    try:
-        target = Path(os.readlink(path))
-    except OSError:
-        return False
-    if not target.is_absolute():
-        target = path.parent / target
-    return target == _helper_target_path()
-
-
 def _snapshot_helper_files() -> list[str]:
-    """Snapshot the helper file paths (canonical and/or legacy) currently installed."""
+    """Snapshot the helper shim path when it is currently installed."""
     helper_files: list[str] = []
     helper_file = _helper_target_path()
-    legacy_file = _helper_legacy_path()
 
     if _snapshot_helper_file(helper_file) or helper_file.exists():
         helper_files.append(str(helper_file))
-
-    if (
-        _snapshot_legacy_helper_link(legacy_file)
-        or legacy_file.exists()
-        and _snapshot_helper_file(legacy_file)
-    ):
-        helper_files.append(str(legacy_file))
 
     return helper_files
 
@@ -2551,6 +2982,7 @@ LAUNCHER_WRAPPERS = [
     "vc-status",
     "vc-update",
     "vc-receipt",
+    "vc-scaffold-doctor",
     "vc-agents",
     "telemetry",
     *[f"vc-{name}" for name in SKILL_WRAPPER_NAMES],
@@ -2639,6 +3071,10 @@ def _launcher_bin_dirs() -> list[Path]:
 def _find_launcher_wrapper(name: str) -> Path | None:
     """Find `name` under any managed launcher bin dir; None if not present anywhere."""
     for launcher_bin_dir in _launcher_bin_dirs():
+        if sys.platform == "win32":
+            cmd = launcher_bin_dir / f"{name}.cmd"
+            if cmd.exists() or cmd.is_symlink():
+                return cmd
         candidate = launcher_bin_dir / name
         if candidate.exists() or candidate.is_symlink():
             return candidate
@@ -2860,17 +3296,9 @@ def scan_helper_conflicts() -> dict[Path, list[HelperConflict]]:
     default = _helper_target_path()
     conflicts: dict[Path, list[HelperConflict]] = {}
 
-    search_dirs = []
-    config_base = xdg_config_home()
-    for subdir in ("vetcoders", "zsh"):
-        candidate = config_base / subdir
-        if candidate.is_dir():
-            search_dirs.append(candidate)
-
+    # Only shell startup files are scanned: no other config directory, retired
+    # sibling or private, is read.
     files_to_scan: list[Path] = []
-    for d in search_dirs:
-        files_to_scan.extend(d.glob("*.sh"))
-        files_to_scan.extend(d.glob("*.zsh"))
     for rcfile in (".zshrc", ".bashrc"):
         rc = Path.home() / rcfile
         if rc.exists():
@@ -3020,11 +3448,14 @@ def rsync_skill(
 
 
 def _remove_path(path: Path) -> None:
-    """Delete `path`, whether it is a symlink, regular file, or directory tree."""
+    """Delete `path`, whether it is a symlink, junction, regular file, or directory tree."""
+    if _is_owned_pointer(path) and not path.is_symlink():
+        path.rmdir()
+        return
     if path.is_symlink() or path.is_file():
         path.unlink()
     elif path.is_dir():
-        shutil.rmtree(path)
+        _remove_owned_temporary_tree(path)
 
 
 _TOOLS_HANDOFF_SCHEMA = "vibecrafted.tools-handoff.v1"
@@ -3547,7 +3978,7 @@ def _validate_tools_lease_descriptor(descriptor: int, lock_path: Path) -> None:
         ) from exc
     if (
         not stat.S_ISREG(opened.st_mode)
-        or opened.st_uid != os.geteuid()
+        or not _owned_by_effective_user(opened)
         or opened.st_nlink != 1
         or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
     ):
@@ -3561,7 +3992,9 @@ def _tools_lease_owner(descriptor: int) -> str:
     placeholder.
     """
     try:
-        raw = os.pread(descriptor, 4096, 0).decode("utf-8", errors="replace").strip()
+        raw = (
+            _pread_bytes(descriptor, 4096, 0).decode("utf-8", errors="replace").strip()
+        )
         payload = json.loads(raw)
     except (OSError, json.JSONDecodeError):
         return "owner metadata unavailable"
@@ -3631,6 +4064,7 @@ def _tools_install_lease(
         lock_path,
         os.O_RDWR
         | os.O_CREAT
+        | getattr(os, "O_BINARY", 0)
         | getattr(os, "O_CLOEXEC", 0)
         | getattr(os, "O_NOFOLLOW", 0),
         0o600,
@@ -4745,6 +5179,16 @@ def _teardown_owned_runtime_for_uninstall(
     shared_home: Path, *, dry_run: bool, app_root: Path | None = None
 ) -> tuple[str, ...]:
     """Stop the owned service plane and retired vc-frame processes before deleting files."""
+    if sys.platform == "win32":
+        _ = shared_home, app_root
+        if dry_run:
+            return ("stop vc-server",)
+        try:
+            from vibecrafted_core.windows_server import uninstall_windows_server
+
+            return tuple(uninstall_windows_server() or ())
+        except Exception:  # noqa: BLE001  # service teardown never blocks uninstall
+            return ()
     if sys.platform != "darwin":
         return ()
     actions: list[str] = []
@@ -7003,18 +7447,111 @@ def run_with_tools_install_lease(
         return 126
 
 
+def _pread_bytes(descriptor: int, size: int, offset: int) -> bytes:
+    """Read ``size`` bytes at ``offset`` without requiring POSIX ``os.pread``."""
+    probe = getattr(os, "pread", None)
+    if callable(probe):
+        return probe(descriptor, size, offset)
+    position = os.lseek(descriptor, 0, os.SEEK_CUR)
+    try:
+        os.lseek(descriptor, offset, os.SEEK_SET)
+        return os.read(descriptor, size)
+    finally:
+        os.lseek(descriptor, position, os.SEEK_SET)
+
+
+def _windows_path_without_extended_prefix(path: Path) -> Path:
+    """Strip ``\\\\?\\`` so junction targets compare equal to Path.resolve()."""
+    if sys.platform != "win32":
+        return path
+    text = os.fspath(path)
+    if text.startswith(("\\\\?\\UNC\\", "//?/UNC/")):
+        text = "\\\\" + text[8:]
+    elif text.startswith(("\\\\?\\", "//?/")):
+        text = text[4:]
+    return Path(text)
+
+
 def _symlink_target(path: Path) -> Path | None:
-    """Resolve a symlink's absolute target, or None if `path` is not a symlink."""
-    if not path.is_symlink():
+    """Return the resolved target of a symlink or junction, or None."""
+    if not path.is_symlink() and not _is_owned_pointer(path):
         return None
     raw_target = Path(os.readlink(path))
     if not raw_target.is_absolute():
         raw_target = path.parent / raw_target
-    return raw_target.resolve(strict=False)
+    return _windows_path_without_extended_prefix(raw_target.resolve(strict=False))
+
+
+def _is_owned_pointer(path: Path) -> bool:
+    """True for a unix symlink or a Windows directory junction."""
+    if path.is_symlink():
+        return True
+    junction = getattr(path, "is_junction", None)
+    try:
+        return bool(junction()) if callable(junction) else False
+    except OSError:
+        return False
+
+
+def _effective_uid() -> int | None:
+    """POSIX effective uid, or None where the platform has no geteuid."""
+    probe = getattr(os, "geteuid", None)
+    if not callable(probe):
+        return None
+    return int(probe())
+
+
+def _owned_by_effective_user(metadata: os.stat_result) -> bool:
+    """Unix uid ownership. Windows has no geteuid; NTFS ACLs are not this check."""
+    uid = _effective_uid()
+    if uid is None:
+        return True
+    return metadata.st_uid == uid
+
+
+def _fsync_directory(path: Path) -> None:
+    """Best-effort directory fsync. Windows cannot open directories for fsync."""
+    if sys.platform == "win32":
+        return
+    directory = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def _atomic_junction(target: Path, link: Path) -> None:
+    """Publish a directory junction (no unix symlink, no administrator token)."""
+    canonical_target = target.resolve(strict=True)
+    if not canonical_target.is_dir():
+        raise OSError(f"junction target is not a directory: {canonical_target}")
+    link.parent.mkdir(parents=True, exist_ok=True)
+    if link.exists() or link.is_symlink() or _is_owned_pointer(link):
+        if not _is_owned_pointer(link):
+            raise OSError(
+                f"cannot atomically publish over non-pointer runtime root: {link}"
+            )
+        _remove_path(link)
+    completed = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link), str(canonical_target)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if completed.returncode != 0 or not link.exists():
+        detail = (completed.stderr or completed.stdout or "").strip()
+        raise OSError(
+            f"cannot publish runtime junction {link} -> {canonical_target}: {detail}"
+        )
 
 
 def _atomic_symlink(target: Path, link: Path) -> None:
     """Publish ``link`` in one rename without ever removing its old target."""
+    if sys.platform == "win32":
+        _atomic_junction(target, link)
+        return
     canonical_target = target.resolve(strict=True)
     link.parent.mkdir(parents=True, exist_ok=True)
     if link.exists() and not link.is_symlink():
@@ -7047,6 +7584,7 @@ def _atomic_json_file(path: Path, payload: dict[str, Any]) -> None:
             os.O_WRONLY
             | os.O_CREAT
             | os.O_EXCL
+            | getattr(os, "O_BINARY", 0)
             | getattr(os, "O_CLOEXEC", 0)
             | getattr(os, "O_NOFOLLOW", 0),
             0o600,
@@ -7060,14 +7598,7 @@ def _atomic_json_file(path: Path, payload: dict[str, Any]) -> None:
         finally:
             os.close(descriptor)
         os.replace(temporary, path)
-        directory = os.open(
-            path.parent,
-            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
-        )
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        _fsync_directory(path.parent)
     finally:
         if temporary.exists() or temporary.is_symlink():
             temporary.unlink()
@@ -7082,7 +7613,7 @@ def _atomic_bytes_file(path: Path, contents: bytes, *, mode: int) -> None:
     if (
         path.parent.is_symlink()
         or not stat.S_ISDIR(parent.st_mode)
-        or parent.st_uid != os.geteuid()
+        or not _owned_by_effective_user(parent)
     ):
         raise OSError(f"refusing atomic write through foreign directory {path.parent}")
     if path.exists() or path.is_symlink():
@@ -7090,7 +7621,7 @@ def _atomic_bytes_file(path: Path, contents: bytes, *, mode: int) -> None:
         if (
             path.is_symlink()
             or not stat.S_ISREG(current.st_mode)
-            or current.st_uid != os.geteuid()
+            or not _owned_by_effective_user(current)
         ):
             raise OSError(f"refusing atomic write over foreign path {path}")
     temporary = path.parent / (f".{path.name}.tmp-{os.getpid()}-{os.urandom(6).hex()}")
@@ -7101,11 +7632,14 @@ def _atomic_bytes_file(path: Path, contents: bytes, *, mode: int) -> None:
             os.O_WRONLY
             | os.O_CREAT
             | os.O_EXCL
+            | getattr(os, "O_BINARY", 0)
             | getattr(os, "O_CLOEXEC", 0)
             | getattr(os, "O_NOFOLLOW", 0),
             0o600,
         )
-        os.fchmod(descriptor, stat.S_IMODE(mode))
+        fchmod = getattr(os, "fchmod", None)
+        if fchmod is not None:
+            fchmod(descriptor, stat.S_IMODE(mode))
         view = memoryview(contents)
         while view:
             written = os.write(descriptor, view)
@@ -7116,11 +7650,7 @@ def _atomic_bytes_file(path: Path, contents: bytes, *, mode: int) -> None:
         os.close(descriptor)
         descriptor = -1
         os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        _fsync_directory(path.parent)
     finally:
         if descriptor >= 0:
             os.close(descriptor)
@@ -7133,7 +7663,7 @@ def _validate_runtime_payload_tree(path: Path) -> str:
     symlinks, foreign owners, and multi-hard-linked files) and return its kind.
     """
     metadata = path.lstat()
-    if path.is_symlink() or metadata.st_uid != os.geteuid():
+    if path.is_symlink() or not _owned_by_effective_user(metadata):
         raise OSError(f"runtime payload path is not user-owned and stable: {path}")
     if stat.S_ISREG(metadata.st_mode):
         if metadata.st_nlink != 1:
@@ -7145,7 +7675,7 @@ def _validate_runtime_payload_tree(path: Path) -> str:
         for name in [*directories, *filenames]:
             candidate = Path(root) / name
             item = candidate.lstat()
-            if candidate.is_symlink() or item.st_uid != os.geteuid():
+            if candidate.is_symlink() or not _owned_by_effective_user(item):
                 raise OSError(
                     f"runtime payload tree contains a foreign link or owner: {candidate}"
                 )
@@ -8655,6 +9185,13 @@ def _is_native_executable(path: Path) -> bool:
     return magic in _NATIVE_EXECUTABLE_MAGIC
 
 
+# The one name the release builder stamps into every vc-terminal.app it
+# materializes — Vibecrafted.app's helper and the Runtime Pack generation's
+# bundle alike. A bundle carrying the donor's name is not this product's
+# Finder/Dock identity, so it is not admitted as the public terminal host.
+_TERMINAL_BUNDLE_DISPLAY_NAME = "VC Terminal"
+
+
 def _is_product_bundle_terminal_host(path: Path) -> bool:
     """True when `path` is the inner binary of a physical vc-terminal.app."""
     try:
@@ -8670,14 +9207,35 @@ def _is_product_bundle_terminal_host(path: Path) -> bool:
         ):
             return False
         plist = contents / "Info.plist"
+        icon = contents / "Resources" / "alacritty.icns"
         metadata = path.lstat()
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o111 == 0:
             return False
-        for node in (path, macos, contents, bundle, plist):
+        for node in (path, macos, contents, bundle, plist, icon):
             if node.is_symlink():
                 return False
-        return plist.is_file()
+        if not plist.is_file() or not icon.is_file() or icon.stat().st_size == 0:
+            return False
+        with plist.open("rb") as stream:
+            document = plistlib.load(stream)
+        # A plist whose root is an array or a string parses cleanly and then
+        # has no `.get`. Admission is a predicate on untrusted bytes under a
+        # path an installed generation hands us, so every shape that is not a
+        # dictionary is simply "not a branded host" — never an AttributeError
+        # escaping into cmd_runtime_install.
+        if not isinstance(document, dict):
+            return False
+        return _is_native_executable(path) and (
+            document.get("CFBundleExecutable") == "alacritty"
+            and document.get("CFBundleIconFile") == "alacritty.icns"
+            and document.get("CFBundleName") == _TERMINAL_BUNDLE_DISPLAY_NAME
+            and document.get("CFBundleDisplayName") == _TERMINAL_BUNDLE_DISPLAY_NAME
+        )
     except OSError:
+        return False
+    # Truncated or malformed XML reaches expat, which raises ExpatError — not a
+    # ValueError, so InvalidFileException alone never covered it.
+    except (plistlib.InvalidFileException, ExpatError, ValueError, TypeError):
         return False
 
 
@@ -8783,7 +9341,14 @@ def _path_fingerprint(path: Path) -> str:
     """SHA-256 hex fingerprint of a resolved path's string form, used to detect stray checkout
     references.
     """
-    return hashlib.sha256(str(path.resolve(strict=False)).encode("utf-8")).hexdigest()
+    raw = str(path)
+    if sys.platform == "win32" and (raw.startswith(("/", "\\")) or ":" not in raw[:2]):
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    try:
+        rendered = str(path.resolve(strict=False))
+    except OSError:
+        rendered = raw
+    return hashlib.sha256(rendered.encode("utf-8")).hexdigest()
 
 
 def _text_references_path_fingerprint(text: str, fingerprint: str) -> bool:
@@ -8838,11 +9403,31 @@ def _runtime_generation_audit_errors(
     return sorted(set(errors))
 
 
+def _capture_stat_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    """Stable identity for one captured file. Windows omits ctime (birth vs change)."""
+    identity = (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+    )
+    if sys.platform != "win32":
+        return (*identity, metadata.st_ctime_ns)
+    return identity
+
+
 def _capture_runtime_bound_file(path: Path) -> bytes:
     """Read one stable, unique regular file without following its final path component."""
     expected = os.path.abspath(path)
     resolved = os.path.realpath(expected)
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_BINARY", 0)
+    )
     try:
         descriptor = os.open(expected, flags)
     except OSError as exc:
@@ -8860,44 +9445,12 @@ def _capture_runtime_bound_file(path: Path) -> bytes:
         resolved_after = os.path.realpath(expected)
         if len(raw) > _MAX_RUNTIME_BOUND_FILE_BYTES:
             raise OSError("file exceeds the runtime-manifest size limit")
-        if (
-            (
-                before.st_dev,
-                before.st_ino,
-                before.st_mode,
-                before.st_nlink,
-                before.st_size,
-                before.st_mtime_ns,
-                before.st_ctime_ns,
-            )
-            != (
-                after.st_dev,
-                after.st_ino,
-                after.st_mode,
-                after.st_nlink,
-                after.st_size,
-                after.st_mtime_ns,
-                after.st_ctime_ns,
-            )
-            or resolved_after != resolved
-            or (
-                after.st_dev,
-                after.st_ino,
-                after.st_mode,
-                after.st_nlink,
-                after.st_size,
-                after.st_mtime_ns,
-                after.st_ctime_ns,
-            )
-            != (
-                path_after.st_dev,
-                path_after.st_ino,
-                path_after.st_mode,
-                path_after.st_nlink,
-                path_after.st_size,
-                path_after.st_mtime_ns,
-                path_after.st_ctime_ns,
-            )
+        if _capture_stat_identity(before) != _capture_stat_identity(after):
+            raise OSError("file changed while it was captured")
+        if resolved_after != resolved:
+            raise OSError("file changed while it was captured")
+        if sys.platform != "win32" and (
+            _capture_stat_identity(after) != _capture_stat_identity(path_after)
         ):
             raise OSError("file changed while it was captured")
         return raw
@@ -9210,7 +9763,10 @@ def _remove_owned_temporary_tree(path: Path, *, attempts: int = 4) -> None:
         except FileNotFoundError:
             return
         except OSError as exc:
-            if exc.errno != errno.ENOTEMPTY or attempt + 1 == attempts:
+            winerr = getattr(exc, "winerror", None)
+            if (
+                exc.errno != errno.ENOTEMPTY and winerr != 32
+            ) or attempt + 1 == attempts:
                 raise
             time.sleep(0.01 * (attempt + 1))
 
@@ -9245,7 +9801,11 @@ def _runtime_verifier_python(runtime_root: Path) -> Path:
     directory, unreadable inode, or non-executable target is corruption and
     fail-closes before drain or publication. Never treat those as host Python.
     """
-    runtime_python = runtime_root / "bin/python3"
+    runtime_python = (
+        runtime_root / "bin/python.exe"
+        if sys.platform == "win32"
+        else runtime_root / "bin/python3"
+    )
     try:
         st = runtime_python.lstat()
     except FileNotFoundError:
@@ -9271,7 +9831,7 @@ def _runtime_verifier_python(runtime_root: Path) -> Path:
         raise OSError(
             f"candidate runtime Python is not an executable file: {runtime_python}"
         )
-    if not os.access(resolved, os.X_OK):
+    if sys.platform != "win32" and not os.access(resolved, os.X_OK):
         raise OSError(f"candidate runtime Python is not executable: {runtime_python}")
     return runtime_python
 
@@ -10225,6 +10785,42 @@ def layout_status(store_path: Path) -> dict[str, Any]:
     }
 
 
+def unremovable_orphan_reason(
+    store_path: Path,
+    location: str,
+    entry: Path,
+    provenance: Mapping[str, SkillProvenance],
+) -> str | None:
+    """Why a real orphan directory must stay, or None when it may be removed.
+
+    A name leaving the bundle says nothing about who wrote the directory still
+    carrying it. `vc-canvas` is a skill we retired; it is also a name an
+    operator could put their own work under, and this code used to `rmtree` it
+    either way — with `ask_yn` defaulting to yes and returning the default in a
+    non-interactive install, so a piped install answered for them.
+
+    So the same proof decides here as for a shadowing copy, which is the same
+    question in a different place: may the installer delete this directory? The
+    manifest covers retired skills for free, because it is built from all of
+    history rather than from the current bundle. Plus the two rails
+    reconciliation uses: never follow a symlink out of the tree, and never let a
+    runtime entry route a removal into the canonical store.
+    """
+    if not _path_is_symlink_free(entry):
+        return (
+            "it is reached through a symlink, so removing it would delete another tree"
+        )
+    resolved = entry.resolve(strict=False)
+    store_resolved = store_path.resolve(strict=False)
+    if location != "store" and (
+        resolved == store_resolved or store_resolved in resolved.parents
+    ):
+        return f"it resolves into the canonical store ({resolved})"
+    return unproven_skill_copy_reason(
+        entry, provenance.get(entry.name, SkillProvenance())
+    )
+
+
 def prune_orphaned_skills(
     store_path: Path,
     runtimes: list[str],
@@ -10233,7 +10829,15 @@ def prune_orphaned_skills(
     orphaned_entries: list[tuple[str, Path]] | None = None,
     interactive: bool = True,
 ) -> int:
-    """Remove vc-* skills from store and runtime dirs that are no longer in the bundle."""
+    """Remove vc-* skills from store and runtime dirs that are no longer in the bundle.
+
+    A pointer or a stray file is removed as before — a view we wrote, or the
+    remains of one. A real *directory* has to prove it came from Vibecrafted
+    first, exactly as a shadowing copy does, and is quarantined under
+    `shadowed-views-<timestamp>/<location>/<skill>` before it goes. One that
+    cannot is kept, reported with the command to move it aside, and never
+    offered for removal at the prompt.
+    """
     orphans = orphaned_entries or collect_orphaned_skills(
         store_path, runtimes, current_bundle
     )
@@ -10241,28 +10845,62 @@ def prune_orphaned_skills(
     if not orphans:
         return 0
 
-    print(bold("Orphaned skills detected (no longer in bundle):"))
+    provenance = load_skill_provenance(store_path)
+    removable: list[tuple[str, Path]] = []
+    kept: list[tuple[str, Path, str]] = []
     for location, entry in orphans:
-        kind = "symlink" if entry.is_symlink() else "dir"
+        if _is_owned_pointer(entry) or entry.is_file():
+            removable.append((location, entry))
+            continue
+        reason = unremovable_orphan_reason(store_path, location, entry, provenance)
+        if reason is None:
+            removable.append((location, entry))
+        else:
+            kept.append((location, entry, reason))
+
+    print(bold("Orphaned skills detected (no longer in bundle):"))
+    for location, entry in removable:
+        kind = "symlink" if _is_owned_pointer(entry) else "dir"
         print(f"  {yellow(f'[{kind}]')} {location}/{entry.name}")
+    for location, entry, reason in kept:
+        print(
+            f"  {WARN} Keeping {location}/{entry.name}: {reason}; move it aside "
+            f"yourself if it is stale: mv {shlex_quote(str(entry))} "
+            f"{shlex_quote(str(entry) + '.bak')}"
+        )
     print()
+
+    if not removable:
+        return 0
 
     if interactive and not ask_yn("Remove orphaned skills?", default=True):
         print(dim("  Keeping orphaned skills."))
         print()
         return 0
 
+    quarantine_root = _backup_root(store_path) / (
+        SHADOW_QUARANTINE_PREFIX + datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    )
     removed = 0
-    for location, entry in orphans:
+    for location, entry in removable:
+        is_pointer = _is_owned_pointer(entry)
         if dry_run:
+            if not is_pointer and entry.is_dir():
+                print(
+                    f"  {dim('quarantine')} {entry} -> "
+                    f"{quarantine_root / location / entry.name}"
+                )
             print(f"  {dim('rm')} {entry}")
             removed += 1
-        else:
-            if entry.is_symlink() or entry.is_file():
-                entry.unlink(missing_ok=True)
-            elif entry.is_dir():
-                shutil.rmtree(entry)
-            removed += 1
+            continue
+        if is_pointer:
+            _remove_view_pointer(entry)
+        elif entry.is_file():
+            entry.unlink(missing_ok=True)
+        elif entry.is_dir():
+            _copy_path_to_backup(entry, quarantine_root / location / entry.name)
+            shutil.rmtree(entry)
+        removed += 1
 
     if removed:
         print(f"  {OK} Removed {removed} orphaned entries")
@@ -10375,21 +11013,161 @@ def create_symlink(target: Path, link: Path, dry_run: bool = False) -> None:
     link.symlink_to(target)
 
 
+def _remove_view_pointer(path: Path) -> None:
+    """Remove a symlink or a Windows junction — never what it points at.
+
+    `shutil.rmtree` is not one of the options. A junction is `is_dir()` and not
+    `is_symlink()`, so a stale one used to land in the writer's `rmtree` branch;
+    on Windows `rmtree` raises on a junction, and an install that hits one dies
+    with a traceback instead of relinking a view. `os.unlink` is what removes a
+    symlink and `os.rmdir` is what removes a junction, and neither descends.
+    """
+    if path.is_symlink():
+        path.unlink()
+        return
+    path.rmdir()
+
+
 def create_skill_view_symlink(target: Path, link: Path, dry_run: bool = False) -> None:
-    """Create an agent skill view, replacing stale legacy store views."""
+    """Create an agent skill view, replacing stale legacy store views.
+
+    Nothing real at `link` is ever removed — not a directory and not a file. By
+    the time the writer runs, `reconcile_shadowed_skill_dirs` has quarantined
+    every copy whose Vibecrafted provenance it could prove, so whatever is left
+    is something nobody could prove: an operator's own skill parked under a
+    `vc-*` name, or a plain file that happens to carry one. A file needs the
+    same protection as a directory and gets less attention: reconciliation only
+    ever looks at directories, and it skips a runtime whose skills dir is
+    reached through a symlink — so `~/.grok/skills -> ~/notes` with a note
+    called `vc-research` in it was, until now, a note the installer deleted.
+
+    Only a pointer gives way, and it is removed as a pointer — see
+    `_remove_view_pointer`, which never reaches the tree on the far side. A
+    dangling one counts: it is still an entry in the way. A pointer that
+    already resolves to `target` is left exactly as it is:
+    unlinking and relinking it would be a no-op at best, and at worst — when the
+    runtime skill dir is itself a link into the store — a removal inside the
+    store.
+    """
     if target == link:
         if dry_run:
             print(f"  {dim('same-path')} {target}")
         return
+    # `exists()` follows the link, so a pointer aimed at something gone reads
+    # as absent — and then `symlink_to` raises FileExistsError on the entry that
+    # is demonstrably still there. A dangling junction is the realistic one: it
+    # survives the generation its target lived in.
+    present = link.exists() or _is_owned_pointer(link)
+    if present and link.resolve(strict=False) == target.resolve(strict=False):
+        if dry_run:
+            print(f"  {dim('same-path')} {link} -> {target}")
+        return
+    if present and not _is_owned_pointer(link):
+        kind = "directory" if link.is_dir() else "file"
+        print(
+            f"  {WARN} Keeping real {kind} {link}; "
+            "run `vibecrafted doctor` to see why it could not be reconciled"
+        )
+        return
     if dry_run:
         print(f"  {dim('ln -s')} {target} -> {link}")
         return
-    if link.exists() or link.is_symlink():
-        if link.is_symlink() or link.is_file():
-            link.unlink()
-        elif link.is_dir():
-            shutil.rmtree(link)
+    if present:
+        _remove_view_pointer(link)
     link.symlink_to(target)
+
+
+def _write_skill_views(
+    runtimes: Sequence[str],
+    store_path: Path,
+    skills_dir: Path,
+    skill_names: Sequence[str],
+    dry_run: bool = False,
+    styled: bool = True,
+) -> None:
+    """Write the `vc-*` views of `skill_names` into each runtime's skill dir.
+
+    A runtime whose skills root is reached through a link is named rather than
+    handled silently: shadow detection skipped it, so nothing under it was
+    inspected and nothing there will be removed, and without this line that
+    outcome is indistinguishable from a clean host.
+
+    A root that resolves into the store gets nothing written into it at all.
+    Every view there would be a symlink inside the canonical store pointing at
+    its own sibling — litter in the one directory that has to stay exactly what
+    we shipped — and the root-rule copy would write `RULE.md` files into it on
+    every run. The skills are already readable through that root: it *is* the
+    store, so `~/.junie/skills/vc-x` already resolves to `~/.vibecrafted/skills/vc-x`
+    without a view.
+    """
+    for runtime in runtimes:
+        rt_skills = runtime_skills_dir(runtime)
+        problem = runtime_skills_root_problem(runtime, store_path)
+        if problem is not None:
+            print(
+                f"  {WARN} {runtime} skill root {rt_skills} {problem}; "
+                "shadows there are not inspected and nothing is removed"
+            )
+            if _runtime_skills_root_in_store(runtime, store_path):
+                print(
+                    f"  {dim('skip') if styled else 'skip'} {runtime}: "
+                    "the store already answers as this runtime's skill dir, "
+                    "so no view is written into it"
+                )
+                continue
+        if not dry_run:
+            rt_skills.mkdir(parents=True, exist_ok=True)
+        print(f"  {cyan(runtime) if styled else runtime} -> {rt_skills}")
+        for rule in sync_skill_root_rules(skills_dir, rt_skills, dry_run=dry_run):
+            print(f"    {dim('->') if styled else '->'} {rule}")
+        for name in skill_names:
+            create_skill_view_symlink(
+                store_path / name, rt_skills / name, dry_run=dry_run
+            )
+
+
+def link_and_reconcile_skill_views(
+    all_runtimes: Sequence[str],
+    store_path: Path,
+    skills_dir: Path,
+    skill_names: Sequence[str],
+    dry_run: bool = False,
+    styled: bool = True,
+) -> None:
+    """Link every runtime view, quarantining proven copies on the way.
+
+    The order is load-bearing in both directions. Reconciliation has to run
+    before the writer, because the writer keeps any real directory it finds and
+    would leave a stale copy shadowing the view forever. But reconciliation also
+    refuses to remove a copy until `~/.agents/skills/<skill>` actually points at
+    the store — it is the fallback the runtime reads once the copy is gone, and
+    removing a copy without it would take the skill away entirely.
+
+    On a first-ever install nothing has written that canonical view yet, so
+    reconciliation would keep every copy, and the next plain `vibecrafted
+    update` stops at "up to date" without ever running again: the runtime would
+    keep loading June-2026 copies until the next release. So the canonical view
+    is written first, then shadows are reconciled, then the remaining runtimes
+    are linked. Relinking a runtime twice would be harmless anyway — the writer
+    skips a link that already resolves to its target — but there is no need.
+
+    `view_runtimes` carries the whole selection into reconciliation, because
+    `agents` need not be in it at all: an advanced or `--tool` install can pick
+    `claude` alone, and then the canonical view will never exist. A copy in a
+    runtime this pass is about to link is still safe to quarantine — the view
+    lands a moment later, in the call below.
+    """
+    canonical = [rt for rt in all_runtimes if rt in SYMLINK_TARGETS]
+    rest = [rt for rt in all_runtimes if rt not in SYMLINK_TARGETS]
+    _write_skill_views(
+        canonical, store_path, skills_dir, skill_names, dry_run=dry_run, styled=styled
+    )
+    reconcile_shadowed_skill_dirs(
+        store_path, skill_names, dry_run=dry_run, view_runtimes=list(all_runtimes)
+    )
+    _write_skill_views(
+        rest, store_path, skills_dir, skill_names, dry_run=dry_run, styled=styled
+    )
 
 
 def prune_shadowed_skill_views(
@@ -10398,9 +11176,29 @@ def prune_shadowed_skill_views(
     active_runtimes: list[str],
     dry_run: bool = False,
 ) -> list[Path]:
-    """Remove managed runtime views shadowed by the canonical .agents view."""
+    """Remove managed runtime views shadowed by the canonical .agents view.
+
+    A pointer-free root is a precondition, and it is checked per runtime rather
+    than per entry. `~/.codex/skills -> ~/.claude/skills` on a host where only
+    `claude` is active makes every one of claude's live views visible under the
+    inactive `codex` name — same inode, same managed target — and each one would
+    be unlinked as codex's leftover. The runtime whose views these are was never
+    consulted, because the pruner only ever looked at the entry in front of it.
+
+    `runtime_skills_root_problem` is the same gate shadow detection uses, so a
+    root reached through a link and a root resolving into the store are both out
+    of scope here for the same reason: what is under it belongs to something
+    else, and the only pointer we may remove is one we can prove we wrote at a
+    path we own.
+    """
     removed: list[Path] = []
     canonical_root = runtime_skills_dir("agents")
+    prunable = [
+        runtime
+        for runtime in SHADOWED_SKILL_VIEW_RUNTIMES
+        if runtime not in active_runtimes
+        and runtime_skills_root_problem(runtime, store_path) is None
+    ]
     for skill_name in skill_names:
         expected = store_path / skill_name
         canonical = canonical_root / skill_name
@@ -10408,9 +11206,7 @@ def prune_shadowed_skill_views(
             strict=False
         ) != expected.resolve(strict=False):
             continue
-        for runtime in SHADOWED_SKILL_VIEW_RUNTIMES:
-            if runtime in active_runtimes:
-                continue
+        for runtime in prunable:
             shadow = runtime_skills_dir(runtime) / skill_name
             if not shadow.is_symlink():
                 continue
@@ -10427,6 +11223,110 @@ def prune_shadowed_skill_views(
                 shadow.unlink()
             removed.append(shadow)
     return removed
+
+
+def reconcile_shadowed_skill_dirs(
+    store_path: Path,
+    skill_names: Sequence[str],
+    shadows: Sequence[ShadowedSkillDir] | None = None,
+    dry_run: bool = False,
+    view_runtimes: Sequence[str] = (),
+) -> tuple[list[ShadowedSkillDir], list[ShadowedSkillDir]]:
+    """Quarantine and remove proven-managed real-directory skill copies.
+
+    Every runtime is in scope, the ones that carry a managed view included.
+    They used to be skipped on the grounds that `create_skill_view_symlink`
+    would `rmtree` the directory on its way to writing the link — which is to
+    say, the unproven copies in `~/.claude/skills` and `~/.codex/skills` were
+    deleted without a backup while the proven ones elsewhere were carefully
+    quarantined first. The writer no longer removes a real directory at all, so
+    reconciliation owns the decision everywhere and runs before it — after the
+    canonical `agents` view has been linked, which is the precondition below.
+
+    Returns `(reconciled, kept)`. A copy is removed only when provenance is
+    proven, it is a real path that no symlink leads into and that lies outside
+    the store, and the skill will still be readable afterwards — otherwise it is
+    kept and reported. Nothing is ever removed before it has been copied aside.
+
+    "Still readable" is the canonical `~/.agents/skills/<skill>` view pointing
+    at the store, *or* the copy's own runtime being one of `view_runtimes`: the
+    caller links those immediately after this returns, so the copy is replaced
+    by a view rather than simply taken away. Without that second half, an
+    advanced or `--tool` selection that leaves `agents` out could never
+    reconcile anything — the precondition would be unmeetable by construction,
+    and every proven copy would be stranded on the host forever.
+    """
+    detected = (
+        list(shadows)
+        if shadows is not None
+        else collect_shadowed_skill_dirs(store_path, skill_names)
+    )
+    reconciled: list[ShadowedSkillDir] = []
+    kept: list[ShadowedSkillDir] = []
+    if not detected:
+        return reconciled, kept
+
+    canonical_root = runtime_skills_dir("agents")
+    quarantine_root = _backup_root(store_path) / (
+        SHADOW_QUARANTINE_PREFIX + datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    )
+
+    for shadow in detected:
+        if not shadow.is_managed:
+            kept.append(shadow)
+            print(
+                f"  {WARN} Unproven skill copy kept: {shadow.path} "
+                f"({shadow.detail}); move it aside yourself if it is stale: "
+                f"mv {shlex_quote(str(shadow.path))} {shlex_quote(str(shadow.path) + '.bak')}"
+            )
+            continue
+        # Independent of detection, because `shadows=` may be supplied by a
+        # caller: nothing inside the store is ever removed, and a symlinked
+        # ancestor makes `shutil.rmtree` delete whatever the link points at.
+        resolved = shadow.path.resolve(strict=False)
+        store_resolved = store_path.resolve(strict=False)
+        if resolved == store_resolved or store_resolved in resolved.parents:
+            kept.append(shadow)
+            print(
+                f"  {WARN} Keeping {shadow.path}: it resolves into the "
+                f"canonical store ({resolved})"
+            )
+            continue
+        if not _path_is_symlink_free(shadow.path):
+            kept.append(shadow)
+            print(
+                f"  {WARN} Keeping {shadow.path}: reached through a symlink, "
+                "so removing it would delete another tree"
+            )
+            continue
+        canonical = canonical_root / shadow.skill
+        expected = store_path / shadow.skill
+        canonical_linked = canonical.is_symlink() and canonical.resolve(
+            strict=False
+        ) == expected.resolve(strict=False)
+        if not canonical_linked and shadow.runtime not in view_runtimes:
+            kept.append(shadow)
+            print(
+                f"  {WARN} Keeping {shadow.path}: canonical view {canonical} "
+                f"is not linked to the store and no view is being written for "
+                f"{shadow.runtime} in this run"
+            )
+            continue
+
+        destination = quarantine_root / shadow.runtime / shadow.skill
+        if dry_run:
+            print(f"  {dim('quarantine')} {shadow.path} -> {destination}")
+            print(f"  {dim('rm -r')} {shadow.path}")
+            reconciled.append(shadow)
+            continue
+        _copy_path_to_backup(shadow.path, destination)
+        shutil.rmtree(shadow.path)
+        print(f"  {dim('reconciled shadow dir')} {shadow.path} -> {destination}")
+        reconciled.append(shadow)
+
+    if reconciled and not dry_run:
+        print(f"  {dim('quarantined copies kept in')} {quarantine_root}")
+    return reconciled, kept
 
 
 def _copy_managed_launcher(src: Path, dst: Path) -> bool:
@@ -10738,6 +11638,94 @@ except Exception as exc:
     )
 
 
+def _secure_walkaround_windows_launcher_contents(
+    current_tools: Path,
+    python_bin: Path,
+    *,
+    launcher_path: Path,
+) -> bytes:
+    """Polyglot ``.cmd`` + Python verifier boundary for native Windows."""
+    current = _canonical_path_preserving_final_symlink(current_tools)
+    tools_root = current.parent
+    interpreter = _canonical_path_preserving_final_symlink(python_bin)
+    managed_wrapper = _canonical_path_preserving_final_symlink(launcher_path)
+    preflight = _secure_walkaround_preflight_source()
+    header = (
+        'rem = """ "\r\n'
+        "@echo off\r\n"
+        "setlocal EnableExtensions\r\n"
+        f'"{interpreter}" -I -B "%~f0" %*\r\n'
+        "exit /b %ERRORLEVEL%\r\n"
+        '"""\r\n'
+    )
+    body = "\n".join(
+        (
+            f"# {SECURE_WALKAROUND_LAUNCHER_MARKER} python={interpreter}",
+            f"CURRENT = {str(current)!r}",
+            f"TOOLS_ROOT = {str(tools_root)!r}",
+            f"INTERPRETER = {str(interpreter)!r}",
+            f"MANAGED_WRAPPER = {str(managed_wrapper)!r}",
+            f"PREFLIGHT = {preflight!r}",
+            "import os",
+            "import shutil",
+            "import subprocess",
+            "import sys",
+            "import tempfile",
+            "from pathlib import Path",
+            "",
+            "def main() -> int:",
+            "    current = Path(CURRENT)",
+            "    if not current.exists():",
+            '        sys.stderr.write("invalid Vibecrafted runtime pointer\\n")',
+            "        return 70",
+            "    target = current.resolve()",
+            "    if not target.is_dir():",
+            '        sys.stderr.write("invalid Vibecrafted runtime generation\\n")',
+            "        return 70",
+            "    _ = TOOLS_ROOT",
+            "    user_args = sys.argv[1:]",
+            '    cache = tempfile.mkdtemp(prefix="vibecrafted-walkaround.")',
+            "    try:",
+            '        snapshot = os.path.join(cache, "runtime")',
+            '        pycache = os.path.join(cache, "pycache")',
+            "        os.makedirs(pycache, exist_ok=True)",
+            '        os.environ.pop("PYTHONPATH", None)',
+            '        os.environ.pop("PYTHONHOME", None)',
+            '        os.environ.pop("PYTHONPYCACHEPREFIX", None)',
+            '        os.environ["PYTHONNOUSERSITE"] = "1"',
+            '        os.environ["PYTHONDONTWRITEBYTECODE"] = "1"',
+            "        saved = sys.argv",
+            '        sys.argv = ["preflight", str(target), MANAGED_WRAPPER, snapshot]',
+            "        try:",
+            '            exec(compile(PREFLIGHT, "vibecrafted-walkaround-preflight.py", "exec"), {})',
+            "        except SystemExit as exc:",
+            "            code = 0 if exc.code is None else exc.code",
+            "            if isinstance(code, str):",
+            "                sys.stderr.write(code + chr(10))",
+            "                return 70",
+            "            if code not in (0,):",
+            "                return int(code)",
+            "        finally:",
+            "            sys.argv = saved",
+            "        runner = os.path.join(",
+            '            snapshot, "vibecrafted-core", "vibecrafted_core", "walkaround_runner.py"',
+            "        )",
+            "        return int(",
+            "            subprocess.call(",
+            '                [INTERPRETER, "-I", "-B", "-X", f"pycache_prefix={pycache}", runner, *user_args]',
+            "            )",
+            "        )",
+            "    finally:",
+            "        shutil.rmtree(cache, ignore_errors=True)",
+            "",
+            'if __name__ == "__main__":',
+            "    raise SystemExit(main())",
+            "",
+        )
+    )
+    return (header + body).encode("utf-8")
+
+
 def _secure_walkaround_launcher_contents(
     current_tools: Path,
     python_bin: Path,
@@ -10745,6 +11733,13 @@ def _secure_walkaround_launcher_contents(
     launcher_path: Path | None = None,
 ) -> bytes:
     """Render the exact wrapper with a stdlib preflight before candidate execution."""
+    destination = launcher_path or python_bin.parent / launcher_name(
+        SECURE_WALKAROUND_LAUNCHER
+    )
+    if sys.platform == "win32":
+        return _secure_walkaround_windows_launcher_contents(
+            current_tools, python_bin, launcher_path=destination
+        )
     current = _canonical_path_preserving_final_symlink(current_tools)
     tools_root = current.parent
     interpreter = _canonical_path_preserving_final_symlink(python_bin)
@@ -10790,7 +11785,7 @@ def _install_secure_walkaround_launcher(
 ) -> Path:
     """Replace the generic console shim with the deterministic installed verifier boundary."""
     destination = launcher_path or (
-        vibecrafted_launcher_bin() / SECURE_WALKAROUND_LAUNCHER
+        vibecrafted_launcher_bin() / launcher_name(SECURE_WALKAROUND_LAUNCHER)
     )
     contents = _secure_walkaround_launcher_contents(
         current_tools,
@@ -11552,7 +12547,7 @@ def _runtime_generation_contract_findings() -> list[DoctorFinding]:
     matches, and the launcher resolves to its entrypoint.
     """
     current = vibecrafted_tools_home() / "vibecrafted-current"
-    if not current.is_symlink():
+    if not _is_owned_pointer(current):
         return [
             DoctorFinding(
                 "fail",
@@ -11663,43 +12658,6 @@ def _host_shell_contract_findings() -> list[DoctorFinding]:
             "ok",
             "host-shell",
             "ordinary shell startup is PATH-only; vc-start owns product helpers",
-        )
-    ]
-
-
-def _managed_frontier_contract_findings() -> list[DoctorFinding]:
-    """Fail if any symlink under the XDG 'frontier' config directory resolves outside the
-    installed runtime root.
-    """
-    frontier = xdg_config_home() / "vetcoders" / "frontier"
-    installed_root = vibecrafted_runtime_home().resolve(strict=False)
-    unsafe: list[str] = []
-    if frontier.is_dir():
-        for path in sorted(frontier.rglob("*")):
-            if not path.is_symlink():
-                continue
-            try:
-                target = path.resolve(strict=True)
-            except (OSError, RuntimeError):
-                unsafe.append(str(path.relative_to(frontier)))
-                continue
-            if not _is_subpath(target, installed_root):
-                unsafe.append(str(path.relative_to(frontier)))
-    if unsafe:
-        return [
-            DoctorFinding(
-                "fail",
-                "frontier-links",
-                f"{len(unsafe)} frontier link(s) escape the installed runtime: "
-                + ", ".join(unsafe[:5])
-                + (" ..." if len(unsafe) > 5 else ""),
-            )
-        ]
-    return [
-        DoctorFinding(
-            "ok",
-            "frontier-links",
-            "all managed frontier links resolve inside the installed runtime",
         )
     ]
 
@@ -11960,8 +12918,8 @@ def _release_contract_asset_issues(
     public_key_raw = captured_assets.get("trust/vibecrafted-signing-v1.pub")
     if public_key_raw is None:
         return sorted(set(issues))
-    openssl = Path("/usr/bin/openssl")
-    if not openssl.is_file() or not os.access(openssl, os.X_OK):
+    openssl = _openssl_for_release_key_probe()
+    if openssl is None:
         issues.append("trust/vibecrafted-signing-v1.pub:unverifiable")
     else:
         result = subprocess.run(
@@ -11982,6 +12940,23 @@ def _release_contract_asset_issues(
         ):
             issues.append("trust/vibecrafted-signing-v1.pub:corrupt")
     return sorted(set(issues))
+
+
+def _openssl_for_release_key_probe() -> Path | None:
+    """Locate openssl for the release-key SPKI probe.
+
+    POSIX pins ``/usr/bin/openssl`` so PATH cannot substitute a decoy.
+    Windows has no such pin; use the first ``openssl`` on PATH when present.
+    Missing openssl on Windows is not an install blocker: the public key is
+    already hash-bound in the generation manifest, and pack signature ran first.
+    """
+    if sys.platform == "win32":
+        found = shutil.which("openssl")
+        return Path(found) if found else None
+    pinned = Path("/usr/bin/openssl")
+    if pinned.is_file() and os.access(pinned, os.X_OK):
+        return pinned
+    return None
 
 
 def _doctor_runtime_receipt_findings() -> list[DoctorFinding]:
@@ -12246,7 +13221,6 @@ def run_doctor(store_path: Path, state: InstallState) -> list[DoctorFinding]:
     findings.extend(_runtime_root_contract_findings())
     findings.extend(_runtime_generation_contract_findings())
     findings.extend(_host_shell_contract_findings())
-    findings.extend(_managed_frontier_contract_findings())
     findings.extend(_public_launcher_contract_findings())
     findings.extend(_slack_provider_contract_findings())
 
@@ -12348,7 +13322,10 @@ def run_doctor(store_path: Path, state: InstallState) -> list[DoctorFinding]:
                     DoctorFinding(
                         "fail",
                         f"symlink:{runtime}/{skill_name}",
-                        "is a COPY, not a symlink — stale drift risk",
+                        "is a COPY, not a symlink — stale drift risk; "
+                        "`vibecrafted update --force` reconciles it, and "
+                        f"shadow-dir:{runtime}/{skill_name} says whether it "
+                        "can be proven",
                     )
                 )
             else:
@@ -12361,6 +13338,71 @@ def run_doctor(store_path: Path, state: InstallState) -> list[DoctorFinding]:
                         else "missing — deck dark for this CLI; rerun 'vibecrafted update'",
                     )
                 )
+
+    # 4a. Real-directory skill copies. A pre-3.x installer materialized copies
+    # into dirs such as ~/.junie/skills; they survive next to the canonical
+    # .agents view and go stale invisibly.
+    #
+    # Runtimes that carry a managed view used to be excluded here, on the
+    # grounds that section 4 already names them. It does — as
+    # `symlink:<rt>/<skill>` "is a COPY", which says nothing about whether the
+    # copy can be proven, and so leaves the operator without the one fact that
+    # decides what happens next. Both reports now run: section 4 keeps the
+    # missing-view contract, and this one supplies the provenance class.
+    shadow_runtimes = list(shadow_candidate_runtimes())
+    shadowed_dirs = collect_shadowed_skill_dirs(
+        store_path, state.skills, shadow_runtimes
+    )
+    # A runtime whose skills root is a link, or which resolves into the store,
+    # was skipped by the collector above. Say so: the alternative is an audit
+    # that looked at nothing and reported the same "no stale skill copies" as a
+    # host that is genuinely clean.
+    # `exists()` follows the link, so a root aimed at something gone reads as
+    # absent while still being an entry the installer would write through.
+    linked_roots = {
+        runtime: problem
+        for runtime in shadow_runtimes
+        if (
+            runtime_skills_dir(runtime).exists()
+            or _is_owned_pointer(runtime_skills_dir(runtime))
+        )
+        and (problem := runtime_skills_root_problem(runtime, store_path)) is not None
+    }
+    for runtime, problem in linked_roots.items():
+        rt_skills = runtime_skills_dir(runtime)
+        findings.append(
+            DoctorFinding(
+                "warn",
+                f"skill-root:{runtime}",
+                f"{rt_skills} {problem} — skill copies under it are not "
+                f"inspected and nothing there is ever removed; check it "
+                f"yourself (`ls -l {rt_skills}`) and point it at a real "
+                f"directory if you want this runtime audited",
+            )
+        )
+    shadow_runtimes = [rt for rt in shadow_runtimes if rt not in linked_roots]
+    for shadow in shadowed_dirs:
+        if shadow.is_managed:
+            action = "`vibecrafted update --force` quarantines and removes it"
+        else:
+            action = "left untouched — move it aside yourself if it is stale"
+        findings.append(
+            DoctorFinding(
+                "warn",
+                f"shadow-dir:{shadow.runtime}/{shadow.skill}",
+                f"{shadow.path} is a real directory shadowing the canonical "
+                f".agents view [{shadow.classification}: {shadow.detail}] — {action}",
+            )
+        )
+    if shadow_runtimes and not shadowed_dirs:
+        findings.append(
+            DoctorFinding(
+                "ok",
+                "shadow-dirs",
+                "no stale skill copies in "
+                + ", ".join(f"~/.{rt}/skills" for rt in shadow_runtimes),
+            )
+        )
 
     # 4b. Agent slash-command views. These are separate from skills and used by
     # provider-native command palettes such as ~/.codex/commands and
@@ -12427,7 +13469,6 @@ def run_doctor(store_path: Path, state: InstallState) -> list[DoctorFinding]:
 
     # 6. Shell helpers
     helper_file = _helper_target_path()
-    legacy_file = _helper_legacy_path()
     if helper_file.exists():
         try:
             helper_content = helper_file.read_text(encoding="utf-8")
@@ -12444,14 +13485,6 @@ def run_doctor(store_path: Path, state: InstallState) -> list[DoctorFinding]:
                     f"{helper_file} is a copied helper — reinstall to remove stale drift risk",
                 )
             )
-    elif legacy_file.exists():
-        findings.append(
-            DoctorFinding(
-                "warn",
-                "shell-helpers",
-                f"compat location only: {legacy_file} — re-run install",
-            )
-        )
     elif state.shell_helpers:
         findings.append(
             DoctorFinding(
@@ -13487,17 +14520,9 @@ def _cmd_install_verbose(args: argparse.Namespace, repo_root: Path) -> int:
 
     # --- Execute: symlink views ---
     print(bold("Linking agent views..."))
-    for rt in all_runtimes:
-        rt_skills = Path.home() / f".{rt}" / "skills"
-        if not dry_run:
-            rt_skills.mkdir(parents=True, exist_ok=True)
-        print(f"  {cyan(rt)} -> {rt_skills}")
-        for rule in sync_skill_root_rules(skills_dir, rt_skills, dry_run=dry_run):
-            print(f"    {dim('->')} {rule}")
-        for name in selected_skills:
-            default = store_path / name
-            link = rt_skills / name
-            create_skill_view_symlink(default, link, dry_run=dry_run)
+    link_and_reconcile_skill_views(
+        all_runtimes, store_path, skills_dir, selected_skills, dry_run=dry_run
+    )
     for shadow in prune_shadowed_skill_views(
         store_path, selected_skills, all_runtimes, dry_run=dry_run
     ):
@@ -14002,17 +15027,14 @@ def _cmd_install_compact(args: argparse.Namespace, repo_root: Path) -> int:
 
         # Symlink views
         print("Linking agent views:")
-        for rt in all_runtimes:
-            rt_skills = Path.home() / f".{rt}" / "skills"
-            if not dry_run:
-                rt_skills.mkdir(parents=True, exist_ok=True)
-            print(f"  {rt} -> {rt_skills}")
-            for rule in sync_skill_root_rules(skills_dir, rt_skills, dry_run=dry_run):
-                print(f"    -> {rule}")
-            for name in selected_skills:
-                default = store_path / name
-                link = rt_skills / name
-                create_skill_view_symlink(default, link, dry_run=dry_run)
+        link_and_reconcile_skill_views(
+            all_runtimes,
+            store_path,
+            skills_dir,
+            selected_skills,
+            dry_run=dry_run,
+            styled=False,
+        )
         for shadow in prune_shadowed_skill_views(
             store_path, selected_skills, all_runtimes, dry_run=dry_run
         ):
@@ -14034,7 +15056,7 @@ def _cmd_install_compact(args: argparse.Namespace, repo_root: Path) -> int:
             " \u00b7 ".join(agent_names) if agent_names else "none detected",
         )
 
-        # Prune (logged only)
+        # Prune orphans: pointers and proven copies go (quarantined first); unproven ones are kept
         prune_orphaned_skills(
             store_path,
             all_runtimes,
@@ -15218,7 +16240,6 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
             return runtime_exit
     bundle = set(_known_bundle_names())
     helper_file = _helper_target_path()
-    legacy_file = _helper_legacy_path()
     has_state = state_file.exists()
 
     # Default to manifest-tracked files for restore-safe uninstall;
@@ -15228,7 +16249,7 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
     elif has_state and not (state.skills or state.runtimes or state.launcher_entries):
         helper_paths = []
     else:
-        helper_paths = [hf for hf in (helper_file, legacy_file) if hf.exists()]
+        helper_paths = [hf for hf in (helper_file,) if hf.exists()]
 
     if state.launcher_entries:
         launchers = _parse_manifest_launchers(state.launcher_entries)
@@ -15686,6 +16707,7 @@ _RUNTIME_WRAPPER_VERBS = {
     "vc-operator": "operator",
     "vc-receipt": "receipt",
     "vc-resume": "resume",
+    "vc-scaffold-doctor": "scaffold-doctor",
     "vc-status": "status",
     "vc-update": "update",
 }
@@ -15695,31 +16717,24 @@ _RUNTIME_NAMESPACE_NAMES = {"vibecraft", "telemetry"}
 
 def _runtime_install_paths(runtime_home_override: str | None = None) -> dict[str, Path]:
     """Resolve the one cross-channel runtime/config/state layout."""
-    home = Path.home()
-    runtime_home = Path(
-        os.environ.get(
-            "VIBECRAFTED_RUNTIME_HOME",
-            str(
-                Path(os.environ.get("XDG_DATA_HOME", home / ".local/share"))
-                / "vibecrafted"
-            ),
-        )
-    ).expanduser()
     if runtime_home_override is not None:
         runtime_home = Path(runtime_home_override)
         if not runtime_home.is_absolute():
             raise RuntimeError("--runtime-home requires an absolute path")
-    config_home = home / ".config"
+    else:
+        runtime_home = vibecrafted_runtime_home()
+    if sys.platform == "win32":
+        product_config = vibecrafted_product_config_home()
+    else:
+        # POSIX keeps the pre-Windows canonical product config root:
+        # always ~/.config/vibecrafted, never $XDG_CONFIG_HOME.
+        product_config = Path.home() / ".config" / "vibecrafted"
     return {
         "runtime_home": runtime_home,
-        "config_home": config_home,
-        "product_config": config_home / "vibecrafted",
-        "crafted_home": Path(
-            os.environ.get("VIBECRAFTED_HOME", home / ".vibecrafted")
-        ).expanduser(),
-        "launcher_home": Path(
-            os.environ.get("VIBECRAFTED_LAUNCHER_BIN", home / ".local/bin")
-        ).expanduser(),
+        "config_home": product_config.parent,
+        "product_config": product_config,
+        "crafted_home": vibecrafted_home(),
+        "launcher_home": vibecrafted_launcher_bin(),
     }
 
 
@@ -15748,9 +16763,59 @@ def _assert_runtime_tree_has_no_symlinks(root: Path) -> None:
 def _atomic_text(path: Path, body: str, *, mode: int = 0o644) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.parent / f".{path.name}.new-{os.getpid()}"
-    temporary.write_text(body, encoding="utf-8", newline="")
-    temporary.chmod(mode)
+    temporary.write_bytes(body.encode("utf-8"))
+    try:
+        temporary.chmod(mode)
+    except OSError:
+        if sys.platform != "win32":
+            raise
     os.replace(temporary, path)
+
+
+def _runtime_cmd_launcher_body(
+    *,
+    generation: Path,
+    config_home: Path,
+    crafted_home: Path,
+    runtime_home: Path,
+    frame_config: Path,
+    executable: Path,
+    leading_arguments: Sequence[str] = (),
+    environment: Mapping[str, str] | None = None,
+) -> str:
+    python = generation / "bin" / "python.exe"
+    extra = " ".join(f'"{argument}"' for argument in leading_arguments)
+    extra = f"{extra} " if extra else ""
+    frame = generation / "libexec" / "vc-frame.exe"
+    if not frame.is_file():
+        frame = generation / "libexec" / "vc-frame"
+    lines = [
+        "@echo off",
+        "setlocal EnableExtensions",
+        f'set "XDG_CONFIG_HOME={config_home}"',
+        f'set "VIBECRAFTED_HOME={crafted_home}"',
+        f'set "VIBECRAFTED_RUNTIME_HOME={runtime_home}"',
+        f'set "VIBECRAFTED_RUNTIME_ROOT={generation}"',
+        f'set "VIBECRAFTED_ROOT={generation}"',
+        f'set "VIBECRAFTED_PYTHON={python}"',
+        f'set "VIBECRAFTED_RUNTIME_BIN={generation / "bin"}"',
+        f'set "VIBECRAFTED_VC_FRAME_BIN={frame}"',
+        f'set "VC_FRAME_CONFIG_DIR={frame_config}"',
+    ]
+    for name, value in sorted((environment or {}).items()):
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]*", name):
+            raise ValueError(f"invalid runtime launcher environment name: {name!r}")
+        lines.append(f'set "{name}={value}"')
+    lines.extend(
+        [
+            f'set "PATH={generation / "bin"};%PATH%"',
+            'set "PYTHONIOENCODING=utf-8"',
+            'set "PYTHONUTF8=1"',
+            'set "VIBECRAFTED_DECLARED_LAUNCHER=%~f0"',
+            f'"{executable}" {extra}%*',
+        ]
+    )
+    return "\r\n".join(lines) + "\r\n"
 
 
 def _runtime_launcher_body(
@@ -15764,6 +16829,17 @@ def _runtime_launcher_body(
     leading_arguments: Sequence[str] = (),
     environment: Mapping[str, str] | None = None,
 ) -> str:
+    if sys.platform == "win32":
+        return _runtime_cmd_launcher_body(
+            generation=generation,
+            config_home=config_home,
+            crafted_home=crafted_home,
+            runtime_home=runtime_home,
+            frame_config=frame_config,
+            executable=executable,
+            leading_arguments=leading_arguments,
+            environment=environment,
+        )
     quoted_arguments = " ".join(shlex_quote(value) for value in leading_arguments)
     prefix = f"{quoted_arguments} " if quoted_arguments else ""
     lines = [
@@ -16077,6 +17153,40 @@ _TOML_MISSING = object()
 # and representation must not change setting identity.
 _TOML_ATOMIC_RECORD_PATHS = frozenset({"terminal.shell"})
 
+# These are deliberately narrower than all terminal-policy settings.  A
+# Founder-owned choice of chrome or font must survive a shipped default that
+# temporarily has the same value: otherwise the next upgrade cannot tell a
+# deliberate preference from the old default and silently takes it away.  Keep
+# only setting identities in the receipt; preference values remain private.
+_TERMINAL_POLICY_PRESERVED_KEYS = frozenset(
+    {
+        "window.blur",
+        "window.opacity",
+        "window.decorations",
+    }
+)
+
+
+def _is_preserved_terminal_policy_key(key: str) -> bool:
+    return key in _TERMINAL_POLICY_PRESERVED_KEYS or key.startswith("font.")
+
+
+def _terminal_policy_user_override_keys(
+    previous: Mapping[str, Any], destination: Path
+) -> set[str]:
+    """Read only redacted terminal preference identities from a prior receipt."""
+    recorded = previous.get("terminal_policy_user_overrides", {})
+    if not isinstance(recorded, Mapping):
+        return set()
+    keys = recorded.get(str(destination), [])
+    if not isinstance(keys, list):
+        return set()
+    return {
+        key
+        for key in keys
+        if isinstance(key, str) and _is_preserved_terminal_policy_key(key)
+    }
+
 
 def _toml_is_atomic_record_path(dotted: str) -> bool:
     return dotted in _TOML_ATOMIC_RECORD_PATHS
@@ -16259,33 +17369,24 @@ def _toml_assignment_key(line: str) -> str | None:
     return _toml_unquote_key(body.split("=", 1)[0])
 
 
-def _toml_assignment_is_complete(line: str) -> bool:
-    body = _toml_line_without_comment(line)
-    if "=" not in body:
-        return True
-    value = body.split("=", 1)[1].strip()
-    if value.startswith(('"""', "'''")):
-        closer = value[:3]
-        return value.count(closer) >= 2
-    opens = value.count("[") + value.count("{")
-    closes = value.count("]") + value.count("}")
-    if opens != closes:
-        return False
-    quoted: str | None = None
-    escaped = False
-    for char in value:
-        if escaped:
-            escaped = False
+def _toml_assignment_end(lines: Sequence[str], start: int) -> int:
+    """Return the exclusive end of one assignment, including multiline values.
+
+    TOML permits basic/literal strings, arrays, and inline values to continue
+    across physical lines.  Let ``tomllib`` establish that boundary instead of
+    treating the first physical line as the whole setting.
+    """
+    if _toml_assignment_key(lines[start]) is None:
+        raise ValueError("unsupported TOML preference value")
+    raw = ""
+    for end in range(start + 1, len(lines) + 1):
+        raw += lines[end - 1]
+        try:
+            _toml_loads_value(raw.split("=", 1)[1].strip())
+        except ValueError:
             continue
-        if quoted:
-            if char == "\\":
-                escaped = True
-            elif char == quoted:
-                quoted = None
-            continue
-        if char in {'"', "'"}:
-            quoted = char
-    return quoted is None
+        return end
+    raise ValueError("unterminated TOML preference value")
 
 
 def _toml_root_insert_index(lines: list[str]) -> int:
@@ -16371,6 +17472,7 @@ class _TomlSettingLocation:
 
     kind: str
     index: int = -1
+    assignment_end: int = -1
     start: int = -1
     end: int = -1
     key: str = ""
@@ -16499,34 +17601,37 @@ def _toml_locate_setting(lines: list[str], dotted: str) -> _TomlSettingLocation 
         if nest is not None:
             return _TomlSettingLocation(kind="nested_table", start=nest[0], end=nest[1])
     current_table = ""
-    for index, line in enumerate(lines):
+    index = 0
+    while index < len(lines):
+        line = lines[index]
         header = _toml_header_name(line)
         if header is not None and not line.lstrip().startswith("[["):
             current_table = header
+            index += 1
             continue
         key = _toml_assignment_key(line)
         if key is None:
+            index += 1
             continue
         table_parts = [part for part in current_table.split(".") if part]
         try:
             key_parts = _toml_split_dotted_keys(key)
         except ValueError:
+            index += 1
             continue
         assigned = table_parts + key_parts
+        assignment_end = _toml_assignment_end(lines, index)
+        raw_assignment = "".join(lines[index:assignment_end])
         if assigned == parts:
-            if not _toml_assignment_is_complete(line):
-                raise ValueError(
-                    "multiline TOML assignment cannot be merged by setting identity"
-                )
             return _TomlSettingLocation(
-                kind="assignment", index=index, key=key, table=current_table
+                kind="assignment",
+                index=index,
+                assignment_end=assignment_end,
+                key=key,
+                table=current_table,
             )
         if len(assigned) < len(parts) and assigned == parts[: len(assigned)]:
-            if not _toml_assignment_is_complete(line):
-                raise ValueError(
-                    "multiline TOML assignment cannot be merged by setting identity"
-                )
-            value = _toml_loads_value(_toml_assignment_value_text(line))
+            value = _toml_loads_value(raw_assignment.split("=", 1)[1].strip())
             if not isinstance(value, dict):
                 raise ValueError(
                     "TOML merge could not represent the resolved preference tree"
@@ -16540,19 +17645,27 @@ def _toml_locate_setting(lines: list[str], dotted: str) -> _TomlSettingLocation 
                 inner_parts=rest,
                 present=_toml_dict_has_path(value, rest),
             )
+        index = assignment_end
     return None
 
 
 def _toml_delete_line_and_empty_table(lines: list[str], index: int) -> None:
+    _toml_delete_assignment_span_and_empty_table(lines, index, index + 1)
+
+
+def _toml_delete_assignment_span_and_empty_table(
+    lines: list[str], start: int, end: int
+) -> None:
+    """Delete an assignment span and its now-empty enclosing table."""
     header_index = -1
     table = ""
-    for cursor in range(index, -1, -1):
+    for cursor in range(start, -1, -1):
         header = _toml_header_name(lines[cursor])
         if header is not None and not lines[cursor].lstrip().startswith("[["):
             header_index = cursor
             table = header
             break
-    del lines[index]
+    del lines[start:end]
     if (
         table
         and header_index >= 0
@@ -16597,7 +17710,9 @@ def _toml_replace_or_insert(text: str, dotted: str, literal: str) -> str:
         text = _toml_remove_nested_table("".join(lines), dotted)
         return _toml_insert_assignment(text, dotted, literal)
     if loc is not None and loc.kind == "assignment":
-        lines[loc.index] = _toml_rewrite_assignment_line(lines[loc.index], literal)
+        lines[loc.index : loc.assignment_end] = [
+            _toml_rewrite_assignment_line(lines[loc.index], literal)
+        ]
         return "".join(lines)
     if loc is not None and loc.kind == "inline_field":
         rewritten = _toml_update_inline_field(
@@ -16623,7 +17738,7 @@ def _toml_raw_assignment(text: str, dotted: str) -> str | None:
     if loc.kind == "nested_table":
         return "".join(lines[loc.start : loc.end])
     if loc.kind == "assignment":
-        return lines[loc.index]
+        return "".join(lines[loc.index : loc.assignment_end])
     return None
 
 
@@ -16638,7 +17753,9 @@ def _toml_delete_assignment(text: str, dotted: str) -> str:
     if loc.kind == "nested_table":
         return _toml_remove_nested_table(text, dotted)
     if loc.kind == "assignment":
-        _toml_delete_line_and_empty_table(lines, loc.index)
+        _toml_delete_assignment_span_and_empty_table(
+            lines, loc.index, loc.assignment_end
+        )
         return "".join(lines)
     if loc.kind == "inline_field":
         if not loc.present:
@@ -16655,21 +17772,40 @@ def _toml_delete_assignment(text: str, dotted: str) -> str:
 
 
 def _merge_toml_runtime_preferences(
-    previous: str, current: str, incoming: str, *, choice: str | None = None
+    previous: str,
+    current: str,
+    incoming: str,
+    *,
+    choice: str | None = None,
+    preserve_current_keys: Collection[str] = (),
+    preserve_terminal_policy_keys: bool = False,
 ) -> str:
-    """Three-way TOML merge by setting identity, then text overlay on incoming."""
+    """Three-way TOML merge by setting identity, then text overlay.
+
+    Default canvas is incoming so unchanged keys pick up new defaults.
+    Bound keep-current overlays onto the current file so operator spelling
+    and multiline assignments survive.
+    """
     import tomllib
 
     previous_values = _toml_flatten(tomllib.loads(previous))
     current_values = _toml_flatten(tomllib.loads(current))
     incoming_values = _toml_flatten(tomllib.loads(incoming))
     keys = set(previous_values) | set(current_values) | set(incoming_values)
+    persisted = set(preserve_current_keys)
     resolved: dict[str, Any] = {}
     conflicts: list[str] = []
     for key in sorted(keys):
         prev = previous_values.get(key, _TOML_MISSING)
         curr = current_values.get(key, _TOML_MISSING)
         inc = incoming_values.get(key, _TOML_MISSING)
+        if (
+            preserve_terminal_policy_keys
+            and key in persisted
+            and curr is not _TOML_MISSING
+        ):
+            resolved[key] = curr
+            continue
         if curr == inc:
             if curr is not _TOML_MISSING:
                 resolved[key] = curr
@@ -16691,6 +17827,15 @@ def _merge_toml_runtime_preferences(
         ):
             resolved[key] = inc
             continue
+        if (
+            preserve_terminal_policy_keys
+            and _is_preserved_terminal_policy_key(key)
+            and prev is not _TOML_MISSING
+            and curr is not _TOML_MISSING
+            and inc is not _TOML_MISSING
+        ):
+            resolved[key] = curr
+            continue
         conflicts.append(key)
         if choice == "keep-current" and curr is not _TOML_MISSING:
             resolved[key] = curr
@@ -16701,13 +17846,17 @@ def _merge_toml_runtime_preferences(
             "settings conflict with changed shipped defaults: " + ", ".join(conflicts)
         )
     intended = _toml_unflatten(resolved)
-    merged = incoming
-    for key in incoming_values:
+    # keep-current must rewrite on the operator's canvas. Overlaying onto
+    # incoming turns a bound keep-current into an incoming-shaped file
+    # (the live starship.toml rewrite).
+    keep_current = choice == "keep-current"
+    merged = current if keep_current else incoming
+    canvas_values = current_values if keep_current else incoming_values
+    for key in canvas_values:
         if key not in resolved:
             merged = _toml_delete_assignment(merged, key)
     for key, value in resolved.items():
-        incoming_value = incoming_values.get(key, _TOML_MISSING)
-        if incoming_value == value:
+        if canvas_values.get(key, _TOML_MISSING) == value:
             continue
         raw = (
             _toml_raw_assignment(current, key)
@@ -16744,8 +17893,10 @@ def _toml_adapt_assignment_spelling(line: str, raw_assignment: str) -> str:
     key = _toml_assignment_key(line)
     if key is None:
         raise ValueError("unsupported TOML preference value")
-    literal = _toml_assignment_value_text(raw_assignment)
-    comment = _toml_hash_comment(line) or _toml_hash_comment(raw_assignment)
+    literal = raw_assignment.split("=", 1)[1].strip()
+    comment = _toml_hash_comment(line)
+    if not comment and "\n" not in raw_assignment.rstrip("\n"):
+        comment = _toml_hash_comment(raw_assignment)
     indent = line[: len(line) - len(line.lstrip())]
     newline = "\n" if line.endswith("\n") else ""
     suffix = f" {comment}" if comment else ""
@@ -16769,22 +17920,12 @@ def _overlay_toml_assignment(text: str, dotted: str, raw_assignment: str) -> str
         return text + (
             raw_assignment if raw_assignment.endswith("\n") else raw_assignment + "\n"
         )
-    table, _, leaf = dotted.rpartition(".")
-    if not leaf:
-        table, leaf = "", dotted
-    current_table = ""
-    for index, line in enumerate(lines):
-        header = _toml_header_name(line)
-        if header is not None and not line.lstrip().startswith("[["):
-            current_table = header
-            continue
-        if current_table == table and _toml_assignment_key(line) == leaf:
-            if not _toml_assignment_is_complete(line):
-                raise ValueError(
-                    "multiline TOML assignment cannot be merged by setting identity"
-                )
-            lines[index] = _toml_adapt_assignment_spelling(line, raw_assignment)
-            return "".join(lines)
+    loc = _toml_locate_setting(lines, dotted)
+    if loc is not None and loc.kind == "assignment":
+        lines[loc.index : loc.assignment_end] = [
+            _toml_adapt_assignment_spelling(lines[loc.index], raw_assignment)
+        ]
+        return "".join(lines)
     text = _toml_remove_nested_table("".join(lines), dotted)
     if "=" in raw_assignment and not raw_assignment.lstrip().startswith("["):
         return _toml_replace_or_insert(
@@ -16805,6 +17946,8 @@ def _merge_runtime_preferences(
     kdl: bool = False,
     toml: bool = False,
     choice: str | None = None,
+    preserve_current_keys: Collection[str] = (),
+    preserve_terminal_policy_keys: bool = False,
 ) -> str:
     """Carry independent user edits onto new defaults; refuse ambiguous overlap.
 
@@ -16823,7 +17966,7 @@ def _merge_runtime_preferences(
             return current
         raise ValueError("previous shipped defaults are unavailable")
     if current == previous:
-        return incoming
+        return current if choice == "keep-current" else incoming
     # An unchanged shipped default needs no three-way merge, irrespective of
     # its format. In particular, do not reject a user-owned custom KDL block
     # merely because this is a KDL preference file.
@@ -16831,7 +17974,12 @@ def _merge_runtime_preferences(
         return current
     if toml:
         return _merge_toml_runtime_preferences(
-            previous, current, incoming, choice=choice
+            previous,
+            current,
+            incoming,
+            choice=choice,
+            preserve_current_keys=preserve_current_keys,
+            preserve_terminal_policy_keys=preserve_terminal_policy_keys,
         )
     if choice in PREFERENCE_CHOICES:
         return current if choice == "keep-current" else incoming
@@ -17110,6 +18258,9 @@ def _reconcile_runtime_preference(
     old = defaults.get(str(destination), {})
     baseline: str | None = None
     baseline_source: Path | None = None
+    prior_terminal_overrides = _terminal_policy_user_override_keys(
+        previous, destination
+    )
     outcome: dict[str, Any] = {
         "path": destination,
         "backup_destination": destination,
@@ -17123,6 +18274,7 @@ def _reconcile_runtime_preference(
         "error": None,
         "settings": [],
         "mergeable": True,
+        "user_override_keys": [],
     }
     try:
         aliases = [
@@ -17146,7 +18298,11 @@ def _reconcile_runtime_preference(
                 "backup recovery; per-file markers cannot prove a complete install"
             )
         old_generation = old.get("generation", prior_generation)
-        if old_generation:
+        # A missing product preference has no user bytes to reconcile.  Seed
+        # the already-validated incoming default without requiring a legacy
+        # generation to prove a three-way baseline it will never consume.
+        # Present preferences keep the strict lineage and digest checks below.
+        if old_generation and current_raw is not None:
             old_root = Path(old_generation)
             if (
                 not old_root.is_absolute()
@@ -17212,38 +18368,92 @@ def _reconcile_runtime_preference(
                     kdl=destination.suffix == ".kdl",
                     toml=destination.suffix == ".toml",
                     choice=selected,
+                    preserve_current_keys=prior_terminal_overrides,
+                    preserve_terminal_policy_keys=destination.name
+                    == "terminal-policy.toml",
                 )
             )
 
-        try:
-            # A later retry of an already-applied choice must not fail merely
-            # because the bound current hash is the pre-merge snapshot.
-            body = merge(None)
-        except ValueError:
-            if not choice:
-                raise
-            current_matches = (
-                not outcome["current_sha256"]
-                or outcome["current_sha256"] == expected_current_sha256
-            )
-            incoming_matches = outcome["incoming_sha256"] == expected_incoming_sha256
-            if current_matches and not incoming_matches:
+        current_matches = (
+            not outcome["current_sha256"]
+            or outcome["current_sha256"] == expected_current_sha256
+        )
+        incoming_matches = outcome["incoming_sha256"] == expected_incoming_sha256
+        if choice == "keep-current":
+            if current is None:
+                raise ValueError("keep-current requires an existing preference file")
+            if not incoming_matches:
                 raise ValueError(
                     "incoming defaults changed during retry; concurrent edit refused"
-                ) from None
-            if incoming_matches and outcome["current_sha256"] and not current_matches:
-                raise ValueError(
-                    "preference changed during retry; concurrent edit refused"
-                ) from None
-            if not (current_matches and incoming_matches):
-                raise
-            body = merge(choice)
+                )
+            if current_matches:
+                # Bound keep-current must merge on the current canvas even when
+                # auto-merge would succeed. merge(None) overlays onto incoming
+                # and rewrites operator spelling after a successful result.
+                body = merge(choice)
+            else:
+                # Idempotent retry: the first apply already rewrote bound keys
+                # (padding upgrade), so the pre-merge snapshot no longer
+                # matches. Accept only when replaying keep-current is a no-op
+                # on the live bytes; a concurrent edit still changes the tree.
+                try:
+                    replay = merge(choice)
+                except ValueError as exc:
+                    raise ValueError(
+                        "preference changed during retry; concurrent edit refused"
+                    ) from exc
+                if replay != current:
+                    raise ValueError(
+                        "preference changed during retry; concurrent edit refused"
+                    )
+                body = replay
+        else:
+            try:
+                # A later retry of an already-applied choice must not fail merely
+                # because the bound current hash is the pre-merge snapshot.
+                body = merge(None)
+            except ValueError:
+                if not choice:
+                    raise
+                if current_matches and not incoming_matches:
+                    raise ValueError(
+                        "incoming defaults changed during retry; concurrent edit refused"
+                    ) from None
+                if (
+                    incoming_matches
+                    and outcome["current_sha256"]
+                    and not current_matches
+                ):
+                    raise ValueError(
+                        "preference changed during retry; concurrent edit refused"
+                    ) from None
+                if not (current_matches and incoming_matches):
+                    raise
+                body = merge(choice)
         if not body.strip() or "\0" in body:
             raise ValueError("merged preference file is empty or invalid")
         if destination.suffix == ".toml":
             import tomllib
 
             tomllib.loads(body)
+            if (
+                destination.name == "terminal-policy.toml"
+                and current is not None
+                and baseline is not None
+            ):
+                previous_values = _toml_flatten(tomllib.loads(baseline))
+                current_values = _toml_flatten(tomllib.loads(current))
+                observed = {
+                    key
+                    for key in set(previous_values) | set(current_values)
+                    if _is_preserved_terminal_policy_key(key)
+                    and current_values.get(key, _TOML_MISSING) is not _TOML_MISSING
+                    and current_values.get(key, _TOML_MISSING)
+                    != previous_values.get(key, _TOML_MISSING)
+                }
+                outcome["user_override_keys"] = sorted(
+                    prior_terminal_overrides | observed
+                )
     except (OSError, UnicodeError, ValueError) as exc:
         message = str(exc)
         outcome["error"] = message
@@ -17306,7 +18516,7 @@ def _previous_runtime_is_available(
     current = runtime_home / "tools/vibecrafted-current"
     active = runtime_home / "active.json"
     try:
-        if not generation.is_dir() or not current.is_symlink():
+        if not generation.is_dir() or not _is_owned_pointer(current):
             return False
         if current.resolve(strict=True) != generation:
             return False
@@ -17436,6 +18646,8 @@ def _prepare_runtime_preferences(
     prepared: dict[Path, dict[str, Any]] = {}
     conflicts: list[dict[str, Any]] = []
     for destination, relative in _runtime_preference_sources(product_config).items():
+        if not (generation / relative).is_file() and sys.platform == "win32":
+            continue
         file_choice = _preference_choice_for_path(
             destination, choice=choice, choice_path=choice_path
         )
@@ -17469,6 +18681,7 @@ def _prepare_runtime_preferences(
             "body": outcome["body"],
             "current_sha256": outcome["current_sha256"],
             "defaults": outcome["defaults"],
+            "user_override_keys": outcome["user_override_keys"],
         }
     if conflicts:
         previous_available = _abandon_unpublished_preference_conflicts(
@@ -17503,7 +18716,8 @@ def _assert_runtime_physical_path(path: Path, *, leaf_symlink: bool = False) -> 
             mode = candidate.lstat().st_mode
         except FileNotFoundError:
             continue
-        if stat.S_ISLNK(mode) and not (leaf_symlink and candidate == path):
+        pointer = stat.S_ISLNK(mode) or _is_owned_pointer(candidate)
+        if pointer and not (leaf_symlink and candidate == path):
             raise RuntimeError(f"runtime path is aliased: {candidate}")
         if candidate != path and not stat.S_ISDIR(mode):
             raise RuntimeError(f"runtime ancestor is not a directory: {candidate}")
@@ -17519,16 +18733,20 @@ def _runtime_config_inventory(path: Path) -> dict[str, list[Any]] | None:
         metadata = path.lstat()
     except FileNotFoundError:
         return None
-    if stat.S_ISLNK(metadata.st_mode):
+    if stat.S_ISLNK(metadata.st_mode) or _is_owned_pointer(path):
         return {".": ["symlink", os.readlink(path)]}
     entries: dict[str, list[Any]] = {}
 
     def visit(node: Path, relative: str) -> None:
         mode = node.lstat().st_mode
+        # NTFS has no Unix mode identity. PATHEXT also makes st_mode depend
+        # on the filename (``file-TOKEN`` vs ``vc-server.cmd``), so including
+        # IMODE would make publication look mutated after os.replace.
+        imode = 0 if sys.platform == "win32" else stat.S_IMODE(mode)
         if stat.S_ISREG(mode):
-            entries[relative] = ["file", stat.S_IMODE(mode), _sha256_path(node)]
+            entries[relative] = ["file", imode, _sha256_path(node)]
         elif stat.S_ISDIR(mode):
-            entries[relative] = ["directory", stat.S_IMODE(mode)]
+            entries[relative] = ["directory", imode]
             for child in sorted(node.iterdir()):
                 if child.name != ".DS_Store":
                     visit(child, child.relative_to(path).as_posix())
@@ -17548,13 +18766,22 @@ def _runtime_config_digest(path: Path) -> str | None:
 
 def _sync_runtime_config_path(path: Path) -> None:
     """Flush pre/postimages before the receipt can authorize any replacement."""
-    if path.is_symlink():
+    if path.is_symlink() or _is_owned_pointer(path):
         return
     if path.is_dir():
         for child in path.iterdir():
             if child.name != ".DS_Store":
                 _sync_runtime_config_path(child)
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        if sys.platform == "win32":
+            return
+    if sys.platform == "win32":
+        # FlushFileBuffers fails on GENERIC_READ-only handles (EBADF).
+        # Writers already fsync O_WRONLY temps in _atomic_bytes_file.
+        return
+    descriptor = os.open(
+        path,
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0),
+    )
     try:
         os.fsync(descriptor)
     finally:
@@ -20339,6 +21566,10 @@ def _stage_runtime_product_config(
             _backup_runtime_collision(
                 destination, runtime_home=paths["runtime_home"], receipt=receipt
             )
+        if not source.is_dir():
+            if sys.platform == "win32":
+                continue
+            raise RuntimeError(f"Runtime Pack is missing {source}")
         target = staged / relative
         if target.exists():
             _remove_path(target)
@@ -20349,14 +21580,21 @@ def _stage_runtime_product_config(
         target = staged / path.relative_to(product)
         target.write_bytes(preference["body"].encode("utf-8"))
         receipt.setdefault("config_defaults", {})[str(path)] = preference["defaults"]
+        if path.name == "terminal-policy.toml":
+            receipt.setdefault("terminal_policy_user_overrides", {})[str(path)] = (
+                preference["user_override_keys"]
+            )
 
     theme = staged / "terminal-theme.toml"
     if not theme.exists():
-        shutil.copy2(generation / "config/vc-terminal/themes/dark.toml", theme)
-    import tomllib
+        theme_source = generation / "config/vc-terminal/themes/dark.toml"
+        if theme_source.is_file() or sys.platform != "win32":
+            shutil.copy2(theme_source, theme)
+    if theme.exists():
+        import tomllib
 
-    # Theme bytes are user-owned; parsing never rewrites them.
-    tomllib.loads(theme.read_text(encoding="utf-8"))
+        # Theme bytes are user-owned; parsing never rewrites them.
+        tomllib.loads(theme.read_text(encoding="utf-8"))
     terminal = staged / "vc-terminal"
     terminal.mkdir(exist_ok=True)
     for relative in _PRODUCT_TERMINAL_DEBRIS:
@@ -20376,13 +21614,29 @@ def _stage_runtime_product_config(
         "]\nlive_config_reload = true\n",
         encoding="utf-8",
     )
-    shutil.copy2(
-        generation / "config/alacritty/launch-primary-shell.zsh",
-        terminal / _PRODUCT_PRIMARY_SHELL_NAME,
-    )
-    shutil.copy2(
-        generation / "config/vc-terminal/interactive.zsh", terminal / "interactive.zsh"
-    )
+    for src, dst in (
+        (
+            generation / "config/alacritty/launch-primary-shell.zsh",
+            terminal / _PRODUCT_PRIMARY_SHELL_NAME,
+        ),
+        (
+            generation / "config/vc-terminal/interactive.zsh",
+            terminal / "interactive.zsh",
+        ),
+    ):
+        if src.is_file() or sys.platform != "win32":
+            shutil.copy2(src, dst)
+    python_door = generation / "config/vc-terminal/bin"
+    if python_door.is_dir():
+        (terminal / "bin").mkdir(exist_ok=True)
+        for src in python_door.iterdir():
+            if (
+                src.is_file()
+                and not src.is_symlink()
+                and src.name in {"python", "python3"}
+            ):
+                shutil.copy2(src, terminal / "bin" / src.name)
+                (terminal / "bin" / src.name).chmod(0o755)
     (terminal / ".zshrc").write_text(
         'source "$HOME/.config/vibecrafted/vc-terminal/launch-primary-shell.zsh"\n',
         encoding="utf-8",
@@ -20391,7 +21645,9 @@ def _stage_runtime_product_config(
         destination = staged / relative
         if not destination.exists():
             destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(generation / "config" / relative, destination)
+            source = generation / "config" / relative
+            if source.is_file() or sys.platform != "win32":
+                shutil.copy2(source, destination)
     if str(product / "vc-terminal") not in receipt["owned_dirs"]:
         receipt["owned_dirs"].append(str(product / "vc-terminal"))
     for raw in list(receipt["owned_files"]):
@@ -20402,12 +21658,17 @@ def _stage_runtime_product_config(
     # Receipt every managed file, not just config.kdl. Preferences have separate
     # default lineage and resolution deliberately permits their edited bytes.
     for subtree in (staged / "vc-frame", staged / "shell", terminal):
+        if not subtree.exists():
+            continue
         for entry in subtree.rglob("*"):
             if entry.is_file() and entry.name != ".DS_Store":
                 receipt["owned_files"][str(product / entry.relative_to(staged))] = (
                     _sha256_path(entry)
                 )
-    receipt["owned_files"][str(policy)] = _sha256_path(staged / "terminal-policy.toml")
+    if (staged / "terminal-policy.toml").is_file():
+        receipt["owned_files"][str(policy)] = _sha256_path(
+            staged / "terminal-policy.toml"
+        )
     _assert_runtime_tree_has_no_symlinks(staged)
 
 
@@ -20424,7 +21685,8 @@ def _runtime_transaction_paths(
         destination.parent == paths["launcher_home"]
         and (
             _runtime_launcher_public_name(destination.name) is not None
-            or destination.name == SECURE_WALKAROUND_LAUNCHER
+            or destination.name
+            in {SECURE_WALKAROUND_LAUNCHER, launcher_name(SECURE_WALKAROUND_LAUNCHER)}
         )
     )
     allowed = (
@@ -20462,23 +21724,35 @@ def _replace_runtime_transaction_entry(
     if source is not None:
         _copy_path_to_backup(source, temporary)
         _sync_runtime_config_path(temporary)
-    needs_displacement = (destination.is_dir() and not destination.is_symlink()) or (
-        source is not None and source.is_dir() and not source.is_symlink()
+    needs_displacement = (
+        destination.is_dir()
+        and not destination.is_symlink()
+        and not _is_owned_pointer(destination)
+    ) or (
+        source is not None
+        and source.is_dir()
+        and not source.is_symlink()
+        and not _is_owned_pointer(source)
     )
-    # Files and symlinks use one atomic replacement, with no missing-path gap.
-    # Two renames for a nonempty directory, never a recursive deletion of the
-    # active tree. The durable pending receipt covers the unavoidable gap.
+    # Files and unix symlinks use one atomic replacement, with no missing-path
+    # gap. Two renames for a nonempty directory, never a recursive deletion of
+    # the active tree. The durable pending receipt covers the unavoidable gap.
+    # NTFS cannot os.replace() over an existing junction, so drop the old
+    # pointer first (same class of gap as the directory two-rename).
     if needs_displacement and _path_present(destination):
         os.replace(destination, displaced)
+    elif (
+        sys.platform == "win32"
+        and source is not None
+        and _path_present(destination)
+        and _is_owned_pointer(destination)
+    ):
+        _remove_path(destination)
     if source is not None:
         os.replace(temporary, destination)
     elif _path_present(destination):
-        destination.unlink()
-    descriptor = os.open(destination.parent, os.O_RDONLY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+        _remove_path(destination)
+    _fsync_directory(destination.parent)
     if _path_present(displaced):
         _remove_path(displaced)
 
@@ -20623,11 +21897,7 @@ def _publish_runtime_config_transaction(
             )
             history.append(str(before))
     _sync_runtime_config_path(staging_root)
-    directory = os.open(staging_root.parent, os.O_RDONLY)
-    try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
+    _fsync_directory(staging_root.parent)
     receipt["config_transaction"] = {
         "schema": "vibecrafted.config-publication.v1",
         "entries": entries,
@@ -20674,17 +21944,35 @@ def _runtime_launcher_public_name(name: str) -> str | None:
     Vibecrafted is a guest on the operator's machine — it never publishes
     `vibecrafted-<tool>` wrapper shims onto the user's PATH.
     """
-    base = name.lower()
-    if base.startswith(_RUNTIME_NAMESPACE_PREFIXES) or base in _RUNTIME_NAMESPACE_NAMES:
-        return name
+    base = Path(name).name
+    lowered = base.lower()
+    for suffix in (".exe", ".cmd", ".bat"):
+        if lowered.endswith(suffix):
+            base = base[: -len(suffix)]
+            lowered = base.lower()
+            break
+    if (
+        lowered.startswith(_RUNTIME_NAMESPACE_PREFIXES)
+        or lowered in _RUNTIME_NAMESPACE_NAMES
+    ):
+        return launcher_name(base)
     return None
 
 
 def _runtime_published_launcher_names(bin_dir: Path) -> set[str]:
     """Launcher names the current install publishes into the launcher home."""
-    names = {"vc-terminal", SECURE_WALKAROUND_LAUNCHER, *_RUNTIME_WRAPPER_VERBS}
+    names = {
+        launcher_name("vc-terminal"),
+        *(launcher_name(name) for name in _RUNTIME_WRAPPER_VERBS),
+    }
+    names.add(launcher_name(SECURE_WALKAROUND_LAUNCHER))
     for entry in bin_dir.iterdir():
-        if not entry.is_file() or not os.access(entry, os.X_OK):
+        if not entry.is_file():
+            continue
+        if sys.platform == "win32":
+            if entry.suffix.lower() not in {".exe", ".cmd", ".bat"}:
+                continue
+        elif not os.access(entry, os.X_OK):
             continue
         public = _runtime_launcher_public_name(entry.name)
         if public is not None:
@@ -21200,7 +22488,7 @@ def _runtime_install_result(
     paths: Mapping[str, Path],
 ) -> dict[str, str]:
     product_config = paths["product_config"]
-    return {
+    result = {
         "schema": "vibecrafted.runtime-install-result.v1",
         "root": str(generation),
         "launcher": str(paths["launcher_home"] / "vibecrafted"),
@@ -21224,6 +22512,10 @@ def _runtime_install_result(
         "crafted_home": str(paths["crafted_home"]),
         "app_root": str(app_root) if app_root else "",
     }
+    if sys.platform == "win32":
+        # The public launcher is a .cmd shim on native Windows.
+        result["launcher"] = str(paths["launcher_home"] / launcher_name("vibecrafted"))
+    return result
 
 
 def cmd_runtime_resolve(args: argparse.Namespace) -> int:
@@ -21646,6 +22938,8 @@ def _runtime_config_repair_plan(
     product_config = paths["product_config"]
     entries: list[dict[str, str]] = []
     for destination, relative in _runtime_preference_sources(product_config).items():
+        if not (generation / relative).is_file() and sys.platform == "win32":
+            continue
         outcome = _reconcile_runtime_preference(
             destination,
             relative,
@@ -22044,6 +23338,102 @@ def _runtime_repair_status(entries: Sequence[Mapping[str, str]]) -> str:
     return "healthy"
 
 
+def _runtime_bin_file(generation: Path, name: str) -> Path:
+    """Resolve a generation binary, preferring Windows ``.exe``/``.cmd`` names."""
+    if sys.platform != "win32":
+        return generation / "bin" / name
+    for candidate in (
+        generation / "bin" / f"{name}.exe",
+        generation / "bin" / f"{name}.cmd",
+        generation / "bin" / name,
+    ):
+        if candidate.is_file():
+            return candidate
+    return generation / "bin" / f"{name}.exe"
+
+
+def _runtime_payload_present(path: Path, *, directory: bool = False) -> bool:
+    if directory:
+        return path.is_dir()
+    if sys.platform == "win32":
+        return path.is_file()
+    return bool(os.access(path, os.X_OK))
+
+
+def _runtime_pack_required_paths(generation: Path, terminal_host: Path) -> list[Path]:
+    skills = generation / "vibecrafted-core/vibecrafted_core/skills"
+    if sys.platform == "win32":
+        return [
+            _runtime_bin_file(generation, "vibecrafted"),
+            _runtime_bin_file(generation, "loct"),
+            _runtime_bin_file(generation, "loctree"),
+            _runtime_bin_file(generation, "loctree-mcp"),
+            _runtime_bin_file(generation, "loctree-lsp"),
+            _runtime_bin_file(generation, "aicx"),
+            _runtime_bin_file(generation, "aicx-mcp"),
+            _runtime_bin_file(generation, "vc-server"),
+            generation / "bin" / "python.exe",
+            skills,
+        ]
+    return [
+        generation / "bin/vibecrafted",
+        generation / "bin/vibecrafted-mcp",
+        generation / "bin/loct",
+        generation / "bin/loctree-mcp",
+        generation / "bin/aicx",
+        generation / "bin/aicx-mcp",
+        generation / "bin/prview",
+        generation / "bin/screenscribe",
+        generation / "bin/vc-frame",
+        generation / "libexec/vc-frame",
+        generation / "bin/vc-server",
+        generation / "bin/vc-server-supervisor",
+        generation / "bin/vc-start",
+        generation / "bin/vc-workflow",
+        generation / "bin/vc-terminal",
+        terminal_host,
+        generation / "config/alacritty/launch-primary-shell.zsh",
+        skills,
+    ]
+
+
+def _prepare_runtime_generation_destination(
+    runtime_home: Path, generation: Path
+) -> None:
+    """Fail closed on split-brain or invalid active.json; drop unpublished leftovers."""
+    current_link = runtime_home / "tools/vibecrafted-current"
+    active_pointer = runtime_home / "active.json"
+    pointer_present = (
+        active_pointer.exists()
+        or _is_owned_pointer(current_link)
+        or current_link.exists()
+    )
+    if pointer_present:
+        try:
+            resolve_active_generation(runtime_home)
+        except GenerationResolutionError as exc:
+            unpublished_current = (
+                sys.platform == "win32"
+                and not active_pointer.exists()
+                and "without active.json" in str(exc)
+            )
+            if unpublished_current:
+                _remove_path(current_link)
+            else:
+                raise RuntimeError(
+                    "stale or split-brain runtime pointer; uninstall or reset "
+                    f"before install: {exc}"
+                ) from exc
+    if generation.exists():
+        try:
+            active = resolve_active_generation(runtime_home)
+            same = active.resolve() == generation.resolve()
+        except GenerationResolutionError:
+            same = False
+        if not same:
+            _remove_owned_temporary_tree(generation)
+
+
 def cmd_runtime_install(args: argparse.Namespace) -> int:
     if getattr(args, "rescue", False):
         return cmd_runtime_rescue(args)
@@ -22145,6 +23535,9 @@ def _install_runtime_pack(
             json.dumps(previous.get("drift_backup_history", {}))
         ),
         "config_defaults": dict(previous.get("config_defaults", {})),
+        "terminal_policy_user_overrides": json.loads(
+            json.dumps(previous.get("terminal_policy_user_overrides", {}))
+        ),
         "config_pending": dict(previous.get("config_pending", {})),
         "foundation_service_pending": json.loads(
             json.dumps(previous.get("foundation_service_pending", {}))
@@ -22156,6 +23549,12 @@ def _install_runtime_pack(
 
     releases = runtime_home / "releases"
     generation = releases / version
+    if sys.platform == "win32":
+        # win32 owns the active.json/junction pair; there is no POSIX
+        # collision-backup transaction to reclaim a stale pointer, so the
+        # destination must be validated before staging. POSIX keeps the
+        # pre-merge flow (foreign pointers are checkpointed and replaced).
+        _prepare_runtime_generation_destination(runtime_home, generation)
     _assert_runtime_physical_path(generation)
     for directory in (
         releases,
@@ -22187,8 +23586,18 @@ def _install_runtime_pack(
             bin_dir.mkdir(parents=True, exist_ok=True)
             _materialize_vc_frame_generation(staging)
             _materialize_runtime_generation_entrypoint(staging)
-            _materialize_runtime_generation_vc_frame_entry(staging)
-            _materialize_runtime_generation_vc_terminal_entry(staging)
+            if sys.platform == "win32":
+                frame_entry = staging / "scripts" / "vc-frame-product-entry.sh"
+                if frame_entry.is_file():
+                    _materialize_runtime_generation_vc_frame_entry(staging)
+                term_entry = staging / "scripts" / "vc-terminal-product-entry.sh"
+                if term_entry.is_file() or (staging / "bin" / "vc-terminal").is_file():
+                    _materialize_runtime_generation_vc_terminal_entry(
+                        staging, require_native_host=False
+                    )
+            else:
+                _materialize_runtime_generation_vc_frame_entry(staging)
+                _materialize_runtime_generation_vc_terminal_entry(staging)
             source_provenance = load_source_provenance(staging)
             if source_provenance is None:
                 raise RuntimeError("Runtime Pack has no source-provenance.json")
@@ -22220,34 +23629,12 @@ def _install_runtime_pack(
     # Historical App bootstrap passes --terminal-host at a non-bundle helper.
     # A real Contents/Helpers/vc-terminal.app inner binary is the public GUI
     # host; any other hint still cannot replace generation libexec.
-    required = [
-        generation / "bin/vibecrafted",
-        generation / "bin/vibecrafted-mcp",
-        generation / "bin/loct",
-        generation / "bin/loctree-mcp",
-        generation / "bin/aicx",
-        generation / "bin/aicx-mcp",
-        generation / "bin/prview",
-        generation / "bin/screenscribe",
-        generation / "bin/vc-frame",
-        generation / "libexec/vc-frame",
-        generation / "bin/vc-server",
-        generation / "bin/vc-server-supervisor",
-        generation / "bin/vc-start",
-        generation / "bin/vc-workflow",
-        generation_terminal_entry,
-        generation_terminal_host,
-        generation / "config/alacritty/launch-primary-shell.zsh",
-        generation / "vibecrafted-core/vibecrafted_core/skills",
-    ]
+    required = _runtime_pack_required_paths(generation, generation_terminal_host)
+    skills = generation / "vibecrafted-core/vibecrafted_core/skills"
     missing = [
         str(path)
         for path in required
-        if not (
-            path.is_dir()
-            if path == generation / "vibecrafted-core/vibecrafted_core/skills"
-            else os.access(path, os.X_OK)
-        )
+        if not _runtime_payload_present(path, directory=(path == skills))
     ]
     if missing:
         raise RuntimeError("Runtime Pack is incomplete: " + ", ".join(missing))
@@ -22299,18 +23686,35 @@ def _install_runtime_pack(
             )
         token = hashlib.sha256(str(destination).encode()).hexdigest()
         staged = staging_root / f"link-{token}"
-        staged.symlink_to(target.resolve(strict=True))
+        resolved_target = target.resolve(strict=True)
+        if sys.platform == "win32":
+            _atomic_symlink(resolved_target, staged)
+        else:
+            # The staged link is renamed into `destination` later; a relative
+            # target computed against the staging root would dangle one level
+            # off, so POSIX keeps the pre-merge absolute symlink here.
+            staged.symlink_to(resolved_target)
         replacements[destination] = staged
-        receipt["owned_symlinks"][str(destination)] = str(target.resolve(strict=True))
+        receipt["owned_symlinks"][str(destination)] = str(resolved_target)
 
     bin_dir = generation / "bin"
+    skip_launcher_names = {
+        "python3",
+        "python.exe",
+        "python3.exe",
+        "vc-terminal",
+        "vc-terminal.exe",
+        "vc-terminal.cmd",
+        SECURE_WALKAROUND_LAUNCHER,
+        launcher_name(SECURE_WALKAROUND_LAUNCHER),
+    }
     for entry in sorted(bin_dir.iterdir(), key=lambda item: item.name):
-        if (
-            entry.name in {"python3", "vc-terminal", SECURE_WALKAROUND_LAUNCHER}
-            or not entry.is_file()
-        ):
+        if entry.name in skip_launcher_names or not entry.is_file():
             continue
-        if not os.access(entry, os.X_OK):
+        if sys.platform == "win32":
+            if entry.suffix.lower() not in {".exe", ".cmd", ".bat"}:
+                continue
+        elif not os.access(entry, os.X_OK):
             continue
         public_name = _runtime_launcher_public_name(entry.name)
         if public_name is None:
@@ -22326,15 +23730,22 @@ def _install_runtime_pack(
             executable=entry,
         )
         stage_launcher(destination, body)
-    verifier_launcher = paths["launcher_home"] / SECURE_WALKAROUND_LAUNCHER
+    verifier_launcher = paths["launcher_home"] / launcher_name(
+        SECURE_WALKAROUND_LAUNCHER
+    )
+    runtime_python = (
+        generation / "bin" / "python.exe"
+        if sys.platform == "win32"
+        else generation / "bin/python3"
+    )
     verifier_body = _secure_walkaround_launcher_contents(
         current_link,
-        generation / "bin/python3",
+        runtime_python,
         launcher_path=verifier_launcher,
     ).decode("utf-8")
     stage_launcher(verifier_launcher, verifier_body)
 
-    terminal_launcher = paths["launcher_home"] / "vc-terminal"
+    terminal_launcher = paths["launcher_home"] / launcher_name("vc-terminal")
     terminal_body = _runtime_launcher_body(
         generation=generation,
         config_home=paths["config_home"],
@@ -22346,13 +23757,15 @@ def _install_runtime_pack(
             generation=generation, app_root=app_root
         ),
     )
-    stage_launcher(terminal_launcher, terminal_body)
+    if _runtime_payload_present(generation_terminal_entry) or sys.platform != "win32":
+        stage_launcher(terminal_launcher, terminal_body)
 
-    deck = generation / "bin/vibecrafted"
+    deck = _runtime_bin_file(generation, "vibecrafted")
     for name, verb in _RUNTIME_WRAPPER_VERBS.items():
-        if (bin_dir / name).is_file() and os.access(bin_dir / name, os.X_OK):
+        native = _runtime_bin_file(generation, name)
+        if native.is_file() and _runtime_payload_present(native):
             continue
-        destination = paths["launcher_home"] / name
+        destination = paths["launcher_home"] / launcher_name(name)
         body = _runtime_launcher_body(
             generation=generation,
             config_home=paths["config_home"],
@@ -22388,7 +23801,12 @@ def _install_runtime_pack(
             current_link, runtime_home=runtime_home, receipt=receipt
         )
     staged_pointer = staging_root / "current"
-    staged_pointer.symlink_to(generation)
+    if sys.platform == "win32":
+        _atomic_symlink(generation, staged_pointer)
+    else:
+        # Renamed into `current_link` below; the target must stay absolute or
+        # the published pointer dangles relative to the wrong parent.
+        staged_pointer.symlink_to(generation)
     receipt["owned_symlinks"][str(current_link)] = str(generation)
     # All root postimages exist. Selectors are published last; readers reject
     # install_pending/config_transaction throughout the multi-root transition.
@@ -22746,7 +24164,7 @@ def _uninstall_runtime_pack(args: argparse.Namespace) -> int:
         for raw_path, raw_target in sorted(owned_symlinks.items())
         if _path_present(path := Path(raw_path))
         and (
-            not path.is_symlink()
+            not _is_owned_pointer(path)
             or _symlink_target(path) != Path(raw_target).resolve(strict=False)
         )
     )

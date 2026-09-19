@@ -140,6 +140,7 @@ def _installed_public_generation(
     shutil.copytree(
         REPO_ROOT / "vibecrafted-core/vibecrafted_core",
         generation / "vibecrafted-core" / "vibecrafted_core",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
     )
     (generation / "VERSION").write_text("4.3.0+g1234567\n", encoding="utf-8")
     (generation / "runtime-manifest.json").write_text("{}\n", encoding="utf-8")
@@ -1057,7 +1058,7 @@ def test_vc_help_wrapper_forwards_topic_help(tmp_path: Path) -> None:
     )
 
     assert "Start an interactive repository orientation session" in result.stdout
-    assert "vc-init [claude|codex|agy|junie|grok|cursor]" in result.stdout
+    assert "vc-init [claude|codex|agy|junie|grok|cursor|kimi]" in result.stdout
     assert "Ship cycle:" not in result.stdout
 
 
@@ -2037,8 +2038,8 @@ def test_gui_help_exposes_local_server_flags() -> None:
 @pytest.mark.parametrize(
     ("topic", "expected"),
     [
-        ("init", "vc-init [claude|codex|agy|junie|grok|cursor]"),
-        ("vc-init", "vc-init [claude|codex|agy|junie|grok|cursor]"),
+        ("init", "vc-init [claude|codex|agy|junie|grok|cursor|kimi]"),
+        ("vc-init", "vc-init [claude|codex|agy|junie|grok|cursor|kimi]"),
         ("vc-review", 'vibecrafted review codex --prompt "Review PR #14"'),
         ("status", "vibecrafted stats"),
     ],
@@ -2129,10 +2130,13 @@ def test_implement_help_is_the_canonical_autonomous_delivery_surface() -> None:
     assert "implement" in result.stdout
     assert "VC-ship WRITE stage: structured end-to-end implementation" in result.stdout
     assert (
-        "vibecrafted implement <claude|codex|agy|junie|grok|cursor> [flags]"
+        "vibecrafted implement <claude|codex|agy|junie|grok|cursor|kimi> [flags]"
         in result.stdout
     )
-    assert "vc-implement <claude|codex|agy|junie|grok|cursor> [flags]" in result.stdout
+    assert (
+        "vc-implement <claude|codex|agy|junie|grok|cursor|kimi> [flags]"
+        in result.stdout
+    )
     assert "Not the same skill as justdo." in result.stdout
 
 
@@ -2148,10 +2152,12 @@ def test_justdo_help_is_a_distinct_standalone_posture() -> None:
     assert "justdo" in result.stdout
     assert "Standalone Just Do posture" in result.stdout
     assert (
-        "vibecrafted justdo <claude|codex|agy|junie|grok|cursor> [flags]"
+        "vibecrafted justdo <claude|codex|agy|junie|grok|cursor|kimi> [flags]"
         in result.stdout
     )
-    assert "vc-justdo <claude|codex|agy|junie|grok|cursor> [flags]" in result.stdout
+    assert (
+        "vc-justdo <claude|codex|agy|junie|grok|cursor|kimi> [flags]" in result.stdout
+    )
     assert "Not implement." in result.stdout
 
 
@@ -2341,7 +2347,8 @@ def test_skill_wrapper_help_is_human_readable_without_agent(
     assert skill in result.stdout
     assert description in result.stdout
     assert (
-        f"{wrapper_name} <claude|codex|agy|junie|grok|cursor> [flags]" in result.stdout
+        f"{wrapper_name} <claude|codex|agy|junie|grok|cursor|kimi> [flags]"
+        in result.stdout
     )
 
 
@@ -3176,6 +3183,37 @@ def _write_fake_aicx_sessions(bin_dir: Path, current_id: str, previous_id: str) 
     script.chmod(0o755)
 
 
+def _write_fake_codex(bin_dir: Path) -> Path:
+    """Hermetic codex CLI: answers the capability probes and nothing else.
+
+    CI runners carry no codex, so the deck's `_require_agent_cli` refused
+    ("codex CLI is not available") while a developer host passed only because
+    its real codex sat on the inherited PATH. The admission probe reads its
+    markers from `codex --help` (continuity/capabilities.py:583-596 requires
+    `exec` and `resume`). Every other invocation is refused loudly, so no
+    provider session can start, and each call is recorded beside the fake.
+    """
+    script = bin_dir / "codex"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        'printf "%s\\n" "$*" >> "$0.calls"\n'
+        'case "$*" in\n'
+        '  --version) printf "codex-cli 0.0.0-fixture\\n" ;;\n'
+        "  --help)\n"
+        '    printf "Usage: codex [OPTIONS] [PROMPT]\\n\\nCommands:\\n"\n'
+        '    printf "  exec    Run Codex non-interactively\\n"\n'
+        '    printf "  resume  Resume a previous interactive session\\n"\n'
+        '    printf "  fork    Fork a previous interactive session\\n" ;;\n'
+        "  *)\n"
+        '    printf "fixture codex: unexpected invocation: %s\\n" "$*" >&2\n'
+        "    exit 97 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    return script
+
+
 @pytest.mark.parametrize(
     ("selector", "expected_session"),
     [("current", "current-codex-session"), ("last", "last-codex-session")],
@@ -3192,6 +3230,7 @@ def test_fork_codex_opens_named_pane_in_current_vc_frame_tab(
     root.mkdir(parents=True)
     _write_fake_vc_frame_with_live_session(fake_bin, capture_file, "operator-test")
     _write_fake_aicx_sessions(fake_bin, "current-codex-session", "last-codex-session")
+    _write_fake_codex(fake_bin)
     generation = _installed_public_generation(tmp_path, home, fake_bin / "vc-frame")
     subprocess.run(["git", "init", "-q", str(root)], check=True)
     subprocess.run(
@@ -3260,6 +3299,11 @@ def test_fork_codex_opens_named_pane_in_current_vc_frame_tab(
         capture_output=True,
         text=True,
     )
+    # Admission consulted the fixture CLI, not whatever the host has installed.
+    assert set((fake_bin / "codex.calls").read_text().splitlines()) == {
+        "--version",
+        "--help",
+    }
     payload = capture_file.read_text(encoding="utf-8").splitlines()
     assert payload[:3] == ["--session", "operator-test", "action"]
     assert "new-pane" in payload
@@ -3294,6 +3338,7 @@ def test_fork_codex_supports_floating_same_tab_placement(tmp_path: Path) -> None
     home.mkdir()
     fake_bin.mkdir()
     _write_fake_vc_frame_with_live_session(fake_bin, capture_file, "operator-test")
+    _write_fake_codex(fake_bin)
 
     env = os.environ.copy()
     env["HOME"] = str(home)
@@ -3327,6 +3372,11 @@ def test_fork_codex_supports_floating_same_tab_placement(tmp_path: Path) -> None
         env=env,
     )
 
+    # Admission consulted the fixture CLI, not whatever the host has installed.
+    assert set((fake_bin / "codex.calls").read_text().splitlines()) == {
+        "--version",
+        "--help",
+    }
     payload = capture_file.read_text(encoding="utf-8").splitlines()
     assert "new-pane" in payload
     assert "--floating" in payload
@@ -3874,6 +3924,65 @@ def test_server_service_prefers_declared_public_identity_over_generation_path(
     assert payload[payload.index("--launcher") + 1] == str(declared_launcher.resolve())
     assert payload[payload.index("--supervisor-bin") + 1] == str(
         (public_bin / "vc-server-supervisor").resolve()
+    )
+
+
+def test_server_service_keeps_declared_launcher_when_supervisor_is_generation_private(
+    tmp_path: Path,
+) -> None:
+    """App PATH prepends generation bin. Public `vc-server-supervisor` may be
+    absent; hashing the inner deck against the LaunchAgent is then a false
+    mismatch. `--launcher` must stay the declared public wrapper."""
+    home = tmp_path / "home"
+    public_bin = home / ".local" / "bin"
+    generation_bin = tmp_path / "generation" / "bin"
+    launcher_copy = tmp_path / "vibecrafted-deck"
+    capture_file = tmp_path / "supervisor-args.txt"
+
+    public_bin.mkdir(parents=True)
+    generation_bin.mkdir(parents=True)
+    _write_trimmed_launcher(launcher_copy)
+
+    public_launcher = public_bin / "vibecrafted"
+    public_launcher.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    public_launcher.chmod(0o755)
+
+    generation_launcher = generation_bin / "vibecrafted"
+    generation_launcher.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    generation_launcher.chmod(0o755)
+    generation_supervisor = generation_bin / "vc-server-supervisor"
+    generation_supervisor.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'printf "%s\\n" "$@" > "$CAPTURE_FILE"\n',
+        encoding="utf-8",
+    )
+    generation_supervisor.chmod(0o755)
+
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "PATH": f"{generation_bin}:{public_bin}:/usr/bin:/bin",
+        "CAPTURE_FILE": str(capture_file),
+        "VIBECRAFTED_DECLARED_LAUNCHER": str(public_launcher),
+    }
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'source "{launcher_copy}"; _server_supervisor_cli service restart',
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = capture_file.read_text(encoding="utf-8").split()
+    assert payload[payload.index("--launcher") + 1] == str(public_launcher.resolve())
+    assert payload[payload.index("--supervisor-bin") + 1] == str(
+        generation_supervisor.resolve()
     )
 
 

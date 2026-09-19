@@ -4,13 +4,19 @@ import json
 import logging
 import os
 import queue
+import shutil
+import socket
 import stat
 import subprocess
+import sys
+import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1761,7 +1767,7 @@ def test_full_quarantine_backpressures_corrupt_triage_outbox(
     assert not guardian_module._terminal_triage_outbox_path("run-real").exists()
 
 
-def test_server_settlement_board_publish_runs_for_caught_up_and_settlement(
+def test_caught_up_and_settlement_complete_without_a_board_publisher(
     tmp_path: Path,
 ) -> None:
     state = GuardianState(
@@ -1769,20 +1775,22 @@ def test_server_settlement_board_publish_runs_for_caught_up_and_settlement(
         cursor=v2_cursor(0),
         baseline_complete=True,
     )
-    published: list[str] = []
     worker = GuardianWorker(
         server_url="http://127.0.0.1:3024",
         state=state,
         notifier=lambda _notification: None,
         reconciler=lambda _event: ReconcileDecision(request_resume=False),
-        board_publisher=lambda: published.append("publish"),
         opener=QueueOpener(
             FakeResponse(
                 [
                     *caught_up(v2_cursor(0)),
                     *frame(
                         v2_cursor(1),
-                        settlement_data("run-publish", 1, "f"),
+                        settlement_data("run-no-board", 1, "f"),
+                    ),
+                    *frame(
+                        v2_cursor(2),
+                        settlement_data("run-no-board", 1, "f"),
                     ),
                 ]
             )
@@ -1792,7 +1800,8 @@ def test_server_settlement_board_publish_runs_for_caught_up_and_settlement(
     stats = worker.consume_connection()
 
     assert stats.completed_actions == 1
-    assert published == ["publish", "publish"]
+    assert state.cursor == v2_cursor(2)
+    assert GuardianState.load(state.path).cursor == v2_cursor(2)
 
 
 def test_server_settlement_board_publish_failure_never_blocks_settlement(
@@ -1832,6 +1841,288 @@ def test_server_settlement_board_publish_failure_never_blocks_settlement(
 
     assert stats.completed_actions == 1
     assert "server settlement-board publication failed" in caplog.text
+
+
+_needs_posix_sockets = pytest.mark.skipif(
+    os.name != "posix", reason="vc-frame session sockets are AF_UNIX files"
+)
+
+_FAKE_VC_FRAME = """#!@PYTHON@
+import json
+import os
+import pathlib
+import stat
+import sys
+
+logs = pathlib.Path(os.environ["FAKE_VC_FRAME_LOG_ROOT"]) / "vc-frame-log"
+(logs / f"client-{os.getpid()}").mkdir(parents=True)
+argv = sys.argv[1:]
+record = os.environ.get("FAKE_VC_FRAME_ARGV")
+if record:
+    with open(record, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(argv) + "\\n")
+if argv[:1] == ["list-sessions"]:
+    contract = pathlib.Path(os.environ["VC_FRAME_SOCKET_DIR"]) / "contract_version_2"
+    names = sorted(
+        entry.name
+        for entry in (contract.iterdir() if contract.is_dir() else ())
+        if stat.S_ISSOCK(entry.lstat().st_mode)
+    )
+    if not names:
+        print("No active vc-frame sessions found.", file=sys.stderr)
+        sys.exit(1)
+    for name in names:
+        print(f"{name} [Created 0s ago] ")
+    sys.exit(0)
+if "pipe" in argv:
+    sys.exit(0)
+sys.exit(2)
+"""
+
+
+def _bind_session_socket(root: Path, name: str) -> Path:
+    directory = root / "contract_version_2"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / name
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        listener.bind(str(path))
+    finally:
+        listener.close()
+    return path
+
+
+def _production_main_frame_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    candidate_session: bool,
+) -> dict[str, object]:
+    """Drive actual Guardian CLI wiring with fake Frame/HTTP/SSE, not a stub Worker."""
+
+    from vibecrafted_core import settlement_ledger
+    from vibecrafted_core.settlements_query import settlements_summary
+
+    socket_root = Path(tempfile.mkdtemp(prefix="vcgf-", dir="/tmp"))
+    frame_bin = tmp_path / "vc-frame"
+    argv_log = tmp_path / "frame-argv.jsonl"
+    argv_log.write_text("", encoding="utf-8")
+    frame_bin.write_text(
+        _FAKE_VC_FRAME.replace("@PYTHON@", sys.executable), encoding="utf-8"
+    )
+    frame_bin.chmod(0o755)
+    client_logs = socket_root / "vc-frame-log"
+    (client_logs / "client-interactive").mkdir(parents=True)
+    if candidate_session:
+        _bind_session_socket(socket_root, "live")
+
+    state_path = tmp_path / "guardian-state.json"
+    lock_path = tmp_path / "guardian.lock"
+    ready_file = tmp_path / "guardian.ready.json"
+    home = Path(os.environ["VIBECRAFTED_HOME"])
+    carrier = home / "control_plane" / "settlement_board_transport.json"
+    carrier.parent.mkdir(parents=True, exist_ok=True)
+    carrier_body = '{"schema":"vibecrafted.settlement-board-transport.v1","carrier":{"f":1,"x":2,"n":3,"total":6}}\n'
+    carrier.write_text(carrier_body, encoding="utf-8")
+    settlement_ledger.initialize_settlement_ledger()
+    ledger_path = home / "control_plane" / "settlement_ledger.jsonl"
+    ledger_before = ledger_path.read_bytes() if ledger_path.is_file() else b""
+    summary_before = settlement_ledger.read_settlement_ledger()["counts"]
+    cli_before = settlements_summary()["counts"]
+
+    sse_lines = [
+        *stream_gap(requested=v2_cursor(0), resumed_at=v2_cursor(0, generation=1)),
+        *caught_up(v2_cursor(0, generation=1)),
+        *frame(
+            v2_cursor(1, generation=1),
+            settlement_data("run-no-frame", 1, "f"),
+        ),
+        *frame(
+            v2_cursor(2, generation=1),
+            settlement_data("run-no-frame", 1, "f"),
+        ),
+        *control_frame(
+            "stream.opaque", v2_cursor(3, generation=1), {"kind": "ignored"}
+        ),
+    ]
+    board_body = json.dumps(
+        {
+            "generated_at": "2026-09-14T00:00:00+00:00",
+            "settlement_counts": {
+                "scope": "retained_control_plane_snapshots",
+                "active": 0,
+                "f": 4,
+                "x": 1,
+                "n": 2,
+                "invalid": 0,
+                "unclassified": 0,
+                "total_settled": 7,
+            },
+        }
+    ).encode("utf-8")
+    run_body = json.dumps(
+        {
+            "run_id": "run-no-frame",
+            "state": "completed",
+            "settlement_tui": "f",
+            "settlement_verdict": "finalized",
+            "settlement_revision": 1,
+            "settlement_source": "await",
+            "worker_alive": False,
+            "recovery_required": False,
+        }
+    ).encode("utf-8")
+    http_calls: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            parsed = urllib.parse.urlsplit(self.path)
+            http_calls.append(self.path)
+            if parsed.path == "/api/control/events":
+                body = "".join(sse_lines).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if parsed.path == "/api/control/state":
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(board_body)))
+                self.end_headers()
+                self.wfile.write(board_body)
+                return
+            if parsed.path.startswith("/api/control/runs/"):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(run_body)))
+                self.end_headers()
+                self.wfile.write(run_body)
+                return
+            self.send_error(404)
+
+        def log_message(self, *_args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address[:2]
+    server_url = f"http://{host}:{port}"
+
+    original_run = guardian_module.GuardianWorker.run_forever
+
+    def run_one_connection(self: Any, **kwargs: Any) -> None:
+        kwargs.setdefault("max_connections", 1)
+        original_run(self, **kwargs)
+
+    ready_payloads: list[dict[str, object]] = []
+    real_write_ready = guardian_module.write_ready_receipt
+
+    def tracking_ready(*args: Any, **kwargs: Any) -> Path:
+        path = real_write_ready(*args, **kwargs)
+        ready_payloads.append(json.loads(path.read_text(encoding="utf-8")))
+        return path
+
+    for proxy in ("http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"):
+        monkeypatch.delenv(proxy, raising=False)
+    monkeypatch.setenv("no_proxy", "*")
+    monkeypatch.setenv("VIBECRAFTED_VC_FRAME_BIN", str(frame_bin))
+    monkeypatch.setenv("VC_FRAME_SOCKET_DIR", str(socket_root))
+    monkeypatch.setenv("FAKE_VC_FRAME_LOG_ROOT", str(socket_root))
+    monkeypatch.setenv("FAKE_VC_FRAME_ARGV", str(argv_log))
+    monkeypatch.setattr(
+        guardian_module.GuardianWorker, "run_forever", run_one_connection
+    )
+    monkeypatch.setattr(guardian_module, "write_ready_receipt", tracking_ready)
+
+    argv_lines: list[list[str]] = []
+    spawned_logs: list[str] = []
+    result = 1
+    try:
+        result = guardian_module.main(
+            [
+                "--server-url",
+                server_url,
+                "--state",
+                str(state_path),
+                "--lock",
+                str(lock_path),
+                "--ready-file",
+                str(ready_file),
+                "--ready-nonce",
+                "ready-nonce",
+                "--no-desktop",
+            ]
+        )
+        # Baseline publisher refresh is a daemon thread; wait long enough that
+        # a still-wired 5s periodic or event pipe would have spawned vc-frame.
+        time.sleep(0.4)
+        argv_lines = [
+            json.loads(line)
+            for line in argv_log.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        spawned_logs = sorted(
+            path.name
+            for path in client_logs.iterdir()
+            if path.name != "client-interactive"
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+        shutil.rmtree(socket_root, ignore_errors=True)
+
+    persisted = GuardianState.load(state_path)
+    return {
+        "result": result,
+        "argv": argv_lines,
+        "http_calls": http_calls,
+        "cursor": persisted.cursor,
+        "ready_payloads": ready_payloads,
+        "ready_exists": ready_file.exists(),
+        "carrier": carrier.read_text(encoding="utf-8"),
+        "ledger_before": ledger_before,
+        "ledger_after": ledger_path.read_bytes() if ledger_path.is_file() else b"",
+        "summary_before": summary_before,
+        "summary_after": settlement_ledger.read_settlement_ledger()["counts"],
+        "cli_before": cli_before,
+        "cli_after": settlements_summary()["counts"],
+        "spawned_logs": spawned_logs,
+        "state_fetches": sum(
+            1 for path in http_calls if path.startswith("/api/control/state")
+        ),
+    }
+
+
+@_needs_posix_sockets
+@pytest.mark.parametrize("candidate_session", [False, True], ids=["idle", "candidate"])
+def test_guardian_main_makes_zero_unsolicited_frame_calls(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    candidate_session: bool,
+) -> None:
+    probe = _production_main_frame_probe(
+        monkeypatch, tmp_path, candidate_session=candidate_session
+    )
+
+    assert probe["result"] == 0
+    assert probe["argv"] == []
+    assert probe["spawned_logs"] == []
+    assert probe["cursor"] == v2_cursor(2, generation=1)
+    assert probe["ready_payloads"]
+    assert probe["ready_payloads"][0]["nonce"] == "ready-nonce"
+    assert probe["ready_exists"] is False
+    assert probe["carrier"] == (
+        '{"schema":"vibecrafted.settlement-board-transport.v1","carrier":{"f":1,"x":2,"n":3,"total":6}}\n'
+    )
+    assert probe["ledger_after"] == probe["ledger_before"]
+    assert probe["summary_after"] == probe["summary_before"]
+    assert probe["cli_after"] == probe["cli_before"]
+    assert any(path.startswith("/api/control/events") for path in probe["http_calls"])
+    assert probe["state_fetches"] == 0
 
 
 def test_recovery_adapter_obeys_vc_guard_block(tmp_path: Path) -> None:
@@ -3503,21 +3794,6 @@ def test_main_recovers_trust_outbox_under_lock_before_sse_attach(
             assert backoff is not None
             order.append("attach")
 
-    class StubSettlementBoardPublisher:
-        def __init__(self, *, server_url: str) -> None:
-            assert server_url == "http://127.0.0.1:3024"
-
-        def request_refresh(self) -> bool:
-            return True
-
-        def start_periodic_refresh(self) -> bool:
-            order.append("history-start")
-            return True
-
-        def stop_periodic_refresh(self) -> bool:
-            order.append("history-stop")
-            return True
-
     monkeypatch.setattr(
         guardian_module,
         "GuardianState",
@@ -3540,11 +3816,6 @@ def test_main_recovers_trust_outbox_under_lock_before_sse_attach(
         guardian_module,
         "BoundedBackoff",
         lambda *_args: object(),
-    )
-    monkeypatch.setattr(
-        guardian_module,
-        "SettlementBoardPublisher",
-        StubSettlementBoardPublisher,
     )
     monkeypatch.setattr(guardian_module, "single_instance_lock", fake_lock)
     monkeypatch.setattr(
@@ -3575,9 +3846,7 @@ def test_main_recovers_trust_outbox_under_lock_before_sse_attach(
     assert order == [
         "lock",
         "recover",
-        "history-start",
         "attach",
-        "history-stop",
     ]
 
 

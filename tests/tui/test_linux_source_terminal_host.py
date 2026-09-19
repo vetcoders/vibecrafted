@@ -57,4 +57,7 @@ def test_source_preflight_does_not_require_native_terminal_host() -> None:
     pack_call = text[pack_idx:].index(
         "_materialize_runtime_generation_vc_terminal_entry(staging)"
     )
-    assert "require_native_host" not in text[pack_idx + pack_call : pack_idx + pack_call + 80]
+    assert (
+        "require_native_host"
+        not in text[pack_idx + pack_call : pack_idx + pack_call + 80]
+    )

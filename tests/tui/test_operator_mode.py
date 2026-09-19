@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
@@ -20,6 +21,44 @@ HELPER_SCRIPT = (
     / "shell"
     / "vetcoders.sh"
 )
+REPO_VC_FRAME_CONFIG = (
+    REPO_ROOT / "vibecrafted-core" / "vibecrafted_core" / "config" / "vc-frame"
+)
+
+# vc-frame and vc-terminal resolve only from the generation that loaded the
+# shell (3d9da4dc, 0e5e6b03), or -- for vc-frame alone -- from developer mode on
+# this checkout. PATH / VIBECRAFTED_RUNTIME_BIN stubs no longer reach them; see
+# tests/tui/_generation_fixture.py for the contract and the seam used here.
+_GENERATION_FIXTURE_SPEC = importlib.util.spec_from_file_location(
+    "tui_generation_fixture", Path(__file__).with_name("_generation_fixture.py")
+)
+assert _GENERATION_FIXTURE_SPEC is not None and _GENERATION_FIXTURE_SPEC.loader
+gen = importlib.util.module_from_spec(_GENERATION_FIXTURE_SPEC)
+_GENERATION_FIXTURE_SPEC.loader.exec_module(gen)
+
+
+def _start_generation(tmp_path: Path, home: Path) -> tuple[Path, Path]:
+    """Installed generation for a public vc-start caller without a PTY.
+
+    Create-only start (dashboard.sh, "one create-only workspace contract",
+    2026-09-09): with no controlling terminal the workspace is created through
+    the selected engine's detached `attach --create-background`, then the
+    product terminal is opened on the root through the generation's own
+    bin/vc-start. Both engines, both front doors, the operator layout at the
+    pinned product config home and the canonical terminal launcher are
+    therefore part of the fixture.
+    """
+    generation = gen.fake_generation(tmp_path, front_doors=("vc-start", "vibecrafted"))
+    terminal_capture = tmp_path / "terminal-launch.json"
+    gen.install_vc_terminal(generation, terminal_capture)
+    gen.install_product_vc_frame_config(home, layouts=("operator", "marbles"))
+    gen.install_primary_shell_launcher(home)
+    return generation, terminal_capture
+
+
+def _hosted_entry(launch: dict) -> list[str]:
+    argv = launch["argv"]
+    return argv[argv.index("-e") + 1 :]
 
 
 def _write_capture_command(bin_dir: Path, name: str, capture_file: Path) -> None:
@@ -184,6 +223,9 @@ if args[:1] == ["list-sessions"]:
     print("abandoned-evidence [Created 72h ago] (EXITED - attach to resurrect)")
 if "--new-session-with-layout" in args and "--session" in args:
     state_file.write_text(args[args.index("--session") + 1], encoding="utf-8")
+# Frame's detached create, the form create-only vc-start uses.
+if args[-2:-1] == ["--create-background"]:
+    state_file.write_text(args[-1], encoding="utf-8")
 sys.exit(0)
 """,
         encoding="utf-8",
@@ -248,18 +290,16 @@ def _org_repo() -> str:
 
 def test_vc_start_launches_operator_entrypoint_layout(tmp_path: Path) -> None:
     home = tmp_path / "home"
-    fake_bin = tmp_path / "bin"
     capture_file = tmp_path / "vc_frame-args.txt"
     session_state_file = tmp_path / "session-state.txt"
 
     home.mkdir()
-    fake_bin.mkdir()
     session_state_file.write_text("missing", encoding="utf-8")
-    _write_stateful_vc_frame(fake_bin, capture_file, session_state_file)
+    generation, terminal_capture = _start_generation(tmp_path, home)
+    _write_stateful_vc_frame(generation / "bin", capture_file, session_state_file)
 
     env = os.environ.copy()
     env["HOME"] = str(home)
-    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
     env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg")
     env["VIBECRAFTED_HOME"] = str(home / ".vibecrafted")
     env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
@@ -270,33 +310,39 @@ def test_vc_start_launches_operator_entrypoint_layout(tmp_path: Path) -> None:
     env.pop("VC_FRAME", None)
     env.pop("VC_FRAME_PANE_ID", None)
     env.pop("VC_FRAME_SESSION_NAME", None)
+    env.pop("VIBECRAFTED_PREFER_REPO_VC_FRAME", None)
 
     expected_session = _resolved_workspace_session(env)
     env["FAKE_VC_FRAME_SESSION"] = expected_session
 
     subprocess.run(
-        ["bash", "-lc", f'source "{HELPER_SCRIPT}"; vc-start'],
+        [
+            "bash",
+            "-lc",
+            f'source "{HELPER_SCRIPT}"; {gen.loaded_root_prelude(generation)}; vc-start',
+        ],
         check=True,
         cwd=REPO_ROOT,
         env=env,
     )
 
+    # Create-only start: the operator layout comes from the pinned product
+    # config (3d9da4dc) and the workspace is created with Frame's detached
+    # create -- the one create that needs no PTY -- instead of a foreground
+    # `--session <name> --new-session-with-layout` client. The caller without a
+    # terminal then gets the product terminal, which enters that very session.
     payload = capture_file.read_text(encoding="utf-8")
-    assert "--session" in payload
-    assert expected_session in payload
-    assert "--new-session-with-layout" in payload
+    layout = gen.product_vc_frame_config_dir(home) / "layouts" / "operator.kdl"
     assert (
-        str(
-            REPO_ROOT
-            / "vibecrafted-core"
-            / "vibecrafted_core"
-            / "config"
-            / "vc-frame"
-            / "layouts"
-            / "operator.kdl"
-        )
-        in payload
-    )
+        f"VC_FRAME --new-session-with-layout {layout} "
+        f"attach --create-background {expected_session}"
+    ) in payload
+    launch = gen.read_terminal_launch(terminal_capture)
+    assert launch is not None, payload
+    hosted = _hosted_entry(launch)
+    assert hosted[1] == str(generation / "bin" / "vc-start")
+    assert hosted[hosted.index("--repo") + 1] == str(REPO_ROOT)
+    assert launch["created"] == expected_session
 
 
 def test_vc_start_with_stale_frame_env_creates_session_foreground(
@@ -306,24 +352,24 @@ def test_vc_start_with_stale_frame_env_creates_session_foreground(
 
     A bare shell that once ran vc-start (or inherited leaked VC_FRAME/ZELLIJ)
     carries the session-name exports but no pane id. The launcher must take
-    the outside path: create the session in the FOREGROUND. The old loose
-    check silently no-opped when the stale name equalled the target session
-    and otherwise raced a background create + switch-session at a session
-    with no live client.
+    the outside path and CREATE the session. The old loose check silently
+    no-opped when the stale name equalled the target session and otherwise
+    raced a background create + switch-session at a session with no live
+    client. The foreground client itself is gone (create-only start,
+    2026-09-09): a caller without a PTY creates detached and is handed the
+    product terminal, which enters the session.
     """
     home = tmp_path / "home"
-    fake_bin = tmp_path / "bin"
     capture_file = tmp_path / "vc_frame-args.txt"
     session_state_file = tmp_path / "session-state.txt"
 
     home.mkdir()
-    fake_bin.mkdir()
     session_state_file.write_text("missing", encoding="utf-8")
-    _write_stateful_vc_frame(fake_bin, capture_file, session_state_file)
+    generation, terminal_capture = _start_generation(tmp_path, home)
+    _write_stateful_vc_frame(generation / "bin", capture_file, session_state_file)
 
     env = os.environ.copy()
     env["HOME"] = str(home)
-    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
     env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg")
     env["VIBECRAFTED_HOME"] = str(home / ".vibecrafted")
     env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
@@ -331,6 +377,7 @@ def test_vc_start_with_stale_frame_env_creates_session_foreground(
     env["SESSION_STATE_FILE"] = str(session_state_file)
     env["VIBECRAFTED_TEST_ALLOW_NON_TTY_VC_FRAME"] = "1"
     env.pop("VC_FRAME_CONFIG_DIR", None)
+    env.pop("VIBECRAFTED_PREFER_REPO_VC_FRAME", None)
     expected_session = _resolved_workspace_session(env)
     env["FAKE_VC_FRAME_SESSION"] = expected_session
     # Stale leak: session-name exports and pane markers WITHOUT pane ids,
@@ -343,17 +390,23 @@ def test_vc_start_with_stale_frame_env_creates_session_foreground(
     env.pop("ZELLIJ_PANE_ID", None)
 
     subprocess.run(
-        ["bash", "-lc", f'source "{HELPER_SCRIPT}"; vc-start'],
+        [
+            "bash",
+            "-lc",
+            f'source "{HELPER_SCRIPT}"; {gen.loaded_root_prelude(generation)}; vc-start',
+        ],
         check=True,
         cwd=REPO_ROOT,
         env=env,
     )
 
     payload = capture_file.read_text(encoding="utf-8")
-    assert "--session" in payload
-    assert expected_session in payload
+    assert f"attach --create-background {expected_session}" in payload
     assert "--new-session-with-layout" in payload
     assert "switch-session" not in payload
+    launch = gen.read_terminal_launch(terminal_capture)
+    assert launch is not None, payload
+    assert launch["created"] == expected_session
 
 
 def test_operator_console_first_screen_is_actionable() -> None:
@@ -386,17 +439,15 @@ def test_operator_console_first_screen_is_actionable() -> None:
 
 def test_vc_start_does_not_run_implicit_session_gc(tmp_path: Path) -> None:
     home = tmp_path / "home"
-    fake_bin = tmp_path / "bin"
     capture_file = tmp_path / "capture.log"
     home.mkdir()
-    fake_bin.mkdir()
-    _write_implicit_gc_probe_vc_frame(fake_bin)
+    generation, terminal_capture = _start_generation(tmp_path, home)
+    _write_implicit_gc_probe_vc_frame(generation / "bin")
 
     env = os.environ.copy()
     env.update(
         {
             "HOME": str(home),
-            "PATH": f"{fake_bin}:{env.get('PATH', '')}",
             "XDG_CONFIG_HOME": str(tmp_path / "xdg"),
             "VIBECRAFTED_ROOT": str(REPO_ROOT),
             "CAPTURE_FILE": str(capture_file),
@@ -409,11 +460,16 @@ def test_vc_start_does_not_run_implicit_session_gc(tmp_path: Path) -> None:
         "VC_FRAME_SESSION_NAME",
         "VIBECRAFTED_OPERATOR_SESSION",
         "VIBECRAFTED_OPERATOR_MODE",
+        "VIBECRAFTED_PREFER_REPO_VC_FRAME",
     ):
         env.pop(name, None)
 
     result = subprocess.run(
-        ["bash", "-lc", f'source "{HELPER_SCRIPT}"; vc-start'],
+        [
+            "bash",
+            "-lc",
+            f'source "{HELPER_SCRIPT}"; {gen.loaded_root_prelude(generation)}; vc-start',
+        ],
         cwd=REPO_ROOT,
         env=env,
         capture_output=True,
@@ -422,9 +478,24 @@ def test_vc_start_does_not_run_implicit_session_gc(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    payload = capture_file.read_text(encoding="utf-8")
-    assert "VC_FRAME list-sessions" not in payload
-    assert "VC_FRAME kill-session abandoned-evidence" not in payload
+    calls = capture_file.read_text(encoding="utf-8").splitlines()
+    # Create-only start (5b25a6cd, dashboard.sh
+    # `_vetcoders_start_session_inventory_state`) reads the engine inventory for
+    # ITS OWN name before creating: `list-sessions --no-formatting`. That read is
+    # the duplicate guard, not session GC -- so the old "no list-sessions at all"
+    # proxy became "no listing but the inventory read". The GC property itself
+    # is unchanged: the abandoned EXITED record it sees is never killed or
+    # deleted, and nothing else is selected from the listing.
+    listings = [call for call in calls if call.startswith("VC_FRAME list-sessions")]
+    assert listings
+    assert set(listings) == {"VC_FRAME list-sessions --no-formatting"}
+    assert not any("kill-session" in call or "delete-session" in call for call in calls)
+    assert not any(
+        "abandoned-evidence" in call
+        for call in calls
+        if not call.startswith("VC_FRAME list-sessions")
+    )
+    assert gen.read_terminal_launch(terminal_capture) is not None
 
 
 def test_explicit_gc_apply_never_selects_untyped_sessions(tmp_path: Path) -> None:
@@ -658,7 +729,7 @@ def test_vc_init_finds_bundled_vc_frame_and_creates_missing_operator_session(
     home = tmp_path / "home"
     crafted_home = home / ".vibecrafted"
     runtime_home = home / ".local" / "share" / "vibecrafted"
-    bundled_bin = runtime_home / "bin"
+    provider_bin = tmp_path / "provider-bin"
     fake_bin = tmp_path / "bin"
     operator_home = tmp_path / "forbidden-operator-home"
     operator_bin = operator_home / ".local" / "share" / "vibecrafted" / "bin"
@@ -667,11 +738,16 @@ def test_vc_init_finds_bundled_vc_frame_and_creates_missing_operator_session(
     session_state_file = tmp_path / "session-state.txt"
 
     home.mkdir()
-    bundled_bin.mkdir(parents=True)
+    provider_bin.mkdir(parents=True)
     fake_bin.mkdir()
     operator_bin.mkdir(parents=True)
+    # The bundled engine is the loaded generation's own bin/vc-frame +
+    # libexec/vc-frame (3d9da4dc); VIBECRAFTED_RUNTIME_BIN is no longer a source.
+    generation = gen.fake_generation(tmp_path)
+    bundled_bin = generation / "bin"
     _write_stateful_vc_frame(bundled_bin, capture_file, session_state_file)
-    _write_fake_claude(bundled_bin)
+    gen.install_product_vc_frame_config(home)
+    _write_fake_claude(provider_bin)
     forbidden_vc_frame = operator_bin / "vc-frame"
     forbidden_vc_frame.write_text(
         "#!/usr/bin/env bash\n"
@@ -689,7 +765,6 @@ def test_vc_init_finds_bundled_vc_frame_and_creates_missing_operator_session(
     env["HOME"] = str(home)
     env["VIBECRAFTED_HOME"] = str(crafted_home)
     env["VIBECRAFTED_RUNTIME_HOME"] = str(runtime_home)
-    env["VIBECRAFTED_RUNTIME_BIN"] = str(bundled_bin)
     env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg")
     env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
     # The test PATH intentionally excludes host tools; policy resolution is
@@ -705,8 +780,12 @@ def test_vc_init_finds_bundled_vc_frame_and_creates_missing_operator_session(
     # …as the child a product terminal already opened. A public init with no
     # TTY and no watched frame now opens that terminal first
     # (tests/tui/test_declaration_entry.py); the in-process create below is the
-    # child's half, and the child carries this boundary.
-    env["VIBECRAFTED_TERMINAL_ENTRY"] = "1"
+    # child's half, and the child carries this boundary. A bare
+    # VIBECRAFTED_TERMINAL_ENTRY=1 is inherited ancestry, not that child: the
+    # boundary counts only with its owner set to the generation's own
+    # bin/vibecrafted (vc_frame.sh `_vetcoders_has_owned_vc_terminal_entry`).
+    env.update(gen.owned_terminal_child_env(generation))
+    env.pop("VIBECRAFTED_PREFER_REPO_VC_FRAME", None)
     env.pop("VC_FRAME", None)
     env.pop("VC_FRAME_PANE_ID", None)
     env.pop("VC_FRAME_SESSION_NAME", None)
@@ -714,6 +793,10 @@ def test_vc_init_finds_bundled_vc_frame_and_creates_missing_operator_session(
     # the runtime computes a fresh session instead of latching onto the ambient one.
     env.pop("VIBECRAFTED_OPERATOR_SESSION", None)
     env.pop("VIBECRAFTED_OPERATOR_MODE", None)
+    init_script = (
+        f'source "{HELPER_SCRIPT}"; {gen.loaded_root_prelude(generation)}; '
+        'vc-init claude --prompt "Check runtime"'
+    )
 
     outcomes: list[tuple[int, str, str]] = []
     for operator_runtime_visible in (True, False):
@@ -723,12 +806,9 @@ def test_vc_init_finds_bundled_vc_frame_and_creates_missing_operator_session(
         forbidden_probe.unlink(missing_ok=True)
         visible_path = f":{operator_bin}" if operator_runtime_visible else ""
         env["PATH"] = (
-            f"{bundled_bin}:{fake_bin}{visible_path}:/usr/bin:/bin:/usr/sbin:/sbin"
+            f"{provider_bin}:{fake_bin}{visible_path}:/usr/bin:/bin:/usr/sbin:/sbin"
         )
-        command = hermetic_login_shell(
-            env,
-            f'source "{HELPER_SCRIPT}"; vc-init claude --prompt "Check runtime"',
-        )
+        command = hermetic_login_shell(env, init_script)
 
         result = subprocess.run(
             ["bash", "-lc", command],
@@ -758,18 +838,38 @@ def test_vc_init_finds_bundled_vc_frame_and_creates_missing_operator_session(
         assert "There is no active session!" not in result.stderr
         outcomes.append((result.returncode, result.stdout, result.stderr))
 
-    assert outcomes[0] == outcomes[1]
+    # Every interactive launch is admitted as a tracked run and announces its
+    # own freshly generated id (spawn.py `interactive-command`, "run_id: ...
+    # model_source: ...", 5b25a6cd; init composes through it since 36614036).
+    # That id differs per launch by design; a foreign operator runtime visible
+    # on PATH must change nothing else, byte for byte.
+    admission_run_id = re.compile(r"\binit-\d{6}-\d{6}-\d{5}\b")
 
+    def _without_admission_run_id(
+        outcome: tuple[int, str, str],
+    ) -> tuple[int, str, str]:
+        returncode, stdout, stderr = outcome
+        return (
+            returncode,
+            admission_run_id.sub("init-<run-id>", stdout),
+            admission_run_id.sub("init-<run-id>", stderr),
+        )
+
+    assert all(admission_run_id.search(stderr) for _, _, stderr in outcomes)
+    assert _without_admission_run_id(outcomes[0]) == _without_admission_run_id(
+        outcomes[1]
+    )
+
+    # The same condition with the cockpit removed from the generation. The
+    # provider CLI stays reachable so the only missing piece is vc-frame.
     (bundled_bin / "vc-frame").unlink()
-    env["PATH"] = f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin"
+    (generation / "libexec" / "vc-frame").unlink()
+    env["PATH"] = f"{provider_bin}:{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin"
     mutated = subprocess.run(
         [
             "bash",
             "-lc",
-            hermetic_login_shell(
-                env,
-                f'source "{HELPER_SCRIPT}"; vc-init claude --prompt "Check runtime"',
-            ),
+            hermetic_login_shell(env, init_script),
         ],
         cwd=REPO_ROOT,
         env=env,
@@ -778,23 +878,25 @@ def test_vc_init_finds_bundled_vc_frame_and_creates_missing_operator_session(
         check=False,
     )
     assert mutated.returncode != 0
+    # d81d1181 contract, still documented at operator_entrypoints.sh
+    # `_vetcoders_skill_init` ("No cockpit ... must not dead-end"): init without
+    # vc-frame degrades to the caller's terminal and says so.
     assert "vc-frame cockpit not installed" in mutated.stderr
     assert not forbidden_probe.exists()
 
 
 def test_operator_spawn_success_prints_actionable_receipt(tmp_path: Path) -> None:
     home = tmp_path / "home"
-    fake_bin = tmp_path / "bin"
     capture_file = tmp_path / "vc_frame-args.txt"
     home.mkdir()
-    fake_bin.mkdir()
-    _write_capture_command(fake_bin, "vc-frame", capture_file)
+    # The engine is the loaded generation's own entry (3d9da4dc), not PATH.
+    generation = gen.fake_generation(tmp_path)
+    _write_capture_command(generation / "bin", "vc-frame", capture_file)
 
     env = os.environ.copy()
     env.update(
         {
             "HOME": str(home),
-            "PATH": f"{fake_bin}:{env.get('PATH', '')}",
             "CAPTURE_FILE": str(capture_file),
             "VIBECRAFTED_OPERATOR_SESSION": "receipt-session",
             "VIBECRAFTED_ROOT": str(REPO_ROOT),
@@ -809,6 +911,7 @@ def test_operator_spawn_success_prints_actionable_receipt(tmp_path: Path) -> Non
         "ZELLIJ",
         "ZELLIJ_SESSION_NAME",
         "ZELLIJ_PANE_ID",
+        "VIBECRAFTED_PREFER_REPO_VC_FRAME",
     ):
         env.pop(name, None)
 
@@ -820,6 +923,7 @@ def test_operator_spawn_success_prints_actionable_receipt(tmp_path: Path) -> Non
             "-c",
             (
                 f'source "{HELPER_SCRIPT}"; '
+                f"{gen.loaded_root_prelude(generation)}; "
                 '_vetcoders_spawn_into_operator_session "codex-init" "true"'
             ),
         ],
@@ -844,17 +948,15 @@ def test_operator_spawn_success_prints_actionable_receipt(tmp_path: Path) -> Non
 
 def test_worker_session_spawn_uses_no_focus_when_supported(tmp_path: Path) -> None:
     home = tmp_path / "home"
-    fake_bin = tmp_path / "bin"
     capture_file = tmp_path / "vc_frame-args.txt"
     home.mkdir()
-    fake_bin.mkdir()
-    _write_capture_command(fake_bin, "vc-frame", capture_file)
+    generation = gen.fake_generation(tmp_path)
+    _write_capture_command(generation / "bin", "vc-frame", capture_file)
 
     env = os.environ.copy()
     env.update(
         {
             "HOME": str(home),
-            "PATH": f"{fake_bin}:{env.get('PATH', '')}",
             "CAPTURE_FILE": str(capture_file),
             "VIBECRAFTED_OPERATOR_SESSION": "operator-seat",
             "VIBECRAFTED_WORKER_SESSION": "worker-host",
@@ -870,6 +972,7 @@ def test_worker_session_spawn_uses_no_focus_when_supported(tmp_path: Path) -> No
         "ZELLIJ",
         "ZELLIJ_SESSION_NAME",
         "ZELLIJ_PANE_ID",
+        "VIBECRAFTED_PREFER_REPO_VC_FRAME",
     ):
         env.pop(name, None)
 
@@ -881,6 +984,7 @@ def test_worker_session_spawn_uses_no_focus_when_supported(tmp_path: Path) -> No
             "-c",
             (
                 f'source "{HELPER_SCRIPT}"; '
+                f"{gen.loaded_root_prelude(generation)}; "
                 '_vetcoders_spawn_into_operator_session "resume-codex" "true"'
             ),
         ],
@@ -900,18 +1004,16 @@ def test_worker_session_spawn_uses_no_focus_when_supported(tmp_path: Path) -> No
 
 def test_operator_spawn_failure_is_loud_and_preserves_status(tmp_path: Path) -> None:
     home = tmp_path / "home"
-    fake_bin = tmp_path / "bin"
     home.mkdir()
-    fake_bin.mkdir()
-    vc_frame = fake_bin / "vc-frame"
-    vc_frame.write_text("#!/usr/bin/env bash\nexit 37\n", encoding="utf-8")
-    vc_frame.chmod(0o755)
+    generation = gen.fake_generation(tmp_path)
+    gen.write_executable(
+        generation / "bin" / "vc-frame", "#!/usr/bin/env bash\nexit 37\n"
+    )
 
     env = os.environ.copy()
     env.update(
         {
             "HOME": str(home),
-            "PATH": f"{fake_bin}:{env.get('PATH', '')}",
             "VIBECRAFTED_OPERATOR_SESSION": "receipt-session",
             "VIBECRAFTED_ROOT": str(REPO_ROOT),
             "VIBECRAFTED_RUN_ID": "impl-receipt-2",
@@ -924,6 +1026,7 @@ def test_operator_spawn_failure_is_loud_and_preserves_status(tmp_path: Path) -> 
         "ZELLIJ",
         "ZELLIJ_SESSION_NAME",
         "ZELLIJ_PANE_ID",
+        "VIBECRAFTED_PREFER_REPO_VC_FRAME",
     ):
         env.pop(name, None)
 
@@ -935,6 +1038,7 @@ def test_operator_spawn_failure_is_loud_and_preserves_status(tmp_path: Path) -> 
             "-c",
             (
                 f'source "{HELPER_SCRIPT}"; '
+                f"{gen.loaded_root_prelude(generation)}; "
                 '_vetcoders_spawn_into_operator_session "marbles" "true"'
             ),
         ],
@@ -959,20 +1063,28 @@ def test_vc_init_missing_vc_frame_message_has_fresh_install_path_hint(
     crafted_home = home / ".vibecrafted"
     runtime_home = home / ".local" / "share" / "vibecrafted"
     effective_home = tmp_path / "effective-home.txt"
-    runtime_bin = runtime_home / "bin"
+    provider_bin = tmp_path / "provider-bin"
 
     home.mkdir()
-    runtime_bin.mkdir(parents=True)
-    _write_fake_claude(runtime_bin)
+    provider_bin.mkdir(parents=True)
+    _write_fake_claude(provider_bin)
+    # A fresh install without the cockpit: the loaded generation ships neither
+    # bin/vc-frame nor its engine (vc_frame.sh `_vetcoders_vc_frame_bin`).
+    generation = gen.fake_generation(tmp_path)
+    (generation / "libexec" / "vc-frame").unlink()
 
     env = os.environ.copy()
     env["HOME"] = str(home)
     env["VIBECRAFTED_HOME"] = str(crafted_home)
     env["VIBECRAFTED_RUNTIME_HOME"] = str(runtime_home)
-    env["VIBECRAFTED_RUNTIME_BIN"] = str(runtime_home / "bin")
-    env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+    env["PATH"] = f"{provider_bin}:/usr/bin:/bin:/usr/sbin:/sbin"
     env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
     env["VIBECRAFTED_PYTHON"] = sys.executable
+    # A caller with no PTY is now handed the product terminal before init runs
+    # (0e5e6b03, `_vetcoders_enter_admitted_interactive`); the degraded path is
+    # reached in that terminal's child, which carries the owned boundary.
+    env.update(gen.owned_terminal_child_env(generation))
+    env.pop("VIBECRAFTED_PREFER_REPO_VC_FRAME", None)
     env.pop("VC_FRAME", None)
     env.pop("VC_FRAME_PANE_ID", None)
     env.pop("VC_FRAME_SESSION_NAME", None)
@@ -981,7 +1093,8 @@ def test_vc_init_missing_vc_frame_message_has_fresh_install_path_hint(
         env,
         (
             f'printf "%s\\n" "$HOME" > "{effective_home}"; '
-            f'source "{HELPER_SCRIPT}"; vc-init claude --prompt "Check runtime"'
+            f'source "{HELPER_SCRIPT}"; {gen.loaded_root_prelude(generation)}; '
+            'vc-init claude --prompt "Check runtime"'
         ),
     )
     result = subprocess.run(
@@ -993,15 +1106,17 @@ def test_vc_init_missing_vc_frame_message_has_fresh_install_path_hint(
         check=False,
     )
 
-    # No cockpit is not a dead end: init degrades to the caller's terminal.
-    # Under a non-TTY test harness that degraded path must still stop with a
-    # message that names the headless alternative instead of "run vc-start".
+    # No cockpit is not a dead end: init degrades to the caller's terminal
+    # (d81d1181). Under a non-TTY test harness that degraded path must still
+    # stop with a message that names the non-interactive alternative instead of
+    # "run vc-start". 6dc398a3 made that alternative the verb's own --prompt form
+    # (`vibecrafted init <agent> --prompt`), replacing `vibecrafted implement`.
     assert result.returncode != 0
     assert effective_home.read_text(encoding="utf-8").strip() == str(home)
     assert "vc-frame cockpit not installed" in result.stderr
     assert "vibecrafted init claude --runtime plain" in result.stderr
     assert "vc-start" not in result.stderr
-    assert 'vibecrafted implement claude --prompt "<task>"' in result.stderr
+    assert 'vibecrafted init claude --prompt "<task>"' in result.stderr
 
 
 def test_explicit_terminal_marbles_from_operator_mode_spawns_fresh_tab(
@@ -1013,7 +1128,11 @@ def test_explicit_terminal_marbles_from_operator_mode_spawns_fresh_tab(
 
     home.mkdir()
     fake_bin.mkdir()
-    _write_capture_command(fake_bin, "vc-frame", capture_file)
+    # The engine is the loaded generation's own entry and the operator layout
+    # the bootstrap creates with comes from the pinned product config (3d9da4dc).
+    generation = gen.fake_generation(tmp_path)
+    _write_capture_command(generation / "bin", "vc-frame", capture_file)
+    gen.install_product_vc_frame_config(home)
 
     env = os.environ.copy()
     env["HOME"] = str(home)
@@ -1023,6 +1142,7 @@ def test_explicit_terminal_marbles_from_operator_mode_spawns_fresh_tab(
     env["VC_FRAME"] = "operator"
     env["VIBECRAFTED_RUN_ID"] = "marb-014520"
     env["VIBECRAFTED_MARBLES_RUN_ID"] = "marb-014520"
+    env.pop("VIBECRAFTED_PREFER_REPO_VC_FRAME", None)
     expected_session = _expected_operator_session()
     run_scoped_session = _expected_operator_session(env["VIBECRAFTED_RUN_ID"])
     env["VC_FRAME_SESSION_NAME"] = expected_session
@@ -1034,6 +1154,7 @@ def test_explicit_terminal_marbles_from_operator_mode_spawns_fresh_tab(
             "-c",
             (
                 f'source "{HELPER_SCRIPT}"; '
+                f"{gen.loaded_root_prelude(generation)}; "
                 'codex-marbles --runtime terminal --prompt "Check runtime" --count 2'
             ),
         ],
@@ -1062,17 +1183,19 @@ def test_explicit_terminal_marbles_inside_vc_frame_prefers_bundled_vc_frame(
 ) -> None:
     home = tmp_path / "home"
     crafted_home = home / ".vibecrafted"
-    runtime_home = home / ".local" / "share" / "vibecrafted"
-    bundled_bin = runtime_home / "bin"
     capture_file = tmp_path / "vc_frame-args.txt"
 
     home.mkdir()
-    bundled_bin.mkdir(parents=True)
-    _write_capture_command(bundled_bin, "vc-frame", capture_file)
+    # "Bundled" is the loaded generation's own bin/vc-frame (3d9da4dc); the
+    # runtime-home bin it used to mean is no longer a source.
+    generation = gen.fake_generation(tmp_path)
+    _write_capture_command(generation / "bin", "vc-frame", capture_file)
+    gen.install_product_vc_frame_config(home)
 
     env = os.environ.copy()
     env["HOME"] = str(home)
     env["VIBECRAFTED_HOME"] = str(crafted_home)
+    env.pop("VIBECRAFTED_PREFER_REPO_VC_FRAME", None)
     env["PATH"] = os.defpath
     env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
     env["CAPTURE_FILE"] = str(capture_file)
@@ -1091,6 +1214,7 @@ def test_explicit_terminal_marbles_inside_vc_frame_prefers_bundled_vc_frame(
             "-c",
             (
                 f'source "{HELPER_SCRIPT}"; '
+                f"{gen.loaded_root_prelude(generation)}; "
                 'codex-marbles --runtime terminal --prompt "Check runtime" --count 2 && '
                 'printf "PATH=%s\\n" "$PATH"'
             ),
@@ -1134,7 +1258,9 @@ def test_explicit_terminal_marbles_manual_spawn_omits_l1_transcript_tail(
     home.mkdir()
     fake_bin.mkdir()
     reports_dir.mkdir(parents=True)
-    _write_capture_command(fake_bin, "vc-frame", capture_file)
+    generation = gen.fake_generation(tmp_path)
+    _write_capture_command(generation / "bin", "vc-frame", capture_file)
+    gen.install_product_vc_frame_config(home)
     _write_capture_command(fake_bin, "codex", capture_file)
     (fake_bin / "osascript").write_text(
         "#!/usr/bin/env bash\nexit 0\n",
@@ -1167,6 +1293,7 @@ def test_explicit_terminal_marbles_manual_spawn_omits_l1_transcript_tail(
     env["VIBECRAFTED_MARBLES_RUN_ID"] = run_id
     env["VIBECRAFTED_MARBLES_PROBE_TTL"] = "10"
     env["VIBECRAFTED_PREFER_REPO_SPAWN"] = "1"
+    env.pop("VIBECRAFTED_PREFER_REPO_VC_FRAME", None)
 
     result = subprocess.run(
         [
@@ -1176,6 +1303,7 @@ def test_explicit_terminal_marbles_manual_spawn_omits_l1_transcript_tail(
             "-c",
             (
                 f'source "{HELPER_SCRIPT}"; '
+                f"{gen.loaded_root_prelude(generation)}; "
                 'codex-marbles --runtime terminal --prompt "Check runtime" --count 2'
             ),
         ],
@@ -1235,18 +1363,16 @@ def test_spawn_script_prefers_repo_runtime_over_installed_copy(tmp_path: Path) -
 
 def test_vc_start_resume_resurrects_dead_session(tmp_path: Path) -> None:
     home = tmp_path / "home"
-    fake_bin = tmp_path / "bin"
     capture_file = tmp_path / "capture.log"
     session_state_file = tmp_path / "session-state.txt"
 
     home.mkdir()
-    fake_bin.mkdir()
     session_state_file.write_text("dead", encoding="utf-8")
-    _write_stateful_vc_frame(fake_bin, capture_file, session_state_file)
+    generation, terminal_capture = _start_generation(tmp_path, home)
+    _write_stateful_vc_frame(generation / "bin", capture_file, session_state_file)
 
     env = os.environ.copy()
     env["HOME"] = str(home)
-    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
     env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg")
     env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
     env["CAPTURE_FILE"] = str(capture_file)
@@ -1255,9 +1381,37 @@ def test_vc_start_resume_resurrects_dead_session(tmp_path: Path) -> None:
     env.pop("VC_FRAME", None)
     env.pop("VC_FRAME_PANE_ID", None)
     env.pop("VC_FRAME_SESSION_NAME", None)
+    env.pop("VIBECRAFTED_PREFER_REPO_VC_FRAME", None)
+    shell_prelude = f'source "{HELPER_SCRIPT}"; {gen.loaded_root_prelude(generation)}; '
 
+    # Public entry: `vc-start resume` is the deliberate re-entry (5b25a6cd,
+    # dashboard.sh `_vetcoders_start_entry` resume branch). A caller without a
+    # PTY is handed the product terminal on this root (0e5e6b03) BEFORE anything
+    # is prepared, created or killed; the recovery happens in that child.
+    entry = subprocess.run(
+        ["bash", "-lc", shell_prelude + "vc-start resume"],
+        check=True,
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    launch = gen.read_terminal_launch(terminal_capture)
+    assert launch is not None, entry.stderr
+    hosted = _hosted_entry(launch)
+    assert hosted[1] == str(generation / "bin" / "vc-start")
+    assert "resume" in hosted[2:]
+    assert hosted[hosted.index("--repo") + 1] == str(REPO_ROOT)
+    parent_calls = (
+        capture_file.read_text(encoding="utf-8") if capture_file.exists() else ""
+    )
+    assert "kill-session" not in parent_calls
+    assert "--new-session-with-layout" not in parent_calls
+
+    # The child's half after product preparation
+    # (`_vetcoders_resume_operator_session`).
     result = subprocess.run(
-        ["bash", "-lc", f'source "{HELPER_SCRIPT}"; vc-start resume'],
+        ["bash", "-lc", shell_prelude + "_vetcoders_resume_operator_session"],
         check=True,
         cwd=REPO_ROOT,
         env=env,
@@ -1290,8 +1444,10 @@ def test_dead_session_recovery_failure_is_not_reported_as_prepared(
     home.mkdir()
     fake_bin.mkdir()
     session_state_file.write_text("dead", encoding="utf-8")
-    _write_stateful_vc_frame(fake_bin, capture_file, session_state_file)
-    vc_frame = fake_bin / "vc-frame"
+    generation = gen.fake_generation(tmp_path)
+    gen.install_product_vc_frame_config(home)
+    _write_stateful_vc_frame(generation / "bin", capture_file, session_state_file)
+    vc_frame = generation / "bin" / "vc-frame"
     source = vc_frame.read_text(encoding="utf-8")
     vc_frame.write_text(
         source.replace(
@@ -1324,6 +1480,7 @@ def test_dead_session_recovery_failure_is_not_reported_as_prepared(
             "-lc",
             (
                 f'source "{HELPER_SCRIPT}"; '
+                f"{gen.loaded_root_prelude(generation)}; "
                 '_vetcoders_ensure_vc_frame_session "workspace-deadbeef" '
                 '"$(_vetcoders_operator_layout_file)"; '
                 'rc=$?; printf "prepared=%s\\n" '
@@ -1354,7 +1511,8 @@ def test_legacy_frame_namespace_is_attached_to_wes_before_new_window(
     home.mkdir()
     fake_bin.mkdir()
     session_state_file.write_text("dead", encoding="utf-8")
-    _write_stateful_vc_frame(fake_bin, frame_capture, session_state_file)
+    generation = gen.fake_generation(tmp_path)
+    _write_stateful_vc_frame(generation / "bin", frame_capture, session_state_file)
     vibecrafted = fake_bin / "vibecrafted"
     vibecrafted.write_text(
         '#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "$WES_CAPTURE_FILE"\n',
@@ -1383,7 +1541,10 @@ def test_legacy_frame_namespace_is_attached_to_wes_before_new_window(
         [
             "bash",
             "-lc",
-            f'source "{HELPER_SCRIPT}"; _vetcoders_import_legacy_vc_frame_sessions',
+            (
+                f'source "{HELPER_SCRIPT}"; {gen.loaded_root_prelude(generation)}; '
+                "_vetcoders_import_legacy_vc_frame_sessions"
+            ),
         ],
         cwd=REPO_ROOT,
         env=env,
@@ -1415,7 +1576,8 @@ def test_new_external_frame_session_is_live_in_wes_before_client_detaches(
     fake_bin.mkdir()
     session_state_file.write_text("missing", encoding="utf-8")
 
-    vc_frame = fake_bin / "vc-frame"
+    generation = gen.fake_generation(tmp_path)
+    vc_frame = generation / "bin" / "vc-frame"
     vc_frame.write_text(
         """#!/usr/bin/env python3
 import os
@@ -1480,6 +1642,7 @@ raise SystemExit(0)
             "-lc",
             (
                 f'source "{HELPER_SCRIPT}"; '
+                f"{gen.loaded_root_prelude(generation)}; "
                 '_vetcoders_ensure_vc_frame_session "workspace-deadbeef" '
                 '"/tmp/operator.kdl"'
             ),
@@ -1523,7 +1686,9 @@ def test_vc_dashboard_recreates_dead_run_id_session_without_layout_suffix(
     home.mkdir()
     fake_bin.mkdir()
     session_state_file.write_text("dead", encoding="utf-8")
-    _write_stateful_vc_frame(fake_bin, capture_file, session_state_file)
+    generation = gen.fake_generation(tmp_path)
+    gen.install_product_vc_frame_config(home, layouts=("operator", "marbles"))
+    _write_stateful_vc_frame(generation / "bin", capture_file, session_state_file)
 
     env = os.environ.copy()
     env["HOME"] = str(home)
@@ -1532,6 +1697,7 @@ def test_vc_dashboard_recreates_dead_run_id_session_without_layout_suffix(
     env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
     env["CAPTURE_FILE"] = str(capture_file)
     env["SESSION_STATE_FILE"] = str(session_state_file)
+    env.pop("VIBECRAFTED_PREFER_REPO_VC_FRAME", None)
     env["VIBECRAFTED_RUN_ID"] = "marb-014520"
     env["FAKE_VC_FRAME_SESSION"] = _expected_operator_session()
     env["VIBECRAFTED_TEST_ALLOW_NON_TTY_VC_FRAME"] = "1"
@@ -1544,7 +1710,14 @@ def test_vc_dashboard_recreates_dead_run_id_session_without_layout_suffix(
     env.pop("VIBECRAFTED_OPERATOR_MODE", None)
 
     result = subprocess.run(
-        ["bash", "-lc", f'source "{HELPER_SCRIPT}"; vc-dashboard vc-marbles'],
+        [
+            "bash",
+            "-lc",
+            (
+                f'source "{HELPER_SCRIPT}"; {gen.loaded_root_prelude(generation)}; '
+                "vc-dashboard vc-marbles"
+            ),
+        ],
         check=True,
         cwd=REPO_ROOT,
         env=env,
@@ -1578,6 +1751,13 @@ def test_explicit_terminal_skill_bootstraps_operator_session_before_spawning(
 
     home.mkdir()
     fake_bin.mkdir(parents=True)
+    # Shell facade: the loaded generation's engine and the pinned product
+    # operator layout (3d9da4dc). The same stateful engine stays on PATH for the
+    # provider spawn, whose own launcher (runtime/scripts/lib/vc_frame.sh) still
+    # resolves vc-frame with `command -v`.
+    generation = gen.fake_generation(tmp_path)
+    _write_stateful_vc_frame(generation / "bin", capture_file, session_state_file)
+    gen.install_product_vc_frame_config(home)
     _write_stateful_vc_frame(fake_bin, capture_file, session_state_file)
     _write_fake_osascript(fake_bin, capture_file, session_state_file)
     _write_capture_command(fake_bin, "codex", tmp_path / "unused-codex.txt")
@@ -1607,6 +1787,7 @@ def test_explicit_terminal_skill_bootstraps_operator_session_before_spawning(
             "-lc",
             (
                 f'source "{HELPER_SCRIPT}"; '
+                f"{gen.loaded_root_prelude(generation)}; "
                 'codex-followup --runtime terminal --prompt "Check runtime"'
             ),
         ],
@@ -1646,6 +1827,9 @@ def test_skill_bootstraps_fresh_operator_session_when_existing_one_is_dead(
     env["CAPTURE_FILE"] = str(capture_file)
     env["SESSION_STATE_FILE"] = str(session_state_file)
     env["VIBECRAFTED_OSASCRIPT_BIN"] = str(fake_bin / "osascript")
+    # The asserted layout is this checkout's operator.kdl: developer mode on the
+    # Git checkout is the one route to it (3d9da4dc), with the engine named.
+    env.update(gen.developer_mode_env(fake_bin / "vc-frame"))
     env["VIBECRAFTED_RUN_ID"] = "fwup-014520"
     env["FAKE_VC_FRAME_SESSION"] = _expected_operator_session()
     # This test exercises the real dead-session recreate path; allow it without a TTY.
@@ -1727,6 +1911,9 @@ def test_dashboard_alt_layout_reuses_live_repo_session_instead_of_layout_session
     env.pop("VC_FRAME", None)
     env.pop("VC_FRAME_PANE_ID", None)
     env.pop("VC_FRAME_SESSION_NAME", None)
+    # vc-frame-only case: developer mode on this checkout names the engine and
+    # serves the checkout's marbles layout (3d9da4dc).
+    env.update(gen.developer_mode_env(fake_bin / "vc-frame"))
 
     subprocess.run(
         ["bash", "-lc", f'source "{HELPER_SCRIPT}"; vc-dashboard vc-marbles'],

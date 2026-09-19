@@ -8,7 +8,11 @@ import argparse
 import contextlib
 import datetime as dt
 import errno
-import fcntl
+
+try:
+    import fcntl
+except ImportError:  # native Windows — flock-shaped portable_lock
+    from . import portable_lock as fcntl
 import gzip
 import json
 import os
@@ -2859,6 +2863,83 @@ def _select_run(snapshot: dict[str, Any], run_id: str) -> dict[str, Any] | None:
     return None
 
 
+_BARE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def bare_run_id(run_id: str) -> str:
+    """Return ``run_id`` only when it is a bare, filesystem-safe token, else ''.
+
+    Run ids reach the bounded lookups below from registry records the control
+    plane does not own end to end. A single-segment token keeps ``<dir>/<id>``
+    joins inside their directory: no separators, no drive letters, no leading
+    dot, so ``..`` and absolute paths can never be composed.
+    """
+    target = str(run_id or "").strip()
+    if not _BARE_RUN_ID_RE.match(target):
+        return ""
+    separators = {os.sep, os.altsep, "/", "\\"} - {None, ""}
+    if any(separator in target for separator in separators):
+        return ""
+    return target
+
+
+def lookup_run_snapshot(run_id: str) -> dict[str, Any] | None:
+    """Read one already-projected run snapshot without rebuilding the board.
+
+    This is intentionally narrower than :func:`lookup_run`: callers that only
+    need durable, already-known run facts must not turn a registry-maintenance
+    pass into an artifact discovery walk. A missing snapshot is unknown, not
+    evidence that a legacy run is terminal.
+
+    A projection is also not the last word on liveness: it can lag behind the
+    canonical runtime record (see :func:`lookup_runtime_run_meta`), so callers
+    deciding to *delete* a claim must corroborate a terminal projection instead
+    of trusting it alone.
+    """
+    target = bare_run_id(run_id)
+    if not target:
+        return None
+    snapshot_path = _snapshot_path(target)
+    # `_read_json` deliberately remains a permissive general-purpose reader:
+    # json.loads() can yield any JSON value.  Here, however, an existing
+    # malformed or mismatched current projection is uncertainty about this
+    # run, not a reason to let an older archive make a destructive decision.
+    if snapshot_path.exists():
+        payload = _read_json(snapshot_path)
+        if not isinstance(payload, dict):
+            return None
+        if str(payload.get("run_id") or "") == target:
+            return payload
+        return None
+    archived = _read_json(_snapshot_archive_dir() / f"{target}.json")
+    if isinstance(archived, dict) and str(archived.get("run_id") or "") == target:
+        return archived
+    return None
+
+
+def lookup_runtime_run_meta(run_id: str) -> dict[str, Any] | None:
+    """Read one run's canonical runtime meta directly; no sync, no discovery.
+
+    ``runtime_runs/<run_id>/meta.json`` is what the dispatcher and the worker
+    supervisor actually write, so it leads the ``runs/<run_id>.json``
+    projection. Three distinguishable answers, because callers must be able to
+    tell absence from doubt:
+
+    * ``None`` — no canonical runtime record exists for this id (nothing to
+      contradict a projection).
+    * ``{}`` — the record exists but could not be read as an object (doubt).
+    * payload — the canonical facts.
+    """
+    target = bare_run_id(run_id)
+    if not target:
+        return None
+    run_dir = _runtime_runs_dir() / target
+    if not run_dir.is_dir():
+        return None
+    payload = _read_json(run_dir / "meta.json")
+    return payload if isinstance(payload, dict) else {}
+
+
 # Fields that drift between consecutive sync_state() passes without
 # representing a meaningful lifecycle change (timestamps re-derived from the
 # event stream, provenance of the winning source, transcript delta counters).
@@ -4392,7 +4473,9 @@ def await_run(
     process dies or the re-arm budget (``hard_cap_seconds``, else
     ``timeout_seconds``) lapses. Returning early with a live process would
     force every supervisor into ad-hoc hedge polling, which AGENT_OPS names a
-    Class 3 violation with the fix pointed at this function.
+    Class 3 violation with the fix pointed at this function. An await that
+    outruns the dispatcher's own boot (no socket, no durable trace yet) gets
+    one bounded launch-grace slice before the run is declared missing.
 
     ``on_poll`` remains accepted for API compatibility; ``interval_seconds``
     only paces liveness re-checks while no socket exists.
@@ -4412,6 +4495,14 @@ def await_run(
         except (TypeError, ValueError):
             rearm_budget = 300.0
     rearm_deadline = time.monotonic() + rearm_budget if rearm_budget > 0 else None
+    # Launch lag: an await can outrun the dispatcher's own boot — socket not
+    # bound, meta not seeded. While no durable trace exists at all, re-arm
+    # inside one interval slice instead of declaring the run missing.
+    launch_grace_deadline = (
+        time.monotonic() + min(rearm_interval, rearm_budget)
+        if rearm_budget > 0
+        else None
+    )
 
     while True:
         signal = wait_for_run_signal(target, timeout=hard_cap)
@@ -4474,6 +4565,15 @@ def await_run(
 
         if on_poll is not None:
             on_poll(last_run)
+
+        if (
+            kind == "missing"
+            and last_run is None
+            and launch_grace_deadline is not None
+            and time.monotonic() < launch_grace_deadline
+        ):
+            time.sleep(min(0.1, launch_grace_deadline - time.monotonic()))
+            continue
 
         if kind == "timeout":
             worker_alive = bool(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from dataclasses import asdict, dataclass
@@ -9,11 +10,38 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from ..control_plane import control_plane_home
 from ..runtime_paths import vibecrafted_home
 
 
 class WorktreeContractError(RuntimeError):
     """Raised when a worker checkout cannot satisfy isolation ownership."""
+
+
+def find_worktree_owner(root: str | Path) -> tuple[str, str] | None:
+    """Return ``(dispatch_run_id, cut_id)`` that registered this checkout."""
+    target = Path(root).expanduser()
+    dispatches = control_plane_home() / "dispatches"
+    if not dispatches.is_dir():
+        return None
+    for receipts in dispatches.glob("*/receipts.json"):
+        try:
+            payload = json.loads(receipts.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        run_id = str(payload.get("run_id") or "").strip()
+        cuts = payload.get("cuts")
+        if not run_id or not isinstance(cuts, dict):
+            continue
+        for cut_id, cut in cuts.items():
+            if not isinstance(cut, dict):
+                continue
+            path = str(cut.get("worktree_path") or "").strip()
+            if path and _same_filesystem_location(path, target):
+                return run_id, str(cut_id)
+    return None
 
 
 @dataclass(frozen=True)
@@ -67,7 +95,16 @@ def canonical_artifact_root(repo: str | Path, *, day: str | None = None) -> Path
 
 
 class WorktreeManager:
-    """Create, validate, reuse, and remove canonical per-cut worktrees."""
+    """Create, validate, reuse, and remove canonical per-cut worktrees.
+
+    Branch canon: the dispatcher's contract branch for a worker cut is
+    ``cut/<id>`` — receipts, recovery, delivery-head resolution and cleanup
+    all key on it. Per-agent branch names (``<agent>/workflow/<slug>`` and
+    friends) may exist ONLY as additional refs; a worker that switched its
+    checkout to such a branch is re-adopted onto ``cut/<id>`` at the same
+    commit during recovery (see :meth:`recover_active`), never rejected by
+    name alone.
+    """
 
     def __init__(self, main_repo: str | Path, *, day: str | None = None) -> None:
         self.main_repo = Path(main_repo).expanduser().resolve()
@@ -131,8 +168,17 @@ class WorktreeManager:
         self.worktree_root.mkdir(parents=True, exist_ok=True)
         if root.exists():
             if not allow_reuse:
+                owner = find_worktree_owner(root)
+                if owner is not None:
+                    run_id, cut_id = owner
+                    raise WorktreeContractError(
+                        f"refusing existing worktree {root}; owning run {run_id} "
+                        f"cut {cut_id}; resume with: "
+                        f"vibecrafted dispatch <plan.toml> --resume {run_id}"
+                    )
                 raise WorktreeContractError(
-                    f"refusing existing worktree {root}; resume with its owning run id or clean it explicitly"
+                    f"refusing existing worktree {root}; resume with its owning "
+                    "run id or clean it explicitly"
                 )
             self._validate_target(root)
             self._validate_reuse(geometry)
@@ -185,13 +231,23 @@ class WorktreeManager:
             self._validate_reuse(geometry)
             self._validate_target(Path(geometry.worktree_path))
 
-    def recover_active(self, geometry: WorktreeGeometry) -> None:
+    def recover_active(
+        self, geometry: WorktreeGeometry, *, delivered_sha: str = ""
+    ) -> None:
         """Validate an already-live checkout without relocating or dirt checks.
 
         A resume receipt is allowed to preserve a dirty worker root, but it may
         not turn an arbitrary directory with a matching branch name into that
         worker.  In particular, the original baseline remains part of the
         identity even when the worker committed (or staged) progress after it.
+
+        Identity is Git ownership + SHA ancestry, never the branch label: a
+        worker that renamed or switched its branch (briefs teach per-agent
+        names like ``<agent>/workflow/<slug>``) is adopted back onto the
+        contract branch ``cut/<id>`` at its current HEAD, provided the HEAD is
+        the receipt's delivered commit or a descendant of the pinned baseline.
+        The foreign branch ref is left untouched (field incident 2026-09-17:
+        resume rejected an intact delivered worktree purely by branch name).
         """
         root = Path(geometry.worktree_path)
         if not root.is_dir():
@@ -201,10 +257,6 @@ class WorktreeManager:
         if not _same_filesystem_location(observed_root, root):
             raise WorktreeContractError(
                 f"active recovery root is not a registered worktree: {root}"
-            )
-        if observed_branch != geometry.branch:
-            raise WorktreeContractError(
-                f"active recovery branch mismatch: expected {geometry.branch}, observed {observed_branch or '<detached>'}"
             )
         main_common_dir = _git(
             self.main_repo, "rev-parse", "--path-format=absolute", "--git-common-dir"
@@ -239,12 +291,63 @@ class WorktreeManager:
                 "active recovery baseline mismatch: receipt baseline is not an ancestor "
                 f"of {root} HEAD"
             )
+        if observed_branch != geometry.branch:
+            self._adopt_contract_branch(
+                root,
+                geometry,
+                head=head,
+                observed_branch=observed_branch,
+                delivered_sha=delivered_sha,
+            )
         target = Path(geometry.target_path)
         if target != root / "target":
             raise WorktreeContractError(
                 "old shared fleet target is forbidden for concurrent plans; unset CARGO_TARGET_DIR — Vibecrafted assigns $PWD/target per worker"
             )
         self._validate_target(root)
+
+    def _adopt_contract_branch(
+        self,
+        root: Path,
+        geometry: WorktreeGeometry,
+        *,
+        head: str,
+        observed_branch: str,
+        delivered_sha: str,
+    ) -> None:
+        """Re-point the contract branch ``cut/<id>`` at an authenticated HEAD.
+
+        Runs only after ownership (common Git dir, worktree registration) and
+        baseline ancestry are proven. When the receipt names a delivered
+        commit, HEAD must be that commit or a descendant of it — an unrelated
+        tip is a different work stream, not this cut. The adoption itself is
+        non-destructive: ``checkout -B`` moves/creates ``cut/<id>`` at the
+        current commit and leaves the worker's own branch ref in place.
+        """
+        if delivered_sha:
+            delivered = _git(
+                root, "rev-parse", "--verify", f"{delivered_sha}^{{commit}}"
+            )
+            delivered_ok = bool(delivered) and (
+                delivered == head
+                or _git(root, "merge-base", delivered, head) == delivered
+            )
+            if not delivered_ok:
+                raise WorktreeContractError(
+                    "active recovery branch mismatch: expected"
+                    f" {geometry.branch}, observed"
+                    f" {observed_branch or '<detached>'}; HEAD {head[:12]} does"
+                    f" not contain the receipt's delivered commit"
+                    f" {delivered_sha[:12]}, refusing adoption"
+                )
+        # Git itself refuses when cut/<id> is checked out in another worktree;
+        # that surfaces as a WorktreeContractError instead of a silent steal.
+        _run(
+            root,
+            ["git", "checkout", "-B", geometry.branch, head],
+            f"adopt recovery branch {geometry.branch} at {head[:12]}"
+            f" (was {observed_branch or '<detached>'})",
+        )
 
     def cleanup(self, geometry: WorktreeGeometry, *, settled: bool) -> str:
         """Remove only a settled worker checkout; durable evidence and branch remain."""

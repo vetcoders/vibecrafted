@@ -219,10 +219,7 @@ fn render_settlement_board(board: &SettlementBoardCounts) -> String {
     let mut out = section_title("Settlement board", board.total_settled);
     out.push_str(&board.render_strip());
     out.push('\n');
-    out.push_str(
-        "note: f/x/n reads settlement_verdict on retained snapshots only; \
-         Python sync_state may also fold meta-derived runs (different scope).\n\n",
-    );
+    out.push_str("note: f/x/n reads settlement_verdict on retained snapshots only.\n\n");
     out
 }
 
@@ -440,7 +437,7 @@ fn render_quality_footer(quality: &DataQuality, generated_at: &str) -> String {
         writeln!(out, "artifact root: unset").unwrap();
     }
     writeln!(out, "generated at: {generated_at}").unwrap();
-    writeln!(out, "scanned meta files: {}", quality.scanned_meta_files).unwrap();
+    writeln!(out, "derived runs scanned: {}", quality.scanned_meta_files).unwrap();
     writeln!(out, "scan capped: {}", yes_no(quality.capped)).unwrap();
     writeln!(out, "missing model: {}", quality.missing_model).unwrap();
     writeln!(out, "missing duration: {}", quality.missing_duration).unwrap();

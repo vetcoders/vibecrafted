@@ -452,7 +452,7 @@ phase "shutdown verification"
 
 kill -15 "$SERVER_PID" 2>/dev/null || true
 exited=0
-for i in {1..50}; do
+for _ in {1..50}; do
   if ! kill -0 "$SERVER_PID" 2>/dev/null; then
     exited=1
     break

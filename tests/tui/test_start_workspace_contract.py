@@ -93,6 +93,7 @@ IDENTITY_ENV = (
     "VIBECRAFTED_START_BASELINE_SHA",
     "VIBECRAFTED_START_PARENT_ROOT",
     "VIBECRAFTED_TERMINAL_ENTRY",
+    "VIBECRAFTED_TERMINAL_ENTRY_OWNER",
     "VIBECRAFTED_TEST_ALLOW_NON_TTY_VC_FRAME",
     "VIBECRAFTED_PRODUCT_ENTRY",
     "VIBECRAFTED_PRODUCT_ENTRY_PROBE",
@@ -713,7 +714,10 @@ class Scene:
         env["VIBECRAFTED_HOME"] = str(self.home / ".vibecrafted")
         env["XDG_CONFIG_HOME"] = str(self.home / ".config")
         env["XDG_DATA_HOME"] = str(self.home / ".local" / "share")
-        env["VC_FRAME_SOCKET_DIR"] = str(self.tmp_path / "sock")
+        sock = self.tmp_path / "sock"
+        sock.mkdir(exist_ok=True)
+        env["VC_FRAME_SOCKET_DIR"] = str(sock)
+        env["ZELLIJ_SOCKET_DIR"] = str(sock)
         env["VIBECRAFTED_PRODUCT_CORE_CLI"] = str(self.owner)
         env["OWNER_CLI_LOG"] = str(self.owner_log)
         env["VC_FRAME_LOG"] = str(self.frame_log)
@@ -1069,8 +1073,18 @@ def _wait_owned_daemon_pid(child_pid_path: Path, *, timeout: float = 3.0) -> int
 
 
 def _create_lock_holder_pids(lock_file: Path) -> list[int]:
+    lsof = next(
+        (
+            candidate
+            for candidate in ("/usr/sbin/lsof", "/usr/bin/lsof", "/bin/lsof")
+            if os.path.exists(candidate)
+        ),
+        None,
+    )
+    if lsof is None:
+        pytest.skip("lsof is required to observe create-lock holders")
     result = subprocess.run(
-        ["/usr/sbin/lsof", "-n", "-P", "-t", str(lock_file)],
+        [lsof, "-n", "-P", "-t", str(lock_file)],
         check=False,
         capture_output=True,
         text=True,
@@ -1154,6 +1168,15 @@ def _creates(calls: list[dict]) -> list[dict]:
         if "--create-background" in c["argv"]
         and not c.get("created")
         and not c.get("resurrected")
+    ]
+
+
+def _standalone_chrome_creates(calls: list[dict]) -> list[dict]:
+    """Create attempts that did not pass --guest-workspace (a second canvas)."""
+    return [
+        c
+        for c in calls
+        if "--create-background" in c["argv"] and "--guest-workspace" not in c["argv"]
     ]
 
 
@@ -2003,6 +2026,77 @@ def test_tty_outside_a_frame_creates_and_attaches_without_a_terminal(
     assert not any("catalog-" in n for n in scene.live()), scene.live()
 
 
+@pytest.mark.parametrize("tty", [False, True])
+def test_outside_caller_with_live_host_gets_no_standalone_chrome(
+    tmp_path: Path, tty: bool
+) -> None:
+    """A live product host already occupies the canvas. An outside vc-start
+    (no attached Frame env) must not raise a second operator.kdl chrome
+    session — it projects a guest into that host and names the host."""
+    scene = Scene(
+        tmp_path,
+        project="mlx-batch-runner",
+        live=("other-place",),
+        clients=("other-place",),
+    )
+    result = _run(
+        scene,
+        "vc-start",
+        tty=tty,
+        developer_root=True,
+        extra_env={
+            "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
+            "VIBECRAFTED_VC_FRAME_BIN": str(scene.generation / "bin" / "vc-frame"),
+        },
+    )
+    combined = result.stdout + result.stderr
+    if tty:
+        assert "RC=[0]" in result.stdout, combined
+    else:
+        assert _rc(result) == 0, combined
+    _assert_projected_into_host(
+        scene, host="other-place", guest="mlx-batch-runner", result=result
+    )
+    assert "live host other-place" in combined or "into host other-place" in combined, (
+        combined
+    )
+    assert not _standalone_chrome_creates(scene.calls()), scene.calls()
+    assert scene.terminal_launches(wait=0.5) == []
+    assert scene.live() == ["mlx-batch-runner", "other-place"]
+    assert not _attaches(scene.calls()), scene.calls()
+    assert not _switches(scene.calls()), scene.calls()
+
+
+@pytest.mark.parametrize("alias", ["dashboard", "marbles", "research", "workflow"])
+def test_layout_alias_respects_live_host(tmp_path: Path, alias: str) -> None:
+    """vc-dashboard layout aliases used to ensure a full-chrome session of
+    their own. With a live host they refuse standalone create and name the
+    host plus the guest command."""
+    scene = Scene(
+        tmp_path,
+        project="mlx-batch-runner",
+        live=("other-place",),
+        clients=("other-place",),
+    )
+    result = _run(
+        scene,
+        f"vc-dashboard {alias}",
+        extra_env={
+            "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
+            "VIBECRAFTED_VC_FRAME_BIN": str(scene.generation / "bin" / "vc-frame"),
+        },
+    )
+    combined = result.stdout + result.stderr
+    assert _rc(result) == EXIT_INVENTORY, combined
+    assert "live host other-place exists" in combined, combined
+    assert "not creating a standalone chrome session" in combined, combined
+    assert "vc-frame --session other-place project-workspace" in combined, combined
+    assert not _standalone_chrome_creates(scene.calls()), scene.calls()
+    assert not _projects(scene.calls()), scene.calls()
+    assert scene.live() == ["other-place"]
+    assert scene.terminal_launches(wait=0.5) == []
+
+
 def test_tty_inside_an_attached_frame_projects_guest_no_nested_multiplexer(
     tmp_path: Path,
 ) -> None:
@@ -2626,11 +2720,31 @@ def test_both_entrypoints_parse_once_and_enter_the_same_owner() -> None:
     start_body = dispatch.split("vc-start()")[1].split("vc-dashboard()")[0]
     deck = DECK.read_text(encoding="utf-8")
     deck_body = deck.split("cmd_start()")[1].split("\n}\n")[0]
+    # Both enter the one owner with the parsed argv. 88ea1097 guarded the deck
+    # expansion (`${a[@]+"${a[@]}"}`): a bare `vibecrafted start` leaves the
+    # array empty and the plain form dies with `unbound variable` under
+    # `set -u` on macOS /bin/bash 3.2. The shell function may keep the plain
+    # form; the deck, which runs under `set -u`, must carry the guard.
+    plain_entry = '_vetcoders_start_entry "${_vetcoders_start_frame_argv[@]}"'
+    guarded_entry = (
+        "_vetcoders_start_entry "
+        '${_vetcoders_start_frame_argv[@]+"${_vetcoders_start_frame_argv[@]}"}'
+    )
     for body in (start_body, deck_body):
         assert '_vetcoders_start_prepare_arguments "$@"' in body
-        assert '_vetcoders_start_entry "${_vetcoders_start_frame_argv[@]}"' in body
+        entries = [
+            line.strip()
+            for line in body.splitlines()
+            if line.strip().startswith("_vetcoders_start_entry ")
+        ]
+        assert len(entries) == 1, entries
+        assert entries[0] in (plain_entry, guarded_entry), entries
+        assert body.index('_vetcoders_start_prepare_arguments "$@"') < body.index(
+            entries[0]
+        )
         assert "_vetcoders_launch_dashboard" not in body
         assert "_vetcoders_start_open_terminal_if_needed" not in body
+    assert guarded_entry in deck_body
     assert (REPO_ROOT / "scripts" / "vibecrafted").read_text(encoding="utf-8") == deck
 
 
@@ -2690,6 +2804,7 @@ def test_start_entry_owns_inside_host_projection_not_switch_session() -> None:
     text = DASHBOARD_SH.read_text(encoding="utf-8")
     entry = text.split("_vetcoders_start_entry()")[1]
     assert "_vetcoders_start_inside_host_guest" in entry
+    assert "_vetcoders_start_maybe_join_outside_live_host" in entry
     assert "action switch-session" not in entry
     assert "_vetcoders_start_projection_receipt_ok" in text
     assert "_vetcoders_start_classify_projection" in text

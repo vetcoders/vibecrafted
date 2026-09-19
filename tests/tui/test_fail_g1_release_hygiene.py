@@ -276,13 +276,18 @@ def test_fail_g1_release_die_writes_stdout_and_release_log(tmp_path: Path) -> No
 def test_fail_g1_python_seed_retries_transient_uv_install() -> None:
     helper = RELEASE.read_text(encoding="utf-8")
     loop = helper[
-        helper.index("# uv 0.9.7 has a transient ENOENT") : helper.index(
+        helper.index("Embedding a private Python runtime") : helper.index(
             "uv pip install --python"
         )
     ]
-    assert "for python_attempt in 1 2 3" in loop
-    assert "uv python install 3.12.3 --install-dir" in loop
-    assert "after retries" in loop
+    assert "install_portable_python" in loop
+    assert "portable-python.sh" in loop
+    assert "uv python install 3.12.3" not in helper
+    pin = (REPO_ROOT / "scripts/lib/portable-python-artifact.json").read_text(
+        encoding="utf-8"
+    )
+    assert '"cpython": "3.14.7"' in pin
+    assert "30daa970c7d223530120f1693cd3c6fa4c0c0d31ef158710b0dd77f286a5b23e" in pin
 
 
 def test_fail_g1_release_prefers_rustup_cargo_before_cargo_runs() -> None:
@@ -293,5 +298,5 @@ def test_fail_g1_release_prefers_rustup_cargo_before_cargo_runs() -> None:
         "for command in cargo codesign"
     )
     assert helper.index("wasm32-unknown-unknown") < helper.index(
-        'make -C "$REPO_ROOT" CARGO_BUILD_ROOT='
+        'make -C "$SOURCE_ROOT" CARGO_BUILD_ROOT='
     )

@@ -101,10 +101,33 @@ _vc_terminal_is_bundle_host() {
   [[ -f "$candidate" && -x "$candidate" && ! -L "$candidate" ]] || return 1
   [[ ! -L "$macos" && ! -L "$contents" && ! -L "$bundle" ]] || return 1
   [[ -f "$bundle/Contents/Info.plist" && ! -L "$bundle/Contents/Info.plist" ]] || return 1
+  # A bundle without its declared icon is not a branded host.  Do not let an
+  # ambient VIBECRAFTED_TERMINAL_HOST turn that incomplete shell into the
+  # visible product identity.
+  [[ -s "$bundle/Contents/Resources/alacritty.icns" \
+    && ! -L "$bundle/Contents/Resources/alacritty.icns" ]] || return 1
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' \
+    "$bundle/Contents/Info.plist" 2>/dev/null)" == "alacritty" ]] || return 1
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' \
+    "$bundle/Contents/Info.plist" 2>/dev/null)" == "alacritty.icns" ]] || return 1
+  # Both payloads' bundles are stamped VC Terminal by the one builder helper.
+  # A bundle still carrying the donor's name is somebody else's app sitting at
+  # a path shaped like ours; it does not get to be the product's Dock identity.
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' \
+    "$bundle/Contents/Info.plist" 2>/dev/null)" == "VC Terminal" ]] || return 1
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' \
+    "$bundle/Contents/Info.plist" 2>/dev/null)" == "VC Terminal" ]] || return 1
 }
 
 _vc_terminal_select_host() {
   local fallback="$1" candidate
+  # .app is a macOS identity mechanism. Other supported platforms always
+  # retain the generation's flat native host, even when a polluted environment
+  # supplies a bundle-shaped path.
+  [[ "$(/usr/bin/uname -s)" == "Darwin" ]] || {
+    printf '%s\n' "$fallback"
+    return 0
+  }
   for candidate in \
     "$root/libexec/vc-terminal.app/Contents/MacOS/alacritty" \
     "${VIBECRAFTED_TERMINAL_HOST:-}"

@@ -83,6 +83,7 @@ fi
 for required in \
   VERSION bin/python3 bin/vibecrafted bin/vc-start bin/vc-terminal bin/vc-frame \
   bin/scaffold-doctor \
+  bin/control-observe \
   libexec/vc-frame libexec/vc-terminal \
   scripts/vibecrafted scripts/vetcoders_install.py \
   scripts/vc-terminal-product-entry.sh \
@@ -100,13 +101,20 @@ if [[ -n "$codesign_identity" ]]; then
   # The static linter cannot see that the sourced helper consumes these globals.
   # shellcheck disable=SC2034
   SIGNING_IDENTITY="$codesign_identity"
-  # shellcheck disable=SC2034
   CODESIGN_KEYCHAIN_ARGS=()
   if [[ -n "$codesign_keychain" ]]; then
-    # shellcheck disable=SC2034
+    # shellcheck disable=SC2034  # consumed by the sourced macho-signing helper
     CODESIGN_KEYCHAIN_ARGS=(--keychain "$codesign_keychain")
   fi
   sign_macho_tree "$root" || die "could not sign final Runtime Pack Mach-O payload"
+  # libexec/vc-terminal.app is the pack's own Finder/Dock identity, so the pack
+  # must seal it as a BUNDLE. Signing the inner Mach-O covers the executable
+  # and nothing else: Info.plist and the icon — the identity itself — are
+  # sealed only by codesign on the bundle directory. Runs after the loose
+  # Mach-O files and before verification, so the inside-out order matches the
+  # release builder's sign_macho_tree → sign_nested_app_bundles.
+  sign_macho_app_bundles "$root" \
+    || die "could not seal the final Runtime Pack .app bundles"
   verify_macho_tree "$root" 1 \
     || die "final Runtime Pack Mach-O signature preflight failed"
 elif [[ -n "$codesign_keychain" ]]; then

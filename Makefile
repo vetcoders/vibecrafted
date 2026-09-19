@@ -36,7 +36,7 @@ if [ ! -d "$$stable_root/vibecrafted-core" ]; then \
 fi
 endef
 
-.PHONY: help help-dev vibecrafted app dmg dmg-signed release-local notarize release runtime-pack portable publish-release release-rehearsal gui-install wizard wizard-dev check test test-core test-skills test-install test-parity test-vc-frame test-iterm2-migrate test-memex test-aicx-sync test-hammerspoon test-keychain-session dispatch-test unified-product-contract-gate exact-release-contract-gate release-version-gate payload-hygiene install install-source install-auto install-all install-python-tools install-bundle-tools install-tools install-tools-held install-vendored-binaries install-app-binaries install-hammerspoon skills helpers setup-dev dry-run doctor list update uninstall restore migrate migrate-dry init-hooks seed-commit-msg-hooks bundle bundle-check foundations foundations-check semgrep version version-show version-bump bump-patch bump-minor bump-major iterm-plugin iterm-plugin-refresh iterm-plugin-show iterm-plugin-uninstall iterm-plugin-migrate demo demo-full commit-safe test-race-protection skill-new server server-build build-server-release server-check server-test install-server install-server-payload install-server-service reconcile-server-service server-smoke
+.PHONY: help help-dev vibecrafted app dmg dmg-signed release-local notarize release runtime-pack portable publish-release release-rehearsal gui-install wizard wizard-dev check test test-core test-skills test-install test-parity test-vc-frame test-iterm2-migrate test-memex test-aicx-sync test-hammerspoon test-keychain-session dispatch-test unified-product-contract-gate exact-release-contract-gate release-version-gate payload-hygiene install install-source install-auto install-all install-python-tools install-bundle-tools install-tools install-tools-held install-vendored-binaries install-app install-app-binaries install-hammerspoon skills helpers setup-dev dry-run doctor list update uninstall restore migrate migrate-dry init-hooks seed-commit-msg-hooks bundle bundle-check foundations foundations-check semgrep version version-show version-bump bump-patch bump-minor bump-major iterm-plugin iterm-plugin-refresh iterm-plugin-show iterm-plugin-uninstall iterm-plugin-migrate demo demo-full commit-safe test-race-protection skill-new server server-build build-server-release server-check server-test install-server install-server-payload install-server-service reconcile-server-service server-smoke
 
 help:
 	@printf "\n"
@@ -66,7 +66,7 @@ help-dev:
 	@printf "            test-memex · test-aicx-sync · test-hammerspoon · test-keychain-session · dispatch-test · test-race-protection · check · semgrep\n"
 	@printf "  \033[1miterm2\033[0m    iterm-plugin · iterm-plugin-refresh · iterm-plugin-show · iterm-plugin-uninstall · iterm-plugin-migrate\n"
 	@printf "  \033[1mserver\033[0m    server · server-build · server-check · server-test · server-smoke\n"
-	@printf "  \033[1mrelease\033[0m   app · dmg · dmg-signed · release-local · notarize · release · portable · publish-release · release-rehearsal\n"
+	@printf "  \033[1mrelease\033[0m   app · install-app · dmg · dmg-signed · release-local · notarize · release · portable · publish-release · release-rehearsal\n"
 	@printf "  \033[1mversion\033[0m   version · version-show · version-bump · bump-patch · bump-minor · bump-major\n"
 	@printf "  \033[1mhooks\033[0m     init-hooks · seed-commit-msg-hooks · commit-safe\n"
 	@printf "  \033[1mmisc\033[0m      doctor · list · update · uninstall · demo · demo-full · skill-new\n"
@@ -103,16 +103,23 @@ KEYS ?= $(HOME)/.keys
 RELEASE_FLAGS ?=
 
 app:
-	@VC_RELEASE_FLAGS='$(RELEASE_FLAGS)' zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" --app-only $${=VC_RELEASE_FLAGS}'
+	@VC_RELEASE_FLAGS='$(RELEASE_FLAGS)' zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" --app-only $${=VC_RELEASE_FLAGS} 2>&1'
+
+# Fast iteration loop: signed dist/Vibecrafted.app -> /Applications without a
+# DMG. The swap goes through scripts/vc-app-update.sh (journaled transaction,
+# signature preflight, prior.app backup, relaunch). Quits a running app first
+# — Founder-gated by invocation; frame sessions and workers survive.
+install-app: app
+	@bash scripts/install-app.sh
 
 dmg dmg-signed release-local:
-	@VC_RELEASE_FLAGS='$(RELEASE_FLAGS)' zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" --no-notarize $${=VC_RELEASE_FLAGS}'
+	@VC_RELEASE_FLAGS='$(RELEASE_FLAGS)' zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" --no-notarize $${=VC_RELEASE_FLAGS} 2>&1'
 
 notarize:
-	@VC_RELEASE_FLAGS='$(RELEASE_FLAGS)' zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" --notarize-only $${=VC_RELEASE_FLAGS}'
+	@VC_RELEASE_FLAGS='$(RELEASE_FLAGS)' zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" --notarize-only $${=VC_RELEASE_FLAGS} 2>&1'
 
 release:
-	@VC_RELEASE_FLAGS='$(RELEASE_FLAGS)' zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" $${=VC_RELEASE_FLAGS}'
+	@VC_RELEASE_FLAGS='$(RELEASE_FLAGS)' zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" $${=VC_RELEASE_FLAGS} 2>&1'
 
 # Build the standalone macOS Runtime Pack directly from source and native donor
 # inputs. Vibecrafted.app consumes this carrier; it is not the carrier's source.
@@ -124,7 +131,7 @@ release:
 # then `make install` had nothing but a glob over eighteen legitimate historical
 # packs, which it correctly refused as ambiguous.
 runtime-pack:
-	@VC_RELEASE_FLAGS='$(RELEASE_FLAGS)' zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" --runtime-pack-only $${=VC_RELEASE_FLAGS}'
+	@VC_RELEASE_FLAGS='$(RELEASE_FLAGS)' zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" --runtime-pack-only $${=VC_RELEASE_FLAGS} 2>&1'
 	@bash -c '. "$(CURDIR)/$(RUNTIME_PACK_SELECTION_LIB)"; \
 	runtime_pack_selection_read "$(CURDIR)" "" "" \
 		|| { printf "%s\n" "$${RUNTIME_PACK_SELECTION_ERROR:-release builder produced no standalone Runtime Pack}" >&2; exit 1; }; \
@@ -309,9 +316,11 @@ install-auto: install
 # signed generation on purpose. Left empty, the installer asks the build
 # selection record which pack the last `make runtime-pack` actually completed;
 # an incomplete or foreign build fails visibly there rather than resolving into
-# some older archive that merely looks plausible.
+# some older archive that merely looks plausible. install.sh hands a verified
+# public candidate's pack over as RUNTIME_PACK together with the source
+# revision it proved (RUNTIME_PACK_EXPECTED_SOURCE_REVISION).
 install:
-	@VIBECRAFTED_RUNTIME_PACK="$(RUNTIME_PACK)" bash "$(RUNTIME_PACK_INSTALLER)"
+	@VIBECRAFTED_RUNTIME_PACK="$(RUNTIME_PACK)" bash "$(RUNTIME_PACK_INSTALLER)" $(if $(RUNTIME_PACK_EXPECTED_SOURCE_REVISION),--expected-source-revision "$(RUNTIME_PACK_EXPECTED_SOURCE_REVISION)")
 	@$(MAKE) --no-print-directory reconcile-server-service
 
 # Retained public spelling: configuration and runtime publication have one
@@ -521,7 +530,12 @@ install-app-binaries:
 			install -m 0755 "$(APP_BUILD_TARGET)/release/$$bin" "$${VIBECRAFTED_RUNTIME_ROOT}/bin/$$bin"; \
 		fi; \
 	done; \
-	echo "[app] installed: $(APP_BINARIES) -> $(BIN_DIR)"
+	rm -f "$(BIN_DIR)/vc-o"; \
+	install -m 0755 "$(APP_BUILD_TARGET)/release/voc" "$(BIN_DIR)/vc-o"; \
+	if [ -n "$${VIBECRAFTED_RUNTIME_ROOT:-}" ] && [ -d "$${VIBECRAFTED_RUNTIME_ROOT}/bin" ]; then \
+		install -m 0755 "$(APP_BUILD_TARGET)/release/voc" "$${VIBECRAFTED_RUNTIME_ROOT}/bin/vc-o"; \
+	fi; \
+	echo "[app] installed: $(APP_BINARIES) vc-o -> $(BIN_DIR)"
 
 skills:
 	@$(PYTHON) $(INSTALLER) install --source "$(SOURCE)" --non-interactive
@@ -682,6 +696,7 @@ restore:
 
 check:
 	@$(PYTHON) scripts/check_shell.py
+	@$(PYTHON) scripts/gen_skill_provenance.py --check
 	@echo "Check complete."
 
 iterm-plugin:

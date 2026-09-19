@@ -17,7 +17,7 @@ from .workflows.registry import workflow_definition, workflow_manifest
 # Canonical fleet display order. Membership is derived from SUPPORTED_AGENTS so
 # a fleet change lands here automatically; `swarm` is a research meta-lane, not
 # a provider CLI, so it never appears in agent selectors.
-_FLEET_AGENT_ORDER = ("claude", "codex", "agy", "junie", "grok", "cursor")
+_FLEET_AGENT_ORDER = ("claude", "codex", "agy", "junie", "grok", "cursor", "kimi")
 FLEET_AGENTS = tuple(agent for agent in _FLEET_AGENT_ORDER if agent in SUPPORTED_AGENTS)
 AGENT_SELECTOR = "<" + "|".join(FLEET_AGENTS) + ">"
 AGENTS_LINE = " · ".join(FLEET_AGENTS)
@@ -321,7 +321,7 @@ WORKFLOW_HELP: dict[str, WorkflowHelp] = {
             "append pass, pass-with-gaps, or block and project f/x/n",
         ),
         (
-            'vibecrafted trust <claude|codex|agy|junie|grok|cursor> --prompt "Judge the commits from this run"',
+            f'vibecrafted trust {AGENT_SELECTOR} --prompt "Judge the commits from this run"',
             "vc-trust claude --file /path/to/trust-brief.md",
             "python -m vibecrafted_core.trust inspect <sha>",
         ),
@@ -338,11 +338,17 @@ WORKFLOW_HELP: dict[str, WorkflowHelp] = {
             "consume trust journal block on HEAD (never invent settlement letters)",
             "refuse dispatch/continuation with mandatory remedium",
             "keep fail-closed, non-interactive-safe doctrine",
+            "authorized remediation is launch-time only; audit check stays BLOCK",
         ),
         (
             "python -m vibecrafted_core.guard inventory",
             "python -m vibecrafted_core.guard check",
             'vibecrafted guard claude --prompt "Audit gate inventory"',
+            (
+                "vibecrafted workflow cursor --remediate-trust-block "
+                "--remediation-task repair --remediation-reason "
+                '"Founder-authorized admission for the recorded BLOCK"'
+            ),
         ),
         (
             "trust judges after the fact; guard enforces at the gate",
@@ -374,6 +380,7 @@ WORKFLOW_HELP: dict[str, WorkflowHelp] = {
         (
             "--session continues a native provider session; it is not a run id, PID, or workspace id",
             "task continuation with --session is headless; fork remains a separate verb",
+            "--remediate-trust-block continues a blocked HEAD for repair|admission with a recorded reason; audit stays BLOCK",
         ),
     ),
 }
@@ -451,6 +458,7 @@ Commands:
   status               Today's agent activity
   doctor               Installation health — pass/fail
   receipt              Delivery/runtime receipt (source ↔ installed)
+  scaffold-doctor     Plan-package gate before implement handoff
   message              Persist/inspect run-addressed Codex queue receipts
   capabilities         Launcher catalog: agents, models, controls, environments (--json)
   claims               Atomic Living Tree path claims (acquire|heartbeat|status|list|release)
@@ -606,6 +614,9 @@ def _option_lines(topic: str) -> list[str]:
         "  --worktree [true|false]        Alias for local-worktrees; dirty parent preserved",
         "  --permissions <policy>         bypass|auto|accept-edits|read-only, enforced by the agent CLI (default: bypass)",
         "  --sandbox [true|false]         Agent CLI sandbox on/off; refused before launch when it cannot be enforced",
+        "  --remediate-trust-block       Founder-authorized continuation on a trust BLOCK; does not rewrite the journal",
+        "  --remediation-reason <text>   Required with --remediate-trust-block; recorded on the launch receipt",
+        "  --remediation-task <id>       Bounded identity: repair or admission",
         "  --model <name>                 Exact model; CLI > plan frontmatter > provider default",
         "  --session <id|current|last>    Continue this provider-native session (never a work-* run id)",
     ]

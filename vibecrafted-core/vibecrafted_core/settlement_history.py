@@ -10,13 +10,18 @@ from __future__ import annotations
 
 import contextlib
 import errno
-import fcntl
+
+try:
+    import fcntl
+except ImportError:  # native Windows — flock-shaped portable_lock
+    from . import portable_lock as fcntl
 import json
 import logging
 import os
 import shutil
 import stat
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -815,6 +820,52 @@ def _running_session_names(output: str) -> tuple[str, ...]:
     return tuple(sessions)
 
 
+def _get_vc_frame_socket_dir(env: Mapping[str, str] | None = None) -> Path:
+    """Return the canonical vc-frame socket directory for client-server contract v2."""
+    environ = os.environ if env is None else env
+    explicit = environ.get("VC_FRAME_SOCKET_DIR") or environ.get("ZELLIJ_SOCKET_DIR")
+    if explicit:
+        return Path(explicit) / "contract_version_2"
+    uid = os.getuid() if hasattr(os, "getuid") else 1000
+    if os.name == "posix" and sys.platform == "darwin":
+        return Path(f"/tmp/vc-frame-{uid}/contract_version_2")
+    xdg = environ.get("XDG_RUNTIME_DIR")
+    if xdg:
+        candidate = Path(xdg) / "io.vetcoders.vc-frame" / "contract_version_2"
+        if candidate.exists():
+            return candidate
+    return Path(f"/tmp/vc-frame-{uid}/contract_version_2")
+
+
+def _discover_running_sessions_from_sockets(
+    env: Mapping[str, str] | None = None,
+) -> tuple[str, ...] | None:
+    """Return running session names discovered from the vc-frame socket directory.
+
+    Returns None if socket inspection is not applicable or fails, signaling
+    fallback to CLI discovery.
+    """
+    try:
+        sock_dir = _get_vc_frame_socket_dir(env)
+        if not sock_dir.exists():
+            return ()
+        sessions: list[str] = []
+        for entry in os.scandir(sock_dir):
+            if entry.name.startswith(".") or entry.name == "web_server_bus":
+                continue
+            if entry.name in _NON_PLUGIN_SESSION_NAMES:
+                continue
+            try:
+                st = entry.stat(follow_symlinks=False)
+                if stat.S_ISSOCK(st.st_mode) or stat.S_ISREG(st.st_mode):
+                    sessions.append(entry.name)
+            except OSError:
+                continue
+        return tuple(sorted(sessions))
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
 class SettlementHistoryPublisher:
     """Coalesced latest-only delivery to already-running vc-frame plugins."""
 
@@ -854,6 +905,7 @@ class SettlementHistoryPublisher:
         self.retry_backoff = retry_backoff
         self.clock = clock
         self._session_retry_after: dict[str, float] = {}
+        self._delivered_payload_by_session: dict[str, str] = {}
         self._refresh_lock = threading.Lock()
         self._refresh_requested = False
         self._refresh_thread: threading.Thread | None = None
@@ -944,25 +996,60 @@ class SettlementHistoryPublisher:
         binary = _resolve_vc_frame_binary(self.env)
         if not binary:
             return DeliveryReport(pending=True, reason="vc-frame unavailable")
-        try:
-            listed = self.runner(
-                [binary, "list-sessions", "--no-formatting"],
-                timeout=self.timeout,
+
+        sessions: tuple[str, ...]
+        if self.runner is not _default_runner:
+            try:
+                listed = self.runner(
+                    [binary, "list-sessions", "--no-formatting"],
+                    timeout=self.timeout,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                return DeliveryReport(
+                    pending=True,
+                    reason=f"session discovery failed: {type(exc).__name__}",
+                )
+            if listed.returncode != 0:
+                return DeliveryReport(
+                    pending=True, reason="no running vc-frame sessions"
+                )
+            sessions = tuple(
+                session
+                for session in _running_session_names(listed.stdout)
+                if session not in _NON_PLUGIN_SESSION_NAMES
             )
-        except (OSError, subprocess.SubprocessError) as exc:
-            return DeliveryReport(
-                pending=True,
-                reason=f"session discovery failed: {type(exc).__name__}",
-            )
-        if listed.returncode != 0:
-            return DeliveryReport(pending=True, reason="no running vc-frame sessions")
-        sessions = tuple(
-            session
-            for session in _running_session_names(listed.stdout)
-            if session not in _NON_PLUGIN_SESSION_NAMES
-        )
+        else:
+            discovered = _discover_running_sessions_from_sockets(self.env)
+            if discovered is not None:
+                sessions = tuple(
+                    session
+                    for session in discovered
+                    if session not in _NON_PLUGIN_SESSION_NAMES
+                )
+            else:
+                try:
+                    listed = self.runner(
+                        [binary, "list-sessions", "--no-formatting"],
+                        timeout=self.timeout,
+                    )
+                except (OSError, subprocess.SubprocessError) as exc:
+                    return DeliveryReport(
+                        pending=True,
+                        reason=f"session discovery failed: {type(exc).__name__}",
+                    )
+                if listed.returncode != 0:
+                    return DeliveryReport(
+                        pending=True, reason="no running vc-frame sessions"
+                    )
+                sessions = tuple(
+                    session
+                    for session in _running_session_names(listed.stdout)
+                    if session not in _NON_PLUGIN_SESSION_NAMES
+                )
+
         if not sessions:
             self._session_retry_after.clear()
+            self._delivered_payload_by_session.clear()
             return DeliveryReport(
                 pending=True,
                 reason="no eligible vc-frame plugin sessions",
@@ -977,11 +1064,19 @@ class SettlementHistoryPublisher:
             for session, retry_after in self._session_retry_after.items()
             if session in running_sessions
         }
+        self._delivered_payload_by_session = {
+            session: prev_payload
+            for session, prev_payload in self._delivered_payload_by_session.items()
+            if session in running_sessions
+        }
         now = self.clock()
         payload = snapshot.to_wire_json()
         for session in sessions:
             if self._session_retry_after.get(session, 0.0) > now:
                 deferred.append(session)
+                continue
+            if self._delivered_payload_by_session.get(session) == payload:
+                delivered.append(session)
                 continue
             try:
                 result = self.runner(
@@ -1000,13 +1095,16 @@ class SettlementHistoryPublisher:
             except (OSError, subprocess.SubprocessError):
                 failed.append(session)
                 self._session_retry_after[session] = now + self.retry_backoff
+                self._delivered_payload_by_session.pop(session, None)
                 continue
             if result.returncode == 0:
                 delivered.append(session)
                 self._session_retry_after.pop(session, None)
+                self._delivered_payload_by_session[session] = payload
             else:
                 failed.append(session)
                 self._session_retry_after[session] = now + self.retry_backoff
+                self._delivered_payload_by_session.pop(session, None)
 
         if not failed and not deferred:
             with _history_lock(self.root):

@@ -79,7 +79,6 @@ setup_repo "$POS_REPO"
     fi
 )
 
-# shellcheck disable=SC1091
 source "$WORKDIR/pos.exit"
 check "positive exit code is 0"           "$(( POS_EXIT == 0 ? 0 : 1 ))"
 check "positive stdout reports clean commit" \
@@ -142,7 +141,6 @@ chmod +x "$HOOK_FILE"
     fi
 )
 
-# shellcheck disable=SC1091
 source "$WORKDIR/neg_a.exit"
 check "negative-A exit code is nonzero" \
     "$(( NEG_A_EXIT != 0 ? 0 : 1 ))"
@@ -192,7 +190,6 @@ chmod +x "$HOOK_FILE_B"
     fi
 )
 
-# shellcheck disable=SC1091
 source "$WORKDIR/neg_b.exit"
 check "negative-B exit code is nonzero" \
     "$(( NEG_B_EXIT != 0 ? 0 : 1 ))"
@@ -251,7 +248,6 @@ chmod +x "$HOOK_FILE_C"
     fi
 )
 
-# shellcheck disable=SC1091
 source "$WORKDIR/pos_c.exit"
 check "positive-C exit code is 0 (no false race on prettier-modify)" \
     "$(( POS_C_EXIT == 0 ? 0 : 1 ))"
@@ -307,7 +303,6 @@ MSGEOF
     fi
 )
 
-# shellcheck disable=SC1091
 source "$WORKDIR/pos_d.exit"
 check "positive-D exit code is 0" \
     "$(( POS_D_EXIT == 0 ? 0 : 1 ))"

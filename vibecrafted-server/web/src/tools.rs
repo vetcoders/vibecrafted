@@ -106,10 +106,18 @@ pub mod api {
     }
 
     fn json_error(status: StatusCode, error: &str) -> Response {
+        let kind = match status {
+            StatusCode::BAD_REQUEST => "validation",
+            StatusCode::FORBIDDEN => "forbidden",
+            StatusCode::BAD_GATEWAY
+            | StatusCode::SERVICE_UNAVAILABLE
+            | StatusCode::GATEWAY_TIMEOUT => "unavailable",
+            _ => "error",
+        };
         (
             status,
             [(header::CACHE_CONTROL, "no-store")],
-            Json(json!({ "error": error })),
+            Json(json!({ "error": error, "kind": kind })),
         )
             .into_response()
     }
@@ -309,7 +317,12 @@ pub mod api {
         };
         let project = match query.get("project").map(String::as_str) {
             None => None,
-            Some(raw) if raw.trim().is_empty() => None,
+            Some(raw) if raw.trim().is_empty() => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "project is required; use owner/repo or omit the parameter for all-projects search",
+                );
+            }
             Some(raw) => match valid_project(raw) {
                 Some(project) => Some(project.to_string()),
                 None => {
@@ -353,6 +366,7 @@ pub mod api {
                             Json(json!({
                                 "schema": "vibecrafted.aicx-search.v1",
                                 "query": term,
+                                "scope": if project.is_some() { "project" } else { "global" },
                                 "project": project,
                                 "count": items.len(),
                                 "items": items,

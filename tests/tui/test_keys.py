@@ -101,15 +101,11 @@ def test_vetcoders_install_env_paths_expand_user(
     assert vetcoders_install.vibecrafted_home() == portable_vc
     assert (
         vetcoders_install._helper_target_path()
-        == portable_config / "vetcoders" / "vc-skills.sh"
-    )
-    assert (
-        vetcoders_install._helper_legacy_path()
-        == portable_config / "zsh" / "vc-skills.zsh"
+        == portable_config / "vibecrafted" / "shell" / "vc-skills.sh"
     )
 
 
-def test_helper_surface_label_prefers_canonical_helper(
+def test_helper_surface_label_reads_only_the_product_shim(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     home = tmp_path / "home"
@@ -118,12 +114,17 @@ def test_helper_surface_label_prefers_canonical_helper(
 
     assert vetcoders_install._helper_surface_label() == "not installed"
 
-    legacy = home / ".config" / "zsh" / "vc-skills.zsh"
-    legacy.parent.mkdir(parents=True)
-    legacy.write_text("# compat\n", encoding="utf-8")
-    assert vetcoders_install._helper_surface_label() == "compat zsh"
+    # Retired helper locations are not a fallback: configuration lives only in
+    # ~/.config/vibecrafted.
+    for retired in (
+        home / ".config" / "zsh" / "vc-skills.zsh",
+        home / ".config" / "vetcoders" / "vc-skills.sh",
+    ):
+        retired.parent.mkdir(parents=True)
+        retired.write_text("# retired\n", encoding="utf-8")
+    assert vetcoders_install._helper_surface_label() == "not installed"
 
-    canonical = home / ".config" / "vetcoders" / "vc-skills.sh"
+    canonical = home / ".config" / "vibecrafted" / "shell" / "vc-skills.sh"
     canonical.parent.mkdir(parents=True)
     canonical.write_text("# canonical\n", encoding="utf-8")
     assert vetcoders_install._helper_surface_label(zsh_available=True) == "bash + zsh"
@@ -136,7 +137,7 @@ def test_helper_surface_label_reports_bash_only_when_zsh_missing(
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
 
-    canonical = home / ".config" / "vetcoders" / "vc-skills.sh"
+    canonical = home / ".config" / "vibecrafted" / "shell" / "vc-skills.sh"
     canonical.parent.mkdir(parents=True)
     canonical.write_text("# canonical\n", encoding="utf-8")
 
@@ -296,6 +297,7 @@ def test_non_python_launcher_wrappers_have_explicit_deck_verbs() -> None:
         "vc-operator": "operator",
         "vc-receipt": "receipt",
         "vc-resume": "resume",
+        "vc-scaffold-doctor": "scaffold-doctor",
         "vc-start": "start",
         "vc-status": "status",
         "vc-update": "update",

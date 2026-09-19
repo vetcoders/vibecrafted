@@ -26,7 +26,7 @@ impl Default for CliOptions {
             tick_ms: 250,
             no_verify_gate: false,
             server: None,
-            view: ConsoleView::Observe,
+            view: ConsoleView::Home,
         }
     }
 }
@@ -342,6 +342,58 @@ pub fn is_operator_home_root(repo: &Path) -> bool {
     repo == home
 }
 
+/// Validate a destination repository typed into the dispatch form.
+///
+/// Only an absolute path (or one under `~/`) naming an existing directory
+/// other than the operator's home is accepted — the home refusal is the one
+/// the launcher applies. A rejected value is reported, never replaced by the
+/// directory VOC happened to start in.
+pub fn resolve_destination_repo(input: &str, home: Option<&Path>) -> Result<PathBuf, String> {
+    let typed = input.trim();
+    if typed.is_empty() {
+        return Err("repository path is empty".to_string());
+    }
+    let expanded = if typed == "~" || typed.starts_with("~/") {
+        let Some(home) = home else {
+            return Err(format!("{typed}: HOME is not set, so ~ cannot be expanded"));
+        };
+        match typed.strip_prefix("~/") {
+            Some(rest) => home.join(rest),
+            None => home.to_path_buf(),
+        }
+    } else {
+        PathBuf::from(typed)
+    };
+    if !expanded.is_absolute() {
+        return Err(format!(
+            "{typed} is a relative path; type an absolute path or one under ~/"
+        ));
+    }
+    let resolved = expanded
+        .canonicalize()
+        .map_err(|error| format!("{} is not reachable: {error}", path_display(&expanded)))?;
+    if !resolved.is_dir() {
+        return Err(format!("{} is not a directory", path_display(&resolved)));
+    }
+    let is_home = home
+        .is_some_and(|home| home.canonicalize().unwrap_or_else(|_| home.to_path_buf()) == resolved);
+    if is_home {
+        return Err(format!(
+            "{} is the home directory; choose a workspace",
+            path_display(&resolved)
+        ));
+    }
+    Ok(resolved)
+}
+
+/// [`resolve_destination_repo`] against this process's `HOME`.
+pub fn resolve_destination_repo_from_env(input: &str) -> Result<PathBuf, String> {
+    let home = env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    resolve_destination_repo(input, home.as_deref())
+}
+
 fn home_dir() -> String {
     env::var("HOME").unwrap_or_else(|_| ".".to_string())
 }
@@ -350,10 +402,14 @@ fn print_help() {
     println!("Voc Agent");
     println!();
     println!("Usage:");
-    println!("  voc [--view observe|full] [--server <url>] [--state-root <dir>] [--repo <path>]");
+    println!(
+        "  voc [--view home|observe|full] [--server <url>] [--state-root <dir>] [--repo <path>]"
+    );
     println!();
     println!("Options:");
-    println!("  --view observe|full  Default observe: server-backed live board + AICX memory");
+    println!(
+        "  --view home|observe|full  Default home: attention / work / history, then an existing conversation"
+    );
     println!(
         "  --server <url>       Vibecrafted Server origin (default: VC_SERVER_URL or http://127.0.0.1:3024)"
     );
@@ -376,6 +432,7 @@ pub fn path_display(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::observe::ConsoleView;
 
     fn parse(args: &[&str]) -> anyhow::Result<CliOptions> {
         parse_args_from(args.iter().map(|arg| arg.to_string()))
@@ -458,6 +515,17 @@ mod tests {
     }
 
     #[test]
+    fn default_view_is_the_shared_home_console() {
+        let options = parse(&[]).unwrap();
+        assert_eq!(options.view, ConsoleView::Home);
+        assert_eq!(parse(&["--view", "home"]).unwrap().view, ConsoleView::Home);
+        assert_eq!(
+            parse(&["--view", "observe"]).unwrap().view,
+            ConsoleView::Observe
+        );
+    }
+
+    #[test]
     fn other_flags_keep_their_behaviour_next_to_repo() {
         let options = parse(&[
             "--repo",
@@ -525,6 +593,45 @@ mod tests {
         let resolved = resolve_repo_from(&cwd, None, None);
         assert_ne!(resolved, runtime);
         assert_eq!(resolved, cwd.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn destination_repo_accepts_only_an_existing_directory_other_than_home() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let project = home.join("work/project");
+        std::fs::create_dir_all(&project).unwrap();
+        let notes = home.join("notes.txt");
+        std::fs::write(&notes, "not a repository\n").unwrap();
+        let canonical = project.canonicalize().unwrap();
+
+        assert_eq!(
+            resolve_destination_repo(project.to_str().unwrap(), Some(&home)),
+            Ok(canonical.clone())
+        );
+        assert_eq!(
+            resolve_destination_repo("  ~/work/project  ", Some(&home)),
+            Ok(canonical)
+        );
+
+        let missing = home.join("work/missing");
+        for (input, reason) in [
+            ("", "empty"),
+            ("   ", "empty"),
+            ("work/project", "relative"),
+            ("~", "home directory"),
+            (home.to_str().unwrap(), "home directory"),
+            (missing.to_str().unwrap(), "not reachable"),
+            (notes.to_str().unwrap(), "not a directory"),
+        ] {
+            let error = resolve_destination_repo(input, Some(&home)).unwrap_err();
+            assert!(error.contains(reason), "{input:?}: {error}");
+        }
+        assert!(
+            resolve_destination_repo("~/work/project", None)
+                .unwrap_err()
+                .contains("HOME is not set")
+        );
     }
 
     #[test]

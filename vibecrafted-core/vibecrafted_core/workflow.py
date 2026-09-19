@@ -34,6 +34,8 @@ from .control_plane import (
     control_plane_home,
     ensure_session_id,
     lookup_run,
+    lookup_run_snapshot,
+    lookup_runtime_run_meta,
     normalize_run_root,
     record_stop_transition,
     resolve_run,
@@ -66,13 +68,22 @@ from .report_contract import CLAIM_DIGEST_ENV, reserve_launcher_report_template
 from .research_config import ResearchAgentSelection, resolve_research_runtime_config
 from .run_mutation import mutate_run_meta, run_mutation_locks
 from .runtime_paths import agent_tool_search_path, selected_runtime_environment
-from .spawn import _resolve_agent_command, _stdin_command
+from .spawn import _default_command, _resolve_agent_command, _stdin_command
 from .workflow_runtime import WORKER_SIGNAL_DISCIPLINE, native_resume_argv
 from .workflows import registry as workflow_registry
 
 SUPPORTED_WORKFLOWS = workflow_registry.SUPPORTED_WORKFLOWS
 WORKFLOW_ALIASES = workflow_registry.WORKFLOW_ALIASES
-SUPPORTED_AGENTS = {"claude", "codex", "agy", "junie", "grok", "cursor", "swarm"}
+SUPPORTED_AGENTS = {
+    "claude",
+    "codex",
+    "agy",
+    "junie",
+    "grok",
+    "cursor",
+    "kimi",
+    "swarm",
+}
 SUPPORTED_RUNTIMES = {"headless", "terminal", "visible"}
 _TERMINAL_ORIGIN_ENV = {
     "VIBECRAFTED_WORKER_SESSION",
@@ -95,6 +106,15 @@ TERMINAL_STATES = {
     "stopped",
     "timed_out",
     "ghost",
+}
+# Identity-validation reasons that positively prove the recorded process is not
+# the one we are asking about — it is gone, or the pid now carries another
+# generation. Every other failure reason (receipt invalid, receipt mismatch,
+# capture unavailable) is doubt, and doubt never settles a claim as stale.
+FOREIGN_PROCESS_IDENTITY_REASONS = {
+    "process_identity_gone",
+    "process_identity_mismatch",
+    "process_run_id_mismatch",
 }
 LAUNCH_IDEMPOTENCY_SCHEMA = "vibecrafted.launch-idempotency.v1"
 LAUNCH_IDEMPOTENCY_KEY_ENV = "VIBECRAFTED_LAUNCH_IDEMPOTENCY_KEY"
@@ -154,10 +174,20 @@ class WorkflowLaunchSpec:
     # installed provider CLI cannot enforce before any process is launched.
     permissions: str = ""
     sandbox: bool | None = None
+    # Founder-authorized continuation on a recorded trust BLOCK. Empty /
+    # false keeps ordinary launches refused. Never rewrites the journal.
+    remediate_trust_block: bool = False
+    remediation_reason: str = ""
+    remediation_task: str = ""
 
     def to_payload(self) -> dict[str, Any]:
         """Serialize the spec to a plain dict for launch logs and events."""
-        return {**asdict(self), "prompt": "", "plan_source": None}
+        payload = {**asdict(self), "prompt": "", "plan_source": None}
+        if not self.remediate_trust_block:
+            payload.pop("remediate_trust_block", None)
+            payload.pop("remediation_reason", None)
+            payload.pop("remediation_task", None)
+        return payload
 
 
 def vibecrafted_launcher(source_dir: str | Path) -> Path:
@@ -1541,6 +1571,18 @@ def select_plan_model(
     return "", "provider_default"
 
 
+def _identity_base_hint(requested_repo: str, base: str) -> str:
+    """Name the identity/remote resolution that made ``--base`` unavailable."""
+    identity = requested_repo or "the selected identity"
+    return (
+        f"--base {base} is unknown to the source of '{identity}': "
+        "a repository identity resolves --base from the refreshed remote, "
+        "never from your local checkout. "
+        "Push the commit to the remote, or pass --root /path/to/checkout "
+        "to use this host's working tree."
+    )
+
+
 def normalize_launch_spec(
     payload: dict[str, Any], source_dir: str | Path
 ) -> WorkflowLaunchSpec:
@@ -1642,6 +1684,13 @@ def normalize_launch_spec(
         raise ValueError(f"Prompt file does not exist or is not a file: {file_path}")
     permissions = parse_permissions_word(payload.get("permissions"))
     sandbox = parse_sandbox_word(payload.get("sandbox"))
+    remediating, remediation_reason, remediation_task = (
+        guard_mod.parse_remediation_flags(
+            remediating=payload.get("remediate_trust_block"),
+            reason=payload.get("remediation_reason"),
+            task=payload.get("remediation_task"),
+        )
+    )
     if permissions or sandbox is not None:
         if definition.runtime_kind in SUPERVISED_RUNTIME_KINDS:
             raise ValueError(
@@ -1716,16 +1765,21 @@ def normalize_launch_spec(
                     candidates.append(candidate)
                 except ValueError:
                     pass
-            if len(candidates) > 1 or (
-                not candidates and not re.fullmatch(r"[0-9a-fA-F]{4,40}", base)
-            ):
+            if len(candidates) > 1:
                 raise ValueError(
-                    "remote --base missing or ambiguous; use refs/heads/ or refs/tags/"
+                    "remote --base is ambiguous; use refs/heads/ or refs/tags/"
                 )
+            if not candidates and not re.fullmatch(r"[0-9a-fA-F]{4,40}", base):
+                raise ValueError(_identity_base_hint(requested_repo, base))
             effective_base = candidates[0] if candidates else base
-    resolved_ref, baseline_sha = (
-        resolve_repository_base(root, effective_base) if top else ("", "")
-    )
+    try:
+        resolved_ref, baseline_sha = (
+            resolve_repository_base(root, effective_base) if top else ("", "")
+        )
+    except ValueError as exc:
+        if repo_kind == "identity":
+            raise ValueError(_identity_base_hint(requested_repo, base)) from exc
+        raise
     if repo_kind == "identity" and baseline_sha:
         advertised = subprocess.run(
             [
@@ -1745,7 +1799,9 @@ def normalize_launch_spec(
         )
         if advertised.returncode or not advertised.stdout.strip():
             raise ValueError(
-                "remote --base commit is not reachable from the refreshed source branches or tags; cached local objects are not a source baseline"
+                _identity_base_hint(requested_repo, base)
+                + "; the commit is not reachable from any refreshed source branch "
+                "or tag, so cached local objects are not a source baseline"
             )
     if payload.get("base") and not top:
         raise ValueError("--base requires a Git repository")
@@ -1785,6 +1841,9 @@ def normalize_launch_spec(
         worktree=worktree,
         permissions=permissions,
         sandbox=sandbox,
+        remediate_trust_block=remediating,
+        remediation_reason=remediation_reason,
+        remediation_task=remediation_task,
     )
 
 
@@ -2020,6 +2079,25 @@ def build_launch_command(
 
     worker_agent = spec.agent
     controls = launch_execution_controls(spec)
+    if worker_agent == "kimi":
+        # kimi print mode has no stdin prompt lane: ``-p`` takes the prompt as
+        # its argv value (kimi 0.42.0). The supervised stdin contract cannot
+        # carry kimi, so the prompt is inlined from the materialized prompt
+        # file (ps/ARG_MAX tradeoff documented in prompt_transport); the
+        # supervisor still wires the 0600 prompt file to stdin, which kimi
+        # ignores.
+        prompt_text = spec.prompt
+        if prompt_path and Path(prompt_path).is_file():
+            prompt_text = Path(prompt_path).read_text(encoding="utf-8")
+        return _with_model_override(
+            worker_agent,
+            _default_command(
+                worker_agent,
+                prompt_text,
+                controls if controls is not None and controls.requested else None,
+            ),
+            spec.model,
+        )
     # The default shape stays byte-identical to the historical command; the
     # resolved argv is injected only when the caller asked for a control.
     if controls is not None and controls.requested:
@@ -2151,6 +2229,8 @@ def machine_launch_receipt(payload: dict[str, Any]) -> dict[str, Any]:
     ):
         if key in payload:
             receipt[key] = _json_plain(payload[key])
+    if isinstance(payload.get("guard"), dict):
+        receipt["guard"] = dict(payload["guard"])
     return receipt
 
 
@@ -2317,8 +2397,100 @@ def _write_launch_idempotency_record(key: str, payload: dict[str, Any]) -> None:
         atomic_write_json(_launch_idempotency_path(key), record)
 
 
+def _process_liveness_evidence(run_id: str, payload: dict[str, Any]) -> str:
+    """Classify the worker/launcher process evidence carried by ``payload``.
+
+    Four answers, deliberately not collapsed into a boolean:
+
+    * ``current`` — a recorded process is alive *and* its canonical identity
+      receipt still qualifies for ``run_id``.
+    * ``unknown`` — a recorded process is alive but we cannot prove whose it
+      is (no receipt, or a receipt that never reached a decisive capture).
+    * ``stale`` — every recorded process is gone, or the pid was positively
+      identified as another generation.
+    * ``none`` — the payload records no process at all.
+
+    A dead pid ends the question before identity validation: there is no live
+    claim left to protect, so an unreadable receipt over a corpse is ``stale``
+    rather than permanent doubt.
+    """
+    seen = False
+    for prefix in ("worker", "launcher"):
+        receipt = payload.get(f"{prefix}_identity")
+        pid = _coerce_positive_int(payload.get(f"{prefix}_pid"))
+        if pid is None and isinstance(receipt, dict):
+            pid = _coerce_positive_int(receipt.get("pid"))
+        if pid is None:
+            continue
+        seen = True
+        if not _pid_is_alive(pid):
+            continue
+        if not isinstance(receipt, dict):
+            return "unknown"
+        current, reason, _identity = _validate_recorded_identity(run_id, receipt, pid)
+        if current:
+            return "current"
+        if reason in FOREIGN_PROCESS_IDENTITY_REASONS:
+            continue
+        return "unknown"
+    return "stale" if seen else "none"
+
+
+def _validate_recorded_identity(
+    run_id: str, receipt: dict[str, Any], pid: int
+) -> tuple[bool, str, Any]:
+    """Run the canonical identity check for one recorded process receipt."""
+    pgid = _coerce_positive_int(receipt.get("pgid"))
+    return validate_process_identity(
+        receipt,
+        expected_pid=pid,
+        expected_pgid=pgid,
+        expected_run_id=run_id,
+    )
+
+
+def _terminal_projection_veto(run_id: str, run: dict[str, Any]) -> str:
+    """Reason a terminal projection must not be believed, or '' when it may be.
+
+    The ``runs/<id>.json`` projection is a lagging view: it can still read
+    ``completed`` while the canonical runtime record and the process table say
+    the worker is running. Deleting a claim is irreversible, so the two
+    canonical sources outrank the projection here and may veto it. Missing
+    canonical evidence is not a veto (there is nothing contradicting the
+    projection), but evidence that is unreadable, non-terminal, or attached to
+    an unidentifiable live process is — unknown liveness retains.
+    """
+    evidence = _process_liveness_evidence(run_id, run)
+    if evidence in {"current", "unknown"}:
+        return f"snapshot_process_liveness_{evidence}"
+    meta = lookup_runtime_run_meta(run_id)
+    if meta is None:
+        return ""
+    if not meta:
+        return "runtime_meta_unreadable"
+    evidence = _process_liveness_evidence(run_id, meta)
+    if evidence in {"current", "unknown"}:
+        return f"runtime_meta_process_liveness_{evidence}"
+    state = str(meta.get("state") or meta.get("status") or "")
+    if state in TERMINAL_STATES or meta.get("exit_code") is not None:
+        return ""
+    return f"runtime_meta_state_{state or 'unknown'}"
+
+
 def _prune_launch_idempotency_registry(*, now: float | None = None) -> int:
-    """Bound failed/terminal history without deleting live or ambiguous claims."""
+    """Bound failed/proven-terminal history without discovering legacy runs.
+
+    Registry maintenance runs on the launch receipt path. It may use an
+    already-projected canonical snapshot, but must not call ``lookup_run()``:
+    that synchronizes state and can recursively walk legacy artifacts while
+    the registry mutation lock is held. No snapshot means unknown, so retain
+    the record until a normal control-plane projection proves it terminal.
+
+    A terminal projection is necessary but not sufficient: it is corroborated
+    against the canonical runtime meta and the process table
+    (:func:`_terminal_projection_veto`) with two bounded direct reads, so a
+    stale ``completed`` snapshot can no longer delete a live launch claim.
+    """
     with run_mutation_locks(control_plane_home(), run_id="launch-idempotency-registry"):
         registry = _launch_idempotency_registry()
         current_time = time.time() if now is None else now
@@ -2330,8 +2502,10 @@ def _prune_launch_idempotency_registry(*, now: float | None = None) -> int:
                 pass
             elif state == "dispatched":
                 run_id = str(payload.get("run_id") or "")
-                run = lookup_run(run_id) if run_id else None
+                run = lookup_run_snapshot(run_id) if run_id else None
                 if run is None or not _run_is_terminal(run):
+                    continue
+                if _terminal_projection_veto(run_id, run):
                     continue
             else:
                 continue
@@ -2458,11 +2632,7 @@ def _classify_record_owner(record: dict[str, Any]) -> tuple[str, str]:
     )
     if current:
         return "current", reason or "process_identity_current"
-    if reason in {
-        "process_identity_gone",
-        "process_identity_mismatch",
-        "process_run_id_mismatch",
-    }:
+    if reason in FOREIGN_PROCESS_IDENTITY_REASONS:
         return "stale", reason
     return "ambiguous", reason or "process_identity_unknown"
 
@@ -2947,6 +3117,7 @@ def launch_workflow(
     # vc-guard proof path: refuse continuation when trust has block on HEAD.
     # Guard never invents settlement; only consumes trust journal. Opt-out via
     # VIBECRAFTED_GUARD=0 for hermetic tests that are not about enforcement.
+    guard_receipt: dict[str, Any] = {}
     if str(os.environ.get("VIBECRAFTED_GUARD", "1")).strip() not in {
         "0",
         "false",
@@ -2960,9 +3131,13 @@ def launch_workflow(
             decision = guard_mod.enforce_continuation(
                 repo=root,
                 skill=str(spec.skill or ""),
+                remediating=spec.remediate_trust_block,
+                remediation_reason=spec.remediation_reason,
+                remediation_task=spec.remediation_task,
             )
+            guard_receipt = guard_mod.launch_disclosure(decision)
             if not decision.allowed:
-                raise ValueError(decision.remedium or "vc-guard refused continuation")
+                raise guard_mod.GuardRefusal(decision)
         except ImportError:
             pass
         except (ValueError, OSError) as exc:
@@ -2971,7 +3146,8 @@ def launch_workflow(
             # explicit guard refusal (remedium text).
             message = str(exc)
             if (
-                "vc-guard" in message
+                isinstance(exc, guard_mod.GuardRefusal)
+                or "vc-guard" in message
                 or "Remedium" in message
                 or "trust recorded block" in message
             ):
@@ -3022,6 +3198,7 @@ def launch_workflow(
                     "parent_root": spec.root,
                     "worktree": True,
                     "status": "failed",
+                    **({"guard": dict(guard_receipt)} if guard_receipt else {}),
                     "control_plane": {"sync": "deferred", "run_id": run_id},
                 },
                 spec_digest=idem_spec_digest,
@@ -3097,6 +3274,7 @@ def launch_workflow(
                 if spec.sandbox is None
                 else str(spec.sandbox).lower(),
                 "status": "failed",
+                **({"guard": dict(guard_receipt)} if guard_receipt else {}),
                 "control_plane": {"sync": "deferred", "run_id": run_id},
             },
             spec_digest=idem_spec_digest,
@@ -3162,6 +3340,7 @@ def launch_workflow(
                 "transcript": str(artifacts["transcript"]),
                 "meta": str(artifacts["meta"]),
                 "prompt_file": str(prompt_path),
+                **({"guard": dict(guard_receipt)} if guard_receipt else {}),
                 "control_plane": {"sync": "deferred", "run_id": run_id},
             },
             spec_digest=idem_spec_digest,
@@ -3186,6 +3365,8 @@ def launch_workflow(
         "runtime_class": spec.runtime_class,
         "presentation": "headless" if spec.runtime == "headless" else "visible",
     }
+    if guard_receipt:
+        model_receipt["guard"] = dict(guard_receipt)
     dispatch_command = _dispatcher_command(
         run_id=run_id,
         root=spec.root,

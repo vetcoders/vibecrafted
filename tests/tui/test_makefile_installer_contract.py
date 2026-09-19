@@ -205,7 +205,13 @@ def test_ci_workflows_select_the_platforms_canonical_carrier() -> None:
     assert "genpkey -algorithm RSA" in install_linux
     assert "genpkey -algorithm ED25519" not in install_linux
     assert "VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY" in install_linux
-    assert 'bash install.sh --runtime-pack-file "$pack" install' in install_linux
+    # install.sh is handed the closed exact-source tuple: the archive whose
+    # provenance it must trust and the pack it must install, in one call. A
+    # pack without its archive trips the channel-manifest refusal (W4).
+    assert (
+        'bash install.sh --archive-file "$archive" --runtime-pack-file "$pack" install'
+        in install_linux
+    )
     assert "actions/upload-artifact@" in install_linux
     assert "actions/download-artifact@" in install_linux
     assert "ubuntu-22.04" in install_linux
@@ -359,9 +365,16 @@ def test_runtime_pack_cleanup_retries_without_overwriting_success(
     installer_text = (REPO_ROOT / "scripts/install-runtime-pack.sh").read_text(
         encoding="utf-8"
     )
-    cleanup_body = installer_text.split("cleanup() {", 1)[1].split(
-        "\n}\ntrap cleanup", 1
-    )[0]
+    # The function body ends at its own closing brace. `trap cleanup` no longer
+    # follows it directly: terminate_installer_child() sits in between (the
+    # TERM/INT/HUP owner, 5aab748f), so splitting on "\n}\ntrap cleanup" dragged
+    # top-level installer code (`$operation`) into the harness.
+    assert "\ncleanup() {\n" in installer_text
+    cleanup_body = installer_text.split("\ncleanup() {", 1)[1].split("\n}\n", 1)[0]
+    assert "terminate_installer_child" not in cleanup_body
+    assert 'rm -rf -- "$temporary"' in cleanup_body
+    # The installer still hands the real EXIT path to this very function.
+    assert "\ntrap cleanup EXIT\n" in installer_text
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -669,6 +682,8 @@ def test_control_plane_staging_delegates_to_distribution_manifest(
     monkeypatch.setattr(
         installer,
         "_materialize_runtime_generation_vc_terminal_entry",
+        # The real symbol grew a require_native_host keyword; the double has to
+        # absorb it or the staging call raises TypeError before it asserts.
         lambda runtime_root, **_kwargs: seen.update(
             vc_terminal_entry_materialized=runtime_root
         ),

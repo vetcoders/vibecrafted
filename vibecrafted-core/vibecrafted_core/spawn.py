@@ -36,7 +36,9 @@ from .control_plane import (
 )
 from .events import append_event
 from .execution_controls import PERMISSION_POLICIES, ExecutionControls
+from .failure_attribution import attribute_failure
 from .model_overrides import _with_model_override
+from .package_resources import skills_path
 from .report_contract import (
     CLAIM_DIGEST_ENV,
     materialize_launcher_report_template,
@@ -54,11 +56,17 @@ from .runtime_transcript import (
     write_runtime_transcript_manifest,
 )
 from .settlement import BareMarkdownError, require_bound_markdown
-from .telemetry import estimate_cost_usd
+from .telemetry import (
+    build_run_telemetry,
+    coerce_exit_code,
+    parent_session_ids,
+    usage_record,
+)
+from .telemetry import tokens_total as _tokens_total
 
 EventCallback = Callable[[dict[str, Any]], None]
 
-POLICY_PROVIDERS = ("codex", "claude", "agy", "grok", "junie", "cursor")
+POLICY_PROVIDERS = ("codex", "claude", "agy", "grok", "junie", "cursor", "kimi")
 # Fleet agent key → installed CLI binary when they differ (key stays the UX
 # name: `vibecrafted implement cursor`, binary remains `cursor-agent`).
 AGENT_BINARY_NAMES: dict[str, str] = {
@@ -86,11 +94,14 @@ _INHERITED_CONTINUITY_ENV = (
     "AICX_CONTINUITY_FILE",
     "CLAUDE_CODE_SESSION_ID",
     "CODEX_SESSION_ID",
+    "GROK_SESSION_ID",
+    "VIBECRAFTED_AGENT_SESSION_ID",
     "VIBECRAFTED_OPERATOR_SESSION_ID",
     "VIBECRAFTED_PARENT_RUN_ID",
     "VIBECRAFTED_PARENT_SESSION_ID",
     "VIBECRAFTED_RESUME_CONTEXT",
     "VIBECRAFTED_RESUME_META",
+    "VIBECRAFTED_SESSION_ID",
     "VIBECRAFTED_LOOP_STATE_FILE",
     "VIBECRAFTED_LOOP_NR",
     "SPAWN_LOOP_NR",
@@ -98,6 +109,345 @@ _INHERITED_CONTINUITY_ENV = (
 USER_OBSERVED_WARNING = (
     "User-observed only: no Operator Agent is supervising this Agent Workspace."
 )
+
+INTERACTIVE_LAUNCHERS = frozenset({"init", "operator", "partner", "resume", "fork"})
+_SLASH_SKILL_TOKEN = re.compile(r"^/vc-([A-Za-z0-9][A-Za-z0-9-]{0,62})$")
+_LAUNCHER_ROLE = {
+    "init": (
+        "orientation gate (vc-init). This is due diligence at session entry — "
+        "map, intent, and ground truth — not an implementation mission. Do not "
+        "invent a task."
+    ),
+    "operator": (
+        "orchestration posture (vc-operator). Conduct a plan only if one is "
+        "already in this session. Do not invent an autonomous implementation "
+        "mission or become the worker."
+    ),
+    "partner": (
+        "shared-steering posture (vc-partner). Preserve the operator's shape. "
+        "Do not invent a mission or silently take ownership."
+    ),
+    "resume": (
+        "launcher verb, not a skill-catalog entry. Continue the already-selected "
+        "native session with the existing continuity policy. Do not start a new "
+        "mission or equate settlement counts with recovered conversation."
+    ),
+    "fork": (
+        "launcher verb, not a skill-catalog entry. Branch the already-selected "
+        "native session. Do not invent a new implementation task unless the "
+        "operator supplied one below."
+    ),
+}
+
+UNKNOWN_NATIVE_IDENTITY = "unknown"
+_AGENT_CONTEXT_SCHEMA = "vibecrafted.agent-context.v1"
+_RESUME_CONTEXT_IS_NOT_NATIVE = (
+    "Resume delta: unfinished-work / settlement context is not a native "
+    "provider-conversation resume. Native resume requires a proven native "
+    "session ID; recovering context alone must not claim one."
+)
+_SESSION_FIELDS_DISJOINT = (
+    "Parent session ID and native child session ID are disjoint fields. "
+    "Do not copy a parent ID onto a child. Unknown stays unknown until the "
+    "provider proves an ID."
+)
+_MANDATE_NO_GRANT = (
+    "This prompt delivers identity and task context. It does not grant extra "
+    "permissions, credentials, or provider authority."
+)
+
+
+def _honest_identity(value: object) -> str:
+    """Return a concrete identifier, or the honest unknown sentinel."""
+    text = str(value or "").strip()
+    return text if text else UNKNOWN_NATIVE_IDENTITY
+
+
+def disjoint_session_identities(
+    *,
+    parent_session_id: str = "",
+    native_child_session_id: str = "",
+) -> tuple[str, str]:
+    """Keep parent and native child IDs as separate fields.
+
+    A missing native ID stays empty (unknown). A child field equal to the
+    parent is treated as unproven, not as inherited identity.
+    """
+    parent = str(parent_session_id or "").strip()
+    native = str(native_child_session_id or "").strip()
+    if native and parent and native == parent:
+        native = ""
+    return parent, native
+
+
+def _panel_identity(admission: Mapping[str, Any] | None = None) -> str:
+    if admission:
+        for key in ("panel_id", "pane_id", "destination_panel", "vc_frame_pane_id"):
+            text = str(admission.get(key) or "").strip()
+            if text:
+                return text
+    for key in ("VC_FRAME_PANE_ID", "ZELLIJ_PANE_ID"):
+        text = str(os.environ.get(key) or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _workspace_identity_for_prompt(
+    root: str | os.PathLike[str],
+    admission: Mapping[str, Any] | None = None,
+) -> str:
+    if admission:
+        existing = str(admission.get("workspace_id") or "").strip()
+        if existing:
+            return existing
+    try:
+        from .workspace_catalog import resolve_run_workspace_identity
+
+        identity = resolve_run_workspace_identity(
+            root=root, env={}, create_if_missing=True
+        )
+        return str(identity.workspace_id)
+    except Exception:  # noqa: BLE001 - unknown is honest; launch still proceeds
+        return ""
+
+
+def agent_context_contract(
+    *,
+    skill: str,
+    root: str | os.PathLike[str],
+    admission: Mapping[str, Any] | None = None,
+    parent_session_id: str = "",
+    resume_block: str = "",
+) -> dict[str, Any]:
+    """Shared VC identity payload for init/partner/operator/resume (and fork).
+
+    Team/launcher role never replaces the real provider or model. Unknown
+    native identity stays unknown. Resume context is a delta, not a native
+    conversation resume.
+    """
+    record = dict(admission or {})
+    launcher = str(skill or record.get("skill") or "init").strip() or "init"
+    role = _LAUNCHER_ROLE.get(
+        launcher,
+        "interactive launcher. Follow the role named above; do not invent a mission.",
+    )
+    parent, native = disjoint_session_identities(
+        parent_session_id=parent_session_id
+        or str(record.get("parent_session_id") or ""),
+        native_child_session_id=str(record.get("agent_session_id") or ""),
+    )
+    provider = str(record.get("agent") or record.get("provider") or "").strip()
+    model = str(
+        record.get("model_effective") or record.get("model_requested") or ""
+    ).strip()
+    run_id = str(record.get("run_id") or "").strip()
+    workspace_id = _workspace_identity_for_prompt(root, record)
+    panel_id = _panel_identity(record)
+    source_snapshot = str(record.get("source_snapshot") or "").strip()
+    native_resume = bool(native) and launcher == "resume"
+    return {
+        "schema": _AGENT_CONTEXT_SCHEMA,
+        "launcher": launcher,
+        "vc_role": launcher,
+        "mandate": role,
+        "provider": provider,
+        "model": model,
+        "run_id": run_id,
+        "workspace_id": workspace_id,
+        "panel_id": panel_id,
+        "parent_session_id": parent,
+        "native_child_session_id": native,
+        "native_identity_status": "proven" if native else "unknown",
+        "native_conversation_resume": native_resume,
+        "resume_delta": resume_block,
+        "source_snapshot": source_snapshot,
+        "root": str(root),
+    }
+
+
+def render_agent_context_block(contract: Mapping[str, Any]) -> list[str]:
+    """Prefill lines for the shared identity contract. Never interpolates secrets."""
+    provider = _honest_identity(contract.get("provider"))
+    model = _honest_identity(contract.get("model"))
+    if model == UNKNOWN_NATIVE_IDENTITY:
+        model = "provider_default"
+    lines = [
+        "VC identity (delivered to this agent):",
+        f"- VC role: {contract.get('vc_role') or contract.get('launcher') or UNKNOWN_NATIVE_IDENTITY}",
+        f"- Mandate: {contract.get('mandate') or _LAUNCHER_ROLE.get('init', '')}",
+        f"- {_MANDATE_NO_GRANT}",
+        f"- Provider: {provider} (team/launcher role does not replace provider or model)",
+        f"- Model: {model}",
+        f"- Task/run: {_honest_identity(contract.get('run_id'))}",
+        f"- Workspace: {_honest_identity(contract.get('workspace_id'))}",
+        f"- Panel: {_honest_identity(contract.get('panel_id'))}",
+        f"- Parent session ID: {_honest_identity(contract.get('parent_session_id'))}",
+        (
+            "- Native child session ID: "
+            f"{_honest_identity(contract.get('native_child_session_id'))}"
+        ),
+        f"- {_SESSION_FIELDS_DISJOINT}",
+        f"- {_RESUME_CONTEXT_IS_NOT_NATIVE}",
+    ]
+    snapshot = str(contract.get("source_snapshot") or "").strip()
+    if snapshot:
+        lines.append(
+            f"- Sources: plan-source `{snapshot}` plus skill files named below."
+        )
+    else:
+        lines.append("- Sources: skill files named below and this private task file.")
+    lines.append("")
+    return lines
+
+
+def legacy_slash_interactive_prompt(skill: str, source: str) -> str:
+    """Historical interactive-launch body: slash token plus plan-source.
+
+    Kept as the regression contrast for the slash-only defect. Providers are
+    not assumed to expand ``/vc-*`` from a Markdown task file.
+    """
+    return f"/vc-{skill}\n\n{source}"
+
+
+def slash_skill_name(text: str) -> str | None:
+    """Return the skill/launcher token inside a single ``/vc-name`` line, else None."""
+    match = _SLASH_SKILL_TOKEN.fullmatch(text.strip())
+    return match.group(1) if match else None
+
+
+def canonical_skill_file(name: str) -> Path | None:
+    """Resolve ``SKILL.md`` from the running package, never a hardcoded checkout.
+
+    ``resume`` and ``fork`` are launcher verbs. They yield None unless a real
+    catalog skill file exists in this runtime.
+    """
+    token = str(name or "").strip().removeprefix("vc-")
+    if not token or "/" in token or "\\" in token or ".." in token:
+        return None
+    path = skills_path() / f"vc-{token}" / "SKILL.md"
+    try:
+        return path if path.is_file() else None
+    except OSError:
+        return None
+
+
+def compose_interactive_task_prompt(
+    *,
+    skill: str,
+    source: str,
+    root: str | os.PathLike[str],
+    resume_block: str | None = None,
+    admission: Mapping[str, Any] | None = None,
+    parent_session_id: str = "",
+) -> str:
+    """Build the private ``prompt.md`` body for interactive init/operator/partner/resume/fork.
+
+    Explicit role, canonical skill files when they exist, preserved extra,
+    the shared VC identity contract, and the existing ``init_resume_block``
+    projection. Empty extra is not a license to invent work. Does not wrap
+    headless ``_runtime_prompt``.
+    """
+    launcher = str(skill or "init").strip() or "init"
+    extra = source if isinstance(source, str) else str(source or "")
+    duplicate_slash = slash_skill_name(extra) == launcher
+    requested: list[str] = [launcher]
+    for line in extra.splitlines():
+        name = slash_skill_name(line)
+        if name and name not in requested:
+            requested.append(name)
+    skill_lines: list[str] = []
+    for name in requested:
+        path = canonical_skill_file(name)
+        if path is None:
+            if name != launcher:
+                skill_lines.append(
+                    f"- `/vc-{name}` is not a skill file in this runtime; treat it as "
+                    "operator text, not a slash-command expansion."
+                )
+            elif name in INTERACTIVE_LAUNCHERS - {"init", "operator", "partner"}:
+                skill_lines.append(
+                    f"- `{name}` is a launcher verb. There is no `vc-{name}/SKILL.md` "
+                    "in this runtime catalog; do not invent one."
+                )
+            else:
+                skill_lines.append(
+                    f"- No `vc-{name}/SKILL.md` in this runtime; keep the launcher "
+                    "role below and do not assume a provider slash command."
+                )
+            continue
+        skill_lines.append(f"- `{name}` → read `{path}`")
+    if resume_block is None:
+        from .init_resume import init_resume_block
+
+        resume_block = init_resume_block(root)
+    role = _LAUNCHER_ROLE.get(
+        launcher,
+        "interactive launcher. Follow the role named above; do not invent a mission.",
+    )
+    contract = agent_context_contract(
+        skill=launcher,
+        root=root,
+        admission=admission,
+        parent_session_id=parent_session_id,
+        resume_block=resume_block or "",
+    )
+    lines = [
+        "You are in an interactive Vibecrafted session.",
+        "",
+        f"Repository root: {root}",
+        f"Launcher: {launcher}",
+        f"Role: {role}",
+        "",
+        *render_agent_context_block(contract),
+        "This private task file is the complete orientation payload. Do not assume",
+        "provider-specific slash commands execute from Markdown. Read the skill",
+        "files named below (when present) instead of treating `/vc-*` tokens as",
+        "executable commands.",
+        "",
+        "Skill and launcher resolution:",
+        *(skill_lines or ["- No catalog skill file applies to this launcher."]),
+        "",
+    ]
+    if launcher in {"init", "operator", "partner"}:
+        lines.extend(
+            [
+                "Orientation (not a ship mission):",
+                f"- Map: materialize the Loctree context atlas for {root} and read it to the end.",
+                "- Intent: recover AICX history for why this tree is shaped this way.",
+                "- Ground truth + risk: git/security sanity, then grade blast radius.",
+                "- Stop after orientation unless the operator supplied a task below.",
+                "",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "Continuity: native session identity and continuity policy are already",
+                "selected by this launcher. Keep them. Settlement counts are unfinished-work",
+                "projection, not recovered conversation.",
+                "",
+            ]
+        )
+    if resume_block:
+        lines.extend([resume_block.rstrip(), ""])
+    if extra.strip() and not duplicate_slash:
+        lines.extend(
+            [
+                "Operator-supplied extra (verbatim; preserve it, do not replace it):",
+                extra.rstrip(),
+                "",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "No operator-supplied implementation task. Do not invent one from",
+                "journals, settlements, or prior sessions.",
+                "",
+            ]
+        )
+    return "\n".join(lines)
 
 
 @dataclass(frozen=True)
@@ -341,6 +691,24 @@ _PERMISSION_CONTRACT: dict[str, dict[str, tuple[tuple[str, ...], str] | None]] =
             "ask mode is read-only Q&A; no edits or execution",
         ),
     },
+    # kimi 0.42.0: unlike agy's single opt-in flag, kimi exposes BOTH
+    # directions as explicit startup modes — --auto (Never Ask) and --yolo
+    # (Ask When Needed) — plus --plan for read-only. All three are
+    # interactive-only: the binary rejects every one of them with -p/--prompt
+    # (OptionConflictError), and print mode always runs under kimi's auto
+    # (never-ask) policy. See the headless overlay below.
+    "kimi": {
+        "bypass": (
+            ("--auto",),
+            "Never Ask mode: everything runs and is decided automatically",
+        ),
+        "auto": (
+            ("--yolo",),
+            "Ask When Needed: routine actions run automatically; risky actions, questions and plans still ask",
+        ),
+        "accept-edits": None,
+        "read-only": (("--plan",), "plan mode prevents edits and execution"),
+    },
 }
 
 
@@ -358,6 +726,22 @@ _HEADLESS_PERMISSION_CONTRACT: dict[str, dict[str, tuple[tuple[str, ...], str]]]
         "read-only": (
             ("--sandbox", "read-only"),
             "read-only sandbox; writes and escalations fail closed",
+        ),
+    },
+    # kimi print mode never prompts (it always runs under the provider's auto
+    # / never-ask policy, with static deny rules still in effect), and the
+    # binary rejects --yolo/--auto/--plan combined with -p. Headless bypass is
+    # therefore the no-flag truth: nothing to emit, nothing downgraded.
+    # Headless auto / read-only stay refused in resolve_provider_policy —
+    # "Ask When Needed" and plan mode are interactive-only surfaces.
+    "kimi": {
+        "bypass": (
+            (),
+            (
+                "kimi print mode never prompts: it always runs under the provider's "
+                "auto (never-ask) permission policy; --yolo/--auto/--plan cannot "
+                "combine with --prompt, so no flag is emitted"
+            ),
         ),
     },
 }
@@ -491,6 +875,7 @@ def _materialize_continuity(
     if policy.mode != "full-lineage":
         return ContinuityMaterial(policy=policy, prompt=prompt)
     from .aicx_session_chain import (
+        DEFAULT_RESUME_AICX_HOURS,
         CliSessionChain,
         assemble_resume_continuity_pack,
         pack_contains_recover_instruction,
@@ -531,7 +916,7 @@ def _materialize_continuity(
     pack = assemble_resume_continuity_pack(
         agent=provider,
         root=root,
-        hours=48,
+        hours=DEFAULT_RESUME_AICX_HOURS,
         context_file=context_path,
         meta_file=meta_path,
         chain=CliSessionChain(aicx_bin),
@@ -632,6 +1017,8 @@ def _fresh_child_environment(
             "CLAUDE_CODE_SESSION_ID",
             "GROK_SESSION_ID",
             "VIBECRAFTED_AGENT_SESSION_ID",
+            "VIBECRAFTED_SESSION_ID",
+            "VIBECRAFTED_PARENT_SESSION_ID",
         ):
             child.pop(name, None)
     if policy.mode == "fresh":
@@ -859,6 +1246,26 @@ def resolve_provider_policy(
             False,
             reason=f"junie {permissions} is interactive-only",
         )
+    if (
+        provider == "kimi"
+        and mode == "headless"
+        and permissions in {"auto", "read-only"}
+    ):
+        # kimi 0.42.0 rejects --yolo/--plan combined with -p/--prompt
+        # (OptionConflictError); print mode never requests approval, so an
+        # "Ask When Needed" or plan-mode promise would be a receipted lie.
+        return ProviderPolicy(
+            provider,
+            runtime,
+            permissions,
+            mode,
+            False,
+            reason=(
+                f"kimi {permissions} is interactive-only: --prompt rejects the "
+                "flag and print mode never prompts (omit --permissions for the "
+                "never-ask print default)"
+            ),
+        )
     flags, behavior = cell
     return ProviderPolicy(provider, runtime, permissions, mode, True, flags, behavior)
 
@@ -927,15 +1334,24 @@ def runtime_policy_capabilities(provider: str) -> dict[str, dict[str, Any]]:
             "reason": ("" if provider_found else f"{provider} executable not found"),
         },
         "local-worktrees": {
-            "available": provider_found and worktree_substrate,
+            # A worktree is a launch substrate, not proof that the resulting
+            # child can be admitted.  Interactive worktree launches carry a
+            # bounded quota, which requires an attributable live usage source.
+            # Keep this predicate here so every picker and launcher consumes
+            # the same admission truth.
+            "available": provider_found and worktree_substrate and usage.supported,
             "substrate": worktree_substrate,
             "usage_capability": usage.as_dict(),
             "reason": ""
-            if provider_found and worktree_substrate
+            if provider_found and worktree_substrate and usage.supported
             else (
                 f"{provider} executable not found"
                 if not provider_found
-                else "git/dispatch manage_worktrees unavailable"
+                else (
+                    "git/dispatch manage_worktrees unavailable"
+                    if not worktree_substrate
+                    else usage.reason
+                )
             ),
         },
         "local-vm": {
@@ -1039,6 +1455,11 @@ def interactive_policy_command(
             "--no-alt-screen",
             prompt,
         ]
+    if provider == "kimi":
+        # Interactive kimi starts the TUI with no prompt on argv (a prompt
+        # exists only as -p, which is non-interactive and conflicts with
+        # --auto/--yolo/--plan); the operator types the slash command inside.
+        return ["kimi", *flags]
     raise ValueError(f"unsupported provider: {provider}")
 
 
@@ -1071,7 +1492,7 @@ def interactive_launch_interpreter(
     server's fresh login shell: no ``PYTHONPATH``, nothing exported by the
     process that composed it. In a Runtime Pack that composer itself runs under
     the generation's ``bin/python3`` -- the bootstrap wrapper that exports the
-    generation-private ``PYTHONPATH`` and execs the raw ``python/bin/python3.12``
+    generation-private ``PYTHONPATH`` and execs the raw ``python/bin/python3.N``
     -- so ``sys.executable`` is the raw interpreter, and raw is exactly what
     the 8177a33d candidate wrote into the pane (``ModuleNotFoundError: No module
     named 'vibecrafted_core'`` before any provider ran).
@@ -1163,7 +1584,7 @@ def interactive_workspace_command(
 
         session_selection = resolve_session_selection(
             provider,
-            native_session or parent_session_id,
+            native_session,
             root,
             selection=session_selection,
         )
@@ -1306,10 +1727,25 @@ def interactive_workspace_command(
         "source_path": source_file,
         "source_origin": "file" if source_file else "inline",
         "parent_run_id": parent_run_id or os.environ.get("VIBECRAFTED_RUN_ID", ""),
+        "parent_session_id": parent_session_id,
         "agent_session_id": native_session,
+        "native_child_session_id": native_session,
+        "native_identity_status": "proven" if native_session else "unknown",
+        "panel_id": _panel_identity(None),
         "session_selection": session_selection or {},
         **worktree_receipt,
     }
+    bound_parent, bound_native = disjoint_session_identities(
+        parent_session_id=parent_session_id,
+        native_child_session_id=native_session,
+    )
+    admission["parent_session_id"] = bound_parent
+    admission["agent_session_id"] = bound_native
+    admission["native_child_session_id"] = bound_native
+    admission["native_identity_status"] = "proven" if bound_native else "unknown"
+    workspace_id = _workspace_identity_for_prompt(spec.root, admission)
+    if workspace_id:
+        admission["workspace_id"] = workspace_id
     if parent:
         admission["baseline_sha"] = parent.get("baseline_sha", "")
         admission["runtime_class"] = parent.get("runtime_class", "living-tree")
@@ -1511,14 +1947,7 @@ def prepare_interactive_workspace_launch(
                 ),
                 "monotonic": capability.supported,
             },
-            "measured_usage": {
-                "input_tokens": 0,
-                "cache_creation_input_tokens": 0,
-                "cache_read_input_tokens": 0,
-                "output_tokens": 0,
-                "total_tokens": 0,
-                "messages": 0,
-            },
+            "measured_usage": _empty_measured_usage(),
             "provider_session_id": effective_provider_session_id,
             "continuity": (
                 continuity_material.receipt()
@@ -1592,18 +2021,33 @@ def _git_output(root: Path, *args: str) -> str:
     return completed.stdout.strip() if completed.returncode == 0 else ""
 
 
+def _empty_measured_usage() -> dict[str, int]:
+    """Zeroed receipt shape shared by unmetered and Claude session readers."""
+    return {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "messages": 0,
+        "foreign_workspace_events": 0,
+    }
+
+
+def _path_is_within(candidate: Path, root: str) -> bool:
+    if not root:
+        return False
+    try:
+        return candidate.is_relative_to(Path(root))
+    except (ValueError, OSError):
+        return False
+
+
 class _UnmeteredUsage:
     """Null usage reader for providers lacking an attributable live side channel."""
 
     def poll(self) -> dict[str, int]:
-        return {
-            "input_tokens": 0,
-            "cache_creation_input_tokens": 0,
-            "cache_read_input_tokens": 0,
-            "output_tokens": 0,
-            "total_tokens": 0,
-            "messages": 0,
-        }
+        return _empty_measured_usage()
 
 
 class _ClaudeTranscriptUsage:
@@ -1623,6 +2067,8 @@ class _ClaudeTranscriptUsage:
         effective_root: str,
         provider_version: str,
         env: dict[str, str],
+        run_id: str = "",
+        run_root: str = "",
     ) -> None:
         configured = env.get("CLAUDE_CONFIG_DIR", "").strip()
         base = (
@@ -1634,11 +2080,21 @@ class _ClaudeTranscriptUsage:
         self.provider_session_id = provider_session_id
         self.effective_root = str(Path(effective_root).resolve())
         self.provider_version = provider_version.split()[0]
+        self.run_id = run_id
+        if run_root:
+            self.run_root = str(Path(run_root).resolve())
+        elif run_id:
+            self.run_root = str(
+                (control_plane_home() / "runtime_runs" / run_id).resolve()
+            )
+        else:
+            self.run_root = ""
         self.path: Path | None = None
         self.identity: tuple[int, int] | None = None
         self.offset = 0
         self.seen_message_ids: set[str] = set()
         self.totals = {field: 0 for field in self._FIELDS}
+        self.foreign_workspace_events = 0
         self._reject_existing_source()
 
     def _matching_paths(self) -> list[Path]:
@@ -1707,11 +2163,12 @@ class _ClaudeTranscriptUsage:
         if event.get("sessionId") != self.provider_session_id:
             raise RuntimeError("provider usage event belongs to a foreign session")
         event_cwd = event.get("cwd")
-        if (
-            not isinstance(event_cwd, str)
-            or str(Path(event_cwd).resolve()) != self.effective_root
-        ):
-            raise RuntimeError("provider usage event belongs to a foreign workspace")
+        if not isinstance(event_cwd, str) or not event_cwd.strip():
+            self.foreign_workspace_events += 1
+            return
+        if not self._cwd_is_own(event_cwd):
+            self.foreign_workspace_events += 1
+            return
         if event.get("version") != self.provider_version:
             raise RuntimeError(
                 "provider usage event version differs from probed executable"
@@ -1732,11 +2189,22 @@ class _ClaudeTranscriptUsage:
         for field_name, value in values.items():
             self.totals[field_name] += value
 
+    def _cwd_is_own(self, event_cwd: str) -> bool:
+        """Count cwd inside effective_root or this run's control-plane directory."""
+        try:
+            resolved = Path(event_cwd).expanduser().resolve()
+        except (OSError, RuntimeError, ValueError):
+            return False
+        return _path_is_within(resolved, self.effective_root) or _path_is_within(
+            resolved, self.run_root
+        )
+
     def as_dict(self) -> dict[str, int]:
         return {
             **self.totals,
             "total_tokens": sum(self.totals.values()),
             "messages": len(self.seen_message_ids),
+            "foreign_workspace_events": self.foreign_workspace_events,
         }
 
 
@@ -1825,7 +2293,17 @@ def launch_interactive_workspace(
         )
     quota = resolve_quota_policy(token_budget, runtime=runtime)
     child_env = _fresh_child_environment(os.environ.copy(), continuity_policy)
-    native_session = str(admission.get("agent_session_id") or "")
+    parent_id, proven_native = disjoint_session_identities(
+        parent_session_id=str(
+            continuity_policy.parent_provider_session_id
+            or admission.get("parent_session_id")
+            or parent_session_id
+            or ""
+        ),
+        native_child_session_id=str(admission.get("agent_session_id") or ""),
+    )
+    native_session = proven_native
+    # Requested --session-id is not a native acknowledgement.
     provider_session_id = native_session or str(uuid.uuid4())
     command = interactive_policy_command(
         provider,
@@ -1835,7 +2313,19 @@ def launch_interactive_workspace(
         provider_session_id=provider_session_id,
         continuity_policy=continuity_policy,
     )
-    native_session = str(admission.get("agent_session_id") or "")
+    if (
+        continuity_policy.mode == "bare-fork"
+        and admission.get("skill") == "fork"
+        and provider != "codex"
+    ):
+        # The public bare fork has no task input. Open the native child idle:
+        # the task-file pointer would only carry the shell's synthetic /vc-fork
+        # marker. Codex drops it after its acknowledged thread/fork below.
+        command.pop()
+    _, native_session = disjoint_session_identities(
+        parent_session_id=parent_id,
+        native_child_session_id=str(admission.get("agent_session_id") or ""),
+    )
     if native_session:
         if provider == "claude":
             if "--session-id" in command:
@@ -1885,17 +2375,26 @@ def launch_interactive_workspace(
     # A requested ID is not a provider acknowledgement. Codex fork does not
     # even accept our generated ID; process admission must not invent one.
     native_fork = continuity_policy.mode == "bare-fork"
-    launch.receipt["provider_session_id"] = "" if native_fork else provider_session_id
-    launch.receipt["agent_session_id"] = "" if native_fork else provider_session_id
+    launch.receipt["parent_session_id"] = parent_id
+    launch.receipt["native_child_session_id"] = native_session
+    launch.receipt["native_identity_status"] = (
+        "pending" if native_fork else ("proven" if native_session else "unknown")
+    )
     if native_fork:
+        launch.receipt["provider_session_id"] = ""
+        launch.receipt["agent_session_id"] = ""
         launch.receipt.update(
             native_fork=True,
             fork_source_session_id=continuity_policy.parent_provider_session_id,
-            native_identity_status="pending",
             provider_session_requested=(
                 provider_session_id if "--session-id" in command else ""
             ),
         )
+    else:
+        launch.receipt["provider_session_id"] = provider_session_id
+        launch.receipt["agent_session_id"] = native_session
+        if not native_session:
+            launch.receipt["provider_session_requested"] = provider_session_id
     launch.receipt["status"] = "prepared"
     if capability.supported and provider == "claude":
         try:
@@ -1904,6 +2403,7 @@ def launch_interactive_workspace(
                 effective_root=launch.effective_root,
                 provider_version=capability.provider_version,
                 env=child_env,
+                run_id=launch.run_id,
             )
         except Exception:
             _cleanup_unspawned_interactive_launch(launch)
@@ -1927,6 +2427,8 @@ def launch_interactive_workspace(
             "VIBECRAFTED_CONTINUITY_LINEAGE_ID": continuity_policy.lineage_id,
         }
     )
+    if parent_id:
+        child_env["VIBECRAFTED_PARENT_SESSION_ID"] = parent_id
     if native_fork and provider == "codex":
         from .continuity.native_fork import confirm_codex_native_fork
 
@@ -2116,7 +2618,7 @@ def launch_interactive_workspace(
             receipt,
             status="failed",
             exit_code=1,
-            terminal_reason="wrapper_exception",
+            terminal_reason="killed_after_start",
             error=str(exc),
         )
         raise
@@ -2233,6 +2735,7 @@ def _launch_supervised_interactive_workspace(
                 effective_root=launch.effective_root,
                 provider_version=child_capability.provider_version,
                 env=base_env,
+                run_id=launch.run_id,
             )
         except Exception:
             _cleanup_unspawned_interactive_launch(launch)
@@ -2272,6 +2775,14 @@ def _launch_supervised_interactive_workspace(
         "state": "reserved",
         "protocol": "operator-protocol-jsonl-v1",
     }
+    parent_id, proven_native = disjoint_session_identities(
+        parent_session_id=str(
+            continuity_policy.parent_provider_session_id
+            or admission.get("parent_session_id")
+            or ""
+        ),
+        native_child_session_id=str(admission.get("agent_session_id") or ""),
+    )
     child_receipt = {
         **launch.receipt,
         **admission,
@@ -2282,6 +2793,11 @@ def _launch_supervised_interactive_workspace(
         "prompt_role": str(admission.get("skill") or "init"),
         "operator_policy": operator_policy.as_dict(),
         "supervision": dict(relation),
+        "parent_session_id": parent_id,
+        "native_child_session_id": proven_native,
+        "agent_session_id": proven_native,
+        "native_identity_status": "proven" if proven_native else "unknown",
+        "provider_session_requested": child_session_id,
     }
     operator_receipt = {
         **launch.receipt,
@@ -2300,14 +2816,7 @@ def _launch_supervised_interactive_workspace(
         "provider_session_id": operator_session_id,
         "operator_policy": operator_policy.as_dict(),
         "supervision": dict(relation),
-        "measured_usage": {
-            "input_tokens": 0,
-            "cache_creation_input_tokens": 0,
-            "cache_read_input_tokens": 0,
-            "output_tokens": 0,
-            "total_tokens": 0,
-            "messages": 0,
-        },
+        "measured_usage": _empty_measured_usage(),
     }
     operator_command = interactive_policy_command(
         operator_policy.provider,
@@ -2682,7 +3191,7 @@ def _launch_supervised_interactive_workspace(
             child_receipt,
             status="failed",
             exit_code=1,
-            terminal_reason="wrapper_exception",
+            terminal_reason="killed_after_start",
             error=str(exc),
             extra={"provider_exit_code": _shell_status(child_code)},
         )
@@ -2692,7 +3201,7 @@ def _launch_supervised_interactive_workspace(
             operator_receipt,
             status="failed",
             exit_code=_shell_status(operator_code),
-            terminal_reason="wrapper_exception",
+            terminal_reason="killed_after_start",
             error=str(exc),
         )
         raise
@@ -3315,6 +3824,127 @@ def _cleanup_settled_interactive_launch(launch: InteractiveWorkspaceLaunch) -> s
         return f"preserved:{exc}"
 
 
+def interactive_child_had_started(meta: Mapping[str, Any] | None) -> bool:
+    """True when the provider child was published before the failure."""
+    if not meta:
+        return False
+    if str(meta.get("spawned_at") or "").strip():
+        return True
+    if str(meta.get("terminal_reason") or "") in {
+        "killed_after_start",
+        "wrapper_exception",
+    }:
+        return True
+    return meta.get("status") == "active" and bool(meta.get("worker_pid"))
+
+
+def classify_interactive_failure_reason(existing_meta: Mapping[str, Any] | None) -> str:
+    """Distinguish a failed start from a live session that supervision then killed."""
+    if interactive_child_had_started(existing_meta):
+        return "killed_after_start"
+    return "interactive_start_failed"
+
+
+def format_interactive_launch_failure(
+    *,
+    run_id: str,
+    reason: str,
+    agent_session_id: str = "",
+    started: bool = False,
+    provider: str = "claude",
+) -> str:
+    """Panel text for an interactive-launch failure: run_id, reason, resume."""
+    verb = "was stopped after it had already started" if started else "failed to start"
+    lines = [f"Session {run_id} {verb}.", f"Reason: {reason}"]
+    session = str(agent_session_id or "").strip()
+    if session:
+        lines.append(f"{agent_cli_name(provider)} --resume {session}")
+    return "\n".join(lines)
+
+
+def record_interactive_launch_cli_failure(
+    *,
+    admission: Mapping[str, Any],
+    exc: BaseException,
+    provider: str = "claude",
+) -> tuple[str, dict[str, Any]]:
+    """Settle interactive-launch CLI failure without wiping a live receipt."""
+    run_id = str(admission.get("run_id") or "")
+    meta_path = control_plane_home() / "runtime_runs" / run_id / "meta.json"
+    existing = _read_meta(meta_path)
+    started = interactive_child_had_started(existing)
+    session = str(
+        existing.get("provider_session_id")
+        or existing.get("agent_session_id")
+        or admission.get("provider_session_id")
+        or admission.get("agent_session_id")
+        or ""
+    )
+    agent = str(existing.get("agent") or admission.get("agent") or provider)
+    if existing.get("liveness") == "terminal":
+        failed = dict(existing)
+        if failed.get("terminal_reason") == "wrapper_exception":
+            failed["terminal_reason"] = "killed_after_start"
+            failed.setdefault("error", str(exc))
+            _write_meta(meta_path, failed)
+        message = format_interactive_launch_failure(
+            run_id=str(failed.get("run_id") or run_id),
+            reason=str(failed.get("error") or exc),
+            agent_session_id=str(
+                failed.get("provider_session_id")
+                or failed.get("agent_session_id")
+                or session
+            ),
+            started=interactive_child_had_started(failed),
+            provider=agent,
+        )
+        return message, failed
+
+    if started:
+        failed = {
+            **existing,
+            "status": "failed",
+            "state": "failed",
+            "liveness": "terminal",
+            "terminal_reason": "killed_after_start",
+            "error": str(exc),
+            "completed_at": utc_now_iso(),
+        }
+        event_detail = "interactive session killed after start"
+    else:
+        failed = {
+            **admission,
+            "status": "failed",
+            "state": "failed",
+            "liveness": "terminal",
+            "terminal_reason": "interactive_start_failed",
+            "error": str(exc),
+            "completed_at": utc_now_iso(),
+        }
+        event_detail = "interactive start failed"
+    meta_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_meta(meta_path, failed)
+    append_event(
+        "lifecycle:failed",
+        run_id,
+        event_detail,
+        {**failed, "meta": str(meta_path)},
+    )
+    _project_interactive_snapshot(run_id)
+    message = format_interactive_launch_failure(
+        run_id=run_id,
+        reason=str(exc),
+        agent_session_id=str(
+            failed.get("provider_session_id")
+            or failed.get("agent_session_id")
+            or session
+        ),
+        started=started,
+        provider=agent,
+    )
+    return message, failed
+
+
 def _terminalize_interactive_launch(
     launch: InteractiveWorkspaceLaunch,
     receipt: dict[str, Any],
@@ -3560,6 +4190,19 @@ def _default_command(
             *flags,
             prompt,
         ]
+    if agent == "kimi":
+        # kimi print mode has no stdin prompt lane (0.42.0): ``-p`` takes the
+        # prompt as its argv value — the only headless input kimi offers.
+        # ps-visible and ARG_MAX-bound by construction; documented in
+        # prompt_transport (ARGV_TRANSPORT).
+        return [
+            "kimi",
+            *flags,
+            "-p",
+            prompt,
+            "--output-format",
+            "stream-json",
+        ]
     raise ValueError(f"unsupported agent: {agent}")
 
 
@@ -3651,6 +4294,19 @@ def _stdin_command(agent: str, controls: ExecutionControls | None = None) -> lis
             "stream-json",
             *flags,
         ]
+    if agent == "kimi":
+        # kimi print mode cannot consume a prompt from stdin (0.42.0: ``-p``
+        # requires its value on argv; a bare ``-p`` is a parse error). The
+        # private stdin contract has no kimi shape — refusing here keeps the
+        # argv-inline builder (``_default_command`` via
+        # ``workflow.build_launch_command``) as the only kimi lane instead of
+        # launching a TUI that silently ignores the wired prompt.
+        raise ValueError(
+            "kimi print mode has no stdin prompt lane: -p takes the prompt "
+            "as its argv value. Supervised kimi launches inline the prompt "
+            "from the materialized prompt file (workflow.build_launch_command "
+            "kimi branch); the stdin contract cannot carry kimi."
+        )
     raise ValueError(f"unsupported agent: {agent}")
 
 
@@ -3775,28 +4431,13 @@ def _extract_session(text: str) -> str:
     return ""
 
 
-def _tokens_total(
-    input_tokens: int, cached_input_tokens: int, output_tokens: int
-) -> int:
-    """Sum usage without double-counting provider-specific cache shapes.
-
-    Claude/Codex: ``input`` already includes cache hits (cached ≤ input).
-    Junie-style: ``input`` is non-cached only and ``cached`` is additive
-    (cached can exceed input). Detect by comparing magnitudes.
-    """
-    inp = max(0, int(input_tokens or 0))
-    cached = max(0, int(cached_input_tokens or 0))
-    out = max(0, int(output_tokens or 0))
-    if cached and cached > inp:
-        return inp + cached + out
-    return inp + out
-
-
 def _extract_tokens(text: str) -> dict[str, int | None]:
     """Parse token usage from combined transcript/report text.
 
     Prefers the authoritative run-closure footer, then JSON usage fields,
     then per-event ``tokens: N in / N out`` lines, in that priority order.
+    ``events`` counts the provider usage evidence found; 0 means the text
+    carries none (a seeded ``tokens_input: 0`` template is not evidence).
     """
     clean = _clean_text(text)
     found = TOKEN_PATTERN.findall(clean)
@@ -3824,6 +4465,9 @@ def _extract_tokens(text: str) -> dict[str, int | None]:
                 "cache_write": cache_write_tokens,
                 "output": output_tokens,
                 "total": total_tokens,
+                # A zero footer is a seeded template or a pre-telemetry close,
+                # not a provider measurement.
+                "events": 1 if total_tokens else 0,
             }
     if any(json_tokens.values()):
         return {
@@ -3838,6 +4482,10 @@ def _extract_tokens(text: str) -> dict[str, int | None]:
                 json_tokens["cached_input"],
                 json_tokens["output"],
             ),
+            "events": max(
+                len(JSON_TOKEN_PATTERNS["input"].findall(clean)),
+                len(JSON_TOKEN_PATTERNS["output"].findall(clean)),
+            ),
         }
     if not found:
         return {
@@ -3846,6 +4494,7 @@ def _extract_tokens(text: str) -> dict[str, int | None]:
             "cache_write": None,
             "output": 0,
             "total": 0,
+            "events": 0,
         }
     input_tokens = cached_tokens = output_tokens = 0
     for raw_in, raw_cached, raw_out in found:
@@ -3858,6 +4507,7 @@ def _extract_tokens(text: str) -> dict[str, int | None]:
         "cache_write": None,
         "output": output_tokens,
         "total": _tokens_total(input_tokens, cached_tokens, output_tokens),
+        "events": len(found),
     }
 
 
@@ -4344,9 +4994,18 @@ def _footer(marker: str, payload: dict[str, object]) -> str:
 
 
 def _normalize_markdown_artifact(
-    path: Path, payload: dict[str, object], *, fallback_body: str = ""
+    path: Path,
+    payload: dict[str, object],
+    *,
+    fallback_body: str = "",
+    extra_frontmatter: Mapping[str, str] | None = None,
 ) -> None:
-    """Stamp/refresh frontmatter and append the run-closure footer on a markdown artifact."""
+    """Stamp/refresh frontmatter and append the run-closure footer on a markdown artifact.
+
+    ``extra_frontmatter`` carries run-close telemetry for the report only; the
+    transcript never gets it, so a re-close cannot mistake its own failure
+    summary for a provider line.
+    """
     text = _read_text(path)
     if not text and fallback_body:
         text = fallback_body
@@ -4392,6 +5051,7 @@ def _normalize_markdown_artifact(
         frontmatter_update["cost_source"] = payload.get("cost_source")
     else:
         frontmatter.pop("cost_source", None)
+    frontmatter_update.update(extra_frontmatter or {})
     frontmatter.update(frontmatter_update)
     marker = str(payload.get("run_id") or "unknown")
     new_text = _render_frontmatter(frontmatter) + body.rstrip() + "\n"
@@ -4428,13 +5088,18 @@ def finalize_artifacts(
     report_text = _read_text(report) if str(report) else ""
     combined_text = f"{transcript_text}\n{report_text}"
 
-    session_id = payload.get("session_id") or _extract_session(combined_text)
+    recorded_session = str(payload.get("session_id") or "")
+    session_id = recorded_session or _extract_session(combined_text)
     tokens = _extract_tokens(combined_text)
-    tokens_input = int(tokens["input"] or 0)
-    tokens_cached_input = int(tokens["cached_input"] or 0)
-    tokens_cache_write = tokens["cache_write"]
-    tokens_output = int(tokens["output"] or 0)
-    tokens_total = int(tokens["total"] or 0)
+    usage = usage_record(
+        int(tokens.get("events") or 0),
+        tokens_input=int(tokens["input"] or 0),
+        tokens_cached_input=int(tokens["cached_input"] or 0),
+        tokens_cache_write=tokens["cache_write"],
+        tokens_output=int(tokens["output"] or 0),
+        source="transcript",
+    )
+    flat_tokens = usage.flat()
     cost = _extract_cost(combined_text)
     completed_at = (
         payload.get("completed_at") or dt.datetime.now(dt.timezone.utc).isoformat()
@@ -4449,35 +5114,34 @@ def finalize_artifacts(
 
     payload["session_id"] = session_id or payload.get("session_id") or ""
     payload["model"] = _resolve_model(payload, combined_text)
-    cost_source = "provider_reported" if cost is not None else None
-    if cost is None:
-        cost, cost_source = estimate_cost_usd(
-            payload["model"],
-            tokens_input=tokens_input,
-            tokens_cached_input=tokens_cached_input,
-            tokens_output=tokens_output,
-        )
+    telemetry = build_run_telemetry(
+        usage=usage,
+        model=str(payload["model"] or ""),
+        reported_cost=cost,
+        reported_cost_source="provider_reported" if cost is not None else None,
+        session_candidate=str(payload["session_id"]),
+        session_source="meta" if recorded_session else "transcript",
+        parents=parent_session_ids(
+            extra={
+                key: payload.get(key)
+                for key in (
+                    "runtime_session_id",
+                    "vibecrafted_session_id",
+                    "parent_provider_session_id",
+                    "fork_source_session_id",
+                )
+            }
+        ),
+        failure=None,
+    )
     payload["duration_s"] = _resolve_duration(payload, str(completed_at))
-    payload["tokens_input"] = tokens_input
-    payload["tokens_cached_input"] = tokens_cached_input
-    if tokens_cache_write is not None:
-        payload["tokens_cache_write"] = tokens_cache_write
-    else:
+    if "tokens_cache_write" not in flat_tokens:
         payload.pop("tokens_cache_write", None)
-    payload["tokens_output"] = tokens_output
-    payload["tokens_total"] = tokens_total
-    token_usage: dict[str, int] = {
-        "input": tokens_input,
-        "cached_input": tokens_cached_input,
-        "output": tokens_output,
-        "total": tokens_total,
+    payload.pop("failure", None)
+    payload.update(telemetry.meta_fields())
+    payload["token_usage"] = {
+        key.removeprefix("tokens_"): value for key, value in flat_tokens.items()
     }
-    if tokens_cache_write is not None:
-        token_usage["cache_write"] = int(tokens_cache_write)
-    payload["token_usage"] = token_usage
-    payload["cost_usd"] = cost
-    if cost_source:
-        payload["cost_source"] = cost_source
     payload["resume_hint"] = resume_hint
     payload["artifact_contract"] = "vibecrafted.agent-artifact.v1"
     payload["date"] = payload.get("date") or artifact_time
@@ -4540,19 +5204,12 @@ def finalize_artifacts(
     payload["artifact_footer"] = {
         "run_id": payload.get("run_id", "unknown"),
         "session_id": payload.get("session_id") or "",
-        "tokens_input": tokens_input,
-        "tokens_cached_input": tokens_cached_input,
-        "tokens_output": tokens_output,
-        "tokens_total": tokens_total,
-        "cost_usd": cost,
+        **flat_tokens,
+        **telemetry.cost.flat(),
         "resume_hint": resume_hint,
     }
     if payload.get("model_requested"):
         payload["artifact_footer"]["model_requested"] = payload.get("model_requested")
-    if tokens_cache_write is not None:
-        payload["artifact_footer"]["tokens_cache_write"] = tokens_cache_write
-    if payload.get("cost_source"):
-        payload["artifact_footer"]["cost_source"] = payload.get("cost_source")
     payload.setdefault("completed_at", completed_at)
     payload["updated_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
 
@@ -4565,17 +5222,8 @@ def finalize_artifacts(
         _leave_compat_link(meta, target_meta)
     meta = target_meta
 
-    footer_payload = {
-        **payload,
-        "tokens_input": tokens_input,
-        "tokens_cached_input": tokens_cached_input,
-        "tokens_output": tokens_output,
-        "tokens_total": tokens_total,
-        "cost_usd": cost,
-    }
-    if tokens_cache_write is not None:
-        footer_payload["tokens_cache_write"] = tokens_cache_write
-    else:
+    footer_payload = {**payload, **flat_tokens, **telemetry.cost.flat()}
+    if "tokens_cache_write" not in flat_tokens:
         footer_payload.pop("tokens_cache_write", None)
 
     if str(transcript):
@@ -4583,6 +5231,24 @@ def finalize_artifacts(
         write_runtime_transcript_manifest(
             transcript,
             run_id=str(payload.get("run_id") or ""),
+        )
+    report_frontmatter = telemetry.frontmatter_fields()
+    # Attribute against the transcript as it now sits on disk (moved and
+    # normalized), so the evidence line number is the one a reader will open.
+    failure = (
+        None
+        if str(payload.get("status") or "") == "stopped"
+        else attribute_failure(
+            transcript if str(transcript) else None,
+            coerce_exit_code(payload.get("exit_code")),
+            agent=str(payload.get("agent") or ""),
+        )
+    )
+    if failure is not None:
+        payload["failure"] = failure.as_dict()
+        report_frontmatter.update(failure.frontmatter())
+        meta.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
         )
     if (
         str(report)
@@ -4599,7 +5265,9 @@ def finalize_artifacts(
             model=str(payload.get("model") or ""),
             claim_digest=launcher_claim_digest,
         )
-        _normalize_markdown_artifact(report, footer_payload)
+        _normalize_markdown_artifact(
+            report, footer_payload, extra_frontmatter=report_frontmatter
+        )
     return meta
 
 
@@ -5198,7 +5866,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                     or args.root != admission["root"]
                 ):
                     raise ValueError("interactive admission target mismatch")
-                args.prompt = f"/vc-{admission['skill']}\n\n" + source.decode("utf-8")
+                args.prompt = compose_interactive_task_prompt(
+                    skill=str(admission["skill"]),
+                    source=source.decode("utf-8"),
+                    root=admission["root"],
+                    admission=admission,
+                    parent_session_id=str(
+                        getattr(args, "parent_session", "")
+                        or admission.get("parent_session_id")
+                        or ""
+                    ),
+                )
                 # Exclusive execution claim: reopening a view cannot run the provider twice.
                 claim_fd = os.open(
                     expected / "execution.claim",
@@ -5238,30 +5916,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         except (OSError, RuntimeError, ValueError) as exc:
             if claimed:
-                failed = {
-                    **admission,
-                    "status": "failed",
-                    "state": "failed",
-                    "liveness": "terminal",
-                    "terminal_reason": "interactive_start_failed",
-                    "error": str(exc),
-                    "completed_at": utc_now_iso(),
-                }
-                meta_path = (
-                    control_plane_home()
-                    / "runtime_runs"
-                    / admission["run_id"]
-                    / "meta.json"
+                message, _failed = record_interactive_launch_cli_failure(
+                    admission=admission,
+                    exc=exc,
+                    provider=str(args.provider),
                 )
-                _write_meta(meta_path, failed)
-                append_event(
-                    "lifecycle:failed",
-                    admission["run_id"],
-                    "interactive start failed",
-                    {**failed, "meta": str(meta_path)},
-                )
-                _project_interactive_snapshot(admission["run_id"])
-            print(str(exc), file=sys.stderr)
+                print(message, file=sys.stderr)
+            else:
+                print(str(exc), file=sys.stderr)
             return 2
         finally:
             if native_lease is not None:

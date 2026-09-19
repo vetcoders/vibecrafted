@@ -12,8 +12,9 @@ use voc::catalog::LauncherCatalog;
 pub const CAPABILITIES_FIXTURE: &str = include_str!("../fixtures/capabilities.json");
 
 /// The launcher catalog as the fixture declares it: agents `agy, claude,
-/// codex, cursor, grok, junie` (grok deliberately unavailable), Living Tree
-/// and Fleet Worktrees available, Fleet VM refused with the launcher's reason.
+/// codex, cursor, grok, junie, kimi` (grok deliberately unavailable), Living
+/// Tree and Fleet Worktrees available, Fleet VM refused with the launcher's
+/// reason.
 pub fn fixture_catalog() -> LauncherCatalog {
     LauncherCatalog::parse(CAPABILITIES_FIXTURE.as_bytes())
         .expect("the bundled capabilities fixture must parse")
@@ -78,6 +79,8 @@ pub fn fixture_app(repo: &Path, deck: &Path, roots: &Path) -> App {
         observe: voc::observe::ObserveState::default(),
         memory: Default::default(),
         interaction: Default::default(),
+        repo_edit: Default::default(),
+        refresh: Default::default(),
     }
 }
 

@@ -231,7 +231,7 @@ def test_run_doctor_smokes_helper_and_launcher_runtime(
     crafted_home = home / ".vibecrafted"
     store_path = crafted_home / "skills"
     launcher_bin = home / ".local" / "bin"
-    helper_dir = config_home / "vetcoders"
+    helper_dir = config_home / "vibecrafted" / "shell"
 
     store_path.mkdir(parents=True)
     launcher_bin.mkdir(parents=True)
@@ -385,7 +385,7 @@ def test_run_doctor_includes_dashboard_smoke(tmp_path: Path, monkeypatch) -> Non
     crafted_home = home / ".vibecrafted"
     store_path = crafted_home / "skills"
     launcher_bin = home / ".local" / "bin"
-    helper_dir = config_home / "vetcoders"
+    helper_dir = config_home / "vibecrafted" / "shell"
 
     store_path.mkdir(parents=True)
     launcher_bin.mkdir(parents=True)
@@ -504,7 +504,7 @@ def test_run_doctor_finds_launchers_outside_local_bin(
     crafted_home = home / ".vibecrafted"
     store_path = crafted_home / "skills"
     launcher_bin = home / ".local" / "bin"
-    helper_dir = config_home / "vetcoders"
+    helper_dir = config_home / "vibecrafted" / "shell"
 
     store_path.mkdir(parents=True)
     launcher_bin.mkdir(parents=True)
@@ -1498,7 +1498,7 @@ def test_run_doctor_spawn_e2e_supplies_full_meta_arguments(
     crafted_home = home / ".vibecrafted"
     runtime_tools = home / ".local" / "share" / "vibecrafted" / "tools"
     store_path = crafted_home / "skills"
-    helper_dir = config_home / "vetcoders"
+    helper_dir = config_home / "vibecrafted" / "shell"
     source_root = runtime_tools / "vibecrafted-main"
     current_link = runtime_tools / "vibecrafted-current"
     scripts_dir = (
@@ -1555,23 +1555,18 @@ def test_cmd_doctor_fix_rc_repairs_compat_shell_lines(
     crafted_home = home / ".vibecrafted"
     store_path = crafted_home / "skills"
     launcher_bin = home / ".local" / "bin"
-    helper_dir = config_home / "vetcoders"
-    compat_helper_dir = config_home / "zsh"
+    helper_dir = config_home / "vibecrafted" / "shell"
     zshrc = home / ".zshrc"
 
     store_path.mkdir(parents=True)
     launcher_bin.mkdir(parents=True)
     helper_dir.mkdir(parents=True)
-    compat_helper_dir.mkdir(parents=True)
 
     helper_file = helper_dir / "vc-skills.sh"
     helper_file.write_text(
         f"# shellcheck shell=bash\n{installer.HELPER_SHIM_MARKER}\nvc-help() {{ :; }}"
         + "\n",
         encoding="utf-8",
-    )
-    (compat_helper_dir / "vc-skills.zsh").write_text(
-        "# compat helper\n", encoding="utf-8"
     )
     _write_executable(
         launcher_bin / "vibecrafted",
@@ -1715,46 +1710,6 @@ def test_host_shell_contract_checks_every_login_and_interactive_startup_file(
         assert finding.level == "fail"
         assert rcname in finding.message
         rcfile.unlink()
-
-
-def test_frontier_contract_rejects_checkout_link(tmp_path: Path, monkeypatch) -> None:
-    home = tmp_path / "home"
-    config_home = home / ".config"
-    frontier = config_home / "vetcoders" / "frontier"
-    checkout = tmp_path / "checkout"
-    frontier.mkdir(parents=True)
-    checkout.mkdir()
-    (frontier / "legacy.bak.1").symlink_to(checkout)
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
-
-    [finding] = installer._managed_frontier_contract_findings()
-
-    assert finding.level == "fail"
-    assert finding.component == "frontier-links"
-    assert "legacy.bak.1" in finding.message
-
-
-def test_frontier_contract_accepts_installed_generation_link(
-    tmp_path: Path, monkeypatch
-) -> None:
-    home = tmp_path / "home"
-    config_home = home / ".config"
-    runtime_home = home / ".local" / "share" / "vibecrafted"
-    frontier = config_home / "vetcoders" / "frontier"
-    installed = runtime_home / "tools" / "vibecrafted-current" / "config"
-    frontier.mkdir(parents=True)
-    installed.mkdir(parents=True)
-    (installed / "starship.toml").write_text("format = ''\n", encoding="utf-8")
-    (frontier / "starship.toml").symlink_to(installed / "starship.toml")
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
-    monkeypatch.setenv("XDG_DATA_HOME", str(home / ".local" / "share"))
-
-    [finding] = installer._managed_frontier_contract_findings()
-
-    assert finding.level == "ok"
-    assert finding.component == "frontier-links"
 
 
 def test_public_launcher_contract_rejects_checkout_link(

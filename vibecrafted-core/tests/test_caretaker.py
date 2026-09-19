@@ -10,6 +10,10 @@ from __future__ import annotations
 
 import json
 import os
+import socket
+import threading
+import time
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -54,7 +58,11 @@ def _receipt(tmp_path: Path, **overrides: object) -> Path:
 def _reachable(
     monkeypatch: pytest.MonkeyPatch, *, reachable: bool, reason: str = ""
 ) -> None:
-    """Pin the liveness probe; no test may depend on a real listening port."""
+    """Pin the liveness probe for tests about what the verdict does with it.
+
+    Tests about the probe itself run against real loopback sockets instead
+    (``health_endpoint``), because a pinned probe cannot prove a retry.
+    """
     monkeypatch.setattr(
         caretaker,
         "probe_health",
@@ -65,6 +73,120 @@ def _reachable(
             "version": "4.3.0" if reachable else "",
         },
     )
+
+
+#: Cadence at which the macOS App re-runs ``server caretaker --json``
+#: (``AppDelegate.swift``). A probe that outlives it stacks polls.
+APP_POLL_SECONDS = 5.0
+
+#: Per-attempt bound where a test needs several silent attempts quickly. The
+#: shipped constants are exercised unshrunk by the probe-level tests.
+SHORT_PROBE_SECONDS = 0.3
+
+
+class _HealthEndpoint:
+    """A real loopback listener standing in for ``/api/health``.
+
+    The first ``silent`` connections are accepted and then left without a single
+    byte of answer — the shape of a server whose sockets stay open while its
+    event loop is stalled. ``silent=None`` never answers anyone. Every later
+    connection gets a genuine HTTP 200 health body.
+    """
+
+    def __init__(self, *, silent: int | None) -> None:
+        self._silent = silent
+        self._held: list[socket.socket] = []
+        self._lock = threading.Lock()
+        self._connections = 0
+        self._stop = threading.Event()
+        self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._listener.bind(("127.0.0.1", 0))
+        self._listener.listen(8)
+        self._listener.settimeout(0.05)
+        self.port = int(self._listener.getsockname()[1])
+        self.origin = f"http://127.0.0.1:{self.port}"
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    @property
+    def connections(self) -> int:
+        with self._lock:
+            return self._connections
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            try:
+                conn, _ = self._listener.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                return
+            with self._lock:
+                self._connections += 1
+                seen = self._connections
+            if self._silent is None or seen <= self._silent:
+                self._held.append(conn)
+                continue
+            self._answer(conn)
+
+    @staticmethod
+    def _answer(conn: socket.socket) -> None:
+        body = json.dumps(
+            {"status": "ok", "version": "9.9.9", "schema": "vibecrafted.health.v1"}
+        ).encode()
+        with conn:
+            conn.settimeout(2.0)
+            request = b""
+            while b"\r\n\r\n" not in request:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    return
+                request += chunk
+            conn.sendall(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                + f"Content-Length: {len(body)}\r\n".encode()
+                + b"Connection: close\r\n\r\n"
+                + body
+            )
+
+    def close(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=2.0)
+        for conn in self._held:
+            conn.close()
+        self._listener.close()
+
+
+@pytest.fixture
+def health_endpoint() -> Iterator[Callable[..., _HealthEndpoint]]:
+    """Open real loopback health endpoints; close every one after the test."""
+    opened: list[_HealthEndpoint] = []
+
+    def _open(*, silent: int | None) -> _HealthEndpoint:
+        endpoint = _HealthEndpoint(silent=silent)
+        opened.append(endpoint)
+        return endpoint
+
+    yield _open
+    for endpoint in opened:
+        endpoint.close()
+
+
+def _receipt_endpoint(port: int) -> dict[str, object]:
+    url = f"http://127.0.0.1:{port}"
+    return {"host": "127.0.0.1", "port": port, "url": url, "public_url": url}
+
+
+def _declare_endpoint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, port: int
+) -> None:
+    """Declare the server endpoint through the operator config the caretaker reads."""
+    config_home = tmp_path / "xdg-config"
+    (config_home / "vibecrafted").mkdir(parents=True)
+    (config_home / "vibecrafted" / "config.toml").write_text(
+        f'[server]\nbind_host = "127.0.0.1"\nport = {port}\n', encoding="utf-8"
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
 
 
 def test_verdict_header_and_health_never_disagree(
@@ -119,12 +241,23 @@ def test_serving_endpoint_with_stale_receipt_is_not_healthy(
     assert "supervisor_receipt_stale" in codes
 
 
+@pytest.mark.parametrize("receipt_fresh", [True, False], ids=["fresh", "stale"])
 def test_unreachable_endpoint_is_never_rendered_healthy(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, receipt_fresh: bool
 ) -> None:
-    """No receipt state may override a silent port."""
+    """No receipt state may lift a silent port to HEALTHY.
+
+    A fresh ``healthy`` receipt may soften a missed probe to DEGRADED — the
+    supervisor proved the pair on its own cadence — and a stale one leaves the
+    port's silence as UNREACHABLE. In neither case may the verdict or its header
+    claim health the endpoint did not answer for.
+    """
     plane = _plane(tmp_path)
     home = _receipt(tmp_path, state="healthy")
+    if not receipt_fresh:
+        receipt = home / "server" / "supervisor.status.json"
+        stale = os.stat(receipt).st_mtime - (caretaker.RECEIPT_STALE_SECONDS + 60)
+        os.utime(receipt, (stale, stale))
     _reachable(
         monkeypatch, reachable=False, reason="ConnectionRefusedError: [Errno 61]"
     )
@@ -133,9 +266,149 @@ def test_unreachable_endpoint_is_never_rendered_healthy(
         "verdict"
     ]
 
-    assert verdict["health"] == caretaker.UNAVAILABLE
+    assert verdict["health"] != caretaker.HEALTHY
+    assert verdict["server_health"] != caretaker.HEALTHY
+    assert "HEALTHY" not in verdict["header"]
+    codes = {f["code"] for f in verdict["findings"]}
+    if receipt_fresh:
+        assert verdict["health"] == caretaker.DEGRADED
+        assert "health_probe_missed" in codes
+    else:
+        assert verdict["health"] == caretaker.UNAVAILABLE
+        assert "UNREACHABLE" in verdict["header"]
+        assert "server_unreachable" in codes
+
+
+def test_probe_answers_past_a_silent_first_attempt(
+    health_endpoint: Callable[..., _HealthEndpoint],
+) -> None:
+    """One stalled GET must not decide liveness when the next one answers.
+
+    On the Founder host the tray read ``UNREACHABLE · TimeoutError: timed out``
+    while supervisor, server and guardian PIDs were alive, and ``/api/health``
+    answered in under a millisecond minutes later: one probe turned one stalled
+    read into a down verdict. This runs the shipped constants against a real
+    socket that swallows the first request.
+    """
+    endpoint = health_endpoint(silent=1)
+
+    started = time.monotonic()
+    result = caretaker.probe_health(endpoint.origin)
+    elapsed = time.monotonic() - started
+
+    assert result["reachable"] is True, result
+    assert result["version"] == "9.9.9"
+    assert endpoint.connections == 2
+    assert result["attempts"] == 2
+    assert elapsed < caretaker.HEALTH_PROBE_BUDGET_SECONDS
+
+
+def test_silent_endpoint_probe_is_bounded_inside_the_app_poll(
+    health_endpoint: Callable[..., _HealthEndpoint],
+) -> None:
+    """Retries are bounded: a silent endpoint costs one budget, not a stacked poll."""
+    endpoint = health_endpoint(silent=None)
+
+    started = time.monotonic()
+    result = caretaker.probe_health(endpoint.origin)
+    elapsed = time.monotonic() - started
+
+    assert result["reachable"] is False
+    assert endpoint.connections > 1, "a single silent GET must not be the verdict"
+    assert endpoint.connections == caretaker.HEALTH_PROBE_ATTEMPTS
+    assert result["attempts"] == caretaker.HEALTH_PROBE_ATTEMPTS
+    assert "timed out" in result["reason"]
+    assert f"after {caretaker.HEALTH_PROBE_ATTEMPTS} attempts" in result["reason"]
+    assert elapsed <= caretaker.HEALTH_PROBE_BUDGET_SECONDS + 0.5
+    assert elapsed < APP_POLL_SECONDS
+
+
+def test_silent_probe_under_fresh_healthy_receipt_is_degraded_not_down(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    health_endpoint: Callable[..., _HealthEndpoint],
+) -> None:
+    """A fresh ``healthy`` supervisor receipt outvotes a missed probe.
+
+    The supervisor proves the managed pair itself and rewrites its receipt every
+    pass. While that receipt is fresh (``RECEIPT_STALE_SECONDS``) and says
+    ``healthy`` with no counted failures, a probe miss is this reader's problem,
+    not the server's death: DEGRADED with a WARN finding, and Start — a verb for
+    a server that is not running — stays disabled.
+    """
+    endpoint = health_endpoint(silent=None)
+    plane = _plane(tmp_path)
+    home = _receipt(tmp_path, endpoint=_receipt_endpoint(endpoint.port))
+    _declare_endpoint(monkeypatch, tmp_path, endpoint.port)
+    monkeypatch.setattr(caretaker, "HEALTH_PROBE_TIMEOUT_SECONDS", SHORT_PROBE_SECONDS)
+
+    snapshot = caretaker.build_caretaker_snapshot(home=home, control_plane=plane)
+
+    liveness = snapshot["server"]["liveness"]
+    assert liveness["probed"] is True
+    assert liveness["reachable"] is False
+
+    verdict = snapshot["verdict"]
+    assert verdict["health"] == caretaker.DEGRADED, verdict
+    assert verdict["server_health"] == caretaker.DEGRADED
+    assert verdict["server_state"] == "running"
+    assert "UNREACHABLE" not in verdict["header"]
+    by_code = {finding["code"]: finding for finding in verdict["findings"]}
+    assert "server_unreachable" not in by_code
+    missed = by_code["health_probe_missed"]
+    assert missed["severity"] == caretaker.WARN
+    assert "supervisor reports healthy" in missed["detail"]
+
+    actions = snapshot["actions"]
+    assert actions["start"]["enabled"] is False
+    assert "supervisor" in actions["start"]["reason"]
+    assert actions["restart"]["enabled"] is True
+    assert endpoint.connections > 1, "the verdict must follow retried attempts"
+
+
+@pytest.mark.parametrize("receipt_case", ["stale", "backoff"])
+def test_silent_probe_without_fresh_healthy_receipt_stays_down(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    health_endpoint: Callable[..., _HealthEndpoint],
+    receipt_case: str,
+) -> None:
+    """Hysteresis needs fresh healthy evidence; anything less keeps the port's word.
+
+    A receipt nobody refreshed may be the last words of a dead supervisor, and a
+    ``backoff`` receipt is the supervisor itself saying the pair is not up.
+    Neither may soften a silent endpoint: UNREACHABLE with an ERROR finding, and
+    Start stays offered.
+    """
+    endpoint = health_endpoint(silent=None)
+    plane = _plane(tmp_path)
+    if receipt_case == "stale":
+        home = _receipt(tmp_path, endpoint=_receipt_endpoint(endpoint.port))
+        receipt = home / "server" / "supervisor.status.json"
+        stale = os.stat(receipt).st_mtime - (caretaker.RECEIPT_STALE_SECONDS + 60)
+        os.utime(receipt, (stale, stale))
+    else:
+        home = _receipt(
+            tmp_path,
+            endpoint=_receipt_endpoint(endpoint.port),
+            state="backoff",
+            consecutive_failures=2,
+            last_error="server start exited 1",
+        )
+    _declare_endpoint(monkeypatch, tmp_path, endpoint.port)
+    monkeypatch.setattr(caretaker, "HEALTH_PROBE_TIMEOUT_SECONDS", SHORT_PROBE_SECONDS)
+
+    snapshot = caretaker.build_caretaker_snapshot(home=home, control_plane=plane)
+
+    assert snapshot["server"]["liveness"]["reachable"] is False
+    verdict = snapshot["verdict"]
+    assert verdict["health"] == caretaker.UNAVAILABLE, verdict
+    assert verdict["server_state"] == "down"
     assert "UNREACHABLE" in verdict["header"]
-    assert {f["code"] for f in verdict["findings"]} >= {"server_unreachable"}
+    by_code = {finding["code"]: finding for finding in verdict["findings"]}
+    assert by_code["server_unreachable"]["severity"] == caretaker.ERROR
+    assert "health_probe_missed" not in by_code
+    assert snapshot["actions"]["start"]["enabled"] is True
 
 
 def test_unprobed_liveness_is_unknown_not_healthy(tmp_path: Path) -> None:

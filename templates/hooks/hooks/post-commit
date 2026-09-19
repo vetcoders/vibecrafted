@@ -10,7 +10,6 @@
 set -euo pipefail
 
 HUSKY_LIB="${BASH_SOURCE[0]%/*}/lib"
-# shellcheck disable=SC1090,SC1091
 . "$HUSKY_LIB/core.sh"
 husky_init
 

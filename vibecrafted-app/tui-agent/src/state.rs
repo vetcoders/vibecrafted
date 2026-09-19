@@ -612,6 +612,12 @@ fn canonical_run_snapshot(run: CanonicalRunStatus) -> RunSnapshot {
     let mut extra = HashMap::new();
     extra.insert("health".to_string(), Value::String(run.health.clone()));
     extra.insert("source".to_string(), Value::String(run.source.clone()));
+    if !run.completed_at.trim().is_empty() {
+        extra.insert(
+            "completed_at".to_string(),
+            Value::String(run.completed_at.clone()),
+        );
+    }
     if !run.liveness.is_empty() {
         extra.insert("liveness".to_string(), Value::String(run.liveness.clone()));
     }
@@ -633,9 +639,9 @@ fn canonical_run_snapshot(run: CanonicalRunStatus) -> RunSnapshot {
         mode: nonempty(run.mode),
         state: nonempty(run.state),
         status: None,
-        started_at: nonempty(run.started_at),
-        updated_at: nonempty(run.updated_at),
-        last_heartbeat: None,
+        started_at: nonempty(run.started_at.clone()),
+        updated_at: nonempty(run.updated_at.clone()),
+        last_heartbeat: nonempty(run.updated_at).or(nonempty(run.started_at)),
         root: nonempty(run.root),
         operator_session: nonempty(run.operator_session),
         latest_report: nonempty(run.latest_report),

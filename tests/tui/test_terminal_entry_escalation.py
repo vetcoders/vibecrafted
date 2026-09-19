@@ -78,6 +78,7 @@ PUBLIC_ENTRY_ISOLATE_ENV = (
     *WORKSPACE_IDENTITY_ENV,
     "VIBECRAFTED_START_CREATED_SESSION",
     "VIBECRAFTED_TERMINAL_ENTRY",
+    "VIBECRAFTED_TERMINAL_ENTRY_OWNER",
     "VIBECRAFTED_ROOT",
     "VIBECRAFTED_RUNTIME_ROOT",
     "VIBECRAFTED_RUNTIME_BIN",
@@ -418,6 +419,21 @@ def _product_args(hosted: list[str]) -> list[str]:
     return hosted[2:]
 
 
+def _resume_front_door_args(hosted: list[str]) -> list[str]:
+    """The terminal re-enters the one public ``vibecrafted`` declaration.
+
+    The provider/admission owner belongs behind that public boundary.  Testing
+    a synthetic ``interactive-handoff`` here would bypass the parser that
+    consumes the owned-terminal marker and is precisely the split contract
+    this suite is meant to prevent.
+    """
+    assert hosted, hosted
+    assert hosted[0].endswith("launch-primary-shell.zsh"), hosted
+    assert hosted[1].endswith("/bin/vibecrafted"), hosted
+    assert not _is_spawn_handoff(hosted), hosted
+    return hosted[2:]
+
+
 def _spawn_owner_argv(hosted: list[str]) -> list[str]:
     """The child owner after the primary shell.
 
@@ -725,23 +741,16 @@ def test_bare_resume_without_tty_opens_terminal_on_this_project(
     # Exact cwd: the session belongs to the project the operator ran this in.
     assert _working_directory(launch) == (tmp_path / "mlx-batch-runner").resolve()
 
-    # The sourced-shell owner, not a PATH-resolved vibecrafted wrapper.
+    # The terminal re-enters the selected generation's public declaration.
     hosted = _hosted_argv(launch)
-    _owner, inner, admission = _spawn_handoff(hosted)
-    project = (tmp_path / "mlx-batch-runner").resolve()
-    assert inner[1] == "codex", inner
-    assert Path(_flag_value(inner, "--root")).resolve() == project
-    assert admission["skill"] == "resume", admission
-    assert admission["agent"] == "codex", admission
-    assert Path(admission["root"]).resolve() == project
-    assert _child_effective_root(tmp_path, launch) == project
+    assert _resume_front_door_args(hosted) == ["resume", "codex"], hosted
 
     # The child re-enters the same entry; the boundary must ride with it.
     assert launch["boundary"] == "1"
 
-    # The parent composes exactly one continuity pack into the handoff
-    # command. The child is interactive-handoff, not a second vc-resume.
-    assert _parent_aicx_calls(tmp_path) == ["called"]
+    # Admission happens before continuity: only the terminal child may compose
+    # the pack and launch the provider.
+    assert _parent_aicx_calls(tmp_path) == []
     assert "refusing to downgrade" not in result.stderr
 
 
@@ -845,12 +854,12 @@ def test_explicit_absolute_root_binds_the_terminal_not_the_cwd(
     assert result.returncode == 0, result.stderr
     assert launch is not None, result.stderr
     assert _working_directory(launch) == other.resolve()
-    _owner, inner, admission = _spawn_handoff(_hosted_argv(launch))
-    assert inner[1] == "codex", inner
-    assert Path(_flag_value(inner, "--root")).resolve() == other.resolve()
-    assert admission["skill"] == "resume", admission
-    assert Path(admission["root"]).resolve() == other.resolve()
-    assert _child_effective_root(tmp_path, launch) == other.resolve()
+    assert _resume_front_door_args(_hosted_argv(launch)) == [
+        "resume",
+        "codex",
+        "--root",
+        str(other.resolve()),
+    ]
 
 
 def test_relative_explicit_root_is_resolved_against_the_caller(
@@ -863,14 +872,10 @@ def test_relative_explicit_root_is_resolved_against_the_caller(
     assert result.returncode == 0, result.stderr
     assert launch is not None, result.stderr
     assert _working_directory(launch) == other.resolve()
-    # A sibling token resolves back onto itself from the new cwd, so this case
-    # is forgiving by accident. Check the child owner too, or it proves nothing.
-    _owner, inner, admission = _spawn_handoff(_hosted_argv(launch))
-    forwarded_root = Path(_flag_value(inner, "--root"))
-    assert forwarded_root.is_absolute(), inner
+    forwarded = _resume_front_door_args(_hosted_argv(launch))
+    forwarded_root = Path(_flag_value(forwarded, "--root"))
+    assert forwarded_root.is_absolute(), forwarded
     assert forwarded_root.resolve() == other.resolve()
-    assert Path(admission["root"]).resolve() == other.resolve()
-    assert _child_effective_root(tmp_path, launch) == other.resolve()
 
 
 def test_nested_relative_root_survives_the_child_reparse(tmp_path: Path) -> None:
@@ -891,20 +896,18 @@ def test_nested_relative_root_survives_the_child_reparse(tmp_path: Path) -> None
     assert launch is not None, result.stderr
     assert _working_directory(launch) == nested.resolve()
 
-    _owner, inner, admission = _spawn_handoff(_hosted_argv(launch))
-    forwarded_root = Path(_flag_value(inner, "--root"))
-    assert forwarded_root.is_absolute(), f"a relative root crossed the cwd: {inner}"
+    forwarded = _resume_front_door_args(_hosted_argv(launch))
+    forwarded_root = Path(_flag_value(forwarded, "--root"))
+    assert forwarded_root.is_absolute(), f"a relative root crossed the cwd: {forwarded}"
     assert forwarded_root.resolve() == nested.resolve()
-    assert Path(admission["root"]).resolve() == nested.resolve()
-    assert _child_effective_root(tmp_path, launch) == nested.resolve()
 
 
 def test_root_rewrite_preserves_every_other_argument(tmp_path: Path) -> None:
     """Only the root VALUE is rewritten; provider and surviving flags stay.
 
-    Resume no longer forwards the raw ``vc-resume`` vector. ``--fork-session``
-    is a closed refuse (resume must not silently become a fork). The extra
-    flag that still rides the child owner is ``--permissions``.
+    The public resume vector is re-parsed in the terminal. ``--fork-session``
+    is a closed refuse (resume must not silently become a fork); the surviving
+    ``--permissions`` flag must retain its value across the re-entry.
     """
     project = tmp_path / "mlx-batch-runner"
     project.mkdir(parents=True, exist_ok=True)
@@ -918,14 +921,10 @@ def test_root_rewrite_preserves_every_other_argument(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert launch is not None, result.stderr
 
-    _owner, inner, admission = _spawn_handoff(_hosted_argv(launch))
-    assert inner[1] == "claude", inner
-    assert _flag_value(inner, "--permissions") == "accept-edits", inner
-    assert Path(_flag_value(inner, "--root")).resolve() == nested.resolve()
-    assert admission["skill"] == "resume", admission
-    assert admission["agent"] == "claude", admission
-    assert Path(admission["root"]).resolve() == nested.resolve()
-    assert _child_effective_root(tmp_path, launch) == nested.resolve()
+    forwarded = _resume_front_door_args(_hosted_argv(launch))
+    assert forwarded[:2] == ["resume", "claude"], forwarded
+    assert _flag_value(forwarded, "--permissions") == "accept-edits", forwarded
+    assert Path(_flag_value(forwarded, "--root")).resolve() == nested.resolve()
 
 
 def test_explicit_root_that_does_not_exist_is_refused(tmp_path: Path) -> None:
@@ -1953,10 +1952,15 @@ def test_missing_terminal_host_fails_actionably(
 
 
 @pytest.mark.parametrize("invocation", ["vc-resume codex", "vc-start"])
-def test_reentry_boundary_stops_a_terminal_launch_loop(
+def test_raw_inherited_marker_is_not_a_reentry_boundary(
     tmp_path: Path, invocation: str
 ) -> None:
-    """A terminal-launched entry never opens another terminal."""
+    """A raw inherited marker is not a terminal-owned re-entry boundary.
+
+    Start and resume share one admission proof: `VIBECRAFTED_TERMINAL_ENTRY=1`
+    without the owner the product exported is agent ancestry, so a pipe still
+    gets its visible terminal.
+    """
     result, launch = _run_entry(
         tmp_path,
         invocation,
@@ -1964,17 +1968,60 @@ def test_reentry_boundary_stops_a_terminal_launch_loop(
         expect_launch=False,
     )
 
-    assert launch is None, "escalation looped despite the explicit boundary"
-    assert "opened the Vibecrafted terminal" not in result.stderr
+    assert result.returncode == 0, result.stderr
+    assert launch is not None, "a raw marker bypassed public admission"
 
 
 @pytest.mark.parametrize("invocation", ["vc-resume codex", "vc-start"])
+def test_owned_reentry_boundary_stops_a_terminal_launch_loop(
+    tmp_path: Path, invocation: str
+) -> None:
+    """The child the product terminal opened never opens another terminal.
+
+    The owned boundary is the marker plus the owner the launcher exported: this
+    generation's own `vibecrafted` front door. It holds even when the host
+    failed to hand the child a PTY.
+    """
+    owner = tmp_path / "generation" / "bin" / "vibecrafted"
+    _result, launch = _run_entry(
+        tmp_path,
+        invocation,
+        extra_env={
+            "VIBECRAFTED_TERMINAL_ENTRY": "1",
+            "VIBECRAFTED_TERMINAL_ENTRY_OWNER": str(owner),
+        },
+        expect_launch=False,
+    )
+
+    assert launch is None, "the owned terminal child opened another terminal"
+
+
+def test_start_projects_into_a_live_named_operator_session(tmp_path: Path) -> None:
+    """vc-start inside a live Frame host projects a guest into that host.
+
+    Distinct from the resume declaration below: a live named operator session
+    is start's guest-projection route, not a terminal it owes the caller.
+    """
+    live = tmp_path / "live-sessions.txt"
+    live.write_text("mlx-batch-runner\n", encoding="utf-8")
+    _result, launch = _run_entry(
+        tmp_path,
+        "vc-start",
+        extra_env={
+            "VIBECRAFTED_OPERATOR_SESSION": "mlx-batch-runner",
+            "VC_FRAME_LIVE": str(live),
+        },
+        expect_launch=False,
+    )
+
+    assert launch is None, "start opened a terminal instead of projecting a guest"
+
+
+@pytest.mark.parametrize("invocation", ["vc-resume codex"])
 def test_explicit_operator_session_keeps_the_direct_path(
     tmp_path: Path, invocation: str
 ) -> None:
-    """An explicitly named LIVE target is honoured; do not hijack it into a
-    window. (The engine confirms the name: see the sibling below for a name
-    the engine does not know.)"""
+    """A pipe has no visible surface even if a live session name is inherited."""
     live = tmp_path / "live-sessions.txt"
     live.write_text("mlx-batch-runner\n", encoding="utf-8")
     _result, launch = _run_entry(
@@ -1987,7 +2034,7 @@ def test_explicit_operator_session_keeps_the_direct_path(
         expect_launch=False,
     )
 
-    assert launch is None, "explicit operator target was overridden by a terminal"
+    assert launch is not None, "a pipe inherited another client's surface proof"
 
 
 @pytest.mark.parametrize("invocation", ["vc-resume codex", "vc-start"])
@@ -2624,12 +2671,10 @@ def test_nested_relative_root_survives_the_child_reparse_under_zsh(
     assert launch is not None, result.stderr
     assert _working_directory(launch) == nested.resolve()
 
-    _owner, inner, admission = _spawn_handoff(_hosted_argv(launch))
-    forwarded_root = Path(_flag_value(inner, "--root"))
-    assert forwarded_root.is_absolute(), f"a relative root crossed the cwd: {inner}"
+    forwarded = _resume_front_door_args(_hosted_argv(launch))
+    forwarded_root = Path(_flag_value(forwarded, "--root"))
+    assert forwarded_root.is_absolute(), f"a relative root crossed the cwd: {forwarded}"
     assert forwarded_root.resolve() == nested.resolve()
-    assert Path(admission["root"]).resolve() == nested.resolve()
-    assert _child_effective_root(tmp_path, launch) == nested.resolve()
 
 
 # --------------------------------------------------------------------------
@@ -2664,14 +2709,28 @@ def test_terminal_host_survives_synthetic_caller_group_death(tmp_path: Path) -> 
     project_dir = tmp_path / "project"
     project_dir.mkdir(parents=True, exist_ok=True)
     survived = tmp_path / "survived.marker"
+    started = tmp_path / "started.marker"
+    release = tmp_path / "release.marker"
     capture = tmp_path / "terminal-launch.json"
     generation = _fake_generation(tmp_path, capture)
-    # Outlive the 1.5s bounded admission window before proving survival --
-    # a host that exits inside that window would pass even under the bug.
+    # The host must be alive past the caller's return AND past the teardown of
+    # the caller's group, then prove it is the same process. A fixed `sleep 2`
+    # raced a slow runner: the caller itself outlived two seconds and the host
+    # finished inside the caller's lifetime, proving nothing. Here the host
+    # announces itself, then blocks until the test says the group is gone, so
+    # it cannot finish early on any runner -- and under the bug it is reaped by
+    # that teardown and never answers. The wait is bounded so a failed run
+    # cannot leave it behind.
     _write(
         generation / "bin" / "vc-terminal",
         "#!/bin/bash\n"
-        "sleep 2\n"
+        f"printf '%s\\n' \"$$\" > {shlex.quote(str(started))}\n"
+        "waited=0\n"
+        f"while [[ ! -e {shlex.quote(str(release))} ]]; do\n"
+        "  ((waited < 1200)) || exit 3\n"
+        "  sleep 0.05\n"
+        "  waited=$((waited + 1))\n"
+        "done\n"
         f"printf '%s\\n' \"$$\" > {shlex.quote(str(survived))}\n"
         "exit 0\n",
     )
@@ -2727,6 +2786,11 @@ def test_terminal_host_survives_synthetic_caller_group_death(tmp_path: Path) -> 
         assert recorded_pid == caller.pid, (
             "pid mismatch -- refusing to signal an unverified group"
         )
+        deadline = time.monotonic() + 30.0
+        while not started.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert started.exists(), "the terminal host never started"
+        host_pid = int(started.read_text().strip())
         assert not survived.exists(), (
             "the fake host finished inside the caller's own lifetime -- "
             "this proves nothing about surviving the caller's group death"
@@ -2741,7 +2805,9 @@ def test_terminal_host_survives_synthetic_caller_group_death(tmp_path: Path) -> 
         except ProcessLookupError:
             pass  # nothing left in that group -- the host already detached out of it
 
-        deadline = time.monotonic() + 5.0
+        # Only now may the host finish: the group it could have died with is gone.
+        release.touch()
+        deadline = time.monotonic() + 10.0
         while not survived.exists() and time.monotonic() < deadline:
             time.sleep(0.05)
 
@@ -2750,7 +2816,13 @@ def test_terminal_host_survives_synthetic_caller_group_death(tmp_path: Path) -> 
             "being torn down -- it is still coupled to the caller's "
             "session/pgid"
         )
+        assert int(survived.read_text().strip()) == host_pid, (
+            "a different process answered -- the host that existed before the "
+            "group teardown did not survive it"
+        )
     finally:
+        # Unblock a host a failed assertion left waiting; it exits on its own.
+        release.touch()
         if caller.poll() is None:
             try:
                 os.killpg(caller_pgid, signal.SIGKILL)
@@ -2773,10 +2845,8 @@ def test_bare_resume_without_tty_opens_terminal_under_zsh(tmp_path: Path) -> Non
     assert result.returncode == 0, result.stderr
     assert launch is not None, f"no terminal was opened: {result.stderr}"
     assert "read-only variable" not in result.stderr, result.stderr
-    _owner, inner, admission = _spawn_handoff(_hosted_argv(launch))
-    assert inner[1] == "codex", inner
-    assert admission["skill"] == "resume", admission
-    assert _parent_aicx_calls(tmp_path) == ["called"]
+    assert _resume_front_door_args(_hosted_argv(launch)) == ["resume", "codex"]
+    assert _parent_aicx_calls(tmp_path) == []
 
 
 def _run_terminal_path_entry(

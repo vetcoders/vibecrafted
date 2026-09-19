@@ -41,6 +41,8 @@ def test_workflow_help_documents_session_continuation() -> None:
     assert "--session <id|current|last>" in output
     assert "vibecrafted workflow agy --session <provider-uuid>" in output
     assert "never a work-* run id" in output
+    assert "--remediate-trust-block" in output
+    assert "--remediation-task <id>" in output
 
 
 def test_partner_help_is_interactive_only() -> None:

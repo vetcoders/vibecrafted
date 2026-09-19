@@ -113,3 +113,110 @@ def test_agy_model_metacharacters_reach_fake_cli_as_one_value(
     ]
     assert not shell_payload_marker.exists()
     assert not command_substitution_marker.exists()
+
+
+def _kimi_argv(*prefix: str) -> list[str]:
+    """Build a canonical Kimi headless argv (prompt travels as the -p value)."""
+
+    return [
+        "kimi",
+        *prefix,
+        "-p",
+        "do the thing",
+        "--output-format",
+        "stream-json",
+    ]
+
+
+def test_kimi_single_pin_is_idempotent() -> None:
+    pinned = _with_model_override("kimi", _kimi_argv(), "kimi-test")
+
+    assert pinned[:3] == ["kimi", "--model", "kimi-test"]
+    assert _with_model_override("kimi", pinned, "kimi-test") == pinned
+
+
+def test_kimi_pin_survives_a_resolved_executable_path() -> None:
+    resolved = ["/opt/agents/bin/kimi", *_kimi_argv()[1:]]
+
+    pinned = _with_model_override("kimi", resolved, "kimi-test")
+
+    assert pinned[:3] == ["/opt/agents/bin/kimi", "--model", "kimi-test"]
+
+
+def test_kimi_short_flag_alias_is_an_existing_pin() -> None:
+    pinned = _with_model_override("kimi", _kimi_argv("-m", "kimi-test"), "kimi-test")
+
+    assert pinned == _kimi_argv("-m", "kimi-test")
+    with pytest.raises(
+        ValueError, match="model_override_conflicts_with_existing_model"
+    ):
+        _with_model_override("kimi", _kimi_argv("-m", "other"), "kimi-test")
+
+
+@pytest.mark.parametrize(
+    ("command", "reason"),
+    [
+        (
+            _kimi_argv("--model", "first", "--model", "first"),
+            "model_override_ambiguous_existing_model",
+        ),
+        (
+            _kimi_argv("--model"),
+            "model_override_missing_existing_model",
+        ),
+        (
+            _kimi_argv("--model", "first"),
+            "model_override_conflicts_with_existing_model",
+        ),
+        (
+            ["bash", "-c", 'kimi -p "$(cat)"'],
+            "model_override_unsupported_kimi_command_shape",
+        ),
+        (
+            ["bash", "-c", "kimi -p prompt --output-format stream-json"],
+            "model_override_unsupported_kimi_command_shape",
+        ),
+    ],
+)
+def test_kimi_invalid_existing_pin_or_shell_shape_is_rejected_before_launch(
+    command: list[str], reason: str
+) -> None:
+    with pytest.raises(ValueError, match=reason):
+        _with_model_override("kimi", command, "requested")
+
+
+def test_kimi_model_metacharacters_reach_fake_cli_as_one_value(
+    tmp_path: Path,
+) -> None:
+    capture = tmp_path / "argv.txt"
+    shell_payload_marker = tmp_path / "shell-payload-ran"
+    command_substitution_marker = tmp_path / "command-substitution-ran"
+    fake_kimi = tmp_path / "kimi"
+    fake_kimi.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$@" > "$CAPTURE"\n', encoding="utf-8"
+    )
+    fake_kimi.chmod(0o755)
+    requested = (
+        f"kimi test; touch {shell_payload_marker}; "
+        f"$(touch {command_substitution_marker})"
+    )
+
+    completed = subprocess.run(
+        _with_model_override("kimi", _kimi_argv(), requested),
+        cwd=tmp_path,
+        env={
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "CAPTURE": str(capture),
+        },
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0
+    assert capture.read_text(encoding="utf-8").splitlines()[:3] == [
+        "--model",
+        requested,
+        "-p",
+    ]
+    assert not shell_payload_marker.exists()
+    assert not command_substitution_marker.exists()

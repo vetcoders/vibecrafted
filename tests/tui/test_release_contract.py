@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -17,7 +18,7 @@ RELEASE_PAGE = "https://github.com/vetcoders/vibecrafted/releases/latest"
 # 2026-08-18; both copies agreed at this digest. See
 # test_windows_entry_point_does_not_drift_between_its_two_copies for why a
 # constant is needed on top of the cross-repo comparison.
-INSTALL_PS1_SHA256 = "d23aad1c55bb8432e0d877b9be8b6dada73b9242468233676c793169f9c1830e"
+INSTALL_PS1_SHA256 = "273cef1b5de9ba57ad133ca37bcce50a82294f29d94a5b09f09f9ba47ad23411"
 
 # Binaries a developer laptop always has and the GitHub macos-15 image does
 # not. Measured 2026-08-18 against actions/runner-images
@@ -694,15 +695,19 @@ def test_release_bundle_binds_the_canonical_terminal_policy_and_font() -> None:
     installer = (REPO_ROOT / "scripts/vetcoders_install.py").read_text(encoding="utf-8")
 
     assert 'family = "Spot Mono"' in terminal
-    assert "size = 18.5" in terminal
+    assert "size = 19.5" in terminal
     assert "live_config_reload = true" in terminal
     assert 'background = "#0b0b12"' in dark
     assert 'background = "#fafafa"' in light
     assert 'chars = "\\u001b[101;9u"' in terminal
     assert "/Users/" not in terminal
-    assert "Contents/Resources/fonts/SpotMono.ttc" in app_delegate
-    assert "CTFontManagerRegisterFontsForURL" in app_delegate
-    assert "kCTFontFamilyNameAttribute as String" in app_delegate
+    # Font ownership belongs to the process that draws the glyphs. The app used
+    # to register SpotMono.ttc for the whole login session on its way to
+    # spawning the terminal, which reached unrelated processes and outranked the
+    # owner's own installed copy. See tests/tui/test_terminal_font_ownership.py
+    # for the measured evidence behind this line.
+    assert "CTFontManagerRegisterFontsForURL" not in app_delegate
+    assert "Contents/Resources/fonts/SpotMono.ttc" not in app_delegate
     assert 'CTFontDescriptorCreateWithNameAndSize("Spot Mono"' not in app_delegate
     assert "_RUNTIME_PREFERENCE_SOURCES" in installer
     assert (
@@ -729,6 +734,8 @@ def test_release_bundle_binds_the_canonical_terminal_policy_and_font() -> None:
     assert (
         'install -m 0644 "$SPOT_MONO_FONT" "$resources/fonts/SpotMono.ttc"' in builder
     )
+    assert 'embed_terminal_font_resources "$terminal_app"' in builder
+    assert "Add :ATSApplicationFontsPath string fonts" in builder
     assert "missing licensed Spot Mono input" in builder
     assert "(OpenType|TrueType) font collection data" in builder
 
@@ -1029,7 +1036,7 @@ def test_the_embedded_interpreter_forgets_where_it_was_seeded() -> None:
 
     Measured on the 4.1.0 payload: 27 mentions of the ephemeral
     `build/unified-release/python-seed.XXXXXX/` directory inside
-    `runtime/python/lib/python3.12/_sysconfigdata__darwin_darwin.py`, and a pip
+    `runtime/python/lib/python3.N/_sysconfigdata__darwin_darwin.py`, and a pip
     console script at `runtime/python-site/bin/jsonschema` whose shebang points
     at that same directory — a path no customer has, so the script could never
     have run. python-site is on PYTHONPATH and never on PATH, so nothing
@@ -1042,6 +1049,175 @@ def test_the_embedded_interpreter_forgets_where_it_was_seeded() -> None:
     assert 'rm -rf "$runtime/python-site/bin"' in builder
     assert "normalize_embedded_python_paths()" in builder
     assert 'normalize_embedded_python_paths "$runtime" "$python_seed"' in builder
+
+
+def test_embedded_interpreter_forgets_the_python_build_standalone_runner_home(
+    tmp_path: Path,
+) -> None:
+    """CPython 3.14 ships _sysconfig_vars__darwin_darwin.json with the PBS CI
+    runner's home frozen into `userbase`. The product contract refuses any
+    /Users path in a config file, so the release died at the bundled verifier.
+    Run the real normalizer function on a generation-shaped tree.
+    """
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+    start = builder.index("normalize_embedded_python_paths() {")
+    end = builder.index("\n}\n", start) + len("\n}\n")
+    function = builder[start:end]
+
+    runtime = tmp_path / "runtime"
+    seed = tmp_path / "python-seed.XXXXXX"
+    lib = runtime / "python/lib/python3.14"
+    lib.mkdir(parents=True)
+    vars_json = lib / "_sysconfig_vars__darwin_darwin.json"
+    vars_json.write_text(
+        json.dumps(
+            {
+                "userbase": "/Users/runner/.local",
+                "prefix": f"{seed}/python",
+                "EXT_SUFFIX": ".cpython-314-darwin.so",
+            },
+            indent=4,
+        ),
+        encoding="utf-8",
+    )
+    (lib / "_sysconfigdata__darwin_darwin.py").write_text(
+        f"build_time_vars = {{'prefix': '{seed}/python'}}\n", encoding="utf-8"
+    )
+    script = tmp_path / "normalize.sh"
+    script.write_text(
+        function + '\nnormalize_embedded_python_paths "$1" "$2"\n', encoding="utf-8"
+    )
+
+    result = subprocess.run(
+        ["/bin/bash", str(script), str(runtime), str(seed)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    values = json.loads(vars_json.read_text(encoding="utf-8"))
+    assert values["userbase"] == "/usr/src/python-build-standalone/.local"
+    assert values["prefix"] == "/usr/src/python-seed/python"
+    assert values["EXT_SUFFIX"] == ".cpython-314-darwin.so"
+    for path in lib.iterdir():
+        text = path.read_text(encoding="utf-8")
+        assert "/Users/" not in text, path.name
+        assert str(seed) not in text, path.name
+
+
+def _embedded_python_fixture(root: Path) -> Path:
+    python = root / "python"
+    stdlib = python / "lib/python3.14"
+    for relative in (
+        "bin/pip3",
+        "bin/idle3",
+        "bin/idle3.14",
+        "lib/libpython3.14.dylib",
+        "lib/libtcl9.0.dylib",
+        "lib/libtcl9tk9.0.dylib",
+        "lib/tcl9.0/init.tcl",
+        "lib/tcl9/9.0/msgcat.tm",
+        "lib/tk9.0/tk.tcl",
+        "lib/thread3.0.6/libthread3.0.6.dylib",
+        "lib/itcl4.3.8/libitcl4.3.8.dylib",
+        "lib/pkgconfig/python3-embed.pc",
+        "lib/python3.14/json/__init__.py",
+        "lib/python3.14/tkinter/__init__.py",
+        "lib/python3.14/idlelib/idle.py",
+        "lib/python3.14/turtledemo/__main__.py",
+        "lib/python3.14/lib-dynload/_ssl.cpython-314-darwin.so",
+        "lib/python3.14/lib-dynload/_tkinter.cpython-314-darwin.so",
+    ):
+        (python / relative).parent.mkdir(parents=True, exist_ok=True)
+        (python / relative).write_bytes(b"fixture\n")
+    assert stdlib.is_dir()
+    interpreter = python / "bin/python3.14"
+    # copyfile, not copy2: /usr/bin/true carries a system-restricted file flag
+    # that chflags may not copy onto a user file.
+    shutil.copyfile("/usr/bin/true", interpreter)
+    interpreter.chmod(0o755)
+    return python
+
+
+def _run_python_prune(tmp_path: Path, python: Path, *, path: str) -> None:
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+    start = builder.index("prune_embedded_python_unreachable() {")
+    end = builder.index("\n}\n", start) + len("\n}\n")
+    script = tmp_path / "prune.sh"
+    # The builder runs under `set -euo pipefail`; release #8 died silently
+    # inside this function on a status that only errexit turns fatal.
+    script.write_text(
+        "set -euo pipefail\n"
+        + builder[start:end]
+        + '\nprune_embedded_python_unreachable "$1" python3.14 libpython3.14.dylib\n'
+        + "printf 'PRUNE_DONE\\n'\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        ["/bin/bash", str(script), str(python)],
+        capture_output=True,
+        text=True,
+        env={"PATH": path},
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "PRUNE_DONE" in result.stdout
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="otool reads Mach-O load commands")
+def test_embedded_python_drops_native_code_no_declared_executable_reaches(
+    tmp_path: Path,
+) -> None:
+    """Release #7 (c71487bf, CPython 3.14.7) died at VCPC027: the bundled
+    verifier found libpython, the Tcl/Tk stack and its thread/itcl packages
+    reachable from no declared executable. Run the real prune function on a
+    python-build-standalone shaped tree whose interpreter links no libpython.
+    """
+    python = _embedded_python_fixture(tmp_path / "static")
+    _run_python_prune(tmp_path, python, path="/usr/bin:/bin")
+
+    remaining = sorted(
+        str(path.relative_to(python)) for path in python.rglob("*") if path.is_file()
+    )
+    assert remaining == [
+        "bin/pip3",
+        "bin/python3.14",
+        "lib/pkgconfig/python3-embed.pc",
+        "lib/python3.14/json/__init__.py",
+        "lib/python3.14/lib-dynload/_ssl.cpython-314-darwin.so",
+    ]
+
+
+def test_embedded_python_keeps_libpython_the_interpreter_links(tmp_path: Path) -> None:
+    python = _embedded_python_fixture(tmp_path / "shared")
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    otool = shim / "otool"
+    otool.write_text(
+        "#!/bin/sh\n"
+        'printf "%s:\\n\\t@executable_path/../lib/libpython3.14.dylib\\n" "$2"\n',
+        encoding="utf-8",
+    )
+    otool.chmod(0o755)
+    _run_python_prune(tmp_path, python, path=f"{shim}:/usr/bin:/bin")
+
+    assert (python / "lib/libpython3.14.dylib").is_file()
+    assert not (python / "lib/libtcl9.0.dylib").exists()
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+    call = builder.index('prune_embedded_python_unreachable "$runtime/python"')
+    assert call < builder.index(
+        'install_name_tool -id "@loader_path/${PORTABLE_PYTHON_DYLIB}"'
+    )
+    assert 'if [[ -f "$runtime/python/lib/${PORTABLE_PYTHON_DYLIB}" ]]; then' in builder
 
 
 def test_release_binaries_never_probe_the_machine_that_compiled_them() -> None:
@@ -1081,6 +1257,7 @@ def test_release_strips_linker_paths_and_pins_frame_source_identity() -> None:
     One shared boundary, no per-binary lists. MEASURED 2026-09-08 on the
     f131b81b candidate: the Runtime Pack step named libexec/vc-terminal and
     libexec/vc-frame and left bin/voc, bin/vc-start, bin/scaffold-doctor,
+    bin/control-observe,
     bin/aicx, bin/aicx-mcp and bin/prview carrying the rustup sysroot and the
     Cargo target directory in linker stabs; the hygiene gate refused the build
     before packaging. Both payloads now pass every Mach-O executable through
@@ -1131,6 +1308,246 @@ def test_release_strips_linker_paths_and_pins_frame_source_identity() -> None:
     app_gate = builder.index('assert_payload_is_anonymous "$APP"')
     app_signing = builder.index('sign_macho_tree "$APP/Contents"')
     assert app_strip_call < app_gate < app_signing
+
+
+_BUNDLE_SIGNING_DRIVER = """
+set -euo pipefail
+. "$1/scripts/lib/macho-signing.sh"
+root="$2"
+SIGNING_IDENTITY="Developer ID Application: Fixture"
+CODESIGN_KEYCHAIN_ARGS=(--keychain "$3")
+sign_macho_tree "$root"
+sign_macho_app_bundles "$root"
+verify_macho_tree "$root" 1
+"""
+
+
+def _seed_signing_fixture_tree(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """A pack-shaped tree: a flat native host plus a real .app beside it.
+
+    The Mach-O is a copy of /usr/bin/true, so `is_macho_file` reads genuine
+    bytes through the real /usr/bin/file — the helper calls that by absolute
+    path and a shim could not reach it anyway. Only `codesign` is faked, and
+    only to record the order it was called in.
+    """
+
+    # copy2 replicates st_flags, and /usr/bin/true carries SF_RESTRICTED under
+    # SIP: chflags on the copy fails with EPERM. The bytes are the point here,
+    # so copy those and set the mode explicitly.
+    def _donor(destination: Path) -> None:
+        destination.write_bytes(Path("/usr/bin/true").read_bytes())
+        destination.chmod(0o755)
+
+    root = tmp_path / "VibecraftedRuntime"
+    (root / "libexec").mkdir(parents=True)
+    _donor(root / "libexec/vc-terminal")
+    bundle = root / "libexec/vc-terminal.app"
+    (bundle / "Contents/MacOS").mkdir(parents=True)
+    (bundle / "Contents/Resources").mkdir(parents=True)
+    _donor(bundle / "Contents/MacOS/alacritty")
+    (bundle / "Contents/Resources/alacritty.icns").write_bytes(b"icns-fixture")
+    (bundle / "Contents/Info.plist").write_text(
+        '<?xml version="1.0"?><plist version="1.0"><dict>'
+        "<key>CFBundleExecutable</key><string>alacritty</string>"
+        "</dict></plist>\n",
+        encoding="utf-8",
+    )
+
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    log = tmp_path / "codesign.log"
+    codesign = fake_bin / "codesign"
+    codesign.write_text(
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$*" >> "' + str(log) + '"\n'
+        # Sealing a bundle is what writes CodeResources; sealing a file does not.
+        'for argument in "$@"; do\n'
+        '  case "$argument" in\n'
+        "    -*) continue ;;\n"
+        "  esac\n"
+        '  if [ -d "$argument/Contents" ]; then\n'
+        '    case "$*" in\n'
+        "      *--verify*) : ;;\n"
+        '      *) mkdir -p "$argument/Contents/_CodeSignature"\n'
+        '         printf "sealed\\n" > "$argument/Contents/_CodeSignature/CodeResources" ;;\n'
+        "    esac\n"
+        "  fi\n"
+        "done\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    codesign.chmod(0o755)
+    return root, fake_bin, log
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin",
+    reason="Mach-O donors and bundle seals are a Darwin boundary",
+)
+def test_bundle_seal_follows_the_inner_macho_and_verification_demands_it(
+    tmp_path: Path,
+) -> None:
+    """Signing a bundle's executable is not signing the bundle.
+
+    `sign_macho_tree` walks `find -type f`, so inside an .app it reaches the
+    inner Mach-O and signs that FILE. Contents/_CodeSignature/CodeResources —
+    the seal that covers Info.plist and the icon, i.e. the Finder/Dock identity
+    the bundle exists for — is written only when codesign is handed the bundle
+    DIRECTORY. This proves the packager now does both, in that order, and that
+    verification refuses a tree where the second step did not happen.
+    """
+    root, fake_bin, log = _seed_signing_fixture_tree(tmp_path)
+    bundle = root / "libexec/vc-terminal.app"
+    keychain = tmp_path / "fixture.keychain"
+    keychain.write_bytes(b"")
+    environment = {
+        "PATH": f"{fake_bin}:/usr/bin:/bin",
+        "HOME": str(tmp_path / "home"),
+    }
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _BUNDLE_SIGNING_DRIVER,
+            "driver",
+            str(REPO_ROOT),
+            str(root),
+            str(keychain),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=environment,
+    )
+    assert result.returncode == 0, result.stderr
+
+    calls = log.read_text(encoding="utf-8").splitlines()
+    signed = [line for line in calls if "--verify" not in line]
+    inner = next(
+        index
+        for index, line in enumerate(signed)
+        if line.endswith("vc-terminal.app/Contents/MacOS/alacritty")
+    )
+    sealed = next(
+        index for index, line in enumerate(signed) if line.endswith("vc-terminal.app")
+    )
+    assert inner < sealed, "the bundle was sealed before its own executable"
+    assert any(line.endswith("libexec/vc-terminal") for line in signed), (
+        "the flat native host beside the bundle stopped being signed"
+    )
+    assert (bundle / "Contents/_CodeSignature/CodeResources").is_file()
+    verified = [line for line in calls if "--verify" in line]
+    assert any(line.endswith("vc-terminal.app") for line in verified)
+
+    # Strip only the seal and the same verification must refuse the tree.
+    shutil.rmtree(bundle / "Contents/_CodeSignature")
+    refusal = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                'set -euo pipefail\n. "$1/scripts/lib/macho-signing.sh"\n'
+                'verify_macho_tree "$2" 1\n'
+            ),
+            "driver",
+            str(REPO_ROOT),
+            str(root),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=environment,
+    )
+    assert refusal.returncode != 0
+    assert "not sealed as a bundle" in refusal.stderr
+
+
+def test_runtime_pack_seals_its_app_bundles_before_the_inventory_closes() -> None:
+    """The pack's own vc-terminal.app must be sealed inside the byte owner.
+
+    Vibecrafted.app has always closed this through sign_nested_app_bundles.
+    The standalone pack gained libexec/vc-terminal.app and had no equivalent
+    step, so it shipped a signed executable inside an unsealed shell — and the
+    closed inventory and provenance then recorded exactly those bytes. The seal
+    therefore has to land before refresh-foundations, not after.
+    """
+    packager = (REPO_ROOT / "scripts/package-runtime-pack.sh").read_text(
+        encoding="utf-8"
+    )
+    helper = (REPO_ROOT / "scripts/lib/macho-signing.sh").read_text(encoding="utf-8")
+
+    signed = packager.index('sign_macho_tree "$root"')
+    sealed = packager.index('sign_macho_app_bundles "$root"')
+    verified = packager.index('verify_macho_tree "$root" 1')
+    foundations = packager.index("refresh-foundations")
+    inventoried = packager.index("vibecrafted_core.runtime_pack_contract write")
+    archived = packager.index('-czf "$candidate"')
+    assert signed < sealed < verified < foundations < inventoried < archived
+
+    assert "sign_macho_app_bundles() {" in helper
+    assert "verify_macho_app_bundles() {" in helper
+    # -depth hands children over before parents: a nested bundle is sealed
+    # before the bundle enclosing it, the same inside-out order the loose
+    # Mach-O files are signed in. The suffix match is case-insensitive: macOS
+    # still treats `Stranger.APP` as an application bundle.
+    assert helper.count("find \"$root\" -depth -type d -iname '*.app' -print0") == 2
+    assert "-name '*.app'" not in helper
+    # One verification boundary: everything that calls verify_macho_tree — the
+    # packager on its staging tree and the archive preflight the App runs on
+    # the embedded carrier — inherits the bundle proof.
+    assert 'verify_macho_app_bundles "$root" || return 1' in helper
+    assert helper.index("verify_macho_app_bundles() {") < helper.index(
+        "verify_macho_tree() {"
+    )
+    assert "_CodeSignature/CodeResources" in helper
+
+
+def test_vc_terminal_bundle_identity_has_a_single_materializer() -> None:
+    """Both payloads' bundles are stamped by one function, or they drift.
+
+    Measured on 5ff2c4c5: the App helper was stamped VC Terminal and the new
+    Runtime Pack bundle kept the donor's CFBundleName, so the same binary
+    reached the Dock under two names depending on which payload was installed.
+    """
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+    entry = (REPO_ROOT / "scripts/vc-terminal-product-entry.sh").read_text(
+        encoding="utf-8"
+    )
+    installer_source = (REPO_ROOT / "scripts/vetcoders_install.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        builder.count('/usr/bin/ditto "$TERMINAL_REPO/extra/osx/vc-terminal.app"') == 1
+    )
+    assert builder.count("Set :CFBundleDisplayName VC Terminal") == 1
+    assert builder.count("Set :CFBundleName VC Terminal") == 1
+    assert (
+        builder.count(
+            'materialize_vc_terminal_app_bundle "$runtime/libexec/vc-terminal.app"'
+        )
+        == 1
+    )
+    assert builder.count('materialize_vc_terminal_app_bundle "$terminal_app"') == 1
+    # The pack bundle is a Darwin-only product contract; Linux keeps the flat
+    # native host, so the call has to stay inside the platform guard.
+    materializer = builder.split("materialize_runtime_payload() {", 1)[1].split(
+        "\nbuild_product() {", 1
+    )[0]
+    guard = materializer.index('if [[ "$RUNTIME_PACK_PLATFORM" == darwin-* ]]; then')
+    call = materializer.index("materialize_vc_terminal_app_bundle")
+    assert guard < call < materializer.index("\n  fi\n", guard)
+
+    # The two admission predicates read the same stamp.
+    assert '"$bundle/Contents/Info.plist" 2>/dev/null)" == "VC Terminal"' in entry
+    assert '_TERMINAL_BUNDLE_DISPLAY_NAME = "VC Terminal"' in installer_source
+    assert (
+        'document.get("CFBundleName") == _TERMINAL_BUNDLE_DISPLAY_NAME'
+        in installer_source
+    )
 
 
 def test_windows_entry_point_does_not_drift_between_its_two_copies() -> None:

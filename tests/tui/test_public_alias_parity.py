@@ -421,6 +421,37 @@ def _write_fake_aicx(bin_dir: Path, current_id: str, previous_id: str) -> None:
     script.chmod(0o755)
 
 
+def _write_fake_codex(bin_dir: Path) -> Path:
+    """Hermetic codex CLI: answers the capability probes and nothing else.
+
+    CI runners carry no codex, so the deck's `_require_agent_cli` refused
+    ("codex CLI is not available") while a developer host passed only because
+    its real codex sat on the inherited PATH. The admission probe reads its
+    markers from `codex --help` (continuity/capabilities.py:583-596 requires
+    `exec` and `resume`). Every other invocation is refused loudly, so no
+    provider session can start, and each call is recorded beside the fake.
+    """
+    script = bin_dir / "codex"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        'printf "%s\\n" "$*" >> "$0.calls"\n'
+        'case "$*" in\n'
+        '  --version) printf "codex-cli 0.0.0-fixture\\n" ;;\n'
+        "  --help)\n"
+        '    printf "Usage: codex [OPTIONS] [PROMPT]\\n\\nCommands:\\n"\n'
+        '    printf "  exec    Run Codex non-interactively\\n"\n'
+        '    printf "  resume  Resume a previous interactive session\\n"\n'
+        '    printf "  fork    Fork a previous interactive session\\n" ;;\n'
+        "  *)\n"
+        '    printf "fixture codex: unexpected invocation: %s\\n" "$*" >&2\n'
+        "    exit 97 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    return script
+
+
 def _installed_generation(tmp_path: Path, home: Path, frame_source: Path) -> Path:
     generation = tmp_path / "generation"
     deck = generation / "bin" / "vibecrafted"
@@ -430,6 +461,7 @@ def _installed_generation(tmp_path: Path, home: Path, frame_source: Path) -> Pat
     shutil.copytree(
         REPO_ROOT / "vibecrafted-core/vibecrafted_core",
         generation / "vibecrafted-core" / "vibecrafted_core",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
     )
     # Same immutable stamp the production guard requires: X.Y.Z+g + hex SHA.
     # `+gtest` is not stamped (`s` is outside hex). Receipt file is the
@@ -468,6 +500,7 @@ def test_fork_spellings_share_normalized_child_admission(tmp_path: Path) -> None
     fake_bin.mkdir()
     root.mkdir(parents=True)
     _write_fake_aicx(fake_bin, "current-codex-session", "last-codex-session")
+    _write_fake_codex(fake_bin)
     subprocess.run(["git", "init", "-q", str(root)], check=True)
     subprocess.run(
         [
@@ -562,6 +595,11 @@ def test_fork_spellings_share_normalized_child_admission(tmp_path: Path) -> None
         admission = _admission_from_capture(payload)
         results.append((payload, admission, proc.stdout))
 
+    # Both spellings were admitted against the fixture CLI, never a host codex.
+    assert set((fake_bin / "codex.calls").read_text().splitlines()) == {
+        "--version",
+        "--help",
+    }
     (
         (deck_payload, deck_admission, deck_out),
         (wrap_payload, wrap_admission, wrap_out),

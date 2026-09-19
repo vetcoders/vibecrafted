@@ -1318,3 +1318,135 @@ def test_stop_ordered_after_resume_request_is_not_cleared_by_that_owner(
     assert payload["scheduler_stop_requested"] is True
     assert payload["scheduler_resume_cleared"] is False
     assert all(cut["state"] == "stopped" for cut in payload["cuts"].values())
+
+
+def _acceptance_brief(tmp_path: Path, body: str) -> Path:
+    brief = tmp_path / "briefs" / "W1-01_gate.md"
+    brief.parent.mkdir(exist_ok=True)
+    brief.write_text(body, encoding="utf-8")
+    return brief
+
+
+def test_unflipped_acceptance_boxes_refute_the_cut(tmp_path: Path) -> None:
+    """Founder 2026-09-15: an untouched `[ ]` marks an undelivered requirement.
+
+    The worker reported done but never flipped its Acceptance checkboxes, so
+    the supervisor refuses the cut before spending verifier time — the `[ ]`
+    is treated as non-delivery, not as a formatting nit.
+    """
+    brief = _acceptance_brief(
+        tmp_path,
+        "# W1-01\n\n## Mission\n\nDo it.\n\n## Acceptance\n\n"
+        "- [ ] A1 behavior holds — `echo ok`\n"
+        "- [x] A2 already measured — `echo ok`\n\n"
+        "## Gates\n\n`echo ok`\n",
+    )
+    dispatch, reports_dir, artifacts_dir = build_dispatch(
+        tmp_path,
+        f"""
+[[cuts]]
+id = "c1"
+agent = "claude"
+workflow = "implement"
+brief = "{brief}"
+  [[cuts.verify]]
+  run = "echo ok"
+  expect = {{ contains = "ok" }}
+""",
+    )
+    launcher = FakeCells(reports_dir=reports_dir)
+
+    result = run_dispatch(dispatch, launcher=launcher, artifacts_dir=artifacts_dir)
+
+    assert result.states == {"c1": STATE_FAILED}
+    journal = (artifacts_dir / "journal.md").read_text(encoding="utf-8")
+    assert "acceptance checkbox never flipped by the worker" in journal
+    assert "A1 behavior holds" in journal
+
+
+def test_flipped_acceptance_is_still_only_a_claim_verifiers_run(
+    tmp_path: Path,
+) -> None:
+    """A worker that flips every box is not believed: verifiers still decide."""
+    brief = _acceptance_brief(
+        tmp_path,
+        "# W1-01\n\n## Mission\n\nDo it.\n\n## Acceptance\n\n"
+        "- [ ] A1 behavior holds — `echo ok`\n\n"
+        "## Gates\n\n`echo ok`\n",
+    )
+    dispatch, reports_dir, artifacts_dir = build_dispatch(
+        tmp_path,
+        f"""
+[[cuts]]
+id = "c1"
+agent = "claude"
+workflow = "implement"
+brief = "{brief}"
+  [[cuts.verify]]
+  run = "echo ok"
+  expect = {{ contains = "ok" }}
+
+[[cuts]]
+id = "c2"
+agent = "claude"
+workflow = "implement"
+brief = "{brief}"
+depends_on = ["c1"]
+  [[cuts.verify]]
+  run = "false"
+  expect = {{ exit_code = 0 }}
+""",
+    )
+    launcher = FakeCells(reports_dir=reports_dir)
+    # The c1 worker flips its checkbox (delivery claim); c2 inherits the same
+    # flipped brief but its verifier is red — the claim must not save it.
+    launcher.cells[("c1", "initial")] = FakeCell(
+        bash=(
+            "python3 - <<'PY'\n"
+            f"from pathlib import Path\n"
+            f"p = Path({str(brief)!r})\n"
+            "p.write_text(p.read_text().replace('- [ ]', '- [x]'))\n"
+            "PY"
+        )
+    )
+
+    result = run_dispatch(dispatch, launcher=launcher, artifacts_dir=artifacts_dir)
+
+    assert result.states["c1"] == STATE_VERIFIED
+    assert result.states["c2"] == STATE_FAILED
+
+
+def test_keyboard_interrupt_marks_receipts_interrupted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    dispatch, _reports_dir, artifacts_dir = build_dispatch(
+        tmp_path,
+        """
+[[cuts]]
+id = "c1"
+agent = "claude"
+workflow = "implement"
+prompt = "will be interrupted"
+  [[cuts.verify]]
+  run = "echo ok"
+  expect = { contains = "ok" }
+""",
+    )
+
+    def boom(*_args: object, **_kwargs: object) -> CellRun:
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        run_dispatch(
+            dispatch,
+            launcher=boom,
+            artifacts_dir=artifacts_dir,
+            run_id="kb-int",
+        )
+
+    store = DispatchReceiptStore("kb-int", dispatch.cuts, create=False)
+    cut = store.cut("c1")
+    assert cut["state"] == "stopped"
+    assert cut["acceptance"] == "interrupted"
+    assert store.read().get("scheduler_stop_requested") is True

@@ -1,6 +1,5 @@
 {
   "schema_version": "vibecrafted.ownership.v1",
-  "adr": "docs/adr/0002-unified-operator-ownership.md",
   "plan_id": "vc-unified-operator-runtime",
   "frozen": "2026-07-29",
   "last_updated": "2026-09-06",

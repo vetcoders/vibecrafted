@@ -26,6 +26,9 @@ targets:
       - name: "Build Rust FFI"
         script: |
           export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
+          # Same shield as shell-agent/Makefile bindings: cargo's release strip
+          # corrupts proc-macro dylib metadata at this deployment target.
+          export CARGO_PROFILE_RELEASE_STRIP=false
           cd "$PROJECT_DIR/../.." && cargo build -p vibecrafted-shell-ffi --release
           ./shell-agent/scripts/fix-dylib-install-names.sh
           cargo run -p vibecrafted-uniffi-bindgen -- generate --library target/release/libvibecrafted_shell_ffi.dylib --language swift --out-dir shell-agent/app/Vibecrafted/Bridge/
@@ -72,6 +75,12 @@ targets:
           bash $SRCROOT/../scripts/fix-dylib-install-names.sh "$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH"
           mkdir -p "$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers"
           install -m 0755 "$SRCROOT/../../../scripts/vc-app-update.sh" \
+            "$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers/vc-app-update"
+          # Xcode's CodeSign step refuses unsigned nested code ("code object is
+          # not signed at all, In subcomponent: .../Helpers/vc-app-update").
+          # Sign the helper with the same identity this invocation uses; the
+          # release pipeline re-signs it with Developer ID + hardened runtime.
+          codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY:--}" --timestamp=none \
             "$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers/vc-app-update"
         name: Normalize notification FFI install names
         shell: /bin/bash

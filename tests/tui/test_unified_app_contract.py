@@ -410,31 +410,24 @@ def _runtime_pack_fixture(app: Path, macho_executable: Path) -> str:
     return name
 
 
-def _app_fixture(app: Path, macho_executable: Path) -> dict[str, Any]:
-    terminal_relative = "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
-    for relative in (
-        "Contents/MacOS/Vibecrafted",
-        terminal_relative,
-        "Contents/Helpers/vc-frame",
-        "Contents/Resources/runtime/bin/vc-start",
-    ):
-        (app / relative).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(macho_executable, app / relative)
-    for relative in (
-        terminal_relative,
-        "Contents/Helpers/vc-frame",
-        "Contents/Resources/runtime/bin/vc-start",
-    ):
-        _codesign_macho(app / relative)
-    primary_shell = app / contract._LAUNCH_PRIMARY_SHELL
-    primary_shell.parent.mkdir(parents=True, exist_ok=True)
-    primary_shell.write_text('#!/bin/zsh\nexec vc-start "$@"\n', encoding="utf-8")
-    primary_shell.chmod(0o755)
-    terminal_app = app / "Contents/Helpers/vc-terminal.app"
-    terminal_icon = terminal_app / "Contents/Resources/alacritty.icns"
-    terminal_icon.parent.mkdir(parents=True, exist_ok=True)
-    terminal_icon.write_bytes(b"terminal-icns-fixture")
-    with (terminal_app / "Contents/Info.plist").open("wb") as handle:
+def _terminal_bundle_fixture(
+    app: Path, relative: str, macho_executable: Path
+) -> list[dict[str, Any]]:
+    """One canonical vc-terminal.app, sealed the way the release builder seals it.
+
+    The inner Mach-O is signed as a file and the directory is then sealed as a
+    bundle: only the second step writes Contents/_CodeSignature, which is what
+    carries the Finder/Dock identity the contract proves.
+    """
+    bundle = app / relative
+    executable = bundle / "Contents/MacOS/alacritty"
+    executable.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(macho_executable, executable)
+    _codesign_macho(executable)
+    icon = bundle / "Contents/Resources/alacritty.icns"
+    icon.parent.mkdir(parents=True, exist_ok=True)
+    icon.write_bytes(b"terminal-icns-fixture")
+    with (bundle / "Contents/Info.plist").open("wb") as handle:
         plistlib.dump(
             {
                 "CFBundleIdentifier": "io.vetcoders.vc-terminal",
@@ -446,7 +439,40 @@ def _app_fixture(app: Path, macho_executable: Path) -> dict[str, Any]:
             },
             handle,
         )
-    _codesign_app(terminal_app)
+    _codesign_app(bundle)
+    return [
+        _entry(app, f"{relative}/Contents/MacOS/alacritty", kind="executable"),
+        _entry(app, f"{relative}/Contents/Info.plist", kind="config"),
+        _entry(app, f"{relative}/Contents/Resources/alacritty.icns", kind="resource"),
+    ]
+
+
+def _app_fixture(app: Path, macho_executable: Path) -> dict[str, Any]:
+    terminal_relative = "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
+    for relative in (
+        "Contents/MacOS/Vibecrafted",
+        "Contents/Helpers/vc-frame",
+        "Contents/Resources/runtime/bin/vc-start",
+    ):
+        (app / relative).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(macho_executable, app / relative)
+    for relative in (
+        "Contents/Helpers/vc-frame",
+        "Contents/Resources/runtime/bin/vc-start",
+    ):
+        _codesign_macho(app / relative)
+    primary_shell = app / contract._LAUNCH_PRIMARY_SHELL
+    primary_shell.parent.mkdir(parents=True, exist_ok=True)
+    primary_shell.write_text('#!/bin/zsh\nexec vc-start "$@"\n', encoding="utf-8")
+    primary_shell.chmod(0o755)
+    # Both declared bundles: the App's Helpers copy and the one the Runtime
+    # Pack materializes for its own standalone install, which arrives inside
+    # the App because the whole pack payload is staged under Resources/runtime.
+    terminal_bundle_entries = [
+        entry
+        for bundle_relative in contract.TERMINAL_APP_BUNDLES
+        for entry in _terminal_bundle_fixture(app, bundle_relative, macho_executable)
+    ]
     terminal_config = app / "Contents/Resources/terminal/vibecrafted.toml"
     terminal_config.parent.mkdir(parents=True, exist_ok=True)
     terminal_config.write_text("[shell]\nprogram = 'vc-start'\n", encoding="utf-8")
@@ -466,7 +492,9 @@ def _app_fixture(app: Path, macho_executable: Path) -> dict[str, Any]:
             },
             handle,
         )
-    terminal_product_entry = _entry(app, terminal_relative, kind="executable")
+    terminal_product_entry = next(
+        entry for entry in terminal_bundle_entries if entry["path"] == terminal_relative
+    )
     frame_product_entry = _entry(app, "Contents/Helpers/vc-frame", kind="executable")
 
     def add_module_binding(
@@ -570,18 +598,8 @@ def _app_fixture(app: Path, macho_executable: Path) -> dict[str, Any]:
                 f"Contents/Resources/{contract.PRODUCT_ICON_FILE}",
                 kind="resource",
             ),
-            terminal_product_entry,
+            *terminal_bundle_entries,
             frame_product_entry,
-            _entry(
-                app,
-                "Contents/Helpers/vc-terminal.app/Contents/Info.plist",
-                kind="config",
-            ),
-            _entry(
-                app,
-                "Contents/Helpers/vc-terminal.app/Contents/Resources/alacritty.icns",
-                kind="resource",
-            ),
             _entry(app, terminal_binding["manifest_path"], kind="config"),
             _entry(app, frame_binding["manifest_path"], kind="config"),
             _entry(app, terminal_binding["assembly_receipt_path"], kind="config"),
@@ -1204,6 +1222,16 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     assert "MainActor.assumeIsolated { completion(result) }" in native_runner
     assert "process.terminationHandler = nil" in native_runner
     assert "durable transaction will recover or report its lease state" in delegate
+    repair = delegate[
+        delegate.index("@objc private func repairRuntime()") : delegate.index(
+            "private func offerConfigurationRepair"
+        )
+    ]
+    assert "reconcileLaunchAgentThenOfferReinstallIfNeeded" in repair
+    assert "Configuration already matches the installed generation." in repair
+    assert "presentHealthyRepairResult" in repair
+    assert "offerReconcileAfterServiceHashMismatch" in delegate
+    assert "launcher hash differs from the installed LaunchAgent" in delegate
     reinstall = delegate[
         delegate.index("private func offerRuntimePackReinstall") : delegate.index(
             "@objc private func openConsoleFromStatusItem"
@@ -1223,12 +1251,14 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     assert "copyItem(at:" not in delegate
     assert "writeLauncher(" not in delegate
     assert 'appendingPathComponent("active.json")' not in delegate
-    # PATH composes: the caller's tools win and the signed generation remains a
-    # fallback. A hard-coded system-only PATH strips Homebrew/~/.local/bin/
-    # ~/.cargo/bin from spawned agent CLIs, so `#!/usr/bin/env` shebangs exit 127.
+    # PATH composes guest-not-landlord: the generation's canonical bin is
+    # prepended so pinned runtime tools resolve deterministically, and every
+    # inherited user entry (Homebrew, ~/.local/bin, ~/.cargo/bin) survives
+    # behind it. A hard-coded system-only PATH strips those tools from spawned
+    # agent CLIs, so `#!/usr/bin/env` shebangs exit 127.
     assert 'environment["PATH"] = composedPath(' in delegate
     assert 'environment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"' not in delegate
-    assert 'return (entries + [generationBin]).joined(separator: ":")' in delegate
+    assert 'return ([generationBin] + entries).joined(separator: ":")' in delegate
     assert '["server", "service", "reconcile"]' in delegate
     assert "shell-agent" not in delegate
     assert 'name = "vc-start"' in cargo
@@ -1238,10 +1268,11 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     assert 'Command::new("/bin/bash")' in launcher
     assert "fn host_agent_search_path(" in launcher
     assert '"/opt/homebrew/bin"' in launcher
-    # vc-start composes: the PATH AppDelegate hands it (the Founder's
-    # Homebrew/npm/cargo/nvm entries first, generation fallback last) survives,
-    # sanitized rather than amputated — a closed allowlist here re-created the
-    # exit-127 shebang failures the composed PATH fixed one process earlier.
+    # vc-start composes: the PATH AppDelegate hands it (the generation's
+    # canonical bin first, the Founder's Homebrew/npm/cargo/nvm entries
+    # surviving behind it) survives, sanitized rather than amputated — a closed
+    # allowlist here re-created the exit-127 shebang failures the composed PATH
+    # fixed one process earlier.
     assert 'let inherited_path = env::var("PATH").ok();' in launcher
     assert "inherited_path.as_deref()" in launcher
     assert "!entry.starts_with('/')" in launcher
@@ -1288,6 +1319,8 @@ def test_tray_menu_supervises_runtime_pack_carrier_drift() -> None:
     )
     assert "func deriveRuntimePackMenuState(" in policy
     assert "func runtimeIdentityBlob(" in policy
+    # The tray passes its XDG base; the policy derives the product config home.
+    assert "xdgConfigHome: install.configHome.path" in delegate
     assert 'generation.range(of: "+g", options: .backwards)' in policy
     assert "signedSourceRevision.lowercased().hasPrefix(token)" in policy
     assert "Matches this App's signed carrier" in policy
@@ -1373,13 +1406,15 @@ let blob = runtimeIdentityBlob(
   generation: "4.4.0+g0a5eaaea", sourceRevision: fullSha,
   terminalRevision: "78d62bb9", frameRevision: "c29b899c",
   runtimeHome: "/Users/o/.local/share/vibecrafted",
-  configHome: "/Users/o/.config/vibecrafted")
+  xdgConfigHome: "/Users/o/.config")
 expect(blob.contains("vibecrafted-runtime: 4.4.0+g0a5eaaea"), "blob generation")
 expect(blob.contains("carrier-source: \\(fullSha)"), "blob source")
 expect(blob.contains("carrier-vc-terminal: 78d62bb9"), "blob terminal")
 expect(blob.contains("carrier-vc-frame: c29b899c"), "blob frame")
 expect(blob.contains("runtime-home: /Users/o/.local/share/vibecrafted"), "blob home")
-expect(blob.contains("config-home: /Users/o/.config/vibecrafted"), "blob config")
+// The App hands over its XDG base; the blob must name the product directory.
+let configLines = blob.split(separator: "\\n").filter { $0.hasPrefix("config-home: ") }
+expect(configLines == ["config-home: /Users/o/.config/vibecrafted"], "blob config")
 print("runtime-pack-policy-ok")
 """,
         encoding="utf-8",
@@ -1563,8 +1598,8 @@ def test_host_path_scan_distinguishes_windows_examples_from_unix_paths(
 def test_host_path_scan_allows_only_known_libpython_documentation_paths(
     tmp_path: Path,
 ) -> None:
-    payload = tmp_path / "libpython3.12.dylib"
-    relative = "Contents/Resources/runtime/python/lib/libpython3.12.dylib"
+    payload = tmp_path / "libpython3.14.dylib"
+    relative = "Contents/Resources/runtime/python/lib/libpython3.14.dylib"
     payload.write_bytes(
         b"example /usr/local/lib/python2.5/site-packages "
         b"/usr/local/lib/python2.5/site-packages/bar "
@@ -1579,6 +1614,41 @@ def test_host_path_scan_allows_only_known_libpython_documentation_paths(
             payload,
             relative=relative,
             kind="dylib",
+        ),
+    )
+
+
+@pytest.mark.parametrize("name", ["python", "python3", "python3.14"])
+def test_host_path_scan_allows_libpython_documentation_paths_in_portable_python_executables(
+    tmp_path: Path, name: str
+) -> None:
+    """python-build-standalone 3.14 carries site.py's examples in the executable too."""
+    payload = tmp_path / name
+    relative = f"Contents/Resources/runtime/python/bin/{name}"
+    payload.write_bytes(
+        b"example /usr/local/lib/python2.5/site-packages "
+        b"/usr/local/lib/python2.5/site-packages/bar "
+        b"/usr/local/lib/python2.5/site-packages/foo"
+    )
+    contract._reject_host_bound_paths(payload, relative=relative, kind="executable")
+
+    payload.write_bytes(b"load /usr/local/lib/libescape.dylib")
+    _assert_error(
+        contract.E_PATH,
+        lambda: contract._reject_host_bound_paths(
+            payload,
+            relative=relative,
+            kind="executable",
+        ),
+    )
+    # Only the portable interpreter names qualify; a look-alike stays refused.
+    payload.write_bytes(b"example /usr/local/lib/python2.5/site-packages")
+    _assert_error(
+        contract.E_PATH,
+        lambda: contract._reject_host_bound_paths(
+            payload,
+            relative="Contents/Resources/runtime/bin/python3-helper",
+            kind="executable",
         ),
     )
 
@@ -1875,10 +1945,14 @@ def test_app_launch_contract_rejects_noncanonical_product_entry(
     )
 
 
-def test_launch_environment_is_fresh_closed_and_resolves_writable_runtime_home(
+def test_launch_environment_is_the_users_environment_with_pins_overlaid(
     tmp_path: Path,
     macho_executable: Path,
 ) -> None:
+    """Guest, not landlord: the child environment is the user's own
+    environment with the deny-list scrubbed and Vibecrafted pins overlaid;
+    the user's PATH survives behind the bundle's canonical bin."""
+
     app = tmp_path / "Vibecrafted.app"
     _app_fixture(app, macho_executable)
     runtime_home = tmp_path / "data/runtime"
@@ -1887,24 +1961,29 @@ def test_launch_environment_is_fresh_closed_and_resolves_writable_runtime_home(
         "HOME": str(tmp_path),
         "USER": "operator",
         "LANG": "pl_PL.UTF-8",
-        "PATH": "/attacker/bin",
+        "PATH": "/opt/homebrew/bin:/usr/bin",
+        "SSH_AUTH_SOCK": "/tmp/probe.sock",
+        "GITHUB_TOKEN": "user-owned-flows-through",
+        "PYTHONPATH": "/foreign/runtime/site",
         "VIBECRAFTED_RUNTIME_HOME": str(runtime_home),
-        "VIBECRAFTED_ROOT": "/attacker/root",
-        "VIBECRAFTED_TOOLS_HOME": "/attacker/tools",
-        "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
-        "VC_FRAME_BIN": "/attacker/vc-frame",
     }
 
     child = contract.build_launch_environment(app, host_environment=host)
 
+    resolved = app.resolve()
     assert child == {
         "HOME": str(tmp_path),
         "USER": "operator",
         "LANG": "pl_PL.UTF-8",
-        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+        "PATH": (
+            f"{resolved / 'Contents/Resources/runtime/bin'}:"
+            "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        ),
+        "SSH_AUTH_SOCK": "/tmp/probe.sock",
+        "GITHUB_TOKEN": "user-owned-flows-through",
         "VIBECRAFTED_RUNTIME_HOME": str(runtime_home),
-        "VIBECRAFTED_APP_ROOT": str(app.resolve()),
-        "VIBECRAFTED_VC_FRAME_BIN": str(app.resolve() / "Contents/Helpers/vc-frame"),
+        "VIBECRAFTED_APP_ROOT": str(resolved),
+        "VIBECRAFTED_VC_FRAME_BIN": str(resolved / "Contents/Helpers/vc-frame"),
     }
 
 
@@ -2178,6 +2257,200 @@ def test_app_negative_controls_reject_competing_or_unbound_product_shape(
     _write_json(app / "Contents/Resources/product-manifest.json", manifest)
 
     _assert_error(expected_code, lambda: contract.verify_app(app))
+
+
+def test_app_accepts_both_declared_terminal_bundles(
+    tmp_path: Path, macho_executable: Path
+) -> None:
+    """The Runtime Pack's own bundle is product, not contraband.
+
+    Before this, `verify_app` compared every nested .app against a list holding
+    only the Helpers copy, so the moment the pack payload staged under
+    Resources/runtime brought its own vc-terminal.app the whole product was
+    rejected as carrying a forbidden nested bundle.
+    """
+    app = tmp_path / "Vibecrafted.app"
+    manifest = _app_fixture(app, macho_executable)
+
+    nested = sorted(
+        path.relative_to(app).as_posix()
+        for path in app.rglob("*")
+        if path.is_dir() and path.suffix.lower() == ".app"
+    )
+    assert nested == sorted(contract.TERMINAL_APP_BUNDLES)
+    declared = {entry["path"] for entry in manifest["files"]}
+    for bundle in contract.TERMINAL_APP_BUNDLES:
+        assert f"{bundle}/Contents/MacOS/alacritty" in declared
+        assert f"{bundle}/Contents/Resources/alacritty.icns" in declared
+        assert (app / bundle / "Contents/_CodeSignature/CodeResources").is_file()
+        # The seal is proof, never payload: nothing under it may be inventoried.
+        assert not any(
+            item.startswith(f"{bundle}/Contents/_CodeSignature") for item in declared
+        )
+
+    assert contract.verify_app(app) == manifest
+
+
+@pytest.mark.parametrize("stranger", ["Stranger.app", "Stranger.APP"])
+def test_app_refuses_an_undeclared_nested_bundle_in_any_suffix_case(
+    tmp_path: Path, macho_executable: Path, stranger: str
+) -> None:
+    """An inventoried, sealed stranger bundle is contraband whatever its case.
+
+    LaunchServices treats `Stranger.APP` as an application on the default
+    case-insensitive volume; a case-sensitive `*.app` walk accepted it.
+    """
+    app = tmp_path / "Vibecrafted.app"
+    manifest = _app_fixture(app, macho_executable)
+    plist_rel = f"Contents/Resources/{stranger}/Contents/Info.plist"
+    exe_rel = f"Contents/Resources/{stranger}/Contents/MacOS/stranger"
+    (app / exe_rel).parent.mkdir(parents=True)
+    with (app / plist_rel).open("wb") as handle:
+        plistlib.dump(
+            {
+                "CFBundleIdentifier": "io.example.stranger",
+                "CFBundleExecutable": "stranger",
+                "CFBundlePackageType": "APPL",
+            },
+            handle,
+        )
+    shutil.copy2(macho_executable, app / exe_rel)
+    _codesign_macho(app / exe_rel)
+    manifest["files"].append(_entry(app, plist_rel, kind="config"))
+    manifest["files"].append(_entry(app, exe_rel, kind="executable"))
+    manifest["files"].sort(key=lambda item: item["path"])
+    _write_app_manifest(app, manifest, sign=True)
+    # A real producer inventories the stranger's seal too; declare it and
+    # re-sign until the nested seal bytes settle, so the only remaining
+    # objection is the bundle itself.
+    seal_rel = f"Contents/Resources/{stranger}/Contents/_CodeSignature/CodeResources"
+    for _ in range(3):
+        if not (app / seal_rel).is_file():
+            break
+        fresh = _entry(app, seal_rel, kind="config")
+        manifest["files"] = [
+            item for item in manifest["files"] if item["path"] != seal_rel
+        ] + [fresh]
+        manifest["files"].sort(key=lambda item: item["path"])
+        _write_app_manifest(app, manifest, sign=True)
+        if _entry(app, seal_rel, kind="config") == fresh:
+            break
+
+    with pytest.raises(contract.ProductContractError) as refused:
+        contract.verify_app(app)
+
+    assert refused.value.code == contract.E_BUNDLE
+    assert f"Contents/Resources/{stranger}" in str(refused.value)
+
+
+@pytest.mark.parametrize("bundle", contract.TERMINAL_APP_BUNDLES)
+@pytest.mark.parametrize(
+    ("mutation", "expected_code"),
+    [
+        ("wrong_identity", contract.E_BUNDLE),
+        ("wrong_display_name", contract.E_BUNDLE),
+        ("plist_is_not_a_dictionary", contract.E_BUNDLE),
+        ("plist_is_malformed_xml", contract.E_BUNDLE),
+        ("icon_absent_from_inventory", contract.E_INVENTORY),
+        ("bundle_seal_removed", contract.E_PROOF),
+    ],
+)
+def test_every_declared_terminal_bundle_is_held_to_one_identity(
+    tmp_path: Path,
+    macho_executable: Path,
+    bundle: str,
+    mutation: str,
+    expected_code: int,
+) -> None:
+    """Same canonical identity, same proof, whichever payload carries it.
+
+    Parametrized over both declared bundles on purpose: a check that only ever
+    ran against the Helpers copy is how the two assemblies drifted apart in the
+    first place. A malformed Info.plist is a contract failure with a code, not
+    an AttributeError escaping the verifier.
+    """
+    app = tmp_path / "Vibecrafted.app"
+    manifest = _app_fixture(app, macho_executable)
+    plist_path = app / bundle / "Contents/Info.plist"
+
+    def _reseal_plist(payload: Any) -> None:
+        with plist_path.open("wb") as handle:
+            plistlib.dump(payload, handle)
+        _resync_plist_entry()
+
+    def _resync_plist_entry() -> None:
+        relative = f"{bundle}/Contents/Info.plist"
+        entry = next(item for item in manifest["files"] if item["path"] == relative)
+        entry.update(_entry(app, relative, kind="config"))
+
+    if mutation == "wrong_identity":
+        with plist_path.open("rb") as handle:
+            info = plistlib.load(handle)
+        info["CFBundleIdentifier"] = "io.example.vc-terminal"
+        _reseal_plist(info)
+    elif mutation == "wrong_display_name":
+        with plist_path.open("rb") as handle:
+            info = plistlib.load(handle)
+        info["CFBundleDisplayName"] = "Alacritty"
+        _reseal_plist(info)
+    elif mutation == "plist_is_not_a_dictionary":
+        _reseal_plist(["not", "a", "dictionary"])
+    elif mutation == "plist_is_malformed_xml":
+        plist_path.write_bytes(b'<?xml version="1.0"?><plist version="1.0"><dict>\n')
+        _resync_plist_entry()
+    elif mutation == "icon_absent_from_inventory":
+        icon_relative = f"{bundle}/Contents/Resources/alacritty.icns"
+        (app / icon_relative).unlink()
+        manifest["files"] = [
+            item for item in manifest["files"] if item["path"] != icon_relative
+        ]
+    elif mutation == "bundle_seal_removed":
+        shutil.rmtree(app / bundle / "Contents/_CodeSignature")
+
+    _write_app_manifest(app, manifest, sign=False)
+
+    _assert_error(expected_code, lambda: contract.verify_app(app))
+
+
+def test_manifest_producer_inventories_an_undeclared_nested_bundle_seal(
+    tmp_path: Path, macho_executable: Path
+) -> None:
+    """No blanket nested-app exemption on the producer side either.
+
+    The writer used to skip anything whose path contained `_CodeSignature` or
+    was named `CodeResources`. That absolved an undeclared nested bundle of
+    being inventoried at all, so the two sides disagreed about what the payload
+    even contained. The producer now asks the contract for the exact paths the
+    signer owns, and a stranger's seal lands in the inventory.
+    """
+    app = tmp_path / "Vibecrafted.app"
+    _app_fixture(app, macho_executable)
+    intruder = "Contents/Resources/Second.app/Contents/_CodeSignature/CodeResources"
+    (app / intruder).parent.mkdir(parents=True)
+    (app / intruder).write_text("sealed\n", encoding="utf-8")
+
+    unified_product_manifest.produce_app(
+        Namespace(
+            app=app,
+            terminal_source=macho_executable,
+            frame_source=macho_executable,
+            version="1.0.0",
+            build="1",
+            vibecrafted_sha="2" * 40,
+            terminal_sha="4" * 40,
+            frame_sha="6" * 40,
+        )
+    )
+    produced = json.loads(
+        (app / "Contents/Resources/product-manifest.json").read_text(encoding="utf-8")
+    )
+
+    declared = {entry["path"] for entry in produced["files"]}
+    assert intruder in declared
+    for bundle in contract.TERMINAL_APP_BUNDLES:
+        assert f"{bundle}/Contents/_CodeSignature/CodeResources" not in declared
+        assert f"{bundle}/Contents/MacOS/alacritty" in declared
+        assert f"{bundle}/Contents/Resources/alacritty.icns" in declared
 
 
 def test_app_binds_embedded_module_receipt_bytes_and_copied_inventory(
@@ -3727,8 +4000,12 @@ def test_unified_release_has_one_top_level_owner() -> None:
     assert "build-server-release" in builder
     assert '"$runtime/bin/vc-server"' in builder
     assert '"$runtime/server/site/"' in builder
-    assert "uv python install 3.12.3" in builder
-    assert "install_name_tool -id '@loader_path/libpython3.12.dylib'" in builder
+    assert "install_portable_python" in builder
+    assert "portable_python_load_pin" in builder
+    assert "scripts/lib/portable-python.sh" in builder
+    assert "uv python install 3.12.3" not in builder
+    assert 'install_name_tool -id "@loader_path/${PORTABLE_PYTHON_DYLIB}"' in builder
+    assert "python3.12" not in builder
     # The remaps are built from PATH_REMAPS rather than written as one literal
     # string, because the snapshot pair is conditional and because rustc applies
     # the LAST match — so the list has to be ordered broadest-first, with $HOME
@@ -3770,9 +4047,9 @@ def test_terminal_policy_uses_operator_toml_and_primary_shell_chain() -> None:
     installer = (REPO_ROOT / "scripts/vetcoders_install.py").read_text(encoding="utf-8")
 
     assert 'family = "Spot Mono"' in terminal
-    assert "size = 18.5" in terminal
-    assert "x = -1" in terminal
-    assert "y = 2" in terminal
+    assert "size = 19.5" in terminal
+    assert "x = -3" in terminal
+    assert "y = -8" in terminal
     assert 'style = { shape = "Underline", blinking = "On" }' in terminal
     assert 'cyan    = "#7dc4e4"' in dark
     assert 'cyan    = "#56949f"' in light
@@ -4038,7 +4315,7 @@ def test_production_release_receipt_platform_passes_staged_bundled_schema_verifi
 # --- Runtime Pack debug-record boundary --------------------------------------
 #
 # MEASURED 2026-09-08 on the f131b81b release candidate: the Runtime Pack payload
-# carried 31 Mach-O files; bin/voc, bin/vc-start, bin/scaffold-doctor, bin/aicx,
+# carried 31 Mach-O files; bin/voc, bin/vc-start, bin/scaffold-doctor, bin/control-observe, bin/aicx,
 # bin/aicx-mcp and bin/prview reached the hygiene gate naming the rustup sysroot
 # and the Cargo target directory in linker N_OSO stabs, because only
 # libexec/vc-terminal and libexec/vc-frame were ever stripped and cargo's own

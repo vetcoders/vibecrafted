@@ -168,8 +168,8 @@ repository:
 ```
 
 The repository-local `.vibecrafted/` directory is runtime state and remains
-ignored by Git except for `JOURNAL.md`, which is deliberately tracked as the
-durable decision history for this repo. Do not introduce date-partitioned
+ignored by Git, `JOURNAL.md` included: the journal is private to each machine
+(Founder decision 2026-09-14) and is never committed. Do not introduce date-partitioned
 canonical journals or a second journal system. Run-specific reports and
 trackers may project or reference it, but they do not replace it. Record
 material dispatches, awaits, stalls, recoveries, integrations, close-outs,
@@ -1016,5 +1016,5 @@ bot = mouth/ear; workers = hands. Unit green ≠ Slack green (STALE
 bridge / empty allowlist = Founder residual, not architecture debt).
 Hydrate residual pack (slack-agent): `deploy/OPERATOR_SMOKE_CARD.md`,
 `npm run doctor`, `npm run install:launchagent`.
-Parent: `docs/adr/0002-unified-operator-ownership.md` (`run-lifecycle` →
+Parent: `docs/adr/ownership-matrix.json` (`run-lifecycle` →
 `control-plane`; Slack owns `a2a-envelopes` only).

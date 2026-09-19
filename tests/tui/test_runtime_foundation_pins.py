@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -99,10 +101,10 @@ def test_runtime_foundations_relocate_darwin_prview_onto_pinned_openssl() -> Non
     assert "stage_relocatable_openssl" in relocator
     assert "@loader_path/libssl.3.dylib" in relocator
     assert (
-        "ffd8ac6981000def0928367924b6cb1e7a98712efbc06e2a2f3f750138bd89ca" in relocator
+        "ebee4a51513f22f6efc6d3b9ff9d638015d2d924c0e443b31df2735798cb8dcb" in relocator
     )
     assert (
-        "a12805a18cd5e4f733fa8727b91afa08b587f9da5a760517cd79cb508a3a3f71" in relocator
+        "380d32d4d229136f9ded004906634491c8d416779d031abadc3d6463b1ef8e3d" in relocator
     )
     assert "homebrew-bottle-dylib" in stager
     assert "SSL_CERT_FILE" in relocator
@@ -116,27 +118,65 @@ def test_runtime_foundations_relocate_darwin_prview_onto_pinned_openssl() -> Non
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="Darwin OpenSSL relocation")
 def test_relocated_openssl_dylibs_are_macos_14_minos(tmp_path: Path) -> None:
+    relocator = REPO_ROOT / "scripts/lib/darwin-relocate-openssl.sh"
     ssl_src = Path("/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib")
-    if not ssl_src.is_file():
+    crypto_src = Path("/opt/homebrew/opt/openssl@3/lib/libcrypto.3.dylib")
+    if not ssl_src.is_file() or not crypto_src.is_file():
         pytest.skip("pinned Homebrew OpenSSL bottle is not present")
 
     lib_dir = tmp_path / "lib"
     license_dir = tmp_path / "licenses"
     env = os.environ.copy()
     env.setdefault("DEVELOPER_DIR", "/Applications/Xcode.app/Contents/Developer")
-    subprocess.run(
-        [
-            "bash",
-            "-c",
-            'source "$1"; stage_relocatable_openssl "$2" "$3"',
-            "openssl-minos",
-            str(REPO_ROOT / "scripts/lib/darwin-relocate-openssl.sh"),
-            str(lib_dir),
-            str(license_dir),
-        ],
-        check=True,
-        env=env,
-    )
+
+    def stage() -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                "bash",
+                "-c",
+                'source "$1"; stage_relocatable_openssl "$2" "$3"',
+                "openssl-minos",
+                str(relocator),
+                str(lib_dir),
+                str(license_dir),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
+
+    # The relocator copies only the pinned bottle BYTES. A runner whose
+    # Homebrew carries another OpenSSL build (macos-latest: not 3.6.3) cannot
+    # prove the minos stamp on those bytes -- but it can and must prove that
+    # the pin refuses them before a single file is staged.
+    relocator_text = relocator.read_text(encoding="utf-8")
+    pins = {
+        ssl_src: re.search(
+            r'^OPENSSL_LIBSSL_SHA256="([0-9a-f]{64})"$', relocator_text, re.MULTILINE
+        ),
+        crypto_src: re.search(
+            r'^OPENSSL_LIBCRYPTO_SHA256="([0-9a-f]{64})"$', relocator_text, re.MULTILINE
+        ),
+    }
+    assert all(pins.values()), "relocator no longer pins both OpenSSL digests"
+    foreign = [
+        str(path)
+        for path, pin in pins.items()
+        if hashlib.sha256(path.read_bytes()).hexdigest() != pin.group(1)
+    ]
+    if foreign:
+        refused = stage()
+        assert refused.returncode != 0, refused.stdout + refused.stderr
+        assert "is not the pinned Homebrew bottle bytes" in refused.stderr
+        assert not lib_dir.exists()
+        pytest.skip(
+            "host OpenSSL is not the pinned Homebrew bottle "
+            f"({', '.join(foreign)}); the pin refused it, minos needs the pinned bytes"
+        )
+
+    staged = stage()
+    assert staged.returncode == 0, staged.stdout + staged.stderr
     for name in ("libssl.3.dylib", "libcrypto.3.dylib"):
         probe = subprocess.check_output(
             ["otool", "-l", str(lib_dir / name)],

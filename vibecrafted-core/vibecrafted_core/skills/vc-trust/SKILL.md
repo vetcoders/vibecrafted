@@ -73,7 +73,7 @@ named below.
 
 ## Invocation
 
-- Worker: `vibecrafted trust <claude|codex|agy|junie|grok|cursor> --prompt ...`
+- Worker: `vibecrafted trust <claude|codex|agy|junie|grok|cursor|kimi> --prompt ...`
 - Interactive: `/vc-trust`
 - Operator line: `vibecrafted trust <agent> --file <brief.md>`
 

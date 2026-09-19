@@ -61,7 +61,11 @@ def test_runtime_pack_timeout_signal_settles_owned_python_before_bash_exits(
             "INSTALLER_CHILD_FIXTURE": "1",
             "INSTALLER_CHILD_PID": str(child_pid),
             "INSTALLER_CHILD_MUTATION": str(mutation),
-            "INSTALLER_CHILD_SLEEP": "2",
+            # Long enough that a loaded CI host still KILLs the child before
+            # its natural exit (installer TERM-grace is 1s), short enough
+            # that the orphaned grandchild `sleep` releases the stdout pipe
+            # before the communicate() deadline below.
+            "INSTALLER_CHILD_SLEEP": "4",
         },
     )
     deadline = time.monotonic() + 10
@@ -70,7 +74,7 @@ def test_runtime_pack_timeout_signal_settles_owned_python_before_bash_exits(
     assert child_pid.exists(), process.communicate(timeout=1)
 
     process.send_signal(signal.SIGTERM)
-    stdout, stderr = process.communicate(timeout=5)
+    stdout, stderr = process.communicate(timeout=10)
     assert process.returncode != 0, (stdout, stderr)
     pid = int(child_pid.read_text(encoding="utf-8"))
     with pytest.raises(ProcessLookupError):

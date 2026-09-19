@@ -659,14 +659,18 @@ def test_twenty_real_cli_await_clients_share_dispatcher_fanout(
     monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
     config_home = _dead_server_config(tmp_path)
     run_id = "signal-cli-fanout-20"
-    process, _meta, _report = _dispatcher(tmp_path, run_id, delay=4.0, home=home)
     socket_path = run_signal_socket_path(run_id)
     payloads: list[dict[str, object]] = []
+    # Arm all twenty clients before the dispatcher exists: the launch-grace
+    # re-arm holds them until the socket binds, so every client is connected
+    # before the worker exits instead of racing the post-terminal teardown
+    # grace (twenty cold CLI boots can outlast it on a loaded host).
+    clients = [
+        _spawn_cli_await(home, run_id, config_home=config_home) for _ in range(20)
+    ]
+    process, _meta, _report = _dispatcher(tmp_path, run_id, delay=4.0, home=home)
     try:
         _wait_for(socket_path)
-        clients = [
-            _spawn_cli_await(home, run_id, config_home=config_home) for _ in range(20)
-        ]
         for client in clients:
             rc, payload, err = _collect_cli(client)
             assert rc == 0, (payload, err)

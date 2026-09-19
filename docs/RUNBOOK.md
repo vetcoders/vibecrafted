@@ -150,7 +150,7 @@ vibecrafted release codex --prompt "Prepare release steps"
 ```bash
 vc-frame delete-session <name> 2>/dev/null
 script -q /tmp/anchor.log vc-frame --session <name> \
-  --new-session-with-layout ~/.config/vetcoders/frontier/vc-frame/layouts/operator.kdl &
+  --new-session-with-layout ~/.config/vibecrafted/vc-frame/layouts/operator.kdl &
 ```
 
 ## 6. Event bus and the Slack bridge

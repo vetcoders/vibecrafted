@@ -58,14 +58,11 @@ done
 source_file="$repo_root/vibecrafted-core/vibecrafted_core/runtime/shell/vetcoders.sh"
 [[ -f "$source_file" ]] || die "Helper file not found: $source_file"
 
-# Canonical install location (shell-agnostic)
+# Canonical install location (shell-agnostic): the product shell tree under the
+# one product config home. Nothing is written into other config directories.
 config_base="${XDG_CONFIG_HOME:-$HOME/.config}"
-target_dir="$config_base/vetcoders"
+target_dir="$config_base/vibecrafted/shell"
 target_file="$target_dir/vc-skills.sh"
-
-# Compat location for existing zsh installs
-legacy_dir="$config_base/zsh"
-legacy_file="$legacy_dir/vc-skills.zsh"
 
 # Minimal host-shell line — same syntax works in both bash and zsh.
 # shellcheck disable=SC2016
@@ -107,7 +104,6 @@ _vibecrafted_source_helper() {
   local helper
   while IFS= read -r helper; do
     [[ -n "\$helper" && -r "\$helper" ]] || continue
-    # shellcheck disable=SC1090
     source "\$helper"
     return 0
   done < <(_vibecrafted_helper_candidates)
@@ -129,9 +125,6 @@ if (( dry_run )); then
 else
   mkdir -p "$target_dir"
   write_helper_shim
-  # Compat symlink so old .zshrc source lines still work
-  mkdir -p "$legacy_dir"
-  ln -sfn "$target_file" "$legacy_file"
 fi
 
 _rc_has_unclosed_vibecrafted_block() {

@@ -12,6 +12,7 @@ No real provider, vc-frame session, or operator home is ever touched.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -19,6 +20,14 @@ import time
 from pathlib import Path
 
 import pytest
+
+# --import-mode=importlib: the shared fixture module is loaded by file.
+_FIXTURES_SPEC = importlib.util.spec_from_file_location(
+    "declaration_fixtures", Path(__file__).with_name("_declaration_fixtures.py")
+)
+assert _FIXTURES_SPEC is not None and _FIXTURES_SPEC.loader is not None
+_fixtures = importlib.util.module_from_spec(_FIXTURES_SPEC)
+_FIXTURES_SPEC.loader.exec_module(_fixtures)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LAUNCHER = REPO_ROOT / "scripts" / "vibecrafted"
@@ -167,9 +176,10 @@ class _DeckWorld:
         self.bin.mkdir()
         self.outside = tmp_path / "no git here"
         self.outside.mkdir()
-        self.repo = tmp_path / "repo with space"
-        self.repo.mkdir()
-        subprocess.run(["git", "init", "-q"], cwd=self.repo, check=True)
+        # The default `--base HEAD` must resolve to one commit
+        # (repo_selection.resolve_repository_base, 5b25a6cd): an empty
+        # `git init` is refused before any receipt.
+        self.repo = _fixtures.commit_fixture_repo(tmp_path / "repo with space")
         self.argv_file = tmp_path / "claude-argv.txt"
         self.capture = tmp_path / "vc-frame-args.txt"
         self._exe(

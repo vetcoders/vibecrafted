@@ -12,15 +12,10 @@ set -euo pipefail
 HUSKY_HOOK_NAME="pre-commit"
 
 HUSKY_LIB="${BASH_SOURCE[0]%/*}/lib"
-# shellcheck disable=SC1090,SC1091
 . "$HUSKY_LIB/core.sh"
-# shellcheck disable=SC1090,SC1091
 . "$HUSKY_LIB/claims.sh"
-# shellcheck disable=SC1090,SC1091
 . "$HUSKY_LIB/secrets.sh"
-# shellcheck disable=SC1090,SC1091
 . "$HUSKY_LIB/env-files.sh"
-# shellcheck disable=SC1090,SC1091
 . "$HUSKY_LIB/lint-routing.sh"
 
 husky_init
@@ -109,7 +104,7 @@ if [ "$(grep -l "^signature=${signature}$" "$(husky_warns_dir)"/"${HUSKY_HOOK_NA
 fi
 
 if husky_warn_mode_active; then
-  # shellcheck disable=SC2012
+  # shellcheck disable=SC2012  # newest-first by mtime; hook log names are hyphenated alphanumerics
   husky_warn "WARN mode: commit allowed, log archived as $(ls -1t "$(husky_warns_dir)"/"${HUSKY_HOOK_NAME}"-*.log | head -1)"
   exit 0
 fi

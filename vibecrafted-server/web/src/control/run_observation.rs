@@ -50,6 +50,7 @@ pub(crate) struct RunObservationV1 {
     monitor_witness: Value,
     aicx_witness: Value,
     writer_revalidation: String,
+    source: String,
 }
 
 impl RunObservationV1 {
@@ -142,6 +143,7 @@ impl RunObservationV1 {
                 "reason": "continuity_witness_not_available_for_run"
             }),
             writer_revalidation,
+            source: "vc-server-compute_view".to_string(),
         }
     }
 
@@ -171,13 +173,12 @@ struct WriterConfig {
 
 impl WriterConfig {
     fn production() -> Option<Self> {
-        let executable =
-            std::env::var_os("VC_RUN_OBSERVATION_WRITER").unwrap_or_else(|| "vibecrafted".into());
-        if executable == "off" {
+        // "off" disables the writer; the value never reaches Command::new.
+        if std::env::var_os("VC_RUN_OBSERVATION_WRITER").is_some_and(|value| value == "off") {
             return None;
         }
         Some(Self {
-            executable: executable.into(),
+            executable: PathBuf::from("vibecrafted"),
             timeout: env_seconds(
                 "VC_RUN_OBSERVATION_WRITER_TIMEOUT_SECONDS",
                 DEFAULT_WRITER_TIMEOUT_SECONDS,
@@ -360,13 +361,53 @@ async fn observe_once(
     };
     let read_plane = plane.clone();
     let read_run_id = run_id.clone();
-    let run = tokio::task::spawn_blocking(move || read_plane.lookup_run(&read_run_id)).await;
+    let run =
+        tokio::task::spawn_blocking(move || read_plane.derived_run(&read_run_id, Utc::now())).await;
     match run {
         Ok(run) => RunObservationV1::from_run(&plane, &run_id, run, writer_outcome.status),
         Err(_) => {
             RunObservationV1::from_run(&plane, &run_id, None, "reader_task_failed".to_string())
         }
     }
+}
+
+/// Production spawns the constant `vibecrafted` name; tests inject
+/// `WriterConfig` directly. Validate the configured value before it becomes a
+/// spawned command: bare names must be exactly `vibecrafted` (re-materialized
+/// as a literal); anything else must be an absolute path to a regular,
+/// non-symlink file canonicalizing under the runtime home.
+fn validated_writer_executable(
+    config: &WriterConfig,
+    home: &std::path::Path,
+) -> Result<PathBuf, &'static str> {
+    let executable = &config.executable;
+    let mut components = executable.components();
+    if let (Some(std::path::Component::Normal(name)), None) = (components.next(), components.next())
+    {
+        return if name == "vibecrafted" {
+            Ok(PathBuf::from("vibecrafted"))
+        } else {
+            Err("invalid_writer_name")
+        };
+    }
+    if !executable.is_absolute() {
+        return Err("invalid_writer_path");
+    }
+    let Ok(meta) = std::fs::symlink_metadata(executable) else {
+        return Err("invalid_writer_path");
+    };
+    if meta.file_type().is_symlink() {
+        return Err("invalid_writer_path");
+    }
+    let canonical = std::fs::canonicalize(executable).map_err(|_| "invalid_writer_path")?;
+    if !canonical.is_file() {
+        return Err("invalid_writer_path");
+    }
+    let canonical_home = std::fs::canonicalize(home).map_err(|_| "invalid_writer_home")?;
+    if !canonical.starts_with(canonical_home) {
+        return Err("invalid_writer_scope");
+    }
+    Ok(canonical)
 }
 
 async fn invoke_python_revalidation(
@@ -388,7 +429,44 @@ async fn invoke_python_revalidation(
             status: "invalid_control_plane_home".to_string(),
         };
     };
-    let mut command = Command::new(&config.executable);
+    let executable = match validated_writer_executable(config, &home) {
+        Ok(executable) => executable,
+        Err(status) => {
+            return WriterOutcome {
+                status: status.to_string(),
+            };
+        }
+    };
+    // Allowlist barrier that is also a real boundary: the writer revalidates
+    // only a run that exists inside this control plane, and the request value
+    // reaches argv only after proving equality with the run's disk-canonical
+    // identity.
+    let runs_root = match std::fs::canonicalize(plane.control_plane_home().join("runtime_runs")) {
+        Ok(root) => root,
+        Err(_) => {
+            return WriterOutcome {
+                status: "invalid_run_scope".to_string(),
+            };
+        }
+    };
+    let run_dir = match std::fs::canonicalize(runs_root.join(run_id)) {
+        Ok(dir) if dir.is_dir() && dir.starts_with(&runs_root) => dir,
+        _ => {
+            return WriterOutcome {
+                status: "invalid_run_scope".to_string(),
+            };
+        }
+    };
+    let verified_run_id = run_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    if run_id != verified_run_id {
+        return WriterOutcome {
+            status: "invalid_run_scope".to_string(),
+        };
+    }
+    let mut command = Command::new(executable);
     command
         .args(["control-plane-revalidate", "--run-id", run_id, "--json"])
         .env("VIBECRAFTED_HOME", home)
@@ -713,6 +791,54 @@ mod tests {
         let outcome = invoke_python_revalidation(&plane, "../../foreign", &config, None).await;
 
         assert_eq!(outcome.status, "invalid_run_id");
+        fs::remove_dir_all(home).expect("remove fixture");
+    }
+
+    #[tokio::test]
+    async fn writer_boundary_rejects_foreign_bare_name_before_spawn() {
+        let home = fixture_home("foreign-bare-name");
+        let plane = ControlPlane::new(&home);
+        let config = WriterConfig {
+            executable: PathBuf::from("definitely-not-vibecrafted"),
+            timeout: Duration::from_secs(1),
+        };
+
+        let outcome = invoke_python_revalidation(&plane, "run-1", &config, None).await;
+
+        assert_eq!(outcome.status, "invalid_writer_name");
+        fs::remove_dir_all(home).expect("remove fixture");
+    }
+
+    #[tokio::test]
+    async fn writer_boundary_rejects_executable_outside_runtime_home() {
+        let home = fixture_home("foreign-path");
+        let plane = ControlPlane::new(&home);
+        let config = WriterConfig {
+            executable: PathBuf::from("/bin/ls"),
+            timeout: Duration::from_secs(1),
+        };
+
+        let outcome = invoke_python_revalidation(&plane, "run-1", &config, None).await;
+
+        assert_eq!(outcome.status, "invalid_writer_scope");
+        fs::remove_dir_all(home).expect("remove fixture");
+    }
+
+    #[tokio::test]
+    async fn writer_boundary_rejects_symlink_executable_before_spawn() {
+        let home = fixture_home("symlink-writer");
+        let plane = ControlPlane::new(&home);
+        let (writer, _pid_file) = blocking_writer(&home);
+        let link = home.join("linked-writer.sh");
+        std::os::unix::fs::symlink(&writer.executable, &link).expect("writer symlink");
+        let config = WriterConfig {
+            executable: link,
+            timeout: Duration::from_secs(1),
+        };
+
+        let outcome = invoke_python_revalidation(&plane, "run-1", &config, None).await;
+
+        assert_eq!(outcome.status, "invalid_writer_path");
         fs::remove_dir_all(home).expect("remove fixture");
     }
 

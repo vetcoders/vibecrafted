@@ -42,13 +42,16 @@ This root is deliberately explicit so reports, transcripts, and run state can be
 
 What actually runs. `${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted/tools/` holds the immutable `vibecrafted-generation-*` directories and the atomic `vibecrafted-current` pointer. The public launcher in `~/.local/bin` enters only this root. See [Update and rollback](/docs/update/) for the generation mechanics.
 
-## `~/.config/vetcoders/` — XDG config
+## `~/.config/vibecrafted/` — the one config home
 
-| Path                                | Purpose                                                                                       |
-| ----------------------------------- | --------------------------------------------------------------------------------------------- |
-| `~/.config/vetcoders/vc-skills.sh`  | Cross-shell helper: puts launchers on `PATH`, enables `vc-*` shortcuts                        |
-| `~/.config/vetcoders/frontier/`     | Optional terminal-frontier assets: starship, atuin, vc-frame presets                          |
-| `~/.config/vibecrafted/config.toml` | Per-user runtime picks (for example research agent defaults) — overrides without reinstalling |
+All product configuration lives here (`${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted`). Vibecrafted reads and writes no other configuration directory.
+
+| Path                                              | Purpose                                                                                                                   |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `~/.config/vibecrafted/config.toml`               | Per-user runtime picks (for example research agent defaults), `[server]`, `[tools]`, `[memex]`, `[aicx_sync]` — mode 0600 |
+| `~/.config/vibecrafted/starship.toml`, `atuin/`   | Prompt and history preferences, preserved across reinstall                                                                |
+| `~/.config/vibecrafted/vc-frame/`, `vc-terminal/` | Frame cockpit and product terminal configuration                                                                          |
+| `~/.config/vibecrafted/shell/`                    | Product shell helpers; `vc-skills.sh` is the opt-in helper shim for sourcing `vc-*` shortcuts by hand                     |
 
 The same file owns the server endpoint. The installer seeds this table once
 from a verified existing service, then preserves it across upgrades:

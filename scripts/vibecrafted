@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. command deck
 set -euo pipefail
+# shellcheck disable=SC2034  # marker the installer and staged-tools tests read from this file
 readonly VIBECRAFTED_SERVICE_LIFECYCLE_LOCK_CONTRACT=1
 
 _vc_source_launcher_ulimits() {
@@ -11,7 +12,6 @@ _vc_source_launcher_ulimits() {
     printf 'vibecrafted: selected launcher limit helper missing: %s\n' "$candidate" >&2
     return 1
   fi
-  # shellcheck disable=SC1090
   source "$candidate" || return $?
   vc_raise_launcher_limits
 }
@@ -80,8 +80,7 @@ _cyan='\033[36m'
 _red='\033[31m'
 _reset='\033[0m'
 
-_agents=(claude codex agy junie grok cursor)
-_modes=(implement research review plan prompt observe await stop resume)
+_agents=(claude codex agy junie grok cursor kimi)
 _skills=(audit canary decorate delegate dou followup guard hydrate implement intents justdo marbles ownership partner polarize prune release research review scaffold trust workflow)
 
 _script_repo_root() {
@@ -230,7 +229,7 @@ PY
 _has_agent() {
   local candidate="${1:-}"
   case "$candidate" in
-    claude|codex|agy|junie|grok|cursor) return 0 ;;
+    claude|codex|agy|junie|grok|cursor|kimi) return 0 ;;
     gemini) return 1 ;;  # deprecated - see migration error below
     *) return 1 ;;
   esac
@@ -272,18 +271,10 @@ _require_agent_cli() {
       grok) printf '    npm install -g @xai-official/grok\n' >&2 ;;
       agy) printf '    install Google Antigravity CLI, then: agy install\n' >&2 ;;
       cursor) printf '    curl https://cursor.com/install -fsS | bash\n' >&2 ;;
+      kimi) printf '    curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash\n' >&2 ;;
     esac
     printf '  Or check the whole fleet: vibecrafted doctor\n' >&2
   fi
-  return 1
-}
-
-_has_mode() {
-  local candidate="${1:-}"
-  local mode
-  for mode in "${_modes[@]}"; do
-    [[ "$candidate" == "$mode" ]] && return 0
-  done
   return 1
 }
 
@@ -304,49 +295,6 @@ _is_marbles_control_subcommand() {
   esac
 }
 
-_skill_candidates() {
-  local skill="$1"
-  local runtime="${2:-}"
-  local repo_source package_root
-  repo_source="$(_repo_source_root 2>/dev/null || true)"
-  package_root="$(_package_resource_root 2>/dev/null || true)"
-
-  if [[ -n "$repo_source" ]]; then
-    printf '%s\n' "$repo_source/skills/${skill}/SKILL.md"
-    printf '%s\n' "$repo_source/vibecrafted-core/vibecrafted_core/skills/${skill}/SKILL.md"
-  fi
-
-  if [[ -n "$package_root" ]]; then
-    printf '%s\n' "$package_root/skills/${skill}/SKILL.md"
-  fi
-
-  if [[ -n "$runtime" ]]; then
-    printf '%s\n' "$HOME/.${runtime}/skills/${skill}/SKILL.md"
-  fi
-
-  printf '%s\n' \
-    "$crafted_tools/skills/${skill}/SKILL.md" \
-    "$crafted_skills/${skill}/SKILL.md" \
-    "$HOME/.agents/skills/${skill}/SKILL.md"
-}
-
-_resolve_skill_path() {
-  local skill="$1"
-  local runtime="${2:-}"
-  local candidate
-
-  while IFS= read -r candidate; do
-    [[ -r "$candidate" ]] || continue
-    printf '%s\n' "$candidate"
-    return 0
-  done < <(_skill_candidates "$skill" "$runtime")
-
-  printf '%b✗%b Could not find %s.\n' "$_red" "$_reset" "$skill" >&2
-  printf '  Expected one of:\n' >&2
-  _skill_candidates "$skill" "$runtime" | sed 's/^/    - /' >&2
-  return 1
-}
-
 _helper_candidates() {
   local repo_source repo_helper package_root
   repo_source="$(_repo_source_root 2>/dev/null || true)"
@@ -363,7 +311,6 @@ _helper_candidates() {
   # freshly updated launcher cannot be shadowed by older installed helpers.
   printf '%s\n' \
     "$crafted_tools/vibecrafted-core/vibecrafted_core/runtime/shell/vetcoders.sh" \
-    "${XDG_CONFIG_HOME:-$HOME/.config}/vetcoders/vc-skills.sh" \
     "$crafted_skills/runtime/shell/vetcoders.sh" \
     "$repo_helper"
 }
@@ -421,7 +368,6 @@ _ensure_helpers_loaded() {
       unset VIBECRAFTED_RUNTIME_ROOT VIBECRAFTED_RUNTIME_BIN VIBECRAFTED_RUNTIME_HOME
       export VIBECRAFTED_PREFER_REPO_SPAWN=1
     fi
-    # shellcheck disable=SC1090
     source "$helper" || return $?
     return 0
   fi
@@ -435,7 +381,6 @@ _ensure_helpers_loaded() {
   fi
   while IFS= read -r helper; do
     [[ -r "$helper" ]] || continue
-    # shellcheck disable=SC1090
     source "$helper" || return $?
     return 0
   done < <(_helper_candidates)
@@ -672,11 +617,6 @@ _voc_app_dir() {
   return 1
 }
 
-# Legacy name kept for older call sites; resolves the product TUI workspace.
-_operator_tui_dir() {
-  _voc_app_dir
-}
-
 _resolve_voc_binary() {
   # A declared Runtime Pack owns VOC.  Do not let an old host install or a
   # source build mask a generation that failed to carry its promised binary.
@@ -814,7 +754,7 @@ _print_ship_path() {
 
 cmd_skill_help() {
   local skill="$1"
-  local agent="${2:-<claude|codex|agy|junie|grok|cursor>}"
+  local agent="${2:-<claude|codex|agy|junie|grok|cursor|kimi>}"
   local wrapper="vc-$skill"
   local display_skill="$skill"
   local version=""
@@ -1145,9 +1085,9 @@ cmd_resume_help() {
   printf '  Resume a stopped control-plane run, a provider session, or AICX continuity.\n'
   printf '\n'
   printf '%bUsage:%b\n' "$_bold" "$_reset"
-  printf '  vibecrafted resume <claude|codex|agy|junie|grok|cursor> --run-id <work-...> [flags]\n'
-  printf '  vibecrafted resume <claude|codex|agy|junie|grok|cursor> --session <provider-uuid> [flags]\n'
-  printf '  vibecrafted resume <claude|codex|agy|junie|grok|cursor> [flags]\n'
+  printf '  vibecrafted resume <claude|codex|agy|junie|grok|cursor|kimi> --run-id <work-...> [flags]\n'
+  printf '  vibecrafted resume <claude|codex|agy|junie|grok|cursor|kimi> --session <provider-uuid> [flags]\n'
+  printf '  vibecrafted resume <claude|codex|agy|junie|grok|cursor|kimi> [flags]\n'
   printf '\n'
   printf '%bAfter stop:%b\n' "$_bold" "$_reset"
   printf '  Stop kills the process group. There is no same-PGID restart.\n'
@@ -1228,8 +1168,8 @@ cmd_init_help() {
   printf '  Start an interactive repository orientation session with an agent.\n'
   printf '\n'
   printf '%bUsage:%b\n' "$_bold" "$_reset"
-  printf '  vibecrafted init [claude|codex|agy|junie|grok|cursor] [--runtime terminal|visible|plain] [--policy-runtime local-native|local-worktrees|local-vm|cloud-soon] [--permissions bypass|auto|accept-edits|read-only] [--token-budget safe|unlimited|N] [--continuity full-lineage|fresh|bare-fork] [--prompt "<context>"]\n'
-  printf '  vc-init [claude|codex|agy|junie|grok|cursor]\n'
+  printf '  vibecrafted init [claude|codex|agy|junie|grok|cursor|kimi] [--runtime terminal|visible|plain] [--policy-runtime local-native|local-worktrees|local-vm|cloud-soon] [--permissions bypass|auto|accept-edits|read-only] [--token-budget safe|unlimited|N] [--continuity full-lineage|fresh|bare-fork] [--prompt "<context>"]\n'
+  printf '  vc-init [claude|codex|agy|junie|grok|cursor|kimi]\n'
   printf '\n'
   printf '%bRuntime:%b\n' "$_bold" "$_reset"
   printf '  terminal  (default) open a tab in the vc-frame cockpit; missing host support refuses\n'
@@ -1263,8 +1203,8 @@ cmd_partner_help() {
   printf '  --prompt/--file remain interactive; without a TTY the canonical VC Terminal handoff is used.\n'
   printf '\n'
   printf '%bUsage:%b\n' "$_bold" "$_reset"
-  printf '  vibecrafted partner [claude|codex|agy|junie|grok|cursor] [--runtime terminal|visible|plain]\n'
-  printf '  vc-partner [claude|codex|agy|junie|grok|cursor]\n'
+  printf '  vibecrafted partner [claude|codex|agy|junie|grok|cursor|kimi] [--runtime terminal|visible|plain]\n'
+  printf '  vc-partner [claude|codex|agy|junie|grok|cursor|kimi]\n'
   printf '\n'
   printf '%bExamples:%b\n' "$_bold" "$_reset"
   printf '  vibecrafted partner claude\n'
@@ -1281,8 +1221,8 @@ cmd_operator_help() {
   printf '  Opens a TTY face with /vc-operator — same family as init, not a worker job.\n'
   printf '\n'
   printf '%bUsage:%b\n' "$_bold" "$_reset"
-  printf '  vibecrafted operator [claude|codex|agy|junie|grok|cursor] [--runtime terminal|visible]\n'
-  printf '  vc-operator [claude|codex|agy|junie|grok|cursor]\n'
+  printf '  vibecrafted operator [claude|codex|agy|junie|grok|cursor|kimi] [--runtime terminal|visible]\n'
+  printf '  vc-operator [claude|codex|agy|junie|grok|cursor|kimi]\n'
   printf '\n'
   printf '%bExamples:%b\n' "$_bold" "$_reset"
   printf '  vibecrafted operator claude\n'
@@ -1390,8 +1330,8 @@ cmd_telemetry_help() {
   printf '  Smoke the marbles telemetry path through the installed command deck.\n'
   printf '\n'
   printf '%bUsage:%b\n' "$_bold" "$_reset"
-  printf '  telemetry smoke [--agent <claude|codex|agy|junie|grok|cursor>] [--count <n>] [--repo <path>] [--no-watch|--watch]\n'
-  printf '  vibecrafted telemetry smoke [--agent <claude|codex|agy|junie|grok|cursor>] [--count <n>] [--repo <path>] [--no-watch|--watch]\n'
+  printf '  telemetry smoke [--agent <claude|codex|agy|junie|grok|cursor|kimi>] [--count <n>] [--repo <path>] [--no-watch|--watch]\n'
+  printf '  vibecrafted telemetry smoke [--agent <claude|codex|agy|junie|grok|cursor|kimi>] [--count <n>] [--repo <path>] [--no-watch|--watch]\n'
   printf '  (--root is the legacy spelling of --repo; the smoke root may be created on demand)\n'
   printf '\n'
   printf '%bExamples:%b\n' "$_bold" "$_reset"
@@ -1651,6 +1591,15 @@ _server_runtime_dir() {
 _server_launcher_path() {
   local supervisor_bin="${1:-}"
   local candidate=""
+  local declared="${VIBECRAFTED_DECLARED_LAUNCHER:-}"
+  # The LaunchAgent binds the public wrapper digest. A generation-first PATH
+  # can resolve vc-server-supervisor next to the inner deck; hashing that
+  # sibling `vibecrafted` against the LaunchAgent is the false mismatch
+  # restart then dumps on the Founder. Prefer the declared public wrapper.
+  if [[ "$declared" == /* && -x "$declared" ]]; then
+    _realpath_quiet "$declared"
+    return 0
+  fi
   if [[ -n "$supervisor_bin" ]]; then
     candidate="$(dirname "$supervisor_bin")/vibecrafted"
     [[ -x "$candidate" ]] || return 1
@@ -4687,7 +4636,7 @@ cmd_help() {
   case "$topic" in
     ""|-h|--help)
       ;;
-    claude|codex|agy|junie|grok|cursor)
+    claude|codex|agy|junie|grok|cursor|kimi)
       cmd_agent_help "$topic"
       return
       ;;
@@ -4746,6 +4695,10 @@ cmd_help() {
       ;;
     doctor)
       cmd_doctor_help
+      return
+      ;;
+    scaffold-doctor)
+      cmd_scaffold_doctor --help
       return
       ;;
     server)
@@ -4824,6 +4777,7 @@ cmd_help() {
   printf '  %bstatus%b               Today'"'"'s agent activity\n' "$_cyan" "$_reset"
   printf '  %bdoctor%b               Installation health — pass/fail\n' "$_cyan" "$_reset"
   printf '  %breceipt%b              Delivery/runtime receipt (source ↔ installed)\n' "$_cyan" "$_reset"
+  printf '  %bscaffold-doctor%b     Plan-package gate before implement handoff\n' "$_cyan" "$_reset"
   printf '  %bresume-session%b       Continue an exact provider session as a tracked run\n' "$_cyan" "$_reset"
   printf '  %brelocate%b             Snapshot open sessions + worktrees (snapshot|restore)\n' "$_cyan" "$_reset"
   printf '  %bmessage%b              Persist/inspect run-addressed Codex queue receipts\n' "$_cyan" "$_reset"
@@ -4838,7 +4792,7 @@ cmd_help() {
   printf '  scaffold → implement → review → workflow → followup → marbles → audit → polarize → dou → hydrate → release\n'
   printf '  %b14 more skills: vibecrafted help --all%b\n' "$_dim" "$_reset"
   printf '\n'
-  printf '%bAgents:%b  claude · codex · agy · junie · grok · cursor\n' "$_bold" "$_reset"
+  printf '%bAgents:%b  claude · codex · agy · junie · grok · cursor · kimi\n' "$_bold" "$_reset"
   printf '\n'
   printf '%bExamples:%b\n' "$_bold" "$_reset"
   printf '  vibecrafted init claude\n'
@@ -4925,7 +4879,7 @@ cmd_help_full() {
   printf '  %bvibecrafted tui%b                       Rust operator console over shared state\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted server%b <action>           Manage local control-plane viewer server\n' "$_cyan" "$_reset"
   printf '\n'
-  printf '%b  Agents: claude · codex · agy · junie · grok · cursor%b\n' "$_bold" "$_reset"
+  printf '%b  Agents: claude · codex · agy · junie · grok · cursor · kimi%b\n' "$_bold" "$_reset"
   printf '\n'
   printf '%b=== ADDITIONAL SKILLS ===%b\n' "$_bold" "$_reset"
   printf '\n'
@@ -5032,6 +4986,7 @@ cmd_start() {
     return 1
   fi
   _vetcoders_start_prepare_arguments "$@" || return $?
+  # shellcheck disable=SC2154  # set by _vetcoders_start_prepare_arguments (dashboard.sh) just above
   _vetcoders_start_entry ${_vetcoders_start_frame_argv[@]+"${_vetcoders_start_frame_argv[@]}"}
 }
 
@@ -5325,7 +5280,7 @@ _scaffold_doctor_first_source_root() {
 
 cmd_scaffold_doctor() {
   # Deterministic plan-package gate (control-core). Not the install doctor.
-  local bin="" plan="" json=0 source_root=""
+  local bin="" plan="" repo="" json=0 source_root=""
   local args=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -5337,10 +5292,18 @@ cmd_scaffold_doctor() {
         plan="$2"
         shift 2
         ;;
+      --repo)
+        if [[ $# -lt 2 || -z "${2:-}" || "${2:-}" == -* ]]; then
+          printf 'scaffold-doctor: --repo requires a path\n' >&2
+          return 2
+        fi
+        repo="$2"
+        shift 2
+        ;;
       --json) json=1; shift ;;
       -h|--help)
-        printf 'Usage: vibecrafted scaffold-doctor --plan <plan_root> [--json]\n'
-        printf '       vibecrafted scaffold-doctor <home> <org> <repo> <day> <plan-id> [--json]\n'
+        printf 'Usage: vibecrafted scaffold-doctor --plan <plan_root> [--repo <git-root>] [--json]\n'
+        printf '       vibecrafted scaffold-doctor <home> <org> <repo> <day> <plan-id> [--repo <git-root>] [--json]\n'
         printf 'Exit 0=pass, 1=refuse (rule violations), 2=not a plan / usage.\n'
         return 0
         ;;
@@ -5380,19 +5343,26 @@ cmd_scaffold_doctor() {
   fi
 
   if [[ -n "$plan" ]]; then
-    if [[ "$json" -eq 1 ]]; then
+    if [[ -n "$repo" && "$json" -eq 1 ]]; then
+      "$bin" --plan "$plan" --repo "$repo" --json
+    elif [[ -n "$repo" ]]; then
+      "$bin" --plan "$plan" --repo "$repo"
+    elif [[ "$json" -eq 1 ]]; then
       "$bin" --plan "$plan" --json
     else
       "$bin" --plan "$plan"
     fi
   elif [[ ${#args[@]} -ge 5 ]]; then
+    if [[ -n "$repo" ]]; then
+      args+=(--repo "$repo")
+    fi
     if [[ "$json" -eq 1 ]]; then
       "$bin" "${args[@]}" --json
     else
       "$bin" "${args[@]}"
     fi
   else
-    printf 'Usage: vibecrafted scaffold-doctor --plan <plan_root> [--json]\n' >&2
+    printf 'Usage: vibecrafted scaffold-doctor --plan <plan_root> [--repo <git-root>] [--json]\n' >&2
     return 2
   fi
 }
@@ -6185,7 +6155,10 @@ cmd_fork() {
   _vetcoders_enter_admitted_interactive fork "$command_text" || admission_status=$?
   case "$admission_status" in 0) return 0 ;; 1) return 1 ;; esac
   root_dir="$_vetcoders_contract_root"
-  if ! _vetcoders_in_vc_frame; then
+  # A stale Frame marker is the environment's claim, not a surface: only an
+  # engine-confirmed pane may host the same-tab fork (fac246a7). Anything else
+  # declares the repository workspace instead of asking a dead session for a pane.
+  if ! _vetcoders_in_vc_frame || ! _vetcoders_has_usable_vc_frame_surface; then
     if [[ "$runtime" == terminal ]]; then
       _vetcoders_init_in_current_terminal "$agent" "$command_text" plain fork
     else
@@ -6291,7 +6264,7 @@ cmd_capabilities() {
 
 cmd_lifecycle_help() {
   local verb="$1"
-  local agent="${2:-<claude|codex|agy|junie|grok|cursor>}"
+  local agent="${2:-<claude|codex|agy|junie|grok|cursor|kimi>}"
   local description=""
   local flags="--last|--run-id <id>"
   case "$verb" in
@@ -6384,35 +6357,6 @@ run_mode() {
   esac
   _ensure_helpers_loaded || return 1
   _run_helper "${agent}-${mode}" "$@"
-}
-
-# True when the argument vector carries `--worktree` / `--worktree=<word>`
-# before the greedy `--prompt` / `-p` or the literal `--` tail.
-_argv_requests_worktree() {
-  local arg
-  for arg in "$@"; do
-    case "$arg" in
-      -p|--prompt|--) return 1 ;;
-      --worktree|--worktree=*) return 0 ;;
-    esac
-  done
-  return 1
-}
-
-# True when the argument vector carries a public execution control
-# (`--permissions <policy>` / `--sandbox [word]`) before the prompt tail. Only
-# the core launcher resolves these against the installed provider CLI
-# (execution_controls.resolve_execution_controls) and refuses what cannot be
-# enforced; the shell skill helper would accept-and-ignore them.
-_argv_requests_execution_controls() {
-  local arg
-  for arg in "$@"; do
-    case "$arg" in
-      -p|--prompt|--) return 1 ;;
-      --permissions|--permissions=*|--sandbox|--sandbox=*) return 0 ;;
-    esac
-  done
-  return 1
 }
 
 run_skill() {
@@ -6576,6 +6520,10 @@ run_wrapper() {
     cmd_receipt "$@"
     return
   fi
+  if [[ "$wrapper" == "vc-scaffold-doctor" ]]; then
+    cmd_scaffold_doctor "$@"
+    return
+  fi
   local skill="${wrapper#vc-}"
   _has_skill "$skill" || {
     printf '%b✗%b Unknown wrapper: %s\n' "$_red" "$_reset" "$wrapper" >&2
@@ -6669,7 +6617,7 @@ main() {
     version|--version|-v) printf 'vibecrafted %s\n' "$(_version)" ;;
     agents) cmd_agents "$@" ;;
     swarm) cmd_swarm "$@" ;;
-    claude|codex|gemini|agy|junie|grok|cursor)
+    claude|codex|gemini|agy|junie|grok|cursor|kimi)
       local action="${1:-<action>}"
       printf '%b✗%b Agent-first grammar was removed: vibecrafted %s %s\n' "$_red" "$_reset" "$cmd" "$action" >&2
       if [[ "$action" == "<action>" ]] || _is_help_flag "$action"; then

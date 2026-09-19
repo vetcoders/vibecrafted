@@ -16,6 +16,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(not(unix))]
 use std::process::{Command, Stdio};
 
 use chrono::{DateTime, Utc};
@@ -25,7 +26,7 @@ use crate::model::{
     AgentMeta, ContinuityPolicyProjection, DeliverySealRef, Event, FINAL_STATES, Health,
     LifecycleRun, LifecycleRunSummary, OperatorAgentPolicyProjection, OperatorAgentProjection,
     RECENT_RUN_LIMIT, RUN_STALL_SECONDS, RunStatus, SettlementBoard, SettlementTui,
-    SettlementVerdict, SupervisionRelationProjection, TrustReceiptV1, coerce_int_value,
+    SettlementVerdict, SupervisionRelationProjection, TrustReceiptV1, age_label, coerce_int_value,
     is_active_state, is_final_state, merge_status, operator_session_name, parse_iso,
     skill_from_code, state_health,
 };
@@ -616,10 +617,9 @@ impl ControlPlane {
             return None;
         }
         let state_path = self.lifecycle_run_dir(target).join("state.json");
-        let mut run = read_json::<LifecycleRun>(&state_path)?;
+        let run = read_json::<LifecycleRun>(&state_path)?;
         if run.run_id == target {
-            run.project_delivery_axes();
-            Some(run)
+            Some(self.project_lifecycle_read(run, &state_path, Utc::now()))
         } else {
             None
         }
@@ -639,13 +639,13 @@ impl ControlPlane {
                 continue;
             }
             let state_path = entry.path().join("state.json");
-            let Some(mut run) = read_json::<LifecycleRun>(&state_path) else {
+            let Some(run) = read_json::<LifecycleRun>(&state_path) else {
                 continue;
             };
             if !is_safe_run_id(&run.run_id) {
                 continue;
             }
-            run.project_delivery_axes();
+            let run = self.project_lifecycle_read(run, &state_path, Utc::now());
             runs.push((modified_at(&state_path), run));
         }
         runs.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
@@ -688,11 +688,11 @@ impl ControlPlane {
         state_paths
             .into_iter()
             .filter_map(|(_, state_path)| {
-                let mut run = read_json::<LifecycleRun>(&state_path)?;
+                let run = read_json::<LifecycleRun>(&state_path)?;
                 if run.run_id.is_empty() {
                     return None;
                 }
-                run.project_delivery_axes();
+                let run = self.project_lifecycle_read(run, &state_path, Utc::now());
                 Some(self.lifecycle_run_summary(&run))
             })
             .take(limit)
@@ -713,6 +713,73 @@ impl ControlPlane {
             self.lifecycle_run_updated_at(run),
             self.lifecycle_dou_index_from_reports(run),
         )
+    }
+
+    /// Overlay liveness + stall at read time. Never writes `state.json`.
+    ///
+    /// A lifecycle container with no live owner and no movement past
+    /// [`RUN_STALL_SECONDS`] is `abandoned` and must not keep
+    /// `approve_transition` as a human control. This is the same class of
+    /// derivation as [`Self::compute_view`], not a second policy.
+    fn project_lifecycle_read(
+        &self,
+        mut run: LifecycleRun,
+        state_path: &Path,
+        now: DateTime<Utc>,
+    ) -> LifecycleRun {
+        run.project_delivery_axes();
+        if run.state_path.trim().is_empty() {
+            run.state_path = state_path.display().to_string();
+        }
+        if is_final_state(&run.status) {
+            return run;
+        }
+        let owner_live = [run.pid, run.owner_pid, run.launcher_pid]
+            .into_iter()
+            .flatten()
+            .any(pid_is_alive);
+        if owner_live {
+            return run;
+        }
+        let updated_at = if run.updated_at.trim().is_empty() {
+            self.lifecycle_run_updated_at(&run)
+        } else {
+            run.updated_at.clone()
+        };
+        let age_secs = parse_iso(&updated_at)
+            .map(|updated| (now - updated).num_seconds())
+            .unwrap_or(i64::MAX);
+        if age_secs > RUN_STALL_SECONDS {
+            let age = parse_iso(&updated_at)
+                .map(|updated| age_label(updated, now))
+                .unwrap_or_else(|| "unknown age".to_string());
+            run.status = "abandoned".to_string();
+            run.human_controls.clear();
+            run.error = format!("no live owner for {age}");
+        }
+        run
+    }
+
+    /// One run as [`compute_view`] would show it, else the single-id lookup.
+    ///
+    /// Observe/CLI/web detail must not bypass this and re-read `meta.json`.
+    #[must_use]
+    pub fn derived_run(&self, run_id: &str, now: DateTime<Utc>) -> Option<RunStatus> {
+        let target = run_id.trim();
+        if !is_safe_run_id(target) {
+            return None;
+        }
+        self.derived_runs(now)
+            .into_iter()
+            .find(|run| run.run_id == target)
+            .or_else(|| self.lookup_run(target))
+    }
+
+    /// Every derived run, newest-first. Same merge as [`compute_view`],
+    /// without the recent-window projection cap.
+    #[must_use]
+    pub fn derived_runs(&self, now: DateTime<Utc>) -> Vec<RunStatus> {
+        self.merge_derived_runs(now).0
     }
 
     fn lifecycle_run_status(&self, run: &LifecycleRun) -> RunStatus {
@@ -779,13 +846,17 @@ impl ControlPlane {
 
     fn append_discoverable_lifecycle_runs(&self, merged: &mut Vec<RunStatus>) {
         for mut run in self.iter_lifecycle_run_status() {
+            let abandoned = run.state == "abandoned";
             if !merged.iter().any(|existing| existing.run_id == run.run_id)
-                && (run.is_terminal() || run.health == "active")
+                && (run.is_terminal() || abandoned || run.health == "active")
             {
                 // Lifecycle containers remain discoverable in `recent`, but
                 // they are neither workers nor heartbeat sources. Only their
                 // dispatched worker runs may enter active/stalled projections.
-                if !run.is_terminal() {
+                if abandoned {
+                    run.health = "stalled".to_string();
+                    run.last_error = "no live owner".to_string();
+                } else if !run.is_terminal() {
                     run.health = "unknown".to_string();
                 }
                 merged.push(run);
@@ -799,6 +870,19 @@ impl ControlPlane {
     /// frontend-self-sufficient path.
     #[must_use]
     pub fn compute_view(&self, now: DateTime<Utc>) -> StateView {
+        let (merged, settlement_counts, mut events) = self.merge_derived_runs(now);
+        if events.len() > crate::model::EVENT_TAIL_LIMIT {
+            let start = events.len() - crate::model::EVENT_TAIL_LIMIT;
+            events.drain(..start);
+        }
+        events.reverse();
+        Self::project_view_with_events(merged, settlement_counts, events)
+    }
+
+    fn merge_derived_runs(
+        &self,
+        now: DateTime<Utc>,
+    ) -> (Vec<RunStatus>, SettlementBoard, Vec<Event>) {
         // Verdict truth is Python's persisted snapshot projection. Raw meta,
         // lock, runtime, marbles, and lifecycle sources below can disagree on
         // process state, but they must never be used to invent a settlement.
@@ -946,12 +1030,7 @@ impl ControlPlane {
         self.append_discoverable_lifecycle_runs(&mut merged);
 
         sort_recent_first(&mut merged);
-        if events.len() > crate::model::EVENT_TAIL_LIMIT {
-            let start = events.len() - crate::model::EVENT_TAIL_LIMIT;
-            events.drain(..start);
-        }
-        events.reverse();
-        Self::project_view_with_events(merged, settlement_counts, events)
+        (merged, settlement_counts, events)
     }
 
     fn project_view(&self, runs: Vec<RunStatus>, settlement_counts: SettlementBoard) -> StateView {
@@ -1412,6 +1491,26 @@ fn event_owner_pid(event: &Event) -> Option<i64> {
     event.payload.get("owner_pid").and_then(coerce_int_value)
 }
 
+/// Whether `pid` names a process this user may signal.
+///
+/// Signal 0 runs the kernel's existence and permission checks without
+/// delivering anything — the same answer `kill -0` gave: a missing process
+/// and one owned by another user (`EPERM`) both read as not alive. Every
+/// projection read probes each in-flight run, so a probe must not cost a
+/// process spawn.
+#[cfg(unix)]
+fn pid_is_alive(pid: i64) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: kill(2) with signal 0 delivers no signal; it only checks `pid`.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+#[cfg(not(unix))]
 fn pid_is_alive(pid: i64) -> bool {
     if pid <= 0 {
         return false;
@@ -2005,6 +2104,29 @@ mod tests {
             }
         }
         panic!("could not allocate an isolated fixture home")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pid_probe_keeps_the_kill_zero_answers_without_spawning_kill() {
+        assert!(super::pid_is_alive(i64::from(std::process::id())));
+        for invalid in [0, -1, i64::from(i32::MAX) + 1, i64::MAX, i64::MIN] {
+            assert!(!super::pid_is_alive(invalid), "pid {invalid}");
+        }
+
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn true");
+        let reaped = i64::from(child.id());
+        child.wait().expect("reap true");
+        assert!(!super::pid_is_alive(reaped), "a reaped child is gone");
+
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } != 0 {
+            // pid 1 belongs to root: signal 0 answers EPERM, which `kill -0`
+            // also reported as a failure.
+            assert!(!super::pid_is_alive(1));
+        }
     }
 
     #[test]

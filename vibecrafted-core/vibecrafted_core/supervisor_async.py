@@ -27,12 +27,19 @@ from .control_plane import (
     normalize_run_root,
 )
 from .events import append_event
+from .failure_attribution import attribute_failure
 from .lifecycle import EventKind, RunState
 from .model_overrides import _model_override_receipt
 from .process_control import process_identity_receipt
 from .prompt_transport import materialize_stdin_file, stdin_transport
 from .report_contract import CLAIM_DIGEST_ENV
 from .run_mutation import RunMetaMutationError, mutate_run_meta
+from .telemetry import (
+    RunTelemetry,
+    build_run_telemetry,
+    parent_session_ids,
+    usage_record,
+)
 
 STDIO_LIMIT_BYTES = 16 * 1024 * 1024
 # Well under the reconciler's 120s staleness threshold, so an ordinary talking
@@ -108,7 +115,7 @@ def _infer_agent(command: Sequence[str]) -> str:
     # (spawn.AGENT_BINARY_NAMES); fold the binary back onto the fleet key.
     if name == "cursor-agent":
         return "cursor"
-    if name in {"claude", "codex", "agy", "junie", "grok", "cursor"}:
+    if name in {"claude", "codex", "agy", "junie", "grok", "cursor", "kimi"}:
         return name
     if name in {"python", "python3"}:
         return "python"
@@ -166,28 +173,45 @@ def _fallback_report_body(transcript_text: str) -> str:
     return "\n".join(plain_lines).strip() + ("\n" if plain_lines else "")
 
 
-def _tokens_total(
-    input_tokens: int, cached_input_tokens: int, output_tokens: int
-) -> int:
-    """Sum usage without double-counting provider-specific cache shapes.
+def _run_telemetry(handle: AsyncRunHandle) -> RunTelemetry:
+    """Usage, cost, failure cause and provider session of a closing run.
 
-    Claude/Codex: ``input`` already includes cache hits (cached ≤ input).
-    Junie-style: ``input`` is non-cached only and ``cached`` is additive
-    (cached can exceed input). Detect by comparing magnitudes.
+    Cached on the handle so meta, report and terminal footer tell one story.
+    The provider session comes from the stream first, then from the launch
+    contract; either is refused when it equals a parent/runtime session id.
     """
-    inp = max(0, int(input_tokens or 0))
-    cached = max(0, int(cached_input_tokens or 0))
-    out = max(0, int(output_tokens or 0))
-    if cached and cached > inp:
-        return inp + cached + out
-    return inp + out
-
-
-def _handle_tokens_total(handle: AsyncRunHandle) -> int:
-    """Total token usage for a run handle, deduplicating cache-shape overlap."""
-    return _tokens_total(
-        handle.tokens_input, handle.tokens_cached_input, handle.tokens_output
+    if handle.telemetry is not None:
+        return handle.telemetry
+    usage = usage_record(
+        handle.usage_events,
+        tokens_input=handle.tokens_input,
+        tokens_cached_input=handle.tokens_cached_input,
+        tokens_cache_write=handle.tokens_cache_write,
+        tokens_output=handle.tokens_output,
+        source="provider_stream",
     )
+    failure = None
+    if not handle.operator_stopped:
+        failure = attribute_failure(
+            handle.transcript_path, handle.exit_code, agent=handle.agent
+        )
+    if handle.stream_session_id:
+        candidate, candidate_source = handle.stream_session_id, "provider_stream"
+    else:
+        candidate, candidate_source = handle.agent_session_id, "launch_contract"
+    handle.telemetry = build_run_telemetry(
+        usage=usage,
+        model=handle.agent_model,
+        reported_cost=handle.cost_usd,
+        reported_cost_source=handle.cost_source,
+        session_candidate=candidate,
+        session_source=candidate_source,
+        parents=parent_session_ids(
+            extra={"runtime_session_id": handle.session_id, **handle.parent_sessions}
+        ),
+        failure=failure,
+    )
+    return handle.telemetry
 
 
 def _origin_fields_from_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -279,6 +303,7 @@ def _render_fallback_report(handle: AsyncRunHandle, transcript_text: str) -> str
         or os.environ.get("VIBECRAFTED_SKILL_CODE")
         or "unknown"
     )
+    telemetry = _run_telemetry(handle)
     header = render_minimal_frontmatter(
         run_id=handle.run_id,
         agent=handle.agent or "unknown",
@@ -288,18 +313,10 @@ def _render_fallback_report(handle: AsyncRunHandle, transcript_text: str) -> str
             "claim_status": "completed",
             "claim_kind": skill,
             "session_id": handle.agent_session_id or "unknown",
-            "tokens_input": handle.tokens_input,
-            "tokens_cached_input": handle.tokens_cached_input,
-            "tokens_output": handle.tokens_output,
-            "tokens_total": _handle_tokens_total(handle),
-            "cost_usd": handle.cost_usd if handle.cost_usd is not None else "unknown",
+            **telemetry.usage.flat(),
+            "cost_usd": telemetry.cost.flat()["cost_usd"],
             "completed_at": now,
             "fallback_report": "true",
-            **(
-                {"tokens_cache_write": handle.tokens_cache_write}
-                if handle.tokens_cache_write is not None
-                else {}
-            ),
         },
     )
     return (
@@ -341,24 +358,32 @@ def _terminal_footer(handle: AsyncRunHandle) -> str:
         if handle.model_requested
         else ""
     )
-    cost_source = f"cost_source: {handle.cost_source}\n" if handle.cost_source else ""
+    telemetry = _run_telemetry(handle)
+    tokens = telemetry.usage.flat()
+    cost = telemetry.cost.flat()
+    failure = (
+        f"failure: {telemetry.failure.summary()}\n"
+        if telemetry.failure is not None
+        else ""
+    )
     return (
         "\n---\n"
         "runner: vibecrafted\n"
         f"run_id: {handle.run_id}\n"
         f"status: {handle.state.value}\n"
         f"exit_code: {handle.exit_code if handle.exit_code is not None else 'unknown'}\n"
+        f"{failure}"
         f"session_id: {handle.agent_session_id or 'unknown'}\n"
         f"model: {handle.agent_model or 'unknown'}\n"
         f"{model_requested}"
         f"{override_skipped}"
-        f"tokens_input: {handle.tokens_input}\n"
-        f"tokens_cached_input: {handle.tokens_cached_input}\n"
-        f"{_cache_write_line('', handle.tokens_cache_write)}"
-        f"tokens_output: {handle.tokens_output}\n"
-        f"tokens_total: {_handle_tokens_total(handle)}\n"
-        f"cost_usd: {handle.cost_usd if handle.cost_usd is not None else 'unknown'}\n"
-        f"{cost_source}"
+        f"tokens_input: {tokens['tokens_input']}\n"
+        f"tokens_cached_input: {tokens['tokens_cached_input']}\n"
+        f"{_cache_write_line('', handle.tokens_cache_write if telemetry.usage.known else None)}"
+        f"tokens_output: {tokens['tokens_output']}\n"
+        f"tokens_total: {tokens['tokens_total']}\n"
+        f"cost_usd: {cost['cost_usd']}\n"
+        f"cost_source: {cost['cost_source']}\n"
         f"resume: {handle.resume_command}\n"
         f"report: {handle.report_path or ''}\n"
         f"transcript: {handle.transcript_path or ''}\n"
@@ -404,8 +429,14 @@ class AsyncRunHandle:
     tokens_cached_input: int = 0
     tokens_cache_write: int | None = None
     tokens_output: int = 0
+    usage_events: int = 0
     cost_usd: float | None = None
     cost_source: str | None = None
+    # Session id the provider stream itself reported (vs. the launch contract's).
+    stream_session_id: str = ""
+    # Parent/fork session ids from meta that the provider id must never equal.
+    parent_sessions: dict[str, str] = field(default_factory=dict)
+    telemetry: RunTelemetry | None = None
     resume_command: str = ""
     heartbeat_monotonic: float = 0.0
     worker_identity: dict[str, object] | None = None
@@ -688,9 +719,7 @@ class AsyncSupervisor:
                             model_receipt.get("model_override_skip_reason") or ""
                         ).strip()
                         if skip_reason:
-                            latest.setdefault(
-                                "model_override_skip_reason", skip_reason
-                            )
+                            latest.setdefault("model_override_skip_reason", skip_reason)
                     return latest
 
                 mutate_run_meta(
@@ -803,6 +832,11 @@ class AsyncSupervisor:
                 or handle.agent_session_id == fork_meta.get("fork_source_session_id")
             ):
                 handle.exit_code = 1
+            handle.parent_sessions = {
+                key: str(fork_meta[key])
+                for key in ("fork_source_session_id", "parent_provider_session_id")
+                if fork_meta.get(key)
+            }
         handle.completed_at = _utc_now()
         operator_stop = await asyncio.to_thread(
             _accepted_operator_stop,
@@ -864,6 +898,7 @@ class AsyncSupervisor:
             require_report=require_report,
             require_transcript_output=require_transcript_output,
         )
+        telemetry = _run_telemetry(handle)
         artifact_payload = {
             "event_kind": EventKind.ARTIFACT.value,
             "meta": str(handle.meta_path or ""),
@@ -872,16 +907,13 @@ class AsyncSupervisor:
             "agent": handle.agent,
             "agent_session_id": handle.agent_session_id,
             "agent_model": handle.agent_model,
-            "tokens_input": handle.tokens_input,
-            "tokens_cached_input": handle.tokens_cached_input,
-            "tokens_output": handle.tokens_output,
-            "tokens_total": _handle_tokens_total(handle),
-            "cost_usd": handle.cost_usd,
+            **telemetry.usage.flat(),
+            **telemetry.cost.flat(),
             "resume_command": handle.resume_command,
             **handle.artifact_validation.as_payload(),
         }
-        if handle.tokens_cache_write is not None:
-            artifact_payload["tokens_cache_write"] = handle.tokens_cache_write
+        if telemetry.failure is not None:
+            artifact_payload["failure"] = telemetry.failure.summary()
         await self._emit(
             handle.run_id,
             RunState.ARTIFACT_SEEN,
@@ -1139,6 +1171,7 @@ class AsyncSupervisor:
             status=status,
             model=handle.agent_model,
             claim_digest=handle.claim_digest,
+            runtime_fields=_run_telemetry(handle).frontmatter_fields(),
         )
 
     def _sync_stream_summary(
@@ -1147,19 +1180,22 @@ class AsyncSupervisor:
         """Copy the parser's latest session/model/token/cost readings onto the handle."""
         if parser.session_id:
             handle.agent_session_id = parser.session_id
+            handle.stream_session_id = parser.session_id
         handle.agent_model = parser.model_id
         handle.tokens_input = parser.tokens_input
         handle.tokens_cached_input = parser.tokens_cached_input
         handle.tokens_cache_write = parser.tokens_cache_write
         handle.tokens_output = parser.tokens_output
+        handle.usage_events = parser.usage_events
         handle.cost_usd = parser.cost_usd
         handle.cost_source = parser.cost_source
         handle.resume_command = parser.resume_command(handle.root)
 
     def _write_meta_summary(self, handle: AsyncRunHandle) -> None:
-        """Merge a full run-state summary (status, tokens, cost, origin) into meta.json."""
+        """Merge a full run-state summary (status, usage, cost, failure, origin) into meta.json."""
         if handle.meta_path is None:
             return
+        telemetry = _run_telemetry(handle)
         summary = {
             "run_id": handle.run_id,
             "agent": handle.agent,
@@ -1170,12 +1206,7 @@ class AsyncSupervisor:
             "root": str(handle.root),
             "report": str(handle.report_path or ""),
             "transcript": str(handle.transcript_path or ""),
-            "tokens_input": handle.tokens_input,
-            "tokens_cached_input": handle.tokens_cached_input,
-            "tokens_output": handle.tokens_output,
-            "tokens_total": _handle_tokens_total(handle),
-            "cost_usd": handle.cost_usd if handle.cost_usd is not None else "unknown",
-            "cost_source": handle.cost_source or "unknown",
+            **telemetry.meta_fields(),
             "resume_command": handle.resume_command,
             "exit_code": handle.exit_code,
             "completed_at": handle.completed_at.isoformat()
@@ -1211,8 +1242,6 @@ class AsyncSupervisor:
                 summary["model_override_skip_reason"] = (
                     handle.model_override_skip_reason
                 )
-        if handle.tokens_cache_write is not None:
-            summary["tokens_cache_write"] = handle.tokens_cache_write
         handle.meta_path.parent.mkdir(parents=True, exist_ok=True)
 
         def _merge_summary(payload: dict[str, object]) -> dict[str, object]:
@@ -1235,8 +1264,11 @@ class AsyncSupervisor:
                 and not str(payload.get("origin_pane_id") or "").strip()
             ):
                 summary["origin_pane_id"] = origin["origin_pane_id"]
-            if handle.tokens_cache_write is None:
-                payload.pop("tokens_cache_write", None)
+            # Keys this close does not assert must not survive from an earlier
+            # close: a stale cache-write count or a previous run's failure.
+            for stale in ("tokens_cache_write", "failure"):
+                if stale not in summary:
+                    payload.pop(stale, None)
             payload.update(summary)
             return payload
 

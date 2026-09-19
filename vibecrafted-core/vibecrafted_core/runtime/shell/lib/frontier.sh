@@ -1,13 +1,16 @@
 # shellcheck shell=bash
 # Extracted from vetcoders.sh; sourced only by the compatibility facade.
 
+# Prompt/history presets resolve per asset: the installer-owned product config
+# first, then the immutable defaults shipped in the selected generation or
+# source checkout. Product configuration lives only in ~/.config/vibecrafted.
 _vetcoders_frontier_candidates() {
   local repo_root crafted_sidecar candidate seen=""
   repo_root="$(_vetcoders_repo_root)"
   crafted_sidecar="${VIBECRAFTED_TOOLS_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted/tools}/vibecrafted-current/config"
 
   for candidate in \
-    "${XDG_CONFIG_HOME:-$HOME/.config}/vetcoders/frontier" \
+    "$HOME/.config/vibecrafted" \
     "$crafted_sidecar" \
     "${VIBECRAFTED_ROOT:+$VIBECRAFTED_ROOT/config}" \
     "${VIBECRAFTED_ROOT:+$VIBECRAFTED_ROOT/vibecrafted-core/vibecrafted_core/config}" \
@@ -21,19 +24,6 @@ _vetcoders_frontier_candidates() {
     seen="${seen:+$seen:}$candidate"
     printf '%s\n' "$candidate"
   done
-}
-
-_vetcoders_frontier_root() {
-  local candidate
-  while IFS= read -r candidate; do
-    if [[ -f "$candidate/starship.toml" ]]; then
-      printf '%s' "$candidate"
-      return 0
-    fi
-  done < <(_vetcoders_frontier_candidates)
-
-  echo "𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. frontier config not found. Run vc-frontier-install from the repo checkout." >&2
-  return 1
 }
 
 # Optional prompt/history presets retain their independent frontier resolution.
@@ -59,31 +49,6 @@ _vetcoders_frontier_file() {
   return 1
 }
 
-_vetcoders_frontier_source_root() {
-  local repo_root crafted_root candidate seen=""
-  repo_root="$(_vetcoders_repo_root)"
-  crafted_root="${VIBECRAFTED_TOOLS_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted/tools}/vibecrafted-current"
-
-  for candidate in \
-    "${VIBECRAFTED_ROOT:-}" \
-    "$repo_root" \
-    "$crafted_root"
-  do
-    [[ -n "$candidate" ]] || continue
-    case ":$seen:" in
-      *":$candidate:"*) continue ;;
-    esac
-    seen="${seen:+$seen:}$candidate"
-    if [[ -f "$candidate/config/starship.toml" ]] \
-      || [[ -f "$candidate/vibecrafted-core/vibecrafted_core/config/starship.toml" ]]; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-  done
-
-  return 1
-}
-
 _vetcoders_vc_frame_config_dir() {
   local owner_root
   if _vetcoders_vc_frame_developer_mode; then
@@ -105,26 +70,23 @@ _vetcoders_pin_vc_frame_config_dir() {
 
 _vetcoders_load_frontier_sidecars() {
   local starship_config atuin_config
-  local xdg_config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
   starship_config="$(_vetcoders_frontier_file "starship.toml" 2>/dev/null || true)"
   atuin_config="$(_vetcoders_frontier_file "atuin/config.toml" 2>/dev/null || true)"
 
-  # Frontier tools (starship, atuin) are suggested for the runtime,
-  # not required. Never override a user's existing config — only set env vars
-  # when the user has no config of their own. Users opt in explicitly.
+  # Frontier tools (starship, atuin) are suggested for the runtime, not
+  # required. An explicit STARSHIP_CONFIG / ATUIN_CONFIG in the environment
+  # wins; private files in the user's own config directory are never consulted.
   if command -v starship >/dev/null 2>&1 \
-    && [[ -n "$starship_config" && -z "${STARSHIP_CONFIG:-}" ]] \
-    && [[ ! -e "$xdg_config_home/starship.toml" ]]; then
+    && [[ -n "$starship_config" && -z "${STARSHIP_CONFIG:-}" ]]; then
     export STARSHIP_CONFIG="$starship_config"
   fi
 
   if command -v atuin >/dev/null 2>&1 \
-    && [[ -n "$atuin_config" && -z "${ATUIN_CONFIG:-}" ]] \
-    && [[ ! -e "$xdg_config_home/atuin/config.toml" ]]; then
+    && [[ -n "$atuin_config" && -z "${ATUIN_CONFIG:-}" ]]; then
     export ATUIN_CONFIG="$atuin_config"
   fi
 
-  # vc-frame must never inherit the user's stock ~/.config/vc-frame namespace.
+  # vc-frame never inherits the stock vc-frame config namespace.
   _vetcoders_pin_vc_frame_config_dir
 }
 

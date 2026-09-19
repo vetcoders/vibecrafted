@@ -35,10 +35,6 @@ struct ServerNavigationState {
   let server: URL?
   let workspaces: URL?
   let unavailableReason: String?
-
-  var isAvailable: Bool {
-    server != nil && workspaces != nil
-  }
 }
 
 /// The `vibecrafted.caretaker.v1` envelope as the tray consumes it. Every
@@ -280,7 +276,10 @@ func resolveServerNavigation(caretakerData: Data?) -> ServerNavigationState {
     server: origin, workspaces: workspaces, unavailableReason: nil)
 }
 
-private func conciseCaretakerLine(_ value: String?) -> String? {
+/// First presentable line of an owner diagnostic, stripped of the red/reset
+/// ANSI pair the owner decorates failures with. Shared by the tray and the
+/// server status window, so both truncate the same way.
+func conciseCaretakerLine(_ value: String?) -> String? {
   guard let line = value?.split(whereSeparator: \.isNewline).first else { return nil }
   let plain = String(line)
     .replacingOccurrences(of: "\u{001B}[31m", with: "")
@@ -366,40 +365,6 @@ func deriveServerMenuState(
     canStart: envelope.actions?.start?.enabled ?? false,
     canStop: envelope.actions?.stop?.enabled ?? false,
     canRestart: envelope.actions?.restart?.enabled ?? false)
-}
-
-/// The diagnostics alert renders the same envelope the menu did — verdict,
-/// server leg, findings — never a second read of raw receipt fields.
-func caretakerDiagnosticsLines(data: Data?) -> [String] {
-  guard let envelope = decodeCaretakerEnvelope(data: data) else {
-    return ["The caretaker has not published a reading for the installed runtime."]
-  }
-  var lines: [String] = []
-  if let verdict = envelope.verdict {
-    lines.append(verdict.header)
-    if !verdict.detail.isEmpty {
-      lines.append(verdict.detail)
-    }
-  }
-  if let server = envelope.server {
-    lines.append("State: \((server.state ?? "unknown").uppercased())")
-    lines.append("Supervisor PID: \(server.supervisorPID.map(String.init) ?? "—")")
-    lines.append("Server PID: \(server.managedPair?.serverPID.map(String.init) ?? "—")")
-    lines.append("Guardian PID: \(server.managedPair?.guardianPID.map(String.init) ?? "—")")
-    if let endpoint = server.endpoint, let host = endpoint.host, let port = endpoint.port {
-      lines.append("Endpoint: \(host):\(port)")
-    }
-    if let reason = conciseCaretakerLine(server.lastError) {
-      lines.append("Last error: \(reason)")
-    }
-    if let path = server.receipt?.path, !path.isEmpty {
-      lines.append("Status receipt: \(path)")
-    }
-  }
-  for finding in envelope.verdict?.findings ?? [] {
-    lines.append("[\(finding.severity)] \(finding.code): \(finding.detail)")
-  }
-  return lines
 }
 
 // MARK: - Installed runtime resolution

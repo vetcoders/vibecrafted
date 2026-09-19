@@ -132,6 +132,19 @@ każdego cięcia `[~]→[x]`.
 - **always** → żadnych odsłoniętych sekretów; structural admission integratora zapisuje Semgrep
   i przegląd sekretów/bezpieczeństwa, a verified delivery po closure zapisuje pełne, odpowiednie dla języka bramki
 
+## Odbiór (matryca wyników) — R12
+
+Każde wymaganie w tym planie startuje jako `[ ]`. Nietknięte `[ ]` na końcu przebiegu to wskaźnik
+niedowiezienia, nie usterka formatowania. Worker przerzuca własne pola w ramach dostawy; żadnemu
+przerzuceniu się nie wierzy — supervisor i tak ponownie uruchamia verifiery. Pola Foundera nigdy
+nie wypełnia agent: `Founder [x]` jest ważne wyłącznie obok `acceptance/founder.json` w root planu.
+
+| cut | agent | commit | dowód (Operator) | zintegrowane | Worker | Operator | Founder |
+|---|---|---|---|---|---|---|---|
+| [W1-01] | [agent] | — | — | — | [ ] | [ ] | [ ] |
+
+Zatwierdzono przez: Worker [ ] Operator [ ] Founder [ ]
+
 ## Living Tree Note
 
 Ten plan żyje. Zmienia się, gdy się uczymy. Gdy zmieniasz plan:
@@ -147,10 +160,12 @@ Udokumentuj rozumowanie. Przyszli inżynierowie ci podziękują.
 
 ## Running This Plan
 
-`<plan-id>.dispatch.toml` jest jedynym kontraktem wykonania. Zweryfikuj go, a potem przekaż dokładnie
-ten artefakt do `/vc-ship`; nie odpalaj cięć ręcznie:
+`<plan-id>.dispatch.toml` jest jedynym kontraktem wykonania. Uruchom bramkę pakietu planu, zweryfikuj
+artefakt dispatch, a potem przekaż dokładnie ten artefakt do `/vc-ship`; nie odpalaj cięć ręcznie.
+REFUSE z scaffold-doctor = brak handoffu.
 
 ```bash
+vibecrafted scaffold-doctor --plan <root-planu> --repo <git-root>
 vibecrafted dispatch <absolutny-root-planu>/<plan-id>.dispatch.toml --doctor
 vibecrafted dispatch <absolutny-root-planu>/<plan-id>.dispatch.toml --dry-run --json
 ````
@@ -165,7 +180,18 @@ Tylko gdy `/vc-ship` lub jego supervisor są dowodnie niedostępne, zapisz dokł
 konieczności fallbacku przed podaniem ograniczonej komendy direct-dispatch albo recovery per cięcie.
 Zapisz, jak kontrola wraca do `/vc-ship`; fallback nigdy nie może stać się drugą ścieżką wykonania.
 
-Żadnego machania rękami. Jasna praca. Jasne kryteria. Tak dowożą founderzy.
+## Zamknięcie — duch Emila (wymagane)
+
+=======================
+[Jedna linijka motywacyjna związana z tym zadaniem i kaomoji.]
+=======================
+
+**Call to Action:** [Następny autoryzowany krok → właściciel → oczekiwany handback.
+Trzymaj się stanu planu i kanonicznej trasy wykonania; nazwij blokera, jeśli
+wykonanie jest zablokowane.]
+
+**Suchar:** [Świeży, zaskakujący, celowo suchy żart o tym zadaniu. Dodaj kaomoji;
+nie powtarzaj gotowej puenty z innego planu albo briefu.]
 
 ```
 

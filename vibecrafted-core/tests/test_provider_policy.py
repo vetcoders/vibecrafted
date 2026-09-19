@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import io
 import itertools
 import json
@@ -26,18 +27,33 @@ from vibecrafted_core.spawn import (
     _fresh_child_environment,
     _materialize_continuity,
     _validate_operator_protocol_event,
+    classify_interactive_failure_reason,
+    format_interactive_launch_failure,
     interactive_launch_interpreter,
     interactive_policy_command,
     interactive_workspace_command,
     launch_interactive_workspace,
     main,
     prepare_interactive_workspace_launch,
+    record_interactive_launch_cli_failure,
     resolve_continuity_policy,
     resolve_operator_agent_policy,
     resolve_provider_policy,
     resolve_provider_usage_capability,
     resolve_quota_policy,
 )
+
+
+def _reap_owner_group(owner: subprocess.Popen[bytes]) -> None:
+    """Kill the owner's whole session group, including the providers it spawned.
+
+    Owners start with start_new_session=True, so the owner pid is the group id and
+    the fake providers stay in that group. Killing only the owner pid, or skipping
+    teardown once the owner already exited, left them looping under PID 1 for hours.
+    """
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(owner.pid, signal.SIGKILL)
+    owner.wait()
 
 
 def _fake_interactive_provider(path: Path) -> None:
@@ -418,9 +434,7 @@ def test_interactive_owner_keeps_distinct_live_provider_on_inherited_tty(
         with pytest.raises(ProcessLookupError):
             os.kill(meta["worker_pid"], 0)
     finally:
-        if owner.poll() is None:
-            owner.kill()
-            owner.wait()
+        _reap_owner_group(owner)
         os.close(master_fd)
 
 
@@ -601,9 +615,7 @@ def test_operator_auto_creates_distinct_supervising_agent_relationship(
             with pytest.raises(ProcessLookupError):
                 os.kill(pid, 0)
     finally:
-        if owner.poll() is None:
-            owner.kill()
-            owner.wait()
+        _reap_owner_group(owner)
 
 
 @pytest.mark.parametrize(
@@ -752,32 +764,35 @@ def test_supervised_owner_signal_settles_operator_and_child(
         env=env,
         start_new_session=True,
     )
-    _wait_for(captures / "operator.json")
-    _wait_for(captures / "agent.json")
-    captured = {
-        role: json.loads((captures / f"{role}.json").read_text())
-        for role in ("operator", "agent")
-    }
-    owner.send_signal(signum)
-    assert owner.wait(timeout=10) == 128 + signum
-    for role in ("operator", "agent"):
-        meta = json.loads(
-            (
-                home
-                / "control_plane/runtime_runs"
-                / captured[role]["run_id"]
-                / "meta.json"
-            ).read_text()
-        )
-        assert meta["liveness"] == "terminal"
-        expected = (
-            "child_settled"
-            if role == "operator"
-            else f"owner_signal:{signal.Signals(signum).name}"
-        )
-        assert meta["terminal_reason"] == expected
-        with pytest.raises(ProcessLookupError):
-            os.kill(captured[role]["pid"], 0)
+    try:
+        _wait_for(captures / "operator.json")
+        _wait_for(captures / "agent.json")
+        captured = {
+            role: json.loads((captures / f"{role}.json").read_text())
+            for role in ("operator", "agent")
+        }
+        owner.send_signal(signum)
+        assert owner.wait(timeout=10) == 128 + signum
+        for role in ("operator", "agent"):
+            meta = json.loads(
+                (
+                    home
+                    / "control_plane/runtime_runs"
+                    / captured[role]["run_id"]
+                    / "meta.json"
+                ).read_text()
+            )
+            assert meta["liveness"] == "terminal"
+            expected = (
+                "child_settled"
+                if role == "operator"
+                else f"owner_signal:{signal.Signals(signum).name}"
+            )
+            assert meta["terminal_reason"] == expected
+            with pytest.raises(ProcessLookupError):
+                os.kill(captured[role]["pid"], 0)
+    finally:
+        _reap_owner_group(owner)
 
 
 def test_supervised_quota_exhaustion_preserves_exit_75_and_settles_operator(
@@ -1067,9 +1082,7 @@ def test_interactive_small_token_quota_stops_live_provider_with_distinct_truth(
         with pytest.raises(ProcessLookupError):
             os.kill(observed["pid"], 0)
     finally:
-        if owner.poll() is None:
-            owner.kill()
-            owner.wait()
+        _reap_owner_group(owner)
 
 
 def test_interactive_nonzero_exit_terminalizes_and_returns_provider_status(
@@ -1161,9 +1174,7 @@ def test_interactive_owner_signal_terminalizes_without_surviving_child(
         with pytest.raises(ProcessLookupError):
             os.kill(observed["pid"], 0)
     finally:
-        if owner.poll() is None:
-            owner.kill()
-            owner.wait()
+        _reap_owner_group(owner)
 
 
 def test_child_spawn_failure_publishes_no_false_active_and_removes_clean_worktree(
@@ -1360,6 +1371,25 @@ def test_interactive_command_uses_contract_flags() -> None:
         interactive_policy_command("codex", "/vc-init", "local-native", "accept-edits")
 
 
+def test_kimi_interactive_command_is_flags_only_tui_entry() -> None:
+    """Interactive kimi enters the TUI with no prompt on argv (a prompt exists
+    only as -p, which is non-interactive and conflicts with --auto/--yolo/
+    --plan), so the contract flags are the whole command."""
+    assert interactive_policy_command("kimi", "/vc-init", "local-native", "bypass") == [
+        "kimi",
+        "--auto",
+    ]
+    assert interactive_policy_command("kimi", "/vc-init", "local-native", "auto") == [
+        "kimi",
+        "--yolo",
+    ]
+    assert interactive_policy_command(
+        "kimi", "/vc-init", "local-native", "read-only"
+    ) == ["kimi", "--plan"]
+    with pytest.raises(ValueError, match="no native accept-edits"):
+        interactive_policy_command("kimi", "/vc-init", "local-native", "accept-edits")
+
+
 def test_interactive_workspace_command_wraps_the_exact_init_route(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1506,6 +1536,7 @@ def test_exact_session_usage_is_monotonic_and_deduplicates_message_ids(
         "output_tokens": 2,
         "total_tokens": 5,
         "messages": 1,
+        "foreign_workspace_events": 0,
     }
     transcript.write_text(
         transcript.read_text(encoding="utf-8")
@@ -1563,6 +1594,226 @@ def test_usage_reader_rejects_preexisting_exact_session_source(tmp_path: Path) -
             provider_version="2.1.232",
             env={"CLAUDE_CONFIG_DIR": str(config)},
         )
+
+
+def test_usage_reader_accepts_event_from_subdirectory_of_effective_root(
+    tmp_path: Path,
+) -> None:
+    session_id = "55555555-5555-4555-8555-555555555555"
+    repo = tmp_path / "repo"
+    nested = repo / "vibecrafted-core"
+    nested.mkdir(parents=True)
+    config = tmp_path / "claude"
+    reader = _ClaudeTranscriptUsage(
+        provider_session_id=session_id,
+        effective_root=str(repo),
+        provider_version="2.1.232",
+        env={"CLAUDE_CONFIG_DIR": str(config)},
+    )
+    transcript = config / "projects" / "fixture" / f"{session_id}.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text(
+        json.dumps(
+            _usage_event(session_id=session_id, cwd=nested, message_id="msg-sub")
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    measured = reader.poll()
+    assert measured["messages"] == 1
+    assert measured["total_tokens"] == 5
+    assert measured["foreign_workspace_events"] == 0
+
+
+def test_usage_reader_accepts_event_from_own_run_directory(tmp_path: Path) -> None:
+    session_id = "66666666-6666-4666-8666-666666666666"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run_id = "init-260915-083822-55412"
+    run_dir = tmp_path / "runtime_runs" / run_id
+    run_dir.mkdir(parents=True)
+    config = tmp_path / "claude"
+    reader = _ClaudeTranscriptUsage(
+        provider_session_id=session_id,
+        effective_root=str(repo),
+        provider_version="2.1.232",
+        env={"CLAUDE_CONFIG_DIR": str(config)},
+        run_id=run_id,
+        run_root=str(run_dir),
+    )
+    transcript = config / "projects" / "fixture" / f"{session_id}.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text(
+        json.dumps(
+            _usage_event(session_id=session_id, cwd=run_dir, message_id="msg-run")
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    measured = reader.poll()
+    assert measured["messages"] == 1
+    assert measured["total_tokens"] == 5
+    assert measured["foreign_workspace_events"] == 0
+
+
+def test_usage_reader_records_foreign_workspace_without_raising(
+    tmp_path: Path,
+) -> None:
+    session_id = "77777777-7777-4777-8777-777777777777"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    foreign = tmp_path / "vc-frame"
+    foreign.mkdir()
+    config = tmp_path / "claude"
+    reader = _ClaudeTranscriptUsage(
+        provider_session_id=session_id,
+        effective_root=str(repo),
+        provider_version="2.1.232",
+        env={"CLAUDE_CONFIG_DIR": str(config)},
+    )
+    transcript = config / "projects" / "fixture" / f"{session_id}.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text(
+        json.dumps(
+            _usage_event(
+                session_id=session_id,
+                cwd=foreign,
+                message_id="msg-foreign-cwd",
+                input_tokens=9,
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    measured = reader.poll()
+    assert measured["foreign_workspace_events"] == 1
+    assert measured["messages"] == 0
+    assert measured["total_tokens"] == 0
+    transcript.write_text(
+        transcript.read_text(encoding="utf-8")
+        + json.dumps(
+            _usage_event(session_id=session_id, cwd=repo, message_id="msg-own")
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    measured = reader.poll()
+    assert measured["foreign_workspace_events"] == 1
+    assert measured["messages"] == 1
+    assert measured["total_tokens"] == 5
+
+
+def test_usage_reader_still_rejects_version_mismatch(tmp_path: Path) -> None:
+    session_id = "88888888-8888-4888-8888-888888888888"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    config = tmp_path / "claude"
+    reader = _ClaudeTranscriptUsage(
+        provider_session_id=session_id,
+        effective_root=str(repo),
+        provider_version="2.1.232",
+        env={"CLAUDE_CONFIG_DIR": str(config)},
+    )
+    transcript = config / "projects" / "fixture" / f"{session_id}.jsonl"
+    transcript.parent.mkdir(parents=True)
+    event = _usage_event(session_id=session_id, cwd=repo, message_id="msg-ver")
+    event["version"] = "9.9.9"
+    transcript.write_text(json.dumps(event) + "\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="version differs"):
+        reader.poll()
+
+
+def test_format_interactive_launch_failure_includes_resume() -> None:
+    text = format_interactive_launch_failure(
+        run_id="init-260915-104809-93621",
+        reason="provider usage event belongs to a foreign workspace",
+        agent_session_id="c9c1307b-ce19-4fa3-be77-5b0f8dcef380",
+        started=True,
+        provider="claude",
+    )
+    assert "init-260915-104809-93621" in text
+    assert "provider usage event belongs to a foreign workspace" in text
+    assert "claude --resume c9c1307b-ce19-4fa3-be77-5b0f8dcef380" in text
+    assert "was stopped after it had already started" in text
+
+
+def test_classify_interactive_failure_reason_splits_start_from_kill() -> None:
+    assert classify_interactive_failure_reason({}) == "interactive_start_failed"
+    assert (
+        classify_interactive_failure_reason(
+            {"spawned_at": "2026-09-15T10:10:41Z", "worker_pid": 12, "status": "active"}
+        )
+        == "killed_after_start"
+    )
+    assert (
+        classify_interactive_failure_reason({"terminal_reason": "wrapper_exception"})
+        == "killed_after_start"
+    )
+
+
+def test_record_interactive_launch_cli_failure_preserves_live_receipt(
+    tmp_path: Path, monkeypatch
+) -> None:
+    run_id = "init-260915-104809-93621"
+    home = tmp_path / "home"
+    meta_path = home / "control_plane" / "runtime_runs" / run_id / "meta.json"
+    meta_path.parent.mkdir(parents=True)
+    live = {
+        "run_id": run_id,
+        "agent": "claude",
+        "status": "failed",
+        "liveness": "terminal",
+        "terminal_reason": "killed_after_start",
+        "spawned_at": "2026-09-15T08:48:09Z",
+        "worker_pid": 4242,
+        "provider_session_id": "c9c1307b-ce19-4fa3-be77-5b0f8dcef380",
+        "measured_usage": {"total_tokens": 12, "foreign_workspace_events": 2},
+        "error": "provider usage event belongs to a foreign workspace",
+    }
+    meta_path.write_text(json.dumps(live), encoding="utf-8")
+    monkeypatch.setattr(
+        "vibecrafted_core.spawn.control_plane_home",
+        lambda: home / "control_plane",
+    )
+    message, failed = record_interactive_launch_cli_failure(
+        admission={"run_id": run_id, "agent": "claude", "skill": "init"},
+        exc=RuntimeError("provider usage event belongs to a foreign workspace"),
+        provider="claude",
+    )
+    assert failed["terminal_reason"] == "killed_after_start"
+    assert failed["provider_session_id"] == "c9c1307b-ce19-4fa3-be77-5b0f8dcef380"
+    assert failed["measured_usage"]["foreign_workspace_events"] == 2
+    assert failed["worker_pid"] == 4242
+    assert "claude --resume c9c1307b-ce19-4fa3-be77-5b0f8dcef380" in message
+    rewritten = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert rewritten["provider_session_id"] == live["provider_session_id"]
+    assert rewritten["measured_usage"] == live["measured_usage"]
+
+
+def test_record_interactive_launch_cli_failure_marks_start_failed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    run_id = "init-260915-000000-00000"
+    home = tmp_path / "home"
+    (home / "control_plane" / "runtime_runs" / run_id).mkdir(parents=True)
+    monkeypatch.setattr(
+        "vibecrafted_core.spawn.control_plane_home",
+        lambda: home / "control_plane",
+    )
+    monkeypatch.setattr(
+        "vibecrafted_core.spawn.append_event", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        "vibecrafted_core.spawn._project_interactive_snapshot", lambda _run_id: ""
+    )
+    message, failed = record_interactive_launch_cli_failure(
+        admission={"run_id": run_id, "agent": "claude", "skill": "init"},
+        exc=ValueError("unsafe interactive admission file"),
+        provider="claude",
+    )
+    assert failed["terminal_reason"] == "interactive_start_failed"
+    assert "failed to start" in message
+    assert run_id in message
 
 
 def test_policy_cli_reads_the_same_contract(monkeypatch, capsys) -> None:
@@ -1811,21 +2062,36 @@ def test_full_lineage_rejects_degraded_material_before_spawn(
         )
 
 
-def test_runtime_policy_capabilities_reports_availability_without_requiring_live_usage(
+def test_runtime_policy_capabilities_require_live_usage_for_worktree_admission(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from vibecrafted_core.spawn import runtime_policy_capabilities
+    from vibecrafted_core import spawn
+
+    unsupported = spawn.ProviderUsageCapability(
+        "controlled-provider",
+        False,
+        reason=(
+            "controlled provider exposes no verified live, child-attributable, "
+            "monotonic usage side channel"
+        ),
+    )
 
     monkeypatch.setattr(
         "vibecrafted_core.spawn.which",
         lambda cmd, path=None: f"/mock/bin/{cmd}",
     )
+    monkeypatch.setattr(
+        spawn,
+        "resolve_provider_usage_capability",
+        lambda *_args, **_kwargs: unsupported,
+    )
     for provider in ("codex", "grok", "cursor", "agy", "junie"):
-        caps = runtime_policy_capabilities(provider)
+        caps = spawn.runtime_policy_capabilities(provider)
         assert caps["local-native"]["available"] is True
         assert caps["local-native"]["reason"] == ""
-        assert caps["local-worktrees"]["available"] is True
+        assert caps["local-worktrees"]["available"] is False
         assert caps["local-native"]["usage_capability"]["supported"] is False
+        assert "child-attributable" in caps["local-worktrees"]["reason"]
 
 
 def test_interactive_workspace_command_defaults_to_unmetered_for_providers_without_usage_sidechannel(
@@ -2140,3 +2406,59 @@ def test_owned_generation_path_anchors_on_real_owned_roots(tmp_path: Path) -> No
         str(tmp_path / ".local" / "share" / "vibecrafted" / "releases"), env
     )
     assert not is_owned_generation_path("", env)
+
+
+# --------------------------------------------------------------------------
+# launch environment (W1-01): the product is a guest in the user's shell,
+# not a landlord — the launch composition starts from the full user
+# environment and only overlays Vibecrafted pins
+# --------------------------------------------------------------------------
+
+
+def test_launch_environment_is_guest_not_landlord(tmp_path: Path) -> None:
+    from vibecrafted_core import product_contract
+
+    app = tmp_path / "Vibecrafted.app"
+    host = {
+        "HOME": str(tmp_path),
+        "SSH_AUTH_SOCK": "/tmp/probe.sock",
+        "GITHUB_TOKEN": "user-owned-flows-through",
+        "EDITOR": "nvim",
+        "PATH": f"/opt/homebrew/bin:{tmp_path}/.cargo/bin:bin::/usr/bin",
+        "PYTHONPATH": "/foreign/runtime/site",
+        "PYTHONHOME": "/foreign/runtime/python",
+    }
+
+    child = product_contract._guest_environment(host)
+
+    # The user's environment is the base: agent socket, tokens and tools flow.
+    assert child["SSH_AUTH_SOCK"] == "/tmp/probe.sock"
+    assert child["GITHUB_TOKEN"] == "user-owned-flows-through"
+    assert child["EDITOR"] == "nvim"
+    assert child["HOME"] == str(tmp_path)
+    # Only the explicit deny-list is scrubbed (interpreter-poison class).
+    for name in product_contract._LAUNCH_ENV_DENYLIST:
+        assert name not in child
+    assert set(host) - set(child) <= product_contract._LAUNCH_ENV_DENYLIST
+
+    path = product_contract._launch_child_path(app, host["PATH"]).split(os.pathsep)
+
+    # Canonical bundle bin is prepended; the user's absolute PATH entries
+    # survive behind it; relative/empty segments are dropped.
+    assert path[0] == str(app / "Contents/Resources/runtime/bin")
+    assert "/opt/homebrew/bin" in path
+    assert f"{tmp_path}/.cargo/bin" in path
+    assert path.index(path[0]) < path.index("/opt/homebrew/bin")
+    assert "bin" not in path
+    assert "" not in path
+    assert "/usr/sbin" in path  # system floor stays present
+    assert len(path) == len(set(path))
+
+    # And build_launch_environment composes exactly from these two helpers:
+    # the guest base plus pins — no hidden allow-list left in the launch path.
+    import inspect
+
+    source = inspect.getsource(product_contract.build_launch_environment)
+    assert "_guest_environment(host)" in source
+    assert "_launch_child_path(app" in source
+    assert "_LAUNCH_INHERITED_ENV" not in source

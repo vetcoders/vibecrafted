@@ -405,7 +405,7 @@ def _ready_fields(pack: Path, **overrides: str) -> dict[str, str]:
     return fields
 
 
-def _git_repo(repo: Path) -> str:
+def _git_repo(repo: Path, *tracked: str) -> str:
     repo.mkdir(parents=True, exist_ok=True)
 
     def run(*args: str) -> subprocess.CompletedProcess[str]:
@@ -419,6 +419,8 @@ def _git_repo(repo: Path) -> str:
     run("init", "-q")
     run("config", "user.email", "agents@vetcoders.io")
     run("config", "user.name", "fixture")
+    if tracked:
+        run("add", "--", *tracked)
     run("commit", "-q", "--allow-empty", "-m", "fixture")
     return run("rev-parse", "HEAD").stdout.strip()
 
@@ -921,6 +923,7 @@ def test_runtime_packager_emits_one_closed_root_and_checksum(tmp_path: Path) -> 
         "VERSION",
         "bin/python3",
         "bin/scaffold-doctor",
+        "bin/control-observe",
         "bin/vc-start",
         "bin/vibecrafted",
         "bin/vibecrafted-mcp",
@@ -1443,7 +1446,10 @@ def _preflight_builder_repo(tmp_path: Path) -> tuple[Path, str, Path]:
     rustup = fake_bin / "rustup"
     rustup.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
     rustup.chmod(0o755)
-    head = _git_repo(repo)
+    # 5d41de86: the builder reads VERSION from the bound ROOT_SHA
+    # (`git show "$ROOT_SHA:VERSION"`), not from the working tree, so the
+    # fixture commits it -- otherwise every preflight dies on that read first.
+    head = _git_repo(repo, "VERSION")
     previous = repo / "dist/Vibecrafted_RuntimePack_previous-darwin-arm64.tar.gz"
     previous.write_bytes(b"the pack that succeeded yesterday")
     _selection_record(
@@ -1494,6 +1500,10 @@ def _record(repo: Path) -> dict[str, str]:
             {"DEVELOPER_DIR": "/nonexistent/Xcode.app/Contents/Developer"},
             "no usable Xcode developer dir",
             id="unusable-xcode",
+            marks=pytest.mark.skipif(
+                sys.platform != "darwin",
+                reason="Xcode preflight is darwin-only; the builder's platform gate fires first elsewhere",
+            ),
         ),
     ),
 )

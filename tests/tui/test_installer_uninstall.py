@@ -52,6 +52,24 @@ def _write_native_stub(path: Path, payload: bytes = b"pack-terminal") -> None:
     path.chmod(0o755)
 
 
+def _write_terminal_bundle_host(path: Path) -> None:
+    _write_native_stub(path)
+    with (path.parents[1] / "Info.plist").open("wb") as handle:
+        plistlib.dump(
+            {
+                "CFBundleIdentifier": "io.vetcoders.vc-terminal",
+                "CFBundleExecutable": "alacritty",
+                "CFBundleIconFile": "alacritty.icns",
+                "CFBundleDisplayName": "VC Terminal",
+                "CFBundleName": "VC Terminal",
+            },
+            handle,
+        )
+    icon = path.parents[1] / "Resources/alacritty.icns"
+    icon.parent.mkdir(parents=True, exist_ok=True)
+    icon.write_bytes(b"fixture-icon")
+
+
 def _runtime_pack_fixture(root: Path) -> tuple[Path, Path, Path]:
     payload = seed_runtime_pack(root / "runtime-pack")
     terminal_host = root / "Vibecrafted.app/Contents/Helpers/vc-terminal"
@@ -216,6 +234,11 @@ def test_runtime_install_reclaims_leftover_alacritty_and_alt_screen(
     )
     assert (product_config / "vc-terminal/vc-terminal.toml").is_file()
     assert (product_config / "vc-terminal/launch-primary-shell.zsh").is_file()
+    for name in ("python", "python3"):
+        installed_door = product_config / "vc-terminal/bin" / name
+        source_door = payload / "config/vc-terminal/bin" / name
+        assert installed_door.read_bytes() == source_door.read_bytes()
+        assert installed_door.stat().st_mode & 0o777 == 0o755
     assert not (debris_dir / "alacritty.toml").exists()
     assert not (debris_dir / "launch-alt-screen.zsh").exists()
     assert not (product_config / "terminal-entry.toml").exists()
@@ -224,6 +247,7 @@ def test_runtime_install_reclaims_leftover_alacritty_and_alt_screen(
     )
     assert names == [
         ".zshrc",
+        "bin",
         "interactive.zsh",
         "launch-primary-shell.zsh",
         "vc-terminal.toml",
@@ -420,19 +444,7 @@ def test_runtime_install_uses_helper_app_as_public_terminal_host(
         tmp_path
         / "Vibecrafted.app/Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
     )
-    helper.parent.mkdir(parents=True, exist_ok=True)
-    helper.write_bytes(_MACHO_MAGIC + b"helper-app")
-    helper.chmod(0o755)
-    with (helper.parents[1] / "Info.plist").open("wb") as handle:
-        plistlib.dump(
-            {
-                "CFBundleIdentifier": "io.vetcoders.vc-terminal",
-                "CFBundleExecutable": "alacritty",
-                "CFBundleDisplayName": "VC Terminal",
-                "CFBundleName": "VC Terminal",
-            },
-            handle,
-        )
+    _write_terminal_bundle_host(helper)
     app_root = tmp_path / "Vibecrafted.app"
     assert (
         installer.cmd_runtime_install(
@@ -455,6 +467,125 @@ def test_runtime_install_uses_helper_app_as_public_terminal_host(
     assert str(helper) in path_wrapper
     assert str(generation / "libexec/vc-terminal") not in path_wrapper
     assert str(generation / "bin/vc-terminal") in path_wrapper
+
+
+def test_runtime_install_uses_generation_bundle_without_app_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A standalone generation supplies its own Finder/Dock terminal identity."""
+    home = tmp_path / "home"
+    runtime_home = home / ".local/share/vibecrafted"
+    launcher_home = home / ".local/bin"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(launcher_home))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home / ".vibecrafted"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    monkeypatch.setattr(
+        installer, "_teardown_owned_runtime_for_uninstall", lambda *_args, **_kwargs: []
+    )
+    payload, _ignored_host, _frame_helper = _runtime_pack_fixture(tmp_path)
+    payload_host = payload / "libexec/vc-terminal.app/Contents/MacOS/alacritty"
+    _write_terminal_bundle_host(payload_host)
+
+    assert (
+        installer.cmd_runtime_install(
+            Namespace(
+                payload_root=str(payload),
+                app_root=None,
+                terminal_host=None,
+                frame_helper=None,
+            )
+        )
+        == 0
+    )
+    installed = json.loads(capsys.readouterr().out)
+    generation = runtime_home / "releases/9.9.9+g12345678"
+    generation_host = generation / "libexec/vc-terminal.app/Contents/MacOS/alacritty"
+    assert installed["app_root"] == ""
+    assert Path(installed["terminal_host"]) == generation_host
+    assert installer._is_product_bundle_terminal_host(generation_host)
+    assert (generation_host.parents[1] / "Info.plist").is_file()
+    assert (generation_host.parents[1] / "Resources/alacritty.icns").is_file()
+    launcher = (launcher_home / "vc-terminal").read_text(encoding="utf-8")
+    assert f"VIBECRAFTED_TERMINAL_HOST={generation_host}" in launcher
+
+    (generation_host.parents[1] / "Resources/alacritty.icns").unlink()
+    assert not installer._is_product_bundle_terminal_host(generation_host)
+
+
+def test_bundle_terminal_host_admission_refuses_every_broken_metadata_shape(
+    tmp_path: Path,
+) -> None:
+    """Admission reads untrusted bytes: a bad bundle is `False`, never a crash.
+
+    `_is_product_bundle_terminal_host` runs inside `cmd_runtime_install` over
+    a path an installed generation — or an ambient `--terminal-host` — hands
+    over. Every shape below is reachable on a real disk: a plist whose root is
+    an array or a string parses cleanly and then has no `.get`, and truncated
+    XML reaches expat, whose error is not a `ValueError`. Before this boundary
+    was closed the first two raised `AttributeError` and the third raised
+    `ExpatError`, either of which aborts the install rather than falling back
+    to the flat native host.
+    """
+    bundle_root = tmp_path / "generation/libexec/vc-terminal.app"
+    host = bundle_root / "Contents/MacOS/alacritty"
+    plist = bundle_root / "Contents/Info.plist"
+    icon = bundle_root / "Contents/Resources/alacritty.icns"
+
+    _write_terminal_bundle_host(host)
+    assert installer._is_product_bundle_terminal_host(host)
+
+    broken_plists = {
+        "array root": b'<?xml version="1.0"?><plist version="1.0">'
+        b"<array><string>x</string></array></plist>",
+        "string root": b'<?xml version="1.0"?><plist version="1.0">'
+        b"<string>x</string></plist>",
+        "truncated xml": b'<?xml version="1.0"?><plist version="1.0"><dict><key>a',
+        "not a plist": b"not a plist at all",
+        "empty": b"",
+    }
+    for label, payload in broken_plists.items():
+        plist.write_bytes(payload)
+        assert not installer._is_product_bundle_terminal_host(host), label
+
+    # The donor's own identity is a complete, parseable plist — and still not
+    # this product's Finder/Dock host.
+    with plist.open("wb") as handle:
+        plistlib.dump(
+            {
+                "CFBundleIdentifier": "io.vetcoders.vc-terminal",
+                "CFBundleExecutable": "alacritty",
+                "CFBundleIconFile": "alacritty.icns",
+                "CFBundleDisplayName": "Alacritty",
+                "CFBundleName": "Alacritty",
+            },
+            handle,
+        )
+    assert not installer._is_product_bundle_terminal_host(host)
+
+    _write_terminal_bundle_host(host)
+    assert installer._is_product_bundle_terminal_host(host)
+
+    # A declared icon that is absent, empty, or a symlink is not a resource the
+    # bundle's seal can cover, so the bundle is not a branded host either.
+    icon.write_bytes(b"")
+    assert not installer._is_product_bundle_terminal_host(host)
+    icon.unlink()
+    assert not installer._is_product_bundle_terminal_host(host)
+    elsewhere = tmp_path / "elsewhere.icns"
+    elsewhere.write_bytes(b"fixture-icon")
+    icon.symlink_to(elsewhere)
+    assert not installer._is_product_bundle_terminal_host(host)
+
+    icon.unlink()
+    icon.write_bytes(b"fixture-icon")
+    assert installer._is_product_bundle_terminal_host(host)
+
+    # A shell script at the inner path is not a native host, however branded.
+    host.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    host.chmod(0o755)
+    assert not installer._is_product_bundle_terminal_host(host)
 
 
 def test_runtime_pack_uninstall_prunes_only_created_empty_xdg_parents(
@@ -586,8 +717,17 @@ def test_generation_owned_mcp_launcher_reports_generation_over_stdio(
     generation = tmp_path / "runtime" / "4.3.1+gdeadbeef"
     runtime_mcp = generation / "vibecrafted-mcp" / "vibecrafted_mcp"
     runtime_core = generation / "vibecrafted-core" / "vibecrafted_core"
-    shutil.copytree(REPO_ROOT / "vibecrafted-mcp" / "vibecrafted_mcp", runtime_mcp)
-    shutil.copytree(REPO_ROOT / "vibecrafted-core" / "vibecrafted_core", runtime_core)
+    no_bytecode = shutil.ignore_patterns("__pycache__", "*.pyc")
+    shutil.copytree(
+        REPO_ROOT / "vibecrafted-mcp" / "vibecrafted_mcp",
+        runtime_mcp,
+        ignore=no_bytecode,
+    )
+    shutil.copytree(
+        REPO_ROOT / "vibecrafted-core" / "vibecrafted_core",
+        runtime_core,
+        ignore=no_bytecode,
+    )
     expected_version = "4.3.1+gdeadbeef"
     (runtime_mcp / "VERSION").write_text(expected_version + "\n", encoding="utf-8")
 
@@ -2260,7 +2400,9 @@ def test_cmd_uninstall_prefers_manifest_tracked_launchers_and_helpers(
     helper_file = installer._helper_target_path()
     helper_file.parent.mkdir(parents=True, exist_ok=True)
     helper_file.write_text("# helper shim\n", encoding="utf-8")
-    manual_helper = installer._helper_legacy_path()
+    # An untracked helper-shaped file outside the product config home: the
+    # retired compat location is neither discovered nor removed.
+    manual_helper = home / ".config" / "zsh" / "vc-skills.zsh"
     manual_helper.parent.mkdir(parents=True, exist_ok=True)
     manual_helper.write_text("# user helper\n", encoding="utf-8")
 
@@ -2308,9 +2450,11 @@ def test_cmd_uninstall_prefers_manifest_tracked_launchers_and_helpers(
     manifest = json.loads(
         (backup_root / latest / "restore-manifest.json").read_text(encoding="utf-8")
     )
-    backed_paths = {Path(item["path"]).name for item in manifest["items"]}
-    assert "vc-skills.sh" in backed_paths
-    assert "vc-help" not in backed_paths
+    backed = [Path(item["path"]) for item in manifest["items"]]
+    # The shim lives in the product shell tree, so the backup may carry it as
+    # the file itself or inside its backed-up parent directory.
+    assert any(path == helper_file or path in helper_file.parents for path in backed)
+    assert "vc-help" not in {path.name for path in backed}
 
 
 def test_restore_roundtrip_recovers_launchers_and_runtime_symlinks(
@@ -2658,7 +2802,7 @@ def test_second_uninstall_after_full_teardown_is_a_no_op(
     stranger.mkdir()
     (stranger / "keep.txt").write_text("keep\n", encoding="utf-8")
     config_root = Path(os.environ["XDG_CONFIG_HOME"])
-    (config_root / "vibecrafted").mkdir(parents=True)
+    (config_root / "vibecrafted").mkdir(parents=True, exist_ok=True)
     (config_root / "vibecrafted" / "slack.env").write_text("T=1\n", encoding="utf-8")
 
     assert installer.cmd_uninstall(Namespace(dry_run=False)) == 0

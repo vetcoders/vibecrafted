@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
@@ -7,6 +8,8 @@ import shutil
 import subprocess
 import textwrap
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HELPER_SCRIPT = (
@@ -25,6 +28,14 @@ RUNTIME_HELPER = (
     / "helpers"
     / "vetcoders-runtime-core.sh"
 )
+REPO_RUNTIME = REPO_ROOT / "vibecrafted-core" / "vibecrafted_core" / "runtime"
+
+_GENERATION_FIXTURE_SPEC = importlib.util.spec_from_file_location(
+    "tui_generation_fixture", Path(__file__).with_name("_generation_fixture.py")
+)
+assert _GENERATION_FIXTURE_SPEC is not None and _GENERATION_FIXTURE_SPEC.loader
+gen = importlib.util.module_from_spec(_GENERATION_FIXTURE_SPEC)
+_GENERATION_FIXTURE_SPEC.loader.exec_module(gen)
 
 
 def _run_vetcoders_helper(
@@ -106,30 +117,73 @@ def _install_runtime_probe_helper(helper_root: Path, marker: str) -> None:
     )
 
 
-def test_vetcoders_shim_prefers_runtime_helper_from_repo_root(tmp_path: Path) -> None:
+def test_vetcoders_shim_loads_its_own_checkout_helper_not_an_ambient_root(
+    tmp_path: Path,
+) -> None:
+    # 65c7db7a (core.sh `_vetcoders_runtime_helper_candidates` /
+    # `_vetcoders_source_runtime_helpers`): the facade sources exactly one
+    # helper -- the one adjacent to its own physical owner root -- and binds
+    # VIBECRAFTED_ROOT to that owner afterwards ("inherited alternate roots
+    # cannot redirect it"). An ambient VIBECRAFTED_ROOT naming another tree with
+    # its own helper stopped being a candidate, so the repo root whose helper
+    # wins is the facade's checkout.
     marker = "runtime-helper-from-repo-root"
     helper_root = tmp_path / "probe-runtime"
     _install_runtime_probe_helper(helper_root, marker)
 
     result = _run_vetcoders_helper(
         HELPER_SCRIPT,
-        'printf "%s\\n" "$(_vetcoders_spawn_home codex)"',
+        'printf "%s\\n" "$(_vetcoders_spawn_home codex)"; '
+        'printf "VIBECRAFTED_ROOT=%s\\n" "$VIBECRAFTED_ROOT"',
         {"VIBECRAFTED_ROOT": str(helper_root)},
     )
 
     assert result.returncode == 0
-    assert result.stdout.strip() == marker
     assert result.stderr == ""
+    assert marker not in result.stdout
+    assert result.stdout.splitlines() == [
+        str(REPO_RUNTIME),
+        f"VIBECRAFTED_ROOT={REPO_ROOT}",
+    ]
 
 
-def test_vetcoders_shim_prefers_staged_tools_runtime_helper(tmp_path: Path) -> None:
+def test_vetcoders_shim_staged_facade_loads_its_helper_and_stray_copy_fails_closed(
+    tmp_path: Path,
+) -> None:
+    # Same owner rule (65c7db7a): a facade loads the helper of the tree it
+    # physically lives in. The staged tools generation's helper therefore wins
+    # for the staged facade itself, while a stray facade copy with no adjacent
+    # shell modules fails closed instead of borrowing that helper through
+    # VIBECRAFTED_TOOLS_HOME (vetcoders.sh `_vetcoders_resolve_shell_lib_dir`:
+    # "An incomplete tree is never permission to load another generation").
     marker = "runtime-helper-from-staged-tools"
     staged_home = tmp_path / "vibecrafted-home" / ".vibecrafted"
     tools_home = (
         tmp_path / "vibecrafted-home" / ".local" / "share" / "vibecrafted" / "tools"
     )
     staged_root = tools_home / "vibecrafted-current"
+    staged_runtime = staged_root / "vibecrafted-core" / "vibecrafted_core" / "runtime"
+    shutil.copytree(
+        REPO_RUNTIME,
+        staged_runtime,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
     _install_runtime_probe_helper(staged_root, marker)
+    staged_env = {
+        "VIBECRAFTED_HOME": str(staged_home),
+        "VIBECRAFTED_TOOLS_HOME": str(tools_home),
+        "VIBECRAFTED_ROOT": "",
+    }
+
+    staged = _run_vetcoders_helper(
+        staged_runtime / "shell" / "vetcoders.sh",
+        'printf "%s\\n" "$(_vetcoders_spawn_home codex)"',
+        staged_env,
+    )
+
+    assert staged.returncode == 0
+    assert staged.stdout.strip() == marker
+    assert staged.stderr == ""
 
     installed_script = (
         tmp_path / "installed-tree" / "skills" / "vc-agents" / "shell" / "vetcoders.sh"
@@ -137,19 +191,18 @@ def test_vetcoders_shim_prefers_staged_tools_runtime_helper(tmp_path: Path) -> N
     installed_script.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(HELPER_SCRIPT, installed_script)
 
-    result = _run_vetcoders_helper(
+    stray = _run_vetcoders_helper(
         installed_script,
-        'printf "%s\\n" "$(_vetcoders_spawn_home codex)"',
-        {
-            "VIBECRAFTED_HOME": str(staged_home),
-            "VIBECRAFTED_TOOLS_HOME": str(tools_home),
-            "VIBECRAFTED_ROOT": "",
-        },
+        "command -v _vetcoders_spawn_home >/dev/null || printf 'NOT_LOADED\\n'",
+        staged_env,
     )
 
-    assert result.returncode == 0
-    assert result.stdout.strip() == marker
-    assert result.stderr == ""
+    assert stray.returncode == 0
+    assert stray.stdout == "NOT_LOADED\n"
+    assert (
+        "Missing or symlinked Vibecrafted shell module directory: "
+        f"{installed_script.parent.resolve()}/lib"
+    ) in stray.stderr
 
 
 def test_vetcoders_spawn_script_path_stays_command_compatible() -> None:
@@ -223,20 +276,28 @@ def test_vetcoders_helper_source_does_not_prepend_bundled_bin_to_path(
 def test_vetcoders_require_vc_frame_uses_bundled_vc_frame_priority_without_path_leak(
     tmp_path: Path,
 ) -> None:
+    # The bundled engine is the loaded generation's own bin/vc-frame with its
+    # libexec/vc-frame engine (vc_frame.sh `_vetcoders_vc_frame_bin`, 3d9da4dc).
+    # The runtime-home bin that used to be preferred is no longer a source, so a
+    # stale copy there must lose, and neither location may leak onto PATH.
     staged_home = tmp_path / "home" / ".vibecrafted"
     runtime_home = tmp_path / "home" / ".local" / "share" / "vibecrafted"
-    bundled_bin = runtime_home / "bin"
-    bundled_bin.mkdir(parents=True)
-    bundled_vc_frame = bundled_bin / "vc-frame"
-    bundled_vc_frame.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
-    bundled_vc_frame.chmod(0o755)
+    stale_runtime_vc_frame = gen.write_executable(
+        runtime_home / "bin" / "vc-frame", "#!/usr/bin/env bash\nexit 97\n"
+    )
+    generation = gen.fake_generation(tmp_path)
+    bundled_vc_frame = gen.write_executable(
+        generation / "bin" / "vc-frame", "#!/usr/bin/env bash\nexit 0\n"
+    )
 
     initial_path = os.defpath
     result = _run_vetcoders_helper(
         HELPER_SCRIPT,
         (
+            f"{gen.loaded_root_prelude(generation)}; "
             "_vetcoders_require_vc_frame; "
             'printf "PATH=%s\\n" "$PATH"; '
+            'printf "BIN=%s\\n" "$(_vetcoders_vc_frame_bin)"; '
             "command -v vc-frame || true"
         ),
         {
@@ -244,57 +305,98 @@ def test_vetcoders_require_vc_frame_uses_bundled_vc_frame_priority_without_path_
             "VIBECRAFTED_HOME": str(staged_home),
             "VIBECRAFTED_RUNTIME_HOME": str(runtime_home),
             "VIBECRAFTED_ROOT": str(REPO_ROOT),
+            "VIBECRAFTED_PREFER_REPO_VC_FRAME": "",
         },
     )
 
     assert result.returncode == 0
     assert result.stderr == ""
-    assert result.stdout == f"PATH={initial_path}\n"
+    assert result.stdout == f"PATH={initial_path}\nBIN={bundled_vc_frame}\n"
+    assert str(stale_runtime_vc_frame) not in result.stdout
 
 
 def test_vetcoders_vc_frame_bin_prefers_vc_frame_on_path(tmp_path: Path) -> None:
+    # PATH lookup survives only in developer mode: VIBECRAFTED_PREFER_REPO_VC_FRAME=1
+    # on a directly sourced Git checkout (vc_frame.sh
+    # `_vetcoders_vc_frame_developer_mode`, 3d9da4dc). An installed generation
+    # never asks PATH; it answers with its own entry even when another vc-frame
+    # is first on PATH.
     fake_bin = tmp_path / "bin"
-    _write_capture_command(fake_bin, "vc-frame", tmp_path / "vc_frame-args.txt")
     _write_capture_command(fake_bin, "vc-frame", tmp_path / "vc-frame-args.txt")
+    path_with_fake = f"{fake_bin}:{os.defpath}"
 
-    result = _run_vetcoders_helper(
+    developer = _run_vetcoders_helper(
         HELPER_SCRIPT,
         "_vetcoders_vc_frame_bin",
         {
-            "PATH": f"{fake_bin}:{os.defpath}",
+            "PATH": path_with_fake,
             "VIBECRAFTED_ROOT": str(REPO_ROOT),
+            "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
+            "VIBECRAFTED_VC_FRAME_BIN": "",
         },
     )
 
-    assert result.returncode == 0
-    assert result.stderr == ""
-    assert result.stdout.strip() == str(fake_bin / "vc-frame")
+    assert developer.returncode == 0
+    assert developer.stderr == ""
+    assert developer.stdout.strip() == str(fake_bin / "vc-frame")
+
+    generation = gen.fake_generation(tmp_path)
+    generation_vc_frame = gen.write_executable(
+        generation / "bin" / "vc-frame", "#!/usr/bin/env bash\nexit 0\n"
+    )
+    installed = _run_vetcoders_helper(
+        HELPER_SCRIPT,
+        f"{gen.loaded_root_prelude(generation)}; _vetcoders_vc_frame_bin",
+        {
+            "PATH": path_with_fake,
+            "VIBECRAFTED_ROOT": str(REPO_ROOT),
+            "VIBECRAFTED_PREFER_REPO_VC_FRAME": "",
+            "VIBECRAFTED_VC_FRAME_BIN": "",
+        },
+    )
+
+    assert installed.returncode == 0
+    assert installed.stderr == ""
+    assert installed.stdout.strip() == str(generation_vc_frame)
 
 
 def test_dashboard_uses_bundled_vc_frame_priority_without_path_leak(
     tmp_path: Path,
 ) -> None:
+    # Same owner as above: the loaded generation's engine, never the retired
+    # runtime-home bin (3d9da4dc), and no PATH mutation visible to the caller.
     staged_home = tmp_path / "home" / ".vibecrafted"
     runtime_home = tmp_path / "home" / ".local" / "share" / "vibecrafted"
     capture_file = tmp_path / "vc-frame-args.txt"
-    _write_capture_command(runtime_home / "bin", "vc-frame", capture_file)
+    stale_probe = tmp_path / "stale-runtime-vc-frame-used"
+    gen.write_executable(
+        runtime_home / "bin" / "vc-frame",
+        f'#!/usr/bin/env bash\nprintf used > "{stale_probe}"\nexit 97\n',
+    )
+    generation = gen.fake_generation(tmp_path)
+    _write_capture_command(generation / "bin", "vc-frame", capture_file)
 
     initial_path = os.defpath
     result = _run_vetcoders_helper(
         HELPER_SCRIPT,
-        '_vetcoders_launch_dashboard ls && printf "PATH=%s\\n" "$PATH"',
+        (
+            f"{gen.loaded_root_prelude(generation)}; "
+            '_vetcoders_launch_dashboard ls && printf "PATH=%s\\n" "$PATH"'
+        ),
         {
             "CAPTURE_FILE": str(capture_file),
             "PATH": initial_path,
             "VIBECRAFTED_HOME": str(staged_home),
             "VIBECRAFTED_RUNTIME_HOME": str(runtime_home),
             "VIBECRAFTED_ROOT": str(REPO_ROOT),
+            "VIBECRAFTED_PREFER_REPO_VC_FRAME": "",
         },
     )
 
     assert result.returncode == 0
     assert result.stderr == ""
     assert capture_file.read_text(encoding="utf-8").splitlines() == ["list-sessions"]
+    assert not stale_probe.exists()
     assert result.stdout == f"PATH={initial_path}\n"
 
 
@@ -347,12 +449,16 @@ def test_await_pane_stays_silent_without_meta_helper(
     staged_home = tmp_path / "home" / ".vibecrafted"
     runtime_home = tmp_path / "home" / ".local" / "share" / "vibecrafted"
     capture_file = tmp_path / "vc-frame-args.txt"
-    _write_capture_command(runtime_home / "bin", "vc-frame", capture_file)
+    # A resolvable engine is the precondition for "silent": the loaded
+    # generation's own entry (3d9da4dc), not the retired runtime-home bin.
+    generation = gen.fake_generation(tmp_path)
+    _write_capture_command(generation / "bin", "vc-frame", capture_file)
 
     initial_path = os.defpath
     result = _run_vetcoders_helper(
         HELPER_SCRIPT,
         (
+            f"{gen.loaded_root_prelude(generation)}; "
             '_vetcoders_maybe_spawn_await_pane codex review run-424242 "$PWD"; '
             "sleep 0.2; "
             'printf "PATH=%s\\n" "$PATH"'
@@ -362,6 +468,7 @@ def test_await_pane_stays_silent_without_meta_helper(
             "PATH": initial_path,
             "VIBECRAFTED_HOME": str(staged_home),
             "VIBECRAFTED_RUNTIME_HOME": str(runtime_home),
+            "VIBECRAFTED_PREFER_REPO_VC_FRAME": "",
             "VC_FRAME": "operator",
         },
     )
@@ -405,8 +512,15 @@ def test_await_pane_targets_operator_tab_with_bundled_vc_frame_without_path_leak
     helper.chmod(0o755)
     (helper_root / "config" / "starship.toml").write_text("", encoding="utf-8")
 
-    _write_capture_command(runtime_home / "bin", "vc-frame", capture_file)
-    jq = runtime_home / "bin" / "jq"
+    # The engine is the loaded generation's own entry (3d9da4dc). The runtime-home
+    # bin is no longer put on PATH for the caller (core.sh
+    # `_vetcoders_path_with_bundled_bin_priority` drops owned generation bins and
+    # never prepends one), so the jq stub lives in an explicit tools dir on PATH.
+    generation = gen.fake_generation(tmp_path)
+    _write_capture_command(generation / "bin", "vc-frame", capture_file)
+    tools_bin = tmp_path / "tools" / "bin"
+    tools_bin.mkdir(parents=True)
+    jq = tools_bin / "jq"
     jq.write_text(
         textwrap.dedent(
             """\
@@ -435,10 +549,11 @@ def test_await_pane_targets_operator_tab_with_bundled_vc_frame_without_path_leak
     )
     jq.chmod(0o755)
 
-    initial_path = os.defpath
+    initial_path = f"{tools_bin}{os.pathsep}{os.defpath}"
     result = _run_vetcoders_helper(
         HELPER_SCRIPT,
         (
+            f"{gen.loaded_root_prelude(generation)}; "
             '_vetcoders_maybe_spawn_await_pane codex review run-424242 "$PWD" 7 3; '
             "sleep 1.2; "
             'printf "PATH=%s\\n" "$PATH"'
@@ -474,7 +589,7 @@ def test_await_pane_targets_operator_tab_with_bundled_vc_frame_without_path_leak
 
 def test_compact_session_name_is_zsh_compatible() -> None:
     if shutil.which("zsh") is None:
-        return
+        pytest.skip("zsh is required for the compact session name contract")
 
     result = subprocess.run(
         [
@@ -595,7 +710,7 @@ def test_vc_skill_wrapper_help_after_agent_does_not_launch_worker() -> None:
     )
 
     assert result.returncode == 0
-    assert "Usage: vc-audit <claude|codex|agy|junie|grok|cursor>" in result.stderr
+    assert "Usage: vc-audit <claude|codex|agy|junie|grok|cursor|kimi>" in result.stderr
     assert "launched" not in result.stdout
 
 

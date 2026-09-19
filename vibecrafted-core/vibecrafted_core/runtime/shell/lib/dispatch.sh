@@ -208,18 +208,18 @@ _vetcoders_skill_wrapper_usage() {
   local skill="$1"
   case "$skill" in
     init)
-      printf 'Usage: vc-init <claude|codex|agy|junie|grok|cursor> [--prompt <text>] [--file <path>]\n' >&2
+      printf 'Usage: vc-init <claude|codex|agy|junie|grok|cursor|kimi> [--prompt <text>] [--file <path>]\n' >&2
       ;;
     marbles)
-      printf 'Usage: vc-marbles <claude|codex|agy|junie|grok|cursor> [--prompt <text>|--file <path>|--depth <n>] [--count <n>]\n' >&2
+      printf 'Usage: vc-marbles <claude|codex|agy|junie|grok|cursor|kimi> [--prompt <text>|--file <path>|--depth <n>] [--count <n>]\n' >&2
       printf '       vc-marbles <pause|stop|resume|session|inspect|delete|gc> [args]\n' >&2
       ;;
     polarize)
-      printf 'Usage: vc-polarize <claude|codex|agy|junie|grok|cursor> --task <text> [--prompt <text>] [--file <path>] [--no-aicx] [--no-context-corpus]\n' >&2
-      printf '       vc-polarize <claude|codex|agy|junie|grok|cursor> [--count <n>] [--prompt <text>] [--file <path>]\n' >&2
+      printf 'Usage: vc-polarize <claude|codex|agy|junie|grok|cursor|kimi> --task <text> [--prompt <text>] [--file <path>] [--no-aicx] [--no-context-corpus]\n' >&2
+      printf '       vc-polarize <claude|codex|agy|junie|grok|cursor|kimi> [--count <n>] [--prompt <text>] [--file <path>]\n' >&2
       ;;
     *)
-      printf 'Usage: vc-%s <claude|codex|agy|junie|grok|cursor> [--prompt <text>] [--file <path>]\n' "$skill" >&2
+      printf 'Usage: vc-%s <claude|codex|agy|junie|grok|cursor|kimi> [--prompt <text>] [--file <path>]\n' "$skill" >&2
       ;;
   esac
 }
@@ -227,7 +227,7 @@ _vetcoders_skill_wrapper_usage() {
 _vetcoders_has_agent() {
   local candidate="${1:-}"
   case "$candidate" in
-    claude|codex|agy|junie|grok|cursor) return 0 ;;
+    claude|codex|agy|junie|grok|cursor|kimi) return 0 ;;
     gemini) return 1 ;;  # deprecated - gemini CLI is dead upstream, use agy (Google Antigravity CLI)
     *) return 1 ;;
   esac
@@ -335,7 +335,7 @@ _vetcoders_skill_wrapper() {
     return 1
   }
   _vetcoders_has_agent "$tool" || {
-    printf 'vc-%s expects claude|codex|agy|junie|grok|cursor as the first argument (not a placeholder with angle brackets).\n' "$skill" >&2
+    printf 'vc-%s expects claude|codex|agy|junie|grok|cursor|kimi as the first argument (not a placeholder with angle brackets).\n' "$skill" >&2
     _vetcoders_deck_help "$skill"
     return 1
   }
@@ -374,19 +374,6 @@ _vetcoders_skill_dispatch() {
     return
   fi
   _vetcoders_no_deck_report "$skill"
-}
-
-_vetcoders_command_dispatch() {
-  local command_name="$1"
-  local deck_command="$2"
-  shift 2 || true
-  local deck_bin
-  deck_bin="$(_vetcoders_resolve_deck_bin)"
-  if [ -n "$deck_bin" ] && [ -x "$deck_bin" ]; then
-    "$deck_bin" "$deck_command" "$@"
-    return
-  fi
-  _vetcoders_no_deck_report "$command_name"
 }
 
 # Shell dotfiles commonly alias vc/vc-* (old container templates did); zsh
@@ -510,7 +497,6 @@ Utilities:
   repo-full                      Legacy full git context helper
   skills-sync                    Sync skills to agents
   vc-frontier-paths              Show frontier config paths
-  vc-frontier-install            Install frontier presets (starship/atuin/vc_frame)
   vc-help                        This help
 
 Frontier docs:  docs/FRONTIER.md (starship, atuin, optional vc_frame)
@@ -707,7 +693,7 @@ repo-full() {
   [[ -z "$default_branch" ]] && default_branch="$(git remote show "$default_remote" 2>/dev/null | sed -n '/HEAD branch/s/.*: //p' | head -n 1)"
   [[ -z "$default_branch" ]] && default_branch="unknown"
 
-  # shellcheck disable=SC1083 # @{u} is git upstream ref syntax, not shell braces
+  # @{u} is git upstream ref syntax, not shell braces
   if git rev-parse '@{u}' >/dev/null 2>&1; then
     if read -r upstream_ahead upstream_behind <<< "$(git rev-list --left-right --count HEAD...'@{u}' 2>/dev/null)" && [[ "$upstream_ahead" =~ ^[0-9]+$ && "$upstream_behind" =~ ^[0-9]+$ ]]; then
       upstream_status="known"
@@ -927,6 +913,7 @@ vc-start() {
   # One parser, one owner: the create-only workspace contract in dashboard.sh
   # (root → name → live inventory → exclusive create → enter / VC Terminal).
   _vetcoders_start_prepare_arguments "$@" || return $?
+  # shellcheck disable=SC2154  # set by _vetcoders_start_prepare_arguments (dashboard.sh) just above
   _vetcoders_start_entry "${_vetcoders_start_frame_argv[@]}"
 }
 
@@ -948,20 +935,4 @@ vc-frontier-paths() {
   [[ -n "$atuin_config" ]] && printf 'ATUIN_CONFIG=%s\n' "$atuin_config"
   [[ -n "$vc_frame_config" ]] && printf 'VC_FRAME_CONFIG_DIR=%s\n' "$(dirname "$vc_frame_config")"
   return 0
-}
-
-vc-frontier-install() {
-  local repo_root script base
-  repo_root="$(_vetcoders_frontier_source_root)" || {
-    echo "Repo-owned frontier source not found." >&2
-    return 1
-  }
-  base="$(_vetcoders_spawn_home "vc-agents")"
-  script="$base/scripts/install-frontier-config.sh"
-  
-  [[ -f "$script" ]] || {
-    echo "Frontier installer not found: $script" >&2
-    return 1
-  }
-  bash "$script" --source "$repo_root" "$@"
 }
