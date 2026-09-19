@@ -59,7 +59,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
 
     let title = if app.config.view == ConsoleView::Observe {
         Line::from(vec![
-            Span::styled("voc", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled("Voc", Style::default().add_modifier(Modifier::BOLD)),
             Span::styled(
                 format!("  {}  {}", app.observe.status.label(), app.observe.origin),
                 Style::default().fg(Color::DarkGray),
@@ -70,11 +70,12 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         Line::from(vec![
             Span::styled(
-                "Vibecrafted Operator Console",
+                "Vibecrafted operator",
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             ),
+            Span::styled("  Console", Style::default().fg(Color::DarkGray)),
             Span::raw("  "),
             Span::styled(app.status_summary(), Style::default().fg(Color::Gray)),
         ])

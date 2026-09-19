@@ -137,7 +137,7 @@ RUNTIME_HELP = {
     "local-vm": ("Not available yet.", ""),
     "cloud-soon": ("Not available yet.", ""),
 }
-_WORKSHOP_TITLES = frozenset({"agent workspaces", "new agent", "voc", "start here"})
+_WORKSHOP_TITLES = frozenset({"agent workspaces", "new agent", "Voc", "start here"})
 _AGENT_BINARIES = {
     "agy": "agy",
     "gemini": "agy",
@@ -970,7 +970,7 @@ class Workshop:
                 curses.A_DIM,
             )
             list_row += 1
-        buttons = ("New agent", "voc")
+        buttons = ("New agent", "Voc")
         col = left
         button_row = min(height - 3, list_row + (0 if compact else 1))
         for index, label in enumerate(buttons):
@@ -1003,9 +1003,9 @@ class Workshop:
                     curses.A_DIM,
                 )
         hint = (
-            "n New  v voc  o other sessions"
+            "n New  v Voc  o other sessions"
             if compact
-            else "n New agent · v voc · o other sessions · click a row to open its tab"
+            else "n New agent · v Voc · o other sessions · click a row to open its tab"
         )
         _safe_addstr(self.window, height - 2, left, hint, curses.A_DIM)
         if self.error:
@@ -1446,7 +1446,7 @@ class Workshop:
     def open_voc(self) -> None:
         try:
             result = subprocess.run(
-                ["vc-frame", "action", "go-to-tab-name", "voc"],
+                ["vc-frame", "action", "go-to-tab-name", "Voc"],
                 check=False,
                 capture_output=True,
                 text=True,
@@ -1456,7 +1456,7 @@ class Workshop:
             return
         if result.returncode != 0:
             self.error = (
-                result.stderr or result.stdout or "voc tab is unavailable"
+                result.stderr or result.stdout or "Voc tab is unavailable"
             ).strip()
 
     def _focus_face(self, index: int) -> None:

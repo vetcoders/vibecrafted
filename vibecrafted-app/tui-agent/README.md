@@ -1,4 +1,4 @@
-# Vibecrafted Operator Console
+# Voc — Vibecrafted operator console
 
 This crate is the Rust TUI operator console for Vibecrafted.
 
