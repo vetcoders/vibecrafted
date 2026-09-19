@@ -2043,9 +2043,8 @@ mod tests {
         ]);
         assert_eq!(unrelated, ArtifactChange::default());
 
-        let leftover_meta = classify_artifact_change(&[
-            PathBuf::from("/tmp/home/artifacts/run/report.meta.json"),
-        ]);
+        let leftover_meta =
+            classify_artifact_change(&[PathBuf::from("/tmp/home/artifacts/run/report.meta.json")]);
         assert_eq!(leftover_meta, ArtifactChange::default());
 
         let relevant = classify_artifact_change(&[

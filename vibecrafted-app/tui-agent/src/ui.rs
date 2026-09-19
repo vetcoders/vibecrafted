@@ -1595,10 +1595,7 @@ fn draw_mc_quality_footer(
     }
     if quality.parse_failures > 0 {
         lines.push(Line::from(Span::styled(
-            format!(
-                "{} snapshot parse failures skipped",
-                quality.parse_failures
-            ),
+            format!("{} snapshot parse failures skipped", quality.parse_failures),
             Style::default().fg(Color::Yellow),
         )));
     }
