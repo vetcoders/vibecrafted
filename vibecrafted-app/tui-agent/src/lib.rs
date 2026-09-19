@@ -787,6 +787,24 @@ fn handle_key(
             {
                 app.toggle_observe_transcript_view();
             }
+            KeyCode::Char('u')
+                if app.config.view == crate::observe::ConsoleView::Observe
+                    && app.active_tab() == AppTab::Monitor =>
+            {
+                app.toggle_observe_transcript_class(crate::observe::TranscriptLineClass::Content);
+            }
+            KeyCode::Char('i')
+                if app.config.view == crate::observe::ConsoleView::Observe
+                    && app.active_tab() == AppTab::Monitor =>
+            {
+                app.toggle_observe_transcript_class(crate::observe::TranscriptLineClass::Thinking);
+            }
+            KeyCode::Char('c')
+                if app.config.view == crate::observe::ConsoleView::Observe
+                    && app.active_tab() == AppTab::Monitor =>
+            {
+                app.toggle_observe_transcript_class(crate::observe::TranscriptLineClass::Command);
+            }
             KeyCode::Char('/') => {
                 app.focus = LaunchFocus::Search;
                 app.append_status("search: type to filter runs, Enter/Esc closes, Ctrl+L clears");

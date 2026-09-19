@@ -262,6 +262,9 @@ fn truncate_event(value: &str) -> String {
 }
 
 fn json_line_human(value: &serde_json::Value) -> Option<String> {
+    if let Some(human) = claude_row_human(value) {
+        return Some(human);
+    }
     if let Some(human) = format_agy_event(value) {
         return Some(human);
     }
@@ -284,9 +287,219 @@ fn json_line_human(value: &serde_json::Value) -> Option<String> {
         if matches!(kind, "init" | "tools" | "step_update" | "result" | "error") {
             return format_agy_event_by_kind(kind, value);
         }
+        // Dig one level into the payload named after the kind before giving up
+        // on content (`{"type":"thought","thought":{"content":…}}`).
+        for key in ["thought", "data", "payload"] {
+            if let Some(text) = value
+                .get(key)
+                .and_then(json_text)
+                .map(|text| text.trim().to_string())
+                .filter(|text| !text.is_empty())
+            {
+                return Some(format!("{kind}: {text}"));
+            }
+        }
+        // Recognized noise: an event whose only payload is its own kind label
+        // earns no line (the operator reads content, not heartbeats).
+        if matches!(kind, "thought" | "thinking" | "ping" | "pong" | "heartbeat") {
+            return Some(String::new());
+        }
         return Some(kind.to_string());
     }
     None
+}
+
+/// Claude-style conversational row: `{"type":"user|assistant|system", …,
+/// "message":{"role":…, "content": …}}`, or a bare row carrying a `content`
+/// array. Walks `content[]` blocks the way aicx-parser's claude adapter
+/// classifies them (`crates/aicx-parser/src/adapters/claude.rs`): text turns,
+/// thinking blocks (empty/signature-only skipped), `tool_use` with an input
+/// preview, `tool_result` with extracted text. Returns `None` for
+/// non-conversational shapes; `Some("")` marks recognized noise the caller
+/// drops. Timestamps render as `[HH:MM]` prefixes when the row carries one.
+fn claude_row_human(value: &serde_json::Value) -> Option<String> {
+    let top_type = value.get("type").and_then(serde_json::Value::as_str);
+    let message = value.get("message").and_then(serde_json::Value::as_object);
+    let content = message
+        .and_then(|msg| msg.get("content"))
+        .or_else(|| value.get("content"));
+    let rowish = message.is_some()
+        || matches!(top_type, Some("user" | "assistant" | "system"))
+        || matches!(content, Some(serde_json::Value::Array(_)));
+    if !rowish {
+        return None;
+    }
+    let role = message
+        .and_then(|msg| msg.get("role"))
+        .and_then(serde_json::Value::as_str)
+        .or(top_type)
+        .unwrap_or("event");
+    let stamp = value
+        .get("timestamp")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|ts| ts.split_once('T').map(|(_, clock)| clock))
+        .and_then(|clock| clock.get(..5))
+        .map(|hhmm| format!("[{hhmm}] "))
+        .unwrap_or_default();
+    let mut out: Vec<String> = Vec::new();
+    match content {
+        Some(serde_json::Value::String(text)) => push_role_line(&mut out, &stamp, role, text),
+        Some(serde_json::Value::Array(blocks)) => {
+            for block in blocks {
+                render_claude_block(&mut out, &stamp, role, block);
+            }
+        }
+        _ => {}
+    }
+    Some(out.join("\n"))
+}
+
+fn push_role_line(out: &mut Vec<String>, stamp: &str, role: &str, text: &str) {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    if role == "user" && is_harness_noise(trimmed) {
+        return;
+    }
+    out.push(format!("{stamp}{role}: {trimmed}"));
+}
+
+/// Head-anchored markers of harness-injected synthetic user turns, ported from
+/// `aicx-parser`'s conversation projection (`HARNESS_HEAD_MARKERS`): slash
+/// command echoes, inline `! command` I/O, and hook reminders are transport,
+/// not conversation.
+const HARNESS_NOISE_HEADS: [&str; 7] = [
+    "<command-message>",
+    "<command-name>",
+    "<local-command-caveat>",
+    "<bash-input>",
+    "<bash-stdout>",
+    "<bash-stderr>",
+    "<system-reminder>",
+];
+
+fn is_harness_noise(text: &str) -> bool {
+    HARNESS_NOISE_HEADS
+        .iter()
+        .any(|marker| text.starts_with(marker))
+}
+
+fn render_claude_block(out: &mut Vec<String>, stamp: &str, role: &str, block: &serde_json::Value) {
+    if let serde_json::Value::String(text) = block {
+        push_role_line(out, stamp, role, text);
+        return;
+    }
+    let Some(object) = block.as_object() else {
+        return;
+    };
+    let kind = object
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    match kind {
+        "text" => {
+            if let Some(text) = object.get("text").and_then(serde_json::Value::as_str) {
+                push_role_line(out, stamp, role, text);
+            }
+        }
+        // Signature-only thinking (`{"thinking":"","signature":…}`) is a known
+        // block with no body — consumed silently, exactly like aicx does.
+        "thinking" => {
+            if let Some(text) = object
+                .get("thinking")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+            {
+                out.push(format!("{stamp}thinking: {}", clip(text, 240)));
+            }
+        }
+        "tool_use" => {
+            let name = object
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .filter(|name| !name.is_empty())
+                .unwrap_or("tool");
+            out.push(format!(
+                "{stamp}[tool] {name}: {}",
+                tool_input_preview(object.get("input"))
+            ));
+        }
+        "tool_result" => {
+            let text = tool_result_preview(object.get("content"));
+            if !text.is_empty() {
+                out.push(format!("{stamp}[result] {text}"));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// One-line command/path preview of a tool call's input: the recognizable key
+/// (`command`, `file_path`, …) wins over a compact JSON rendering.
+fn tool_input_preview(input: Option<&serde_json::Value>) -> String {
+    let Some(input) = input else {
+        return String::new();
+    };
+    let text = match input {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Object(map) => {
+            let mut picked = None;
+            for key in [
+                "command",
+                "file_path",
+                "path",
+                "pattern",
+                "query",
+                "prompt",
+                "url",
+            ] {
+                if let Some(value) = map.get(key).and_then(serde_json::Value::as_str) {
+                    picked = Some(value.to_string());
+                    break;
+                }
+            }
+            picked.unwrap_or_else(|| serde_json::to_string(input).unwrap_or_default())
+        }
+        other => other.to_string(),
+    };
+    clip(&text, 110)
+}
+
+/// Text of a tool result: plain string, or the joined `text` blocks of a
+/// content array (mirrors aicx `tool_result_text`, trimmed to one preview).
+fn tool_result_preview(content: Option<&serde_json::Value>) -> String {
+    let text = match content {
+        Some(serde_json::Value::String(text)) => text.clone(),
+        Some(serde_json::Value::Array(blocks)) => blocks
+            .iter()
+            .filter_map(|block| match block {
+                serde_json::Value::String(text) => Some(text.trim()),
+                serde_json::Value::Object(object) => object
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim),
+                _ => None,
+            })
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · "),
+        _ => String::new(),
+    };
+    clip(&text, 160)
+}
+
+/// Collapse whitespace and truncate to `max` chars with an ellipsis tail.
+fn clip(text: &str, max: usize) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = collapsed.chars();
+    let prefix: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() {
+        format!("{prefix}…")
+    } else {
+        prefix
+    }
 }
 
 /// Map `AgentStreamParser._format_agy_event`: `{"event": ..., "<event>": {...}}`
@@ -466,19 +679,24 @@ fn unescape_json_string(raw: &str) -> Option<String> {
 }
 
 fn wrap_human_line(value: &str, width: usize) -> Vec<String> {
-    if value.chars().count() <= width {
-        return vec![value.to_string()];
-    }
     let mut lines = Vec::new();
-    let mut current = String::new();
-    for ch in value.chars() {
-        current.push(ch);
-        if current.chars().count() >= width {
-            lines.push(std::mem::take(&mut current));
+    for segment in value.split('\n') {
+        let mut rest = segment;
+        loop {
+            if rest.chars().count() <= width {
+                lines.push(rest.to_string());
+                break;
+            }
+            // Word boundary when one exists inside the window; hard cut only
+            // for unbroken runs longer than the width.
+            let window: String = rest.chars().take(width).collect();
+            let cut = window
+                .rfind(char::is_whitespace)
+                .filter(|index| *index > 0)
+                .unwrap_or(window.len());
+            lines.push(window[..cut].trim_end().to_string());
+            rest = rest[cut..].trim_start();
         }
-    }
-    if !current.is_empty() {
-        lines.push(current);
     }
     lines
 }
@@ -638,6 +856,81 @@ mod tests {
         assert!(done.contains("not json at all"));
         assert!(!done.contains("\"event\":\"result\""));
         let _ = human;
+    }
+
+    #[test]
+    fn humanize_transcript_walks_claude_content_blocks() {
+        let raw = concat!(
+            r#"{"type":"user","timestamp":"2026-09-19T10:12:37.000Z","message":{"role":"user","content":[{"type":"text","text":"napraw transkrypt"}]}}"#,
+            "\n",
+            r#"{"type":"assistant","timestamp":"2026-09-19T10:12:41.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":""},{"type":"text","text":"patrzę w kod"},{"type":"tool_use","name":"Bash","input":{"command":"loct find render_line"}},{"type":"tool_use","name":"Read","input":{"file_path":"/tmp/x.rs"}}]}}"#,
+            "\n",
+            r#"{"type":"user","timestamp":"2026-09-19T10:12:42.000Z","message":{"role":"user","content":[{"type":"tool_result","content":[{"type":"text","text":"found 3"}]}]}}"#,
+            "\n",
+            r#"{"type":"system","subtype":"hook","content":null}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":"<command-message>vc-init</command-message>"}}"#,
+            "\n"
+        );
+        let human = humanize_transcript(raw);
+        assert!(human.contains("[10:12] user: napraw transkrypt"));
+        assert!(human.contains("[10:12] assistant: patrzę w kod"));
+        assert!(human.contains("[tool] Bash: loct find render_line"));
+        assert!(human.contains("[tool] Read: /tmp/x.rs"));
+        assert!(human.contains("[result] found 3"));
+        // Signature-only thinking, content-less system rows, and harness
+        // noise earn no line — the pane shows content, not scaffolding.
+        assert!(!human.contains("thinking"));
+        assert!(!human.contains("system"));
+        assert!(!human.contains("command-message"));
+        assert!(
+            !human.lines().any(|line| line.trim() == "user"),
+            "bare role label leaked into the human transcript"
+        );
+    }
+
+    #[test]
+    fn humanize_transcript_skips_empty_thoughts_and_keeps_unknown_kinds_honest() {
+        let raw = concat!(
+            r#"{"type":"thought"}"#,
+            "\n",
+            r#"{"type":"thought","thought":{"content":"kontekst rośnie"}}"#,
+            "\n",
+            r#"{"kind":"custom_event"}"#,
+            "\n"
+        );
+        let human = humanize_transcript(raw);
+        assert!(
+            !human.lines().any(|line| line.trim() == "thought"),
+            "content-less thought earned a line: {human:?}"
+        );
+        assert!(human.contains("thought: kontekst rośnie"));
+        assert!(human.contains("custom_event"));
+    }
+
+    #[test]
+    fn wrap_human_line_breaks_on_word_boundaries() {
+        let wrapped = wrap_human_line("ala ma kota a kot ma ale i coś jeszcze długiego", 20);
+        assert!(wrapped.iter().all(|line| line.chars().count() <= 20));
+        assert_eq!(
+            wrapped.first().map(String::as_str),
+            Some("ala ma kota a kot")
+        );
+        assert_eq!(
+            wrapped.join(" "),
+            "ala ma kota a kot ma ale i coś jeszcze długiego"
+        );
+        // Unbroken runs still hard-cut at the width.
+        let hard = wrap_human_line(&"x".repeat(50), 20);
+        assert_eq!(
+            hard.iter().map(String::len).collect::<Vec<_>>(),
+            vec![20, 20, 10]
+        );
+        // Embedded newlines become separate lines.
+        assert_eq!(
+            wrap_human_line("a\nb", 88),
+            vec!["a".to_string(), "b".to_string()]
+        );
     }
 
     #[test]
