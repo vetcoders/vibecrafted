@@ -9,7 +9,7 @@ use crate::mission_control::{
     ActionPriority, ActionQueueItem, ActionQueueKind, ActiveDispatch, AgentStatsRow, DataQuality,
     FailureEntry, FleetHealthSignal, FleetHealthStatus, SkillStatsRow, WaveSegment, WaveState,
 };
-use crate::observe::{ConsoleView, ObserveHealth};
+use crate::observe::{self, ConsoleView, ObserveHealth};
 use crate::state::RunKind;
 use ratatui::prelude::*;
 use ratatui::style::{Color, Modifier, Style};
@@ -225,7 +225,16 @@ fn draw_observe(frame: &mut Frame, area: Rect, app: &App) {
                 Style::default().fg(Color::DarkGray),
             )));
         } else {
+            let filtering = app.observe.transcript_view == observe::TranscriptView::Human;
             for line in app.observe.transcript.lines() {
+                if filtering
+                    && !app
+                        .observe
+                        .transcript_filter
+                        .shows(observe::transcript_line_class(line))
+                {
+                    continue;
+                }
                 body.push(Line::from(line.to_string()));
             }
         }
@@ -238,12 +247,21 @@ fn draw_observe(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(Color::DarkGray),
         )));
     }
+    let transcript_title = match app.observe.transcript_filter.hidden_label() {
+        Some(hidden) if app.observe.transcript_view == observe::TranscriptView::Human => {
+            format!(
+                " Transcript · {} · {hidden} ",
+                app.observe.transcript_view.label()
+            )
+        }
+        _ => format!(" Transcript · {} ", app.observe.transcript_view.label()),
+    };
     frame.render_widget(
         Paragraph::new(body)
             .wrap(Wrap { trim: false })
             .scroll((app.interaction.scroll.observe_transcript, 0))
             .block(Block::default().borders(Borders::ALL).title(Span::styled(
-                format!(" Transcript · {} ", app.observe.transcript_view.label()),
+                transcript_title,
                 Style::default().add_modifier(Modifier::BOLD),
             ))),
         columns.transcript,
@@ -841,7 +859,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     );
 
     let shortcuts = if app.config.view == ConsoleView::Observe {
-        "Observe: j/k select  o latest/oldest  t human/raw  m memory  w aicx wizard  r refresh  q quit"
+        "Observe: j/k select  o latest/oldest  t human/raw  u/i/c content/thinking/commands  m memory  w aicx wizard  r refresh  q quit"
     } else {
         "Global: q quit  r refresh  a cycle agent  v cycle runtime  y copy  Ctrl+L clear search  ? help"
     };

@@ -810,6 +810,15 @@ impl App {
         ));
     }
 
+    pub fn toggle_observe_transcript_class(&mut self, class: observe::TranscriptLineClass) {
+        self.observe.transcript_filter.toggle(class);
+        let label = match self.observe.transcript_filter.hidden_label() {
+            Some(hidden) => format!("transcript filter: {hidden}"),
+            None => "transcript filter: all".to_string(),
+        };
+        self.append_status(label);
+    }
+
     pub fn move_observe_selection(&mut self, delta: isize) {
         if self.observe.runs.is_empty() {
             return;

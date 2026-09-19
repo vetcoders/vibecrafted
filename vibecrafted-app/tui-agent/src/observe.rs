@@ -69,6 +69,102 @@ impl TranscriptView {
     }
 }
 
+/// Which human-transcript line classes the operator wants on screen. The raw
+/// view always shows everything; the filter only applies to the human render.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TranscriptFilter {
+    pub content: bool,
+    pub thinking: bool,
+    pub commands: bool,
+}
+
+impl Default for TranscriptFilter {
+    fn default() -> Self {
+        Self {
+            content: true,
+            thinking: true,
+            commands: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranscriptLineClass {
+    Content,
+    Thinking,
+    Command,
+    Other,
+}
+
+/// Classify one human-rendered transcript line. Lines carry an optional
+/// `[HH:MM] ` stamp, so strip it first — `[tool]` / `[result]` labels also
+/// start with `[` and must not be eaten as a clock.
+pub fn transcript_line_class(line: &str) -> TranscriptLineClass {
+    let mut body = line;
+    if let Some(rest) = body.strip_prefix('[')
+        && let Some(after) = rest.get(5..).and_then(|tail| tail.strip_prefix("] "))
+    {
+        let clock = &rest[..5];
+        let is_clock = clock.len() == 5
+            && clock.as_bytes()[0].is_ascii_digit()
+            && clock.as_bytes()[1].is_ascii_digit()
+            && clock.as_bytes()[2] == b':'
+            && clock.as_bytes()[3].is_ascii_digit()
+            && clock.as_bytes()[4].is_ascii_digit();
+        if is_clock {
+            body = after;
+        }
+    }
+    if body.starts_with("thinking:") {
+        TranscriptLineClass::Thinking
+    } else if body.starts_with("[tool]") || body.starts_with("[result]") {
+        TranscriptLineClass::Command
+    } else if body.starts_with("user:") || body.starts_with("assistant:") {
+        TranscriptLineClass::Content
+    } else {
+        TranscriptLineClass::Other
+    }
+}
+
+impl TranscriptFilter {
+    pub fn shows(&self, class: TranscriptLineClass) -> bool {
+        match class {
+            TranscriptLineClass::Content => self.content,
+            TranscriptLineClass::Thinking => self.thinking,
+            TranscriptLineClass::Command => self.commands,
+            TranscriptLineClass::Other => true,
+        }
+    }
+
+    pub fn toggle(&mut self, class: TranscriptLineClass) {
+        match class {
+            TranscriptLineClass::Content => self.content = !self.content,
+            TranscriptLineClass::Thinking => self.thinking = !self.thinking,
+            TranscriptLineClass::Command => self.commands = !self.commands,
+            TranscriptLineClass::Other => {}
+        }
+    }
+
+    /// `Some("-thinking -commands")` when anything is hidden, for the title.
+    pub fn hidden_label(&self) -> Option<String> {
+        let mut hidden = Vec::new();
+        if !self.content {
+            hidden.push("-content");
+        }
+        if !self.thinking {
+            hidden.push("-thinking");
+        }
+        if !self.commands {
+            hidden.push("-commands");
+        }
+        if hidden.is_empty() {
+            None
+        } else {
+            Some(hidden.join(" "))
+        }
+    }
+}
+
 impl ConsoleView {
     pub fn parse(raw: &str) -> anyhow::Result<Self> {
         match raw {
@@ -94,6 +190,7 @@ pub struct ObserveState {
     pub selected: usize,
     pub sort: ObserveSort,
     pub transcript_view: TranscriptView,
+    pub transcript_filter: TranscriptFilter,
     pub transcript: String,
     pub transcript_raw: String,
     pub transcript_run_id: Option<String>,
@@ -473,6 +570,76 @@ fn truncate(value: &str, width: usize) -> String {
 mod tests {
     use super::*;
     use std::time::UNIX_EPOCH;
+
+    #[test]
+    fn transcript_line_class_sees_through_optional_clock_stamp() {
+        assert_eq!(
+            transcript_line_class("[14:23] user: inspect the suite"),
+            TranscriptLineClass::Content
+        );
+        assert_eq!(
+            transcript_line_class("assistant: done"),
+            TranscriptLineClass::Content
+        );
+        assert_eq!(
+            transcript_line_class("[14:23] thinking: what now"),
+            TranscriptLineClass::Thinking
+        );
+        assert_eq!(
+            transcript_line_class("[14:24] [tool] bash: cargo test"),
+            TranscriptLineClass::Command
+        );
+        assert_eq!(
+            transcript_line_class("[result] test result: ok"),
+            TranscriptLineClass::Command
+        );
+        // `[tool]` must not be eaten as a clock prefix.
+        assert_eq!(
+            transcript_line_class("[tool] bash: cargo test"),
+            TranscriptLineClass::Command
+        );
+        // Malformed stamps and unknown shapes stay visible (Other).
+        assert_eq!(
+            transcript_line_class("[9:99] user: nope"),
+            TranscriptLineClass::Other
+        );
+        assert_eq!(
+            transcript_line_class("system: note"),
+            TranscriptLineClass::Other
+        );
+    }
+
+    #[test]
+    fn transcript_filter_toggles_and_reports_hidden_classes() {
+        let mut filter = TranscriptFilter::default();
+        assert!(filter.shows(TranscriptLineClass::Content));
+        assert!(filter.shows(TranscriptLineClass::Thinking));
+        assert!(filter.shows(TranscriptLineClass::Command));
+        assert!(filter.shows(TranscriptLineClass::Other));
+        assert_eq!(filter.hidden_label(), None);
+
+        filter.toggle(TranscriptLineClass::Thinking);
+        filter.toggle(TranscriptLineClass::Command);
+        assert!(filter.shows(TranscriptLineClass::Content));
+        assert!(!filter.shows(TranscriptLineClass::Thinking));
+        assert!(!filter.shows(TranscriptLineClass::Command));
+        assert!(filter.shows(TranscriptLineClass::Other));
+        assert_eq!(
+            filter.hidden_label().as_deref(),
+            Some("-thinking -commands")
+        );
+
+        filter.toggle(TranscriptLineClass::Content);
+        assert_eq!(
+            filter.hidden_label().as_deref(),
+            Some("-content -thinking -commands")
+        );
+        filter.toggle(TranscriptLineClass::Other);
+        assert_eq!(
+            filter.hidden_label().as_deref(),
+            Some("-content -thinking -commands")
+        );
+    }
 
     #[test]
     fn parse_live_payload_uses_human_labels() {
