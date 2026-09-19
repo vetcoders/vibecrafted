@@ -178,6 +178,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   private var terminalRegistrationTimer: Timer?
   private var productUpdate: ProductUpdateCoordinator?
   private var productUpdatePanel: NSWindow?
+  /// The native server status window. Lazily built, never released when closed,
+  /// and re-rendered from `updateDeckPresentation` so an open window tracks the
+  /// same caretaker reading as the tray instead of freezing a modal snapshot.
+  private var serverStatusWindow: NSWindow?
+  private var serverStatusHosting: NSHostingView<ServerStatusView>?
   private var productUpdateStartupAdoption: ProductUpdateHandoffAdoption = .none
   /// Long-lived `vc-frame web` started from the App when `[tools.vc-frame]`
   /// names a loopback origin. Tabs never own this process; closing a tab does
@@ -1638,6 +1643,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
         canStopRuntime: actions.contains(.requestStopRuntime),
         canShowDiagnostics: true, canQuitApp: true, runtimeActions: utilities),
       toolTip: "Vibecrafted — \(presentation.phase.rawValue). \(detail). \(runtimePack.header). \(runtimePack.detail)"))
+    // The open server status window consumes the same derivation as the tray,
+    // so a poll, a transition or a repair is reflected there immediately.
+    renderServerStatusWindow()
   }
 
   private func revealNativePath(_ url: URL) {
@@ -2188,27 +2196,66 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   }
 
   @objc private func showServerDiagnostics() {
-    let envelope = decodeCaretakerEnvelope(data: lastCaretakerData)
-    let alert = NSAlert()
-    alert.alertStyle = envelope?.verdict?.health == "healthy" ? .informational : .warning
-    alert.messageText = "Vibecrafted Server"
-    var lines = caretakerDiagnosticsLines(data: lastCaretakerData)
-    if let configuration = lastConfigRepair {
-      lines.append("")
-      lines.append("Configuration")
-      lines.append(configRepairSummary(configuration))
+    if serverStatusWindow == nil {
+      // A utility window, not a modal: titled and closable only, never
+      // restorable, and sized by the SwiftUI content it hosts.
+      let window = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 480, height: 420),
+        styleMask: [.titled, .closable],
+        backing: .buffered, defer: false)
+      window.title = "Vibecrafted Server"
+      window.isReleasedWhenClosed = false
+      window.isRestorable = false
+      window.restorationClass = nil
+      let hosting = NSHostingView(rootView: serverStatusRootView())
+      window.contentView = hosting
+      // The window hugs its content and is not user-resizable, so the App owns
+      // the size: fit once here, and let AppKit track the hosting view's
+      // preferred size from then on — a finding appearing or the last error
+      // wrapping grows the panel instead of clipping it.
+      hosting.sizingOptions = [.preferredContentSize]
+      window.setContentSize(hosting.fittingSize)
+      window.center()
+      serverStatusWindow = window
+      serverStatusHosting = hosting
     }
-    if let conflict = lastPreferenceConflict {
-      lines.append("")
-      lines.append("Upgrade conflict")
-      lines.append(preferenceConflictDiagnostics(conflict))
-    }
-    alert.informativeText = lines.joined(separator: "\n")
-    alert.addButton(withTitle: "OK")
-    alert.addButton(withTitle: "Open Console")
-    if alert.runModal() == .alertSecondButtonReturn {
-      showMainWindowIfNeeded()
-    }
+    renderServerStatusWindow()
+    serverStatusWindow?.makeKeyAndOrderFront(nil)
+    NSApp.activate(ignoringOtherApps: true)
+  }
+
+  /// The window renders the same reading as the tray: one caretaker envelope,
+  /// one `deriveServerMenuState` call, plus the persisted configuration and
+  /// upgrade-conflict envelopes. Buttons forward to the exact paths the menu
+  /// items use, so no lifecycle flow exists twice.
+  private func serverStatusRootView() -> ServerStatusView {
+    let state = deriveServerMenuState(
+      caretakerData: lastCaretakerData,
+      actionInFlight: serverActionInFlight,
+      runtimeReady: canonicalInstall != nil)
+    return ServerStatusView(
+      state: state,
+      envelope: decodeCaretakerEnvelope(data: lastCaretakerData),
+      configuration: lastConfigRepair,
+      upgradeConflict: lastPreferenceConflict,
+      canOpenLogs: canonicalInstall != nil
+        && serverUtilityProcess?.isRunning != true
+        && runtimeActionPreflight == nil,
+      onStart: { [weak self] in self?.performServerAction(.start) },
+      onStop: { [weak self] in self?.handle(.requestStopRuntime) },
+      onRestart: { [weak self] in self?.performServerAction(.restart) },
+      onOpenConsole: { [weak self] in self?.showMainWindowIfNeeded() },
+      onOpenLogs: { [weak self] in self?.openServerLogsFromStatusItem() },
+      onRevealPath: { [weak self] path in
+        self?.revealNativePath(URL(fileURLWithPath: path))
+      },
+      onClose: { [weak self] in self?.serverStatusWindow?.close() })
+  }
+
+  private func renderServerStatusWindow() {
+    // Assigning rootView re-runs SwiftUI layout; `.preferredContentSize` on
+    // the hosting view carries any size change to the window.
+    serverStatusHosting?.rootView = serverStatusRootView()
   }
 
   @objc private func showStatusItemHelp() {
