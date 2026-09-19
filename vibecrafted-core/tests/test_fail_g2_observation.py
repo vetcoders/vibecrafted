@@ -35,6 +35,7 @@ def test_observe_client_timeout_is_longer_than_measured_slow_observe(
 
     monkeypatch.setattr(server_observation, "_origin", lambda: "http://127.0.0.1:9")
     monkeypatch.setattr(server_observation.urllib.request, "urlopen", _boom)
+    _disable_control_observe(monkeypatch)
 
     with pytest.raises(server_observation.ServerObservationError):
         server_observation.observe_run("missing-run")
@@ -43,11 +44,18 @@ def test_observe_client_timeout_is_longer_than_measured_slow_observe(
     assert recorded["timeout"] >= 15.0
 
 
+def _disable_control_observe(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("VIBECRAFTED_CONTROL_OBSERVE", raising=False)
+    monkeypatch.delenv("VIBECRAFTED_ROOT", raising=False)
+    monkeypatch.setattr(server_observation.shutil, "which", lambda _name: None)
+
+
 def test_observe_run_falls_back_to_runtime_runs_after_http_timeout(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     home = tmp_path / ".vibecrafted"
     monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    _disable_control_observe(monkeypatch)
     run_id = "polr-260904-200526-39344"
     _write_runtime_meta(
         home,
@@ -70,9 +78,11 @@ def test_observe_run_falls_back_to_runtime_runs_after_http_timeout(
 
     assert payload["found"] is True
     assert payload["run_id"] == run_id
-    assert payload["source"] == "local_control_plane_fallback"
+    assert payload["source"] == "control_core_observe_unavailable"
+    assert payload["terminal"] is False
+    assert payload["process_truth"] == "unknown"
     assert payload.get("run") is not None
-    assert str((payload.get("run") or {}).get("state") or "") == "running"
+    assert (payload.get("run") or {}).get("state") in (None, "", "unknown")
 
 
 def _write_loop_lock(home: Path, run_id: str, **fields: object) -> Path:
@@ -389,11 +399,12 @@ def _patch_lookup_run(monkeypatch: pytest.MonkeyPatch, payload: dict[str, Any]) 
     monkeypatch.setattr(control_plane, "lookup_run", lambda _run_id: dict(payload))
 
 
-def test_observe_fallback_completed_status_is_terminal(
+def test_observe_fallback_completed_status_is_not_classified_without_control_core(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Independent probe (a): status=completed, exit_code=0 must resolve terminal."""
+    """Without control-observe, Python must not invent terminal from lookup_run."""
     _boom_observe(monkeypatch)
+    _disable_control_observe(monkeypatch)
     _patch_lookup_run(
         monkeypatch,
         {"run_id": "probe", "status": "completed", "exit_code": 0},
@@ -402,11 +413,11 @@ def test_observe_fallback_completed_status_is_terminal(
     payload = server_observation.observe_run("probe")
 
     assert payload["found"] is True
-    assert payload["terminal"] is True
-    assert payload["worker_alive"] is False
-    assert payload["process_truth"] == "terminal"
-    assert payload["evidence_disagreement"] is False
-    assert payload["source"] == "local_control_plane_fallback"
+    assert payload["terminal"] is False
+    assert payload["worker_alive"] is None
+    assert payload["process_truth"] == "unknown"
+    assert payload["source"] == "control_core_observe_unavailable"
+    assert "control_core_observe_unavailable" in payload["disagreement_reasons"]
 
 
 def test_observe_fallback_unknown_running_is_not_death(
@@ -414,6 +425,7 @@ def test_observe_fallback_unknown_running_is_not_death(
 ) -> None:
     """Independent probe (b): missing worker evidence is not proof of death."""
     _boom_observe(monkeypatch)
+    _disable_control_observe(monkeypatch)
     _patch_lookup_run(
         monkeypatch,
         {"run_id": "probe", "state": "running", "process_truth": "unknown"},
@@ -426,9 +438,7 @@ def test_observe_fallback_unknown_running_is_not_death(
     assert payload["worker_alive"] is None
     assert payload["process_truth"] == "unknown"
     assert payload["evidence_disagreement"] is True
-    assert (
-        "canonical_writer_revalidation_unavailable" in payload["disagreement_reasons"]
-    )
+    assert "control_core_observe_unavailable" in payload["disagreement_reasons"]
 
 
 @pytest.mark.parametrize(
@@ -555,10 +565,11 @@ def test_local_observation_classifies_uncertainty_without_sealing(
         assert reason in payload["disagreement_reasons"]
 
 
-def test_observe_fallback_timeout_keeps_stale_read_uncertain(
+def test_observe_fallback_without_control_core_does_not_classify(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _boom_observe(monkeypatch)
+    _disable_control_observe(monkeypatch)
     _patch_lookup_run(
         monkeypatch,
         {"run_id": "probe", "state": "running", "liveness": "pid_alive"},
@@ -567,12 +578,54 @@ def test_observe_fallback_timeout_keeps_stale_read_uncertain(
     payload = server_observation.observe_run("probe")
 
     assert payload["found"] is True
+    assert payload["source"] == "control_core_observe_unavailable"
     assert payload["terminal"] is False
     assert payload["worker_alive"] is None
-    assert payload["evidence_disagreement"] is True
-    assert (
-        "canonical_writer_revalidation_unavailable" in payload["disagreement_reasons"]
+    assert payload["process_truth"] == "unknown"
+    assert "control_core_observe_unavailable" in payload["disagreement_reasons"]
+    assert (payload.get("run") or {}).get("state") in (None, "", "unknown")
+
+
+def test_observe_fallback_uses_control_observe_binary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _boom_observe(monkeypatch)
+    binary = tmp_path / "control-observe"
+    binary.write_text(
+        "#!/bin/sh\n"
+        "cat <<'EOF'\n"
+        '{"schema":"vibecrafted.run-observation.v1","run_id":"probe","found":true,'
+        '"terminal":false,"worker_alive":true,"process_truth":"live",'
+        '"run":{"run_id":"probe","state":"active"}}\n'
+        "EOF\n",
+        encoding="utf-8",
     )
-    assert (
-        "persisted_pid_alive_without_current_proof" in payload["disagreement_reasons"]
+    binary.chmod(0o755)
+    monkeypatch.setenv("VIBECRAFTED_CONTROL_OBSERVE", str(binary))
+
+    payload = server_observation.observe_run("probe")
+
+    assert payload["source"] == "control_core_compute_view"
+    assert payload["process_truth"] == "live"
+    assert payload["worker_alive"] is True
+    assert (payload.get("run") or {}).get("state") == "active"
+
+
+def test_observe_http_stamps_source_when_server_omits_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        server_observation,
+        "_request_json",
+        lambda *_args, **_kwargs: {
+            "schema": "vibecrafted.run-observation.v1",
+            "run_id": "probe",
+            "found": True,
+            "run": {"run_id": "probe", "state": "active"},
+        },
     )
+
+    payload = server_observation.observe_run("probe")
+
+    assert payload["source"] == "vc-server-compute_view"
+    assert (payload.get("run") or {}).get("state") == "active"

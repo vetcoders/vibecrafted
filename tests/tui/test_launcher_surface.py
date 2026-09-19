@@ -113,9 +113,10 @@ def test_implement_help_is_ship_write_and_distinct_from_justdo(tmp_path: Path) -
         "and marbles built in." in output
     )
     assert (
-        "vibecrafted implement <claude|codex|agy|junie|grok|cursor> [flags]" in output
+        "vibecrafted implement <claude|codex|agy|junie|grok|cursor|kimi> [flags]"
+        in output
     )
-    assert "vc-implement <claude|codex|agy|junie|grok|cursor> [flags]" in output
+    assert "vc-implement <claude|codex|agy|junie|grok|cursor|kimi> [flags]" in output
     assert "Not the same skill as justdo." in output
     assert 'vibecrafted implement codex --prompt "Ship the feature"' in output
 

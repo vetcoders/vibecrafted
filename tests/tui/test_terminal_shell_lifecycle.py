@@ -1322,7 +1322,7 @@ class _OwnedFrameSandbox:
         # `opts.layout`, so under an `attach` subcommand that fold is
         # unreachable and the flag is dropped without a word. What answers then
         # is the engine's built-in default layout, whose tabs open command
-        # panes ("Shell", "voc") in place of the single pane asked for here.
+        # panes ("Shell", "Voc") in place of the single pane asked for here.
         # `--layout` is already in `opts` when the attach arm starts the
         # client, so it survives that arm and reaches the new session.
         created = self.run(

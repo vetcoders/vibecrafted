@@ -113,7 +113,7 @@ PY
 # the Cargo target directory under the checkout. Cargo's own `strip` profile
 # is not a boundary: the 2026-09-08 f131b81b release compiled clean while
 # rustc's `rust-objcopy` aborted with "Library not loaded: @rpath/libLLVM.dylib"
-# — a warning, not an error — so voc, vc-start, scaffold-doctor, aicx, aicx-mcp
+# — a warning, not an error — so voc, vc-start, scaffold-doctor, control-observe, aicx, aicx-mcp
 # and prview reached the Runtime Pack payload carrying 1–28 such stabs each and
 # the payload gate refused the build. `strip -S` removes debugging symbol table
 # entries only; code, exports and the indirect symbol table are untouched.

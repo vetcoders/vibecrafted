@@ -2,20 +2,20 @@
 source: tui-agent/tests/mission_control_snapshots.rs
 expression: buffer_text(&buffer)
 ---
-Vibecrafted Operator Console  no live runs loaded
+Vibecrafted operator  Console  no live runs loaded
 workspace: repo  |  active 0  stalled 0  |  scope: live  |  Mission Control
 ┌Surface───────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │ Monitor live 0 │ Dispatch workflow/claude │ Controls 4 │ Mission 0|0                                                 │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-┌Active dispatches─────────────────────┐┌History (30d)─────────────────────────┐┌Mission posture───────────────────────┐
-│0 running                             ││0 meta.json scanned                   ││model parity 0/1                      │
+┌ Active dispatches ───────────────────┐┌ History (30d) ───────────────────────┐┌ Mission posture ─────────────────────┐
+│0 running                             ││0 derived runs scanned                ││model parity 0/1                      │
 │0 stalled queue items                 ││0 agents · 0 skills                   ││duration parity 0/1                   │
 │                                      ││                                      ││                                      │
 └──────────────────────────────────────┘└──────────────────────────────────────┘└──────────────────────────────────────┘
 ┌ Active dispatches (0) ───────────────────────────────────┐┌ Wave atlas (0) ──────────────────────────────────────────┐
 │no live dispatches                                        ││no waves in the last 30d                                  │
 │                                                          ││                                                          │
-│Launch a worker from the Dispatch tab to populate this    ││Waves emerge from prompt_id groups in meta.json.          │
+│Launch a worker from the Dispatch tab to populate this    ││Waves emerge from prompt_id groups on derived runs.       │
 │panel.                                                    ││                                                          │
 │                                                          ││                                                          │
 └──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘

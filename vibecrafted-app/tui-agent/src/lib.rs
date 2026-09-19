@@ -1478,7 +1478,8 @@ fn classify_artifact_change(paths: &[PathBuf]) -> ArtifactChange {
         mission_control: paths.iter().any(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| name.ends_with(".meta.json"))
+                .map(str::to_ascii_lowercase)
+                .is_some_and(|name| name.starts_with("untitled") && name.ends_with(".md"))
         }),
     }
 }
@@ -2042,9 +2043,13 @@ mod tests {
         ]);
         assert_eq!(unrelated, ArtifactChange::default());
 
+        let leftover_meta =
+            classify_artifact_change(&[PathBuf::from("/tmp/home/artifacts/run/report.meta.json")]);
+        assert_eq!(leftover_meta, ArtifactChange::default());
+
         let relevant = classify_artifact_change(&[
             PathBuf::from("/tmp/home/artifacts/project/polarize/run/prism.json"),
-            PathBuf::from("/tmp/home/artifacts/run/report.meta.json"),
+            PathBuf::from("/tmp/home/artifacts/run/Untitled note.md"),
         ]);
         assert!(relevant.polarize);
         assert!(relevant.mission_control);

@@ -59,7 +59,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
 
     let title = if app.config.view == ConsoleView::Observe {
         Line::from(vec![
-            Span::styled("voc", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled("Voc", Style::default().add_modifier(Modifier::BOLD)),
             Span::styled(
                 format!("  {}  {}", app.observe.status.label(), app.observe.origin),
                 Style::default().fg(Color::DarkGray),
@@ -70,11 +70,12 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         Line::from(vec![
             Span::styled(
-                "Vibecrafted Operator Console",
+                "Vibecrafted operator",
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             ),
+            Span::styled("  Console", Style::default().fg(Color::DarkGray)),
             Span::raw("  "),
             Span::styled(app.status_summary(), Style::default().fg(Color::Gray)),
         ])
@@ -726,11 +727,7 @@ fn draw_dispatch(frame: &mut Frame, area: Rect, app: &App) {
             Block::default()
                 .borders(Borders::ALL)
                 .title("Dispatch playbook")
-                .border_style(if playbook_focused {
-                    Style::default().add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                }),
+                .border_style(pane_border_style(playbook_focused)),
         )
         .scroll((app.interaction.scroll.playbook, 0))
         .wrap(Wrap { trim: false });
@@ -961,11 +958,7 @@ fn draw_launch(frame: &mut Frame, area: Rect, app: &App) {
             Block::default()
                 .borders(Borders::ALL)
                 .title(title)
-                .border_style(if deck_focused {
-                    Style::default().add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                }),
+                .border_style(pane_border_style(deck_focused)),
         )
         .scroll((app.interaction.scroll.deck, 0))
         .wrap(Wrap { trim: false });
@@ -999,11 +992,7 @@ fn draw_launch_history(frame: &mut Frame, area: Rect, app: &App) {
             Block::default()
                 .borders(Borders::ALL)
                 .title("Launch trail")
-                .border_style(if trail_focused {
-                    Style::default().add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                }),
+                .border_style(pane_border_style(trail_focused)),
         )
         .scroll((app.interaction.scroll.trail, 0))
         .wrap(Wrap { trim: false });
@@ -1049,7 +1038,7 @@ fn draw_mission_control(frame: &mut Frame, area: Rect, app: &App) {
                 "History (30d)",
                 vec![
                     format!(
-                        "{} meta.json scanned",
+                        "{} derived runs scanned",
                         mission.data_quality.scanned_meta_files
                     ),
                     if mission.data_quality.capped {
@@ -1208,7 +1197,7 @@ fn draw_mc_wave_atlas(
                 Style::default().fg(Color::DarkGray),
             )),
             Line::from(""),
-            Line::from("Waves emerge from prompt_id groups in meta.json."),
+            Line::from("Waves emerge from prompt_id groups on derived runs."),
         ]
     } else {
         segments
@@ -1588,16 +1577,13 @@ fn draw_mc_quality_footer(
     }
     if quality.capped {
         lines.push(Line::from(Span::styled(
-            "meta scan capped — older history may not be folded",
+            "derived scan capped — older history may not be folded",
             Style::default().fg(Color::Yellow),
         )));
     }
     if quality.parse_failures > 0 {
         lines.push(Line::from(Span::styled(
-            format!(
-                "{} meta.json parse failures skipped",
-                quality.parse_failures
-            ),
+            format!("{} snapshot parse failures skipped", quality.parse_failures),
             Style::default().fg(Color::Yellow),
         )));
     }
@@ -1612,14 +1598,9 @@ fn draw_mc_quality_footer(
 }
 
 fn panel_block(title: &str, focused: bool, accent: Color) -> Block<'_> {
-    let style = if focused {
-        Style::default().fg(accent).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(accent)
-    };
     Block::default()
         .borders(Borders::ALL)
-        .border_style(style)
+        .border_style(pane_border_style(focused))
         .title(Span::styled(
             format!(" {} ", title.trim()),
             Style::default().fg(accent).add_modifier(Modifier::BOLD),
@@ -1649,6 +1630,16 @@ fn format_duration_seconds(seconds: f64) -> String {
     }
 }
 
+fn pane_border_style(focused: bool) -> Style {
+    if focused {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    }
+}
+
 fn draw_stat_strip(
     frame: &mut Frame,
     columns: [Rect; 3],
@@ -1657,17 +1648,16 @@ fn draw_stat_strip(
 ) {
     for (index, ((title, lines, accent), column)) in cards.into_iter().zip(columns).enumerate() {
         let focused = selected == Some(index);
-        let mut border = Style::default().fg(accent);
-        if focused {
-            border = border.add_modifier(Modifier::BOLD | Modifier::REVERSED);
-        }
         let content = lines.into_iter().map(Line::from).collect::<Vec<_>>();
         let panel = Paragraph::new(content)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(title)
-                    .border_style(border),
+                    .title(Span::styled(
+                        format!(" {} ", title.trim()),
+                        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                    ))
+                    .border_style(pane_border_style(focused)),
             )
             .style(Style::default())
             .wrap(Wrap { trim: false });

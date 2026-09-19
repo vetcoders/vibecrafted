@@ -7,6 +7,202 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- Run-state readers now share one derivation: events + snapshot + liveness at
+  read (`compute_view` / `project_lifecycle_read`). A lifecycle `state.json`
+  stuck on `launching` with no live owner is `abandoned` with age, never
+  `Operator: approve_transition`. voc, web Control/Lifecycle, run detail, and
+  `observe` consume that overlay. When vc-server is down, `observe` shells
+  `control-observe` (same crate as voc) and stamps `source`; without that
+  binary it admits `control_core_observe_unavailable` instead of inventing a
+  second Python classifier. Runtime Pack install scripts now ship
+  `control-observe` beside `scaffold-doctor`. `/api/control/runs` list and
+  transcript search use the same derived set as detail. Mission Control
+  agent/skill/wave/failure stats read derived control-plane snapshots, not a
+  second `*.meta.json` walk. Ctrl-C on a dispatch supervisor marks receipts
+  `stopped`/`interrupted`, and a worktree refuse names the owning `run_id`
+  plus a ready `--resume` command.
+
+- Pruning the **managed symlink views** of a runtime left out of the install now
+  requires that runtime's skills root to be pointer-free. With
+  `~/.codex/skills -> ~/.claude/skills` on a host where only `claude` is active,
+  every one of claude's live views was visible under the inactive `codex` name —
+  same inode, same managed target — and each one was unlinked as codex's
+  leftover, blanking the deck of the runtime that was actually installed. The
+  precondition is checked per runtime rather than per entry, because the entry
+  in front of the pruner is indistinguishable from a view it wrote itself; it is
+  the same gate shadow detection uses, so a root resolving into the store is out
+  of scope for the same reason.
+
+- A per-runtime skill root that is a **link** is now named instead of silently
+  skipped. Shadow detection has always refused to judge
+  `~/.junie/skills -> ~/notes` (`shutil.rmtree` follows the pointer) or
+  `~/.junie/skills -> ~/.vibecrafted/skills` (the store would compare identical
+  with itself), and the refusal is correct — but it left nothing behind. Doctor
+  reported no finding, install printed no line, and the `shadow-dirs` OK line
+  listed the directory among the ones it had just cleared, so a root nobody had
+  looked at read exactly like a clean host. Doctor now warns once per such root
+  as `skill-root:<runtime>` with the path, what it resolves to and the fact that
+  nothing under it is inspected or removed; the action list asks the operator to
+  check it and replace it with a real directory to get that runtime reconciled;
+  the OK line covers only the roots actually inspected; and install/update print
+  the same fact as they write the views. A root that resolves **into the store**
+  additionally gets no views written into it at all — every view there would be
+  a symlink inside the canonical store aimed at its own sibling, and the
+  root-rule sync would drop `*_RULE.md` copies in the store on every run, while
+  nothing is lost by skipping: that root _is_ the store, so
+  `~/.junie/skills/vc-x` already resolves to `~/.vibecrafted/skills/vc-x`
+  without a view.
+
+- Install, update and doctor now see **real directory copies** of bundled
+  skills sitting in per-runtime skill dirs. Installers before 3.x materialized
+  copies instead of views, so hosts carried stale `vc-*` directories in
+  `~/.junie/skills` next to the canonical `~/.agents/skills` symlink view
+  (27 on one host, 17 on another) — an agent that reads both directories saw a
+  stale duplicate, and no install, update or doctor run ever noticed:
+  shadow pruning only covered `claude`/`codex` and only symlinks, and orphan
+  pruning only covered names no longer in the bundle. Doctor reports one
+  `shadow-dir:<runtime>/<skill>` warning per copy with its exact path and
+  provenance class, and install/update quarantine the copy under
+  `~/.vibecrafted/backups/installer/shadowed-views-<timestamp>/` before
+  removing it. Provenance is proven from content, never from the `vc-` name.
+  A copy byte-identical to the store copy of that skill is claimed outright —
+  the store holds the same bytes. Anything else has to be proven by
+  `SKILL_PROVENANCE.json`, a new manifest shipped inside the skill store that
+  records, per skill, the sha256 of every `SKILL.md` Vibecrafted has ever
+  released _and_ every relative file path that has ever existed under that
+  skill's directory in the repository history. Both halves must hold: the
+  copy's `SKILL.md` is one of those releases, and every file it carries sits at
+  a path we shipped. A `SKILL.md` absent from the history was edited by its
+  owner, and a single unexpected file — an operator's own note or script next
+  to a shipped `SKILL.md` — withdraws the claim and is named in the warning.
+  That is what reaches the real-world case: the 27 copies recovered from one
+  host carry no generator marker of any kind, four of them still carry files
+  the current bundle has dropped, and every one of those hashes and paths is
+  still in the repository history. A missing, corrupt or older-schema manifest
+  disables that proof alone and never fails an install. Maintainers regenerate
+  with `scripts/gen_skill_provenance.py` (`--check` is the CI freshness gate);
+  the merge is additive and idempotent, so a shallow clone cannot shrink it. A
+  `vc-*` directory that proves nothing is classified `unknown` and is only
+  reported, never touched. A runtime skill dir that is a symlink, or that
+  resolves into the store, is skipped entirely — otherwise
+  `ln -s ~/.vibecrafted/skills ~/.junie/skills` would make the store compare
+  identical with itself and reconciliation would delete it through the link.
+  The canonical `~/.agents/skills` view is never modified, runtimes that carry
+  a managed view stay owned by the existing symlink checks for reporting, and
+  `--dry-run` mutates nothing.
+
+- The skill-view writer no longer removes a real directory to make room for a
+  symlink, and reconciliation no longer skips the runtimes that carry a managed
+  view. Those two facts were one bug: `~/.claude/skills` and `~/.codex/skills`
+  were excluded from the careful path — quarantine, then remove — precisely
+  because `create_skill_view_symlink` would `shutil.rmtree` whatever sat there
+  on its way to writing the link. So a copy in `~/.junie/skills` was backed up
+  before removal while the operator's own `vc-*` skill in `~/.claude/skills`
+  was deleted without one, on the very run meant to be careful. Reconciliation
+  now runs before the writer and covers every runtime, and the writer keeps any
+  real directory it still finds with a `Keeping real directory …` line; doctor
+  reports it. A link that already resolves to its target is left untouched
+  rather than unlinked and rewritten, which is what kept a runtime skills dir
+  symlinked into the store from having the store copy removed under it.
+
+- A stale copy in a runtime that carries a managed view (`~/.claude/skills`,
+  `~/.codex/skills`) now gets the provenance class and the command that fixes
+  it. Doctor reported it only as `symlink:<rt>/<skill>` "is a COPY", which says
+  nothing about whether the copy can be proven, and the action list then
+  suggested a plain `vibecrafted update` — which stops at "up to date" on a
+  host already at the latest version and never reconciles anything. Shadow
+  detection now runs for those runtimes too, so the `shadow-dir:` finding
+  appears beside the COPY finding, and both name `vibecrafted update --force`.
+
+- Orphan pruning follows the same provenance contract as shadow
+  reconciliation. A `vc-*` directory whose name has left the bundle was
+  `shutil.rmtree`d on sight — and `ask_yn` defaults to yes and returns that
+  default when stdin is not a TTY, so a piped install answered the prompt for
+  the operator. `vc-canvas` is a skill we retired; it is also a name someone
+  could park their own work under. A real orphan directory now has to prove the
+  same thing a shadowing copy proves (`SKILL.md` sha256 plus every file's blob
+  id, which covers retired skills because the manifest is built from all of
+  history), is quarantined under the same
+  `shadowed-views-<timestamp>/<location>/<skill>` layout before removal, and is
+  otherwise kept with a `mv` hint and never offered at the prompt. The two
+  reconciliation rails apply here too: never follow a symlink out of the tree,
+  and never let a runtime entry route a removal into the store. Pointers and
+  stray files are still removed as leftovers of views we wrote.
+
+- Reconciliation no longer needs the canonical `agents` view specifically. It
+  needs the skill to remain readable once the copy is gone, which is satisfied
+  either by `~/.agents/skills/<skill>` pointing at the store or by the copy's
+  own runtime being one the same pass is about to link. An advanced or `--tool`
+  selection can omit `agents` altogether, and then the old precondition was
+  unmeetable by construction: every proven copy stayed on the host for good.
+
+- Doctor now sees a real **file** sitting where a skill view belongs — an
+  operator's own note at `~/.grok/skills/vc-research`, say. Detection only ever
+  examined directories, so that file was invisible to every audit while the
+  view writer stood ready to remove it. It is reported as `unknown` with
+  "regular file, kept" and never touched: a view is a link and a legacy copy is
+  a directory, so a file there is nobody's but yours.
+
+- The view writer no longer trips over a **dangling** pointer. `exists()`
+  follows a link, so one aimed at something gone read as absent, and
+  `symlink_to` then raised `FileExistsError` on the entry that was plainly
+  still there. A junction outliving the generation it pointed into is the
+  realistic case; it is now removed as a pointer, like any other.
+
+- Skill-copy provenance proves **bytes, not names**. `SKILL_PROVENANCE.json`
+  (schema `vibecrafted.skill-provenance.v3`) now records, per skill, the sha256
+  of every `SKILL.md` released and — for every relative path under a directory
+  that has actually held a `SKILL.md` — the git blob id of every version of
+  that file ever committed. A copy is claimed only when its `SKILL.md` is a
+  release and every entry in it is a plain file whose bytes are a version we
+  shipped at that path. A path was never evidence on its own: an operator's own
+  edited `scripts/await.sh`, sitting at a path the bundle does ship, was
+  claimed by name and would have gone into the quarantine. The installer
+  recomputes a blob id locally as `sha1(b"blob <len>\0" + data)`, so nothing
+  needs git, a repository or a network.
+
+  Path scope is fixed in the same cut: `runtime/vc-marbles/` never held a
+  `SKILL.md`, so its files are not `vc-marbles`' files and no longer widen what
+  the installer may delete (13 such paths dropped). And because we have shipped
+  a file as a symlink (`skills/vc-agents/shell/vetcoders.zsh -> vetcoders.sh`)
+  that a copying installer dereferences, the manifest records the target's blob
+  ids under the link's path too — without which the largest recovered copy is
+  unprovable for one file out of 54.
+
+  `--check` now compares the whole rendered document instead of hunting for
+  missing entries, so an unsorted or duplicated manifest fails as well, and it
+  is wired into the Makefile `check` target — the doc called it a CI gate
+  before anything ran it. Manifest: 35 skills, 971 `SKILL.md` hashes, 366
+  paths, 2517 blob ids, 224 KB.
+
+- A stale junction standing where a skill view belongs is now removed as a
+  pointer (`os.rmdir`) instead of through `shutil.rmtree`. A junction reports
+  `is_dir()` and not `is_symlink()`, so it reached the writer's `rmtree`
+  branch, and `rmtree` raises on a junction on Windows — an install that met
+  one aborted with a traceback instead of relinking the view. `shutil.rmtree`
+  no longer appears in the writer at all, which is also what makes the
+  keep-what-is-real rule above impossible to undo by accident.
+
+- The skill-view writer keeps a real _file_ under a `vc-*` name as well as a
+  real directory; it used to remove it. A file had less protection than a
+  directory, not more: shadow detection only ever examines directories, and it
+  skips a runtime whose skills dir is reached through a symlink — so with
+  `~/.grok/skills -> ~/notes`, a note called `vc-research` was removed by the
+  writer with nothing quarantined and nothing reported.
+
+- Install now links the canonical `~/.agents/skills` view _before_ reconciling
+  skill-copy shadows, and the remaining runtime views after. Reconciliation
+  refuses to remove a copy until that view points at the store, so on a
+  first-ever install — where nothing has written it yet — every copy was kept,
+  and the next plain `vibecrafted update` stops at "up to date" without
+  retrying: the runtime would have gone on loading June-2026 copies until the
+  following release. One pass now links, reconciles and links.
+
+- Doctor's fix for a `shadow-dir:` finding is now `vibecrafted update --force`.
+  It used to say `vibecrafted update`, which on a host already on the latest
+  version prints `up to date` and returns before the reconciliation runs — the
+  advice could not fix what the finding reported.
+
 - Server web: the Loctree report opens whole in a browser. The document now
   lives at the directory-style `/structure/report/` (`/structure/report`
   redirects there), so Loctree's relative `loctree-*.js` references resolve

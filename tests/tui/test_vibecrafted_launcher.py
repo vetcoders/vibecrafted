@@ -1058,7 +1058,7 @@ def test_vc_help_wrapper_forwards_topic_help(tmp_path: Path) -> None:
     )
 
     assert "Start an interactive repository orientation session" in result.stdout
-    assert "vc-init [claude|codex|agy|junie|grok|cursor]" in result.stdout
+    assert "vc-init [claude|codex|agy|junie|grok|cursor|kimi]" in result.stdout
     assert "Ship cycle:" not in result.stdout
 
 
@@ -2038,8 +2038,8 @@ def test_gui_help_exposes_local_server_flags() -> None:
 @pytest.mark.parametrize(
     ("topic", "expected"),
     [
-        ("init", "vc-init [claude|codex|agy|junie|grok|cursor]"),
-        ("vc-init", "vc-init [claude|codex|agy|junie|grok|cursor]"),
+        ("init", "vc-init [claude|codex|agy|junie|grok|cursor|kimi]"),
+        ("vc-init", "vc-init [claude|codex|agy|junie|grok|cursor|kimi]"),
         ("vc-review", 'vibecrafted review codex --prompt "Review PR #14"'),
         ("status", "vibecrafted stats"),
     ],
@@ -2130,10 +2130,13 @@ def test_implement_help_is_the_canonical_autonomous_delivery_surface() -> None:
     assert "implement" in result.stdout
     assert "VC-ship WRITE stage: structured end-to-end implementation" in result.stdout
     assert (
-        "vibecrafted implement <claude|codex|agy|junie|grok|cursor> [flags]"
+        "vibecrafted implement <claude|codex|agy|junie|grok|cursor|kimi> [flags]"
         in result.stdout
     )
-    assert "vc-implement <claude|codex|agy|junie|grok|cursor> [flags]" in result.stdout
+    assert (
+        "vc-implement <claude|codex|agy|junie|grok|cursor|kimi> [flags]"
+        in result.stdout
+    )
     assert "Not the same skill as justdo." in result.stdout
 
 
@@ -2149,10 +2152,12 @@ def test_justdo_help_is_a_distinct_standalone_posture() -> None:
     assert "justdo" in result.stdout
     assert "Standalone Just Do posture" in result.stdout
     assert (
-        "vibecrafted justdo <claude|codex|agy|junie|grok|cursor> [flags]"
+        "vibecrafted justdo <claude|codex|agy|junie|grok|cursor|kimi> [flags]"
         in result.stdout
     )
-    assert "vc-justdo <claude|codex|agy|junie|grok|cursor> [flags]" in result.stdout
+    assert (
+        "vc-justdo <claude|codex|agy|junie|grok|cursor|kimi> [flags]" in result.stdout
+    )
     assert "Not implement." in result.stdout
 
 
@@ -2342,7 +2347,8 @@ def test_skill_wrapper_help_is_human_readable_without_agent(
     assert skill in result.stdout
     assert description in result.stdout
     assert (
-        f"{wrapper_name} <claude|codex|agy|junie|grok|cursor> [flags]" in result.stdout
+        f"{wrapper_name} <claude|codex|agy|junie|grok|cursor|kimi> [flags]"
+        in result.stdout
     )
 
 

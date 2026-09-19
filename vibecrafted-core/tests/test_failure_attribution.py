@@ -324,7 +324,7 @@ def test_observe_names_the_403_for_a_legacy_run_lazily(
         },
     )
 
-    assert cli.main(["kimi", "observe", "--run-id", QUOTA_RUN]) == 0
+    assert cli.main(["kimi", "observe", "--run-id", QUOTA_RUN, "--tail"]) == 0
     out = capsys.readouterr().out
     assert "exit:       1 (provider's code 403 quota exhausted)" in out
     assert "failure:    quota_exhausted" in out
@@ -333,7 +333,7 @@ def test_observe_names_the_403_for_a_legacy_run_lazily(
     assert "usage:      unknown (provider emitted no usage events)" in out
     assert "cost:       unknown" in out
 
-    assert cli.main(["kimi", "observe", "--run-id", QUOTA_RUN, "--json"]) == 0
+    assert cli.main(["kimi", "observe", "--run-id", QUOTA_RUN, "--json", "--tail"]) == 0
     observation = json.loads(capsys.readouterr().out)
     telemetry = observation["telemetry"]
     assert telemetry["failure"]["kind"] == "quota_exhausted"
@@ -387,7 +387,7 @@ def test_observe_prefers_the_recorded_cause_of_a_new_run(
         },
     )
 
-    assert cli.main(["kimi", "observe", "--run-id", run_id]) == 0
+    assert cli.main(["kimi", "observe", "--run-id", run_id, "--tail"]) == 0
     out = capsys.readouterr().out
     assert "exit:       1 (provider's code 403 quota exhausted)" in out
     assert f"{transcript}:2 · source: transcript\n" in out

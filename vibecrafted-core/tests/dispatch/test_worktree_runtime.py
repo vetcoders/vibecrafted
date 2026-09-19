@@ -35,6 +35,7 @@ from vibecrafted_core.dispatch.worktrees import (
     WorktreeManager,
     _same_filesystem_location,
     canonical_artifact_root,
+    find_worktree_owner,
 )
 from vibecrafted_core.report_contract import reserve_launcher_report_template
 from vibecrafted_core.workflow import _canonical_report_path
@@ -1359,3 +1360,38 @@ def test_runtime_doctor_detects_duplicate_reports_integrators_and_serial_degrada
     assert "serial-only supervisor" in messages
     assert "duplicate report path" in messages
     assert "multiple active integrators" in messages
+
+
+def test_existing_worktree_refuse_names_owning_run_and_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / ".vibecrafted"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    repo = tmp_path / "repo"
+    baseline = _repo(repo)
+    manager = WorktreeManager(repo, day="2026_0919")
+    geometry = manager.geometry("cut-a", baseline, integrator=False)
+    Path(geometry.worktree_path).mkdir(parents=True)
+
+    run_id = "owning-dispatch"
+    receipts_dir = home / "control_plane" / "dispatches" / run_id
+    receipts_dir.mkdir(parents=True)
+    (receipts_dir / "receipts.json").write_text(
+        json.dumps(
+            {
+                "schema": "vibecrafted.dispatch-receipts.v1",
+                "run_id": run_id,
+                "cuts": {
+                    "cut-a": {"worktree_path": geometry.worktree_path},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert find_worktree_owner(geometry.worktree_path) == (run_id, "cut-a")
+    with pytest.raises(
+        WorktreeContractError,
+        match=r"owning run owning-dispatch cut cut-a.*--resume owning-dispatch",
+    ):
+        manager.prepare("cut-a", baseline, allow_reuse=False)

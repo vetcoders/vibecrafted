@@ -185,15 +185,6 @@ pub fn launch_wizard(project: &str, launch_root: &Path) -> anyhow::Result<()> {
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::piped());
-    #[cfg(unix)]
-    {
-        if let (Ok(input), Ok(output)) = (
-            std::fs::OpenOptions::new().read(true).open("/dev/tty"),
-            std::fs::OpenOptions::new().write(true).open("/dev/tty"),
-        ) {
-            command.stdin(input).stdout(output);
-        }
-    }
     wait_for_wizard(&mut command)
 }
 

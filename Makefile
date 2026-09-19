@@ -36,7 +36,7 @@ if [ ! -d "$$stable_root/vibecrafted-core" ]; then \
 fi
 endef
 
-.PHONY: help help-dev vibecrafted app dmg dmg-signed release-local notarize release runtime-pack portable publish-release release-rehearsal gui-install wizard wizard-dev check test test-core test-skills test-install test-parity test-vc-frame test-iterm2-migrate test-memex test-aicx-sync test-hammerspoon test-keychain-session dispatch-test unified-product-contract-gate exact-release-contract-gate release-version-gate payload-hygiene install install-source install-auto install-all install-python-tools install-bundle-tools install-tools install-tools-held install-vendored-binaries install-app-binaries install-hammerspoon skills helpers setup-dev dry-run doctor list update uninstall restore migrate migrate-dry init-hooks seed-commit-msg-hooks bundle bundle-check foundations foundations-check semgrep version version-show version-bump bump-patch bump-minor bump-major iterm-plugin iterm-plugin-refresh iterm-plugin-show iterm-plugin-uninstall iterm-plugin-migrate demo demo-full commit-safe test-race-protection skill-new server server-build build-server-release server-check server-test install-server install-server-payload install-server-service reconcile-server-service server-smoke
+.PHONY: help help-dev vibecrafted app dmg dmg-signed release-local notarize release runtime-pack portable publish-release release-rehearsal gui-install wizard wizard-dev check test test-core test-skills test-install test-parity test-vc-frame test-iterm2-migrate test-memex test-aicx-sync test-hammerspoon test-keychain-session dispatch-test unified-product-contract-gate exact-release-contract-gate release-version-gate payload-hygiene install install-source install-auto install-all install-python-tools install-bundle-tools install-tools install-tools-held install-vendored-binaries install-app install-app-binaries install-hammerspoon skills helpers setup-dev dry-run doctor list update uninstall restore migrate migrate-dry init-hooks seed-commit-msg-hooks bundle bundle-check foundations foundations-check semgrep version version-show version-bump bump-patch bump-minor bump-major iterm-plugin iterm-plugin-refresh iterm-plugin-show iterm-plugin-uninstall iterm-plugin-migrate demo demo-full commit-safe test-race-protection skill-new server server-build build-server-release server-check server-test install-server install-server-payload install-server-service reconcile-server-service server-smoke
 
 help:
 	@printf "\n"
@@ -66,7 +66,7 @@ help-dev:
 	@printf "            test-memex · test-aicx-sync · test-hammerspoon · test-keychain-session · dispatch-test · test-race-protection · check · semgrep\n"
 	@printf "  \033[1miterm2\033[0m    iterm-plugin · iterm-plugin-refresh · iterm-plugin-show · iterm-plugin-uninstall · iterm-plugin-migrate\n"
 	@printf "  \033[1mserver\033[0m    server · server-build · server-check · server-test · server-smoke\n"
-	@printf "  \033[1mrelease\033[0m   app · dmg · dmg-signed · release-local · notarize · release · portable · publish-release · release-rehearsal\n"
+	@printf "  \033[1mrelease\033[0m   app · install-app · dmg · dmg-signed · release-local · notarize · release · portable · publish-release · release-rehearsal\n"
 	@printf "  \033[1mversion\033[0m   version · version-show · version-bump · bump-patch · bump-minor · bump-major\n"
 	@printf "  \033[1mhooks\033[0m     init-hooks · seed-commit-msg-hooks · commit-safe\n"
 	@printf "  \033[1mmisc\033[0m      doctor · list · update · uninstall · demo · demo-full · skill-new\n"
@@ -104,6 +104,13 @@ RELEASE_FLAGS ?=
 
 app:
 	@VC_RELEASE_FLAGS='$(RELEASE_FLAGS)' zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" --app-only $${=VC_RELEASE_FLAGS} 2>&1'
+
+# Fast iteration loop: signed dist/Vibecrafted.app -> /Applications without a
+# DMG. The swap goes through scripts/vc-app-update.sh (journaled transaction,
+# signature preflight, prior.app backup, relaunch). Quits a running app first
+# — Founder-gated by invocation; frame sessions and workers survive.
+install-app: app
+	@bash scripts/install-app.sh
 
 dmg dmg-signed release-local:
 	@VC_RELEASE_FLAGS='$(RELEASE_FLAGS)' zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" --no-notarize $${=VC_RELEASE_FLAGS} 2>&1'
@@ -523,7 +530,12 @@ install-app-binaries:
 			install -m 0755 "$(APP_BUILD_TARGET)/release/$$bin" "$${VIBECRAFTED_RUNTIME_ROOT}/bin/$$bin"; \
 		fi; \
 	done; \
-	echo "[app] installed: $(APP_BINARIES) -> $(BIN_DIR)"
+	rm -f "$(BIN_DIR)/vc-o"; \
+	install -m 0755 "$(APP_BUILD_TARGET)/release/voc" "$(BIN_DIR)/vc-o"; \
+	if [ -n "$${VIBECRAFTED_RUNTIME_ROOT:-}" ] && [ -d "$${VIBECRAFTED_RUNTIME_ROOT}/bin" ]; then \
+		install -m 0755 "$(APP_BUILD_TARGET)/release/voc" "$${VIBECRAFTED_RUNTIME_ROOT}/bin/vc-o"; \
+	fi; \
+	echo "[app] installed: $(APP_BINARIES) vc-o -> $(BIN_DIR)"
 
 skills:
 	@$(PYTHON) $(INSTALLER) install --source "$(SOURCE)" --non-interactive
@@ -684,6 +696,7 @@ restore:
 
 check:
 	@$(PYTHON) scripts/check_shell.py
+	@$(PYTHON) scripts/gen_skill_provenance.py --check
 	@echo "Check complete."
 
 iterm-plugin:

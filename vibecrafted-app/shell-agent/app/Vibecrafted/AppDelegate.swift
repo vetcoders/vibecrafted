@@ -1106,26 +1106,30 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   /// so a refused or leased reconcile was indistinguishable from a successful
   /// one. Recovery ownership stays with the supervisor; this asks once,
   /// observes the answer and reports it.
+  private struct ControlPlaneReconcileError: Error, Equatable, Sendable {
+    let message: String
+  }
+
   private func reconcileControlPlaneEye(
     install: CanonicalRuntimeInstall,
     environment: [String: String],
-    completion: (@MainActor (Result<Void, String>) -> Void)? = nil
+    completion: (@MainActor (Result<Void, ControlPlaneReconcileError>) -> Void)? = nil
   ) {
     // One reconcile at a time: overlapping calls would race the supervisor's
     // install lease against itself.
-    func finish(_ result: Result<Void, String>) {
+    func finish(_ result: Result<Void, ControlPlaneReconcileError>) {
       completion?(result)
     }
     guard eyeReconcileProcess?.isRunning != true else {
       lifecycleLog("service reconcile already in flight; not starting a second")
-      finish(.failure("LaunchAgent reconcile is already running."))
+      finish(.failure(ControlPlaneReconcileError(message: "LaunchAgent reconcile is already running.")))
       return
     }
     let deck = install.root.appendingPathComponent("bin/vibecrafted")
     guard FileManager.default.isExecutableFile(atPath: deck.path) else {
       let message = "The installed service owner is missing: \(deck.path)"
       surfaceRuntimeAdvisory(message)
-      finish(.failure(message))
+      finish(.failure(ControlPlaneReconcileError(message: message)))
       return
     }
     let epoch = runtimeResolveEpoch
@@ -1139,7 +1143,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
         guard let self else { return }
         self.eyeReconcileProcess = nil
         guard epoch == self.runtimeResolveEpoch else {
-          finish(.failure("Runtime identity changed while reconciling the LaunchAgent."))
+          finish(.failure(ControlPlaneReconcileError(message: "Runtime identity changed while reconciling the LaunchAgent.")))
           return
         }
         guard result.clean, result.terminationStatus == 0 else {
@@ -1147,7 +1151,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
           let message = "The shared VC Server service could not be reconciled" + detail
           self.surfaceRuntimeAdvisory(message)
           self.renderServerStatus()
-          finish(.failure(message))
+          finish(.failure(ControlPlaneReconcileError(message: message)))
           return
         }
         self.runtimeAdvisory = nil
@@ -1160,7 +1164,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       let message =
         "The shared VC Server service could not be reconciled: \(error.localizedDescription)"
       surfaceRuntimeAdvisory(message)
-      finish(.failure(message))
+      finish(.failure(ControlPlaneReconcileError(message: message)))
     }
   }
 
@@ -1724,7 +1728,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       case .success:
         self.presentHealthyRepairResult(note: note)
       case .failure(let detail):
-        self.offerRuntimePackReinstall(configuration: note + "\n\n" + detail)
+        self.offerRuntimePackReinstall(configuration: note + "\n\n" + detail.message)
       }
     }
   }
@@ -2104,8 +2108,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       guard let self else { return }
       self.repairInFlight = false
       self.updateDeckPresentation()
-      if case .failure(let message) = result {
-        self.offerRuntimePackReinstall(configuration: message)
+      if case .failure(let reconcileError) = result {
+        self.offerRuntimePackReinstall(configuration: reconcileError.message)
       }
     }
   }

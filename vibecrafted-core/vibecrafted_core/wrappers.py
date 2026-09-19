@@ -15,6 +15,7 @@ from typing import Any
 
 from . import control_plane
 from .events import append_event
+from .help_surface import AGENT_SELECTOR
 from .package_resources import deck_path, package_root, runtime_path
 from .spawn import Supervisor
 
@@ -285,7 +286,7 @@ def supervised_skill_main(skill: str, argv: Sequence[str] | None = None) -> int:
         return handle.wait()
     if not args or args[0] not in AGENTS:
         print(
-            f"Usage: vc-{skill} <claude|codex|agy|junie|grok|cursor> [--prompt <text>|--file <path>]",
+            f"Usage: vc-{skill} {AGENT_SELECTOR} [--prompt <text>|--file <path>]",
             file=sys.stderr,
         )
         return 2

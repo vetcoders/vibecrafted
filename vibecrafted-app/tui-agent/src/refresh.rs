@@ -1,8 +1,8 @@
 //! Console reads off the input loop.
 //!
 //! Loading the projection walks `runs/`, replays `events.jsonl`, probes
-//! worker processes, and Mission Control walks every `*.meta.json` under the
-//! artifact root; an Observe transcript is a file read or a server request
+//! worker processes, and Mission Control folds derived control-plane
+//! snapshots; an Observe transcript is a file read or a server request
 //! plus its human rendering. Sampled on the operator host, that kind of work
 //! filled the gaps between key presses for seconds at a time. Two worker
 //! threads now own those reads, each with a single waiting slot: the input

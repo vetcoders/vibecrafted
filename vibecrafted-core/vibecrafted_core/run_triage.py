@@ -45,7 +45,7 @@ import errno
 try:
     import fcntl
 except ImportError:  # native Windows — flock-shaped portable_lock
-    from . import portable_lock as fcntl
+    import vibecrafted_core.portable_lock as fcntl
 import hashlib
 import json
 import os

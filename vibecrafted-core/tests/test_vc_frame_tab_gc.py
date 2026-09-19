@@ -32,7 +32,7 @@ VIEWER_TOKEN = "a" * 32
 
 
 def test_product_workspace_tabs_are_never_gc_candidates() -> None:
-    assert PROTECTED_TAB_NAMES == {"Start here", "Agents", "Shell", "voc"}
+    assert PROTECTED_TAB_NAMES == {"Start here", "Agents", "Shell", "Voc"}
 
 
 def _write_json(path: Path, payload: Any) -> None:
