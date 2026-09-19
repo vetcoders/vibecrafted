@@ -1,0 +1,44 @@
+---
+source: tui-agent/tests/monitor_controls_snapshots.rs
+expression: text
+---
+Vibecrafted operator  Console  runs: 2 | active 1 | stalled 1
+workspace: vibecrafted  |  active 1  stalled 1  |  scope: live  |  Dispatch
+┌Surface───────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ Monitor live 2 │ Dispatch workflow/claude │ Controls 10 │ Mission 0|0                                                │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ Mission ─────────────────────────────┐┌ Operator ────────────────────────────┐┌ Execution ───────────────────────────┐
+│Workflow                              ││agent claude                          ││Living Tree · terminal                │
+│Best default. Examine the surface,    ││model agent default                   ││1 blocking issue(s)                   │
+│plan the cut, then implement.         ││                                      ││                                      │
+└──────────────────────────────────────┘└──────────────────────────────────────┘└──────────────────────────────────────┘
+┌Dispatch deck─────────────────────────────────────────────────────────┐┌Dispatch playbook─────────────────────────────┐
+│▶ mission: Workflow  Best default. Examine the surface, plan the cut, ││Dispatch posture                              │
+│then implement.                                                       ││                                              │
+│  agent: claude                                                       ││Shape the next worker before you launch it.   │
+│  model: agent default                                                ││Mission, agent and model say WHAT runs;       │
+│  environment: Living Tree                                            ││environment and                               │
+│  presentation: interactive view — vc-frame tab in the workspace worke││presentation say WHERE it runs and whether you│
+│r host                                                                ││watch it.                                     │
+│  permissions: provider default                                       ││Unsupported combinations are refused before   │
+│  sandbox: provider default                                           ││any worker starts.                            │
+│  prompt: Ship the operator surface.                                  ││Prompt edit is the last mile: keep it sharp   │
+│  repo: /work/vetcoders/vibecrafted                                   │└──────────────────────────────────────────────┘
+│                                                                      │┌Launch trail──────────────────────────────────┐
+│Arrows: ↑/↓ choose field  ←/→ change field  Enter launch              ││No launches from this session yet.            │
+│Shortcuts: a agent  M model  n environment  v presentation  p permissi││                                              │
+│ons  s sandbox  e prompt  g repo                                      ││Use Dispatch to stage a worker, then press    │
+│                                                                      ││Enter.                                        │
+│command: /usr/bin/vibecrafted workflow claude --prompt-stdin --runtime││                                              │
+│ terminal --repo /work/vetcoders/vibecrafted --json  <stdin: prompt, 2││selected run: impl-1                          │
+│6 chars>                                                              ││                                              │
+│                                                                      ││                                              │
+│cannot launch this declaration:                                       ││                                              │
+│  · repository /work/vetcoders/vibecrafted is not an existing director││                                              │
+│y; press g to choose another                                          ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+└──────────────────────────────────────────────────────────────────────┘└──────────────────────────────────────────────┘
+Dispatch: click a cell  wheel that pane  ↑/↓ field  ←/→ change  e edit  Enter launch
+Global: q quit  r refresh  a cycle agent  v cycle runtime  y copy  Ctrl+L clear search  ? help
+state root: /fixture/state

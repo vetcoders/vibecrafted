@@ -7,7 +7,7 @@ workspace: vibecrafted  |  active 1  stalled 1  |  scope: live  |  Monitor
 ┌Surface───────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │ Monitor live 2 │ Dispatch workflow/claude │ Controls 10 │ Mission 0|0                                                │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-┌Monitor pulse─────────────────────────┐┌Selection─────────────────────────────┐┌Filter────────────────────────────────┐
+┌ Monitor pulse ───────────────────────┐┌ Selection ───────────────────────────┐┌ Filter ──────────────────────────────┐
 │2 runs visible                        ││implement · codex · vibecrafted       ││live scope                            │
 │1 active · 1 stalled                  ││active  impl-1                        ││f cycles live/history/all             │
 │                                      ││                                      ││                                      │

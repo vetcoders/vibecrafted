@@ -727,11 +727,7 @@ fn draw_dispatch(frame: &mut Frame, area: Rect, app: &App) {
             Block::default()
                 .borders(Borders::ALL)
                 .title("Dispatch playbook")
-                .border_style(if playbook_focused {
-                    Style::default().add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                }),
+                .border_style(pane_border_style(playbook_focused)),
         )
         .scroll((app.interaction.scroll.playbook, 0))
         .wrap(Wrap { trim: false });
@@ -962,11 +958,7 @@ fn draw_launch(frame: &mut Frame, area: Rect, app: &App) {
             Block::default()
                 .borders(Borders::ALL)
                 .title(title)
-                .border_style(if deck_focused {
-                    Style::default().add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                }),
+                .border_style(pane_border_style(deck_focused)),
         )
         .scroll((app.interaction.scroll.deck, 0))
         .wrap(Wrap { trim: false });
@@ -1000,11 +992,7 @@ fn draw_launch_history(frame: &mut Frame, area: Rect, app: &App) {
             Block::default()
                 .borders(Borders::ALL)
                 .title("Launch trail")
-                .border_style(if trail_focused {
-                    Style::default().add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                }),
+                .border_style(pane_border_style(trail_focused)),
         )
         .scroll((app.interaction.scroll.trail, 0))
         .wrap(Wrap { trim: false });
@@ -1610,14 +1598,9 @@ fn draw_mc_quality_footer(
 }
 
 fn panel_block(title: &str, focused: bool, accent: Color) -> Block<'_> {
-    let style = if focused {
-        Style::default().fg(accent).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(accent)
-    };
     Block::default()
         .borders(Borders::ALL)
-        .border_style(style)
+        .border_style(pane_border_style(focused))
         .title(Span::styled(
             format!(" {} ", title.trim()),
             Style::default().fg(accent).add_modifier(Modifier::BOLD),
@@ -1647,6 +1630,16 @@ fn format_duration_seconds(seconds: f64) -> String {
     }
 }
 
+fn pane_border_style(focused: bool) -> Style {
+    if focused {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    }
+}
+
 fn draw_stat_strip(
     frame: &mut Frame,
     columns: [Rect; 3],
@@ -1655,17 +1648,16 @@ fn draw_stat_strip(
 ) {
     for (index, ((title, lines, accent), column)) in cards.into_iter().zip(columns).enumerate() {
         let focused = selected == Some(index);
-        let mut border = Style::default().fg(accent);
-        if focused {
-            border = border.add_modifier(Modifier::BOLD | Modifier::REVERSED);
-        }
         let content = lines.into_iter().map(Line::from).collect::<Vec<_>>();
         let panel = Paragraph::new(content)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(title)
-                    .border_style(border),
+                    .title(Span::styled(
+                        format!(" {} ", title.trim()),
+                        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                    ))
+                    .border_style(pane_border_style(focused)),
             )
             .style(Style::default())
             .wrap(Wrap { trim: false });

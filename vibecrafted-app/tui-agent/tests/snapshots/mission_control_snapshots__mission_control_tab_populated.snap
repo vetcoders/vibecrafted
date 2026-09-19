@@ -7,7 +7,7 @@ workspace: repo  |  active 0  stalled 0  |  scope: live  |  Mission Control
 ┌Surface───────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │ Monitor live 0 │ Dispatch workflow/claude │ Controls 4 │ Mission 2|4                                                 │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-┌Active dispatches─────────────────────┐┌History (30d)─────────────────────────┐┌Mission posture───────────────────────┐
+┌ Active dispatches ───────────────────┐┌ History (30d) ───────────────────────┐┌ Mission posture ─────────────────────┐
 │2 running                             ││128 derived runs scanned              ││model parity 40/128                   │
 │4 stalled queue items                 ││3 agents · 3 skills                   ││duration parity 2/128                 │
 │                                      ││                                      ││                                      │

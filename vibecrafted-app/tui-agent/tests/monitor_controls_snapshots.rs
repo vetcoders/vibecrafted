@@ -1,13 +1,17 @@
-//! Snapshot coverage for Monitor and Controls hierarchy after the VVOC cut.
+//! Snapshot coverage for Monitor, Controls, and Dispatch hierarchy after the
+//! VVOC cut.
 //!
 //! Freezes the operator-visible board: focused row, scope, primary action,
-//! and human labels. IDs stay secondary copyable metadata.
+//! and human labels. IDs stay secondary copyable metadata. The Dispatch color
+//! map freezes the border rule: focused pane carries the Yellow focus line,
+//! every other border stays neutral.
 
 use std::time::Duration;
 
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
+use ratatui::style::Color;
 use voc::app::{App, AppTab, DispatchFocus, LaunchFocus, QueueScope};
 use voc::config::AppConfig;
 use voc::launch::{Environment, LaunchKind, PermissionPolicy, Presentation, SandboxChoice};
@@ -122,6 +126,38 @@ fn buffer_text(buffer: &Buffer) -> String {
         .join("\n")
 }
 
+/// One char per cell encoding the foreground color. Freezes color
+/// *placement*; actual light/dark RGB values resolve terminal-side.
+fn buffer_color_map(buffer: &Buffer) -> String {
+    let width = buffer.area.width as usize;
+    buffer
+        .content()
+        .iter()
+        .map(|cell| color_char(cell.style().fg.unwrap_or(Color::Reset)))
+        .collect::<Vec<_>>()
+        .chunks(width)
+        .map(|row| row.iter().collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn color_char(color: Color) -> char {
+    match color {
+        Color::Reset => '.',
+        Color::Black => 'k',
+        Color::White => 'W',
+        Color::Gray => 'g',
+        Color::DarkGray => 'd',
+        Color::Red => 'R',
+        Color::Green => 'G',
+        Color::Yellow => 'Y',
+        Color::Blue => 'B',
+        Color::Magenta => 'M',
+        Color::Cyan => 'C',
+        _ => '?',
+    }
+}
+
 #[test]
 fn monitor_tab_hierarchy_snapshot() {
     let app = board_app();
@@ -146,4 +182,37 @@ fn controls_tab_hierarchy_snapshot() {
     assert!(text.contains("focused:"));
     assert!(app.deep_actions().len() < 12);
     assert!(!text.contains("Launch skill: vibecrafted justdo"));
+}
+
+#[test]
+fn dispatch_tab_content_snapshot() {
+    let mut app = board_app();
+    app.set_active_tab(AppTab::Dispatch);
+    let buffer = render(&app);
+    let text = buffer_text(&buffer);
+    insta::assert_snapshot!(text);
+    assert!(text.contains(" Mission "));
+    assert!(text.contains(" Operator "));
+    assert!(text.contains(" Execution "));
+    assert!(text.contains("Dispatch deck"));
+}
+
+#[test]
+fn dispatch_tab_focus_border_color_map_snapshot() {
+    let mut app = board_app();
+    app.set_active_tab(AppTab::Dispatch);
+    let buffer = render(&app);
+    let colors = buffer_color_map(&buffer);
+    insta::assert_snapshot!(colors);
+    // The focused stat card border is the only pane border painted with the
+    // focus color; the sibling card borders stay neutral.
+    let stat_rows: Vec<&str> = colors.lines().skip(4).take(6).collect();
+    let yellow_borders = stat_rows
+        .iter()
+        .map(|row| row.matches('Y').count())
+        .sum::<usize>();
+    assert!(
+        yellow_borders > 0,
+        "focused Dispatch card must carry the Yellow border line"
+    );
 }
