@@ -1,6 +1,6 @@
 # VC Operator 22-Next: Mission Control From Shell To Product
 
-- Repo: `/Users/tester/vc-workspace/vetcoders/vc-operator`
+- Repo: `/Users/Shared/vc-workspace/vetcoders/vc-operator`
 - Branch: `main`
 - Baseline commit: `a2a0a51`
 - Generated: `2026-05-12`

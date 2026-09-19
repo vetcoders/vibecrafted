@@ -219,9 +219,7 @@ fn render_settlement_board(board: &SettlementBoardCounts) -> String {
     let mut out = section_title("Settlement board", board.total_settled);
     out.push_str(&board.render_strip());
     out.push('\n');
-    out.push_str(
-        "note: f/x/n reads settlement_verdict on retained snapshots only.\n\n",
-    );
+    out.push_str("note: f/x/n reads settlement_verdict on retained snapshots only.\n\n");
     out
 }
 

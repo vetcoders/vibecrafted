@@ -31,7 +31,7 @@ const STATS_WINDOW_DAYS: i64 = 30;
 /// failures should be reasoned about from the wider per-agent panel.
 const FAILURE_WINDOW_HOURS: i64 = 24;
 
-/// Active-dispatch ETA uses the same stall window as `compute_view`.
+// Active-dispatch ETA uses the same stall window as `compute_view`.
 
 const DISK_WARN_FREE_PERCENT: f64 = 15.0;
 const DISK_BLOCKED_FREE_PERCENT: f64 = 5.0;
@@ -91,8 +91,7 @@ pub struct SettlementBoardCounts {
 }
 
 impl SettlementBoardCounts {
-    pub const SCOPE_RETAINED_SNAPSHOTS: &'static str =
-        "retained control_plane/runs snapshots";
+    pub const SCOPE_RETAINED_SNAPSHOTS: &'static str = "retained control_plane/runs snapshots";
 
     /// Count settlement axis from retained run snapshots.
     ///
@@ -471,7 +470,8 @@ impl MissionControlState {
         let skill_stats = skill_stats_from_derived(&derived_records);
         let failures = failure_board_from_derived(&derived_records, state, now);
         let fleet_health = fleet_health_from_inputs(state, artifact_root, &data_quality);
-        let action_queue = action_queue_from_inputs(state, &failures, &derived_records, intents, now);
+        let action_queue =
+            action_queue_from_inputs(state, &failures, &derived_records, intents, now);
         let mut settlement = SettlementBoardCounts::from_snapshots(
             &state.retained_runs,
             state.canonical_active_count(),
@@ -561,7 +561,10 @@ fn snapshot_completed_at(snapshot: &RunSnapshot, window_floor: DateTime<Utc>) ->
         .unwrap_or(window_floor)
 }
 
-fn derived_record_from_snapshot(snapshot: &RunSnapshot, window_floor: DateTime<Utc>) -> DerivedRecord {
+fn derived_record_from_snapshot(
+    snapshot: &RunSnapshot,
+    window_floor: DateTime<Utc>,
+) -> DerivedRecord {
     DerivedRecord {
         run_id: snapshot.run_id.clone(),
         agent: snapshot
@@ -609,7 +612,7 @@ fn collect_derived_records(
         .map(|snapshot| derived_record_from_snapshot(&snapshot, window_floor))
         .filter(|record| record.completed_at >= window_floor)
         .collect();
-    records.sort_by(|left, right| right.completed_at.cmp(&left.completed_at));
+    records.sort_by_key(|record| std::cmp::Reverse(record.completed_at));
     if records.len() > META_SCAN_CAP {
         quality.capped = true;
         records.truncate(META_SCAN_CAP);
@@ -3103,7 +3106,7 @@ mod tests {
     #[test]
     fn mcp_process_match_uses_executable_token_only() {
         assert!(process_line_mentions_server(
-            "/Users/tester/.local/bin/loctree-mcp --transport stdio",
+            "/Users/Shared/.local/bin/loctree-mcp --transport stdio",
             "loctree-mcp"
         ));
         assert!(process_line_mentions_server(
