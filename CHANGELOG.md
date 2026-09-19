@@ -51,15 +51,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   the owner named, never a guessed port. Configured consoles open in a
   `service`-scoped tab on their own origin.
 - Server web: Scaffold inspector endpoint links open outside the studio
-  document (`target="_blank"`). The studio's global navigation carries the
-  full route vocabulary (Workspaces, Sessions, Agent Manager, Runs, Control,
-  Activity, Structure, Scaffold) and stays reachable on narrow viewports as a
-  scrollable row; the artifact index remains the second, document-level
-  navigation.
-- Server web: navigation separates **Agent Manager** (`/agents`, provider and
-  launcher catalog) from **Live runs** (`/runs`); **Sessions** lists the
-  canonical run transcripts joined by logical session identity. Sidebar and
-  mobile numbering agree (01–10).
+  document (`target="_blank"`). Global navigation is five views — Overview,
+  Transcripts, Structure, Plans, Frame. Workspaces, Sessions, Agents, Live
+  runs, Control, Activity and Guide stay in the Overview rail (same URLs).
+  AICX search sits on Structure. The artifact index remains the second,
+  document-level navigation.
+- Server web: **Agent Manager** (`/agents`) stays distinct from **Live runs**
+  (`/runs`); **Sessions** lists canonical run transcripts joined by logical
+  session identity. They are Overview-rail catalogs, not extra primary views.
 - Server web: `/structure/report` serves the canonical Loctree report under a
   Content-Security-Policy `sandbox` (opaque origin, no `fetch`/forms/frames)
   with its sibling assets on `/structure/report/{asset}`, so the interactive
@@ -81,7 +80,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   including the unfiltered listing. The transcripts page loads pages of 50
   and re-applies Fleet/Project focus after each fetch. The live run page
   still shows a tail preview. Overview no longer links a guessed AICX port;
-  `/aicx` is the search door. `POST /api/structure/report` runs `loct report`
+  `/aicx` remains the deep-link search door and Structure hosts the same
+  form. `POST /api/structure/report` runs `loct report`
   in a known control-plane workspace (local-peer gated; proven against a real
   `loct` binary). Plan cards expose `data-focus-repo` and PPM infers a
   transcript URL only for `data-ppm="run"`.

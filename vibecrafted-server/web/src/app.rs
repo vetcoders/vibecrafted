@@ -620,6 +620,73 @@ fn run_cards(runs: Vec<DashboardRun>) -> impl IntoView {
         .collect_view()
 }
 
+fn run_table(
+    title: &'static str,
+    aria: &'static str,
+    band: &'static str,
+    runs: Vec<DashboardRun>,
+) -> impl IntoView {
+    let count = runs.len();
+    let empty = count == 0;
+    view! {
+        <section class="overview-band run-table-band" aria-label=aria data-rail-band=band>
+            <header class="run-table-head">
+                <h2>{title}</h2>
+                <span>{count}</span>
+            </header>
+            <div class="run-table-wrap">
+                <table class="run-table">
+                    <thead>
+                        <tr>
+                            <th>"Run"</th>
+                            <th>"Agent"</th>
+                            <th>"Skill"</th>
+                            <th>"Age"</th>
+                            <th>"Heartbeat"</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr class="run-table-empty" hidden={!empty}>
+                            <td colspan="5">"None."</td>
+                        </tr>
+                        {runs.into_iter().map(|run| {
+                            let detail_href = format!("/run/{}", run.run_id);
+                            let transcript_url = format!("/api/control/runs/{}/transcript", run.run_id);
+                            let live = run.health == "active";
+                            let beat = if live { "live" } else { "none" };
+                            let beat_class = if live { "run-beat is-live" } else { "run-beat" };
+                            view! {
+                                <tr
+                                    data-ppm="run"
+                                    data-run-id=run.run_id.clone()
+                                    data-href=detail_href.clone()
+                                    data-focus-root=run.root.clone()
+                                    data-transcript-url=transcript_url
+                                    data-report=run.latest_report.clone()
+                                    data-error=run.last_error.clone()
+                                >
+                                    <td>
+                                        <a class="control-run-id" href=detail_href.clone() data-copy=run.run_id.clone()>{run.run_id.clone()}</a>
+                                    </td>
+                                    <td>{run.agent}</td>
+                                    <td>{run.skill}</td>
+                                    <td>{run.updated_at}</td>
+                                    <td>
+                                        <span class=beat_class>
+                                            <i aria-hidden="true"></i>
+                                            {beat}
+                                        </span>
+                                    </td>
+                                </tr>
+                            }
+                        }).collect_view()}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    }
+}
+
 fn is_terminal_state(state: &str) -> bool {
     matches!(
         state.to_ascii_lowercase().as_str(),
@@ -834,6 +901,22 @@ pub fn App() -> impl IntoView {
 /// Client behaviour of the AICX search page. Injected through `inner_html`
 /// like the theme scripts, so SSR and hydration agree on the DOM. Every hit
 /// links to the server-owned reference route, never to a `file://` path.
+fn aicx_search_panel() -> impl IntoView {
+    view! {
+        <section class="control-panel control-panel-wide" aria-label="AICX search">
+            <div class="control-panel-head"><h2>"AICX"</h2><span>"intent"</span></div>
+            <form id="aicx-search-form" class="server-console-links">
+                <input id="aicx-search-query" name="q" type="search" required=true maxlength="512" placeholder="Search intent (query)" />
+                <input id="aicx-search-project" name="project" type="text" maxlength="129" placeholder="owner/repo (optional)" />
+                <button class="server-console-link server-console-link-primary" type="submit">"Search AICX"</button>
+            </form>
+            <p id="aicx-search-status" class="control-empty">"Enter a query to search the local AICX corpus."</p>
+            <ul id="aicx-search-results" class="control-warning-list"></ul>
+            <script inner_html=aicx_page_script()></script>
+        </section>
+    }
+}
+
 fn aicx_page_script() -> &'static str {
     r#"(() => {
   const form = document.getElementById('aicx-search-form');
@@ -895,16 +978,7 @@ pub fn AicxPage() -> impl IntoView {
         <ServerFrame active=ServerSection::Structure status="intent search".to_string()>
             <div class="server-console-shell route-page-shell">
                 {route_header("Intent", "AICX search", "Search runs the installed AICX CLI on this host. The corpus is private: results are served to local peers only, and every hit opens through a server-owned reference route.")}
-                <section class="control-panel control-panel-wide" aria-label="AICX search">
-                    <form id="aicx-search-form" class="server-console-links">
-                        <input id="aicx-search-query" name="q" type="search" required=true maxlength="512" placeholder="Search intent (query)" />
-                        <input id="aicx-search-project" name="project" type="text" maxlength="129" placeholder="owner/repo (optional)" />
-                        <button class="server-console-link server-console-link-primary" type="submit">"Search AICX"</button>
-                    </form>
-                    <p id="aicx-search-status" class="control-empty">"Enter a query to search the local AICX corpus."</p>
-                    <ul id="aicx-search-results" class="control-warning-list"></ul>
-                    <script inner_html=aicx_page_script()></script>
-                </section>
+                {aicx_search_panel()}
                 <p class="server-console-links"><a class="server-console-link" href="/structure">"Back to Structure"</a><a class="server-console-link" href="/agents">"Agent Manager"</a></p>
             </div>
         </ServerFrame>
@@ -969,40 +1043,37 @@ fn console_dashboard(dashboard: DashboardData) -> impl IntoView {
                         <div><dt>"failures"</dt><dd>{stalled_count}</dd></div>
                         <div><dt>"recent"</dt><dd>{recent_count}</dd></div>
                     </dl>
-                    <p class="overview-head-actions">
-                        <a class="server-navbar-action" href="/transcripts">"Transcripts"</a>
-                        <a class="server-navbar-action" href="/aicx">"AICX"</a>
-                        <a class="server-navbar-action" href="/structure">"Loctree"</a>
-                        <a class="server-navbar-action" href="/frame">"Frame"</a>
-                    </p>
                 </header>
 
-                <div class="settlement-board-wrap">
-                    {settlement_board(settlement)}
+                <div class="overview-desk-body">
+                    <div class="overview-desk-main">
+                        <div class="settlement-board-wrap" data-rail-band="health" hidden>
+                            {settlement_board(settlement)}
+                        </div>
+                        {run_table("Active dispatches", "Active dispatches", "active", active_runs)}
+                        {run_table("Failures", "Failures", "failures", stalled_runs)}
+                        {run_table("Recent", "Recent", "recent", recent_runs)}
+                        <p class="overview-structure-line" aria-label="Structure">
+                            <a href="/structure">"Structure"</a>
+                            " · "
+                            {loctree_note}
+                            " · "
+                            <a href="/scaffold">"Plans"</a>
+                        </p>
+                    </div>
+                    <aside class="overview-inspector" id="overview-inspector" aria-label="Run inspector">
+                        <header>
+                            <p class="section-eyebrow">"Run"</p>
+                            <h2 data-inspector-id>"Nothing selected"</h2>
+                        </header>
+                        <a class="inspector-open" data-inspector-open href="/runs" hidden>"Open transcript →"</a>
+                        <p class="section-eyebrow">"Report"</p>
+                        <p data-inspector-report>"Select a row."</p>
+                        <p class="control-run-error" data-inspector-error hidden></p>
+                        <p class="section-eyebrow">"Transcript tail"</p>
+                        <pre class="inspector-tail" data-inspector-tail>"Select a row."</pre>
+                    </aside>
                 </div>
-
-                <section class="overview-band" aria-label="Active dispatches">
-                    <div class="control-panel-head"><h2>"Active dispatches"</h2><span>{active_count}</span></div>
-                    <p class="control-empty" hidden={active_count != 0}>"None."</p>
-                    <div class="control-run-list">{run_cards(active_runs)}</div>
-                </section>
-                <section class="overview-band" aria-label="Failures">
-                    <div class="control-panel-head"><h2>"Failures"</h2><span>{stalled_count}</span></div>
-                    <p class="control-empty" hidden={stalled_count != 0}>"None."</p>
-                    <div class="control-run-list">{run_cards(stalled_runs)}</div>
-                </section>
-                <section class="overview-band" aria-label="Recent">
-                    <div class="control-panel-head"><h2>"Recent"</h2><span>{recent_count}</span></div>
-                    <p class="control-empty" hidden={recent_count != 0}>"None."</p>
-                    <div class="control-run-list">{run_cards(recent_runs)}</div>
-                </section>
-                <p class="overview-structure-line" aria-label="Structure">
-                    <a href="/structure">"Structure"</a>
-                    " · "
-                    {loctree_note}
-                    " · "
-                    <a href="/scaffold">"Plans"</a>
-                </p>
             </div>
         </ServerFrame>
     }
@@ -1509,7 +1580,7 @@ fn structure_dashboard(dashboard: DashboardData) -> impl IntoView {
                     </p>
                     <p id="loctree-generate-status" class="control-empty"></p>
                     <p class="control-plane-meta" hidden={!has_report}>"The report opens sandboxed: its scripts run, but it holds no control-plane authority."</p>
-                    <p class="server-console-links"><a class="server-console-link server-console-link-primary" href="/scaffold">"Open scaffold studio"</a><a class="server-console-link" href="/aicx">"Search intent (AICX)"</a></p>
+                    {aicx_search_panel()}
                     <script inner_html=loctree_generate_script()></script>
                 </section>
             </div>
@@ -1614,8 +1685,8 @@ mod tests {
         ActivityPage, AicxPage, ConsolePage, DashboardData, DashboardRun, DashboardSession,
         DashboardSessionRun, FramePage, LifecyclePage, RunsPage, SessionsPage, StructurePage,
         TranscriptsPage, WorkspacesPage, console_dashboard, decode_dashboard_embed,
-        encode_dashboard_embed, git_repo_name, load_dashboard_data_from, operator_active_runs, run_cards,
-        session_cards, unique_runtime_labels, workspaces_dashboard,
+        encode_dashboard_embed, git_repo_name, load_dashboard_data_from, operator_active_runs,
+        run_cards, session_cards, unique_runtime_labels, workspaces_dashboard,
     };
     use crate::control::api::{control_routes, state_payload};
     use crate::theme::provide_theme_context;
@@ -1833,16 +1904,18 @@ mod tests {
         assert!(html.contains("failed"));
         assert!(html.contains("attention"));
         assert!(html.contains("aria-label=\"Switch to light theme\""));
-        assert!(html.contains("href=\"/aicx\""));
+        assert!(html.contains("href=\"/structure\""));
+        assert!(html.contains("id=\"overview-inspector\""));
+        assert!(html.contains("class=\"run-table\""));
         assert!(!html.contains("http://127.0.0.1:8033/"));
         assert!(!html.contains("AICX desk"));
         assert!(!html.contains("Choose the truth"));
+        assert!(!html.contains("Open scaffold"));
         assert!(html.contains("Vibecrafted server navigation"));
         assert!(html.contains("server-sidebar"));
         assert!(html.contains("href=\"/runs\""));
         assert!(html.contains("href=\"/lifecycle\""));
         assert!(html.contains("href=\"/activity\""));
-        assert!(html.contains("href=\"/structure\""));
         assert!(html.contains("href=\"/scaffold\""));
         assert!(!html.contains("href=\"#fleet\""));
         let board_position = html
@@ -1899,6 +1972,8 @@ mod tests {
         assert!(structure.contains("Latest Loctree report"));
         assert!(structure.contains("id=\"loctree-generate\""));
         assert!(structure.contains("/api/structure/report"));
+        assert!(structure.contains("id=\"aicx-search-form\""));
+        assert!(structure.contains("/api/aicx/search"));
         assert!(!structure.contains("href=\"/Volumes/"));
         assert!(card.contains("href=\"/run/impl-live-agent\""));
         assert!(card.contains("Open transcript"));
