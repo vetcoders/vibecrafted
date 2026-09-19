@@ -179,3 +179,22 @@ def test_prepush_checks_commit_projection_not_foreign_dirty_worktree(
 
     assert result.returncode == 0, result.stderr
     assert source.read_text(encoding="utf-8") == "x=1\n"
+
+
+def test_ruff_format_check_on_repo_root_passes() -> None:
+    """Husky full-repo ruff and a manual `ruff format --check .` must stay green.
+
+    ruff 0.16 includes Markdown. Fenced examples in docs used to fail this
+    gate and refuse `git push` even when every `*.py` file was formatted.
+    """
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    result = subprocess.run(
+        ["uvx", "ruff", "format", "--check", "--", str(REPO_ROOT)],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
