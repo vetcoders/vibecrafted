@@ -1,0 +1,337 @@
+<title>Intencje __PROJECT__</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Sans+3:ital,wght@0,400;0,600;0,700;1,400&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+:root{
+  --ground:#F2F4F7;--surface:#FFFFFF;--surface2:#E9EDF2;--ink:#1B2230;--muted:#5F6B7A;--line:#D5DBE3;--accent:#2F5D9E;--accent-ink:#FFFFFF;--focus:#7FA6DE;
+  --c-landed:#2E7D4F;--c-partial:#B7791F;--c-absent:#B23A3A;--c-contested:#7B4FA3;--c-bydoc:#8A6BB3;--c-superseded:#6B7280;--c-unclear:#4B6478;--c-contradiction:#C2417A;--c-none:#9AA3AE;
+  --ok:#2E7D4F;--warn:#B7791F;--bad:#B23A3A;--mark:#FFE58A;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--ground:#11151B;--surface:#1A2029;--surface2:#232B36;--ink:#E4E9F0;--muted:#98A3B1;--line:#2E3745;--accent:#7FA6DE;--accent-ink:#0F1622;--focus:#A9C4EA;--c-landed:#5FBF86;--c-partial:#E0A64A;--c-absent:#E06B6B;--c-contested:#B58BE0;--c-bydoc:#A78BD6;--c-superseded:#8B95A3;--c-unclear:#7F9AB3;--c-contradiction:#EA7DAB;--ok:#5FBF86;--warn:#E0A64A;--bad:#E06B6B;--mark:#6A5A15}}
+:root[data-theme="dark"]{--ground:#11151B;--surface:#1A2029;--surface2:#232B36;--ink:#E4E9F0;--muted:#98A3B1;--line:#2E3745;--accent:#7FA6DE;--accent-ink:#0F1622;--focus:#A9C4EA;--c-landed:#5FBF86;--c-partial:#E0A64A;--c-absent:#E06B6B;--c-contested:#B58BE0;--c-bydoc:#A78BD6;--c-superseded:#8B95A3;--c-unclear:#7F9AB3;--c-contradiction:#EA7DAB;--ok:#5FBF86;--warn:#E0A64A;--bad:#E06B6B;--mark:#6A5A15}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--ground);color:var(--ink);font:15px/1.45 "Source Sans 3",system-ui,-apple-system,sans-serif;display:flex;flex-direction:column;overflow:hidden}
+.mono{font-family:"JetBrains Mono",ui-monospace,Menlo,monospace;font-size:.86em}
+button,select,input,textarea{font:inherit;color:inherit}
+button{cursor:pointer}
+:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
+a{color:var(--accent)}
+header{flex:none;z-index:5;background:var(--surface);border-bottom:1px solid var(--line);padding:10px 16px;display:flex;flex-wrap:wrap;gap:8px 18px;align-items:baseline}
+header h1{font-size:18px;margin:0;font-weight:700;letter-spacing:.01em}
+header .sub{color:var(--muted);font-size:13px}
+.stats{display:flex;flex-wrap:wrap;gap:6px;margin-left:auto}
+.stat{display:inline-flex;gap:6px;align-items:center;font-size:12.5px;padding:2px 8px;border-radius:999px;background:var(--surface2);cursor:pointer;border:1px solid transparent;font-variant-numeric:tabular-nums}
+.stat.on{border-color:var(--accent)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--c-none);flex:none}
+main{flex:1;display:grid;grid-template-columns:260px minmax(0,1fr);min-height:0;overflow:hidden}
+aside{border-right:1px solid var(--line);padding:14px 16px 40px;background:var(--surface);overflow:auto;min-height:0}
+aside h2{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:14px 0 6px}
+aside h2:first-child{margin-top:0}
+.chips{display:flex;flex-wrap:wrap;gap:5px}
+.chip{border:1px solid var(--line);background:transparent;border-radius:999px;padding:2px 9px;font-size:12.5px;color:var(--ink)}
+.chip.on{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+input[type=search]{width:100%;padding:7px 9px;border:1px solid var(--line);border-radius:6px;background:var(--ground)}
+select{padding:5px 8px;border:1px solid var(--line);border-radius:6px;background:var(--ground);max-width:100%}
+.content{min-width:0;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) 0;transition:grid-template-columns .2s;overflow:hidden}
+.content.open{grid-template-columns:minmax(0,1fr) minmax(360px,44%)}
+.list{padding:10px 16px 60px;min-width:0;min-height:0;overflow:auto}
+.toolbar{position:sticky;top:0;z-index:2;background:var(--ground);padding:4px 0;display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;color:var(--muted);font-size:13px;margin-bottom:8px}
+.toolbar .n{color:var(--ink);font-weight:600;font-variant-numeric:tabular-nums}
+.row{display:grid;grid-template-columns:78px 84px minmax(0,1fr) 92px 52px 28px;gap:10px;align-items:center;padding:8px 10px;border-radius:6px;cursor:pointer;border:1px solid transparent}
+.row:hover{background:var(--surface)}
+.row.sel{background:var(--surface);border-color:var(--accent)}
+.row .id{color:var(--muted)}
+.row .d{color:var(--muted);font-variant-numeric:tabular-nums;font-size:13px}
+.row .topic{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row .topic small{color:var(--muted);margin-left:6px}
+.hosts{display:flex;gap:4px;align-items:center}
+.pip{width:10px;height:10px;border-radius:3px;background:var(--c-none)}
+.str{display:flex;gap:2px}
+.str i{display:block;width:6px;height:10px;border-radius:2px;background:var(--line)}
+.str i.f{background:var(--muted)}
+.st{font-size:14px;text-align:center}
+.st.ok{color:var(--ok)}.st.chg{color:var(--warn)}.st.drop{color:var(--bad)}.st.note{color:var(--accent)}
+.hdr{position:sticky;top:34px;z-index:2;background:var(--ground);color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em;cursor:default}
+.hdr:hover{background:transparent}
+.dsp{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;padding:1px 8px;border-radius:999px;background:var(--surface2);white-space:nowrap}
+.dsp .dot{width:7px;height:7px}
+.empty{padding:40px;text-align:center;color:var(--muted)}
+/* detail */
+.detail{border-left:1px solid var(--line);background:var(--surface);overflow:auto;min-width:0;min-height:0}
+.detail:not(.has){display:none}
+.dwrap{padding:16px 18px 40px;display:flex;flex-direction:column;gap:16px}
+.dtop{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}
+.dtop h2{margin:0;font-size:17px;font-weight:700;text-wrap:balance}
+.meta{display:flex;flex-wrap:wrap;gap:6px 12px;color:var(--muted);font-size:13px}
+.x{border:0;background:transparent;font-size:20px;line-height:1;padding:2px 6px;color:var(--muted)}
+blockquote{margin:0;padding:12px 14px;border-left:3px solid var(--accent);background:var(--ground);border-radius:0 6px 6px 0;font-size:16px;line-height:1.45;font-style:italic}
+details{border:1px solid var(--line);border-radius:6px}
+details summary{padding:8px 12px;cursor:pointer;color:var(--muted);font-size:13px;list-style:none;display:flex;justify-content:space-between}
+details summary::after{content:"rozwiń";color:var(--accent)}
+details[open] summary::after{content:"zwiń"}
+.ctx{padding:0 14px 12px;white-space:pre-wrap;font-size:14px;line-height:1.5;max-height:420px;overflow:auto;color:var(--ink)}
+.ctx mark{background:var(--mark);color:inherit;padding:0 2px;border-radius:2px}
+.hostcards{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.hc{border:1px solid var(--line);border-radius:6px;padding:10px 12px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.hc h3{margin:0;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);display:flex;justify-content:space-between;align-items:center}
+.hc .ev{font-size:13px;word-break:break-word}
+.hc .gap{font-size:13px;color:var(--muted)}
+.ev a{text-decoration:none;border-bottom:1px dotted var(--accent)}
+.ov{font-size:13px;color:var(--muted);display:flex;flex-direction:column;gap:4px}
+.ov b{color:var(--ink);font-weight:600}
+.form{border:1px solid var(--line);border-radius:6px;padding:12px 14px;display:flex;flex-direction:column;gap:10px;background:var(--ground)}
+.form h3{margin:0;font-size:13px;font-weight:700}
+.form label{font-size:12.5px;color:var(--muted);display:flex;flex-direction:column;gap:4px}
+.seg{display:flex;gap:4px;flex-wrap:wrap}
+.seg button{border:1px solid var(--line);background:var(--surface);border-radius:6px;padding:5px 10px;font-size:13px}
+.seg button.on{border-color:var(--accent);background:var(--accent);color:var(--accent-ink)}
+.seg button.on.ok{background:var(--ok);border-color:var(--ok);color:#fff}
+.seg button.on.drop{background:var(--bad);border-color:var(--bad);color:#fff}
+textarea{width:100%;min-height:64px;padding:7px 9px;border:1px solid var(--line);border-radius:6px;background:var(--surface);resize:vertical}
+.actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.primary{background:var(--accent);color:var(--accent-ink);border:0;border-radius:6px;padding:7px 14px;font-weight:600}
+.ghost{background:transparent;border:1px solid var(--line);border-radius:6px;padding:6px 12px}
+.saved{font-size:12.5px;color:var(--muted)}
+.banner{font-size:12.5px;color:var(--muted);padding:6px 10px;border:1px dashed var(--line);border-radius:6px}
+kbd{font-family:"JetBrains Mono",monospace;font-size:11px;border:1px solid var(--line);border-radius:4px;padding:0 4px;background:var(--surface)}
+@media (max-width:1000px){.content.open{grid-template-columns:minmax(0,1fr)}.content.open .list{display:none}}
+@media (max-width:760px){body{overflow:auto}main{grid-template-columns:1fr;overflow:visible}aside{overflow:visible;border-right:0;border-bottom:1px solid var(--line)}.content,.list,.detail{overflow:visible}.row{grid-template-columns:72px minmax(0,1fr) 60px 28px}.row .d,.row .str{display:none}.hostcards{grid-template-columns:1fr}header .stats{margin-left:0}}
+@media (prefers-reduced-motion:reduce){.content{transition:none}}
+</style>
+
+<header>
+  <h1>Intencje __PROJECT__</h1>
+  <span class="sub" id="sub"></span>
+  <div class="stats" id="stats"></div>
+</header>
+
+<main>
+<aside>
+  <h2>Szukaj</h2>
+  <input type="search" id="q" placeholder="cytat, temat, id, plik…" autocomplete="off">
+  <h2>Twoja decyzja</h2>
+  <div class="chips" id="f-status"></div>
+  <h2>Dyspozycja (efektywna)</h2>
+  <div class="chips" id="f-disp"></div>
+  <h2>Zgodność hostów</h2>
+  <div class="chips" id="f-agree"></div>
+  <h2>Siła wypowiedzi</h2>
+  <div class="chips" id="f-str"></div>
+  <h2>Rodzaj</h2>
+  <div class="chips" id="f-kind"></div>
+  <h2>Obszar</h2>
+  <div class="chips" id="f-subj"></div>
+  <h2>Sortowanie</h2>
+  <select id="sort">
+    <option value="date-desc">Data · najnowsze</option>
+    <option value="date-asc">Data · najstarsze</option>
+    <option value="str-desc">Siła · najmocniejsze</option>
+    <option value="id">Id</option>
+  </select>
+  <h2>Eksport</h2>
+  <button class="ghost" id="dl" hidden>Pobierz overrides.jsonl</button>
+  <div class="banner" id="dbstate">Łączę z zapisem decyzji…</div>
+</aside>
+
+<div class="content" id="content">
+  <section class="list" id="list">
+    <div class="toolbar"><span><span class="n" id="count">0</span> pozycji</span><span id="filterdesc"></span><button class="ghost" id="clear" style="padding:2px 8px;font-size:12px">wyczyść filtry</button><span style="margin-left:auto">nawigacja <kbd>↑</kbd><kbd>↓</kbd> · zamknij <kbd>Esc</kbd></span></div>
+    <div class="row hdr"><span>id</span><span>data</span><span>temat · obszar</span><span id="hosthdr">hosty</span><span>siła</span><span></span></div>
+    <div id="rows"></div>
+  </section>
+  <section class="detail" id="detail"></section>
+</div>
+</main>
+
+<script id="data" type="application/json">__DATA__</script>
+<script>
+const DATA = JSON.parse(document.getElementById('data').textContent);
+const BASE = '__REPO_BLOB_BASE__';
+const HOST0 = '__HOST0__', HOST1 = '__HOST1__';
+const DISP = {
+  'landed':['Wdrożone','c-landed'],'partial':['Częściowo','c-partial'],'absent':['Brak w kodzie','c-absent'],
+  'landed-contested':['W kodzie, Founder: nie działa','c-contested'],'landed-by-doc':['Tylko w dokumencie','c-bydoc'],
+  'superseded':['Zastąpione późniejszą decyzją','c-superseded'],'unclear':['Niejasne','c-unclear'],'contradiction':['Sprzeczność','c-contradiction'],
+  'drop':['Do usunięcia (fałszywy trop)','c-none']
+};
+const KIND = {complaint:'skarga',task:'zadanie',constraint:'ograniczenie',decision:'decyzja',preference:'preferencja',question:'pytanie'};
+const STATUS = {todo:'do przejrzenia',ok:'zatwierdzone',chg:'zmienione',drop:'do usunięcia',note:'z komentarzem'};
+const byId = Object.fromEntries(DATA.map(d=>[d.id,d]));
+
+// ---- state ----
+let decisions = Object.fromEntries(DATA.filter(d=>d.decision).map(d=>[d.id,d.decision]));  // seeded from the ledger's human overrides; db overrides when present
+let db=null, dlcap=null, canWrite=true;
+const F = load('filters', {q:'',status:[],disp:[],agree:[],str:[],kind:[],subj:[],sort:'date-desc'});
+let selected = load('selected', null);
+
+function load(k,def){try{const v=localStorage.getItem('ic.'+k);return v?JSON.parse(v):def}catch(e){return def}}
+function save(k,v){try{localStorage.setItem('ic.'+k,JSON.stringify(v))}catch(e){}}
+function esc(s){return (s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+
+function effective(d){const dec=decisions[d.id];return (dec&&dec.disposition)||d.div0}
+function status(d){const dec=decisions[d.id];if(!dec)return 'todo';if(dec.verdict==='drop')return 'drop';if(dec.disposition&&dec.disposition!==d.div0)return 'chg';if(dec.verdict==='ok')return 'ok';if(dec.note)return 'note';return 'todo'}
+function agree(d){if(!d.dragon)return 'nodragon';return d.div0===d.dragon?'same':'diff'}
+
+// ---- filters UI ----
+function chips(el,items,key,fmt){
+  el.innerHTML=items.map(v=>`<button class="chip${F[key].includes(v)?' on':''}" data-v="${esc(v)}">${fmt(v)}</button>`).join('');
+  el.onclick=e=>{const b=e.target.closest('.chip');if(!b)return;const v=b.dataset.v;const i=F[key].indexOf(v);i<0?F[key].push(v):F[key].splice(i,1);apply()}
+}
+const uniq=(k)=>[...new Set(DATA.map(d=>d[k]))].sort();
+function buildFilters(){
+  chips(document.getElementById('f-status'),Object.keys(STATUS),'status',v=>STATUS[v]);
+  chips(document.getElementById('f-disp'),Object.keys(DISP),'disp',v=>`<span class="dot" style="background:var(--${DISP[v][1]})"></span> ${DISP[v][0]}`);
+  chips(document.getElementById('f-agree'),['same','diff','nodragon'],'agree',v=>({same:'zgodne',diff:'rozjazd',nodragon:'brak drugiego hosta'})[v]);
+  chips(document.getElementById('f-str'),['5','4','3','2','1'],'str',v=>'siła '+v);
+  chips(document.getElementById('f-kind'),Object.keys(KIND),'kind',v=>KIND[v]);
+  chips(document.getElementById('f-subj'),uniq('subject'),'subj',v=>v);
+  document.getElementById('q').value=F.q; document.getElementById('sort').value=F.sort;
+}
+document.getElementById('q').oninput=e=>{F.q=e.target.value;apply()};
+document.getElementById('sort').onchange=e=>{F.sort=e.target.value;apply()};
+document.getElementById('clear').onclick=()=>{Object.assign(F,{q:'',status:[],disp:[],agree:[],str:[],kind:[],subj:[]});buildFilters();apply()};
+
+function filtered(){
+  const q=F.q.trim().toLowerCase();
+  let r=DATA.filter(d=>
+    (!F.status.length||F.status.includes(status(d)))&&
+    (!F.disp.length||F.disp.includes(effective(d)))&&
+    (!F.agree.length||F.agree.includes(agree(d)))&&
+    (!F.str.length||F.str.includes(String(d.strength)))&&
+    (!F.kind.length||F.kind.includes(d.kind))&&
+    (!F.subj.length||F.subj.includes(d.subject))&&
+    (!q||[d.id,d.topic,d.quote,d.subject,d.ev0,d.ev1,d.gap0,d.gap1,(decisions[d.id]||{}).note||''].join(' ').toLowerCase().includes(q))
+  );
+  const s=F.sort;
+  r.sort((a,b)=>s==='date-asc'?a.date.localeCompare(b.date)||a.id.localeCompare(b.id):s==='str-desc'?b.strength-a.strength||b.date.localeCompare(a.date):s==='id'?a.id.localeCompare(b.id,undefined,{numeric:true}):b.date.localeCompare(a.date)||b.id.localeCompare(a.id));
+  return r;
+}
+let view=[];
+function apply(){
+  save('filters',F);
+  view=filtered();
+  document.getElementById('count').textContent=view.length;
+  const parts=[];if(F.q)parts.push('„'+F.q+'”');for(const k of ['status','disp','agree','str','kind','subj'])if(F[k].length)parts.push(F[k].map(v=>k==='disp'?DISP[v][0]:k==='status'?STATUS[v]:k==='kind'?KIND[v]:v).join(', '));
+  document.getElementById('filterdesc').textContent=parts.length?'· '+parts.join(' · '):'';
+  document.querySelectorAll('.chip').forEach(b=>{const key=b.parentElement.id.slice(2);b.classList.toggle('on',(F[key]||[]).includes(b.dataset.v))});
+  renderRows(); renderStats();
+}
+function pip(v){return `<span class="pip" title="${v?esc(DISP[v][0]):'brak werdyktu'}" style="background:var(--${v?DISP[v][1]:'c-none'})"></span>`}
+function stIcon(s){return {todo:'',ok:'✓',chg:'↺',drop:'✕',note:'✎'}[s]}
+function renderRows(){
+  const el=document.getElementById('rows');
+  if(!view.length){el.innerHTML='<div class="empty">Nic nie pasuje do filtrów.</div>';return}
+  el.innerHTML=view.map(d=>{const s=status(d);return `<div class="row${d.id===selected?' sel':''}" data-id="${d.id}" tabindex="0">
+    <span class="id mono">${d.id}</span><span class="d">${d.date}</span>
+    <span class="topic">${esc(d.topic)}<small>${esc(d.subject)} · ${KIND[d.kind]||d.kind}</small></span>
+    <span class="hosts">${pip(d.div0)}${pip(d.dragon)}${decisions[d.id]&&decisions[d.id].disposition?' → '+pip(decisions[d.id].disposition):''}</span>
+    <span class="str" title="siła ${d.strength}/5">${[1,2,3,4,5].map(i=>`<i class="${i<=d.strength?'f':''}"></i>`).join('')}</span>
+    <span class="st ${s}" title="${STATUS[s]}">${stIcon(s)}</span></div>`}).join('');
+}
+document.getElementById('rows').onclick=e=>{const r=e.target.closest('.row');if(r)select(r.dataset.id)};
+document.getElementById('rows').onkeydown=e=>{if(e.key==='Enter'){const r=e.target.closest('.row');if(r)select(r.dataset.id)}};
+document.addEventListener('keydown',e=>{
+  if(e.target.matches('input,textarea,select'))return;
+  if(e.key==='Escape'){select(null);return}
+  if(e.key==='ArrowDown'||e.key==='ArrowUp'){e.preventDefault();const i=view.findIndex(d=>d.id===selected);const n=Math.min(view.length-1,Math.max(0,i+(e.key==='ArrowDown'?1:-1)));if(view[n])select(view[n].id)}
+});
+function renderStats(){
+  const c={};for(const d of DATA){const e=effective(d);c[e]=(c[e]||0)+1}
+  const done=DATA.filter(d=>status(d)!=='todo').length;
+  document.getElementById('stats').innerHTML=Object.keys(DISP).filter(k=>c[k]).map(k=>`<span class="stat${F.disp.length===1&&F.disp[0]===k?' on':''}" data-d="${k}"><span class="dot" style="background:var(--${DISP[k][1]})"></span>${DISP[k][0]} <b>${c[k]}</b></span>`).join('')+`<span class="stat" title="pozycje z Twoją decyzją">przejrzane <b>${done}</b>/${DATA.length}</span>`;
+}
+document.getElementById('stats').onclick=e=>{const s=e.target.closest('.stat[data-d]');if(!s)return;F.disp=F.disp.length===1&&F.disp[0]===s.dataset.d?[]:[s.dataset.d];apply()};
+
+// ---- detail ----
+function evLinks(ev){
+  if(!ev)return '<span style="color:var(--muted)">brak dowodu</span>';
+  return esc(ev).replace(/([\w@./+-]+\.(?:rs|swift|py|ts|js|toml|sh|md|json|yaml|yml|plist|h|m|c|txt|html|css))(?::(\d+)(?:-(\d+))?)?/g,(m,p,a,b)=>{
+    const frag=a?('#L'+a+(b?'-L'+b:'')):'';return `<a class="mono" href="${BASE}${p}${frag}" target="_blank" rel="noopener">${m}</a>`});
+}
+function ctxHtml(d){
+  let t=esc(d.ctx);const q=esc(d.quote);const i=t.indexOf(q);
+  if(i>=0)t=t.slice(0,i)+'<mark>'+q+'</mark>'+t.slice(i+q.length);
+  else{const k=esc(d.quote.slice(0,40));const j=t.indexOf(k);if(j>=0)t=t.slice(0,j)+'<mark>'+k+'</mark>'+t.slice(j+k.length)}
+  return t;
+}
+function select(id){
+  selected=id;save('selected',id);
+  document.querySelectorAll('.row.sel').forEach(r=>r.classList.remove('sel'));
+  const c=document.getElementById('content'),el=document.getElementById('detail');
+  if(!id){c.classList.remove('open');el.classList.remove('has');el.innerHTML='';return}
+  const d=byId[id];if(!d)return;
+  const r=document.querySelector(`.row[data-id="${id}"]`);if(r){r.classList.add('sel');r.scrollIntoView({block:'nearest'})}
+  c.classList.add('open');el.classList.add('has');
+  const dec=decisions[id]||{};
+  const cur=dec.disposition||d.div0;
+  el.innerHTML=`<div class="dwrap">
+    <div class="dtop"><div><h2>${esc(d.topic)}</h2>
+      <div class="meta"><span class="mono">${d.id}</span><span>${d.date}</span><span>${esc(d.subject)}</span><span>${KIND[d.kind]||d.kind}</span><span>siła ${d.strength}/5</span>${d.stable?'<span title="oba hosty zgodne, siła ≥ 4">stabilne</span>':''}</div></div>
+      <button class="x" title="zamknij (Esc)" data-close>×</button></div>
+    <blockquote>${esc(d.quote)}</blockquote>
+    <details><summary>Szerszy wycinek transkrypcji · <span class="mono">${esc(d.src)}</span></summary><div class="ctx">${ctxHtml(d)}</div></details>
+    <div class="hostcards">
+      <div class="hc"><h3>${HOST0} <span class="dsp"><span class="dot" style="background:var(--${DISP[d.div0]?DISP[d.div0][1]:'c-none'})"></span>${d.div0?DISP[d.div0][0]:'—'}</span></h3><div class="ev">${evLinks(d.ev0)}</div>${d.gap0?`<div class="gap">${esc(d.gap0)}</div>`:''}</div>
+      <div class="hc"><h3>${HOST1} <span class="dsp"><span class="dot" style="background:var(--${d.dragon&&DISP[d.dragon]?DISP[d.dragon][1]:'c-none'})"></span>${d.dragon?DISP[d.dragon][0]:'brak werdyktu na tym hoście'}</span></h3><div class="ev">${d.dragon?evLinks(d.ev1):''}</div>${d.gap1?`<div class="gap">${esc(d.gap1)}</div>`:''}</div>
+    </div>
+    ${d.ov.length?`<div class="ov"><b>Reklasyfikacja mechaniczna</b>${d.ov.map(o=>`<span>${o.host}: ${DISP[o.from]?DISP[o.from][0]:o.from} → ${DISP[o.to]?DISP[o.to][0]:o.to} <span class="mono">(${esc(o.rule||o.by)})</span> — ${esc(o.reason||'')}</span>`).join('')}</div>`:''}
+    <div class="form" id="form">
+      <h3>Twoja decyzja${dec.at?` <span class="saved">· zapisano ${new Date(dec.at).toLocaleString('pl-PL')}${dec.by?' · '+esc(dec.by):''}</span>`:''}</h3>
+      <label>Werdykt<div class="seg" id="verdict">
+        <button data-v="ok" class="ok${dec.verdict==='ok'?' on':''}">✓ zgadza się</button>
+        <button data-v="wrong" class="${dec.verdict==='wrong'?' on':''}">↺ zmieniam dyspozycję</button>
+        <button data-v="drop" class="drop${dec.verdict==='drop'?' on':''}">✕ usuń (fałszywy trop)</button></div></label>
+      <label>Dyspozycja<select id="disp">${Object.keys(DISP).filter(k=>k!=='drop').map(k=>`<option value="${k}"${k===cur?' selected':''}>${DISP[k][0]}${k===d.div0?' (flota ${HOST0})':''}</option>`).join('')}</select></label>
+      <label>Komentarz<textarea id="note" placeholder="dlaczego, co naprawdę działa / nie działa, na której maszynie…">${esc(dec.note||'')}</textarea></label>
+      <div class="actions"><button class="primary" id="saveBtn"${canWrite?'':' disabled'}>Zapisz</button>${dec.at?'<button class="ghost" id="delBtn">Cofnij decyzję</button>':''}<span class="saved" id="savemsg">${canWrite?'':'tylko odczyt — brak uprawnień do zapisu'}</span></div>
+    </div></div>`;
+  el.querySelector('[data-close]').onclick=()=>select(null);
+  const seg=el.querySelector('#verdict');let verdict=dec.verdict||'';
+  seg.onclick=e=>{const b=e.target.closest('button');if(!b)return;verdict=verdict===b.dataset.v?'':b.dataset.v;seg.querySelectorAll('button').forEach(x=>x.classList.toggle('on',x.dataset.v===verdict));if(verdict==='ok')el.querySelector('#disp').value=d.div0};
+  el.querySelector('#disp').onchange=e=>{if(e.target.value!==d.div0&&verdict!=='drop'){verdict='wrong';seg.querySelectorAll('button').forEach(x=>x.classList.toggle('on',x.dataset.v===verdict))}};
+  el.querySelector('#saveBtn').onclick=async()=>{
+    const disp=el.querySelector('#disp').value,note=el.querySelector('#note').value.trim();
+    if(!verdict&&disp!==d.div0)verdict='wrong';
+    const rec={disposition:verdict==='drop'?'drop':disp,verdict,note,from_div0:d.div0,from_dragon:d.dragon||null,at:new Date().toISOString()};
+    await writeDecision(id,rec,el.querySelector('#savemsg'));
+  };
+  const del=el.querySelector('#delBtn');if(del)del.onclick=async()=>{await deleteDecision(id,el.querySelector('#savemsg'))};
+}
+
+// ---- persistence ----
+async function writeDecision(id,rec,msg){
+  msg.textContent='zapisuję…';
+  if(!db){decisions[id]={...rec};msg.textContent='zapisane tylko w tej karcie (baza niedostępna)';apply();select(id);return}
+  try{await db.doc('decisions/'+id).set(rec);msg.textContent='zapisane'}
+  catch(e){msg.textContent='nie zapisano: '+(e&&e.code||e);if(e&&e.code==='invalid_argument'){canWrite=false}}
+}
+async function deleteDecision(id,msg){
+  if(!db){delete decisions[id];apply();select(id);return}
+  try{await db.doc('decisions/'+id).delete();msg.textContent='cofnięte'}catch(e){msg.textContent='nie udało się: '+(e&&e.code||e)}
+}
+function exportLines(){return Object.entries(decisions).map(([id,r])=>JSON.stringify({id,host:'*',from:r.from_div0||r.from||null,to:r.disposition,verdict:r.verdict||null,by:'founder',reason:r.note||'',at:r.at||new Date().toISOString()}))}
+function exportLocal(){const el=document.getElementById('detail');const c=document.getElementById('content');c.classList.add('open');el.classList.add('has');const txt=exportLines().join('\n');el.innerHTML=`<div class="dwrap"><div class="dtop"><h2>Eksport decyzji</h2><button class="x" data-close>×</button></div><p class="saved">${Object.keys(decisions).length} decyzji. Skopiuj do pliku <span class="mono">decisions.jsonl</span> i wczytaj: <span class="mono">intents_cli.py &lt;workdir&gt; decide --import-file decisions.jsonl --by founder</span></p><textarea id="exp" style="min-height:320px" readonly>${esc(txt)}</textarea><div class="actions"><button class="primary" id="cp">Kopiuj</button><span class="saved" id="cpmsg"></span></div></div>`;el.querySelector('[data-close]').onclick=()=>select(null);el.querySelector('#cp').onclick=async()=>{try{await navigator.clipboard.writeText(txt);el.querySelector('#cpmsg').textContent='skopiowane'}catch(e){el.querySelector('#exp').select();el.querySelector('#cpmsg').textContent='zaznaczone — Cmd+C'}}}
+function setDbState(t){document.getElementById('dbstate').textContent=t}
+async function boot(){
+  buildFilters();apply();if(selected)select(selected);
+  document.getElementById('sub').textContent=`${DATA.length} wypowiedzi Foundera · hosty ${HOST0}${HOST1&&HOST1!=='—'?' / '+HOST1:''} · linki do kodu ${BASE?'pod commitem bazowym':'wyłączone'}`;
+  document.getElementById('hosthdr').textContent=HOST1&&HOST1!=='—'?`${HOST0} / ${HOST1}`:HOST0;
+  if(!window.claude||!window.claude.use){setDbState('Plik lokalny: decyzje zostają w tej karcie. Eksportuj je przyciskiem i wczytaj: intents_cli.py <workdir> decide --import-file.');const b=document.getElementById('dl');b.hidden=false;b.textContent='Eksportuj decyzje (JSONL)';b.onclick=()=>exportLocal();return}
+  const [_db,_dl,_user]=await Promise.all([claude.use('db'),claude.use('downloads'),claude.use('user')]);
+  db=_db;dlcap=_dl;
+  if(_user){const w=await _user.can('data.write');if(w===false){canWrite=false}}
+  if(!db){setDbState('Baza decyzji niedostępna w tym widoku. Zmiany zostają tylko w tej karcie.');return}
+  setDbState('Decyzje zapisują się w bazie artefaktu i są widoczne dla wszystkich, którzy mają tę stronę.');
+  db.collection('decisions').onSnapshot(snap=>{
+    const next={};
+    const docs=snap.docs||snap;
+    for(const doc of docs){const data=typeof doc.data==='function'?doc.data():doc.data||doc;const did=doc.id||(doc.ref&&doc.ref.id);if(did)next[did]=data}
+    decisions=next;apply();if(selected&&document.getElementById('detail').classList.contains('has')){const a=document.activeElement;if(!a||!a.matches('textarea,select'))select(selected)}
+  });
+  if(dlcap){const b=document.getElementById('dl');b.hidden=false;b.onclick=async()=>{
+    const lines=exportLines();
+    try{await dlcap.save({filename:'overrides.founder.jsonl',data:lines.join('\n')+'\n'})}catch(e){}
+  }}
+}
+boot();
+</script>

@@ -143,16 +143,16 @@ WORKFLOW_HELP: dict[str, WorkflowHelp] = {
         ),
     ),
     "intents": WorkflowHelp(
-        "Plan-to-runtime truth audit across prior intent and present repository state.",
+        "Plan-to-runtime truth audit that ends in a plan of cuts: Founder intents in a window, two fleets, a ledger, a stable queue.",
         (
-            "recover planned intentions",
-            "map current runtime ownership",
-            "compare intent with landed code",
-            "classify truth, drift, and missing work",
+            "sweep transcripts and aicx inside a window; verbatim quotes only",
+            "confront every intent with the live repo on two hosts",
+            "reclassify what `landed` hides; let the Founder override",
+            "write the implement plan for vc-dispatch",
         ),
         (
-            'vibecrafted intents codex --prompt "Which planned changes actually landed?"',
-            "vc-intents claude --file /path/to/plan.md",
+            'vibecrafted intents junie --prompt "Extract Founder intents from shard s03 per extraction-brief.md"',
+            "vc-intents kimi --file ~/.vibecrafted/artifacts/vetcoders/codescribe/intents/lanes/L1-overlay-ui.json",
         ),
     ),
     "justdo": WorkflowHelp(
