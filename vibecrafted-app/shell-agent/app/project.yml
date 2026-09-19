@@ -73,5 +73,11 @@ targets:
           mkdir -p "$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers"
           install -m 0755 "$SRCROOT/../../../scripts/vc-app-update.sh" \
             "$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers/vc-app-update"
+          # Xcode's CodeSign step refuses unsigned nested code ("code object is
+          # not signed at all, In subcomponent: .../Helpers/vc-app-update").
+          # Sign the helper with the same identity this invocation uses; the
+          # release pipeline re-signs it with Developer ID + hardened runtime.
+          codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY:--}" --timestamp=none \
+            "$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers/vc-app-update"
         name: Normalize notification FFI install names
         shell: /bin/bash
