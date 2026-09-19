@@ -321,7 +321,7 @@ WORKFLOW_HELP: dict[str, WorkflowHelp] = {
             "append pass, pass-with-gaps, or block and project f/x/n",
         ),
         (
-            'vibecrafted trust <claude|codex|agy|junie|grok|cursor> --prompt "Judge the commits from this run"',
+            f'vibecrafted trust {AGENT_SELECTOR} --prompt "Judge the commits from this run"',
             "vc-trust claude --file /path/to/trust-brief.md",
             "python -m vibecrafted_core.trust inspect <sha>",
         ),

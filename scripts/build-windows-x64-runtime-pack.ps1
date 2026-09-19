@@ -137,6 +137,10 @@ if ($serverExe) {
     Copy-Item $serverExe (Join-Path $payload "bin\vc-server.exe")
 }
 
+$controlCoreToml = Join-Path $repoRoot "vibecrafted-server\control-core\Cargo.toml"
+Install-CargoBin $controlCoreToml "scaffold-doctor" "scaffold-doctor" | Out-Null
+Install-CargoBin $controlCoreToml "control-observe" "control-observe" | Out-Null
+
 $embedZip = Join-Path $work "python-embed.zip"
 $embedUrl = "https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip"
 Invoke-WebRequest -Uri $embedUrl -OutFile $embedZip

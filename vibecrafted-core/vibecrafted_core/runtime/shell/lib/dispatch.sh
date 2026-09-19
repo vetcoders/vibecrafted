@@ -208,18 +208,18 @@ _vetcoders_skill_wrapper_usage() {
   local skill="$1"
   case "$skill" in
     init)
-      printf 'Usage: vc-init <claude|codex|agy|junie|grok|cursor> [--prompt <text>] [--file <path>]\n' >&2
+      printf 'Usage: vc-init <claude|codex|agy|junie|grok|cursor|kimi> [--prompt <text>] [--file <path>]\n' >&2
       ;;
     marbles)
-      printf 'Usage: vc-marbles <claude|codex|agy|junie|grok|cursor> [--prompt <text>|--file <path>|--depth <n>] [--count <n>]\n' >&2
+      printf 'Usage: vc-marbles <claude|codex|agy|junie|grok|cursor|kimi> [--prompt <text>|--file <path>|--depth <n>] [--count <n>]\n' >&2
       printf '       vc-marbles <pause|stop|resume|session|inspect|delete|gc> [args]\n' >&2
       ;;
     polarize)
-      printf 'Usage: vc-polarize <claude|codex|agy|junie|grok|cursor> --task <text> [--prompt <text>] [--file <path>] [--no-aicx] [--no-context-corpus]\n' >&2
-      printf '       vc-polarize <claude|codex|agy|junie|grok|cursor> [--count <n>] [--prompt <text>] [--file <path>]\n' >&2
+      printf 'Usage: vc-polarize <claude|codex|agy|junie|grok|cursor|kimi> --task <text> [--prompt <text>] [--file <path>] [--no-aicx] [--no-context-corpus]\n' >&2
+      printf '       vc-polarize <claude|codex|agy|junie|grok|cursor|kimi> [--count <n>] [--prompt <text>] [--file <path>]\n' >&2
       ;;
     *)
-      printf 'Usage: vc-%s <claude|codex|agy|junie|grok|cursor> [--prompt <text>] [--file <path>]\n' "$skill" >&2
+      printf 'Usage: vc-%s <claude|codex|agy|junie|grok|cursor|kimi> [--prompt <text>] [--file <path>]\n' "$skill" >&2
       ;;
   esac
 }
@@ -227,7 +227,7 @@ _vetcoders_skill_wrapper_usage() {
 _vetcoders_has_agent() {
   local candidate="${1:-}"
   case "$candidate" in
-    claude|codex|agy|junie|grok|cursor) return 0 ;;
+    claude|codex|agy|junie|grok|cursor|kimi) return 0 ;;
     gemini) return 1 ;;  # deprecated - gemini CLI is dead upstream, use agy (Google Antigravity CLI)
     *) return 1 ;;
   esac
@@ -335,7 +335,7 @@ _vetcoders_skill_wrapper() {
     return 1
   }
   _vetcoders_has_agent "$tool" || {
-    printf 'vc-%s expects claude|codex|agy|junie|grok|cursor as the first argument (not a placeholder with angle brackets).\n' "$skill" >&2
+    printf 'vc-%s expects claude|codex|agy|junie|grok|cursor|kimi as the first argument (not a placeholder with angle brackets).\n' "$skill" >&2
     _vetcoders_deck_help "$skill"
     return 1
   }

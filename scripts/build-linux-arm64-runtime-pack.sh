@@ -108,10 +108,13 @@ install -m 0755 "$server_build/vibecrafted-server/release/vibecrafted-server-web
 (
   cd "$repo_root/vibecrafted-server"
   CARGO_TARGET_DIR="$server_build/vibecrafted-server" \
-    cargo build --release --locked -p control-core --bin scaffold-doctor
+    cargo build --release --locked -p control-core \
+      --bin scaffold-doctor --bin control-observe
 )
 install -m 0755 "$server_build/vibecrafted-server/release/scaffold-doctor" \
   "$payload/bin/scaffold-doctor"
+install -m 0755 "$server_build/vibecrafted-server/release/control-observe" \
+  "$payload/bin/control-observe"
 cp -R "$server_build/vibecrafted-server/site/." "$payload/server/site/"
 rm -rf "$server_build"
 

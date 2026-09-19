@@ -57,9 +57,9 @@ pub use model::{
     LifecycleOperatorAction, LifecycleRun, LifecycleRunSummary, LifecycleStage,
     LifecycleTransition, NativeResumeCandidate, ProofState, RECENT_RUN_LIMIT, RUN_STALL_SECONDS,
     RunControls, RunStatus, SKILL_CODE_MAP, SettlementBoard, SettlementScope, SettlementTui,
-    SettlementVerdict, StateClass, classify_state, coerce_int_value, delivery_axes_for_receipt,
-    is_active_state, is_final_state, merge_status, operator_session_name, parse_iso,
-    skill_from_code, state_health,
+    SettlementVerdict, StateClass, age_label, classify_state, coerce_int_value,
+    delivery_axes_for_receipt, is_active_state, is_final_state, lifecycle_next_action,
+    merge_status, operator_session_name, parse_iso, skill_from_code, state_health,
 };
 pub use read::{ControlPlane, StateView, is_safe_run_id, vibecrafted_home};
 pub use scaffold::{

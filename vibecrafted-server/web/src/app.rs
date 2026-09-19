@@ -122,6 +122,7 @@ struct DashboardLifecycleRun {
     human_controls: Vec<String>,
     human_controls_count: usize,
     operator_actions_count: usize,
+    next_action: String,
     updated_at: String,
 }
 
@@ -217,6 +218,7 @@ fn load_dashboard_data_from(
             human_controls: run.human_controls,
             human_controls_count: run.human_controls_count,
             operator_actions_count: run.operator_actions_count,
+            next_action: run.next_action,
             updated_at: run.updated_at,
         }
     }
@@ -786,7 +788,9 @@ fn action_cards(runs: Vec<DashboardLifecycleRun>) -> impl IntoView {
             } else {
                 run.current_stage.clone()
             };
-            let next_action = if let Some(control) = run.human_controls.first() {
+            let next_action = if !run.next_action.is_empty() {
+                run.next_action.clone()
+            } else if let Some(control) = run.human_controls.first() {
                 format!("Operator: {control}")
             } else if !run.next_stage.is_empty() && !run.next_agent.is_empty() {
                 format!("Launch {} with {}", run.next_stage, run.next_agent)

@@ -374,7 +374,7 @@ fn load_run_detail_from(
         value.as_ref().map(ToString::to_string).unwrap_or_default()
     }
 
-    let run = plane.lookup_run(run_id).map(|run| RunDetailView {
+    let run = plane.derived_run(run_id, now).map(|run| RunDetailView {
         state: run.state,
         health: run.health,
         agent: run.agent,
