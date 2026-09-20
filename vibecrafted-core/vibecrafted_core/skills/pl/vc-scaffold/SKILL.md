@@ -340,11 +340,15 @@ to wyzwala recovery-vector** (fallback/failover/handsoff). Pełen alfabet + mark
   dostawy, supervisor odmawia weryfikacji cięcia z nieprzerzuconymi polami, a żadnemu przerzuceniu
   się nie wierzy — decydują verifiery. `Founder [x]` bez `acceptance/founder.json` to sfałszowany
   podpis i scaffold-doctor odrzuca plan.
-- **Trwałe artefakty NIGDY nie idą do `/tmp`.** `/tmp` to tylko ulotny scratch — jest wymazywany, nieśledzony
-  i niewidoczny dla tooling-u i synca operatora. Każdy plan, brief, DRIVER, tracker, journal, raport
-  i design doc ląduje w **kanonicznym root planu**:
+- **Trwałe artefakty NIGDY nie idą do `/tmp` i NIGDY do checkoutu produktu.** `/tmp` to tylko ulotny
+  scratch — jest wymazywany, nieśledzony i niewidoczny dla tooling-u i synca operatora. Checkout
+  produktu niesie wyłącznie kod i dokumentację produktu: plan, brief, DRIVER, tracker, journal, raport
+  czy design doc wrzucony do drzewa (np. `docs/plans/`) brudzi worktree, zatruwa snapshoty strukturalne
+  fałszywym sygnałem dirty-worktree i ryzykuje commit efemer dyspozytury do produktu. Każdy trwały
+  artefakt ląduje w **kanonicznym root planu**:
   `~/.vibecrafted/artifacts/<org>/<repo>/<DATE>/plans/<plan_id>/`
-  (lustro layoutu raportów). Zapis trwałego artefaktu do `/tmp` to porażka procesu, nie skrót.
+  (lustro layoutu raportów; `<org>/<repo>` z tożsamości git remote, nigdy ze ścieżki checkoutu).
+  Zapis trwałego artefaktu do `/tmp` lub do checkoutu to porażka procesu, nie skrót.
 - **manifest.json jest obowiązkowy.** To jedyny inwentarz artefaktów i kontrakt ról. Żadne lustro
   `operator/`, duplikat, inferencja roli z nazwy ani symlink kompatybilności nie może stać się drugą
   zapisywalną prawdą.
