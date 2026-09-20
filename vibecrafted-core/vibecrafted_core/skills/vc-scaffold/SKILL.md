@@ -344,11 +344,16 @@ it triggers a recovery-vector** (fallback/failover/handsoff). Full alphabet + ma
   delivery, the supervisor refuses to verify a cut with unflipped Acceptance boxes, and no flip is
   believed — verifiers decide. `Founder [x]` without `acceptance/founder.json` is a forged
   signature and scaffold-doctor refuses the plan.
-- **Durable artifacts NEVER go to `/tmp`.** `/tmp` is ephemeral scratch only — it is wiped, untracked,
-  and invisible to the operator's tooling and sync. Every plan, brief, DRIVER, tracker, journal, report,
-  and design doc lands in the **canonical plan root**:
+- **Durable artifacts NEVER go to `/tmp`, and NEVER into the product checkout.** `/tmp` is ephemeral
+  scratch only — it is wiped, untracked, and invisible to the operator's tooling and sync. The product
+  checkout carries code and product documentation only: a plan, brief, DRIVER, tracker, journal, report,
+  or design doc dropped into the tree (e.g. `docs/plans/`) dirties the worktree, poisons structural
+  snapshots with a false dirty-worktree signal, and risks committing dispatch ephemera to the product.
+  Every durable artifact lands in the **canonical plan root**:
   `~/.vibecrafted/artifacts/<org>/<repo>/<DATE>/plans/<plan_id>/`
-  (mirrors the reports layout). Writing a durable artifact to `/tmp` is a process failure, not a shortcut.
+  (mirrors the reports layout; `<org>/<repo>` comes from the git remote identity, never from the
+  checkout path). Writing a durable artifact to `/tmp` or into the checkout is a process failure,
+  not a shortcut.
 - **manifest.json is mandatory.** It is the only artifact inventory and role contract. No `operator/`
   mirror, duplicate, filename-role inference, or compatibility symlink may become a second writable truth.
 - **A `.dispatch.toml` artifact is mandatory.** Validate `vibecrafted.dispatch.v1` with dispatcher doctor and hand

@@ -43,6 +43,8 @@ Each WRITE leaves an artifact; the next READ falsifies it. See `references/caden
 
 ### Session artifacts
 
-- Artifact root: `$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/`
+- Artifact root: `$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/` — `<org>/<repo>` from the
+  git remote identity, never from the checkout path. Durable artifacts NEVER land in `/tmp` or inside
+  the product checkout; the tree carries code and product documentation only.
 - Lock: `$VIBECRAFTED_HOME/locks/<org>/<repo>/<run_id>.lock`
 - Outputs: `reports/<timestamp>_<slug>_<agent>.md` with matching `.transcript.log` and `.meta.json`
