@@ -32,7 +32,12 @@ prefer_rustup_cargo() {
     fi
   fi
 }
+# Pin the complete release, including donor subprocesses and proc-macro hosts.
+export RUSTUP_TOOLCHAIN=1.96.0
 prefer_rustup_cargo
+require rustup
+rustup which --toolchain "$RUSTUP_TOOLCHAIN" rustc >/dev/null \
+  || die "install the release toolchain: rustup toolchain install $RUSTUP_TOOLCHAIN --target wasm32-wasip1"
 
 # A --remap-path-prefix whose prefix still contains `..` never matches the path
 # the compiler actually sees, because the match is textual. The donor roots used
