@@ -231,7 +231,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     lifecycleLog(
       "launch ppid=\(getppid()) launchedByLS=\(launchedByLS) args=[\(launchArgs)]")
 
-    NSApp.setActivationPolicy(.regular)
+    // Vibecrafted owns the tray, canvas, and runtime supervision. The embedded
+    // vc-terminal is the only user-facing Dock application.
+    NSApp.setActivationPolicy(.accessory)
     configureCommandDeck()
     buildMainMenu()
     buildStatusItem()

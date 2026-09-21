@@ -34,7 +34,8 @@ def test_single_native_host_source_contract() -> None:
     assert delegate.count("WebConsoleSession()") == 1
     assert delegate.count("MainWindowController(model:") == 1
     assert "if mainWindow == nil" in delegate
-    assert "NSApp.setActivationPolicy(.regular)" in delegate
+    assert "NSApp.setActivationPolicy(.accessory)" in delegate
+    assert "NSApp.setActivationPolicy(.regular)" not in delegate
     assert main.index("NSApplication.shared") < main.index("AppDelegate()")
     coordinator = (APP / "CommandDeck/NativeTabCoordinator.swift").read_text()
     policy = (APP / "CommandDeck/WebNavigationPolicy.swift").read_text()
@@ -149,7 +150,10 @@ def test_package_has_distinct_art_and_no_competing_tray() -> None:
     assert "VIBECRAFTED_ICON_SOURCE:-$TERMINAL_REPO" not in builder
     assert '"$TERMINAL_REPO/assets/icon/vc-terminal-icon.png"' in builder
     assert 'install -m 0644 "$resources/Vibecrafted.icns"' not in builder
+    assert "image.isTemplate = true" in tray
     assert "image.isTemplate = false" not in tray
+    assert 'Bundle.main.image(forResource: "TrayIcon")' in tray
+    assert "rounded deck frame" not in tray
 
 
 def _compile(tmp_path: Path, name: str, sources: list[Path]) -> Path:

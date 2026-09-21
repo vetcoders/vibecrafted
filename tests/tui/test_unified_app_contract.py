@@ -1052,7 +1052,7 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     assert "connectCommandDeck()" in launch_handler
     assert "launchWorkspaceTerminal()" not in launch_handler
     assert "showMainWindowIfNeeded()" in launch_handler
-    assert "\t<key>LSUIElement</key>\n\t<false/>" in info
+    assert "\t<key>LSUIElement</key>\n\t<true/>" in info
     assert "\t<key>NSQuitAlwaysKeepsWindows</key>\n\t<false/>" in info
     tray = (
         REPO_ROOT

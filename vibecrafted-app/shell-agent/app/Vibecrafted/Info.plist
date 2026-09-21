@@ -24,7 +24,7 @@
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.developer-tools</string>
 	<key>LSUIElement</key>
-	<false/>
+	<true/>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<!-- nosemgrep: swift.insecure-communication.ats.ats-local.ATS-local-networking -- Required for the caretaker-selected loopback or Tailscale IP-literal HTTP runtime. Apple documents NSAllowsLocalNetworking as the narrow macOS 14+ ATS declaration for local IP resources; WebNavigationPolicy admits HTTP only for that exact resolved origin. -->
