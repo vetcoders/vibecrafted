@@ -36,7 +36,7 @@ if [ ! -d "$$stable_root/vibecrafted-core" ]; then \
 fi
 endef
 
-.PHONY: help help-dev vibecrafted app dmg dmg-signed release-local notarize release runtime-pack portable publish-release release-rehearsal gui-install wizard wizard-dev check test test-core test-skills test-install test-parity test-vc-frame test-iterm2-migrate test-memex test-aicx-sync test-hammerspoon test-keychain-session dispatch-test unified-product-contract-gate exact-release-contract-gate release-version-gate payload-hygiene install install-source install-auto install-all install-python-tools install-bundle-tools install-tools install-tools-held install-vendored-binaries install-app install-app-binaries install-hammerspoon skills helpers setup-dev dry-run doctor list update uninstall restore migrate migrate-dry init-hooks seed-commit-msg-hooks bundle bundle-check foundations foundations-check semgrep version version-show version-bump bump-patch bump-minor bump-major iterm-plugin iterm-plugin-refresh iterm-plugin-show iterm-plugin-uninstall iterm-plugin-migrate demo demo-full commit-safe test-race-protection skill-new server server-build build-server-release server-check server-test install-server install-server-payload install-server-service reconcile-server-service server-smoke
+.PHONY: help help-dev vibecrafted app dmg dmg-signed release-local notarize release runtime-pack portable publish-release release-rehearsal gui-install wizard wizard-dev check skills-check layouts-check test test-core test-skills test-install test-parity test-vc-frame test-iterm2-migrate test-memex test-aicx-sync test-hammerspoon test-keychain-session dispatch-test unified-product-contract-gate exact-release-contract-gate release-version-gate payload-hygiene install install-source install-auto install-all install-python-tools install-bundle-tools install-tools install-tools-held install-vendored-binaries install-app install-app-binaries install-hammerspoon skills helpers setup-dev dry-run doctor list update uninstall restore migrate migrate-dry init-hooks seed-commit-msg-hooks bundle bundle-check foundations foundations-check semgrep version version-show version-bump bump-patch bump-minor bump-major iterm-plugin iterm-plugin-refresh iterm-plugin-show iterm-plugin-uninstall iterm-plugin-migrate demo demo-full commit-safe test-race-protection skill-new server server-build build-server-release server-check server-test install-server install-server-payload install-server-service reconcile-server-service server-smoke
 
 help:
 	@printf "\n"
@@ -321,6 +321,7 @@ install-auto: install
 # revision it proved (RUNTIME_PACK_EXPECTED_SOURCE_REVISION).
 install:
 	@VIBECRAFTED_RUNTIME_PACK="$(RUNTIME_PACK)" bash "$(RUNTIME_PACK_INSTALLER)" $(if $(RUNTIME_PACK_EXPECTED_SOURCE_REVISION),--expected-source-revision "$(RUNTIME_PACK_EXPECTED_SOURCE_REVISION)")
+	@bash scripts/install-foundations.sh screenscribe
 	@$(MAKE) --no-print-directory reconcile-server-service
 
 # Retained public spelling: configuration and runtime publication have one
@@ -694,9 +695,14 @@ uninstall:
 restore:
 	@$(PYTHON) $(INSTALLER) restore
 
-check:
+skills-check:
+	@$(PYTHON) scripts/gen_skill_provenance.py $(if $(filter 1,$(UPDATE)),,--check)
+
+layouts-check:
+	@$(PYTHON) scripts/check-layout-contract.py $(if $(filter 1,$(UPDATE)),--update,)
+
+check: skills-check layouts-check
 	@$(PYTHON) scripts/check_shell.py
-	@$(PYTHON) scripts/gen_skill_provenance.py --check
 	@echo "Check complete."
 
 iterm-plugin:

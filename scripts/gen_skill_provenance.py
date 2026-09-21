@@ -498,7 +498,7 @@ def main(argv: list[str] | None = None) -> int:
         if _without_timestamp(on_disk) != _without_timestamp(rendered):
             print(
                 f"{manifest_path} is not what a regeneration renders.\n"
-                "Regenerate with: scripts/gen_skill_provenance.py",
+                "Regenerate with: make skills-check UPDATE=1",
                 file=sys.stderr,
             )
             return 1

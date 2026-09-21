@@ -89,6 +89,65 @@ def test_runtime_foundations_never_compile_external_tools() -> None:
     )
 
 
+def test_install_path_uses_published_foundations_and_pipx_screenscribe() -> None:
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    installer = (REPO_ROOT / "scripts/install-foundations.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "scripts/install-foundations.sh screenscribe" in makefile
+    assert "skills-check:" in makefile
+    assert "layouts-check:" in makefile
+    assert "check: skills-check layouts-check" in makefile
+    assert "scripts/gen_skill_provenance.py" in makefile
+    assert 'SCREENSCRIBE_VERSION="0.1.19"' in installer
+    assert 'pipx install --force "screenscribe==${SCREENSCRIBE_VERSION}"' in installer
+    assert 'install_from_bundled "prview"' in installer
+    assert "scripts/stage-runtime-foundations.sh" in installer
+    assert "cargo install" not in installer
+    assert "install_from_cargo" not in installer
+
+
+def test_screenscribe_installer_invokes_pipx_with_the_pinned_wheel(
+    tmp_path: Path,
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    capture = tmp_path / "pipx-args.txt"
+    screenscribe = fake_bin / "screenscribe"
+    pipx = fake_bin / "pipx"
+    pipx.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        'printf "%s\\n" "$@" > "$PIPX_CAPTURE"\n'
+        "printf '#!/bin/sh\\nexit 0\\n' > \"$SCREENSCRIBE_BIN\"\n"
+        'chmod +x "$SCREENSCRIBE_BIN"\n',
+        encoding="utf-8",
+    )
+    pipx.chmod(0o755)
+
+    env = os.environ.copy()
+    env["HOME"] = str(tmp_path / "home")
+    env["PATH"] = f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin"
+    env["PIPX_CAPTURE"] = str(capture)
+    env["SCREENSCRIBE_BIN"] = str(screenscribe)
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "scripts/install-foundations.sh"), "screenscribe"],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert capture.read_text(encoding="utf-8").splitlines() == [
+        "install",
+        "--force",
+        "screenscribe==0.1.19",
+    ]
+
+
 def test_runtime_foundations_relocate_darwin_prview_onto_pinned_openssl() -> None:
     stager = STAGER.read_text(encoding="utf-8")
     relocator = (REPO_ROOT / "scripts/lib/darwin-relocate-openssl.sh").read_text(
