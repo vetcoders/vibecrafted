@@ -218,15 +218,25 @@ function apply(){
 }
 function pip(v){return `<span class="pip" title="${v?esc(DISP[v][0]):'brak werdyktu'}" style="background:var(--${v?DISP[v][1]:'c-none'})"></span>`}
 function stIcon(s){return {todo:'',ok:'✓',chg:'↺',drop:'✕',note:'✎'}[s]}
+function rowNode(d){
+  const s=status(d),row=document.createElement('div');
+  row.className='row'+(d.id===selected?' sel':'');row.dataset.id=d.id;row.tabIndex=0;
+  const id=document.createElement('span');id.className='id mono';id.textContent=d.id;
+  const date=document.createElement('span');date.className='d';date.textContent=d.date;
+  const topic=document.createElement('span');topic.className='topic';topic.textContent=d.topic;
+  const small=document.createElement('small');small.textContent=`${d.subject} · ${KIND[d.kind]||d.kind}`;topic.appendChild(small);
+  const hosts=document.createElement('span');hosts.className='hosts';
+  const addPip=v=>{const p=document.createElement('span');p.className='pip';p.title=v?DISP[v][0]:'brak werdyktu';p.style.background=`var(--${v?DISP[v][1]:'c-none'})`;hosts.appendChild(p)};
+  addPip(d.div0);addPip(d.dragon);if(decisions[d.id]&&decisions[d.id].disposition){hosts.append(' → ');addPip(decisions[d.id].disposition)}
+  const strength=document.createElement('span');strength.className='str';strength.title=`siła ${d.strength}/5`;
+  for(const i of [1,2,3,4,5]){const mark=document.createElement('i');if(i<=d.strength)mark.className='f';strength.appendChild(mark)}
+  const state=document.createElement('span');state.className=`st ${s}`;state.title=STATUS[s];state.textContent=stIcon(s);
+  row.append(id,date,topic,hosts,strength,state);return row;
+}
 function renderRows(){
   const el=document.getElementById('rows');
-  if(!view.length){el.innerHTML='<div class="empty">Nic nie pasuje do filtrów.</div>';return}
-  el.innerHTML=view.map(d=>{const s=status(d);return `<div class="row${d.id===selected?' sel':''}" data-id="${d.id}" tabindex="0">
-    <span class="id mono">${d.id}</span><span class="d">${d.date}</span>
-    <span class="topic">${esc(d.topic)}<small>${esc(d.subject)} · ${KIND[d.kind]||d.kind}</small></span>
-    <span class="hosts">${pip(d.div0)}${pip(d.dragon)}${decisions[d.id]&&decisions[d.id].disposition?' → '+pip(decisions[d.id].disposition):''}</span>
-    <span class="str" title="siła ${d.strength}/5">${[1,2,3,4,5].map(i=>`<i class="${i<=d.strength?'f':''}"></i>`).join('')}</span>
-    <span class="st ${s}" title="${STATUS[s]}">${stIcon(s)}</span></div>`}).join('');
+  if(!view.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='Nic nie pasuje do filtrów.';el.replaceChildren(empty);return}
+  el.replaceChildren(...view.map(rowNode));
 }
 document.getElementById('rows').onclick=e=>{const r=e.target.closest('.row');if(r)select(r.dataset.id)};
 document.getElementById('rows').onkeydown=e=>{if(e.key==='Enter'){const r=e.target.closest('.row');if(r)select(r.dataset.id)}};
