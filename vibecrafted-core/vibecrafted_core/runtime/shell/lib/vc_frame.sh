@@ -527,7 +527,7 @@ _vetcoders_launch_interactive_declaration() {
   # The tab exists, so the terminal may now be handed over. This blocks until
   # the Founder detaches, which is exactly what they asked for.
   # No override: attach the prepared ambient target.
-  _vetcoders_attach_prepared_vc_frame_session
+  _vetcoders_attach_prepared_vc_frame_session ""
 }
 
 _vetcoders_in_vc_frame() {

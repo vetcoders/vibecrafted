@@ -836,7 +836,7 @@ _vetcoders_resume_operator_session() {
   # `vc-start` opened `vibecrafted-<token>` while `vc-start resume` opened a
   # plain basename session with no binding receipt behind it.
   # Resume intentionally selects the ambient/cwd owner.
-  _vetcoders_ensure_canonical_workspace_identity || {
+  _vetcoders_ensure_canonical_workspace_identity "" || {
     identity_status=$?
     printf 'vc-start: resume could not resolve the canonical workspace owner for this project.\n' >&2
     printf 'vc-start: refusing to target a session by name alone; re-run from the intended root or inspect '"'"'vibecrafted workspace list'"'"'.\n' >&2

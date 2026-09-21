@@ -208,7 +208,9 @@ activator_lefthook() {
   # that path without --force. We detect the collision and pass --force so
   # the installer succeeds without operator intervention.
   local existing_hookspath
-  existing_hookspath="$( cd "$REPO_ROOT" && git config --get core.hooksPath 2>/dev/null || true )"
+  if ! existing_hookspath="$(cd "$REPO_ROOT" && git config --get core.hooksPath 2>/dev/null)"; then
+    existing_hookspath=""
+  fi
   local force_flag=""
   if [ -n "$existing_hookspath" ] && [ "$existing_hookspath" != ".git/hooks" ]; then
     force_flag="--force"

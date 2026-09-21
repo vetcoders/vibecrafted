@@ -73,7 +73,9 @@ FRAME_DONOR="${VIBECRAFTED_FRAME_REPO:-$REPO_ROOT/../vc-frame}"
 # Resolve, never concatenate: a prefix that still contains `..` matches nothing,
 # which is the 4.1.0 W0-a defect reproduced inside its own detector.
 for donor in TERMINAL_DONOR FRAME_DONOR; do
-  resolved="$(cd "${!donor}" >/dev/null 2>&1 && pwd || true)"
+  if ! resolved="$(cd "${!donor}" >/dev/null 2>&1 && pwd)"; then
+    resolved=""
+  fi
   if [[ -n "$resolved" ]]; then
     printf -v "$donor" '%s' "$resolved"
   else

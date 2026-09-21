@@ -30,9 +30,13 @@ spawn_frontier_root() {
 # in ~/.config/vibecrafted.
 spawn_frontier_candidates() {
   local script_root candidate seen=""
-  script_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." 2>/dev/null && pwd || true)"
+  if ! script_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." 2>/dev/null && pwd)"; then
+    script_root=""
+  fi
   if [[ ! -f "$script_root/VERSION" && -f "$(dirname "${BASH_SOURCE[0]}")/../../../VERSION" ]]; then
-    script_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../" 2>/dev/null && pwd || true)"
+    if ! script_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../" 2>/dev/null && pwd)"; then
+      script_root=""
+    fi
   fi
 
   for candidate in \

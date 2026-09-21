@@ -2037,7 +2037,7 @@ def test_explicit_operator_session_keeps_the_direct_path(
     assert launch is not None, "a pipe inherited another client's surface proof"
 
 
-@pytest.mark.parametrize("invocation", ["vc-resume codex", "vc-start"])
+@pytest.mark.parametrize("invocation", ["vc-resume codex"])
 def test_explicit_operator_session_the_engine_does_not_know_is_not_trusted(
     tmp_path: Path, invocation: str
 ) -> None:
@@ -2059,6 +2059,30 @@ def test_explicit_operator_session_the_engine_does_not_know_is_not_trusted(
 
     assert launch is not None, f"no terminal was opened: {result.stderr}"
     assert result.returncode == 0, result.stderr
+
+
+def test_stale_operator_session_does_not_override_live_host_routing(
+    tmp_path: Path,
+) -> None:
+    """Start treats inventory as host truth even when inherited env names a
+    missing session. It must keep the existing canvas and route the requested
+    workspace through the guest path instead of opening a second terminal."""
+    live = tmp_path / "live-sessions.txt"
+    live.write_text("3more-studio\n", encoding="utf-8")
+    result, launch = _run_entry(
+        tmp_path,
+        "vc-start",
+        extra_env={
+            "VIBECRAFTED_OPERATOR_SESSION": "mlx-batch-runner",
+            "VC_FRAME_LIVE": str(live),
+        },
+        expect_launch=False,
+    )
+
+    assert launch is None, "start opened a second terminal beside the live host"
+    assert result.returncode == 4, result.stderr
+    assert "live host 3more-studio exists" in result.stderr
+    assert "project-workspace mlx-batch-runner" in result.stderr
 
 
 def test_real_tty_is_not_rerouted(tmp_path: Path) -> None:

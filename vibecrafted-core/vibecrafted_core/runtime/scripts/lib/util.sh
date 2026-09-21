@@ -196,7 +196,9 @@ spawn_org_repo() {
   local root="${1:-$(spawn_repo_root)}"
   local fallback_to_basename="${2:-1}"
   local org_repo=""
-  org_repo="$(cd "$root" && git remote get-url origin 2>/dev/null | sed -E 's|.*[:/]([^/]+)/([^/.]+)(\.git)?$|\1/\2|' || true)"
+  if ! org_repo="$(cd "$root" && git remote get-url origin 2>/dev/null | sed -E 's|.*[:/]([^/]+)/([^/.]+)(\.git)?$|\1/\2|')"; then
+    org_repo=""
+  fi
   if [[ -n "$org_repo" ]]; then
     printf '%s\n' "$org_repo"
   elif [[ "$fallback_to_basename" == "1" ]]; then
@@ -224,9 +226,13 @@ spawn_framework_version() {
   local state_file=""
   local state_version=""
 
-  script_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." 2>/dev/null && pwd || true)"
+  if ! script_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." 2>/dev/null && pwd)"; then
+    script_root=""
+  fi
   if [[ ! -f "$script_root/VERSION" && -f "$(dirname "${BASH_SOURCE[0]}")/../../../VERSION" ]]; then
-    script_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../" 2>/dev/null && pwd || true)"
+    if ! script_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../" 2>/dev/null && pwd)"; then
+      script_root=""
+    fi
   fi
 
   for candidate in \
