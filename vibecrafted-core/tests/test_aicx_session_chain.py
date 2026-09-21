@@ -529,7 +529,7 @@ def _intents_payload(count: int, *, available: int, summary: str) -> str:
                     "session_id": f"session-{index:04d}",
                     "count": 1,
                     "source_chunk": (
-                        f"/Users/polyversai/.claude/projects/-very-long-"
+                        f"/Users/tester/.claude/projects/-very-long-"
                         f"projection-path-segment-{index}/session-{index:04d}.jsonl"
                     ),
                     "claim_scope": "session_close",
@@ -976,7 +976,7 @@ def _lopsided_chain(repo: Path) -> CliSessionChain:
                     "date": "2026-09-13",
                     "session_id": "session-lopsided-first",
                     "source_chunk": (
-                        "/Users/polyversai/.claude/projects/"
+                        "/Users/tester/.claude/projects/"
                         + ("-long-projection-path-segment" * 6)
                         + "/first.jsonl"
                     ),
@@ -993,7 +993,7 @@ def _lopsided_chain(repo: Path) -> CliSessionChain:
                     "date": "2026-09-12",
                     "session_id": "session-lopsided-second",
                     "source_chunk": (
-                        "/Users/polyversai/.claude/projects/"
+                        "/Users/tester/.claude/projects/"
                         + ("-long-projection-path-segment" * 6)
                         + "/second.jsonl"
                     ),

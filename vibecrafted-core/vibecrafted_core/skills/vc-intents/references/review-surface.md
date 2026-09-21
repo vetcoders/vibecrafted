@@ -2,7 +2,7 @@
 
 `intents_cli.py <workdir> render --html` fills `assets/intents.html` with the
 ledger and writes `<workdir>/intents.html`. It is a single file: data inline,
-no server, opens from disk. Monika asked for the _procedure_, not the HTML —
+no server, opens from disk. The Founder asked for the _procedure_, not the HTML —
 "HTML jest najmniej ważny" — so the page is a view of `LEDGER.json`, never a
 second source of truth.
 

@@ -156,7 +156,7 @@ Każde dochodzenie i wprowadzona zmiana musi pozostawić trwały ślad w repozyt
 
 ## 7. Git, Atrybucja i Granice Uprawnień
 
-- **Founder vs Operator:** Founder to wyłącznie Maciej Gad i Monika Szymańska — ludzki głos, decyzje i ostateczne przyciski. Operator to wyłącznie rola agenta (`vc-operator`, integrator). Nigdy nie nazywaj Foundera operatorem.
+- **Founder vs Operator:** Founder to wyłącznie ludzcy Founderzy — ich głos, decyzje i ostateczne przyciski. Operator to wyłącznie rola agenta (`vc-operator`, integrator). Nigdy nie nazywaj Foundera operatorem.
 - **Dyscyplina commitu:** Dodawaj do indeksu wyłącznie pliki zmienione w ramach danego cięcia (`git add <plik>`). Nigdy nie zamiataj brudnego drzewa (`git commit -am` i `git add .` są zabronione).
 - **Pushing brancha roboczego:** Wypchnięcie bieżącego brancha funkcjonalnego (fast-forward, nigdy `--force`) jest dozwolonym, swobodnym ruchem po autorskim commicie (decyzja Foundera 2026-08-18).
 - **Przyciski Foundera:** Merge do trunka/main, force-push, usuwanie tagów/branchy oraz deploy na produkcję wymagają bezpośredniej decyzji Foundera.
