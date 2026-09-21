@@ -13738,8 +13738,9 @@ def run_doctor(store_path: Path, state: InstallState) -> list[DoctorFinding]:
                 "bash",
                 "-c",
                 (
-                    'source "$1" && '
                     'tmpdir="$(mktemp -d)" && '
+                    'export VIBECRAFTED_HOME="$tmpdir/vibecrafted-home" && '
+                    'source "$1" && '
                     "export SPAWN_AGENT=doctor-smoke SPAWN_RUN_ID=smoke-000 "
                     "SPAWN_PROMPT_ID=smoke SPAWN_LOOP_NR=0 SPAWN_SKILL_CODE=doctor "
                     'SPAWN_ROOT="$tmpdir" SPAWN_PLAN="$tmpdir/doctor-plan.md" '
