@@ -701,6 +701,7 @@ def test_release_bundle_binds_the_vibecrafted_app_icon() -> None:
     assert '- "Vibecrafted.icns"' in project
     assert "<key>CFBundleIconFile</key>" in info_plist
     assert "<string>Vibecrafted.icns</string>" in info_plist
+    assert "\t<key>LSUIElement</key>\n\t<true/>" in info_plist
     assert "<key>CFBundleShortVersionString</key>" in info_plist
     assert "<string>$(MARKETING_VERSION)</string>" in info_plist
     assert 'plist["CFBundleIconFile"] = contract.PRODUCT_ICON_FILE' in manifest
@@ -712,6 +713,8 @@ def test_release_bundle_binds_the_vibecrafted_app_icon() -> None:
     assert "$TERMINAL_REPO/assets/icon/terminal.png" in builder
     assert '"$ICON_SOURCE" "$resources/Vibecrafted.icns" "$ICON_REFERENCE"' in builder
     assert "! -name 'Vibecrafted.icns'" in builder
+    assert '[[ -s "$resources/TrayIcon.png" ]]' in builder
+    assert "must remain a menu-bar application without a Dock tile" in builder
     assert "iconutil -c icns" in icon_builder
     assert 'cmp -s "$ICONSET/icon_128x128.png" "$REFERENCE"' in icon_builder
 

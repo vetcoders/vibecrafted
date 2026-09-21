@@ -1150,6 +1150,11 @@ build_product() {
     "$APP/Contents/Info.plist" 2>/dev/null \
     || /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string Vibecrafted.icns" \
       "$APP/Contents/Info.plist"
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' \
+    "$APP/Contents/Info.plist")" == "true" ]] \
+    || die "Vibecrafted.app must remain a menu-bar application without a Dock tile"
+  [[ -s "$resources/TrayIcon.png" ]] \
+    || die "Vibecrafted.app is missing its dedicated tray pictogram"
   remove_ambient_swift_rpath
 
   log "Embedding the already-materialized Runtime Pack payload"
