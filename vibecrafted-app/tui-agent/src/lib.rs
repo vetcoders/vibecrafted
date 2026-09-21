@@ -15,6 +15,7 @@ pub mod run_detail;
 pub mod skills_catalog;
 pub mod state;
 pub mod ui;
+pub mod usage;
 
 use anyhow::Context;
 use crossterm::event::{
@@ -704,6 +705,7 @@ fn handle_key(
                     app.move_observe_selection(-1);
                 }
                 AppTab::Monitor => app.move_selection(-1),
+                AppTab::Usage => {}
                 AppTab::Dispatch => app.move_dispatch_selection(-1),
                 AppTab::Controls => app.move_deep_selection(-1),
                 AppTab::MissionControl => app.move_mission_focus(-1),
@@ -719,6 +721,7 @@ fn handle_key(
                     app.move_observe_selection(1);
                 }
                 AppTab::Monitor => app.move_selection(1),
+                AppTab::Usage => {}
                 AppTab::Dispatch => app.move_dispatch_selection(1),
                 AppTab::Controls => app.move_deep_selection(1),
                 AppTab::MissionControl => app.move_mission_focus(1),
@@ -728,12 +731,14 @@ fn handle_key(
             }
             KeyCode::Left | KeyCode::Char('h') => match app.active_tab() {
                 AppTab::Monitor => {}
+                AppTab::Usage => {}
                 AppTab::Dispatch => app.adjust_dispatch_selection(-1),
                 AppTab::Controls => app.move_selection(-1),
                 AppTab::MissionControl => app.move_mission_focus(-1),
             },
             KeyCode::Right | KeyCode::Char('l') => match app.active_tab() {
                 AppTab::Monitor => {}
+                AppTab::Usage => {}
                 AppTab::Dispatch => app.adjust_dispatch_selection(1),
                 AppTab::Controls => app.move_selection(1),
                 AppTab::MissionControl => app.move_mission_focus(1),
@@ -852,6 +857,7 @@ fn handle_key(
                         app.set_active_tab(AppTab::Controls);
                     }
                 }
+                AppTab::Usage => {}
                 AppTab::Dispatch => match app.dispatch_focus() {
                     DispatchFocus::Prompt => app.focus = LaunchFocus::EditPrompt,
                     DispatchFocus::Model => app.focus = LaunchFocus::EditModel,
@@ -1779,8 +1785,12 @@ mod tests {
 
         assert_eq!(app.active_tab(), AppTab::Monitor);
         handle_key(&mut app, key(KeyCode::Tab), &tx).unwrap();
+        assert_eq!(app.active_tab(), AppTab::Usage);
+        handle_key(&mut app, key(KeyCode::Tab), &tx).unwrap();
         assert_eq!(app.active_tab(), AppTab::Dispatch);
 
+        handle_key(&mut app, key(KeyCode::BackTab), &tx).unwrap();
+        assert_eq!(app.active_tab(), AppTab::Usage);
         handle_key(&mut app, key(KeyCode::BackTab), &tx).unwrap();
         assert_eq!(app.active_tab(), AppTab::Monitor);
     }

@@ -44,6 +44,9 @@ pub mod model;
 pub mod read;
 pub mod scaffold;
 pub mod scaffold_verifiers;
+pub mod usage;
+pub mod usage_agy;
+pub mod usage_kimi;
 pub mod workspace;
 
 pub use events::{
@@ -73,6 +76,19 @@ pub use scaffold::{
     doctor_plan_root_in_repo,
 };
 pub use scaffold_verifiers::{execute_brief_verifiers, extract_brief_verifier_commands};
+pub use usage::{
+    USAGE_REPORT_SCHEMA, UsageCost, UsageDimension, UsageDimensions, UsageFilter, UsageReport,
+    UsageReportFilter, UsageRun, UsageTokens, UsageTotals,
+};
+pub use usage_agy::{
+    AgyAdapterDiagnostics, AgyEstimatedCost, AgyEstimatedTokens, AgyFileError, AgyModelRate,
+    AgyPricing, AgySessionUsage, AgySignals, AgySurface, AgyTranscriptInput, AgyUsageReport,
+    analyze_agy_transcripts, normalize_agy_model,
+};
+pub use usage_kimi::{
+    KimiAdapterDiagnostics, KimiEstimatedCost, KimiFileError, KimiModelRate, KimiPricing,
+    KimiTokenBuckets, KimiUsageReport, KimiUsageSlice, KimiWireInput, analyze_kimi_wires,
+};
 pub use workspace::{
     AttachmentIdentity, FrameSessionInventory, FrameSessionOwner, LiveFrameSession,
     RuntimeSessionAttachment, SessionCurrency, WorkspaceCatalogProjection, WorkspaceProjection,

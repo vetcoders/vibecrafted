@@ -134,7 +134,7 @@ def test_core_surface_is_advertised_and_python_owned() -> None:
     assert set(CORE_SURFACE_COMMANDS) <= set(owned)
     deck = SCRIPTS_DECK.read_text(encoding="utf-8")
     assert "cmd_core_cli() {" in deck
-    assert "claims|message|relocate|resume-session) cmd_core_cli" in deck
+    assert "claims|message|relocate|resume-session|usage) cmd_core_cli" in deck
     assert "cmd_settlements() {" in deck
     assert 'cmd_core_cli settlements "$@"' in deck
 

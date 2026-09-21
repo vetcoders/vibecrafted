@@ -11,6 +11,7 @@ use crate::mission_control::{
 };
 use crate::observe::{self, ConsoleView, ObserveHealth};
 use crate::state::RunKind;
+use crate::usage::UsageCost;
 use ratatui::prelude::*;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -126,6 +127,7 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &App) {
             draw_observe(frame, area, app);
         }
         AppTab::Monitor => draw_monitor(frame, area, app),
+        AppTab::Usage => draw_usage(frame, area, app),
         AppTab::Dispatch => draw_dispatch(frame, area, app),
         AppTab::Controls => draw_controls(frame, area, app),
         AppTab::MissionControl => draw_mission_control(frame, area, app),
@@ -821,6 +823,157 @@ fn draw_controls(frame: &mut Frame, area: Rect, app: &App) {
     draw_events(frame, layout.timeline, app, "Selected timeline");
 }
 
+fn draw_usage(frame: &mut Frame, area: Rect, app: &App) {
+    let usage = &app.state.usage;
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(7), Constraint::Min(5)])
+        .split(area);
+
+    let summary = if usage.runs.is_empty() {
+        vec![
+            Line::from(Span::styled(
+                "No telemetry receipts yet.",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from("Canonical control-plane projection has no recorded usage runs yet."),
+            Line::from(Span::styled(
+                "Unknown is preserved; absence is never displayed as zero.",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ]
+    } else {
+        vec![
+            Line::from(vec![
+                Span::styled(
+                    format!("{} runs", usage.runs.len()),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("   "),
+                Span::styled(
+                    format!("{} known tokens", format_count(usage.tokens_total_known)),
+                    Style::default().fg(Color::Green),
+                ),
+                Span::raw(format!("   {} token unknown", usage.runs_tokens_unknown)),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    format!("${:.4} USD", usage.usd_total),
+                    Style::default().fg(Color::Green),
+                ),
+                Span::raw("   "),
+                Span::styled(
+                    format!("{:.2} credits", usage.credits_total),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::raw(format!("   {} cost unknown", usage.runs_cost_unknown)),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    format!("{} failures", usage.failures),
+                    if usage.failures > 0 {
+                        Style::default().fg(Color::Red)
+                    } else {
+                        Style::default().fg(Color::Green)
+                    },
+                ),
+                Span::raw("   canonical timestamps"),
+            ]),
+            Line::from(Span::styled(
+                usage.window_label(),
+                Style::default().fg(Color::DarkGray),
+            )),
+        ]
+    };
+    frame.render_widget(
+        Paragraph::new(summary).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Usage telemetry · retained receipts"),
+        ),
+        rows[0],
+    );
+
+    let items = usage.runs.iter().map(usage_run_item).collect::<Vec<_>>();
+    let list = if items.is_empty() {
+        List::new(vec![ListItem::new(Line::from(Span::styled(
+            "Waiting for the first canonical run receipt.",
+            Style::default().fg(Color::DarkGray),
+        )))])
+    } else {
+        List::new(items)
+    };
+    frame.render_widget(
+        list.block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Recent runs · provider / model / usage / cost"),
+        ),
+        rows[1],
+    );
+}
+
+fn usage_run_item(run: &crate::usage::UsageRun) -> ListItem<'static> {
+    let tokens = run
+        .tokens_total
+        .map(format_count)
+        .unwrap_or_else(|| "unknown".to_string());
+    let cost = match &run.cost {
+        UsageCost::Known { amount, unit } if unit.eq_ignore_ascii_case("USD") => {
+            format!("${amount:.4} USD")
+        }
+        UsageCost::Known { amount, unit } => format!("{amount:.2} {unit}"),
+        UsageCost::Unknown => "unknown".to_string(),
+    };
+    let failed = run.failure.as_deref().unwrap_or_else(|| {
+        if run.status.eq_ignore_ascii_case("failed") {
+            "unknown"
+        } else {
+            "none"
+        }
+    });
+    ListItem::new(vec![
+        Line::from(vec![
+            Span::styled(
+                run.run_id.clone(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!(
+                "  {}  {}",
+                run.status,
+                short_timestamp(&run.timestamp)
+            )),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                format!("{} / {} / {}", run.provider, run.agent, run.model),
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::raw(format!("  tokens {tokens}  cost {cost}  failure {failed}")),
+        ]),
+    ])
+}
+
+fn short_timestamp(value: &str) -> &str {
+    value.get(..16).unwrap_or(value)
+}
+
+fn format_count(value: u64) -> String {
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, ch) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -835,6 +988,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         (AppTab::Monitor, _) => {
             "Monitor: click a row  wheel that pane  ↑/↓ runs  / search  f scope  x archive  ? help"
         }
+        (AppTab::Usage, _) => "Usage: canonical runtime receipts  r refresh  Tab next surface",
         (AppTab::Dispatch, LaunchFocus::EditPrompt) => {
             "Dispatch edit: type prompt  Enter newline  Ctrl+S/Esc save"
         }
@@ -2221,6 +2375,7 @@ mod tests {
             runs: vec![live.snapshot, history.snapshot],
             events: Vec::new(),
             archived_run_ids: HashSet::new(),
+            usage: Default::default(),
         };
         app.refresh_rendered_runs();
         app.refresh_observe();
@@ -2278,6 +2433,7 @@ mod tests {
             runs: vec![old_run.snapshot, new_run.snapshot],
             events: Vec::new(),
             archived_run_ids: HashSet::new(),
+            usage: Default::default(),
         };
         app.refresh_rendered_runs();
         app.refresh_observe();
@@ -2327,6 +2483,7 @@ mod tests {
             runs: vec![run.snapshot],
             events: Vec::new(),
             archived_run_ids: HashSet::new(),
+            usage: Default::default(),
         };
         app.refresh_rendered_runs();
         app.refresh_observe();

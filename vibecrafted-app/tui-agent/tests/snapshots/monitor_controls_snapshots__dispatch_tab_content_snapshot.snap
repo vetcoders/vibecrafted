@@ -5,7 +5,7 @@ expression: text
 Vibecrafted operator  Console  runs: 2 | active 1 | stalled 1
 workspace: vibecrafted  |  active 1  stalled 1  |  scope: live  |  Dispatch
 ┌Surface───────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│ Monitor live 2 │ Dispatch workflow/claude │ Controls 10 │ Mission 0|0                                                │
+│ Monitor live 2 │ Usage 0 │ Dispatch workflow/claude │ Controls 10 │ Mission 0|0                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌ Mission ─────────────────────────────┐┌ Operator ────────────────────────────┐┌ Execution ───────────────────────────┐
 │Workflow                              ││agent claude                          ││Living Tree · terminal                │

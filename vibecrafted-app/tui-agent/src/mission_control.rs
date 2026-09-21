@@ -2493,6 +2493,7 @@ mod tests {
             runs: Vec::new(),
             events: Vec::new(),
             archived_run_ids: Default::default(),
+            usage: Default::default(),
         }
     }
 
@@ -2549,6 +2550,7 @@ mod tests {
             runs,
             events: Vec::new(),
             archived_run_ids: Default::default(),
+            usage: Default::default(),
         }
     }
 
@@ -2956,6 +2958,7 @@ mod tests {
             runs: vec![active, stalled],
             events: Vec::<RunEvent>::new(),
             archived_run_ids: Default::default(),
+            usage: Default::default(),
         };
         let dir = tempdir().unwrap();
         let mission =
@@ -3063,6 +3066,7 @@ mod tests {
             runs: Vec::new(),
             events: Vec::new(),
             archived_run_ids: Default::default(),
+            usage: Default::default(),
         };
         let board =
             MissionControlState::build_at(&state, &artifact_root, ts("2026-05-20T00:00:00Z"))

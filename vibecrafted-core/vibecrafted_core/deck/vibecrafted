@@ -6611,7 +6611,7 @@ main() {
     telemetry) cmd_telemetry "$@" ;;
     stats|status) cmd_stats "$@" ;;
     settlements) cmd_settlements "$@" ;;
-    claims|message|relocate|resume-session) cmd_core_cli "$cmd" "$@" ;;
+    claims|message|relocate|resume-session|usage) cmd_core_cli "$cmd" "$@" ;;
     update|upgrade) cmd_update "$@" ;;
     uninstall|remove) cmd_uninstall "$@" ;;
     version|--version|-v) printf 'vibecrafted %s\n' "$(_version)" ;;

@@ -16,6 +16,7 @@ use voc::app::{App, AppTab, DispatchFocus, LaunchFocus, QueueScope};
 use voc::config::AppConfig;
 use voc::launch::{Environment, LaunchKind, PermissionPolicy, Presentation, SandboxChoice};
 use voc::state::{ControlPlaneState, RenderedRun, RunKind, RunSnapshot};
+use voc::usage::{UsageCost, UsageDashboard, UsageRun};
 mod support;
 use support::{agent_index, fixture_catalog};
 use voc::catalog::CatalogState;
@@ -182,6 +183,71 @@ fn controls_tab_hierarchy_snapshot() {
     assert!(text.contains("focused:"));
     assert!(app.deep_actions().len() < 12);
     assert!(!text.contains("Launch skill: vibecrafted justdo"));
+}
+
+#[test]
+fn usage_tab_truthful_units_and_unknowns_snapshot() {
+    let mut app = board_app();
+    app.state.usage = UsageDashboard {
+        runs: vec![
+            UsageRun {
+                run_id: "impl-usage".to_string(),
+                provider: "openai".to_string(),
+                agent: "codex".to_string(),
+                model: "gpt-6".to_string(),
+                status: "completed".to_string(),
+                timestamp: "2026-09-21T16:10:00Z".to_string(),
+                tokens_total: Some(12_345),
+                cost: UsageCost::Known {
+                    amount: 0.3125,
+                    unit: "USD".to_string(),
+                },
+                failure: None,
+            },
+            UsageRun {
+                run_id: "review-credit".to_string(),
+                provider: "google".to_string(),
+                agent: "agy".to_string(),
+                model: "unknown".to_string(),
+                status: "failed".to_string(),
+                timestamp: "2026-09-21T16:12:00Z".to_string(),
+                tokens_total: None,
+                cost: UsageCost::Known {
+                    amount: 7.0,
+                    unit: "credits".to_string(),
+                },
+                failure: Some("quota_exhausted".to_string()),
+            },
+            UsageRun {
+                run_id: "legacy-unknown".to_string(),
+                provider: "moonshot".to_string(),
+                agent: "kimi".to_string(),
+                model: "unknown".to_string(),
+                status: "completed".to_string(),
+                timestamp: "2026-09-21T16:09:00Z".to_string(),
+                tokens_total: None,
+                cost: UsageCost::Unknown,
+                failure: None,
+            },
+        ],
+        tokens_total_known: 12_345,
+        runs_tokens_unknown: 2,
+        usd_total: 0.3125,
+        credits_total: 7.0,
+        runs_cost_unknown: 1,
+        failures: 1,
+        observed_from: Some("2026-09-21T16:09:00Z".to_string()),
+        observed_to: Some("2026-09-21T16:12:00Z".to_string()),
+    };
+    app.set_active_tab(AppTab::Usage);
+    let text = buffer_text(&render(&app));
+    insta::assert_snapshot!(text);
+    assert!(text.contains("12,345 known tokens"));
+    assert!(text.contains("$0.3125 USD"));
+    assert!(text.contains("7.00 credits"));
+    assert!(text.contains("2 token unknown"));
+    assert!(text.contains("1 cost unknown"));
+    assert!(text.contains("failure quota_exhausted"));
 }
 
 #[test]

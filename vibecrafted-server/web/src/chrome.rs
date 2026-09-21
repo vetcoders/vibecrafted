@@ -15,6 +15,7 @@ pub enum ServerSection {
     Sessions,
     Agents,
     Runs,
+    Usage,
     Transcripts,
     Lifecycle,
     Activity,
@@ -25,7 +26,7 @@ pub enum ServerSection {
 }
 
 impl ServerSection {
-    /// Five primary views. Catalog pages (workspaces, sessions, agents, live
+    /// Six primary views. Catalog pages (workspaces, sessions, agents, live
     /// runs, control, activity, guide) stay reachable — they highlight Overview
     /// in the primary nav and themselves in the rail. AICX lives under Structure.
     fn family(self) -> Self {
@@ -100,6 +101,9 @@ pub fn ServerFrame(active: ServerSection, status: String, children: Children) ->
                         <a class=active.nav_class(ServerSection::Transcripts) href="/transcripts">
                             <strong>"Transcripts"</strong>
                         </a>
+                        <a class=active.nav_class(ServerSection::Usage) href="/usage">
+                            <strong>"Usage"</strong>
+                        </a>
                         <a class=active.nav_class(ServerSection::Structure) href="/structure">
                             <strong>"Structure"</strong>
                         </a>
@@ -147,6 +151,11 @@ pub fn ServerFrame(active: ServerSection, status: String, children: Children) ->
                             </a>
                         </li>
                         <li>
+                            <a class=active.rail_class(ServerSection::Usage) href="/usage">
+                                <span>"Cost & usage"</span>
+                            </a>
+                        </li>
+                        <li>
                             <a class=active.rail_class(ServerSection::Lifecycle) href="/lifecycle">
                                 <span>"Control"</span>
                             </a>
@@ -179,6 +188,9 @@ pub fn ServerFrame(active: ServerSection, status: String, children: Children) ->
                 </a>
                 <a class=active.nav_class(ServerSection::Transcripts) href="/transcripts">
                     <strong>"Logs"</strong>
+                </a>
+                <a class=active.nav_class(ServerSection::Usage) href="/usage">
+                    <strong>"Usage"</strong>
                 </a>
                 <a class=active.nav_class(ServerSection::Structure) href="/structure">
                     <strong>"Structure"</strong>

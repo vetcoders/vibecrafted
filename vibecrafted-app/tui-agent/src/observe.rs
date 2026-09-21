@@ -862,6 +862,7 @@ mod tests {
             runs,
             events: Vec::new(),
             archived_run_ids: HashSet::new(),
+            usage: Default::default(),
         };
 
         let faces = project_control_plane(&state);

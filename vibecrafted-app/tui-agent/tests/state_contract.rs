@@ -986,19 +986,20 @@ fn tab_labels_surface_monitor_dispatch_and_controls_context() {
 
     let labels = app.tab_labels();
     assert_eq!(labels[0], "Monitor live 1");
+    assert_eq!(labels[1], "Usage 0");
     // The agent shown is whatever the launcher catalog offers at this index —
     // never the retired gemini launcher that used to sit here.
     assert_eq!(
-        labels[1],
+        labels[2],
         format!("Dispatch marbles/{}", app.selected_agent())
     );
     assert_ne!(app.selected_agent(), "gemini");
-    assert_eq!(labels[2], format!("Controls {}", app.deep_actions().len()));
+    assert_eq!(labels[3], format!("Controls {}", app.deep_actions().len()));
     assert!(app.deep_actions().len() < 12);
 
     app.selected = 1;
     let labels = app.tab_labels();
-    assert_eq!(labels[2], format!("Controls {}", app.deep_actions().len()));
+    assert_eq!(labels[3], format!("Controls {}", app.deep_actions().len()));
     assert!(app.deep_actions().len() < 12);
 }
 
@@ -1121,16 +1122,18 @@ fn changing_launch_kind_reorients_the_operator_into_dispatch() {
     assert!(app.launch_prompt.contains("Review"));
 }
 
-/// `AppTab` contract — Mission Control is a first-class fourth tab and
+/// `AppTab` contract — Usage and Mission Control are first-class tabs and
 /// must be reachable through the standard Tab/Shift+Tab rotation, with a
 /// stable index and label. This locks PLAN_23 Wave A acceptance.
 #[test]
 fn mission_control_tab_is_addressable_and_reachable_via_rotation() {
-    assert_eq!(AppTab::TITLES.len(), 4);
+    assert_eq!(AppTab::TITLES.len(), 5);
+    assert_eq!(AppTab::Usage.label(), "Usage");
+    assert_eq!(AppTab::Usage.index(), 1);
     assert_eq!(AppTab::MissionControl.label(), "Mission Control");
-    assert_eq!(AppTab::MissionControl.index(), 3);
-    assert_eq!(AppTab::from_index(3), AppTab::MissionControl);
-    assert_eq!(AppTab::from_index(7), AppTab::MissionControl);
+    assert_eq!(AppTab::MissionControl.index(), 4);
+    assert_eq!(AppTab::from_index(4), AppTab::MissionControl);
+    assert_eq!(AppTab::from_index(9), AppTab::MissionControl);
 }
 
 /// Mission Control aggregation over derived control-plane snapshots: agent
@@ -1191,6 +1194,7 @@ fn mission_control_aggregates_real_derived_snapshots() {
         runs,
         events: Vec::new(),
         archived_run_ids: Default::default(),
+        usage: Default::default(),
     };
     let now = chrono::DateTime::parse_from_rfc3339("2026-05-19T13:00:00Z")
         .unwrap()
@@ -1360,6 +1364,7 @@ fn mission_control_failure_board_respects_24h_window() {
         runs,
         events: Vec::new(),
         archived_run_ids: Default::default(),
+        usage: Default::default(),
     };
     let now = chrono::DateTime::parse_from_rfc3339("2026-05-19T13:00:00Z")
         .unwrap()
@@ -1505,6 +1510,7 @@ fn mission_control_defaults_to_live_runs_across_roots_with_root_labels() {
         ],
         events: Vec::new(),
         archived_run_ids: Default::default(),
+        usage: Default::default(),
     };
 
     let mission = MissionControlState::build_at(&state, &artifact_root, now);
