@@ -1,6 +1,6 @@
 {
   "name": "vc-intents",
-  "description": "Operator-side intention-to-runtime truth audit. Use /vc-intents to compare planned intentions (extracted via aicx) against the live repo and surface which items landed, which are partial, which never materialized, and what the highest remaining truth is.",
+  "description": "Hunt the Founder's intents for a repository inside a chosen window, settle each against the live code with two independent fleets, reclassify what `landed` hides, let the Founder review and override, and hand back a stable plan of cuts for vc-dispatch. Use /vc-intents when the team asks what was promised, what is still owed, or what from the plan actually sits in code.",
   "author": {
     "name": "Vetcoders",
     "email": "hello@vetcoders.io"

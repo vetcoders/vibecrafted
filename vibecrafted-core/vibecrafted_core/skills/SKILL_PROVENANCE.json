@@ -2348,6 +2348,7 @@
     "vc-intents": {
       "sha256": [
         "04ce7e799e38b94b74706ea3fce2c1ada2281ad174cd2e1e320d03c6652db4df",
+        "08dfbde9b5a6a6d15f439936535954dc18c8fc5641107269c4144ce13a18d363",
         "0f048f0d4019ec0462cae3eb4e6e999a79d8d7f6405ded7bedd9a814204cd8cc",
         "0fc551fe437aaf20a4399513761d64fc22f1c57bfdb65a80074361506d426af5",
         "1d00b4a3f89172dc749fe9c78c654009482f6231c83b71500d726efaa29d4c74",
@@ -2366,6 +2367,7 @@
         "7b8f2b29fc1d89e00d2306cf158f0be687121c73548565ea58863804c0bda55a",
         "9536e9868fad402e0df057ea7776809edf66cc11e58cfe1e5387549e298070ab",
         "a3379d405deffd6a4bcd31568c571e00c4cb737778dd129136de2299613de24c",
+        "a59df032b2f4b9c6f673ff6b8dcb6fcde13c620619aeaa21efd28d9338307872",
         "b0595ae09f3183581956578fa7d697afb69d9032ed48c517abd6da4277f34da0",
         "d1a8d746d78901d96f61769cac8b65841c2e55e3940fa1455ce6f132496ce00a",
         "dd24459d42c0c9e3408cc8bbcf23e61259076af3d7ffa90130f01f22feee937c",
@@ -2382,12 +2384,15 @@
         "FLOW.md": [
           "32e89211387f0eb74d03558f949115a0281d8262",
           "4277ab12f2f28e9e7b84511c8271d6cb43ef2a65",
+          "4557180f5d37bec94610b3df269133079b853f92",
           "508853db6d39339ff6ca10d141b0612e97f3d36c",
+          "763173b61d9478a666e3dae8b8e39fbbab64e85b",
           "bb8707b79ce39e472237de9b2ef8e9d8b347a3b5"
         ],
         "SKILL.md": [
           "0e64b492d194acb10cb93cd770688a6f54c8b19e",
           "0fd6ae033b71a9b5960c28b5846eeeef9f978c82",
+          "14c3848238448e3d92051af7699ebb1a805b6b72",
           "22737edc53db0fb0c1331ca3847f2797b3afa529",
           "235aef629e576f270e3367491fc5d41c9e7ca751",
           "31b82d02f272eeb36175f90bbbbeaa4ed72be02d",
@@ -2401,6 +2406,7 @@
           "90e4c55cd8f4f6dfa2ceccfc0ed90291eb29d36c",
           "97300eab8b9397ced20f03eab36a1c05f75cdc4d",
           "a7494e83267a765bf328ced99814996b93f028d5",
+          "a8b42174aafb367582913a76797f58c8ef52dcd7",
           "ab06779cff47589cbdb88ef4f651d791ee5f6bd3",
           "b917c61a9fb05360cdc828c8194a72b26dae3d3e",
           "bc35feb2387ff15c03e5797942c7314f42b53192",
@@ -2419,13 +2425,16 @@
           "ef93a11deda8a5127591b4d4bd6f927f9ef41e87"
         ],
         "examples/codescribe-two-hosts.md": [
-          "33e7e6a08323d2e973732c90453e980176d4eb41"
+          "33e7e6a08323d2e973732c90453e980176d4eb41",
+          "bbead6d8d65b587912887740e05f59035ab601a1"
         ],
         "references/aicx-retrieval.md": [
+          "60973cd6fefb46a15d6fe78514b36f0a6b996b7b",
           "97d72077d33a85f4bb0b87bde0ee488f67c9d92a",
           "b69d045df4bf7e6424f5fcbff9b782b82bc2c415"
         ],
         "references/confrontation-brief.md": [
+          "13b47fa709da16a8139cff0cddc4c5f7155bbca4",
           "833eeb0d80703c35d9ded98f93f222981a6df217",
           "fe2a21f11d981ba768d3d4ca32b6014f84ca1885"
         ],
@@ -2438,6 +2447,7 @@
           "e044c1382e932a23b59d66cebb81d15bdb0af60d"
         ],
         "references/ledger-schema.md": [
+          "1504db79ac6525e76277f3f7f2d20a2a528801d8",
           "b4ca4e13af93f0abd158bf2becaa51d5a88c6b96",
           "db7cef04866c7a6790dc285b643f9d5b0f5b0b80"
         ],
@@ -2446,12 +2456,15 @@
           "8998065023b448373e6d56016f57b4a1b1b7e339"
         ],
         "references/replication.md": [
+          "1c1893f5cec3ab28d7efd9499a0f0932f6d11c85",
           "d59930873f5966141a0c54d58bdf8c286b38a2c8"
         ],
         "references/review-surface.md": [
-          "0a5e91dbd7e4439e38da7db03a6dde8094a790c7"
+          "0a5e91dbd7e4439e38da7db03a6dde8094a790c7",
+          "170c5a34ebd1e0c296bce6353273bb640afefecf"
         ],
         "scripts/intents_cli.py": [
+          "6148a918c79b595489ae483a32d13ad9bf88bcd0",
           "d5c9a4104c2d6795fa9b19c18d44162633d75ee4"
         ]
       }
