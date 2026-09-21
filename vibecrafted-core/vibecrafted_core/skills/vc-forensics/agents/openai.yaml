@@ -1,0 +1,4 @@
+interface:
+  display_name: "VC Forensics"
+  short_description: "Autonomous preflight bug detection and radical fix"
+  default_prompt: "Use $vc-forensics to investigate codebase execution paths for race conditions, truth multi-authority, resource leaks, and data corruption, then prove with regression tests and eliminate via radical cutting (git rm, no shims)."
