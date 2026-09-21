@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HOOK_INSTALLER = REPO_ROOT / "templates" / "hooks" / "install.sh"
@@ -179,3 +182,26 @@ def test_prepush_checks_commit_projection_not_foreign_dirty_worktree(
 
     assert result.returncode == 0, result.stderr
     assert source.read_text(encoding="utf-8") == "x=1\n"
+
+
+def test_ruff_format_check_on_repo_root_passes() -> None:
+    """Husky full-repo ruff and a manual `ruff format --check .` must stay green.
+
+    ruff 0.16 includes Markdown. Fenced examples in docs used to fail this
+    gate and refuse `git push` even when every `*.py` file was formatted.
+    """
+    if shutil.which("uvx") is None:
+        pytest.skip("uvx is required for the repository-wide Ruff contract")
+
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    result = subprocess.run(
+        ["uvx", "ruff", "format", "--check", "--", str(REPO_ROOT)],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
