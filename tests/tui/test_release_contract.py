@@ -37,9 +37,21 @@ def test_make_release_bootstraps_exact_rust_targets_and_uses_classic_ld() -> Non
     linker = (REPO_ROOT / "scripts/lib/rust-linker-darwin-classic.sh").read_text(
         encoding="utf-8"
     )
+    contract = (REPO_ROOT / "scripts/lib/release-toolchain-contract.sh").read_text(
+        encoding="utf-8"
+    )
 
-    assert "RELEASE_RUSTUP_TOOLCHAIN := 1.96.0" in makefile
-    assert "RELEASE_RUST_TARGETS := wasm32-wasip1 wasm32-unknown-unknown" in makefile
+    assert (
+        "RELEASE_TOOLCHAIN_CONTRACT := scripts/lib/release-toolchain-contract.sh"
+        in makefile
+    )
+    assert "VIBECRAFTED_RELEASE_RUSTUP_TOOLCHAIN='1.96.0'" in contract
+    assert (
+        "VIBECRAFTED_RELEASE_RUST_TARGETS='wasm32-wasip1 wasm32-unknown-unknown'"
+        in contract
+    )
+    assert "clang-1700.6.3.2" in contract
+    assert "PROJECT:ld64-956.6" in contract
     assert 'rustup toolchain install "$$toolchain" --profile minimal' in makefile
     assert 'rustup target add --toolchain "$$toolchain" "$$target"' in makefile
     assert (
@@ -48,13 +60,20 @@ def test_make_release_bootstraps_exact_rust_targets_and_uses_classic_ld() -> Non
     )
     assert "RELEASE_MIN_FREE_KIB ?= 6291456" in makefile
 
-    assert "export RUSTUP_TOOLCHAIN=1.96.0" in builder
+    assert 'export RUSTUP_TOOLCHAIN="$VIBECRAFTED_RELEASE_RUSTUP_TOOLCHAIN"' in builder
     assert 'target list --installed --toolchain "$RUSTUP_TOOLCHAIN"' in builder
-    assert "wasm32-wasip1 wasm32-unknown-unknown" in builder
+    assert "VIBECRAFTED_RELEASE_RUST_TARGETS" in builder
+    assert "notary_profile_from_keychain" in builder
+    assert 'export NOTARY_PROFILE="$profile"' in builder
     assert "CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER" in builder
     assert "rust-linker-darwin-classic.sh" in builder
-    assert '$(dirname "$classic_ld")/clang' in linker
-    assert 'exec "$clang" -Wl,-ld_classic "$@"' in linker
+    assert 'if [[ "$MODE" != "notarize" ]]; then' in builder
+    assert builder.index('--notarize-only) MODE="notarize"') < builder.index(
+        'export RUSTUP_TOOLCHAIN="$VIBECRAFTED_RELEASE_RUSTUP_TOOLCHAIN"'
+    )
+    assert builder.count('if [[ "$MODE" != "notarize" ]]; then') >= 2
+    assert "release-toolchain-contract.sh" in linker
+    assert 'exec "$VIBECRAFTED_RELEASE_DARWIN_CLANG" -Wl,-ld_classic "$@"' in linker
 
 
 def test_classic_darwin_linker_wrapper_injects_flag_before_cargo_arguments(
@@ -65,32 +84,41 @@ def test_classic_darwin_linker_wrapper_injects_flag_before_cargo_arguments(
     fake_bin.mkdir()
     fake_clang = fake_bin / "clang"
     fake_clang.write_text(
-        '#!/usr/bin/env bash\nset -euo pipefail\nprintf "%s\\n" "$@" > "$CAPTURED"\n',
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'if [[ "${1:-}" == --version ]]; then printf "%s\\n" "Fake pinned clang"; exit 0; fi\n'
+        'printf "%s\\n" "$@" > "$CAPTURED"\n',
         encoding="utf-8",
     )
     fake_clang.chmod(0o755)
     fake_ld_classic = fake_bin / "ld-classic"
-    fake_ld_classic.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
-    fake_ld_classic.chmod(0o755)
-    fake_xcrun = fake_bin / "xcrun"
-    fake_xcrun.write_text(
-        "#!/usr/bin/env bash\n"
-        "set -euo pipefail\n"
-        '[[ "$1" == --find ]]\n'
-        'case "$2" in\n'
-        '  ld-classic) printf "%s\\n" "$FAKE_LD_CLASSIC" ;;\n'
-        "  *) exit 1 ;;\n"
-        "esac\n",
+    fake_ld_classic.write_text(
+        '#!/usr/bin/env bash\nprintf "%s\\n" "Fake pinned ld-classic"\n',
         encoding="utf-8",
     )
-    fake_xcrun.chmod(0o755)
+    fake_ld_classic.chmod(0o755)
+    fake_contract = tmp_path / "release-toolchain-contract.sh"
+    fake_contract.write_text(
+        "VIBECRAFTED_RELEASE_RUSTUP_TOOLCHAIN='test'\n"
+        "VIBECRAFTED_RELEASE_RUST_TARGETS='test-target'\n"
+        f"VIBECRAFTED_RELEASE_DARWIN_CLANG='{fake_clang}'\n"
+        "VIBECRAFTED_RELEASE_DARWIN_CLANG_VERSION='Fake pinned clang'\n"
+        f"VIBECRAFTED_RELEASE_DARWIN_LD_CLASSIC='{fake_ld_classic}'\n"
+        "VIBECRAFTED_RELEASE_DARWIN_LD_CLASSIC_VERSION='Fake pinned ld-classic'\n"
+        "vibecrafted_release_verify_darwin_linker() {\n"
+        '  actual_clang="$($VIBECRAFTED_RELEASE_DARWIN_CLANG --version | head -n 1)"\n'
+        '  actual_ld="$($VIBECRAFTED_RELEASE_DARWIN_LD_CLASSIC -v 2>&1 | head -n 1)"\n'
+        '  [ "$actual_clang" = "$VIBECRAFTED_RELEASE_DARWIN_CLANG_VERSION" ]\n'
+        '  [ "$actual_ld" = "$VIBECRAFTED_RELEASE_DARWIN_LD_CLASSIC_VERSION" ]\n'
+        "}\n",
+        encoding="utf-8",
+    )
 
     env = dict(os.environ)
     env.update(
         {
             "CAPTURED": str(captured),
-            "FAKE_LD_CLASSIC": str(fake_ld_classic),
-            "PATH": f"{fake_bin}:{env['PATH']}",
+            "VIBECRAFTED_RELEASE_TOOLCHAIN_CONTRACT": str(fake_contract),
         }
     )
     result = subprocess.run(

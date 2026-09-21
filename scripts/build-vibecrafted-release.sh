@@ -16,49 +16,9 @@ die() {
 }
 require() { command -v "$1" >/dev/null 2>&1 || die "$1 is required"; }
 
-prefer_rustup_cargo() {
-  # Homebrew `rust` (helix-db/pake) often shadows rustup on login PATH and
-  # then `cargo leptos` dies with a content-free wasm32 E0463. Prefer rustup.
-  if [[ -d "${HOME}/.cargo/bin" ]]; then
-    PATH="${HOME}/.cargo/bin:${PATH}"
-    export PATH
-  fi
-  if command -v rustup >/dev/null 2>&1; then
-    local rustup_cargo
-    rustup_cargo="$(rustup which cargo 2>/dev/null || true)"
-    if [[ -n "$rustup_cargo" && -x "$rustup_cargo" ]]; then
-      PATH="$(dirname "$rustup_cargo"):${PATH}"
-      export PATH
-    fi
-  fi
-}
-# Pin the complete release, including donor subprocesses and proc-macro hosts.
-export RUSTUP_TOOLCHAIN=1.96.0
-prefer_rustup_cargo
-require rustup
-rustup which --toolchain "$RUSTUP_TOOLCHAIN" rustc >/dev/null \
-  || die "install the release toolchain: rustup toolchain install $RUSTUP_TOOLCHAIN --profile minimal"
-for release_target in wasm32-wasip1 wasm32-unknown-unknown; do
-  rustup target list --installed --toolchain "$RUSTUP_TOOLCHAIN" 2>/dev/null \
-    | grep -Fxq "$release_target" \
-    || die "rustup target $release_target is missing from $RUSTUP_TOOLCHAIN; run: rustup target add --toolchain $RUSTUP_TOOLCHAIN $release_target"
-done
-
-# A --remap-path-prefix whose prefix still contains `..` never matches the path
-# the compiler actually sees, because the match is textual. The donor roots used
-# to be plain concatenations ("$REPO_ROOT/../vc-terminal"), so both donor remaps
-# silently missed every file: measured on the shipped 4.1.0 payload
-# (Vibecrafted_4.1.0-20260817-237d2814.dmg, roadmap 4.2.0 cut W0-a), the strings
-# `/usr/src/vc-frame` and `/usr/src/vc-terminal` are ABSENT from every binary
-# while `/Volumes/<...>/vc-frame` and `/Volumes/<...>/vc-terminal` are present in
-# Contents/Helpers/vc-frame, Contents/MacOS/Vibecrafted, Contents/MacOS/voc and
-# the bundled alacritty. Resolve the donor roots; never concatenate them.
-canonical_dir() {
-  local target="$1"
-  (cd "$target" >/dev/null 2>&1 && pwd) || die "missing donor directory: $target"
-}
-
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+RELEASE_TOOLCHAIN_CONTRACT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/release-toolchain-contract.sh"
+# shellcheck disable=SC1090 # resolved from this script's canonical directory
+. "$RELEASE_TOOLCHAIN_CONTRACT"
 
 MODE="release"
 SNAPSHOT_DONORS=0
@@ -79,6 +39,54 @@ for argument in "$@"; do
       ;;
   esac
 done
+
+prefer_rustup_cargo() {
+  # Homebrew `rust` (helix-db/pake) often shadows rustup on login PATH and
+  # then `cargo leptos` dies with a content-free wasm32 E0463. Prefer rustup.
+  if [[ -d "${HOME}/.cargo/bin" ]]; then
+    PATH="${HOME}/.cargo/bin:${PATH}"
+    export PATH
+  fi
+  if command -v rustup >/dev/null 2>&1; then
+    local rustup_cargo
+    rustup_cargo="$(rustup which cargo 2>/dev/null || true)"
+    if [[ -n "$rustup_cargo" && -x "$rustup_cargo" ]]; then
+      PATH="$(dirname "$rustup_cargo"):${PATH}"
+      export PATH
+    fi
+  fi
+}
+# Pin the complete build, including donor subprocesses and proc-macro hosts.
+# Notarize-only consumes already-built, already-signed bytes and must not depend
+# on Cargo or WASM targets that cannot change those bytes.
+if [[ "$MODE" != "notarize" ]]; then
+  export RUSTUP_TOOLCHAIN="$VIBECRAFTED_RELEASE_RUSTUP_TOOLCHAIN"
+  prefer_rustup_cargo
+  require rustup
+  rustup which --toolchain "$RUSTUP_TOOLCHAIN" rustc >/dev/null \
+    || die "install the release toolchain: rustup toolchain install $RUSTUP_TOOLCHAIN --profile minimal"
+  for release_target in $VIBECRAFTED_RELEASE_RUST_TARGETS; do
+    rustup target list --installed --toolchain "$RUSTUP_TOOLCHAIN" 2>/dev/null \
+      | grep -Fxq "$release_target" \
+      || die "rustup target $release_target is missing from $RUSTUP_TOOLCHAIN; run: rustup target add --toolchain $RUSTUP_TOOLCHAIN $release_target"
+  done
+fi
+
+# A --remap-path-prefix whose prefix still contains `..` never matches the path
+# the compiler actually sees, because the match is textual. The donor roots used
+# to be plain concatenations ("$REPO_ROOT/../vc-terminal"), so both donor remaps
+# silently missed every file: measured on the shipped 4.1.0 payload
+# (Vibecrafted_4.1.0-20260817-237d2814.dmg, roadmap 4.2.0 cut W0-a), the strings
+# `/usr/src/vc-frame` and `/usr/src/vc-terminal` are ABSENT from every binary
+# while `/Volumes/<...>/vc-frame` and `/Volumes/<...>/vc-terminal` are present in
+# Contents/Helpers/vc-frame, Contents/MacOS/Vibecrafted, Contents/MacOS/voc and
+# the bundled alacritty. Resolve the donor roots; never concatenate them.
+canonical_dir() {
+  local target="$1"
+  (cd "$target" >/dev/null 2>&1 && pwd) || die "missing donor directory: $target"
+}
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # The build -> install handoff record is owned by this library, and it is loaded
 # HERE rather than beside the other libraries further down: the claim it makes
@@ -253,10 +261,15 @@ export MACOSX_DEPLOYMENT_TARGET=14.0
 # linker input succeeds under ld-classic 956.6. Scope the workaround to Cargo's
 # native Apple target: WASM keeps rust-lld, while Swift, signing and notarization
 # keep using the selected Xcode toolchain.
-DARWIN_RUST_LINKER="$REPO_ROOT/scripts/lib/rust-linker-darwin-classic.sh"
-[[ -x "$DARWIN_RUST_LINKER" ]] || die "missing executable Darwin Rust linker wrapper: $DARWIN_RUST_LINKER"
-export CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER="${CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER:-$DARWIN_RUST_LINKER}"
-echo "==> Rust Darwin linker: $CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER ($(xcrun --find ld-classic 2>/dev/null || echo 'ld-classic: unresolved'))"
+if [[ "$MODE" != "notarize" ]]; then
+  DARWIN_RUST_LINKER="$REPO_ROOT/scripts/lib/rust-linker-darwin-classic.sh"
+  [[ -x "$DARWIN_RUST_LINKER" ]] || die "missing executable Darwin Rust linker wrapper: $DARWIN_RUST_LINKER"
+  vibecrafted_release_verify_darwin_linker \
+    || die "the pinned Darwin Rust linker contract is not satisfied"
+  export VIBECRAFTED_RELEASE_TOOLCHAIN_CONTRACT="$RELEASE_TOOLCHAIN_CONTRACT"
+  export CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER="${CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER:-$DARWIN_RUST_LINKER}"
+  echo "==> Rust Darwin linker: $CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER ($VIBECRAFTED_RELEASE_DARWIN_CLANG -> $VIBECRAFTED_RELEASE_DARWIN_LD_CLASSIC)"
+fi
 # Keep host proc-macro dylibs loadable under the Xcode beta linker/strip pair.
 # Strip only packaged Mach-O payloads through the existing signing pipeline.
 export CARGO_PROFILE_RELEASE_STRIP=false
@@ -580,16 +593,30 @@ notary_profile_from_env_file() {
   sed -n 's/^NOTARY_PROFILE=//p' "$file" | head -n1 | tr -d '\r"'
 }
 
+notary_profile_from_keychain() {
+  local candidate="${NOTARY_FALLBACK_PROFILE:-vibecrafted-notary}"
+  # A conventional name is only admitted after Apple authenticates it. This
+  # keeps headless retries smooth after the one-time secure credential prompt
+  # without reviving the old bug where an invented profile masked valid
+  # Apple-ID or API-key credentials.
+  if xcrun notarytool history --keychain-profile "$candidate" >/dev/null 2>&1; then
+    printf '%s\n' "$candidate"
+  fi
+}
+
 notary_submit() {
   local artifact="$1"
   local profile="${NOTARY_PROFILE:-}"
   if [[ -z "$profile" ]]; then
     profile="$(notary_profile_from_env_file "$NOTARY_ENV")"
   fi
-  # Explicit Founder profile (env or .notary.env name-only) beats API keys.
-  # Do not invent a default Keychain profile; that made Apple-ID unreachable
-  # and submitted against credentials nobody configured.
+  if [[ -z "$profile" ]]; then
+    profile="$(notary_profile_from_keychain)"
+  fi
+  # An explicit Founder profile (env or .notary.env name-only), or a fallback
+  # profile independently authenticated above, beats API keys.
   if [[ -n "$profile" ]]; then
+    export NOTARY_PROFILE="$profile"
     xcrun notarytool submit "$artifact" --keychain-profile "$profile" \
       --wait --timeout 30m
     return

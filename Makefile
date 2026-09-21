@@ -108,27 +108,27 @@ RELEASE_FLAGS ?=
 # minutes compiling. Apple ld64 1230 and 27037 both assert on the server's
 # generated symbol; the Rust-only linker wrapper selects ld-classic without
 # changing xcodebuild, codesign, notarytool or the selected Xcode SDK.
-RELEASE_RUSTUP_TOOLCHAIN := 1.96.0
-RELEASE_RUST_TARGETS := wasm32-wasip1 wasm32-unknown-unknown
+RELEASE_TOOLCHAIN_CONTRACT := scripts/lib/release-toolchain-contract.sh
 RELEASE_MIN_FREE_KIB ?= 6291456
 
 release-prereqs:
 	@set -eu; \
+	. "$(RELEASE_TOOLCHAIN_CONTRACT)"; \
 	command -v rustup >/dev/null 2>&1 || { printf '%s\n' 'FATAL: rustup is required for release' >&2; exit 1; }; \
-	toolchain='$(RELEASE_RUSTUP_TOOLCHAIN)'; \
+	toolchain="$$VIBECRAFTED_RELEASE_RUSTUP_TOOLCHAIN"; \
 	if ! rustup which --toolchain "$$toolchain" rustc >/dev/null 2>&1; then \
 		printf '==> Installing pinned release toolchain %s\n' "$$toolchain"; \
 		rustup toolchain install "$$toolchain" --profile minimal; \
 	fi; \
 	installed="$$(rustup target list --installed --toolchain "$$toolchain")"; \
-	for target in $(RELEASE_RUST_TARGETS); do \
+	for target in $$VIBECRAFTED_RELEASE_RUST_TARGETS; do \
 		if ! printf '%s\n' "$$installed" | grep -Fx "$$target" >/dev/null; then \
 			printf '==> Installing %s for release toolchain %s\n' "$$target" "$$toolchain"; \
 			rustup target add --toolchain "$$toolchain" "$$target"; \
 		fi; \
 	done; \
 	if [ "$$(uname -s)" = Darwin ]; then \
-		xcrun --find ld-classic >/dev/null 2>&1 || { printf '%s\n' 'FATAL: ld-classic is required for deterministic Rust release linking' >&2; exit 1; }; \
+		vibecrafted_release_verify_darwin_linker; \
 	fi; \
 	free_kib="$$(df -Pk "$(CURDIR)" | awk 'NR == 2 { print $$4 }')"; \
 	case "$$free_kib" in ''|*[!0-9]*) printf '%s\n' 'FATAL: could not measure release disk space' >&2; exit 1;; esac; \
@@ -136,7 +136,7 @@ release-prereqs:
 		printf 'FATAL: release needs at least %s KiB free; only %s KiB remain\n' '$(RELEASE_MIN_FREE_KIB)' "$$free_kib" >&2; \
 		exit 1; \
 	fi; \
-	printf '==> Release prerequisites ready: Rust %s, targets [%s], free %s KiB\n' "$$toolchain" '$(RELEASE_RUST_TARGETS)' "$$free_kib"
+	printf '==> Release prerequisites ready: Rust %s, targets [%s], linker [%s -> %s], free %s KiB\n' "$$toolchain" "$$VIBECRAFTED_RELEASE_RUST_TARGETS" "$$VIBECRAFTED_RELEASE_DARWIN_CLANG" "$$VIBECRAFTED_RELEASE_DARWIN_LD_CLASSIC" "$$free_kib"
 
 app dmg dmg-signed release-local release runtime-pack: release-prereqs
 
