@@ -838,6 +838,7 @@ impl ControlPlane {
     #[must_use]
     pub fn read_state_view(&self) -> StateView {
         let mut runs = self.load_snapshots();
+        quarantine_test_runs(&mut runs);
         let settlement_counts = SettlementBoard::from_snapshots(&runs);
         self.append_discoverable_lifecycle_runs(&mut runs);
         sort_recent_first(&mut runs);
@@ -886,7 +887,8 @@ impl ControlPlane {
         // Verdict truth is Python's persisted snapshot projection. Raw meta,
         // lock, runtime, marbles, and lifecycle sources below can disagree on
         // process state, but they must never be used to invent a settlement.
-        let retained_snapshots = self.load_snapshots();
+        let mut retained_snapshots = self.load_snapshots();
+        quarantine_test_runs(&mut retained_snapshots);
         let settlement_counts = SettlementBoard::from_snapshots(&retained_snapshots);
         // Snapshots are also the durable run baseline. Event rotation is
         // allowed only after Python has projected the generation into these
@@ -1028,6 +1030,7 @@ impl ControlPlane {
             }
         }
         self.append_discoverable_lifecycle_runs(&mut merged);
+        quarantine_test_runs(&mut merged);
 
         sort_recent_first(&mut merged);
         (merged, settlement_counts, events)
@@ -1473,11 +1476,22 @@ fn event_has_test_provenance(event: &Event, home: &Path) -> bool {
     if is_pytest_temp_path(home) {
         return false;
     }
-    ["root", "source_dir", "report", "transcript", "meta"]
-        .into_iter()
-        .filter_map(|key| event.payload.get(key))
-        .filter_map(serde_json::Value::as_str)
-        .any(|value| is_pytest_temp_path(Path::new(value)))
+    let doctor_smoke = event
+        .payload
+        .get("agent")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|agent| agent == "doctor-smoke")
+        && event
+            .payload
+            .get("mode")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|mode| mode == "doctor");
+    doctor_smoke
+        || ["root", "source_dir", "report", "transcript", "meta"]
+            .into_iter()
+            .filter_map(|key| event.payload.get(key))
+            .filter_map(serde_json::Value::as_str)
+            .any(path_has_test_provenance)
 }
 
 fn event_worker_pids(event: &Event) -> impl Iterator<Item = i64> + '_ {
@@ -1544,6 +1558,53 @@ fn is_pytest_temp_path(path: &Path) -> bool {
             .to_str()
             .is_some_and(|part| part.starts_with("pytest-of-"))
     })
+}
+
+fn path_has_test_provenance(value: &str) -> bool {
+    let path = Path::new(value);
+    if is_pytest_temp_path(path) {
+        return true;
+    }
+    let normalized = value.replace('\\', "/");
+    normalized.contains("/.vibecrafted/artifacts/local/test_")
+        || normalized.contains("/artifacts/local/test_")
+}
+
+fn run_has_test_provenance(run: &RunStatus) -> bool {
+    (run.agent == "doctor-smoke" && run.mode == "doctor")
+        || [
+            run.root.as_str(),
+            run.latest_report.as_str(),
+            run.latest_transcript.as_str(),
+        ]
+        .into_iter()
+        .any(path_has_test_provenance)
+}
+
+/// Remove synthetic runs from the product projection while retaining their
+/// durable evidence on disk. A test parent also quarantines its derived worker
+/// rows (`<parent>-research-*`), which often carry no paths of their own.
+fn quarantine_test_runs(runs: &mut Vec<RunStatus>) {
+    let test_families = runs
+        .iter()
+        .filter(|run| run_has_test_provenance(run))
+        .map(|run| {
+            ["-research-", "-marbles-"]
+                .into_iter()
+                .find_map(|marker| run.run_id.split_once(marker).map(|(parent, _)| parent))
+                .unwrap_or(&run.run_id)
+                .to_string()
+        })
+        .collect::<HashSet<_>>();
+    runs.retain(|run| {
+        !test_families.iter().any(|family| {
+            run.run_id == *family
+                || run
+                    .run_id
+                    .strip_prefix(family)
+                    .is_some_and(|suffix| suffix.starts_with('-'))
+        })
+    });
 }
 
 fn sort_recent_first(runs: &mut [RunStatus]) {
@@ -2075,7 +2136,8 @@ impl MarblesState {
 
 #[cfg(test)]
 mod tests {
-    use super::{ControlPlane, is_safe_run_id};
+    use super::{ControlPlane, is_safe_run_id, quarantine_test_runs};
+    use crate::RunStatus;
     use crate::events::STREAM_SEGMENT_SCHEMA;
     use chrono::{DateTime, Duration, Utc};
     use serde_json::json;
@@ -2494,6 +2556,85 @@ mod tests {
         assert_eq!(view.settlement_counts.total_settled, 0);
 
         fs::remove_dir_all(home).ok();
+    }
+
+    #[test]
+    fn product_projection_quarantines_doctor_smoke_and_test_run_families() {
+        fn run(run_id: &str, agent: &str, mode: &str, root: &str, report: &str) -> RunStatus {
+            serde_json::from_value(json!({
+                "run_id": run_id,
+                "state": "active",
+                "agent": agent,
+                "skill": "doctor",
+                "mode": mode,
+                "root": root,
+                "operator_session": "fixture",
+                "latest_report": report,
+                "latest_transcript": "",
+                "last_error": "",
+                "updated_at": "2026-09-21T00:00:00Z",
+                "started_at": "2026-09-21T00:00:00Z",
+                "health": "stalled",
+                "source": "agent-meta",
+                "lock_present": false
+            }))
+            .expect("run fixture")
+        }
+
+        let test_parent = "rese-260826-184310-92149";
+        let mut runs = vec![
+            run(
+                "smoke-000",
+                "doctor-smoke",
+                "doctor",
+                "/srv/checkout/vibecrafted",
+                "",
+            ),
+            run(
+                test_parent,
+                "swarm",
+                "research",
+                "/srv/checkout/vibecrafted",
+                "",
+            ),
+            run(
+                &format!("{test_parent}-research-codex"),
+                "codex",
+                "research",
+                "/private/tmp/pytest-of-founder/pytest-1/test_research0",
+                "",
+            ),
+            run(
+                &format!("{test_parent}-research-agy"),
+                "agy",
+                "research",
+                "",
+                "",
+            ),
+            run(
+                "impl-test-report",
+                "codex",
+                "implement",
+                "",
+                "/srv/.vibecrafted/artifacts/local/test_delivery/2026/report.md",
+            ),
+            run(
+                "real-run",
+                "codex",
+                "implement",
+                "/srv/checkout/vibecrafted",
+                "/srv/report.md",
+            ),
+        ];
+
+        quarantine_test_runs(&mut runs);
+
+        assert_eq!(
+            runs.iter()
+                .map(|run| run.run_id.as_str())
+                .collect::<Vec<_>>(),
+            ["real-run"]
+        );
     }
 
     #[test]

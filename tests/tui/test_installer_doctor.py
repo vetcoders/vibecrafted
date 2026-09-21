@@ -1519,7 +1519,7 @@ def test_run_doctor_spawn_e2e_supplies_full_meta_arguments(
     )
 
     (scripts_dir / "common.sh").write_text(
-        '#!/usr/bin/env bash\nset -euo pipefail\nspawn_write_meta() { local meta_path="$1"; local status="$2"; printf "%s\\n" "$status" > "$meta_path"; }\nspawn_prepare_paths() { :; }\nspawn_watch_startup() { :; }\nspawn_generate_launcher() { local launcher="$1"; local _meta="$2"; local _report="$3"; local _transcript="$4"; local common="$5"; local command="$6"; cat > "$launcher" <<EOF\n#!/usr/bin/env bash\nset -euo pipefail\nsource "$common"\n$command\nEOF\n}'
+        '#!/usr/bin/env bash\nset -euo pipefail\nspawn_write_meta() { local meta_path="$1"; local status="$2"; printf "%s\\n" "$status" > "$meta_path"; local runtime="$VIBECRAFTED_HOME/control_plane/runtime_runs/$SPAWN_RUN_ID"; mkdir -p "$runtime"; printf "%s\\n" "$status" > "$runtime/meta.json"; }\nspawn_prepare_paths() { :; }\nspawn_watch_startup() { :; }\nspawn_generate_launcher() { local launcher="$1"; local _meta="$2"; local _report="$3"; local _transcript="$4"; local common="$5"; local command="$6"; cat > "$launcher" <<EOF\n#!/usr/bin/env bash\nset -euo pipefail\nsource "$common"\n$command\nEOF\n}'
         + "\n",
         encoding="utf-8",
     )
@@ -1545,6 +1545,7 @@ def test_run_doctor_spawn_e2e_supplies_full_meta_arguments(
 
     assert indexed["spawn-pipeline"].level == "ok"
     assert indexed["spawn-e2e"].level == "ok"
+    assert not (crafted_home / "control_plane/runtime_runs/smoke-000").exists()
 
 
 def test_cmd_doctor_fix_rc_repairs_compat_shell_lines(
