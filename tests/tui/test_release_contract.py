@@ -546,6 +546,46 @@ def test_exact_release_gate_is_release_only_and_repeats_the_repo_verifier() -> N
     assert "exact-release-contract-gate" not in source_workflow
 
 
+def test_codeql_keeps_default_coverage_and_builds_swift_for_one_architecture() -> None:
+    workflow = (REPO_ROOT / ".github/workflows/codeql.yml").read_text(encoding="utf-8")
+
+    for language in ("actions", "javascript-typescript", "python", "ruby", "rust"):
+        assert f"- {language}" in workflow
+    assert "languages: swift" in workflow
+    assert "build-mode: manual" in workflow
+    assert "runs-on: macos-15" in workflow
+    assert "make -C vibecrafted-app/shell-agent xcode" in workflow
+    assert "ARCHS=arm64" in workflow
+    assert "ONLY_ACTIVE_ARCH=YES" in workflow
+    assert "CODE_SIGNING_ALLOWED=NO" in workflow
+    assert "github/codeql-action/init@" in workflow
+    assert "github/codeql-action/analyze@" in workflow
+
+
+def test_tag_release_builds_all_carriers_from_a_commit_on_main() -> None:
+    workflow = (REPO_ROOT / ".github/workflows/release-dmg.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert '"v*"' in workflow
+    assert "git fetch --no-tags origin main:refs/remotes/origin/main" in workflow
+    assert "git merge-base --is-ancestor HEAD refs/remotes/origin/main" in workflow
+    assert "make release" in workflow
+    assert "make portable" in workflow
+    for artifact in (
+        "Vibecrafted_*.dmg",
+        "Vibecrafted_RuntimePack_*.tar.gz",
+        "Vibecrafted_RuntimePack_*.tar.gz.sha256",
+        "Vibecrafted_RuntimePack_*.tar.gz.sig",
+        "Vibecrafted_*-portable.tar.gz",
+        "Vibecrafted_*-portable.tar.gz.sha256",
+        "release-output.json",
+        "release-output.json.sig",
+        "portable-output.json",
+    ):
+        assert artifact in workflow
+
+
 def test_notary_authentication_never_puts_the_password_in_process_argv() -> None:
     builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
         encoding="utf-8"

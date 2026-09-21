@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -341,6 +344,34 @@ def test_host_layout_has_exactly_one_projection_owner_outside_session_layer() ->
     assert payload.count("frame_host true") == 1
     assert "frame_host true" in workspace_tab
     assert "workspace_surface true" in workspace_tab
+
+
+def test_layout_contract_gate_is_fail_closed_on_hash_drift(tmp_path: Path) -> None:
+    layouts = tmp_path / "layouts"
+    shutil.copytree(LAYOUTS_DIR, layouts)
+    config = tmp_path / "config.kdl"
+    shutil.copy2(VC_FRAME_CONFIG, config)
+    lock = tmp_path / "layouts.sha256.json"
+    shutil.copy2(LAYOUTS_DIR.parent / "layouts.sha256.json", lock)
+    command = [
+        sys.executable,
+        str(REPO_ROOT / "scripts/check-layout-contract.py"),
+        "--layouts-dir",
+        str(layouts),
+        "--config",
+        str(config),
+        "--lock",
+        str(lock),
+    ]
+
+    clean = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert clean.returncode == 0, clean.stdout + clean.stderr
+
+    with (layouts / "dashboard.kdl").open("a", encoding="utf-8") as handle:
+        handle.write("\n// unreviewed layout drift\n")
+    drifted = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert drifted.returncode != 0
+    assert "layout hashes drifted" in drifted.stderr
 
 
 def test_first_session_is_the_frame_host() -> None:

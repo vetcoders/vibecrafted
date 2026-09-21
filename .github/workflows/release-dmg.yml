@@ -9,7 +9,7 @@ name: Release DMG (hosted macOS)
 # runner, not only from the operator's machine. Publication to the GitHub
 # release stays a separate, explicit step (publish-vibecrafted-release.sh).
 #
-# Secrets (repository → Settings → Secrets → Actions):
+# Secrets (organization → Settings → Secrets → Actions, granted to this repo):
 #   VC_CERT_P12_B64        base64 of Certificates.p12 (Developer ID Application)
 #   VC_CERT_PASSWORD       password of that .p12
 #   VC_SIGNING_IDENTITY    "Developer ID Application: <name> (<team>)"
@@ -76,6 +76,18 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Verify tag belongs to main
+        if: github.event_name == 'push'
+        working-directory: vibecrafted
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          git merge-base --is-ancestor HEAD refs/remotes/origin/main \
+            || { echo "::error::tag $GITHUB_REF_NAME does not point to a commit on main"; exit 1; }
+          version="$(tr -d '[:space:]' < VERSION)"
+          test "$GITHUB_REF_NAME" = "v$version" \
+            || { echo "::error::tag $GITHUB_REF_NAME does not match VERSION $version"; exit 1; }
+
       - name: Check out donors (vc-frame, vc-terminal)
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -95,6 +107,7 @@ jobs:
       - name: Select Xcode
         run: |
           set -euo pipefail
+          # shellcheck disable=SC2012 # runner-controlled Xcode bundle names
           sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -1)/Contents/Developer"
           xcodebuild -version
 
@@ -165,7 +178,15 @@ jobs:
           set -euo pipefail
           rustup show active-toolchain || true
           make release RELEASE_FLAGS="$RELEASE_FLAGS" KEYS="$KEYS"
-          ls -la dist/*.dmg dist/*.dmg.sha256 dist/release-output.json
+          # shellcheck disable=SC2012 # globs deliberately fail when an artifact is missing
+          ls -la \
+            dist/*.dmg \
+            dist/*.dmg.sha256 \
+            dist/Vibecrafted_RuntimePack_*.tar.gz \
+            dist/Vibecrafted_RuntimePack_*.tar.gz.sha256 \
+            dist/Vibecrafted_RuntimePack_*.tar.gz.sig \
+            dist/release-output.json \
+            dist/release-output.json.sig
 
       - name: Verify the exact signed release tuple twice
         working-directory: vibecrafted
@@ -175,22 +196,40 @@ jobs:
         working-directory: vibecrafted
         run: |
           set -euo pipefail
+          # shellcheck disable=SC2012 # release naming is constrained and exactly one DMG is required
           dmg="$(ls dist/Vibecrafted_*.dmg | sort | tail -1)"
           bash scripts/payload-hygiene-artifact.sh "$dmg"
           spctl -a -t open --context context:primary-signature -v "$dmg" || true
+
+      - name: Build portable source tarball from the same tag
+        working-directory: vibecrafted
+        run: |
+          set -euo pipefail
+          make portable
+          # shellcheck disable=SC2012 # globs deliberately fail when an artifact is missing
+          ls -la \
+            dist/Vibecrafted_*-portable.tar.gz \
+            dist/Vibecrafted_*-portable.tar.gz.sha256 \
+            dist/portable-output.json
 
       - name: Scrub keys
         if: always()
         run: rm -rf "$KEYS"
 
-      - name: Upload DMG + receipts
+      - name: Upload release carriers + receipts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: vibecrafted-dmg-${{ github.run_id }}
+          name: vibecrafted-release-${{ github.run_id }}
           if-no-files-found: error
           retention-days: 30
           path: |
             vibecrafted/dist/Vibecrafted_*.dmg
             vibecrafted/dist/Vibecrafted_*.dmg.sha256
+            vibecrafted/dist/Vibecrafted_RuntimePack_*.tar.gz
+            vibecrafted/dist/Vibecrafted_RuntimePack_*.tar.gz.sha256
+            vibecrafted/dist/Vibecrafted_RuntimePack_*.tar.gz.sig
+            vibecrafted/dist/Vibecrafted_*-portable.tar.gz
+            vibecrafted/dist/Vibecrafted_*-portable.tar.gz.sha256
             vibecrafted/dist/release-output.json
             vibecrafted/dist/release-output.json.sig
+            vibecrafted/dist/portable-output.json

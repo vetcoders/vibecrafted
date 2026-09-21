@@ -7,7 +7,8 @@ set -euo pipefail
 #   loctree / loctree-mcp  — required Loctree product binaries via Loctree installer
 #   aicx / aicx-mcp       — required AICX product binaries via Loctree installer
 #   vc-frame               — required donor BINARY installed by this owner from sibling source
-#   prview                 — cargo install OR binary from GH releases
+#   prview                 — bundled binary from a pinned GitHub release
+#   screenscribe           — pinned PyPI wheel installed through pipx
 #
 # Usage:
 #   bash scripts/install-foundations.sh                   # install/validate foundations
@@ -29,8 +30,8 @@ set -euo pipefail
 # without a rideable operator surface.
 # ---------------------------------------------------------------------------
 
-PRVIEW_CRATE="prview"
-PRVIEW_REPO="vetcoders/prview"
+PRVIEW_REPO="vetcoders/prview-rs"
+SCREENSCRIBE_VERSION="0.1.19"
 
 LOCTREE_INSTALL_URL="${LOCTREE_INSTALL_URL:-https://loct.io/install.sh}"
 
@@ -432,65 +433,47 @@ install_loctree() {
 }
 
 # ---------------------------------------------------------------------------
-# Generic cargo installer
+# pipx-installed Python products
 # ---------------------------------------------------------------------------
 
-install_from_cargo() {
-  local crate="$1" binary="${2:-$1}"
+ensure_pipx() {
+  has_cmd pipx && return 0
 
-  if has_cmd "$binary"; then
-    ok "$binary already installed: $(command -v "$binary")"
+  if has_cmd brew; then
+    info "Installing pipx via Homebrew..."
+    brew install pipx 2>&1 | tail -3 || true
+    has_cmd pipx && return 0
+  fi
+
+  if has_cmd python3 && python3 -m pip --version >/dev/null 2>&1; then
+    info "Installing pipx into the user Python environment..."
+    python3 -m pip install --user pipx 2>&1 | tail -3 || true
+    export PATH="$HOME/.local/bin:$PATH"
+    has_cmd pipx && return 0
+  fi
+
+  warn "pipx is required to install ScreenScribe."
+  return 1
+}
+
+install_screenscribe() {
+  if binary_runs screenscribe; then
+    ok "screenscribe already installed: $(command -v screenscribe)"
     return 0
   fi
 
   if (( CHECK_ONLY )); then
-    if has_cmd cargo; then
-      info "Would run: cargo install $crate"
-    else
-      warn "$binary not found and cargo not available"
-      info "Install Rust (https://rustup.rs) then: cargo install $crate"
-    fi
+    info "Would install screenscribe==${SCREENSCRIBE_VERSION} from PyPI via pipx"
     return 0
   fi
 
-  if ! has_cmd cargo; then
-    warn "cargo not found. Cannot install $crate from crates.io."
-    warn "Options:"
-    warn "  1. Install Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
-    warn "  2. Download binary from GitHub releases"
+  ensure_pipx || return 1
+  info "Installing screenscribe==${SCREENSCRIBE_VERSION} from PyPI via pipx..."
+  pipx install --force "screenscribe==${SCREENSCRIBE_VERSION}" || {
+    warn "pipx failed to install screenscribe==${SCREENSCRIBE_VERSION}."
     return 1
-  fi
-
-  ensure_prefix
-
-  info "Installing $crate via cargo..."
-  # Install to a temp dir, then copy binaries to PREFIX
-  local cargo_root
-  cargo_root="$(mktemp -d)"
-
-  if cargo install "$crate" --root "$cargo_root" 2>&1; then
-    local installed=0
-    for bin in "$cargo_root/bin/"*; do
-      [ -f "$bin" ] || continue
-      local name
-      name="$(basename "$bin")"
-      cp "$bin" "$PREFIX/$name"
-      chmod +x "$PREFIX/$name"
-      ok "Installed $name -> $PREFIX/$name"
-      installed=1
-    done
-    if (( !installed )); then
-      rm -rf "$cargo_root"
-      warn "cargo install $crate succeeded but no binaries found"
-      return 1
-    fi
-  else
-    rm -rf "$cargo_root"
-    warn "cargo install $crate failed"
-    return 1
-  fi
-
-  rm -rf "$cargo_root"
+  }
+  binary_runs screenscribe
 }
 
 # ---------------------------------------------------------------------------
@@ -603,8 +586,9 @@ install_prview() {
   # --- Attempt 0: bundled tarball (notarized drop-in) ---
   install_from_bundled "prview" && return 0
 
-  info "Installing prview from crate metadata; release repo is $PRVIEW_REPO"
-  install_from_cargo "$PRVIEW_CRATE" "prview"
+  warn "prview is absent from the Runtime Pack."
+  warn "Rebuild the pack from the pinned GitHub release in scripts/stage-runtime-foundations.sh ($PRVIEW_REPO)."
+  return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -752,7 +736,8 @@ Targets:
   loctree         Validate loctree + loctree-mcp product binaries
   aicx            Validate aicx / aicx-mcp product binaries
   vc-frame        Validate vc-frame product binary
-  prview          Install prview (cargo)
+  prview          Validate bundled prview from the pinned GitHub release
+  screenscribe    Install the pinned PyPI wheel through pipx
   sandbox         Optional microsandbox/libkrun runtime
   iterm2-plugin   vibecrafted iTerm2 / locterm AutoLaunch plugin (macOS, opt-in)
   (no target)     Validate required foundations; install only framework-owned tools
@@ -776,6 +761,7 @@ while [[ $# -gt 0 ]]; do
     vc-frame)    TARGETS+=("vc-frame") ;;
     agents)      TARGETS+=("agents"); AGENTS_REQUIRED=1 ;;
     prview)      TARGETS+=("prview") ;;
+    screenscribe) TARGETS+=("screenscribe") ;;
     sandbox)     TARGETS+=("sandbox") ;;
     iterm2-plugin) TARGETS+=("iterm2-plugin") ;;
     *)           die "Unknown argument: $1" ;;
@@ -835,6 +821,7 @@ for target in "${TARGETS[@]}"; do
       fi
       ;;
     prview)  install_prview  || exit_code=1 ;;
+    screenscribe) install_screenscribe || exit_code=1 ;;
     sandbox) install_sandbox || exit_code=1 ;;
     iterm2-plugin) install_iterm2_integration || exit_code=1 ;;
   esac
