@@ -37,7 +37,7 @@ default is the Founder-stated chrome:
 | `font.normal/bold/italic.family` | `"Spot Mono"`                    |
 
 Zero inset with the Founder's pixel-counted Spot Mono grid (size 19.5,
-offset -3/-8) is the laptop and dragon policy as of 2026-09-15; it already
+offset -3/-8) is the laptop and desktop-host policy as of 2026-09-15; it already
 clears the transparent title controls, so the earlier `y = 24` workaround
 (`49356cb6`) is gone with it.
 

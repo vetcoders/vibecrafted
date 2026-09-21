@@ -16,7 +16,7 @@ shell = { program = "/bin/sh", args = ["-c", "exec \"$HOME/.config/vibecrafted/v
 blur = true
 opacity = 0.9
 title = "𝓥𝓲𝓫𝓮𝓬𝓻𝓪𝓯𝓽𝓮𝓭."
-# Founder-stated product chrome (Maciej, 2026-09-15): transparent macOS title
+# Founder-stated product chrome (2026-09-15): transparent macOS title
 # controls over the vc-frame chrome, window draggable, rounded corners. The
 # borderless "None" default shipped in c95ef76a was an implementation
 # judgement that removed the traffic lights and the drag handle on a fresh
@@ -30,7 +30,7 @@ dynamic_padding = true
 option_as_alt = "Both"
 
 [font]
-# Founder's pixel-counted Spot Mono grid (laptop + dragon policy, 2026-09-15).
+# Founder's pixel-counted Spot Mono grid (laptop + desktop-host policy, 2026-09-15).
 size = 19.5
 
 [font.offset]

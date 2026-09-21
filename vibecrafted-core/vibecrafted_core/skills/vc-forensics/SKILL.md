@@ -156,7 +156,7 @@ Every investigation and modification must leave a durable trail in the repositor
 
 ## 7. Git, Attribution, and Authority Boundaries
 
-- **Founder vs Operator:** Founder refers exclusively to Maciej Gad and Monika Szymańska — human voice, decisions, and ultimate buttons. Operator is strictly an agent role (`vc-operator`, integrator). Never call the Founder an operator.
+- **Founder vs Operator:** Founder refers exclusively to the human Founders — their voice, decisions, and ultimate buttons. Operator is strictly an agent role (`vc-operator`, integrator). Never call a Founder an operator.
 - **Commit discipline:** Stage only files modified for the bounded cut (`git add <file>`). Never sweep the dirty tree (`git commit -am` and `git add .` are forbidden).
 - **Branch pushing:** Pushing the current working/feature branch (fast-forward, never `--force`) is a free move following an authored commit (Founder decision 2026-08-18).
 - **Founder buttons:** Trunk merges, force-pushes, tag/branch deletions, and production deployments remain Founder buttons.

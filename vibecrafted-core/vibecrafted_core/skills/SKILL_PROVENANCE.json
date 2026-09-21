@@ -1986,14 +1986,18 @@
     },
     "vc-forensics": {
       "sha256": [
+        "462002285cc0e2f8b3aa512271912afbf5a2eccaaddc823550f3239fb46e5a4f",
         "a85869a6878db2b03f355ba7eddc3c51a7db0095a6740b66c69acd77ccaba6e1",
-        "b7865cc887ef17422f660f2a8f59b9761e87ef2b3bf55a3e499016fd2cb73dd2"
+        "b7865cc887ef17422f660f2a8f59b9761e87ef2b3bf55a3e499016fd2cb73dd2",
+        "faf7fde58db75c6c97baa4f568cfca6817cc3d3a810398552470352263db678d"
       ],
       "files": {
         ".claude-plugin/plugin.json": [
           "c8bcdeb7fdfdaaa521e65bdaf30572be88fd7e51"
         ],
         "SKILL.md": [
+          "427f80acc9c937ed8597fd82bed0e2d34dcb0540",
+          "8bf204b94932eefec91083fd88d1d084a6d4564c",
           "ad1e854391e12c0cefb6ef0f3a087c2fd6bc4fae",
           "d80a7861357016ccc8390b936cd95b96135e4f43"
         ],
@@ -2462,7 +2466,8 @@
         ],
         "references/review-surface.md": [
           "0a5e91dbd7e4439e38da7db03a6dde8094a790c7",
-          "170c5a34ebd1e0c296bce6353273bb640afefecf"
+          "170c5a34ebd1e0c296bce6353273bb640afefecf",
+          "a7c50e6fc0010fa90e62bd9738683d3ee2eaf279"
         ],
         "scripts/intents_cli.py": [
           "6148a918c79b595489ae483a32d13ad9bf88bcd0",

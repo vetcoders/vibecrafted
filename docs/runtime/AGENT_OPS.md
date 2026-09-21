@@ -39,7 +39,7 @@ replace passive waiting with active verification on the side that can act.
 ## Class 1 — Gate-nap („Drzemka na bramce")
 
 _3 confirmed cases, prview-rs session 2026-07-02/03 (operator). Canonical
-description by Monika._
+description by the Founder._
 
 ### Symptom
 
