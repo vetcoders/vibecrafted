@@ -243,6 +243,9 @@ fi
 export DEVELOPER_DIR="$XCODE_DEVELOPER_DIR"
 echo "==> Xcode developer dir: $DEVELOPER_DIR ($(xcrun --find strip 2>/dev/null || echo 'strip: unresolved'))"
 export MACOSX_DEPLOYMENT_TARGET=14.0
+# Keep host proc-macro dylibs loadable under the Xcode beta linker/strip pair.
+# Strip only packaged Mach-O payloads through the existing signing pipeline.
+export CARGO_PROFILE_RELEASE_STRIP=false
 # Release payloads must not remember the operator account, Cargo registry, or
 # living checkout locations through compiler metadata.
 #
