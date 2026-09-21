@@ -68,7 +68,7 @@ The remaining 14 skills live in `help --all` and in `help <skill>`.
 | ------------------------------------------------------ | -------------------------------------------------------------------- |
 | `gui`, `tui`, `dashboard` (+ ls/switch/attach/kill/gc) | Operator consoles — second visit, not first contact                  |
 | `loop`, `cron`, `ship`, `dispatch run`                 | Runtime/automation plumbing; humans meet them via docs, not the deck |
-| `telemetry smoke`                                      | Dev-only diagnostic                                                  |
+| `telemetry` (`agy`/`kimi`/`line`/`once`, plus `smoke`) | Quota engines + marbles smoke — second visit, not first contact  |
 | action-first workflow and lifecycle commands           | One public grammar: `<action> <agent>`                               |
 | `marbles <pause·stop·resume·session·inspect·delete>`   | Control plane, documented in `help marbles`                          |
 | `uninstall`, `version`                                 | Necessary, not promotional                                           |

@@ -55,6 +55,11 @@ const MESH_CONF_FILE: &str = "mesh.conf";
 const AICX_HEALTH_TIMEOUT_MS: u64 = 750;
 const AICX_HEALTH_JSON_ENV: &str = "VIBECRAFTED_AICX_HEALTH_JSON";
 const DISK_HEALTH_JSON_ENV: &str = "VIBECRAFTED_DISK_HEALTH_JSON";
+const AGY_QUOTA_JSON_ENV: &str = "VIBECRAFTED_AGY_QUOTA_JSON";
+const KIMI_QUOTA_JSON_ENV: &str = "VIBECRAFTED_KIMI_QUOTA_JSON";
+const QUOTA_STALE_SECS: u64 = 300;
+const KIMI_NEAR_LIMIT: f64 = 0.85;
+const KIMI_BLOCKED_LIMIT: f64 = 0.95;
 const MCP_PROCESS_SCAN_ENV: &str = "VIBECRAFTED_MCP_PROCESS_SCAN";
 const LOCTREE_SNAPSHOT_FRESHNESS_JSON_ENV: &str = "VIBECRAFTED_LOCTREE_SNAPSHOT_FRESHNESS_JSON";
 
@@ -1238,6 +1243,7 @@ fn fleet_health_from_inputs(
     signals.extend(mcp_health_signals());
     signals.extend(tailscale_health_signals());
     signals.extend(aicx_health_signals());
+    signals.extend(quota_health_signals());
 
     signals
 }
@@ -1687,6 +1693,246 @@ fn worst_fleet_health_status(
         right
     } else {
         left
+    }
+}
+
+fn quota_health_signals() -> Vec<FleetHealthSignal> {
+    let mut signals = Vec::new();
+    signals.extend(optional_quota_signal(
+        "agy quota",
+        read_quota_source(AGY_QUOTA_JSON_ENV, default_agy_quota_path()),
+        agy_quota_signal_from_json,
+    ));
+    signals.extend(optional_quota_signal(
+        "kimi quota",
+        read_quota_source(KIMI_QUOTA_JSON_ENV, default_kimi_quota_path()),
+        kimi_quota_signal_from_json,
+    ));
+    signals
+}
+
+fn default_agy_quota_path() -> PathBuf {
+    home_dir()
+        .map(|home| home.join(".gemini/agy-monitor/runtime/quota.json"))
+        .unwrap_or_else(|| PathBuf::from("/nonexistent/.gemini/agy-monitor/runtime/quota.json"))
+}
+
+fn default_kimi_quota_path() -> PathBuf {
+    home_dir()
+        .map(|home| home.join(".kimi-code/runtime/quota.json"))
+        .unwrap_or_else(|| PathBuf::from("/nonexistent/.kimi-code/runtime/quota.json"))
+}
+
+/// Env override is raw JSON (leading `{`) or a filesystem path.
+/// Missing files are silent — the operator may not run that agent.
+fn read_quota_source(env_name: &str, default_path: PathBuf) -> Option<Result<String, String>> {
+    match env::var(env_name) {
+        Ok(raw) if raw.trim().starts_with('{') => Some(Ok(raw)),
+        Ok(path) if !path.is_empty() => read_quota_file(Path::new(&path)),
+        Ok(_) => None,
+        Err(_) => read_quota_file(&default_path),
+    }
+}
+
+fn read_quota_file(path: &Path) -> Option<Result<String, String>> {
+    match fs::read_to_string(path) {
+        Ok(raw) => Some(Ok(raw)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => Some(Err(format!("{}: {err}", path.display()))),
+    }
+}
+
+fn optional_quota_signal(
+    label: &str,
+    source: Option<Result<String, String>>,
+    parse: fn(&str) -> FleetHealthSignal,
+) -> Vec<FleetHealthSignal> {
+    match source {
+        None => Vec::new(),
+        Some(Err(err)) => vec![FleetHealthSignal {
+            label: label.to_string(),
+            status: FleetHealthStatus::Unknown,
+            detail: err,
+        }],
+        Some(Ok(raw)) => vec![parse(&raw)],
+    }
+}
+
+fn agy_quota_signal_from_json(raw: &str) -> FleetHealthSignal {
+    let value = match serde_json::from_str::<Value>(raw) {
+        Ok(value) => value,
+        Err(err) => {
+            return FleetHealthSignal {
+                label: "agy quota".to_string(),
+                status: FleetHealthStatus::Unknown,
+                detail: format!("invalid quota JSON: {err}"),
+            };
+        }
+    };
+
+    let quota_status = value
+        .pointer("/quota/status")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_uppercase();
+    let model = value
+        .get("model_id")
+        .and_then(Value::as_str)
+        .filter(|model| !model.is_empty());
+    let tokens = value
+        .pointer("/metrics/estimated_tokens")
+        .and_then(Value::as_f64)
+        .map(format_token_count);
+    let reset_in = value
+        .pointer("/quota/quota_reset_in")
+        .or_else(|| value.pointer("/quota/reset_in"))
+        .and_then(Value::as_str)
+        .filter(|reset| !reset.is_empty());
+
+    let (mut status, mut detail) = match quota_status.as_str() {
+        "RESOURCE_EXHAUSTED" => {
+            let mut parts = vec!["RESOURCE_EXHAUSTED".to_string()];
+            if let Some(model) = model {
+                parts.push(model.to_string());
+            }
+            if let Some(reset_in) = reset_in {
+                parts.push(format!("reset {reset_in}"));
+            }
+            (FleetHealthStatus::Blocked, parts.join(" "))
+        }
+        "OK" => {
+            let mut parts = vec!["OK".to_string()];
+            if let Some(tokens) = tokens {
+                parts.push(format!("{tokens} tok"));
+            }
+            if let Some(model) = model {
+                parts.push(model.to_string());
+            }
+            (FleetHealthStatus::Ok, parts.join(" "))
+        }
+        "" => (
+            FleetHealthStatus::Unknown,
+            "quota snapshot missing status".to_string(),
+        ),
+        other => (
+            FleetHealthStatus::Unknown,
+            format!("quota status {other}"),
+        ),
+    };
+    status = apply_quota_staleness(status, json_unix_ts(&value), &mut detail);
+    FleetHealthSignal {
+        label: "agy quota".to_string(),
+        status,
+        detail,
+    }
+}
+
+fn kimi_quota_signal_from_json(raw: &str) -> FleetHealthSignal {
+    let value = match serde_json::from_str::<Value>(raw) {
+        Ok(value) => value,
+        Err(err) => {
+            return FleetHealthSignal {
+                label: "kimi quota".to_string(),
+                status: FleetHealthStatus::Unknown,
+                detail: format!("invalid quota JSON: {err}"),
+            };
+        }
+    };
+
+    let kind = value
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let ratio_5h = json_used_ratio(&value, "limit5h");
+    let ratio_month = json_used_ratio(&value, "monthTotal");
+    let poll_error = value
+        .get("last_poll_error")
+        .and_then(Value::as_str)
+        .filter(|err| !err.is_empty());
+
+    let (mut status, mut detail) = if kind == "ok" {
+        let mut status = ratio_status(ratio_5h.max(ratio_month));
+        let mut detail = format!(
+            "5h {:.0}% · month {:.0}%",
+            ratio_5h * 100.0,
+            ratio_month * 100.0
+        );
+        if let Some(err) = poll_error {
+            status = worst_fleet_health_status(status, FleetHealthStatus::Warn);
+            detail.push_str("; poll ");
+            detail.push_str(err);
+        }
+        (status, detail)
+    } else {
+        let message = value
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .or_else(|| value.get("error").and_then(Value::as_str))
+            .or_else(|| poll_error)
+            .unwrap_or("quota snapshot error");
+        (FleetHealthStatus::Warn, format!("error: {message}"))
+    };
+    status = apply_quota_staleness(status, json_unix_ts(&value), &mut detail);
+    FleetHealthSignal {
+        label: "kimi quota".to_string(),
+        status,
+        detail,
+    }
+}
+
+fn json_used_ratio(value: &Value, key: &str) -> f64 {
+    value
+        .get(key)
+        .and_then(|entry| entry.get("usedRatio"))
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0)
+}
+
+fn json_unix_ts(value: &Value) -> Option<u64> {
+    value.get("ts").and_then(Value::as_u64)
+}
+
+fn ratio_status(ratio: f64) -> FleetHealthStatus {
+    if ratio >= KIMI_BLOCKED_LIMIT {
+        FleetHealthStatus::Blocked
+    } else if ratio >= KIMI_NEAR_LIMIT {
+        FleetHealthStatus::Warn
+    } else {
+        FleetHealthStatus::Ok
+    }
+}
+
+fn apply_quota_staleness(
+    status: FleetHealthStatus,
+    ts: Option<u64>,
+    detail: &mut String,
+) -> FleetHealthStatus {
+    let Some(ts) = ts else {
+        return status;
+    };
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    if now.saturating_sub(ts) <= QUOTA_STALE_SECS {
+        return status;
+    }
+    if !detail.is_empty() {
+        detail.push_str("; stale");
+    } else {
+        *detail = "stale".to_string();
+    }
+    worst_fleet_health_status(status, FleetHealthStatus::Warn)
+}
+
+fn format_token_count(tokens: f64) -> String {
+    if tokens >= 1_000_000.0 {
+        format!("{:.1}M", tokens / 1_000_000.0)
+    } else if tokens >= 1000.0 {
+        format!("{:.0}k", tokens / 1000.0)
+    } else {
+        format!("{:.0}", tokens)
     }
 }
 
@@ -3325,6 +3571,121 @@ mod tests {
         assert_eq!(signals[0].label, "aicx index");
         assert_eq!(signals[0].status, FleetHealthStatus::Unknown);
         assert_eq!(signals[0].detail, "aicx binary not found on PATH");
+    }
+
+    fn fresh_quota_ts() -> u64 {
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(1)
+    }
+
+    #[test]
+    fn quota_missing_files_are_silent() {
+        let signals = optional_quota_signal("agy quota", None, agy_quota_signal_from_json);
+        assert!(signals.is_empty());
+        let signals = optional_quota_signal("kimi quota", None, kimi_quota_signal_from_json);
+        assert!(signals.is_empty());
+    }
+
+    #[test]
+    fn agy_quota_ok_reports_tokens_and_model() {
+        let ts = fresh_quota_ts();
+        let signal = agy_quota_signal_from_json(&format!(
+            r#"{{
+                "ts": {ts},
+                "model_id": "gemini-3.1-pro-high",
+                "metrics": {{"estimated_tokens": 12400}},
+                "quota": {{"status": "OK"}}
+            }}"#
+        ));
+        assert_eq!(signal.label, "agy quota");
+        assert_eq!(signal.status, FleetHealthStatus::Ok);
+        assert!(signal.detail.contains("OK"));
+        assert!(signal.detail.contains("12k tok"));
+        assert!(signal.detail.contains("gemini-3.1-pro-high"));
+        assert!(!signal.detail.contains("stale"));
+    }
+
+    #[test]
+    fn agy_quota_resource_exhausted_blocks() {
+        let ts = fresh_quota_ts();
+        let signal = agy_quota_signal_from_json(&format!(
+            r#"{{
+                "ts": {ts},
+                "model_id": "gemini-3.8-flash-high",
+                "quota": {{"status": "RESOURCE_EXHAUSTED", "quota_reset_in": "2h"}}
+            }}"#
+        ));
+        assert_eq!(signal.status, FleetHealthStatus::Blocked);
+        assert!(signal.detail.contains("RESOURCE_EXHAUSTED"));
+        assert!(signal.detail.contains("reset 2h"));
+    }
+
+    #[test]
+    fn kimi_quota_near_limit_warns() {
+        let ts = fresh_quota_ts();
+        let signal = kimi_quota_signal_from_json(&format!(
+            r#"{{
+                "ts": {ts},
+                "kind": "ok",
+                "limit5h": {{"usedRatio": 0.88}},
+                "monthTotal": {{"usedRatio": 0.41}}
+            }}"#
+        ));
+        assert_eq!(signal.label, "kimi quota");
+        assert_eq!(signal.status, FleetHealthStatus::Warn);
+        assert!(signal.detail.contains("5h 88%"));
+        assert!(signal.detail.contains("month 41%"));
+    }
+
+    #[test]
+    fn kimi_quota_five_hour_exhaustion_blocks() {
+        let ts = fresh_quota_ts();
+        let signal = kimi_quota_signal_from_json(&format!(
+            r#"{{
+                "ts": {ts},
+                "kind": "ok",
+                "limit5h": {{"usedRatio": 0.97}},
+                "monthTotal": {{"usedRatio": 0.20}}
+            }}"#
+        ));
+        assert_eq!(signal.status, FleetHealthStatus::Blocked);
+        assert!(signal.detail.contains("5h 97%"));
+    }
+
+    #[test]
+    fn kimi_quota_error_kind_warns() {
+        let ts = fresh_quota_ts();
+        let signal = kimi_quota_signal_from_json(&format!(
+            r#"{{
+                "ts": {ts},
+                "kind": "error",
+                "error": {{"message": "usage API error"}}
+            }}"#
+        ));
+        assert_eq!(signal.status, FleetHealthStatus::Warn);
+        assert!(signal.detail.contains("usage API error"));
+    }
+
+    #[test]
+    fn quota_invalid_json_is_unknown() {
+        let signal = agy_quota_signal_from_json("not-json");
+        assert_eq!(signal.status, FleetHealthStatus::Unknown);
+        assert!(signal.detail.contains("invalid quota JSON"));
+    }
+
+    #[test]
+    fn quota_stale_snapshot_warns() {
+        let signal = agy_quota_signal_from_json(
+            r#"{
+                "ts": 1,
+                "model_id": "gemini-3.1-pro-high",
+                "quota": {"status": "OK"}
+            }"#,
+        );
+        assert_eq!(signal.status, FleetHealthStatus::Warn);
+        assert!(signal.detail.contains("stale"));
     }
 
     #[test]

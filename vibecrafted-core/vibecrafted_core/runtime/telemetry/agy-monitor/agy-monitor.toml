@@ -1,0 +1,75 @@
+[paths]
+gemini_home = "~/.gemini"
+ide_app_data = "~/.gemini/antigravity-ide"
+cli_app_data = "~/.gemini/antigravity-cli"
+runtime_dir = "~/.gemini/agy-monitor/runtime"
+logs_dir = "~/.gemini/agy-monitor/logs"
+
+[monitor]
+poll_interval_s = 15
+
+[statusline]
+show_cost = true
+show_tool_calls = true
+desync_ceiling = 0.95
+
+# Per-model pricing per 1M tokens (USD). Shadow pricing (api-equiv).
+[pricing."gemini-3.8-flash-high"]
+fresh = 0.15
+cache_read = 0.0375
+output = 0.60
+
+[pricing."gemini-3.8-flash-medium"]
+fresh = 0.15
+cache_read = 0.0375
+output = 0.60
+
+[pricing."gemini-3.8-flash-low"]
+fresh = 0.15
+cache_read = 0.0375
+output = 0.60
+
+[pricing."gemini-3.7-flash-high"]
+fresh = 0.15
+cache_read = 0.0375
+output = 0.60
+
+[pricing."gemini-3.7-flash-medium"]
+fresh = 0.15
+cache_read = 0.0375
+output = 0.60
+
+[pricing."gemini-3.7-flash-low"]
+fresh = 0.15
+cache_read = 0.0375
+output = 0.60
+
+[pricing."gemini-3.6-flash-high"]
+fresh = 0.15
+cache_read = 0.0375
+output = 0.60
+
+[pricing."gemini-3.1-pro-high"]
+fresh = 1.25
+cache_read = 0.3125
+output = 5.00
+
+[pricing."gemini-3.1-pro-low"]
+fresh = 1.25
+cache_read = 0.3125
+output = 5.00
+
+[pricing."claude-sonnet-4-6"]
+fresh = 3.00
+cache_read = 0.30
+output = 15.00
+
+[pricing."claude-opus-4-6-thinking"]
+fresh = 15.00
+cache_read = 1.50
+output = 75.00
+
+[pricing."gpt-oss-120b-medium"]
+fresh = 0.50
+cache_read = 0.10
+output = 1.50
