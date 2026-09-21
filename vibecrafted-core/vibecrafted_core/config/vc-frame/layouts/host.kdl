@@ -18,18 +18,7 @@ layout {
                 left_inset "6"
             }
         }
-        pane split_direction="vertical" {
-            pane size=24 borderless=true {
-                plugin location="frame-host" {
-                    session_canvas true
-                    session_canvas_kind "session-manager"
-                    rail true
-                    frame_host true
-                    pane_title "Sessions"
-                }
-            }
-            pane { children; }
-        }
+        pane { children; }
         pane size=1 borderless=true {
             plugin location="status-bar" {
                 session_canvas true
@@ -44,9 +33,22 @@ layout {
         pane { children; }
     }
 
+    // session_layer is mounted into every tab. Keep the exclusive frame host
+    // beside its single workspace surface so Screen sees exactly one owner.
     tab name="Workspace" focus=true {
-        pane name="VC Guest" {
-            plugin location="session-manager" { workspace_surface true; }
+        pane split_direction="vertical" {
+            pane size=24 borderless=true {
+                plugin location="frame-host" {
+                    session_canvas true
+                    session_canvas_kind "session-manager"
+                    rail true
+                    frame_host true
+                    pane_title "Sessions"
+                }
+            }
+            pane name="VC Guest" {
+                plugin location="session-manager" { workspace_surface true; }
+            }
         }
     }
 }
