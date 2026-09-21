@@ -58,7 +58,7 @@ PRIMARY_SHELL = REPO_ROOT / "config" / "alacritty" / "launch-primary-shell.zsh"
 
 NATIVE_SESSION = "01a082bb-1a48-7151-bc36-4e0372c0cecc"
 STALE_MARKER = "vibecrafted"
-FOREIGN_LIVE = "3more-studio"
+FOREIGN_LIVE = "host-a"
 
 # A worker run exports these; pytest inherits them. The public entry resolves
 # identity through the canonical owner, so the fixture presents a blank slate.
@@ -620,7 +620,7 @@ def test_explicit_root_from_stale_attached_marker_opens_the_declared_workspace(
 
     Baseline: the in-frame branch adopts the stale marker `vibecrafted` as the
     target, the tab action fails with "Session 'vibecrafted' not found; active
-    session is '3more-studio'", the bounded create inherits the marker and
+    session is 'host-a'", the bounded create inherits the marker and
     panics at src/commands.rs:844, and the launch fails with status 2. The
     first cut then prepared the workspace and printed `vc-frame attach …`,
     which the parent rejected: a declaration ENTERS the workspace.

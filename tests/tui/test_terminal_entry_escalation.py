@@ -1019,16 +1019,16 @@ def test_no_live_sessions_leaves_the_target_unresolved(tmp_path: Path) -> None:
 
 def test_single_unrelated_live_session_is_not_adopted(tmp_path: Path) -> None:
     """One live session elsewhere is a coincidence, not ownership."""
-    result = _resolve_target(tmp_path, ["3more-studio"])
+    result = _resolve_target(tmp_path, ["host-a"])
     assert "TARGET=[]" in result.stdout, result.stdout + result.stderr
-    assert "3more-studio" in result.stderr
+    assert "host-a" in result.stderr
 
 
 def test_many_unrelated_live_sessions_do_not_capture_the_project(
     tmp_path: Path,
 ) -> None:
     """The exact P0 listing: none of these belong to mlx-batch-runner."""
-    result = _resolve_target(tmp_path, ["Live runs", "Needs attention", "3more-studio"])
+    result = _resolve_target(tmp_path, ["Live runs", "Needs attention", "host-a"])
     assert "TARGET=[]" in result.stdout, result.stdout + result.stderr
     assert "unrelated live vc-frame session" in result.stderr
 
@@ -1037,7 +1037,7 @@ def test_attached_marker_on_another_project_is_not_ownership(
     tmp_path: Path,
 ) -> None:
     """`(attached)` means SOME client is attached -- not this caller."""
-    result = _resolve_target(tmp_path, ["3more-studio (attached)"])
+    result = _resolve_target(tmp_path, ["host-a (attached)"])
     assert "TARGET=[]" in result.stdout, result.stdout + result.stderr
 
 
@@ -1048,7 +1048,7 @@ def test_project_bound_live_session_is_reused(tmp_path: Path) -> None:
     owner = _canonical_owner_cli(tmp_path / "owner-cli", calls=calls)
     result = _resolve_target(
         tmp_path,
-        ["Live runs", BOUND_SESSION, "mlx-batch-runner", "3more-studio"],
+        ["Live runs", BOUND_SESSION, "mlx-batch-runner", "host-a"],
         owner_cli=owner,
     )
     assert f"TARGET=[{BOUND_SESSION}]" in result.stdout, result.stdout + result.stderr
@@ -1061,7 +1061,7 @@ def test_project_bound_live_session_is_reused(tmp_path: Path) -> None:
 def test_unrelated_live_sessions_do_not_block_the_project(tmp_path: Path) -> None:
     """End to end: global sessions elsewhere never refuse the escalation."""
     live_file = tmp_path / "live-sessions.txt"
-    live_file.write_text("Live runs\nNeeds attention\n3more-studio\n", encoding="utf-8")
+    live_file.write_text("Live runs\nNeeds attention\nhost-a\n", encoding="utf-8")
     _commit_fixture_repo(tmp_path / "mlx-batch-runner")
     result, launch = _run_entry(
         tmp_path,
@@ -2047,7 +2047,7 @@ def test_explicit_operator_session_the_engine_does_not_know_is_not_trusted(
     resurrect a background host under that name and park the tab there; the
     public entry opens a terminal instead."""
     live = tmp_path / "live-sessions.txt"
-    live.write_text("3more-studio\n", encoding="utf-8")
+    live.write_text("host-a\n", encoding="utf-8")
     result, launch = _run_entry(
         tmp_path,
         invocation,
@@ -2068,7 +2068,7 @@ def test_stale_operator_session_does_not_override_live_host_routing(
     missing session. It must keep the existing canvas and route the requested
     workspace through the guest path instead of opening a second terminal."""
     live = tmp_path / "live-sessions.txt"
-    live.write_text("3more-studio\n", encoding="utf-8")
+    live.write_text("host-a\n", encoding="utf-8")
     result, launch = _run_entry(
         tmp_path,
         "vc-start",
@@ -2081,7 +2081,7 @@ def test_stale_operator_session_does_not_override_live_host_routing(
 
     assert launch is None, "start opened a second terminal beside the live host"
     assert result.returncode == 4, result.stderr
-    assert "live host 3more-studio exists" in result.stderr
+    assert "live host host-a exists" in result.stderr
     assert "project-workspace mlx-batch-runner" in result.stderr
 
 
@@ -2568,10 +2568,10 @@ def test_child_does_not_hang_its_tab_on_an_unrelated_session(
 ) -> None:
     """Three unrelated live sessions must not receive this project's provider."""
     _result, calls = _run_child_resume(
-        tmp_path, live=["Live runs", "Needs attention", "3more-studio"]
+        tmp_path, live=["Live runs", "Needs attention", "host-a"]
     )
 
-    unrelated = {"Live runs", "Needs attention", "3more-studio"}
+    unrelated = {"Live runs", "Needs attention", "host-a"}
     for argv in calls:
         if "new-tab" in argv and argv[:1] == ["--session"]:
             assert argv[1] not in unrelated, (

@@ -43,7 +43,7 @@ Explicitly **not** targets (removed 2026-09-06):
 Both let a single unrelated live session capture another project's resume and
 dispatch its provider tab there (P0, Founder 2026-09-06: a resume launched in
 `mlx-batch-runner` was blocked by `Live runs` / `Needs attention` /
-`3more-studio`).
+`host-a`).
 
 ### Project identity (one owner)
 

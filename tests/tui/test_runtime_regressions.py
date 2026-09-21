@@ -851,7 +851,7 @@ def test_interactive_target_single_live_session_is_not_adopted(
     """A lone live session elsewhere is a coincidence, not ownership.
 
     Reversed on 2026-09-06. Adopting "the only live session" is what let a
-    3more-studio window capture a resume launched from mlx-batch-runner: the
+    host-a window capture a resume launched from mlx-batch-runner: the
     provider tab was dispatched into somebody else's project. Ownership must be
     proven (this caller's frame, an explicit target, or this project's own
     session), never inferred from a global count.
