@@ -302,6 +302,20 @@ def _layout_declares_frame_host(payload: str) -> bool:
     return "frame_host true" in payload or 'frame_host "true"' in payload
 
 
+def _kdl_block(payload: str, declaration: str) -> str:
+    start = payload.index(declaration)
+    opening_brace = payload.index("{", start)
+    depth = 0
+    for offset, character in enumerate(payload[opening_brace:], start=opening_brace):
+        if character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                return payload[opening_brace + 1 : offset]
+    raise AssertionError(f"unterminated KDL block: {declaration}")
+
+
 def test_product_layout_declares_frame_host() -> None:
     """A1: a shipped product layout carries rail frame_host true."""
     host = LAYOUTS_DIR / "host.kdl"
@@ -315,6 +329,18 @@ def test_product_layout_declares_frame_host() -> None:
     config = VC_FRAME_CONFIG.read_text(encoding="utf-8")
     assert "frame-host location=" in config
     assert "frame_host true" in config
+
+
+def test_host_layout_has_exactly_one_projection_owner_outside_session_layer() -> None:
+    """The session layer is cloned per tab and cannot own the host projection."""
+    payload = (LAYOUTS_DIR / "host.kdl").read_text(encoding="utf-8")
+    session_layer = _kdl_block(payload, "session_layer")
+    workspace_tab = _kdl_block(payload, 'tab name="Workspace"')
+
+    assert "frame_host true" not in session_layer
+    assert payload.count("frame_host true") == 1
+    assert "frame_host true" in workspace_tab
+    assert "workspace_surface true" in workspace_tab
 
 
 def test_first_session_is_the_frame_host() -> None:
