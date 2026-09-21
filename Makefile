@@ -36,7 +36,7 @@ if [ ! -d "$$stable_root/vibecrafted-core" ]; then \
 fi
 endef
 
-.PHONY: help help-dev vibecrafted app dmg dmg-signed release-local notarize release runtime-pack portable publish-release release-rehearsal gui-install wizard wizard-dev check skills-check layouts-check test test-core test-skills test-install test-parity test-vc-frame test-iterm2-migrate test-memex test-aicx-sync test-hammerspoon test-keychain-session dispatch-test unified-product-contract-gate exact-release-contract-gate release-version-gate payload-hygiene install install-source install-auto install-all install-python-tools install-bundle-tools install-tools install-tools-held install-vendored-binaries install-app install-app-binaries install-hammerspoon skills helpers setup-dev dry-run doctor list update uninstall restore migrate migrate-dry init-hooks seed-commit-msg-hooks bundle bundle-check foundations foundations-check semgrep version version-show version-bump bump-patch bump-minor bump-major iterm-plugin iterm-plugin-refresh iterm-plugin-show iterm-plugin-uninstall iterm-plugin-migrate demo demo-full commit-safe test-race-protection skill-new server server-build build-server-release server-check server-test install-server install-server-payload install-server-service reconcile-server-service server-smoke
+.PHONY: help help-dev vibecrafted app dmg dmg-signed release-local notarize release runtime-pack release-prereqs portable publish-release release-rehearsal gui-install wizard wizard-dev check skills-check layouts-check test test-core test-skills test-install test-parity test-vc-frame test-iterm2-migrate test-memex test-aicx-sync test-hammerspoon test-keychain-session dispatch-test unified-product-contract-gate exact-release-contract-gate release-version-gate payload-hygiene install install-source install-auto install-all install-python-tools install-bundle-tools install-tools install-tools-held install-vendored-binaries install-app install-app-binaries install-hammerspoon skills helpers setup-dev dry-run doctor list update uninstall restore migrate migrate-dry init-hooks seed-commit-msg-hooks bundle bundle-check foundations foundations-check semgrep version version-show version-bump bump-patch bump-minor bump-major iterm-plugin iterm-plugin-refresh iterm-plugin-show iterm-plugin-uninstall iterm-plugin-migrate demo demo-full commit-safe test-race-protection skill-new server server-build build-server-release server-check server-test install-server install-server-payload install-server-service reconcile-server-service server-smoke
 
 help:
 	@printf "\n"
@@ -101,6 +101,44 @@ KEYS ?= $(HOME)/.keys
 # Through the environment and split with zsh's ${=...} the same value arrives as
 # four inert argv words and nothing is evaluated.
 RELEASE_FLAGS ?=
+
+# One public preflight owns the expensive release prerequisites. The release
+# builder repeats the fail-closed checks so direct script callers stay safe,
+# while `make release` repairs a missing pinned toolchain/target before spending
+# minutes compiling. Apple ld64 1230 and 27037 both assert on the server's
+# generated symbol; the Rust-only linker wrapper selects ld-classic without
+# changing xcodebuild, codesign, notarytool or the selected Xcode SDK.
+RELEASE_RUSTUP_TOOLCHAIN := 1.96.0
+RELEASE_RUST_TARGETS := wasm32-wasip1 wasm32-unknown-unknown
+RELEASE_MIN_FREE_KIB ?= 6291456
+
+release-prereqs:
+	@set -eu; \
+	command -v rustup >/dev/null 2>&1 || { printf '%s\n' 'FATAL: rustup is required for release' >&2; exit 1; }; \
+	toolchain='$(RELEASE_RUSTUP_TOOLCHAIN)'; \
+	if ! rustup which --toolchain "$$toolchain" rustc >/dev/null 2>&1; then \
+		printf '==> Installing pinned release toolchain %s\n' "$$toolchain"; \
+		rustup toolchain install "$$toolchain" --profile minimal; \
+	fi; \
+	installed="$$(rustup target list --installed --toolchain "$$toolchain")"; \
+	for target in $(RELEASE_RUST_TARGETS); do \
+		if ! printf '%s\n' "$$installed" | grep -Fx "$$target" >/dev/null; then \
+			printf '==> Installing %s for release toolchain %s\n' "$$target" "$$toolchain"; \
+			rustup target add --toolchain "$$toolchain" "$$target"; \
+		fi; \
+	done; \
+	if [ "$$(uname -s)" = Darwin ]; then \
+		xcrun --find ld-classic >/dev/null 2>&1 || { printf '%s\n' 'FATAL: ld-classic is required for deterministic Rust release linking' >&2; exit 1; }; \
+	fi; \
+	free_kib="$$(df -Pk "$(CURDIR)" | awk 'NR == 2 { print $$4 }')"; \
+	case "$$free_kib" in ''|*[!0-9]*) printf '%s\n' 'FATAL: could not measure release disk space' >&2; exit 1;; esac; \
+	if [ "$$free_kib" -lt '$(RELEASE_MIN_FREE_KIB)' ]; then \
+		printf 'FATAL: release needs at least %s KiB free; only %s KiB remain\n' '$(RELEASE_MIN_FREE_KIB)' "$$free_kib" >&2; \
+		exit 1; \
+	fi; \
+	printf '==> Release prerequisites ready: Rust %s, targets [%s], free %s KiB\n' "$$toolchain" '$(RELEASE_RUST_TARGETS)' "$$free_kib"
+
+app dmg dmg-signed release-local release runtime-pack: release-prereqs
 
 app:
 	@VC_RELEASE_FLAGS='$(RELEASE_FLAGS)' zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" --app-only $${=VC_RELEASE_FLAGS} 2>&1'

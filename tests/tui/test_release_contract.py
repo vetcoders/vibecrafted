@@ -29,6 +29,92 @@ INSTALL_PS1_SHA256 = "273cef1b5de9ba57ad133ca37bcce50a82294f29d94a5b09f09f9ba47a
 ABSENT_FROM_MACOS_RUNNER_IMAGE = ("rg", "fd")
 
 
+def test_make_release_bootstraps_exact_rust_targets_and_uses_classic_ld() -> None:
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+    linker = (REPO_ROOT / "scripts/lib/rust-linker-darwin-classic.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "RELEASE_RUSTUP_TOOLCHAIN := 1.96.0" in makefile
+    assert "RELEASE_RUST_TARGETS := wasm32-wasip1 wasm32-unknown-unknown" in makefile
+    assert 'rustup toolchain install "$$toolchain" --profile minimal' in makefile
+    assert 'rustup target add --toolchain "$$toolchain" "$$target"' in makefile
+    assert (
+        "app dmg dmg-signed release-local release runtime-pack: release-prereqs"
+        in makefile
+    )
+    assert "RELEASE_MIN_FREE_KIB ?= 6291456" in makefile
+
+    assert "export RUSTUP_TOOLCHAIN=1.96.0" in builder
+    assert 'target list --installed --toolchain "$RUSTUP_TOOLCHAIN"' in builder
+    assert "wasm32-wasip1 wasm32-unknown-unknown" in builder
+    assert "CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER" in builder
+    assert "rust-linker-darwin-classic.sh" in builder
+    assert '$(dirname "$classic_ld")/clang' in linker
+    assert 'exec "$clang" -Wl,-ld_classic "$@"' in linker
+
+
+def test_classic_darwin_linker_wrapper_injects_flag_before_cargo_arguments(
+    tmp_path: Path,
+) -> None:
+    captured = tmp_path / "clang-arguments"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_clang = fake_bin / "clang"
+    fake_clang.write_text(
+        '#!/usr/bin/env bash\nset -euo pipefail\nprintf "%s\\n" "$@" > "$CAPTURED"\n',
+        encoding="utf-8",
+    )
+    fake_clang.chmod(0o755)
+    fake_ld_classic = fake_bin / "ld-classic"
+    fake_ld_classic.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    fake_ld_classic.chmod(0o755)
+    fake_xcrun = fake_bin / "xcrun"
+    fake_xcrun.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        '[[ "$1" == --find ]]\n'
+        'case "$2" in\n'
+        '  ld-classic) printf "%s\\n" "$FAKE_LD_CLASSIC" ;;\n'
+        "  *) exit 1 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    fake_xcrun.chmod(0o755)
+
+    env = dict(os.environ)
+    env.update(
+        {
+            "CAPTURED": str(captured),
+            "FAKE_LD_CLASSIC": str(fake_ld_classic),
+            "PATH": f"{fake_bin}:{env['PATH']}",
+        }
+    )
+    result = subprocess.run(
+        [
+            str(REPO_ROOT / "scripts/lib/rust-linker-darwin-classic.sh"),
+            "object.o",
+            "-o",
+            "product",
+        ],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert captured.read_text(encoding="utf-8").splitlines() == [
+        "-Wl,-ld_classic",
+        "object.o",
+        "-o",
+        "product",
+    ]
+
+
 def _native_voc_build_function() -> str:
     """Extract the builder helper so this test executes its actual command path."""
     builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(

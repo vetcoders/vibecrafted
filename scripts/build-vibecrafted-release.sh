@@ -37,7 +37,12 @@ export RUSTUP_TOOLCHAIN=1.96.0
 prefer_rustup_cargo
 require rustup
 rustup which --toolchain "$RUSTUP_TOOLCHAIN" rustc >/dev/null \
-  || die "install the release toolchain: rustup toolchain install $RUSTUP_TOOLCHAIN --target wasm32-wasip1"
+  || die "install the release toolchain: rustup toolchain install $RUSTUP_TOOLCHAIN --profile minimal"
+for release_target in wasm32-wasip1 wasm32-unknown-unknown; do
+  rustup target list --installed --toolchain "$RUSTUP_TOOLCHAIN" 2>/dev/null \
+    | grep -Fxq "$release_target" \
+    || die "rustup target $release_target is missing from $RUSTUP_TOOLCHAIN; run: rustup target add --toolchain $RUSTUP_TOOLCHAIN $release_target"
+done
 
 # A --remap-path-prefix whose prefix still contains `..` never matches the path
 # the compiler actually sees, because the match is textual. The donor roots used
@@ -243,6 +248,15 @@ fi
 export DEVELOPER_DIR="$XCODE_DEVELOPER_DIR"
 echo "==> Xcode developer dir: $DEVELOPER_DIR ($(xcrun --find strip 2>/dev/null || echo 'strip: unresolved'))"
 export MACOSX_DEPLOYMENT_TARGET=14.0
+# Apple ld64 1230.1 and 27037.1 both assert in makeSymbolStringInPlace while
+# linking the generated Vibecrafted Server entry object. The exact captured
+# linker input succeeds under ld-classic 956.6. Scope the workaround to Cargo's
+# native Apple target: WASM keeps rust-lld, while Swift, signing and notarization
+# keep using the selected Xcode toolchain.
+DARWIN_RUST_LINKER="$REPO_ROOT/scripts/lib/rust-linker-darwin-classic.sh"
+[[ -x "$DARWIN_RUST_LINKER" ]] || die "missing executable Darwin Rust linker wrapper: $DARWIN_RUST_LINKER"
+export CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER="${CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER:-$DARWIN_RUST_LINKER}"
+echo "==> Rust Darwin linker: $CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER ($(xcrun --find ld-classic 2>/dev/null || echo 'ld-classic: unresolved'))"
 # Keep host proc-macro dylibs loadable under the Xcode beta linker/strip pair.
 # Strip only packaged Mach-O payloads through the existing signing pipeline.
 export CARGO_PROFILE_RELEASE_STRIP=false
@@ -1093,10 +1107,6 @@ build_product() {
 
   log "Building the bundled Vibecrafted Server and hydrated site"
   local server_build_root="$BUILD_DIR/cargo"
-  if command -v rustup >/dev/null 2>&1; then
-    rustup target list --installed 2>/dev/null | grep -q '^wasm32-unknown-unknown$' \
-      || die "rustup is missing wasm32-unknown-unknown; run: rustup target add wasm32-unknown-unknown"
-  fi
   make -C "$SOURCE_ROOT" CARGO_BUILD_ROOT="$server_build_root" build-server-release
   local server_source="$server_build_root/vibecrafted-server/release/vibecrafted-server-web"
   local server_site="$server_build_root/vibecrafted-server/site"
