@@ -1245,7 +1245,7 @@ def test_foundations_product_binaries_are_validation_only() -> None:
     )
 
     loctree_block = text.split("install_loctree() {", 1)[1].split(
-        "# ---------------------------------------------------------------------------\n# Generic cargo installer",
+        "# ---------------------------------------------------------------------------\n# pipx-installed Python products",
         1,
     )[0]
     aicx_block = text.split("install_aicx() {", 1)[1].split(
