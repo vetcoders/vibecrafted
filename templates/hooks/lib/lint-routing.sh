@@ -300,6 +300,7 @@ husky_lint_py_ruff_full() {
   else husky_warn "ruff/uvx not installed — skipping."; return 0
   fi
   $ruff check -- "$root" || return 1
+  # Whole-tree format --check follows pyproject exclude (Markdown is docs).
   $ruff format --check -- "$root"
 }
 

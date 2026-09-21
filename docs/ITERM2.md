@@ -50,10 +50,10 @@ print(
 Example — drive the tab progress bar from a long-running task:
 
 ```python
-print(osc.progress(3))               # indeterminate spinner
+print(osc.progress(3))  # indeterminate spinner
 # ... work ...
 print(osc.progress(1, percent=100))  # success solid
-print(osc.progress(0))               # clear
+print(osc.progress(0))  # clear
 ```
 
 CLI surface (handy for shell scripts):

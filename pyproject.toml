@@ -14,6 +14,13 @@ dev = [
     "textual>=8.2.3",
 ]
 
+[tool.ruff]
+# ruff 0.16+ includes Markdown and formats fenced Python. Pre-push is a
+# Python gate (`scripts/hooks/pre-push` lists `*.py`). Keep docs out so
+# `ruff format --check .` (husky full / a manual whole-tree run) cannot
+# refuse a push over installer/iTerm examples.
+extend-exclude = ["*.md"]
+
 [tool.ruff.lint.per-file-ignores]
 # tests whose imports legitimately follow a sys.path setup.
 "tests/agent_dispatch_test.py" = ["E402"]
