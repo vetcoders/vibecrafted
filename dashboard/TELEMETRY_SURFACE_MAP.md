@@ -50,10 +50,10 @@ flowchart LR
   than a second parser.
 - VibecraftedApp registers `Usage & Costs` as a runtime-scoped native
   destination at `/usage`.
-- Kimi and Agy have separate read-only analytical adapters. Kimi consumes
-  injected `wire.jsonl` paths and exact provider token buckets. Agy consumes
-  injected IDE/CLI transcript paths and marks character-derived token and
-  API-equivalent price calculations as estimates. Neither adapter discovers
+- Every supported provider has a separate read-only analytical adapter:
+  `agy`, `claude`, `codex`, `cursor`, `grok`, `junie`, and `kimi`. Each parser
+  follows its provider's actual evidence shape, preserves reported token/cost
+  truth, and labels fallback calculations as estimates. No adapter discovers
   provider homes, writes provider state, starts a daemon, or sends data.
 
 The live dashboard continues to read canonical Vibecrafted run metadata. The
@@ -78,6 +78,11 @@ or rewrite run metadata.
 | Native app            | `ToolDestinations.swift`                               | Runtime-scoped `Usage & Costs` destination                                                                | Implemented                        |
 | Kimi analysis         | `control-core::usage_kimi`                             | Exact injected wire usage and estimated API-equivalent USD                                                | Implemented library adapter        |
 | Agy analysis          | `control-core::usage_agy`                              | Injected transcript signals, estimated tokens and shadow price                                            | Implemented library adapter        |
+| Claude analysis       | `control-core::usage_claude`                           | Exact message usage with cache-create/read buckets and API-equivalent pricing                             | Implemented library adapter        |
+| Codex analysis        | `control-core::usage_codex`                            | Native cumulative token snapshots plus per-turn exec usage, cache-write/read and reasoning                | Implemented library adapter        |
+| Cursor analysis       | `control-core::usage_cursor`                           | Stream result usage, provider-reported cost when complete, otherwise explicit estimate                    | Implemented library adapter        |
+| Grok analysis         | `control-core::usage_grok`                             | Exact stream/model usage and provider cost; labelled estimates for cumulative session snapshots           | Implemented library adapter        |
+| Junie analysis        | `control-core::usage_junie`                            | Nested per-model usage, cache buckets, provider-reported and cost-only records                            | Implemented library adapter        |
 
 ## Data contract
 
@@ -129,8 +134,8 @@ output. Parser-specific coverage also lives in `test_agent_stream.py`; close
 integration reaches `test_supervisor.py` and `test_supervisor_async.py`.
 
 The delivered contract tests cover Python reporting, public-deck parity,
-control-core aggregation, both provider adapters, HTTP projection, web render,
-VOC rendering, and native destination resolution.
+control-core aggregation, all seven provider adapters, HTTP projection, web
+render, VOC rendering, and native destination resolution.
 
 ## Dashboard seam and risks
 

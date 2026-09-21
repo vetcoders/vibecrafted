@@ -16,6 +16,11 @@ use serde_json::{Map, Value, json};
 use crate::{ControlPlane, is_safe_run_id};
 
 pub const USAGE_REPORT_SCHEMA: &str = "vibecrafted.usage-report.v1";
+/// Every provider launcher currently supported by Vibecrafted has a dedicated
+/// analytical adapter. Keep this inventory explicit so adding a launcher
+/// cannot silently leave cost analysis behind.
+pub const USAGE_PROVIDER_ADAPTERS: &[&str] =
+    &["agy", "claude", "codex", "cursor", "grok", "junie", "kimi"];
 const MAX_META_BYTES: u64 = 1024 * 1024;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

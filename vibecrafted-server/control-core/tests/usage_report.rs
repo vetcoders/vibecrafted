@@ -181,3 +181,11 @@ fn usage_report_filters_window_and_dimensions_without_following_symlinks() {
     assert_eq!(report.dimensions.models[0].name, "gpt-5.6-terra");
     fs::remove_dir_all(home).ok();
 }
+
+#[test]
+fn analytical_adapter_inventory_covers_every_supported_provider() {
+    assert_eq!(
+        control_core::USAGE_PROVIDER_ADAPTERS,
+        &["agy", "claude", "codex", "cursor", "grok", "junie", "kimi"]
+    );
+}
