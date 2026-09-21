@@ -114,19 +114,19 @@ Oparty o `vibecrafted_core.cli.LAUNCHERS` + shell wrappers + meta lifecycle. Kat
 
 ### Dodatkowe launchery skilli
 
-| Launcher    | Skill                                      | Worker CLI                      | Interactive     | Notatki                                                                                        |
-| ----------- | ------------------------------------------ | ------------------------------- | --------------- | ---------------------------------------------------------------------------------------------- |
-| `justdo`    | [`vc-justdo`](../vc-justdo/SKILL.md)       | `vibecrafted justdo <agent>`    | `/vc-justdo`    | **Samodzielna postawa** — nie faza ship; nie `implement`. Typ zadania z promptu. ADR-0001      |
-| `canary`    | [`vc-canary`](../vc-canary/SKILL.md)       | `vibecrafted canary <agent>`    | `/vc-canary`    | Katalog ownership: wyczucie atlasu → 1 agent/scope → jeden commit → raport z ustaleniami       |
-| `research`  | [`vc-research`](../vc-research/SKILL.md)   | `vibecrafted research …`        | `/vc-research`  | Swarm                                                                                          |
-| `ownership` | [`vc-ownership`](../vc-ownership/SKILL.md) | `vibecrafted ownership <agent>` | `/vc-ownership` | Ownership delivery                                                                             |
-| `partner`   | [`vc-partner`](../vc-partner/SKILL.md)     | `vibecrafted partner <agent>`   | `/vc-partner`   | Wspólne sterowanie                                                                             |
-| `prune`     | [`vc-prune`](../vc-prune/SKILL.md)         | `vibecrafted prune <agent>`     | `/vc-prune`     | Runtime cone                                                                                   |
-| `intents`   | [`vc-intents`](../vc-intents/SKILL.md)     | `vibecrafted intents <agent>`   | `/vc-intents`   | Plan→runtime                                                                                   |
-| `delegate`  | [`vc-delegate`](../vc-delegate/SKILL.md)   | `vibecrafted delegate <agent>`  | `/vc-delegate`  | Doktryna **native**                                                                            |
-| `trust`     | [`vc-trust`](../vc-trust/SKILL.md)         | `vibecrafted trust <agent>`     | `/vc-trust`     | READ; post-hoc falsyfikacja claimów commitów (agent fairness + kompletność) + settlement f/x/n |
-| `guard`     | [`vc-guard`](../vc-guard/SKILL.md)         | `vibecrafted guard <agent>`     | `/vc-guard`     | READ; inwentarz gates + odmowa kontynuacji przy trust `block` (nigdy nie zmyśla settlementu)   |
-| `paste`     | (helper)                                   | `vibecrafted paste …`           | —               | Nie pełny ERi                                                                                  |
+| Launcher    | Skill                                      | Worker CLI                      | Interactive     | Notatki                                                                                          |
+| ----------- | ------------------------------------------ | ------------------------------- | --------------- | ------------------------------------------------------------------------------------------------ |
+| `justdo`    | [`vc-justdo`](../vc-justdo/SKILL.md)       | `vibecrafted justdo <agent>`    | `/vc-justdo`    | **Samodzielna postawa** — nie faza ship; nie `implement`. Typ zadania z promptu. ADR-0001        |
+| `canary`    | [`vc-canary`](../vc-canary/SKILL.md)       | `vibecrafted canary <agent>`    | `/vc-canary`    | Katalog ownership: wyczucie atlasu → 1 agent/scope → jeden commit → raport z ustaleniami         |
+| `research`  | [`vc-research`](../vc-research/SKILL.md)   | `vibecrafted research …`        | `/vc-research`  | Swarm                                                                                            |
+| `ownership` | [`vc-ownership`](../vc-ownership/SKILL.md) | `vibecrafted ownership <agent>` | `/vc-ownership` | Ownership delivery                                                                               |
+| `partner`   | [`vc-partner`](../vc-partner/SKILL.md)     | `vibecrafted partner <agent>`   | `/vc-partner`   | Wspólne sterowanie                                                                               |
+| `prune`     | [`vc-prune`](../vc-prune/SKILL.md)         | `vibecrafted prune <agent>`     | `/vc-prune`     | Runtime cone                                                                                     |
+| `intents`   | [`vc-intents`](../vc-intents/SKILL.md)     | `vibecrafted intents <agent>`   | `/vc-intents`   | Polowanie na intencje w oknie → ledger z dwu flot → korekty Foundera → stabilny plan cięć (READ) |
+| `delegate`  | [`vc-delegate`](../vc-delegate/SKILL.md)   | `vibecrafted delegate <agent>`  | `/vc-delegate`  | Doktryna **native**                                                                              |
+| `trust`     | [`vc-trust`](../vc-trust/SKILL.md)         | `vibecrafted trust <agent>`     | `/vc-trust`     | READ; post-hoc falsyfikacja claimów commitów (agent fairness + kompletność) + settlement f/x/n   |
+| `guard`     | [`vc-guard`](../vc-guard/SKILL.md)         | `vibecrafted guard <agent>`     | `/vc-guard`     | READ; inwentarz gates + odmowa kontynuacji przy trust `block` (nigdy nie zmyśla settlementu)     |
+| `paste`     | (helper)                                   | `vibecrafted paste …`           | —               | Nie pełny ERi                                                                                    |
 
 ### Meta i orientacja (inny kształt niż workery skillowe)
 

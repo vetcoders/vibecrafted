@@ -121,7 +121,7 @@ Grounded in `vibecrafted_core.cli.LAUNCHERS` + shell wrappers + lifecycle meta. 
 | `ownership` | [`vc-ownership`](vc-ownership/SKILL.md) | `vibecrafted ownership <agent>` | `/vc-ownership` | Full-spectrum ownership delivery                                                                |
 | `partner`   | [`vc-partner`](vc-partner/SKILL.md)     | `vibecrafted partner <agent>`   | `/vc-partner`   | Shared steering with operator                                                                   |
 | `prune`     | [`vc-prune`](vc-prune/SKILL.md)         | `vibecrafted prune <agent>`     | `/vc-prune`     | Runtime cone / silencer strip                                                                   |
-| `intents`   | [`vc-intents`](vc-intents/SKILL.md)     | `vibecrafted intents <agent>`   | `/vc-intents`   | Plan-to-runtime truth                                                                           |
+| `intents`   | [`vc-intents`](vc-intents/SKILL.md)     | `vibecrafted intents <agent>`   | `/vc-intents`   | Intent hunt in a window → two-fleet ledger → Founder overrides → stable plan of cuts (READ)     |
 | `delegate`  | [`vc-delegate`](vc-delegate/SKILL.md)   | `vibecrafted delegate <agent>`  | `/vc-delegate`  | **Native** subagent doctrine (bounded)                                                          |
 | `trust`     | [`vc-trust`](vc-trust/SKILL.md)         | `vibecrafted trust <agent>`     | `/vc-trust`     | READ; post-hoc commit-claim falsification (agent fairness + completeness) + settlement f/x/n    |
 | `guard`     | [`vc-guard`](vc-guard/SKILL.md)         | `vibecrafted guard <agent>`     | `/vc-guard`     | READ; gate inventory + refuse continuation on trust `block` (never invents settlement)          |
