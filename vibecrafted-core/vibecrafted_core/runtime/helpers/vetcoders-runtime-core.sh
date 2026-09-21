@@ -225,7 +225,9 @@ _vetcoders_effective_project_root() {
 _vetcoders_org_repo() {
   local root="${1:-$(_vetcoders_repo_root)}"
   local org_repo=""
-  org_repo="$(cd "$root" && git remote get-url origin 2>/dev/null | sed -E 's|.*[:/]([^/]+)/([^/.]+)(\.git)?$|\1/\2|' || true)"
+  if ! org_repo="$(cd "$root" && git remote get-url origin 2>/dev/null | sed -E 's|.*[:/]([^/]+)/([^/.]+)(\.git)?$|\1/\2|')"; then
+    org_repo=""
+  fi
   if [[ -n "$org_repo" ]]; then
     printf '%s\n' "$org_repo"
   else
@@ -501,7 +503,7 @@ _vetcoders_operator_place_session_name() {
   fi
   local root_dir="" resolved="" python_spec py import_root
   # Intentionally request the ambient-owner fallback.
-  root_dir="$(_vetcoders_effective_project_root)"
+  root_dir="$(_vetcoders_effective_project_root "")"
 
   # Physical owner first: the selected generation's CLI is the same catalogue
   # reader vc-start's workspace preparation uses, with the interpreter and

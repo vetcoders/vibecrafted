@@ -85,9 +85,9 @@ if (( use_watcher )); then
 fi
 
 sources=0
-[[ -n "$depth" ]]  && ((sources++)) || true
-[[ -n "$task" ]]   && ((sources++)) || true
-[[ -n "$prompt" ]] && ((sources++)) || true
+if [[ -n "$depth" ]]; then ((sources += 1)); fi
+if [[ -n "$task" ]]; then ((sources += 1)); fi
+if [[ -n "$prompt" ]]; then ((sources += 1)); fi
 [[ $sources -le 1 ]] || spawn_die "Use at most one source: --depth, --file, or --prompt"
 if [[ $sources -eq 0 ]]; then
   depth=3

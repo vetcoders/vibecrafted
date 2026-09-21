@@ -9,7 +9,11 @@ husky_claims_runtime_root() {
   fi
   local current="${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted/tools/vibecrafted-current"
   if [ -e "$current" ]; then
-    root="$(cd "$(dirname "$current")" && cd "$(readlink "$current" 2>/dev/null || basename "$current")" 2>/dev/null && pwd -P || true)"
+    local selected
+    selected="$(readlink "$current" 2>/dev/null || basename "$current")"
+    if ! root="$(cd "$(dirname "$current")" && cd "$selected" 2>/dev/null && pwd -P)"; then
+      root=""
+    fi
     if [ -n "$root" ] && [ -d "$root/vibecrafted-core/vibecrafted_core" ]; then
       printf '%s\n' "$root"
       return 0
