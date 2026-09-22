@@ -1068,9 +1068,10 @@ _vetcoders_start_live_inventory_hosts() {
 
 # Classify one live session from the engine's materialized layout, rather than
 # inferring its role from existence or client attachment. Output is one of:
-# host (exactly one projection owner and one surface), guest (no owner), or
-# legacy (any other owner/surface shape). Query/parser failure is exit 2 and
-# produces no role: callers must fail closed instead of guessing.
+# host (exactly one projection owner), guest (no owner), or legacy (multiple
+# owners). The workspace_surface plugin is only the empty-host placeholder and
+# disappears after a guest projection, so it is deliberately not identity.
+# Query/parser failure is exit 2 and produces no role: callers fail closed.
 _vetcoders_start_session_projection_role() {
   local session_name="${1:-}" vc_frame_bin="${2:-}" layout="" python_bin=""
   [[ -n "$session_name" && -n "$vc_frame_bin" ]] || return 2
@@ -1087,8 +1088,7 @@ text = sys.stdin.read()
 text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
 text = re.sub(r"//[^\n]*", "", text)
 owners = len(re.findall(r"\bframe_host\s+(?:\"true\"|true)(?=\s|;|})", text))
-surfaces = len(re.findall(r"\bworkspace_surface\s+(?:\"true\"|true)(?=\s|;|})", text))
-if owners == 1 and surfaces == 1:
+if owners == 1:
     print("host")
 elif owners == 0:
     print("guest")

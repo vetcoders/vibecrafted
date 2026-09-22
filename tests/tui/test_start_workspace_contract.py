@@ -691,7 +691,9 @@ class Scene:
             elif name in guests:
                 body = "layout { pane; }\n"
             else:
-                body = "layout { frame_host true; workspace_surface true; }\n"
+                # A projected host has replaced its workspace_surface
+                # placeholder but remains the singleton projection owner.
+                body = "layout { frame_host true; pane; }\n"
             (self.table / "live" / name).write_text(body, encoding="utf-8")
         for name in dead:
             (self.table / "dead" / name).write_text("", encoding="utf-8")
