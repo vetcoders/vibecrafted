@@ -491,3 +491,209 @@ def test_execution_path_state_parity(
             f"python-dispatcher={projection_a.get(key)!r} != "
             f"shell-meta={projection_b.get(key)!r}"
         )
+
+
+def test_reading_paths_run_state_parity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """W2-02 gate: Reading paths achieve state parity on a shared fixture.
+
+    Compares >=2 reading paths:
+      1. server_observation.observe_run (Python canonical observation reader / CLI `observe --json`)
+      2. control-observe binary (direct compute_view reader CLI used by voc and vc-server)
+
+    Across 3 canonical run states:
+      (a) Live worker run: state=active, worker alive -> terminal=False, process_truth=live, worker_alive=True
+      (b) Dead-with-residue run: state=completed, exit_code=0 -> terminal=True, process_truth=terminal
+      (c) Stale launching run without PID: state=abandoned, no approve_transition -> phantom 'launching' eliminated
+    """
+    from vibecrafted_core import server_observation
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+
+    control_observe_bin = (
+        REPO_ROOT / "target" / "debug" / "control-observe"
+        if (REPO_ROOT / "target" / "debug" / "control-observe").is_file()
+        else REPO_ROOT / "target" / "release" / "control-observe"
+    )
+    assert control_observe_bin.is_file(), (
+        f"control-observe binary must exist at {control_observe_bin}"
+    )
+    monkeypatch.setenv("VIBECRAFTED_CONTROL_OBSERVE", str(control_observe_bin))
+
+    now = dt.datetime.now(dt.timezone.utc)
+    now_iso = now.isoformat()
+
+    # --- Setup Run (a): live worker ---
+    live_worker = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"]
+    )
+    live_id = "parity-live-run"
+
+    # --- Setup Run (b): dead with residue ---
+    dead_worker = subprocess.Popen([sys.executable, "-c", "import sys; sys.exit(0)"])
+    dead_worker.wait()
+    dead_id = "parity-dead-residue"
+
+    # --- Setup Run (c): stale launching lifecycle with pid=null ---
+    stale_id = "parity-stale-launching"
+
+    try:
+        # Materialize Run (a)
+        live_dir = home / "control_plane" / "runtime_runs" / live_id
+        live_dir.mkdir(parents=True, exist_ok=True)
+        (live_dir / "meta.json").write_text(
+            json.dumps(
+                {
+                    "run_id": live_id,
+                    "state": "active",
+                    "status": "active",
+                    "agent": "codex",
+                    "skill": "implement",
+                    "session_id": "sess-live",
+                    "worker_pid": live_worker.pid,
+                    "owner_pid": live_worker.pid,
+                    "started_at": now_iso,
+                    "updated_at": now_iso,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (home / "control_plane" / "runs").mkdir(parents=True, exist_ok=True)
+        (home / "control_plane" / "runs" / f"{live_id}.json").write_text(
+            json.dumps(
+                {
+                    "run_id": live_id,
+                    "state": "active",
+                    "operator_state": "running",
+                    "session_id": "sess-live",
+                    "worker_pid": live_worker.pid,
+                    "owner_pid": live_worker.pid,
+                    "started_at": now_iso,
+                    "updated_at": now_iso,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        # Materialize Run (b)
+        dead_dir = home / "control_plane" / "runtime_runs" / dead_id
+        dead_dir.mkdir(parents=True, exist_ok=True)
+        (dead_dir / "meta.json").write_text(
+            json.dumps(
+                {
+                    "run_id": dead_id,
+                    "state": "completed",
+                    "status": "completed",
+                    "agent": "codex",
+                    "skill": "implement",
+                    "session_id": "sess-dead",
+                    "exit_code": 0,
+                    "worker_pid": dead_worker.pid,
+                    "owner_pid": dead_worker.pid,
+                    "completed_at": now_iso,
+                    "started_at": now_iso,
+                    "updated_at": now_iso,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (home / "control_plane" / "runs" / f"{dead_id}.json").write_text(
+            json.dumps(
+                {
+                    "run_id": dead_id,
+                    "state": "completed",
+                    "operator_state": "completed",
+                    "session_id": "sess-dead",
+                    "exit_code": 0,
+                    "worker_pid": dead_worker.pid,
+                    "owner_pid": dead_worker.pid,
+                    "completed_at": now_iso,
+                    "started_at": now_iso,
+                    "updated_at": now_iso,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        # Materialize Run (c)
+        stale_dir = home / "control_plane" / "lifecycle_runs" / stale_id
+        stale_dir.mkdir(parents=True, exist_ok=True)
+        stale_iso = (now - dt.timedelta(days=7)).isoformat()
+        state_file = stale_dir / "state.json"
+        state_file.write_text(
+            json.dumps(
+                {
+                    "run_id": stale_id,
+                    "status": "launching",
+                    "pid": None,
+                    "owner_pid": None,
+                    "launcher_pid": None,
+                    "created_at": stale_iso,
+                    "updated_at": stale_iso,
+                    "stages": [],
+                    "human_controls": ["approve_transition"],
+                }
+            ),
+            encoding="utf-8",
+        )
+        stale_ts = time.time() - 7 * 86400
+        os.utime(state_file, (stale_ts, stale_ts))
+
+        # --- Reading Path comparisons across both readers ---
+        for run_id in (live_id, dead_id, stale_id):
+            # Path 1: Python server_observation.observe_run (uses control-observe under the hood)
+            obs = server_observation.observe_run(run_id)
+
+            # Path 2: Direct control-observe CLI
+            proc = subprocess.run(
+                [
+                    str(control_observe_bin),
+                    "--home",
+                    str(home),
+                    "--run-id",
+                    run_id,
+                    "--json",
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            cli = json.loads(proc.stdout)
+
+            # Invariant: Both reading paths produce identical top-level verdict keys
+            assert obs["found"] is True, f"{run_id} must be found"
+            assert cli["found"] is True, f"{run_id} must be found by CLI"
+            assert obs["schema"] == cli["schema"] == "vibecrafted.run-observation.v1"
+            assert obs["terminal"] == cli["terminal"]
+            assert obs["worker_alive"] == cli["worker_alive"]
+            assert obs["process_truth"] == cli["process_truth"]
+
+            run_obs = obs.get("run") or {}
+            run_cli = cli.get("run") or {}
+            assert run_obs.get("state") == run_cli.get("state")
+
+            # Invariant: State-specific truths
+            if run_id == live_id:
+                assert obs["terminal"] is False
+                assert obs["worker_alive"] is True
+                assert obs["process_truth"] == "live"
+                assert run_obs["state"] == "active"
+            elif run_id == dead_id:
+                assert obs["terminal"] is True
+                assert obs["process_truth"] == "terminal"
+                assert run_obs["state"] == "completed"
+            elif run_id == stale_id:
+                # Phantom launching run is unified onto compute_view canon:
+                # stale launching with null pid is re-classified as abandoned
+                assert run_obs["state"] == "abandoned"
+                assert run_obs["health"] == "stalled"
+                assert "no live owner" in run_obs.get("last_error", "")
+                controls = run_obs.get("controls") or {}
+                assert controls.get("approve_transition") is not True
+
+    finally:
+        live_worker.kill()
+        live_worker.wait()

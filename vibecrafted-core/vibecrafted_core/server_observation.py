@@ -49,167 +49,6 @@ def observe_timeout_seconds() -> float:
     return DEFAULT_OBSERVE_TIMEOUT_SECONDS
 
 
-def _named_lifecycle(payload: Mapping[str, Any]) -> tuple[str, str, str]:
-    """Overlay order: nonempty ``status`` wins over ``state``."""
-    status = str(payload.get("status") or "").strip()
-    state = str(payload.get("state") or "").strip()
-    return status, state, status or state
-
-
-def _optional_bool(value: Any) -> bool | None:
-    """Preserve missing evidence. Only an explicit bool is proof."""
-    if isinstance(value, bool):
-        return value
-    return None
-
-
-def _has_terminal_residue(payload: Mapping[str, Any]) -> bool:
-    raw = payload.get("exit_code")
-    if raw is not None and raw != "":
-        try:
-            int(raw)
-        except (TypeError, ValueError):
-            pass
-        else:
-            return True
-    return bool(str(payload.get("completed_at") or "").strip())
-
-
-def _named_class(named: str, *, active: set[str], final: set[str]) -> str:
-    if named in final:
-        return "final"
-    if named in active:
-        return "active"
-    return "unknown"
-
-
-def _consistently_terminal(payload: Mapping[str, Any], *, named_class: str) -> bool:
-    """Same gate as control-core ``runtime_meta_is_consistently_terminal``.
-
-    An active named state keeps leftover ``exit_code`` / ``completed_at`` from
-    sealing finality. A coherent final name, explicit ``terminal``, or
-    ``liveness=terminal`` still resolves as terminal.
-    """
-    if named_class == "final":
-        return True
-    if named_class == "active":
-        return False
-    if str(payload.get("liveness") or "").strip() == "terminal":
-        return True
-    if payload.get("terminal") is True:
-        return True
-    return _has_terminal_residue(payload)
-
-
-def _observation_from_payload(
-    run_id: str,
-    payload_run: dict[str, Any] | None,
-    *,
-    reason: str,
-) -> dict[str, Any]:
-    """Legacy classifier retained for unit characterization only.
-
-    Production observe never calls this. Fallback is ``control-observe``
-    (``compute_view``) or an explicit ``control_core_observe_unavailable``
-    payload with no Python classification.
-    """
-    from .control_plane import ACTIVE_STATES, FINAL_STATES
-
-    payload = payload_run or {}
-    status, state, named = _named_lifecycle(payload)
-    named_cls = _named_class(named, active=ACTIVE_STATES, final=FINAL_STATES)
-    status_cls = (
-        _named_class(status, active=ACTIVE_STATES, final=FINAL_STATES)
-        if status
-        else named_cls
-    )
-    state_cls = (
-        _named_class(state, active=ACTIVE_STATES, final=FINAL_STATES)
-        if state
-        else named_cls
-    )
-    disagreement: list[str] = []
-    named_conflict = bool(status and state and status != state)
-    if named_conflict:
-        disagreement.append("conflicting_status_and_state")
-    class_conflict = named_conflict and {"final", "active"} <= {
-        status_cls,
-        state_cls,
-    }
-    persisted_truth = str(payload.get("process_truth") or "").strip()
-    persisted_worker = _optional_bool(payload.get("worker_alive"))
-    persisted_live = persisted_truth == "live" or persisted_worker is True
-    terminal = (
-        False
-        if class_conflict
-        else _consistently_terminal(payload, named_class=named_cls)
-    )
-    if terminal and persisted_live:
-        disagreement.append("terminal_state_with_live_worker")
-        terminal = False
-    if named_cls == "active" and (
-        _has_terminal_residue(payload) or payload.get("terminal") is True
-    ):
-        disagreement.append("conflicting_active_state_and_terminal_evidence")
-    if (
-        named_cls == "unknown"
-        and payload.get("terminal") is not True
-        and str(payload.get("liveness") or "").strip() != "terminal"
-    ):
-        disagreement.append("unknown_control_plane_state")
-    if terminal:
-        worker_alive: bool | None = False
-    elif persisted_truth == "live":
-        worker_alive = True
-    else:
-        worker_alive = persisted_worker
-    liveness = str(payload.get("liveness") or "").strip()
-    if terminal:
-        process_truth = "terminal"
-    elif persisted_truth in _KNOWN_PROCESS_TRUTH:
-        process_truth = persisted_truth
-    elif worker_alive is True:
-        process_truth = "live"
-    elif liveness == "pid_gone" or persisted_truth == "ghost":
-        process_truth = "ghost"
-    else:
-        process_truth = "unknown"
-    if (
-        not terminal
-        and liveness == "pid_alive"
-        and worker_alive is not True
-        and persisted_truth != "live"
-    ):
-        disagreement.append("persisted_pid_alive_without_current_proof")
-    writer_unavailable = reason not in _WRITER_OK_REASONS
-    if writer_unavailable:
-        found_currently_live = (not terminal) and (
-            persisted_truth == "live" or worker_alive is True
-        )
-        if not found_currently_live and not terminal:
-            disagreement.append("canonical_writer_revalidation_unavailable")
-    # Stable unique reasons; first occurrence wins.
-    seen: set[str] = set()
-    reasons: list[str] = []
-    for item in disagreement:
-        if item not in seen:
-            seen.add(item)
-            reasons.append(item)
-    return {
-        "schema": "vibecrafted.run-observation.v1",
-        "run_id": run_id,
-        "found": True,
-        "terminal": terminal,
-        "worker_alive": worker_alive,
-        "process_truth": process_truth,
-        "evidence_disagreement": bool(reasons),
-        "disagreement_reasons": reasons,
-        "run": payload_run,
-        "writer_revalidation": reason,
-        "source": "local_control_plane_fallback",
-    }
-
-
 def _control_observe_bin() -> Path | None:
     """Locate the control-core observe binary. Never a second classifier."""
     raw = str(os.environ.get("VIBECRAFTED_CONTROL_OBSERVE") or "").strip()
@@ -228,15 +67,16 @@ def _control_observe_bin() -> Path | None:
     root = str(os.environ.get("VIBECRAFTED_ROOT") or "").strip()
     if root:
         for profile in ("release", "debug"):
-            candidate = (
+            for candidate in (
+                Path(root) / "target" / profile / "control-observe",
                 Path(root)
                 / "vibecrafted-server"
                 / "target"
                 / profile
-                / "control-observe"
-            )
-            if candidate.is_file() and os.access(candidate, os.X_OK):
-                return candidate
+                / "control-observe",
+            ):
+                if candidate.is_file() and os.access(candidate, os.X_OK):
+                    return candidate
     return None
 
 
@@ -313,10 +153,10 @@ def _local_observation(run_id: str, *, reason: str) -> dict[str, Any] | None:
         ],
         "run": {
             "run_id": target,
-            "source": "control_core_observe_unavailable",
+            "source": "local_control_plane_fallback",
         },
         "writer_revalidation": reason,
-        "source": "control_core_observe_unavailable",
+        "source": "local_control_plane_fallback",
     }
 
 
@@ -377,7 +217,7 @@ def observe_run(run_id: str) -> dict[str, Any]:
             run_id, reason=f"local_fallback_after_server_error:{type(exc).__name__}"
         )
         if local is not None:
-            return _ensure_source(local, "control_core_observe_unavailable")
+            return _ensure_source(local, "local_control_plane_fallback")
         raise
     if not isinstance(payload, dict):
         raise ServerObservationError("vc-server observe omitted object")
