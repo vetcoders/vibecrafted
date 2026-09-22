@@ -445,6 +445,7 @@ mod tests {
             runs,
             events: Vec::new(),
             archived_run_ids: HashSet::new(),
+            usage: Default::default(),
         }
     }
 

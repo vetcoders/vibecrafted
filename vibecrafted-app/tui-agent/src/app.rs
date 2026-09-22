@@ -29,17 +29,25 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppTab {
     Monitor,
+    Usage,
     Dispatch,
     Controls,
     MissionControl,
 }
 
 impl AppTab {
-    pub const TITLES: [&'static str; 4] = ["Monitor", "Dispatch", "Controls", "Mission Control"];
+    pub const TITLES: [&'static str; 5] = [
+        "Monitor",
+        "Usage",
+        "Dispatch",
+        "Controls",
+        "Mission Control",
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Monitor => "Monitor",
+            Self::Usage => "Usage",
             Self::Dispatch => "Dispatch",
             Self::Controls => "Controls",
             Self::MissionControl => "Mission Control",
@@ -49,8 +57,9 @@ impl AppTab {
     pub fn from_index(index: usize) -> Self {
         match index % Self::TITLES.len() {
             0 => Self::Monitor,
-            1 => Self::Dispatch,
-            2 => Self::Controls,
+            1 => Self::Usage,
+            2 => Self::Dispatch,
+            3 => Self::Controls,
             _ => Self::MissionControl,
         }
     }
@@ -58,9 +67,10 @@ impl AppTab {
     pub fn index(self) -> usize {
         match self {
             Self::Monitor => 0,
-            Self::Dispatch => 1,
-            Self::Controls => 2,
-            Self::MissionControl => 3,
+            Self::Usage => 1,
+            Self::Dispatch => 2,
+            Self::Controls => 3,
+            Self::MissionControl => 4,
         }
     }
 }
@@ -1973,7 +1983,7 @@ impl App {
             .count()
     }
 
-    pub fn tab_labels(&self) -> [String; 4] {
+    pub fn tab_labels(&self) -> [String; 5] {
         let monitor = if self.search_query.is_empty() {
             format!("Monitor {} {}", self.queue_scope.label(), self.runs.len())
         } else {
@@ -1990,7 +2000,8 @@ impl App {
             self.mission_control.active_dispatches.len(),
             self.mission_control.action_queue.len()
         );
-        [monitor, dispatch, controls, mission]
+        let usage = format!("Usage {}", self.state.usage.runs.len());
+        [monitor, usage, dispatch, controls, mission]
     }
 
     pub fn deep_actions(&self) -> Vec<DeepAction> {

@@ -113,6 +113,11 @@ name = "tools_report_http"
 path = "tests/tools_report_http.rs"
 required-features = ["ssr"]
 
+[[test]]
+name = "usage_http"
+path = "tests/usage_http.rs"
+required-features = ["ssr"]
+
 [package.metadata.leptos]
 output-name = "vibecrafted-server-web"
 site-root = "target/site"

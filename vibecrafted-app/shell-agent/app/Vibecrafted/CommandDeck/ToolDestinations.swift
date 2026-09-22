@@ -88,6 +88,9 @@ struct ToolDestination: Identifiable, Equatable, Sendable {
 
   /// Every destination the App knows about, in menu order.
   static let catalog: [ToolDestination] = [
+    ToolDestination(
+      id: "usage", title: "Usage & Costs", symbol: "chart.xyaxis.line",
+      role: .tool, target: .runtimeRoute("/usage")),
     // The server answers this route with a Content-Security-Policy `sandbox`,
     // so the report runs with an opaque origin and no control-plane authority;
     // the App adds an ephemeral data store on top.

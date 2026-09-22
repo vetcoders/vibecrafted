@@ -1,3 +1,4 @@
+use crate::usage::UsageDashboard;
 use chrono::{DateTime, TimeZone, Utc};
 use control_core::{
     ControlPlane, Event as CanonicalEvent, RunStatus as CanonicalRunStatus, is_active_state,
@@ -21,6 +22,8 @@ pub struct ControlPlaneState {
     pub runs: Vec<RunSnapshot>,
     pub events: Vec<RunEvent>,
     pub archived_run_ids: HashSet<String>,
+    /// Read-only fold of `runtime_runs/*/meta.json`; receipts remain canonical.
+    pub usage: UsageDashboard,
 }
 
 impl ControlPlaneState {
@@ -31,6 +34,7 @@ impl ControlPlaneState {
         };
         let archived_run_ids = root.load_archived_run_ids()?;
         let retained_runs = root.load_runs()?;
+        let usage = UsageDashboard::load(root.as_path())?;
         let canonical =
             ControlPlane::from_control_plane_home(root.as_path()).compute_view(Utc::now());
         let canonical_runtime_authority = root.as_path().join("events.jsonl").is_file()
@@ -64,6 +68,7 @@ impl ControlPlaneState {
             runs,
             events,
             archived_run_ids,
+            usage,
         })
     }
 
@@ -74,6 +79,7 @@ impl ControlPlaneState {
             runs: Vec::new(),
             events: Vec::new(),
             archived_run_ids: HashSet::new(),
+            usage: UsageDashboard::default(),
         }
     }
 

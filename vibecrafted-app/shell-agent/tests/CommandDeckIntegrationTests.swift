@@ -271,6 +271,17 @@ struct CommandDeckIntegrationTests {
       throw Failure(message: "Loctree report claimed availability without a runtime")
     }
 
+    let usage = ToolDestination.named("usage")!
+    guard case .available(let usageURL, .runtime(let usageOrigin)) = usage.resolve(
+      in: context(endpoint: endpoint))
+    else { throw Failure(message: "Usage dashboard did not resolve against the connected runtime") }
+    try require(usageURL.host == endpoint.host && usageURL.port == endpoint.port
+      && usageURL.path == "/usage" && usageOrigin == WebRuntimeOrigin(url: endpoint)!,
+      "Usage dashboard route was not derived from the runtime endpoint")
+    guard case .unavailable = usage.resolve(in: context(endpoint: nil)) else {
+      throw Failure(message: "Usage dashboard claimed availability without a runtime")
+    }
+
     let dashboard = ToolDestination.named("aicx-dashboard")!
     guard case .unavailable(let reason) = dashboard.resolve(in: context(endpoint: endpoint)),
       reason.contains("/fixture/home/.aicx/aicx-dashboard.html"), reason.contains("aicx dashboard")
@@ -347,8 +358,8 @@ struct CommandDeckIntegrationTests {
       if case .unavailable = destination.target { return true }
       return false
     }, "A destination hardcodes a host or port, or is registered as permanently unavailable")
-    try require(report.isolatedContent && !dashboard.isolatedContent,
-      "Generated report must be isolated; the AICX dashboard is a plain local document")
+    try require(report.isolatedContent && !usage.isolatedContent && !dashboard.isolatedContent,
+      "Generated report must be isolated; trusted runtime and local dashboards keep their normal stores")
   }
 
   static func hasFixtureCookie(_ store: WKHTTPCookieStore) async -> Bool {

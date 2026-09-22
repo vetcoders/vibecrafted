@@ -29,6 +29,7 @@ revalidate qualified process identity; only that writer may issue a receipted
 | GET    | `/api/control/lifecycle`             | Lifecycle run summaries, newest-first.                                                                                |
 | GET    | `/api/control/lifecycle/{run_id}`    | Full nested lifecycle state with per-run and per-stage axes.                                                          |
 | GET    | `/api/control/events`                | Server-Sent Events stream of the control-plane event log.                                                             |
+| GET    | `/api/usage`                         | Read-only `vibecrafted.usage-report.v1` usage and cost projection.                                                    |
 
 Run payloads serialise the delivery-proof axes (`execution_state`,
 `proof_state`, `delivery_state`) and `seal` only when the snapshot or kernel
@@ -152,6 +153,23 @@ curl -s http://127.0.0.1:3024/api/control/lifecycle/life-ship-20260730-c3d4
 
 List responses carry a `count` and the resolved `control_plane` path, so you
 can verify which home the server is reading.
+
+## Usage and costs
+
+`GET /api/usage` reads canonical `runtime_runs/*/meta.json` records and returns
+token totals, costs grouped by unit, failures, and provider, agent, and model
+dimensions. Missing measurements remain explicit unknowns; USD, credits, and
+other provider units are never added together.
+
+Query parameters:
+
+- `window`: `24h` (default), `7d`, `30d`, or `all`;
+- `provider`: exact provider filter;
+- `agent`: exact agent filter;
+- `model`: exact model filter.
+
+The human dashboard is available at `/usage` and applies the same filters.
+Both surfaces are read-only and send `Cache-Control: no-store`.
 
 ## Event stream (SSE)
 

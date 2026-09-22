@@ -5,7 +5,7 @@ expression: buffer_text(&buffer)
 Vibecrafted operator  Console  no live runs loaded
 workspace: repo  |  active 0  stalled 0  |  scope: live  |  Mission Control
 ┌Surface───────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│ Monitor live 0 │ Dispatch workflow/claude │ Controls 4 │ Mission 2|4                                                 │
+│ Monitor live 0 │ Usage 0 │ Dispatch workflow/claude │ Controls 4 │ Mission 2|4                                       │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌ Active dispatches ───────────────────┐┌ History (30d) ───────────────────────┐┌ Mission posture ─────────────────────┐
 │2 running                             ││128 derived runs scanned              ││model parity 40/128                   │

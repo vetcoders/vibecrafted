@@ -1,0 +1,44 @@
+---
+source: tui-agent/tests/monitor_controls_snapshots.rs
+expression: text
+---
+Vibecrafted operator  Console  runs: 2 | active 1 | stalled 1
+workspace: vibecrafted  |  active 1  stalled 1  |  scope: live  |  Usage
+┌Surface───────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ Monitor live 2 │ Usage 3 │ Dispatch workflow/claude │ Controls 10 │ Mission 0|0                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌Usage telemetry · retained receipts───────────────────────────────────────────────────────────────────────────────────┐
+│3 runs   12,345 known tokens   2 token unknown                                                                        │
+│$0.3125 USD   7.00 credits   1 cost unknown                                                                           │
+│1 failures   canonical timestamps                                                                                     │
+│all retained · 2026-09-21T16:09 → 2026-09-21T16:12                                                                    │
+│                                                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌Recent runs · provider / model / usage / cost─────────────────────────────────────────────────────────────────────────┐
+│impl-usage  completed  2026-09-21T16:10                                                                               │
+│openai / codex / gpt-6  tokens 12,345  cost $0.3125 USD  failure none                                                 │
+│review-credit  failed  2026-09-21T16:12                                                                               │
+│google / agy / unknown  tokens unknown  cost 7.00 credits  failure quota_exhausted                                    │
+│legacy-unknown  completed  2026-09-21T16:09                                                                           │
+│moonshot / kimi / unknown  tokens unknown  cost unknown  failure none                                                 │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+Usage: canonical runtime receipts  r refresh  Tab next surface
+Global: q quit  r refresh  a cycle agent  v cycle runtime  y copy  Ctrl+L clear search  ? help
+state root: /fixture/state

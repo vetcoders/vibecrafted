@@ -399,6 +399,7 @@ pub fn hit_test(
                 None
             }
         }
+        AppTab::Usage => None,
         AppTab::Dispatch => {
             let layout = dispatch_layout(root.body);
             if let Some(index) = first_stat(&layout.stats, column, row) {

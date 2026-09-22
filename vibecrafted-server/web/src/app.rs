@@ -933,6 +933,7 @@ pub fn App() -> impl IntoView {
                 <Route path=path!("/sessions") view=SessionsPage />
                 <Route path=path!("/agents") view=AgentManagerPage />
                 <Route path=path!("/runs") view=RunsPage />
+                <Route path=path!("/usage") view=UsagePage />
                 <Route path=path!("/transcripts") view=TranscriptsPage />
                 <Route path=path!("/lifecycle") view=LifecyclePage />
                 <Route path=path!("/activity") view=ActivityPage />
@@ -944,6 +945,154 @@ pub fn App() -> impl IntoView {
             </Routes>
         </Router>
     }
+}
+
+#[component]
+pub fn UsagePage() -> impl IntoView {
+    view! {
+        <Title text="Usage - vc-server" />
+        <Meta name="description" content="Provider-neutral Vibecrafted token and cost telemetry." />
+        <ServerFrame active=ServerSection::Usage status="usage telemetry".to_string()>
+            <div class="server-console-shell route-page-shell usage-dashboard" data-usage-dashboard>
+                {route_header(
+                    "Telemetry",
+                    "Cost & usage",
+                    "Canonical per-run usage and cost from runtime metadata. Missing measurements remain unknown; currencies and provider credits are never combined.",
+                )}
+                <form id="usage-filter-form" class="usage-filter-bar" aria-label="Usage filters">
+                    <label><span>"Window"</span><select id="usage-window" name="window">
+                        <option value="24h">"24 hours"</option>
+                        <option value="7d">"7 days"</option>
+                        <option value="30d">"30 days"</option>
+                        <option value="all">"All recorded"</option>
+                    </select></label>
+                    <label><span>"Provider"</span><input id="usage-provider" name="provider" maxlength="128" placeholder="all" /></label>
+                    <label><span>"Agent"</span><input id="usage-agent" name="agent" maxlength="128" placeholder="all" /></label>
+                    <label><span>"Model"</span><input id="usage-model" name="model" maxlength="128" placeholder="all" /></label>
+                    <button type="submit" class="server-console-link server-console-link-primary">"Apply"</button>
+                </form>
+                <p id="usage-status" class="control-plane-meta" role="status">"Loading canonical telemetry…"</p>
+                <dl class="usage-summary-grid" aria-label="Usage totals">
+                    <div><dt>"Runs"</dt><dd id="usage-total-runs">"—"</dd></div>
+                    <div><dt>"Failed"</dt><dd id="usage-total-failed">"—"</dd></div>
+                    <div><dt>"Known tokens"</dt><dd id="usage-total-tokens">"—"</dd></div>
+                    <div><dt>"Token unknowns"</dt><dd id="usage-total-token-unknown">"—"</dd></div>
+                    <div class="usage-summary-cost"><dt>"Cost by unit"</dt><dd id="usage-total-cost">"—"</dd></div>
+                    <div><dt>"Cost unknowns"</dt><dd id="usage-total-cost-unknown">"—"</dd></div>
+                </dl>
+                <section class="usage-dimensions" aria-label="Usage dimensions">
+                    <div class="usage-dimension-card"><h2>"Providers"</h2><div id="usage-providers" class="usage-dimension-list"></div></div>
+                    <div class="usage-dimension-card"><h2>"Agents"</h2><div id="usage-agents" class="usage-dimension-list"></div></div>
+                    <div class="usage-dimension-card"><h2>"Models"</h2><div id="usage-models" class="usage-dimension-list"></div></div>
+                </section>
+                <section class="control-panel control-panel-wide usage-runs-panel" aria-label="Recent usage runs">
+                    <div class="control-panel-head"><h2>"Recent runs"</h2><span id="usage-run-count">"0"</span></div>
+                    <div class="usage-table-scroll">
+                        <table class="usage-runs-table">
+                            <thead><tr><th>"Run"</th><th>"Provider / agent"</th><th>"Model"</th><th>"Tokens"</th><th>"Cost"</th><th>"State"</th></tr></thead>
+                            <tbody id="usage-runs-body"></tbody>
+                        </table>
+                    </div>
+                    <p id="usage-empty" class="control-empty" hidden>"No canonical runtime runs match this window and filter."</p>
+                </section>
+                <p class="control-plane-meta"><span id="usage-schema">"vibecrafted.usage-report.v1"</span><span id="usage-generated"></span></p>
+                <script inner_html=usage_dashboard_script()></script>
+            </div>
+        </ServerFrame>
+    }
+}
+
+fn usage_dashboard_script() -> &'static str {
+    r#"(() => {
+  const root = document.querySelector('[data-usage-dashboard]');
+  if (!root) return;
+  const form = document.getElementById('usage-filter-form');
+  const status = document.getElementById('usage-status');
+  const body = document.getElementById('usage-runs-body');
+  const empty = document.getElementById('usage-empty');
+  const byId = (id) => document.getElementById(id);
+  const number = new Intl.NumberFormat();
+  const params = new URLSearchParams(location.search);
+  for (const key of ['window', 'provider', 'agent', 'model']) {
+    const field = byId('usage-' + key);
+    if (field && params.has(key)) field.value = params.get(key);
+  }
+  const unknown = (value) => value && typeof value === 'object' && value.value === 'unknown';
+  const label = (value) => unknown(value) || value === null || value === '' || value === undefined ? 'unknown' : String(value);
+  const reason = (value) => unknown(value) && value.reason ? value.reason : '';
+  const costText = (cost) => {
+    if (!cost || unknown(cost.amount)) return 'unknown';
+    return label(cost.amount) + ' ' + (cost.unit || cost.currency || 'USD');
+  };
+  const costsText = (values) => {
+    const entries = Object.entries(values || {});
+    return entries.length ? entries.map(([unit, amount]) => label(amount) + ' ' + unit).join(' · ') : 'none known';
+  };
+  const set = (id, value) => { const node = byId(id); if (node) node.textContent = value; };
+  const renderDimensions = (id, values) => {
+    const target = byId(id);
+    target.replaceChildren();
+    if (!values || !values.length) {
+      const p = document.createElement('p'); p.className = 'control-empty'; p.textContent = 'No measured runs.'; target.append(p); return;
+    }
+    for (const item of values) {
+      const row = document.createElement('div'); row.className = 'usage-dimension-row';
+      const name = document.createElement('strong'); name.textContent = item.name;
+      const detail = document.createElement('span'); detail.textContent = item.runs + ' runs · ' + number.format(item.tokens_total_known) + ' tokens · ' + costsText(item.cost_by_unit);
+      row.append(name, detail); target.append(row);
+    }
+  };
+  const render = (report) => {
+    const totals = report.totals || {};
+    set('usage-total-runs', number.format(totals.runs || 0));
+    set('usage-total-failed', number.format(totals.runs_failed || 0));
+    set('usage-total-tokens', number.format(totals.tokens_total_known || 0));
+    set('usage-total-token-unknown', number.format(totals.runs_tokens_unknown || 0));
+    set('usage-total-cost', costsText(totals.cost_by_unit));
+    set('usage-total-cost-unknown', number.format(totals.runs_cost_unknown || 0));
+    renderDimensions('usage-providers', report.dimensions && report.dimensions.providers);
+    renderDimensions('usage-agents', report.dimensions && report.dimensions.agents);
+    renderDimensions('usage-models', report.dimensions && report.dimensions.models);
+    body.replaceChildren();
+    const runs = report.runs || [];
+    for (const run of runs) {
+      const tr = document.createElement('tr');
+      const runCell = document.createElement('td');
+      const link = document.createElement('a'); link.href = '/run/' + encodeURIComponent(run.run_id); link.textContent = run.run_id; link.className = 'control-run-open';
+      const stamp = document.createElement('small'); stamp.textContent = run.recorded_at || ''; runCell.append(link, stamp);
+      const identity = document.createElement('td'); identity.textContent = label(run.provider) + ' / ' + label(run.agent);
+      const model = document.createElement('td'); model.textContent = label(run.model); if (reason(run.model)) model.title = reason(run.model);
+      const tokens = document.createElement('td'); tokens.textContent = label(run.tokens && run.tokens.tokens_total); if (run.tokens && reason(run.tokens.tokens_total)) tokens.title = reason(run.tokens.tokens_total);
+      const cost = document.createElement('td'); cost.textContent = costText(run.cost); if (run.cost && reason(run.cost.amount)) cost.title = reason(run.cost.amount);
+      const state = document.createElement('td'); state.textContent = run.failure_kind ? run.status + ' · ' + run.failure_kind : run.status;
+      if (run.failure) state.title = run.failure;
+      tr.append(runCell, identity, model, tokens, cost, state); body.append(tr);
+    }
+    empty.hidden = runs.length !== 0;
+    set('usage-run-count', String(runs.length));
+    set('usage-schema', report.schema || 'unknown schema');
+    set('usage-generated', report.generated_at ? 'Generated ' + report.generated_at : '');
+    status.textContent = runs.length ? 'Live read-only projection · ' + runs.length + ' matching run(s)' : 'Live read-only projection · empty window';
+  };
+  const load = async () => {
+    status.textContent = 'Loading canonical telemetry…';
+    const query = new URLSearchParams(new FormData(form));
+    for (const [key, value] of [...query.entries()]) if (!String(value).trim()) query.delete(key);
+    try {
+      const response = await fetch('/api/usage?' + query.toString(), { credentials: 'same-origin', cache: 'no-store' });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || ('HTTP ' + response.status));
+      history.replaceState(null, '', '/usage?' + query.toString());
+      render(payload);
+    } catch (error) {
+      status.textContent = 'Usage telemetry unavailable: ' + error.message;
+      empty.hidden = false;
+      empty.textContent = 'The canonical usage projection could not be read.';
+    }
+  };
+  form.addEventListener('submit', (event) => { event.preventDefault(); load(); });
+  load();
+})();"#
 }
 
 /// Client behaviour of the AICX search page. Injected through `inner_html`
@@ -1848,7 +1997,7 @@ mod tests {
     use super::{
         ActivityPage, AicxPage, ConsolePage, DashboardData, DashboardRun, DashboardSession,
         DashboardSessionRun, FramePage, LifecyclePage, RunsPage, SessionsPage, StructurePage,
-        TranscriptsPage, WorkspacesPage, aicx_page_script, console_dashboard,
+        TranscriptsPage, UsagePage, WorkspacesPage, aicx_page_script, console_dashboard,
         decode_dashboard_embed, encode_dashboard_embed, git_repo_name, load_dashboard_data_from,
         operator_active_runs, run_cards, runs_dashboard, session_cards, unique_runtime_labels,
         workspaces_dashboard,
@@ -2386,13 +2535,14 @@ mod tests {
     #[test]
     fn transcripts_and_frame_pages_name_their_doors() {
         let owner = Owner::new();
-        let (transcripts, frame, aicx) = owner.with(|| {
+        let (transcripts, frame, aicx, usage) = owner.with(|| {
             leptos_meta::provide_meta_context();
             provide_theme_context();
             (
                 TranscriptsPage().to_html(),
                 FramePage().to_html(),
                 AicxPage().to_html(),
+                UsagePage().to_html(),
             )
         });
         assert!(transcripts.contains("id=\"transcript-search-form\""));
@@ -2411,6 +2561,12 @@ mod tests {
         assert!(aicx.contains("/api/aicx/search"));
         assert!(aicx.contains("location.search"));
         assert!(aicx.contains("Search AICX"));
+        assert!(usage.contains("Cost &amp; usage"));
+        assert!(usage.contains("id=\"usage-filter-form\""));
+        assert!(usage.contains("/api/usage?"));
+        assert!(usage.contains("vibecrafted.usage-report.v1"));
+        assert!(usage.contains("No canonical runtime runs match this window and filter."));
+        assert!(!usage.contains("innerHTML"));
     }
 
     #[test]

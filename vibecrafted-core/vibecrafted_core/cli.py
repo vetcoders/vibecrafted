@@ -4,7 +4,6 @@ Python launch/observe/await surface or falls back to the legacy bash deck."""
 from __future__ import annotations
 
 import argparse
-import datetime as dt
 import json
 import os
 import stat
@@ -19,7 +18,6 @@ from . import doctor as doctor_module
 from .agent_stream import ANSI_PATTERN, AgentStreamParser, resolve_default_model
 from .control_plane import (
     RunNotResolved,
-    control_plane_home,
     lookup_run,
     resolve_run,
     sync_state,
@@ -46,6 +44,7 @@ from .server_observation import (
     resolve_run_id as resolve_server_run_id,
 )
 from .telemetry import is_unknown, run_telemetry_from_meta, unknown_reason
+from .usage_reporting import UsageReportQueryError, build_usage_report
 from .workflow import (
     classify_resume_identity,
     find_run_for_identity_token,
@@ -1857,87 +1856,6 @@ def _agent_observe(agent: str, argv: Sequence[str]) -> int:
     )
 
 
-_SINCE_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
-USAGE_REPORT_SCHEMA = "vibecrafted.usage-report.v1"
-
-
-def _since_seconds(value: str) -> int | None:
-    """Seconds in a ``<N><s|m|h|d|w>`` window, or None when unparseable."""
-    text = str(value or "").strip().lower()
-    if len(text) < 2 or text[-1] not in _SINCE_UNITS or not text[:-1].isdigit():
-        return None
-    return int(text[:-1]) * _SINCE_UNITS[text[-1]]
-
-
-def _epoch(stamp: object) -> float | None:
-    """POSIX seconds of an ISO-8601 meta timestamp, or None."""
-    try:
-        parsed = dt.datetime.fromisoformat(str(stamp or "").strip())
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=dt.timezone.utc)
-    return parsed.timestamp()
-
-
-def _usage_row(meta: dict[str, Any], transcript: Path | None) -> dict[str, Any]:
-    """One ``vibecrafted usage`` row: tokens, cost and failure cause of a run."""
-    telemetry = run_telemetry_from_meta(meta, transcript=transcript)
-    failure = telemetry.get("failure")
-    return {
-        "run_id": telemetry["run_id"],
-        "agent": telemetry["agent"],
-        "model": telemetry["model"],
-        "status": telemetry["status"],
-        "exit_code": telemetry["exit_code"],
-        "tokens": telemetry["usage"],
-        "cost": telemetry["cost"],
-        "failure_kind": failure.get("kind") if isinstance(failure, dict) else None,
-        "failure": failure.get("summary") if isinstance(failure, dict) else None,
-        "provider_session_id": telemetry["provider_session_id"],
-        "telemetry_source": telemetry["telemetry_source"],
-    }
-
-
-def _load_meta(path: Path) -> dict[str, Any]:
-    """A run's meta.json as a dict ({} when missing or unreadable)."""
-    try:
-        loaded = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return loaded if isinstance(loaded, dict) else {}
-
-
-def _usage_totals(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
-    """Known-token sum and cost per currency/unit; unknowns are counted, not zeroed.
-
-    Credits and dollars never share a field: each unit keeps its own sum.
-    """
-    tokens_known = 0
-    tokens_unknown = 0
-    cost_unknown = 0
-    by_unit: dict[str, float] = {}
-    for row in rows:
-        total = row["tokens"].get("tokens_total")
-        if isinstance(total, int) and not isinstance(total, bool):
-            tokens_known += total
-        else:
-            tokens_unknown += 1
-        amount = row["cost"].get("amount")
-        if isinstance(amount, (int, float)) and not isinstance(amount, bool):
-            unit = str(row["cost"].get("unit") or row["cost"].get("currency") or "USD")
-            by_unit[unit] = round(by_unit.get(unit, 0.0) + float(amount), 6)
-        else:
-            cost_unknown += 1
-    return {
-        "runs": len(rows),
-        "tokens_total_known": tokens_known,
-        "runs_tokens_unknown": tokens_unknown,
-        "cost_by_unit": dict(sorted(by_unit.items())),
-        "runs_cost_unknown": cost_unknown,
-    }
-
-
 def _usage_cell(value: object) -> str:
     """Compact table cell: a number/string, or "unknown"."""
     if is_unknown(value) or value in (None, ""):
@@ -1962,49 +1880,15 @@ def _usage_main(argv: Sequence[str]) -> int:
         args = parser.parse_args(list(argv))
     except SystemExit as exc:
         return int(exc.code or 0)
-    run_ids = sorted({str(run_id).strip() for run_id in args.run_id if run_id})
-    if run_ids and args.since:
-        print("usage: pass --run-id or --since, not both", file=sys.stderr)
+    try:
+        report = build_usage_report(run_ids=args.run_id, since=args.since)
+    except UsageReportQueryError as exc:
+        print(f"usage: {exc}", file=sys.stderr)
         return 2
-    since = "" if run_ids else (args.since or "24h")
-    window = _since_seconds(since) if since else None
-    if since and window is None:
-        print(
-            f"usage: --since must look like 30m, 24h or 7d (got {since!r})",
-            file=sys.stderr,
-        )
-        return 2
-
-    rows: list[dict[str, Any]] = []
-    if run_ids:
-        for run_id in run_ids:
-            try:
-                resolved = resolve_run(run_id)
-            except (RunNotResolved, ValueError) as exc:
-                print(f"usage: {exc}", file=sys.stderr)
-                return 1
-            meta = _load_meta(resolved.meta) if resolved.meta is not None else {}
-            meta.setdefault("run_id", run_id)
-            rows.append(_usage_row(meta, resolved.transcript))
-    else:
-        cutoff = time.time() - float(window or 0)
-        for meta_path in sorted(
-            (control_plane_home() / "runtime_runs").glob("*/meta.json")
-        ):
-            meta = _load_meta(meta_path)
-            stamp = _epoch(meta.get("completed_at") or meta.get("updated_at"))
-            if stamp is None or stamp < cutoff:
-                continue
-            meta.setdefault("run_id", meta_path.parent.name)
-            transcript = meta_path.parent / "transcript.log"
-            rows.append(_usage_row(meta, transcript if transcript.is_file() else None))
-    rows.sort(key=lambda row: str(row["run_id"]))
-    report = {
-        "schema": USAGE_REPORT_SCHEMA,
-        "filter": {"run_ids": run_ids} if run_ids else {"since": since},
-        "runs": rows,
-        "totals": _usage_totals(rows),
-    }
+    except (RunNotResolved, ValueError) as exc:
+        print(f"usage: {exc}", file=sys.stderr)
+        return 1
+    rows = report["runs"]
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
         return 0

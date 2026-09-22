@@ -61,6 +61,8 @@ mod events_sse;
 mod observability;
 #[cfg(feature = "ssr")]
 mod run_observation;
+#[cfg(feature = "ssr")]
+mod usage;
 
 #[cfg(feature = "ssr")]
 pub mod api {
@@ -84,6 +86,7 @@ pub mod api {
     use super::events_sse::events_sse;
     use super::observability::observability;
     use super::run_observation::{await_run as await_run_observation, observe as observe_run};
+    use super::usage::usage;
 
     const STATE_CACHE_TTL: Duration = Duration::from_secs(15);
 
@@ -118,6 +121,7 @@ pub mod api {
             .route("/api/control/events", get(events_sse))
             .route("/api/control/caretaker", get(caretaker))
             .route("/api/control/observability", get(observability))
+            .route("/api/usage", get(usage))
     }
 
     /// Cheap liveness/readiness contract for the local process supervisor.

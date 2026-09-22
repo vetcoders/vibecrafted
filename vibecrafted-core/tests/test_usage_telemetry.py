@@ -15,7 +15,7 @@ import shutil
 from pathlib import Path
 
 import pytest
-from vibecrafted_core import cli, runtime_receipt, spawn, telemetry
+from vibecrafted_core import cli, runtime_receipt, spawn, telemetry, usage_reporting
 from vibecrafted_core.agent_stream import AgentStreamParser
 from vibecrafted_core.control_plane import control_plane_home
 from vibecrafted_core.report_contract import parse_report_text
@@ -487,6 +487,101 @@ def _usage_json(capsys: pytest.CaptureFixture, *argv: str) -> tuple[str, dict]:
     assert cli.main(["usage", *argv, "--json"]) == 0
     raw = capsys.readouterr().out
     return raw, json.loads(raw)
+
+
+def test_usage_report_builder_is_reusable_without_cli() -> None:
+    for run_id in (QUOTA_RUN, COMPLETED_RUN):
+        _install_fixture_run(run_id)
+
+    report = usage_reporting.build_usage_report(
+        run_ids=(COMPLETED_RUN, QUOTA_RUN, COMPLETED_RUN)
+    )
+
+    assert report["schema"] == usage_reporting.USAGE_REPORT_SCHEMA
+    assert report["filter"] == {"run_ids": [QUOTA_RUN, COMPLETED_RUN]}
+    assert [row["run_id"] for row in report["runs"]] == [
+        QUOTA_RUN,
+        COMPLETED_RUN,
+    ]
+    assert [row["provider"] for row in report["runs"]] == ["kimi", "kimi"]
+    assert report["totals"]["runs_tokens_unknown"] == 2
+
+
+def test_usage_report_builder_rejects_conflicting_filters() -> None:
+    with pytest.raises(
+        usage_reporting.UsageReportQueryError,
+        match="pass --run-id or --since, not both",
+    ):
+        usage_reporting.build_usage_report(run_ids=(QUOTA_RUN,), since="1h")
+
+
+def test_usage_report_accepts_explicit_external_cost_adapter() -> None:
+    _install_fixture_run(QUOTA_RUN)
+
+    class FixtureCostAdapter:
+        adapter_id = "fixture-cost"
+
+        def cost_for_run(self, **_context: object) -> dict[str, object]:
+            return {
+                "amount": 3.25,
+                "unit": "credits",
+                "source": "external:fixture-cost",
+            }
+
+    report = usage_reporting.build_usage_report(
+        run_ids=(QUOTA_RUN,), cost_adapters=(FixtureCostAdapter(),)
+    )
+
+    assert report["runs"][0]["cost"] == {
+        "amount": 3.25,
+        "unit": "credits",
+        "source": "external:fixture-cost",
+    }
+    assert report["totals"]["cost_by_unit"] == {"credits": 3.25}
+    assert report["totals"]["runs_cost_unknown"] == 0
+
+
+def test_usage_report_never_overrides_provider_reported_cost() -> None:
+    run_id = "provider-cost-wins"
+    run_dir = _runtime_runs() / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "meta.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "agent": "codex",
+                "status": "completed",
+                "exit_code": 0,
+                "usage": telemetry.usage_record(
+                    1,
+                    tokens_input=10,
+                    tokens_cached_input=0,
+                    tokens_cache_write=None,
+                    tokens_output=5,
+                    source="provider_stream",
+                ).as_dict(),
+                "cost": {
+                    "amount": 0.125,
+                    "currency": "USD",
+                    "source": "provider_reported",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class MustNotRunAdapter:
+        adapter_id = "must-not-run"
+
+        def cost_for_run(self, **_context: object) -> dict[str, object]:
+            raise AssertionError("provider-reported cost must win before adapters")
+
+    report = usage_reporting.build_usage_report(
+        run_ids=(run_id,), cost_adapters=(MustNotRunAdapter(),)
+    )
+
+    assert report["runs"][0]["cost"]["amount"] == 0.125
+    assert report["runs"][0]["cost"]["source"] == "provider_reported"
 
 
 def test_usage_json_for_the_two_fixture_runs_is_deterministic(
