@@ -532,6 +532,161 @@ enum InputOutcome {
     TerminalReturned,
 }
 
+fn clamp_home_selection(app: &mut App) {
+    let len = app.home_rows().len();
+    app.observe.home.selected = app.observe.home.selected.min(len.saturating_sub(1));
+}
+
+fn resume_home_target(app: &mut App, target: &str) -> anyhow::Result<InputOutcome> {
+    let row = match app.select_home_target(target) {
+        Ok(row) => row,
+        Err(reason) => {
+            app.show_error("resume unavailable", vec![reason]);
+            return Ok(InputOutcome::Handled);
+        }
+    };
+    let command = match app.home_resume_command(&row.run_id) {
+        Ok(command) => command,
+        Err(reason) => {
+            app.show_error("resume unavailable", vec![reason]);
+            return Ok(InputOutcome::Handled);
+        }
+    };
+    let summary = command.command_line();
+    match suspend_and_run(&command)? {
+        Err(error) => app.show_error("resume failed", error.detail_lines(summary)),
+        Ok(()) => {
+            app.push_launch_history(summary.clone());
+            app.append_status(format!("ran: {summary}"));
+            app.request_full_refresh();
+        }
+    }
+    Ok(InputOutcome::TerminalReturned)
+}
+
+fn submit_home_input(app: &mut App) -> anyhow::Result<InputOutcome> {
+    let input = app.observe.home.input.trim().to_string();
+    if input.is_empty() {
+        app.open_selected_home_row();
+        return Ok(InputOutcome::Handled);
+    }
+    if let Some(query) = input.strip_prefix('/') {
+        app.append_status(format!(
+            "filter /{} · {} operational run(s)",
+            query,
+            app.home_rows().len()
+        ));
+        return Ok(InputOutcome::Handled);
+    }
+    let Some(command) = input.strip_prefix('!') else {
+        app.show_error(
+            "ZEN input",
+            vec!["search starts with /; commands start with !".to_string()],
+        );
+        return Ok(InputOutcome::Handled);
+    };
+    let mut words = command.split_whitespace();
+    let verb = words.next().unwrap_or_default();
+    let target = words.next().unwrap_or_default();
+    if words.next().is_some() {
+        app.show_error(
+            "ZEN command",
+            vec!["expected one run id or prefix".to_string()],
+        );
+        return Ok(InputOutcome::Handled);
+    }
+    match verb {
+        "observe" => match app.select_home_target(target) {
+            Ok(_) => {
+                app.observe.home.input.clear();
+                app.open_selected_home_row();
+                Ok(InputOutcome::Handled)
+            }
+            Err(reason) => {
+                app.show_error("observe unavailable", vec![reason]);
+                Ok(InputOutcome::Handled)
+            }
+        },
+        "resume" => {
+            app.observe.home.input.clear();
+            resume_home_target(app, target)
+        }
+        _ => {
+            app.show_error(
+                "unknown ZEN command",
+                vec![format!(
+                    "!{verb} is not available; use !observe <run> or !resume <run>"
+                )],
+            );
+            Ok(InputOutcome::Handled)
+        }
+    }
+}
+
+fn handle_home_landing_key(app: &mut App, key: KeyEvent) -> anyhow::Result<Option<InputOutcome>> {
+    if app.focus != LaunchFocus::Browse
+        || !app.config.view.is_home()
+        || app.observe.home.surface != crate::home::HomeSurface::Landing
+    {
+        return Ok(None);
+    }
+    let input_is_empty = app.observe.home.input.is_empty();
+    let outcome = match key.code {
+        KeyCode::Up => {
+            app.move_home_selection(-1);
+            InputOutcome::Handled
+        }
+        KeyCode::Down => {
+            app.move_home_selection(1);
+            InputOutcome::Handled
+        }
+        KeyCode::Tab | KeyCode::BackTab if input_is_empty => {
+            app.open_home_panels();
+            InputOutcome::Handled
+        }
+        KeyCode::Char('f') if input_is_empty => {
+            app.toggle_home_scope();
+            InputOutcome::Handled
+        }
+        KeyCode::Char('r') if input_is_empty => resume_home_target(app, "")?,
+        KeyCode::Char('?') if input_is_empty => {
+            app.focus = LaunchFocus::Help;
+            InputOutcome::Handled
+        }
+        KeyCode::Char('q') if input_is_empty => InputOutcome::Quit,
+        KeyCode::Esc if input_is_empty => InputOutcome::Quit,
+        KeyCode::Esc => {
+            app.observe.home.input.clear();
+            clamp_home_selection(app);
+            app.append_status("ZEN input cleared");
+            InputOutcome::Handled
+        }
+        KeyCode::Backspace => {
+            app.observe.home.input.pop();
+            clamp_home_selection(app);
+            InputOutcome::Handled
+        }
+        KeyCode::Enter => submit_home_input(app)?,
+        KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.observe.home.input.clear();
+            clamp_home_selection(app);
+            app.append_status("ZEN filter cleared");
+            InputOutcome::Handled
+        }
+        KeyCode::Char(ch)
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            app.observe.home.input.push(ch);
+            clamp_home_selection(app);
+            InputOutcome::Handled
+        }
+        _ => InputOutcome::Handled,
+    };
+    Ok(Some(outcome))
+}
+
 fn handle_key(
     app: &mut App,
     key: KeyEvent,
@@ -539,6 +694,9 @@ fn handle_key(
 ) -> anyhow::Result<InputOutcome> {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         return Ok(InputOutcome::Quit);
+    }
+    if let Some(outcome) = handle_home_landing_key(app, key)? {
+        return Ok(outcome);
     }
     let mut outcome = InputOutcome::Handled;
 
@@ -686,7 +844,7 @@ fn handle_key(
             KeyCode::Char('q') => return Ok(InputOutcome::Quit),
             KeyCode::Esc
                 if app.config.view.is_home()
-                    && app.observe.home.surface == crate::home::HomeSurface::Conversation =>
+                    && app.observe.home.surface != crate::home::HomeSurface::Landing =>
             {
                 app.return_home();
             }
@@ -777,7 +935,12 @@ fn handle_key(
                 app.dispatch_selected = DispatchFocus::Model as usize;
                 app.focus = LaunchFocus::EditModel;
             }
-            KeyCode::Char('f') if app.config.view.is_home() => app.toggle_home_scope(),
+            KeyCode::Char('f')
+                if app.config.view.is_home()
+                    && app.observe.home.surface != crate::home::HomeSurface::Panels =>
+            {
+                app.toggle_home_scope()
+            }
             KeyCode::Char('f') => app.toggle_filter(),
             KeyCode::Char('H') if app.config.view.is_home() => app.return_home(),
             KeyCode::Char('o')
@@ -845,7 +1008,10 @@ fn handle_key(
             }
             KeyCode::Char('g') => app.begin_repo_edit(),
             KeyCode::Enter => match app.active_tab() {
-                AppTab::Monitor if app.config.view.is_home() => {
+                AppTab::Monitor
+                    if app.config.view.is_home()
+                        && app.observe.home.surface != crate::home::HomeSurface::Panels =>
+                {
                     if app.observe.home.surface == crate::home::HomeSurface::Landing {
                         app.open_selected_home_row();
                     }
@@ -924,10 +1090,17 @@ fn apply_mouse(
     }
     let mux_height = crate::layout::mux_panel_height(app.mux_status_lines().len());
     let polarize_height = crate::layout::polarize_panel_height(app.polarize_status_lines().len());
+    let layout_view = if app.config.view.is_home()
+        && app.observe.home.surface == crate::home::HomeSurface::Panels
+    {
+        crate::observe::ConsoleView::Full
+    } else {
+        app.config.view
+    };
     let Some(hit) = crate::layout::hit_test(
         area,
         app.active_tab(),
-        app.config.view,
+        layout_view,
         mux_height,
         polarize_height,
         mouse.column,
@@ -1054,7 +1227,9 @@ fn pane_rect(
         PaneId, controls_layout, dispatch_layout, mission_layout, monitor_layout, mux_panel_height,
         observe_layout, polarize_panel_height, root_layout,
     };
-    let body = if app.config.view.is_home() {
+    let body = if app.config.view.is_home()
+        && app.observe.home.surface != crate::home::HomeSurface::Panels
+    {
         crate::layout::home_root_layout(area).body
     } else {
         root_layout(area).body
@@ -1705,9 +1880,9 @@ mod tests {
     }
 
     #[test]
-    fn handle_key_home_opens_existing_panel_without_launch_and_returns() {
+    fn handle_key_home_observes_rows_with_or_without_a_panel_and_returns() {
         let mut app = sample_app();
-        app.config.view = crate::observe::ConsoleView::Home;
+        app.config.view = crate::observe::ConsoleView::HomeAttention;
         app.state.runs = vec![sample_run("work-1", "claude", "pane-2").snapshot, {
             let mut missing = sample_run("ask-beta", "grok", "").snapshot;
             missing.operator_session = None;
@@ -1730,7 +1905,7 @@ mod tests {
             app.observe.home.surface,
             crate::home::HomeSurface::Conversation
         );
-        assert!(app.status_line.contains("navigate existing panel pane-2"));
+        assert!(app.status_line.contains("panel pane-2 available"));
         assert!(app.status_line.contains("no launch"));
         assert!(rx.try_recv().is_err(), "Home must not enqueue a launch");
 
@@ -1745,9 +1920,89 @@ mod tests {
             .expect("missing-panel row");
         app.observe.home.selected = missing_at;
         handle_key(&mut app, key(KeyCode::Enter), &tx).unwrap();
-        assert_eq!(app.focus, LaunchFocus::Error);
-        assert!(app.error_title.contains("no existing panel"));
+        assert_eq!(
+            app.observe.home.surface,
+            crate::home::HomeSurface::Conversation
+        );
+        assert_eq!(
+            app.observe.home.conversation_run_id.as_deref(),
+            Some("ask-beta")
+        );
+        assert!(app.status_line.contains("no panel route yet"));
         assert!(rx.try_recv().is_err(), "missing panel must not launch");
+    }
+
+    #[test]
+    fn zen_input_filters_and_bang_observe_selects_a_run() {
+        let mut app = sample_app();
+        app.config.view = crate::observe::ConsoleView::HomeAttention;
+        app.state.runs = vec![
+            sample_run("run-codex", "codex", "pane-codex").snapshot,
+            sample_run("run-kimi", "kimi", "pane-kimi").snapshot,
+        ];
+        app.state.retained_runs = app.state.runs.clone();
+        let (tx, _rx) = std::sync::mpsc::channel::<BackgroundMessage>();
+
+        for ch in "/kimi".chars() {
+            handle_key(&mut app, key(KeyCode::Char(ch)), &tx).unwrap();
+        }
+        assert_eq!(app.observe.home.input, "/kimi");
+        assert_eq!(app.home_rows().len(), 1);
+        assert_eq!(app.home_rows()[0].run_id, "run-kimi");
+
+        handle_key(&mut app, key(KeyCode::Esc), &tx).unwrap();
+        assert!(app.observe.home.input.is_empty());
+        for ch in "!observe run-codex".chars() {
+            handle_key(&mut app, key(KeyCode::Char(ch)), &tx).unwrap();
+        }
+        handle_key(&mut app, key(KeyCode::Enter), &tx).unwrap();
+        assert_eq!(
+            app.observe.home.surface,
+            crate::home::HomeSurface::Conversation
+        );
+        assert_eq!(
+            app.observe.home.conversation_run_id.as_deref(),
+            Some("run-codex")
+        );
+        assert!(app.observe.home.input.is_empty());
+    }
+
+    #[test]
+    fn zen_resume_uses_the_canonical_launcher_contract() {
+        let mut app = sample_app();
+        app.config.view = crate::observe::ConsoleView::Home;
+        app.state.runs = vec![sample_run("run-1", "codex", "pane-1").snapshot];
+        let command = app.home_resume_command("run-1").unwrap();
+        assert_eq!(
+            command.program,
+            std::path::PathBuf::from("/usr/bin/vibecrafted")
+        );
+        assert_eq!(
+            command
+                .args
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            ["resume", "codex", "--session", "sess-run-1"]
+        );
+    }
+
+    #[test]
+    fn zen_tab_opens_existing_console_at_all_seven_mission_panels() {
+        let mut app = sample_app();
+        app.config.view = crate::observe::ConsoleView::Home;
+        let (tx, _rx) = std::sync::mpsc::channel::<BackgroundMessage>();
+        handle_key(&mut app, key(KeyCode::Tab), &tx).unwrap();
+        assert_eq!(app.observe.home.surface, crate::home::HomeSurface::Panels);
+        assert_eq!(app.active_tab(), AppTab::MissionControl);
+        assert_eq!(
+            crate::layout::mission_layout(ratatui::layout::Rect::new(0, 0, 120, 35))
+                .panels
+                .len(),
+            7
+        );
+        handle_key(&mut app, key(KeyCode::Char('H')), &tx).unwrap();
+        assert_eq!(app.observe.home.surface, crate::home::HomeSurface::Landing);
     }
 
     #[test]

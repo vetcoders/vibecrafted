@@ -1,0 +1,28 @@
+---
+source: tui-agent/src/ui.rs
+expression: snapshot_without_terminal_padding(&wide)
+---
+Voc ZEN  [Global]  runs: 3 | active 1 | failed 1 | unknown 1
+live 1  attention 1  failed 1  · attention working rule on
+┌ Live · Needs attention (working rule) · Failed ──────────────────────────────┐
+│Live                                                                          │
+│  ● claude   work-1             running            ws-alpha   cost —          │
+│Needs attention · working rule                                                │
+│  ! kimi     ask-1              waiting on operator ws-alpha   cost —         │
+│Failed                                                                        │
+│  × cursor   failed-1           failed             ws-alpha   cost —          │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+↑/↓ select · Enter observe · r resume · f scope · Tab panels · q quit
+state root: /tmp/state
+› /query  !observe <run>  !resume <run>  █

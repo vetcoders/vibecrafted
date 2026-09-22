@@ -1,0 +1,28 @@
+---
+source: tui-agent/src/ui.rs
+expression: snapshot_without_terminal_padding(&rendered)
+---
+Voc ZEN  [Global]  no live runs loaded
+live 0  attention 0  failed 0  · attention working rule on
+┌ Live · Needs attention (working rule) · Failed ──────────────────────────────┐
+│Live                                                                          │
+│  —                                                                           │
+│Needs attention · working rule                                                │
+│  —                                                                           │
+│Failed                                                                        │
+│  —                                                                           │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+↑/↓ select · Enter observe · r resume · f scope · Tab panels · q quit
+state root: /tmp/state
+› /query  !observe <run>  !resume <run>  █

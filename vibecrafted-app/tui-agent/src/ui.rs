@@ -18,7 +18,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs, Wrap};
 
 pub fn draw(frame: &mut Frame, app: &App) {
-    if app.config.view.is_home() {
+    if app.config.view.is_home() && app.observe.home.surface != HomeSurface::Panels {
         draw_home_shell(frame, app);
     } else {
         let root = frame.area();
@@ -280,6 +280,7 @@ fn draw_home_shell(frame: &mut Frame, app: &App) {
     match app.observe.home.surface {
         HomeSurface::Landing => draw_home_board(frame, root.body, app),
         HomeSurface::Conversation => draw_home_conversation(frame, root.body, app),
+        HomeSurface::Panels => {}
     }
     draw_home_footer(frame, root.footer, app);
 }
@@ -291,7 +292,7 @@ fn draw_home_header(frame: &mut Frame, area: Rect, app: &App) {
         .split(area);
     let counts = app.home_counts();
     let title = Line::from(vec![
-        Span::styled("Home", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("Voc ZEN", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw("  "),
         Span::styled(
             format!("[{}]", app.observe.home.scope.label()),
@@ -301,10 +302,15 @@ fn draw_home_header(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled(app.status_summary(), Style::default().fg(Color::Gray)),
     ]);
     frame.render_widget(Paragraph::new(title), rows[0]);
+    let rule = if app.config.view.attention_working_rule() {
+        "on"
+    } else {
+        "off; flag --attention-working-rule"
+    };
     frame.render_widget(
         Paragraph::new(format!(
-            "attention {}  work {}  history {}  cost — if unknown",
-            counts.attention, counts.work, counts.history
+            "live {}  attention {}  failed {}  · attention working rule {rule}",
+            counts.live, counts.attention, counts.failed,
         ))
         .style(Style::default().fg(Color::DarkGray)),
         rows[1],
@@ -314,7 +320,7 @@ fn draw_home_header(frame: &mut Frame, area: Rect, app: &App) {
 fn home_board_lines(app: &App) -> Vec<(Option<usize>, String, Style)> {
     let rows = app.home_rows();
     let mut lines = Vec::new();
-    for band in [HomeBand::Attention, HomeBand::Work, HomeBand::History] {
+    for band in [HomeBand::Live, HomeBand::Attention, HomeBand::Failed] {
         lines.push((
             None,
             band.title().to_string(),
@@ -341,10 +347,10 @@ fn home_board_lines(app: &App) -> Vec<(Option<usize>, String, Style)> {
                 Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
             } else if band == HomeBand::Attention {
                 Style::default().fg(Color::Yellow)
-            } else if band == HomeBand::Work {
+            } else if band == HomeBand::Live {
                 Style::default().fg(Color::Green)
             } else {
-                Style::default()
+                Style::default().fg(Color::Red)
             };
             lines.push((Some(index), format!("  {}", row.list_line(72)), style));
         }
@@ -372,7 +378,7 @@ fn draw_home_board(frame: &mut Frame, area: Rect, app: &App) {
         .collect::<Vec<_>>();
     frame.render_widget(
         List::new(items).block(Block::default().borders(Borders::ALL).title(Span::styled(
-            " Needs attention · In progress · History ",
+            " Live · Needs attention (working rule) · Failed ",
             Style::default().add_modifier(Modifier::BOLD),
         ))),
         area,
@@ -416,25 +422,34 @@ fn draw_home_footer(frame: &mut Frame, area: Rect, app: &App) {
             "Conversation: Esc/H returns Home  no launch  transcript wraps at the pane width"
         }
         (HomeSurface::Landing, _) => {
-            "Home: ↑/↓ agent  Enter opens existing panel  f Global/Local  H Home  q quit"
+            "↑/↓ select · Enter observe · r resume · f scope · Tab panels · q quit"
         }
+        (HomeSurface::Panels, _) => "H/Esc returns to ZEN Home",
     };
     frame.render_widget(
         Paragraph::new(hint).style(Style::default().fg(Color::Cyan)),
         rows[0],
     );
     frame.render_widget(
-        Paragraph::new("Shared console · one Home · existing conversations only")
-            .style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(if app.status_line.is_empty() {
+            format!("state root: {}", app.config.state_root.to_string_lossy())
+        } else {
+            app.status_line.clone()
+        })
+        .style(Style::default().fg(Color::DarkGray)),
         rows[1],
     );
-    let status = if app.status_line.is_empty() {
-        format!("state root: {}", app.config.state_root.to_string_lossy())
+    let input = if app.observe.home.input.is_empty() {
+        "› /query  !observe <run>  !resume <run>  █".to_string()
     } else {
-        app.status_line.clone()
+        format!("› {} █", app.observe.home.input)
     };
     frame.render_widget(
-        Paragraph::new(status).style(Style::default().fg(Color::Gray)),
+        Paragraph::new(input).style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
         rows[2],
     );
 }
@@ -2245,7 +2260,7 @@ mod tests {
 
     fn home_fixture_app() -> App {
         let mut app = sample_app();
-        app.config.view = crate::observe::ConsoleView::Home;
+        app.config.view = crate::observe::ConsoleView::HomeAttention;
         app.config.repo = std::path::PathBuf::from("/tmp/ws-alpha");
         let now = chrono::Utc::now().to_rfc3339();
         let mut ask = sample_run("ask-1", "kimi", "pane-1");
@@ -2263,37 +2278,47 @@ mod tests {
         work.snapshot.root = Some("/tmp/ws-alpha".into());
         work.snapshot.updated_at = Some(now.clone());
         work.snapshot.last_heartbeat = Some(now);
-        let mut hist = sample_run("hist-1", "cursor", "pane-old");
-        hist.snapshot.root = Some("/tmp/ws-alpha".into());
-        hist.snapshot.state = Some("completed".into());
-        hist.kind = RunKind::Completed;
-        hist.snapshot
+        let mut failed = sample_run("failed-1", "cursor", "pane-old");
+        failed.snapshot.root = Some("/tmp/ws-alpha".into());
+        failed.snapshot.state = Some("failed".into());
+        failed.kind = RunKind::Failed;
+        failed
+            .snapshot
             .extra
-            .insert("exit_code".into(), serde_json::Value::from(0));
-        let mut missing = sample_run("ask-beta", "grok", "");
-        missing.snapshot.root = Some("/tmp/ws-beta".into());
-        missing.snapshot.operator_session = None;
-        missing.snapshot.state = Some("unknown".into());
-        missing.kind = RunKind::Unknown;
+            .insert("exit_code".into(), serde_json::Value::from(1));
         app.state.runs = vec![
             ask.snapshot.clone(),
             work.snapshot.clone(),
-            hist.snapshot.clone(),
-            missing.snapshot.clone(),
+            failed.snapshot.clone(),
         ];
         app.state.retained_runs = app.state.runs.clone();
-        app.runs = vec![ask, work, hist, missing];
+        app.runs = vec![ask, work, failed];
         app
     }
 
+    fn snapshot_without_terminal_padding(rendered: &str) -> String {
+        rendered
+            .lines()
+            .map(str::trim_end)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
-    fn home_board_exposes_attention_separates_history_and_keeps_unknown_cost() {
+    fn zen_home_snapshot_has_three_groups_and_one_bottom_input() {
         let app = home_fixture_app();
         let wide = render_home_size(&app, 80, 24);
+        insta::assert_snapshot!(
+            "zen_home_three_groups",
+            snapshot_without_terminal_padding(&wide)
+        );
+        let wide = render_home_size(&app, 80, 24);
+        assert!(wide.contains("Live"), "{wide}");
         assert!(wide.contains("Needs attention"), "{wide}");
-        assert!(wide.contains("In progress"), "{wide}");
-        assert!(wide.contains("History"), "{wide}");
+        assert!(wide.contains("Failed"), "{wide}");
         assert!(wide.contains("[Global]"), "{wide}");
+        assert!(wide.contains("/query"), "{wide}");
+        assert!(wide.contains("!observe <run>"), "{wide}");
         assert!(
             wide.contains("waiting on operator") || wide.contains("waiting on operat"),
             "{wide}"
@@ -2301,7 +2326,24 @@ mod tests {
         assert!(!wide.contains("cost 0"), "{wide}");
         let compact = render_home_size(&app, 40, 20);
         assert!(compact.contains("Needs attention"), "{compact}");
-        assert!(compact.contains("History"), "{compact}");
+        assert!(compact.contains("Failed"), "{compact}");
+    }
+
+    #[test]
+    fn zen_home_empty_snapshot_keeps_all_groups_and_input() {
+        let mut app = home_fixture_app();
+        app.state = ControlPlaneState::empty("/tmp/state");
+        app.runs.clear();
+        let rendered = render_home_size(&app, 80, 24);
+        insta::assert_snapshot!(
+            "zen_home_empty",
+            snapshot_without_terminal_padding(&rendered)
+        );
+        let rendered = render_home_size(&app, 80, 24);
+        assert!(rendered.contains("Live"), "{rendered}");
+        assert!(rendered.contains("Needs attention"), "{rendered}");
+        assert!(rendered.contains("Failed"), "{rendered}");
+        assert!(rendered.contains("!resume <run>"), "{rendered}");
     }
 
     #[test]

@@ -1,7 +1,8 @@
 use crate::catalog::CatalogState;
 use crate::config::{AppConfig, path_display, resolve_destination_repo_from_env};
 use crate::home::{
-    HomeCounts, HomeNavigation, HomeRow, HomeSurface, project_home, wrap_transcript_words,
+    HomeCounts, HomeNavigation, HomeRow, HomeSurface, project_home_with_options,
+    wrap_transcript_words,
 };
 use crate::launch::{
     Environment, LaunchCommand, LaunchKind, LaunchOutcome, LaunchRequest, PermissionPolicy,
@@ -862,7 +863,19 @@ impl App {
     }
 
     pub fn home_rows(&self) -> Vec<HomeRow> {
-        project_home(&self.state, self.observe.home.scope, &self.config.repo)
+        let query = self
+            .observe
+            .home
+            .input
+            .strip_prefix('/')
+            .unwrap_or_default();
+        project_home_with_options(
+            &self.state,
+            self.observe.home.scope,
+            &self.config.repo,
+            self.config.view.attention_working_rule(),
+            query,
+        )
     }
 
     pub fn home_counts(&self) -> HomeCounts {
@@ -896,63 +909,120 @@ impl App {
         }
         let counts = HomeCounts::from_rows(&rows);
         self.append_status(format!(
-            "[{}] attention {}  work {}  history {}",
+            "[{}] live {}  attention {}  failed {}",
             self.observe.home.scope.label(),
+            counts.live,
             counts.attention,
-            counts.work,
-            counts.history
+            counts.failed
         ));
     }
 
-    /// Open the selected Home row. A known panel becomes an in-console
-    /// conversation. A missing target is an error. Neither path launches.
+    pub fn select_home_target(&mut self, target: &str) -> Result<HomeRow, String> {
+        let rows = self.home_rows();
+        if target.trim().is_empty() {
+            return rows
+                .get(self.observe.home.selected.min(rows.len().saturating_sub(1)))
+                .cloned()
+                .ok_or_else(|| "no agent on Home".to_string());
+        }
+        let target = target.trim();
+        if let Some((index, row)) = rows
+            .iter()
+            .enumerate()
+            .find(|(_, row)| row.run_id == target)
+        {
+            self.observe.home.selected = index;
+            return Ok(row.clone());
+        }
+        let matches = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.run_id.starts_with(target))
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [(index, row)] => {
+                self.observe.home.selected = *index;
+                Ok((*row).clone())
+            }
+            [] => Err(format!("no operational run matches {target}")),
+            _ => Err(format!("run prefix {target} is ambiguous")),
+        }
+    }
+
+    pub fn home_resume_command(&self, run_id: &str) -> Result<LaunchCommand, String> {
+        let snapshot = self
+            .state
+            .runs
+            .iter()
+            .find(|snapshot| snapshot.run_id == run_id)
+            .ok_or_else(|| format!("run {run_id} is no longer in the control-core view"))?;
+        let agent = snapshot
+            .agent
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && *value != "unknown")
+            .ok_or_else(|| format!("run {run_id} has no resumable agent"))?;
+        let session = snapshot
+            .session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| format!("run {run_id} has no resumable session"))?;
+        Ok(LaunchCommand {
+            program: self.config.command_deck.clone(),
+            args: vec![
+                "resume".into(),
+                agent.into(),
+                "--session".into(),
+                session.into(),
+            ],
+            env: Default::default(),
+            stdin: None,
+        })
+    }
+
+    /// Observe the selected operational row in-console. Panel routing belongs
+    /// to W1-4; a missing panel never blocks transcript observation here.
     pub fn open_selected_home_row(&mut self) {
         let Some(row) = self.selected_home_row() else {
             self.append_status("no agent on Home");
             return;
         };
-        match row.panel.clone() {
-            Some(panel) => {
-                let nav = HomeNavigation::ToPanel {
-                    run_id: row.run_id.clone(),
-                    panel: panel.clone(),
-                };
-                self.observe.home.navigations.push(nav.clone());
-                self.observe.home.surface = HomeSurface::Conversation;
-                self.observe.home.conversation_run_id = Some(row.run_id.clone());
-                if let Some(index) = self
-                    .observe
-                    .runs
-                    .iter()
-                    .position(|run| run.run_id == row.run_id)
-                {
-                    self.observe.selected = index;
-                    self.refresh_observe_transcript();
-                } else if let Some(index) = self
-                    .runs
-                    .iter()
-                    .position(|run| run.snapshot.run_id == row.run_id)
-                {
-                    self.selected = index;
-                }
-                self.append_status(nav.status_line());
-            }
-            None => {
-                let reason = format!("no existing panel for {} · not launching", row.agent);
-                let nav = HomeNavigation::MissingTarget {
-                    run_id: row.run_id.clone(),
-                    reason: reason.clone(),
-                };
-                self.observe.home.navigations.push(nav);
-                self.show_error(
-                    "no existing panel",
-                    vec![
-                        reason,
-                        "Home opens an existing conversation only.".to_string(),
-                    ],
-                );
-            }
+        let nav = match row.panel.clone() {
+            Some(panel) => HomeNavigation::ToPanel {
+                run_id: row.run_id.clone(),
+                panel,
+            },
+            None => HomeNavigation::MissingTarget {
+                run_id: row.run_id.clone(),
+                reason: "no panel route yet".to_string(),
+            },
+        };
+        self.observe.home.navigations.push(nav.clone());
+        self.observe.home.surface = HomeSurface::Conversation;
+        self.observe.home.conversation_run_id = Some(row.run_id.clone());
+        if let Some(index) = self
+            .observe
+            .runs
+            .iter()
+            .position(|run| run.run_id == row.run_id)
+        {
+            self.observe.selected = index;
+            self.refresh_observe_transcript();
+        } else if let Some(index) = self
+            .runs
+            .iter()
+            .position(|run| run.snapshot.run_id == row.run_id)
+        {
+            self.selected = index;
         }
+        self.append_status(nav.status_line());
+    }
+
+    pub fn open_home_panels(&mut self) {
+        self.observe.home.surface = HomeSurface::Panels;
+        self.set_active_tab(AppTab::MissionControl);
+        self.append_status("classic panels · Mission Control exposes all 7 PLAN_23 panels");
     }
 
     pub fn return_home(&mut self) {

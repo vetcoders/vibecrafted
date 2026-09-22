@@ -1,6 +1,6 @@
 //! Shared Home / Dashboard projection for the operator console.
 //!
-//! Home is the first surface: attention, then work in progress, then history.
+//! Home is the ZEN surface: live, needs attention, failed, then one input line.
 //! It reads the existing control-plane snapshots. It does not own a second
 //! register of truth, and selecting an agent never launches a process.
 
@@ -38,29 +38,32 @@ pub enum HomeSurface {
     #[default]
     Landing,
     Conversation,
+    /// The existing five-tab console, including all seven PLAN_23 Mission
+    /// Control panels. ZEN is its shell, not its replacement.
+    Panels,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum HomeBand {
+    Live,
     Attention,
-    Work,
-    History,
+    Failed,
 }
 
 impl HomeBand {
     pub fn title(self) -> &'static str {
         match self {
-            Self::Attention => "Needs attention",
-            Self::Work => "In progress",
-            Self::History => "History",
+            Self::Live => "Live",
+            Self::Attention => "Needs attention · working rule",
+            Self::Failed => "Failed",
         }
     }
 
     pub fn marker(self) -> &'static str {
         match self {
+            Self::Live => "●",
             Self::Attention => "!",
-            Self::Work => "●",
-            Self::History => "○",
+            Self::Failed => "×",
         }
     }
 }
@@ -85,15 +88,11 @@ impl HomeRow {
             .attention_reason
             .as_deref()
             .unwrap_or(self.state_label.as_str());
-        let panel = self
-            .panel
-            .as_deref()
-            .map(|value| format!("panel:{value}"))
-            .unwrap_or_else(|| "no panel".to_string());
         let line = format!(
-            "{} {:<8} {:<18} {:<10} {panel}  cost {}",
+            "{} {:<8} {:<18} {:<18} {:<10} cost {}",
             self.band.marker(),
             truncate(&self.agent, 8),
+            truncate(&self.run_id, 18),
             truncate(reason, 22),
             truncate(&self.workspace, 10),
             self.cost_label
@@ -114,10 +113,12 @@ pub enum HomeNavigation {
 impl HomeNavigation {
     pub fn status_line(&self) -> String {
         match self {
-            Self::ToPanel { panel, .. } => {
-                format!("navigate existing panel {panel} · no launch")
+            Self::ToPanel { run_id, panel } => {
+                format!("observe {run_id} · panel {panel} available · no launch")
             }
-            Self::MissingTarget { reason, .. } => reason.clone(),
+            Self::MissingTarget { run_id, reason } => {
+                format!("observe {run_id} · {reason} · no launch")
+            }
         }
     }
 }
@@ -129,44 +130,60 @@ pub struct HomeState {
     pub selected: usize,
     pub navigations: Vec<HomeNavigation>,
     pub conversation_run_id: Option<String>,
+    /// The always-focused ZEN line. `/text` filters; `!command` executes.
+    pub input: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct HomeCounts {
+    pub live: usize,
     pub attention: usize,
-    pub work: usize,
-    pub history: usize,
+    pub failed: usize,
 }
 
 impl HomeCounts {
     pub fn from_rows(rows: &[HomeRow]) -> Self {
         Self {
+            live: rows.iter().filter(|row| row.band == HomeBand::Live).count(),
             attention: rows
                 .iter()
                 .filter(|row| row.band == HomeBand::Attention)
                 .count(),
-            work: rows.iter().filter(|row| row.band == HomeBand::Work).count(),
-            history: rows
+            failed: rows
                 .iter()
-                .filter(|row| row.band == HomeBand::History)
+                .filter(|row| row.band == HomeBand::Failed)
                 .count(),
         }
     }
 }
 
 pub fn project_home(state: &ControlPlaneState, scope: HomeScope, workspace: &Path) -> Vec<HomeRow> {
+    project_home_with_options(state, scope, workspace, false, "")
+}
+
+pub fn project_home_with_options(
+    state: &ControlPlaneState,
+    scope: HomeScope,
+    workspace: &Path,
+    attention_working_rule: bool,
+    query: &str,
+) -> Vec<HomeRow> {
     let now = chrono::Utc::now();
     let mut rows = state
         .runs
         .iter()
         .cloned()
-        .map(|snapshot| {
+        .filter_map(|snapshot| {
             let kind = crate::state::classify_run(&snapshot, now);
-            project_row(snapshot, kind)
+            project_row(snapshot, kind, attention_working_rule)
         })
         .collect::<Vec<_>>();
     if matches!(scope, HomeScope::Local) {
         rows.retain(|row| local_workspace_matches(state, row, workspace));
+    }
+    let query = query.trim().to_ascii_lowercase();
+    if !query.is_empty() {
+        rows.retain(|row| row_matches_query(row, &query));
     }
     rows.sort_by(|left, right| {
         left.band
@@ -180,7 +197,7 @@ pub fn project_home(state: &ControlPlaneState, scope: HomeScope, workspace: &Pat
 pub fn project_rendered(runs: &[RenderedRun], scope: HomeScope, workspace: &Path) -> Vec<HomeRow> {
     let mut rows = runs
         .iter()
-        .map(|run| project_row(run.snapshot.clone(), run.kind))
+        .filter_map(|run| project_row(run.snapshot.clone(), run.kind, false))
         .collect::<Vec<_>>();
     if matches!(scope, HomeScope::Local) {
         rows.retain(|row| {
@@ -206,14 +223,22 @@ fn local_workspace_matches(state: &ControlPlaneState, row: &HomeRow, workspace: 
         .is_some_and(|snapshot| workspace_matches(snapshot, workspace))
 }
 
-fn project_row(snapshot: RunSnapshot, kind: RunKind) -> HomeRow {
-    let attention_reason = attention_reason(&snapshot, kind);
-    let band = if attention_reason.is_some() {
+fn project_row(
+    snapshot: RunSnapshot,
+    kind: RunKind,
+    attention_working_rule: bool,
+) -> Option<HomeRow> {
+    let candidate_reason = attention_reason(&snapshot, kind);
+    let band = if kind == RunKind::Failed {
+        HomeBand::Failed
+    } else if attention_working_rule && candidate_reason.is_some() {
         HomeBand::Attention
-    } else if matches!(kind, RunKind::Active | RunKind::Paused | RunKind::Stalled) {
-        HomeBand::Work
+    } else if matches!(kind, RunKind::Active | RunKind::Paused | RunKind::Stalled)
+        || candidate_reason.is_some()
+    {
+        HomeBand::Live
     } else {
-        HomeBand::History
+        return None;
     };
     let agent = display_token(snapshot.agent.as_deref());
     let skill = display_token(snapshot.skill.as_deref());
@@ -221,17 +246,30 @@ fn project_row(snapshot: RunSnapshot, kind: RunKind) -> HomeRow {
     let panel = panel_destination(&snapshot);
     let cost = cost_label(&snapshot);
     let state_label = snapshot.display_state();
-    HomeRow {
+    Some(HomeRow {
         run_id: snapshot.run_id,
         title: format!("{skill} · {agent}"),
         agent,
         band,
-        attention_reason,
+        attention_reason: attention_working_rule.then_some(candidate_reason).flatten(),
         workspace,
         panel,
         cost_label: cost,
         state_label,
-    }
+    })
+}
+
+fn row_matches_query(row: &HomeRow, query: &str) -> bool {
+    [
+        row.run_id.as_str(),
+        row.agent.as_str(),
+        row.title.as_str(),
+        row.workspace.as_str(),
+        row.state_label.as_str(),
+        row.attention_reason.as_deref().unwrap_or_default(),
+    ]
+    .into_iter()
+    .any(|value| value.to_ascii_lowercase().contains(query))
 }
 
 fn attention_reason(snapshot: &RunSnapshot, kind: RunKind) -> Option<String> {
@@ -450,7 +488,7 @@ mod tests {
     }
 
     #[test]
-    fn home_orders_attention_then_work_then_history_and_keeps_them_apart() {
+    fn home_orders_live_then_attention_then_failed_and_omits_finished_history() {
         let state = plane(vec![
             snapshot(
                 "hist-1",
@@ -461,7 +499,7 @@ mod tests {
                 &[("exit_code", Value::from(0))],
             ),
             snapshot(
-                "work-1",
+                "live-1",
                 "claude",
                 "running",
                 "/tmp/ws-alpha",
@@ -479,18 +517,74 @@ mod tests {
                     Value::String("waiting on operator".into()),
                 )],
             ),
+            snapshot(
+                "fail-1",
+                "codex",
+                "failed",
+                "/tmp/ws-alpha",
+                None,
+                &[("exit_code", Value::from(1))],
+            ),
         ]);
-        let rows = project_home(&state, HomeScope::Global, Path::new("/tmp/ws-alpha"));
+        let rows = project_home_with_options(
+            &state,
+            HomeScope::Global,
+            Path::new("/tmp/ws-alpha"),
+            true,
+            "",
+        );
         assert_eq!(
             rows.iter().map(|row| row.band).collect::<Vec<_>>(),
-            [HomeBand::Attention, HomeBand::Work, HomeBand::History]
+            [HomeBand::Live, HomeBand::Attention, HomeBand::Failed]
         );
+        assert_eq!(rows[0].agent, "claude");
         assert_eq!(
-            rows[0].attention_reason.as_deref(),
+            rows[1].attention_reason.as_deref(),
             Some("waiting on operator")
         );
-        assert_eq!(rows[1].agent, "claude");
-        assert_eq!(rows[2].band, HomeBand::History);
+        assert_eq!(rows[2].agent, "codex");
+        assert!(!rows.iter().any(|row| row.run_id == "hist-1"));
+    }
+
+    #[test]
+    fn attention_rule_is_explicit_and_slash_query_filters_operational_rows() {
+        let state = plane(vec![
+            snapshot(
+                "live-codex",
+                "codex",
+                "running",
+                "/tmp/ws-alpha",
+                Some("pane-live"),
+                &[],
+            ),
+            snapshot(
+                "blocked-kimi",
+                "kimi",
+                "blocked",
+                "/tmp/ws-alpha",
+                None,
+                &[("needs_attention", Value::Bool(true))],
+            ),
+        ]);
+        let disabled = project_home_with_options(
+            &state,
+            HomeScope::Global,
+            Path::new("/tmp/ws-alpha"),
+            false,
+            "",
+        );
+        assert!(disabled.iter().all(|row| row.band == HomeBand::Live));
+
+        let enabled = project_home_with_options(
+            &state,
+            HomeScope::Global,
+            Path::new("/tmp/ws-alpha"),
+            true,
+            "kimi",
+        );
+        assert_eq!(enabled.len(), 1);
+        assert_eq!(enabled[0].run_id, "blocked-kimi");
+        assert_eq!(enabled[0].band, HomeBand::Attention);
     }
 
     #[test]
@@ -568,12 +662,13 @@ mod tests {
             run_id: "work-1".into(),
             panel: "pane-2".into(),
         };
-        assert!(nav.status_line().contains("navigate existing panel pane-2"));
+        assert!(nav.status_line().contains("panel pane-2 available"));
         assert!(nav.status_line().contains("no launch"));
         let missing = HomeNavigation::MissingTarget {
             run_id: "ask-beta".into(),
-            reason: "no existing panel for ask-beta · not launching".into(),
+            reason: "no panel route".into(),
         };
-        assert!(missing.status_line().contains("not launching"));
+        assert!(missing.status_line().contains("observe ask-beta"));
+        assert!(missing.status_line().contains("no launch"));
     }
 }
