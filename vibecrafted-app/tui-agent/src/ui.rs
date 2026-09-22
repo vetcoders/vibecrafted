@@ -417,12 +417,15 @@ fn draw_home_footer(frame: &mut Frame, area: Rect, app: &App) {
         ])
         .split(area);
     let hint = match (app.observe.home.surface, app.focus) {
+        (_, LaunchFocus::Error) if app.error_title.starts_with("goto-work ") => {
+            "Goto work: Enter/Esc closes · no automatic retry"
+        }
         (_, LaunchFocus::Error) => "Error: Enter/Esc closes · Home did not launch",
         (HomeSurface::Conversation, _) => {
             "Conversation: Esc/H returns Home  no launch  transcript wraps at the pane width"
         }
         (HomeSurface::Landing, _) => {
-            "↑/↓ select · Enter observe · r resume · f scope · Tab panels · q quit"
+            "↑/↓ select · Enter observe · g goto · r resume · f scope · Tab panels · q quit"
         }
         (HomeSurface::Panels, _) => "H/Esc returns to ZEN Home",
     };
@@ -440,7 +443,7 @@ fn draw_home_footer(frame: &mut Frame, area: Rect, app: &App) {
         rows[1],
     );
     let input = if app.observe.home.input.is_empty() {
-        "› /query  !observe <run>  !resume <run>  █".to_string()
+        "› /query  !observe <run>  !goto <run>  !resume <run>  █".to_string()
     } else {
         format!("› {} █", app.observe.home.input)
     };
@@ -2027,11 +2030,16 @@ fn draw_error_overlay(frame: &mut Frame, app: &App) {
         .into_iter()
         .map(Line::from)
         .collect::<Vec<_>>();
+    let title = if app.error_title.starts_with("goto-work ") {
+        "Goto work"
+    } else {
+        "Launch error"
+    };
     let error = Paragraph::new(lines)
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Launch error")
+                .title(title)
                 .border_style(Style::default().fg(Color::Red)),
         )
         .wrap(Wrap { trim: false });
@@ -2343,6 +2351,7 @@ mod tests {
         assert!(rendered.contains("Live"), "{rendered}");
         assert!(rendered.contains("Needs attention"), "{rendered}");
         assert!(rendered.contains("Failed"), "{rendered}");
+        assert!(rendered.contains("!goto <run>"), "{rendered}");
         assert!(rendered.contains("!resume <run>"), "{rendered}");
     }
 

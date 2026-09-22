@@ -1047,8 +1047,10 @@ impl App {
         {
             lines.extend(wrap_transcript_words(
                 &format!(
-                    "Home · conversation  {}  {}",
+                    "Home · conversation  {}  workspace:{}  Frame:{}  {}",
                     row.agent,
+                    row.workspace,
+                    row.frame_session,
                     row.panel
                         .as_deref()
                         .map(|panel| format!("panel:{panel}"))

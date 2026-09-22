@@ -1,6 +1,7 @@
 pub mod app;
 pub mod catalog;
 pub mod config;
+pub mod goto_work;
 pub mod home;
 pub mod launch;
 pub mod layout;
@@ -564,6 +565,42 @@ fn resume_home_target(app: &mut App, target: &str) -> anyhow::Result<InputOutcom
     Ok(InputOutcome::TerminalReturned)
 }
 
+fn goto_home_target(app: &mut App, target: &str) -> InputOutcome {
+    let row = match app.select_home_target(target) {
+        Ok(row) => row,
+        Err(reason) => {
+            app.show_error("goto-work refused", vec![reason]);
+            return InputOutcome::Handled;
+        }
+    };
+    let vc_frame = match crate::goto_work::vc_frame_binary_from_env() {
+        Ok(path) => path,
+        Err(error) => {
+            app.show_error("goto-work refused", vec![error.to_string()]);
+            return InputOutcome::Handled;
+        }
+    };
+    match crate::goto_work::goto_work(
+        &app.state.root,
+        &row.run_id,
+        &vc_frame,
+        &app.config.command_deck,
+    ) {
+        Ok(receipt) => {
+            app.append_status(receipt.status_line());
+            app.request_full_refresh();
+        }
+        Err(error) => {
+            let title = match &error {
+                crate::goto_work::GotoWorkError::Refused(_) => "goto-work refused",
+                crate::goto_work::GotoWorkError::Unconfirmed(_) => "goto-work unconfirmed",
+            };
+            app.show_error(title, vec![error.to_string()]);
+        }
+    }
+    InputOutcome::Handled
+}
+
 fn submit_home_input(app: &mut App) -> anyhow::Result<InputOutcome> {
     let input = app.observe.home.input.trim().to_string();
     if input.is_empty() {
@@ -611,11 +648,15 @@ fn submit_home_input(app: &mut App) -> anyhow::Result<InputOutcome> {
             app.observe.home.input.clear();
             resume_home_target(app, target)
         }
+        "goto" => {
+            app.observe.home.input.clear();
+            Ok(goto_home_target(app, target))
+        }
         _ => {
             app.show_error(
                 "unknown ZEN command",
                 vec![format!(
-                    "!{verb} is not available; use !observe <run> or !resume <run>"
+                    "!{verb} is not available; use !observe, !resume, or !goto <run>"
                 )],
             );
             Ok(InputOutcome::Handled)
@@ -648,6 +689,7 @@ fn handle_home_landing_key(app: &mut App, key: KeyEvent) -> anyhow::Result<Optio
             app.toggle_home_scope();
             InputOutcome::Handled
         }
+        KeyCode::Char('g') if input_is_empty => goto_home_target(app, ""),
         KeyCode::Char('r') if input_is_empty => resume_home_target(app, "")?,
         KeyCode::Char('?') if input_is_empty => {
             app.focus = LaunchFocus::Help;
@@ -799,6 +841,12 @@ fn handle_key(
             _ => {}
         },
         LaunchFocus::Error => match key.code {
+            KeyCode::Char('r') | KeyCode::Char('R')
+                if app.error_title.starts_with("goto-work ") =>
+            {
+                app.focus = LaunchFocus::Browse;
+                app.append_status("goto-work was not retried automatically");
+            }
             KeyCode::Char('r') | KeyCode::Char('R') => {
                 app.focus = LaunchFocus::Browse;
                 launch_selected(app, tx)?;
@@ -1930,6 +1978,27 @@ mod tests {
         );
         assert!(app.status_line.contains("no panel route yet"));
         assert!(rx.try_recv().is_err(), "missing panel must not launch");
+    }
+
+    #[test]
+    fn goto_work_uncertainty_never_turns_r_into_a_blind_retry() {
+        let mut app = sample_app();
+        app.config.view = crate::observe::ConsoleView::HomeAttention;
+        app.show_error(
+            "goto-work unconfirmed",
+            vec!["the tab may exist, do not retry blindly".to_string()],
+        );
+        let (tx, rx) = std::sync::mpsc::channel::<BackgroundMessage>();
+
+        handle_key(&mut app, key(KeyCode::Char('r')), &tx).expect("r handled");
+
+        assert_eq!(app.focus, LaunchFocus::Browse);
+        assert_eq!(app.status_line, "goto-work was not retried automatically");
+        assert!(app.pending_launch.is_none(), "no launch may be scheduled");
+        assert!(
+            rx.try_recv().is_err(),
+            "goto-work uncertainty must not launch"
+        );
     }
 
     #[test]

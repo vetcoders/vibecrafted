@@ -23,6 +23,6 @@ live 0  attention 0  failed 0  · attention working rule on
 │                                                                              │
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
-↑/↓ select · Enter observe · r resume · f scope · Tab panels · q quit
+↑/↓ select · Enter observe · g goto · r resume · f scope · Tab panels · q quit
 state root: /tmp/state
-› /query  !observe <run>  !resume <run>  █
+› /query  !observe <run>  !goto <run>  !resume <run>  █

@@ -76,6 +76,7 @@ pub struct HomeRow {
     pub band: HomeBand,
     pub attention_reason: Option<String>,
     pub workspace: String,
+    pub frame_session: String,
     pub panel: Option<String>,
     /// Honest cost cell. Missing or null data is "—", never an invented zero.
     pub cost_label: String,
@@ -89,12 +90,13 @@ impl HomeRow {
             .as_deref()
             .unwrap_or(self.state_label.as_str());
         let line = format!(
-            "{} {:<8} {:<18} {:<18} {:<10} cost {}",
+            "{} {:<7} {:<10} {:<11} {:<10} {:<19} cost {}",
             self.band.marker(),
-            truncate(&self.agent, 8),
-            truncate(&self.run_id, 18),
-            truncate(reason, 22),
+            truncate(&self.agent, 7),
             truncate(&self.workspace, 10),
+            truncate(&self.frame_session, 11),
+            truncate(&self.run_id, 10),
+            truncate(reason, 19),
             self.cost_label
         );
         if width == 0 || line.chars().count() <= width {
@@ -242,7 +244,15 @@ fn project_row(
     };
     let agent = display_token(snapshot.agent.as_deref());
     let skill = display_token(snapshot.skill.as_deref());
-    let workspace = crate::state::workspace_label(snapshot.root.as_deref());
+    let workspace = snapshot
+        .routing_value("workspace_display_label")
+        .or_else(|| snapshot.routing_value("workspace_id"))
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| crate::state::workspace_label(snapshot.root.as_deref()));
+    let frame_session = snapshot
+        .routing_value("worker_host_session")
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| "—".to_string());
     let panel = panel_destination(&snapshot);
     let cost = cost_label(&snapshot);
     let state_label = snapshot.display_state();
@@ -253,6 +263,7 @@ fn project_row(
         band,
         attention_reason: attention_working_rule.then_some(candidate_reason).flatten(),
         workspace,
+        frame_session,
         panel,
         cost_label: cost,
         state_label,
@@ -265,6 +276,7 @@ fn row_matches_query(row: &HomeRow, query: &str) -> bool {
         row.agent.as_str(),
         row.title.as_str(),
         row.workspace.as_str(),
+        row.frame_session.as_str(),
         row.state_label.as_str(),
         row.attention_reason.as_deref().unwrap_or_default(),
     ]

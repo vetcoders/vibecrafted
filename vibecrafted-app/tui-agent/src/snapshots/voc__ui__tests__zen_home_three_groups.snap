@@ -6,11 +6,11 @@ Voc ZEN  [Global]  runs: 3 | active 1 | failed 1 | unknown 1
 live 1  attention 1  failed 1  · attention working rule on
 ┌ Live · Needs attention (working rule) · Failed ──────────────────────────────┐
 │Live                                                                          │
-│  ● claude   work-1             running            ws-alpha   cost —          │
+│  ● claude  ws-alpha   —           work-1     running             cost —      │
 │Needs attention · working rule                                                │
-│  ! kimi     ask-1              waiting on operator ws-alpha   cost —         │
+│  ! kimi    ws-alpha   —           ask-1      waiting on operator cost —      │
 │Failed                                                                        │
-│  × cursor   failed-1           failed             ws-alpha   cost —          │
+│  × cursor  ws-alpha   —           failed-1   failed              cost —      │
 │                                                                              │
 │                                                                              │
 │                                                                              │
@@ -23,6 +23,6 @@ live 1  attention 1  failed 1  · attention working rule on
 │                                                                              │
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
-↑/↓ select · Enter observe · r resume · f scope · Tab panels · q quit
+↑/↓ select · Enter observe · g goto · r resume · f scope · Tab panels · q quit
 state root: /tmp/state
-› /query  !observe <run>  !resume <run>  █
+› /query  !observe <run>  !goto <run>  !resume <run>  █
