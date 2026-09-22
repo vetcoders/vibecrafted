@@ -79,6 +79,42 @@ Closing the terminal or App projection does not grant permission to relaunch
 the fleet. Re-open it with `vibecrafted start`, then query `status` and the
 same tracker. The server/control plane owns the run; the UI is an attachment.
 
+### Founder driving the dispatch personally
+
+Keep launch/resume and observation in separate terminals. The dispatch id and
+provider-run id are different namespaces: pass the dispatch id only to
+`dispatch --resume`, and take the current provider-run id from the dispatch
+receipt before using `observe` or `await`.
+
+```bash
+# Terminal A: admit or resume exactly the declared plan
+vibecrafted dispatch "$PLAN" --doctor --json
+vibecrafted dispatch "$PLAN" --resume <dispatch-run-id>
+
+# Terminal B: watch without taking ownership away from the dispatcher
+vibecrafted status --all --json
+vibecrafted observe <provider> --run-id <provider-run-id>
+vibecrafted await <provider> --run-id <provider-run-id>
+```
+
+Use three independent liveness signals before declaring a worker dead:
+
+1. receipt/meta state and its timestamp;
+2. transcript or report size/mtime movement;
+3. the recorded process identity still being alive.
+
+One stale signal is not a restart instruction. Two agreeing signals justify
+investigation; all three are required before declaring settlement or death.
+Do not interrupt a quiet test, compiler, signer, or notary process merely
+because no chat text appeared. If every signal is unchanged for ten minutes,
+inspect the report and receipt for an orphan delivery before resuming. Never
+edit the receipt ledger to make a retry possible.
+
+The Founder may close every terminal projection and later return with
+`vibecrafted start`; the server-owned run survives. Conversely, a visible pane
+is not proof that the worker is still admitted. The receipt plus the three
+signals decide.
+
 ## 3. One owned failure: stop and retry only that cut
 
 Suppose only `W0-b` fails and its receipt identifies an owned lifecycle run
