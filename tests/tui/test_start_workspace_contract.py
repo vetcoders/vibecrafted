@@ -393,6 +393,10 @@ if rest[:1] == ["action"]:
         for _ in clients_of(target):
             print("1         terminal_1     zsh ")
         sys.exit(0)
+    if verb == "dump-layout":
+        with open(os.path.join(table, "live", target), encoding="utf-8") as handle:
+            print(handle.read(), end="")
+        sys.exit(0)
     if verb == "list-tabs":
         if "--json" in rest:
             position = max(int(os.environ.get("VC_FRAME_ACTIVE_TAB", "1")) - 1, 0)
@@ -649,6 +653,8 @@ class Scene:
         live: tuple[str, ...] = (),
         dead: tuple[str, ...] = (),
         clients: tuple[str, ...] = (),
+        legacy: tuple[str, ...] = (),
+        guests: tuple[str, ...] = (),
         git: bool = False,
     ) -> None:
         self.tmp_path = tmp_path
@@ -664,6 +670,10 @@ class Scene:
         )
         self.config_dir = self.home / ".config" / "vibecrafted" / "vc-frame"
         _write(self.config_dir / "layouts" / "operator.kdl", "layout {\n}\n")
+        _write(
+            self.config_dir / "layouts" / "host.kdl",
+            "layout { frame_host true; workspace_surface true; }\n",
+        )
         self.terminal_log = tmp_path / "terminal-launches.jsonl"
         self.generation = self._generation(tmp_path)
         self.owner_log = tmp_path / "owner-calls.log"
@@ -673,7 +683,16 @@ class Scene:
         (self.table / "live").mkdir(parents=True)
         (self.table / "dead").mkdir(parents=True)
         for name in live:
-            (self.table / "live" / name).write_text("", encoding="utf-8")
+            if name in legacy:
+                body = (
+                    "layout { frame_host true; frame_host true; "
+                    "workspace_surface true; }\n"
+                )
+            elif name in guests:
+                body = "layout { pane; }\n"
+            else:
+                body = "layout { frame_host true; workspace_surface true; }\n"
+            (self.table / "live" / name).write_text(body, encoding="utf-8")
         for name in dead:
             (self.table / "dead" / name).write_text("", encoding="utf-8")
         self.clients_file = tmp_path / "attached-clients.txt"
@@ -2067,6 +2086,70 @@ def test_outside_caller_with_live_host_gets_no_standalone_chrome(
     assert not _switches(scene.calls()), scene.calls()
 
 
+def test_outside_caller_ignores_legacy_multi_owner_session_and_uses_valid_host(
+    tmp_path: Path,
+) -> None:
+    scene = Scene(
+        tmp_path,
+        project="mlx-batch-runner",
+        live=("legacy-operator", "product-host"),
+        clients=("legacy-operator", "product-host"),
+        legacy=("legacy-operator",),
+    )
+    result = _run(
+        scene,
+        "vc-start",
+        tty=True,
+        developer_root=True,
+        extra_env={
+            "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
+            "VIBECRAFTED_VC_FRAME_BIN": str(scene.generation / "bin" / "vc-frame"),
+        },
+    )
+    assert "RC=[0]" in result.stdout, result.stdout + result.stderr
+    _assert_projected_into_host(
+        scene, host="product-host", guest="mlx-batch-runner", result=result
+    )
+    assert not any(
+        call.get("projected", [None])[0] == "legacy-operator" for call in scene.calls()
+    ), scene.calls()
+
+
+def test_only_legacy_session_does_not_block_fresh_singleton_host(
+    tmp_path: Path,
+) -> None:
+    scene = Scene(
+        tmp_path,
+        project="mlx-batch-runner",
+        live=("legacy-operator",),
+        clients=("legacy-operator",),
+        legacy=("legacy-operator",),
+    )
+    result = _run(
+        scene,
+        "vc-start",
+        tty=True,
+        developer_root=True,
+        extra_env={
+            "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
+            "VIBECRAFTED_VC_FRAME_BIN": str(scene.generation / "bin" / "vc-frame"),
+        },
+    )
+    assert "RC=[0]" in result.stdout, result.stdout + result.stderr
+    creates = _creates(scene.calls())
+    assert len(creates) == 1, scene.calls()
+    assert "--guest-workspace" not in creates[0]["argv"]
+    layout_index = creates[0]["argv"].index("--new-session-with-layout") + 1
+    assert Path(creates[0]["argv"][layout_index]).name == "host.kdl"
+    created_records = [
+        call for call in scene.calls() if call.get("created") == "mlx-batch-runner"
+    ]
+    assert len(created_records) == 1, scene.calls()
+    assert created_records[0]["guest_workspace"] is False
+    assert scene.live() == ["legacy-operator", "mlx-batch-runner"]
+    assert not _projects(scene.calls()), scene.calls()
+
+
 @pytest.mark.parametrize("alias", ["dashboard", "marbles", "research", "workflow"])
 def test_layout_alias_respects_live_host(tmp_path: Path, alias: str) -> None:
     """vc-dashboard layout aliases used to ensure a full-chrome session of
@@ -2119,6 +2202,33 @@ def test_tty_inside_an_attached_frame_projects_guest_no_nested_multiplexer(
     )
     assert scene.live() == ["mlx-batch-runner", "other-place"]
     assert "TARGET=[mlx-batch-runner]" in result.stdout
+
+
+@pytest.mark.parametrize("role", ["legacy", "guest"])
+def test_inside_non_host_session_refuses_before_guest_create(
+    tmp_path: Path, role: str
+) -> None:
+    scene = Scene(
+        tmp_path,
+        project="mlx-batch-runner",
+        live=("other-place",),
+        clients=("other-place",),
+        legacy=("other-place",) if role == "legacy" else (),
+        guests=("other-place",) if role == "guest" else (),
+    )
+    result = _run(
+        scene,
+        "vc-start",
+        tty=True,
+        developer_root=True,
+        extra_env=_inside_host_env(scene),
+    )
+    combined = result.stdout + result.stderr
+    assert _rc(result) == EXIT_INVENTORY, combined
+    assert f"role: {role}" in combined, combined
+    assert scene.live() == ["other-place"]
+    assert not _creates(scene.calls()), scene.calls()
+    assert not _projects(scene.calls()), scene.calls()
 
 
 def test_inside_host_refuses_older_frame_before_create(tmp_path: Path) -> None:

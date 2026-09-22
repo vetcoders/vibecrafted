@@ -899,6 +899,10 @@ _vetcoders_operator_layout_file() {
   _vetcoders_frontier_file "vc-frame/layouts/operator.kdl"
 }
 
+_vetcoders_host_layout_file() {
+  _vetcoders_frontier_file "vc-frame/layouts/host.kdl"
+}
+
 _vetcoders_operator_session_name() {
   _vetcoders_normalize_ambient_context
   _vetcoders_operator_place_session_name

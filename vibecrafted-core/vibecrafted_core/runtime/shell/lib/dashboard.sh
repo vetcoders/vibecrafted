@@ -1066,26 +1066,67 @@ _vetcoders_start_live_inventory_hosts() {
   return 0
 }
 
+# Classify one live session from the engine's materialized layout, rather than
+# inferring its role from existence or client attachment. Output is one of:
+# host (exactly one projection owner and one surface), guest (no owner), or
+# legacy (any other owner/surface shape). Query/parser failure is exit 2 and
+# produces no role: callers must fail closed instead of guessing.
+_vetcoders_start_session_projection_role() {
+  local session_name="${1:-}" vc_frame_bin="${2:-}" layout="" python_bin=""
+  [[ -n "$session_name" && -n "$vc_frame_bin" ]] || return 2
+  layout="$(_vetcoders_start_frame_env "$vc_frame_bin" --session "$session_name" \
+    action dump-layout 2>/dev/null)" || return 2
+  [[ -n "$layout" ]] || return 2
+  python_bin="$(_vetcoders_internal_python 2>/dev/null || true)"
+  [[ -n "$python_bin" ]] || return 2
+  "$python_bin" -c '
+import re
+import sys
+
+text = sys.stdin.read()
+text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+text = re.sub(r"//[^\n]*", "", text)
+owners = len(re.findall(r"\bframe_host\s+(?:\"true\"|true)(?=\s|;|})", text))
+surfaces = len(re.findall(r"\bworkspace_surface\s+(?:\"true\"|true)(?=\s|;|})", text))
+if owners == 1 and surfaces == 1:
+    print("host")
+elif owners == 0:
+    print("guest")
+else:
+    print("legacy")
+' <<<"$layout"
+}
+
 # Pick the live product host for an outside caller. $1 is the workspace
 # about to be created and is never chosen. Returns:
 #   0  printed one host name
-#   1  no live host (first-session standalone create is legal)
-#   2  inventory unreadable
-#   3  more than one live session and no unique-client owner
+#   1  no role-valid live host (first-session host create is legal)
+#   2  inventory/layout truth unreadable
+#   3  more than one role-valid host and no unique-client owner
 _vetcoders_start_resolve_inventory_host() {
-  local exclude="${1:-}" hosts="" line="" count=0 chosen="" unique="" uniq_count=0
-  local vc_frame_bin="" listing_rc=0
-  hosts="$(_vetcoders_start_live_inventory_hosts)" || listing_rc=$?
+  local exclude="${1:-}" sessions="" valid_hosts="" line="" role=""
+  local count=0 chosen="" unique="" uniq_count=0 vc_frame_bin="" listing_rc=0 role_rc=0
+  sessions="$(_vetcoders_start_live_inventory_hosts)" || listing_rc=$?
   if ((listing_rc != 0)); then
     return 2
   fi
+  vc_frame_bin="$(_vetcoders_vc_frame_bin 2>/dev/null)" || return 2
   while IFS= read -r line; do
     [[ -n "$line" && "$line" != "$exclude" ]] || continue
+    role=""
+    role_rc=0
+    role="$(_vetcoders_start_session_projection_role "$line" "$vc_frame_bin")" || role_rc=$?
+    if ((role_rc != 0)); then
+      _vetcoders_start_inventory_error="could not determine the runtime role of live session $line"
+      return 2
+    fi
+    [[ "$role" == host ]] || continue
+    valid_hosts+="${line}"$'\n'
     count=$((count + 1))
     if [[ -z "$chosen" ]]; then
       chosen="$line"
     fi
-  done <<<"$hosts"
+  done <<<"$sessions"
   if ((count == 0)); then
     return 1
   fi
@@ -1093,19 +1134,18 @@ _vetcoders_start_resolve_inventory_host() {
     printf '%s\n' "$chosen"
     return 0
   fi
-  vc_frame_bin="$(_vetcoders_vc_frame_bin 2>/dev/null)" || return 2
   while IFS= read -r line; do
-    [[ -n "$line" && "$line" != "$exclude" ]] || continue
+    [[ -n "$line" ]] || continue
     if _vetcoders_start_host_has_unique_client "$line" "$vc_frame_bin"; then
       uniq_count=$((uniq_count + 1))
       unique="$line"
     fi
-  done <<<"$hosts"
+  done <<<"$valid_hosts"
   if ((uniq_count == 1)); then
     printf '%s\n' "$unique"
     return 0
   fi
-  _vetcoders_start_inventory_error="multiple live vc-frame sessions; refusing a second chrome canvas"
+  _vetcoders_start_inventory_error="multiple role-valid Frame hosts; refusing an ambiguous canvas"
   return 3
 }
 
@@ -1241,8 +1281,8 @@ _vetcoders_start_release_create_lock() {
 # was taken meanwhile -- the caller re-reads the inventory and refuses), or 4
 # (any other engine refusal / the session never came up). Never waits a real
 # refusal out, never treats "already exists" as success.
-# $4 = host (default; full operator chrome from the selected operator.kdl) or
-# guest (--guest-workspace so Frame strips nested rail/tab chrome). Guest
+# $4 = host (default; singleton chrome from the selected host.kdl) or guest
+# (--guest-workspace so Frame strips nested rail/tab chrome). Guest
 # create keeps the selected File. Frame `from_cli` treats a path with an
 # extension as File; `guest_workspace_layout_info` → `stringified_from_dir`
 # does `dir.join(layout)`. Rust Path::join keeps an absolute layout, so the
@@ -1685,7 +1725,7 @@ _vetcoders_start_create_guest_and_project() {
 # attached owner. Host canvas stays; switch-session is never used.
 _vetcoders_start_inside_host_guest() {
   local session_name="${1:-}" root="${2:-}"
-  local vc_frame_bin="" host=""
+  local vc_frame_bin="" host="" role="" role_rc=0
   local PATH="${PATH:-}"
   PATH="$(_vetcoders_path_with_bundled_bin_priority "$PATH")"
   export PATH
@@ -1703,6 +1743,14 @@ _vetcoders_start_inside_host_guest() {
       "$(_vetcoders_shell_quote "$session_name")" >&2
     return 4
   }
+  role="$(_vetcoders_start_session_projection_role "$host" "$vc_frame_bin")" || role_rc=$?
+  if ((role_rc != 0)) || [[ "$role" != host ]]; then
+    printf 'vc-start: attached session %s is not a singleton Frame host (role: %s); refusing before creating %s. Existing sessions were left untouched.\n' \
+      "$(_vetcoders_shell_quote "$host")" \
+      "$(_vetcoders_shell_quote "${role:-unknown}")" \
+      "$(_vetcoders_shell_quote "$session_name")" >&2
+    return 4
+  fi
   if [[ "$host" == "$session_name" ]]; then
     printf 'vc-start: host %s cannot project into itself; pass a different workspace name.\n' \
       "$(_vetcoders_shell_quote "$host")" >&2
@@ -1826,7 +1874,7 @@ _vetcoders_start_create_before_terminal() {
   _vetcoders_require_vc_frame || return 1
   _vetcoders_pin_vc_frame_config_dir || return $?
   vc_frame_bin="$(_vetcoders_vc_frame_bin)" || return 1
-  layout_file="$(_vetcoders_operator_layout_file 2>/dev/null || true)"
+  layout_file="$(_vetcoders_host_layout_file 2>/dev/null || true)"
   _vetcoders_start_create_workspace_session "$vc_frame_bin" "$session_name" "$layout_file" || rc=$?
   if ((rc == 3)); then
     state="$(_vetcoders_start_session_inventory_state "$session_name")"
@@ -1859,7 +1907,7 @@ _vetcoders_start_launch_workspace() {
     return 1
   }
   _vetcoders_load_frontier_sidecars
-  layout_file="$(_vetcoders_operator_layout_file 2>/dev/null || true)"
+  layout_file="$(_vetcoders_host_layout_file 2>/dev/null || true)"
 
   state="$(_vetcoders_start_session_inventory_state "$session_name")"
   case "$state" in
