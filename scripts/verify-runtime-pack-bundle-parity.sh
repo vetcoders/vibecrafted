@@ -88,11 +88,18 @@ chmod 0755 "$probe_bin/vc-frame"
 
 expected_binaries=(voc vc-o vc-admin vc-procs control-observe)
 command -v loct >/dev/null 2>&1 || die 'loct is required to map binary consumers'
-(
-  cd "$repo_root"
-  loct find --literal "${expected_binaries[@]}" --group-by-file
-) > "$work/consumer-map.txt"
-[[ -s "$work/consumer-map.txt" ]] || die 'Loctree returned an empty consumer map'
+: > "$work/consumer-map.txt"
+for binary in "${expected_binaries[@]}"; do
+  binary_map="$work/consumer-map-$binary.txt"
+  (
+    cd "$repo_root"
+    loct find --literal --whole-token --compact --all "$binary"
+  ) > "$binary_map"
+  [[ -s "$binary_map" ]] \
+    || die "Loctree returned no code contract for $binary"
+  printf '=== %s ===\n' "$binary" >> "$work/consumer-map.txt"
+  cat "$binary_map" >> "$work/consumer-map.txt"
+done
 
 tar -tzf "$pack" > "$work/archive.txt"
 for binary in "${expected_binaries[@]}"; do

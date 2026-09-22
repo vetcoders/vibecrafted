@@ -684,7 +684,10 @@ def test_bundle_parity_verifier_uses_artifact_and_isolated_install_roots() -> No
     assert 'VIBECRAFTED_RUNTIME_HOME="$runtime_home"' in verifier
     assert 'VIBECRAFTED_LAUNCHER_BIN="$launcher_bin"' in verifier
     assert 'VC_FRAME_SOCKET_DIR="$frame_socket_dir"' in verifier
-    assert 'loct find --literal "${expected_binaries[@]}"' in verifier
+    assert 'for binary in "${expected_binaries[@]}"' in verifier
+    assert 'loct find --literal --whole-token --compact --all "$binary"' in verifier
+    assert 'die "Loctree returned no code contract for $binary"' in verifier
+    assert 'loct find --literal "${expected_binaries[@]}"' not in verifier
     assert '[[ ! -L "$generation/bin/vc-o" ]]' in verifier
     assert 'cmp -s "$generation/bin/voc" "$generation/bin/vc-o"' in verifier
     assert '[[ -x "$launcher_bin/$binary" ]]' in verifier
