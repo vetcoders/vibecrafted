@@ -388,6 +388,87 @@ def test_async_supervisor_preseeds_and_stamps_launcher_owned_identity(
     assert meta_payload["claim_digest"] == digest
 
 
+def test_async_supervisor_publishes_provider_identity_while_child_is_live(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "home"))
+    run_id = "active-provider-axis"
+    meta = _runtime_meta(tmp_path, run_id)
+    meta.parent.mkdir(parents=True, exist_ok=True)
+    meta.write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "status": "running",
+                "workspace_id": "workspace-alpha",
+                "worker_host_session": "frame-alpha",
+                "launch_receipt": "preserve-me",
+            }
+        ),
+        encoding="utf-8",
+    )
+    release = tmp_path / "release-worker"
+    worker = tmp_path / "codex"
+    worker.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, time\n"
+        "from pathlib import Path\n"
+        f"release = Path({str(release)!r})\n"
+        "print(json.dumps({'type': 'thread.started', "
+        "'thread_id': 'codex-live-provider'}), flush=True)\n"
+        "while not release.exists():\n"
+        "    time.sleep(0.01)\n",
+        encoding="utf-8",
+    )
+    worker.chmod(0o755)
+
+    async def exercise() -> tuple[dict[str, object] | None, bool, bool, AsyncRunHandle]:
+        supervisor = AsyncSupervisor()
+        task = asyncio.create_task(
+            supervisor.run(
+                run_id=run_id,
+                command=[str(worker)],
+                root=tmp_path,
+                meta_path=meta,
+                require_report=False,
+            )
+        )
+        active_payload: dict[str, object] | None = None
+        process_was_live = False
+        task_was_done = True
+        try:
+            for _ in range(500):
+                await asyncio.sleep(0.01)
+                payload = json.loads(meta.read_text(encoding="utf-8"))
+                if payload.get("provider_session_id") == "codex-live-provider":
+                    active_payload = payload
+                    live_handle = supervisor.get(run_id)
+                    process_was_live = bool(
+                        live_handle is not None
+                        and live_handle.process.returncode is None
+                    )
+                    task_was_done = task.done()
+                    break
+        finally:
+            release.touch()
+        handle = await asyncio.wait_for(task, timeout=5)
+        return active_payload, process_was_live, task_was_done, handle
+
+    active_payload, process_was_live, task_was_done, handle = asyncio.run(exercise())
+
+    assert active_payload is not None, "provider identity was not published while live"
+    assert process_was_live is True
+    assert task_was_done is False
+    assert active_payload["session_id"] == "codex-live-provider"
+    assert active_payload["agent_session_id"] == "codex-live-provider"
+    assert active_payload["provider_session_id"] == "codex-live-provider"
+    assert active_payload["provider_session_source"] == "provider_stream"
+    assert active_payload["workspace_id"] == "workspace-alpha"
+    assert active_payload["worker_host_session"] == "frame-alpha"
+    assert active_payload["launch_receipt"] == "preserve-me"
+    assert handle.exit_code == 0
+
+
 def test_async_supervisor_preserves_explicit_resume_identity_without_new_event(
     tmp_path: Path, monkeypatch
 ) -> None:

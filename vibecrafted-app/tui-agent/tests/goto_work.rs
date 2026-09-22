@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-use serde_json::json;
+use serde_json::{Value, json};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
@@ -40,6 +40,22 @@ fn two_workspaces_three_runs_route_exactly_and_refuse_wrong_destinations() {
     assert_eq!(alpha.frame_session, "frame-alpha");
 
     let command_deck = Path::new("/opt/vibecrafted/bin/vibecrafted");
+    let capture_path = fixture.fake_frame.with_extension("capture");
+    let missing_identity = goto_work(
+        &fixture.control_plane,
+        "run-alpha",
+        &fixture.fake_frame,
+        command_deck,
+    )
+    .expect_err("an active run without canonical provider identity must refuse");
+    assert!(matches!(missing_identity, GotoWorkError::Refused(_)));
+    assert!(missing_identity.to_string().contains("provider_session_id"));
+    assert!(
+        !capture_path.exists(),
+        "missing provider identity must refuse before invoking vc-frame"
+    );
+
+    enrich_provider_identity(&fixture.control_plane, "run-alpha", "provider-alpha");
     let receipt = goto_work(
         &fixture.control_plane,
         "run-alpha",
@@ -51,7 +67,6 @@ fn two_workspaces_three_runs_route_exactly_and_refuse_wrong_destinations() {
     assert_eq!(receipt.frame_session, "frame-alpha");
     assert_eq!(receipt.tab_id, 41);
 
-    let capture_path = fixture.fake_frame.with_extension("capture");
     let capture = fs::read_to_string(&capture_path).expect("fake argv capture");
     assert!(
         capture.contains("ARG=--session\nARG=frame-alpha\n"),
@@ -123,6 +138,7 @@ fn two_workspaces_three_runs_route_exactly_and_refuse_wrong_destinations() {
 #[test]
 fn mutation_without_canonical_tab_registration_is_unconfirmed() {
     let fixture = fixture();
+    enrich_provider_identity(&fixture.control_plane, "run-alpha", "provider-alpha");
     fs::write(fixture.fake_frame.with_extension("omit-confirm"), b"").expect("omit-confirm marker");
 
     let error = goto_work(
@@ -145,6 +161,7 @@ fn mutation_without_canonical_tab_registration_is_unconfirmed() {
 #[test]
 fn nonzero_new_tab_result_is_unconfirmed_because_mutation_may_have_happened() {
     let fixture = fixture();
+    enrich_provider_identity(&fixture.control_plane, "run-alpha", "provider-alpha");
     fs::write(fixture.fake_frame.with_extension("fail-new-tab"), b"").expect("fail-new-tab marker");
 
     let error = goto_work(
@@ -210,7 +227,7 @@ fn fixture() -> Fixture {
         &control_plane,
         "run-alpha",
         "codex",
-        "provider-alpha",
+        None,
         "/work/alpha",
         WORKSPACE_ALPHA,
         INSTANCE_ALPHA,
@@ -222,7 +239,7 @@ fn fixture() -> Fixture {
         &control_plane,
         "run-wrong",
         "claude",
-        "provider-wrong",
+        Some("provider-wrong"),
         "/work/alpha",
         WORKSPACE_ALPHA,
         INSTANCE_ALPHA,
@@ -234,7 +251,7 @@ fn fixture() -> Fixture {
         &control_plane,
         "run-missing",
         "kimi",
-        "provider-missing",
+        Some("provider-missing"),
         "/work/beta",
         WORKSPACE_BETA,
         INSTANCE_BETA,
@@ -319,7 +336,7 @@ fn write_run(
     control_plane: &Path,
     run_id: &str,
     agent: &str,
-    provider_session_id: &str,
+    provider_session_id: Option<&str>,
     root: &str,
     workspace_id: &str,
     workspace_instance_id: &str,
@@ -329,28 +346,48 @@ fn write_run(
 ) {
     let run = control_plane.join("runtime_runs").join(run_id);
     fs::create_dir(&run).expect("runtime run");
+    let mut payload = json!({
+        "run_id": run_id,
+        "status": "running",
+        "updated_at": chrono::Utc::now().to_rfc3339(),
+        "started_at": chrono::Utc::now().to_rfc3339(),
+        "agent": agent,
+        "skill": "implement",
+        "mode": "headless",
+        "root": root,
+        "workspace_id": workspace_id,
+        "workspace_instance_id": workspace_instance_id,
+        "workspace_display_label": workspace_display_label,
+        "vibecrafted_session_id": workspace_session_id,
+        "worker_host_session": worker_host_session,
+        "worker_host_display": worker_host_session
+    });
+    if let Some(provider_session_id) = provider_session_id {
+        payload["provider_session_id"] = json!(provider_session_id);
+    }
     fs::write(
         run.join("meta.json"),
-        serde_json::to_vec(&json!({
-            "run_id": run_id,
-            "status": "running",
-            "updated_at": chrono::Utc::now().to_rfc3339(),
-            "started_at": chrono::Utc::now().to_rfc3339(),
-            "agent": agent,
-            "skill": "implement",
-            "mode": "headless",
-            "root": root,
-            "provider_session_id": provider_session_id,
-            "workspace_id": workspace_id,
-            "workspace_instance_id": workspace_instance_id,
-            "workspace_display_label": workspace_display_label,
-            "vibecrafted_session_id": workspace_session_id,
-            "worker_host_session": worker_host_session,
-            "worker_host_display": worker_host_session
-        }))
-        .expect("run json"),
+        serde_json::to_vec(&payload).expect("run json"),
     )
     .expect("run meta");
+}
+
+fn enrich_provider_identity(control_plane: &Path, run_id: &str, provider_session_id: &str) {
+    let path = control_plane
+        .join("runtime_runs")
+        .join(run_id)
+        .join("meta.json");
+    let mut payload: Value =
+        serde_json::from_slice(&fs::read(&path).expect("read run meta")).expect("parse run meta");
+    payload["session_id"] = json!(provider_session_id);
+    payload["agent_session_id"] = json!(provider_session_id);
+    payload["provider_session_id"] = json!(provider_session_id);
+    payload["provider_session_source"] = json!("provider_stream");
+    fs::write(
+        &path,
+        serde_json::to_vec(&payload).expect("enriched run json"),
+    )
+    .expect("enrich run meta");
 }
 
 fn fake_frame_script() -> &'static str {
