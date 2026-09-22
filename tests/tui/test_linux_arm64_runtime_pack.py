@@ -5,6 +5,8 @@ import stat
 import subprocess
 from pathlib import Path
 
+from vibecrafted_core.runtime_pack_contract import LINUX_EXECUTABLES
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -96,11 +98,27 @@ def test_linux_builder_uses_pinned_public_inputs_for_arm64_and_x64() -> None:
     assert 'export CXX="${CXX:-g++}"' in assembler
     assert 'voc_target="$work/voc-target"' in assembler
     assert 'CARGO_TARGET_DIR="$voc_target" cargo build --locked' in assembler
-    assert "--release -p voc --bin voc --bin vc-start" in assembler
+    assert (
+        "--release -p voc --bin voc --bin vc-start --bin vc-admin --bin vc-procs"
+        in assembler
+    )
     assert (
         'install -m 0755 "$voc_target/release/vc-start" '
         '"$payload/bin/vc-start"' in assembler
     )
+    assert 'install -m 0755 "$voc_target/release/voc" "$payload/bin/vc-o"' in assembler
+    assert (
+        'install -m 0755 "$voc_target/release/vc-admin" '
+        '"$payload/bin/vc-admin"' in assembler
+    )
+    assert (
+        'install -m 0755 "$voc_target/release/vc-procs" '
+        '"$payload/bin/vc-procs"' in assembler
+    )
+    assert {"vc-o", "vc-admin", "vc-procs"}.issubset(LINUX_EXECUTABLES)
+    assert '"vc-o": ["--version"]' in assembler
+    assert '"vc-admin": ["--version"]' in assembler
+    assert '"vc-procs": ["--version"]' in assembler
     assert '"$repo_root/vibecrafted-app/target' not in assembler
     assert 'rm -rf "$work/vc-terminal" "$work/vc-terminal.tar.gz"' in assembler
     assert (

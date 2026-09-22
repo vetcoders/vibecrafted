@@ -184,7 +184,9 @@ def _run_native_voc_build(
         "log() { :; }\n"
         'die() { printf "FATAL: %s\\n" "$*" >&2; exit 1; }\n'
         + _native_voc_build_function()
-        + 'build_native_voc\nprintf "%s\\n%s\\n" "$NATIVE_VC_START_SOURCE" "$NATIVE_VOC_SOURCE"\n',
+        + 'build_native_voc\nprintf "%s\\n%s\\n%s\\n%s\\n" '
+        '"$NATIVE_VC_START_SOURCE" "$NATIVE_VOC_SOURCE" '
+        '"$NATIVE_VC_ADMIN_SOURCE" "$NATIVE_VC_PROCS_SOURCE"\n',
         encoding="utf-8",
     )
     harness.chmod(0o755)
@@ -214,7 +216,9 @@ def _run_native_voc_build(
 def test_native_voc_build_owns_release_target_despite_ambient_cargo_target(
     tmp_path: Path,
 ) -> None:
-    result = _run_native_voc_build(tmp_path, outputs=("vc-start", "voc"))
+    result = _run_native_voc_build(
+        tmp_path, outputs=("vc-start", "voc", "vc-admin", "vc-procs")
+    )
     assert result.returncode == 0, result.stderr
     owned_target = tmp_path / "release-build/cargo/vibecrafted-app"
     assert (
@@ -230,11 +234,17 @@ def test_native_voc_build_owns_release_target_despite_ambient_cargo_target(
         "vc-start",
         "--bin",
         "voc",
+        "--bin",
+        "vc-admin",
+        "--bin",
+        "vc-procs",
         "--release",
     ]
     assert result.stdout.splitlines() == [
         str(owned_target / "release/vc-start"),
         str(owned_target / "release/voc"),
+        str(owned_target / "release/vc-admin"),
+        str(owned_target / "release/vc-procs"),
     ]
 
 
@@ -244,6 +254,21 @@ def test_native_voc_build_fails_when_owned_release_output_is_missing(
     result = _run_native_voc_build(tmp_path, outputs=("vc-start",))
     assert result.returncode != 0
     assert "VOC release binary is missing" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("outputs", "missing"),
+    [
+        (("vc-start", "voc"), "vc-admin release binary is missing"),
+        (("vc-start", "voc", "vc-admin"), "vc-procs release binary is missing"),
+    ],
+)
+def test_native_voc_build_fails_when_operator_binary_is_missing(
+    tmp_path: Path, outputs: tuple[str, ...], missing: str
+) -> None:
+    result = _run_native_voc_build(tmp_path, outputs=outputs)
+    assert result.returncode != 0
+    assert missing in result.stderr
 
 
 def test_public_install_surfaces_name_all_release_carriers() -> None:
@@ -619,6 +644,9 @@ def test_runtime_pack_signing_happens_after_final_copy_and_before_archive() -> N
         in materializer
     )
     assert 'install -m 0755 "$voc_source" "$runtime/bin/voc"' in materializer
+    assert 'install -m 0755 "$voc_source" "$runtime/bin/vc-o"' in materializer
+    assert 'install -m 0755 "$admin_source" "$runtime/bin/vc-admin"' in materializer
+    assert 'install -m 0755 "$procs_source" "$runtime/bin/vc-procs"' in materializer
     assert (
         'install -m 0755 "$runtime/scripts/vc-terminal-product-entry.sh"'
         in materializer
@@ -629,7 +657,10 @@ def test_runtime_pack_signing_happens_after_final_copy_and_before_archive() -> N
         not in materializer
     )
     assert 'install -m 0755 "$frame_source" "$runtime/libexec/vc-frame"' in materializer
-    assert "cargo build --locked -p voc --bin vc-start --bin voc --release" in builder
+    assert (
+        "cargo build --locked -p voc --bin vc-start --bin voc "
+        "--bin vc-admin --bin vc-procs --release"
+    ) in builder
     assert 'install -m 0644 "$RUNTIME_PACK" "$EMBEDDED_RUNTIME_PACK"' in embed
     assert '--codesign-identity "$SIGNING_IDENTITY"' in builder
     assert (
@@ -640,6 +671,30 @@ def test_runtime_pack_signing_happens_after_final_copy_and_before_archive() -> N
     )
     carrier_signature = builder.index('-out "$RUNTIME_PACK_SIGNATURE" "$RUNTIME_PACK"')
     assert standalone_preflight < carrier_signature
+
+
+def test_bundle_parity_verifier_uses_artifact_and_isolated_install_roots() -> None:
+    verifier = (REPO_ROOT / "scripts/verify-runtime-pack-bundle-parity.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        'bash "$repo_root/scripts/install-runtime-pack.sh" --pack "$pack"' in verifier
+    )
+    assert 'VIBECRAFTED_RUNTIME_HOME="$runtime_home"' in verifier
+    assert 'VIBECRAFTED_LAUNCHER_BIN="$launcher_bin"' in verifier
+    assert 'VC_FRAME_SOCKET_DIR="$frame_socket_dir"' in verifier
+    assert 'loct find --literal "${expected_binaries[@]}"' in verifier
+    assert '[[ ! -L "$generation/bin/vc-o" ]]' in verifier
+    assert 'cmp -s "$generation/bin/voc" "$generation/bin/vc-o"' in verifier
+    assert '[[ -x "$launcher_bin/$binary" ]]' in verifier
+    assert 'vc_o_version="$("$launcher_bin/vc-o" --version)"' in verifier
+    assert (
+        "from vibecrafted_core.server_observation import _control_observe_bin"
+        in verifier
+    )
+    assert '[[ ! -e "$probe_log" ]]' in verifier
+    assert 'config_sha_after="$(shasum -a 256 "$config_file"' in verifier
 
 
 def test_exact_release_gate_is_release_only_and_repeats_the_repo_verifier() -> None:

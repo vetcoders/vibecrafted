@@ -35,6 +35,9 @@ LINUX_EXECUTABLES = frozenset(
         "vc-frame",
         "vc-terminal",
         "voc",
+        "vc-o",
+        "vc-admin",
+        "vc-procs",
     }
 )
 WINDOWS_X64_MANDATORY_EXECUTABLES = frozenset(

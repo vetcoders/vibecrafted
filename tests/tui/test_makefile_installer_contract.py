@@ -1061,7 +1061,7 @@ def test_internal_binary_targets_preserve_real_files_and_are_not_manifest_writer
     assert 'command -v "$$bin"' in vendor_block
     assert "preserving pre-existing" in vendor_block
     assert "fill-gap policy; never downgrade" in vendor_block
-    assert "APP_BINARIES := voc vc-admin" in makefile
+    assert "APP_BINARIES := voc vc-admin vc-procs" in makefile
     assert "SERVER_PACKAGE := vibecrafted-server-web" in makefile
     assert "SERVER_BIN  := vc-server" in makefile
     assert "SERVER_COMPAT_BIN := vibecrafted-server-web" in makefile

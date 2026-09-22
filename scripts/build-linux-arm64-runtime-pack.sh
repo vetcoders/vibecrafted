@@ -92,9 +92,12 @@ rm -rf "$work/vc-frame" "$work/vc-frame.tar.gz"
 voc_target="$work/voc-target"
 CARGO_TARGET_DIR="$voc_target" cargo build --locked \
   --manifest-path "$repo_root/vibecrafted-app/Cargo.toml" \
-  --release -p voc --bin voc --bin vc-start
+  --release -p voc --bin voc --bin vc-start --bin vc-admin --bin vc-procs
 install -m 0755 "$voc_target/release/voc" "$payload/bin/voc"
+install -m 0755 "$voc_target/release/voc" "$payload/bin/vc-o"
 install -m 0755 "$voc_target/release/vc-start" "$payload/bin/vc-start"
+install -m 0755 "$voc_target/release/vc-admin" "$payload/bin/vc-admin"
+install -m 0755 "$voc_target/release/vc-procs" "$payload/bin/vc-procs"
 rm -rf "$voc_target"
 
 server_build="$work/server-build"
@@ -197,12 +200,14 @@ sources = {
 }
 owners = {
     "vibecrafted": "vibecrafted", "vc-server": "vibecrafted", "voc": "vibecrafted",
+    "vc-o": "vibecrafted", "vc-admin": "vibecrafted", "vc-procs": "vibecrafted",
     "vc-terminal": "vc-terminal", "vc-frame": "vc-frame", "screenscribe": "screenscribe",
     "loct": "loctree", "loctree": "loctree", "loctree-mcp": "loctree", "loctree-lsp": "loctree",
     "aicx": "aicx", "aicx-mcp": "aicx", "prview": "prview",
 }
 commands = {
     "vibecrafted": ["--version"], "vc-server": ["--version"], "voc": ["--version"],
+    "vc-o": ["--version"], "vc-admin": ["--version"], "vc-procs": ["--version"],
     "vc-terminal": ["--version"], "vc-frame": ["--version"], "screenscribe": ["--version"],
     "loct": ["--version"], "loctree": ["--version"], "loctree-mcp": ["--version"],
     "loctree-lsp": ["--version"], "aicx": ["--version"], "aicx-mcp": ["--version"],
