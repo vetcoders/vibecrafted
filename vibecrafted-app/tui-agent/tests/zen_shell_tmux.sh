@@ -45,6 +45,18 @@ contains "$screen" "blocked-kimi"
 contains "$screen" "failed-claude"
 contains "$screen" "attention working rule on"
 
+# The input is focused from the first frame: no mode switch precedes this
+# query. Scope remains a shell action while the line is empty.
+tmux -L "$SOCKET" send-keys -t "$SESSION":0.0 f
+sleep 0.2
+screen="$(tmux -L "$SOCKET" capture-pane -p -t "$SESSION":0.0)"
+contains "$screen" "[Local]"
+contains "$screen" "live-codex"
+tmux -L "$SOCKET" send-keys -t "$SESSION":0.0 f
+sleep 0.2
+screen="$(tmux -L "$SOCKET" capture-pane -p -t "$SESSION":0.0)"
+contains "$screen" "[Global]"
+
 tmux -L "$SOCKET" send-keys -t "$SESSION":0.0 -l '/kimi'
 sleep 0.2
 screen="$(tmux -L "$SOCKET" capture-pane -p -t "$SESSION":0.0)"
@@ -74,4 +86,28 @@ sleep 0.4
 screen="$(tmux -L "$SOCKET" capture-pane -p -t "$SESSION":0.0)"
 contains "$screen" "ran: /usr/bin/true resume claude --session session-failed-claude"
 
-echo "ZEN_TMUX_OK query observe cursor-enter resume"
+# The selected failed run remains actionable through the one-key resume path.
+tmux -L "$SOCKET" send-keys -t "$SESSION":0.0 r
+sleep 0.4
+screen="$(tmux -L "$SOCKET" capture-pane -p -t "$SESSION":0.0)"
+contains "$screen" "ran: /usr/bin/true resume claude --session session-failed-claude"
+
+# ZEN wraps the existing console; it does not remove any PLAN_23 panel.
+tmux -L "$SOCKET" send-keys -t "$SESSION":0.0 Tab
+sleep 0.2
+screen="$(tmux -L "$SOCKET" capture-pane -p -t "$SESSION":0.0)"
+contains "$screen" "Active dispatches"
+contains "$screen" "Wave atlas"
+contains "$screen" "Per-agent stats"
+contains "$screen" "Per-skill stats"
+contains "$screen" "Fleet health"
+contains "$screen" "Failure board"
+contains "$screen" "Operator action queue"
+
+tmux -L "$SOCKET" send-keys -t "$SESSION":0.0 H
+sleep 0.2
+screen="$(tmux -L "$SOCKET" capture-pane -p -t "$SESSION":0.0)"
+contains "$screen" "Voc ZEN"
+contains "$screen" "!observe <run>"
+
+echo "ZEN_TMUX_OK default-focus query scope observe cursor-enter bang-resume key-resume seven-panels"
