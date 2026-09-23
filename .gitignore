@@ -68,3 +68,4 @@ vibecrafted-io-link
 
 # Host-local Codex CLI project config (per-machine MCP endpoints).
 /.codex/
+/.playwright-cli

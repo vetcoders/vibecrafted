@@ -913,6 +913,102 @@ _vetcoders_resume_as_guest() {
   _vetcoders_start_enter_via_host "$vc_frame_bin" "$session_name"
 }
 
+# Resume under the one-host contract (Founder P0, 2026-09-23). The workspace is
+# always a guest: a missing one is created (host first when no host exists), a
+# dead one is preserved and replaced by a recovery guest, a live one is reused.
+# Outside a frame the caller enters the host and the guest is projected into
+# it; inside one (Start here → Open project) the guest is projected into the
+# attached host. Never a second full-chrome session, never switch-session.
+_vetcoders_resume_as_guest() {
+  local session_name="${1:-}" guest_layout="${2:-}" vc_frame_bin="" state="" host="" resolve_rc=0 rc=0 dead_name="" tab=""
+  local PATH="${PATH:-}"
+  PATH="$(_vetcoders_path_with_bundled_bin_priority "$PATH")"
+  export PATH
+  _vetcoders_require_vc_frame || return 1
+  _vetcoders_pin_vc_frame_config_dir || return $?
+  vc_frame_bin="$(_vetcoders_vc_frame_bin)" || return 1
+
+  state="$(_vetcoders_start_session_inventory_state "$session_name")"
+  case "$state" in
+    error)
+      _vetcoders_start_refuse_inventory "$session_name"
+      return $?
+      ;;
+    dead)
+      # EXITED sessions are recovery evidence: preserve, never kill-and-reuse.
+      dead_name="$session_name"
+      _vetcoders_record_vc_frame_attachment dead "$dead_name" || return $?
+      session_name="$(_vetcoders_recovery_vc_frame_session_name "$dead_name")"
+      printf "Session '%s' is dead; preserving it and creating '%s'.\n" \
+        "$dead_name" "$session_name" >&2
+      state="missing"
+      ;;
+  esac
+
+  host="$(_vetcoders_start_resolve_inventory_host "$session_name")" || resolve_rc=$?
+  case "$resolve_rc" in
+    2)
+      _vetcoders_start_refuse_inventory "$session_name"
+      return $?
+      ;;
+    3)
+      printf 'vc-start: more than one Frame host is live; refusing to guess which one should show %s.\n' \
+        "$(_vetcoders_shell_quote "$session_name")" >&2
+      return 4
+      ;;
+  esac
+
+  if [[ "$state" == missing ]]; then
+    [[ -n "$guest_layout" ]] || guest_layout="$(_vetcoders_operator_layout_file 2>/dev/null || true)"
+    if ((resolve_rc == 0)); then
+      _vetcoders_start_create_workspace_session "$vc_frame_bin" "$session_name" \
+        "$guest_layout" guest || rc=$?
+    else
+      _vetcoders_start_create_host_then_guest "$vc_frame_bin" "$session_name" "" "$guest_layout" || rc=$?
+    fi
+    ((rc == 0 || rc == 3)) || return "$rc"
+    printf 'vc-start: created workspace %s\n' "$(_vetcoders_shell_quote "$session_name")"
+  else
+    _vetcoders_record_vc_frame_attachment live "$session_name" || return $?
+    # The guest brings the layout's tabs (marbles, research, ...) into itself;
+    # its operator tabs are already there.
+    if [[ -n "$guest_layout" && "$guest_layout" != "$(_vetcoders_operator_layout_file 2>/dev/null || true)" ]]; then
+      _vetcoders_start_frame_env "$vc_frame_bin" --session "$session_name" \
+        action new-tab --layout "$guest_layout" || return $?
+    fi
+    # A live guest without a host still gets the host first. A live session
+    # that is itself a host (a pre-P0 standalone) is entered as it is.
+    if ((resolve_rc == 1)) &&
+      [[ "$(_vetcoders_start_session_projection_role "$session_name" "$vc_frame_bin" 2>/dev/null)" == guest ]]; then
+      _vetcoders_start_ensure_host "$vc_frame_bin" "$session_name" || return $?
+      _vetcoders_start_inventory_cache_valid=0
+    fi
+  fi
+  export VIBECRAFTED_OPERATOR_SESSION="$session_name"
+  export VIBECRAFTED_PREPARED_VC_FRAME_SESSION="$session_name"
+
+  if _vetcoders_in_vc_frame; then
+    [[ -z "$host" ]] && host="$(_vetcoders_start_resolve_inventory_host "$session_name" 2>/dev/null || true)"
+    if [[ -z "$host" ]]; then
+      printf 'vc-start: no Frame host to show %s in; open it from a terminal with: vc-start resume --repo <project>\n' \
+        "$(_vetcoders_shell_quote "$session_name")" >&2
+      return 4
+    fi
+    tab="$(_vetcoders_start_resolve_host_tab "$host" "$vc_frame_bin" 2>/dev/null || true)"
+    _vetcoders_start_project_guest_into_host "$vc_frame_bin" "$host" "$session_name" "$tab"
+    return $?
+  fi
+  # Someone is already looking at the host: show the guest there, no second client.
+  if [[ -n "$host" ]] && _vetcoders_start_host_has_unique_client "$host" "$vc_frame_bin"; then
+    tab="$(_vetcoders_start_resolve_host_tab "$host" "$vc_frame_bin" 2>/dev/null || true)"
+    _vetcoders_start_project_guest_into_host "$vc_frame_bin" "$host" "$session_name" "$tab" || return $?
+    printf 'vc-start: projected workspace %s into host %s (shared canvas)\n' \
+      "$(_vetcoders_shell_quote "$session_name")" "$(_vetcoders_shell_quote "$host")"
+    return 0
+  fi
+  return 1
+}
+
 # ---------------------------------------------------------------------------
 # vc-start: one create-only workspace contract (2026-09-09, Founder P0)
 # ---------------------------------------------------------------------------
