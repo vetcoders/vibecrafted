@@ -6,7 +6,6 @@
 //! this module never discovers or writes `~/.gemini` state.
 
 use std::collections::{BTreeMap, HashSet};
-use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
@@ -221,7 +220,9 @@ fn read_transcript(
     diagnostics: &mut AgyAdapterDiagnostics,
     seen: &mut HashSet<String>,
 ) -> io::Result<()> {
-    let mut reader = BufReader::new(File::open(&input.path)?);
+    let mut reader = BufReader::new(crate::transcript_open::open_provider_transcript(
+        &input.path,
+    )?);
     loop {
         let mut line = Vec::new();
         let read = reader.read_until(b'\n', &mut line)?;

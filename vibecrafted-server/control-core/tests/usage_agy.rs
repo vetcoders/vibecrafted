@@ -1,13 +1,10 @@
-#[path = "../src/usage_agy.rs"]
-mod usage_agy;
-
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{TimeZone, Utc};
-use usage_agy::{
+use control_core::{
     AgyModelRate, AgyPricing, AgySurface, AgyTranscriptInput, analyze_agy_transcripts,
     normalize_agy_model,
 };

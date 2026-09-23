@@ -1,12 +1,9 @@
-#[path = "../src/usage_cursor.rs"]
-mod usage_cursor;
-
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use usage_cursor::{
+use control_core::{
     CursorModelRate, CursorPricing, CursorTranscriptInput, analyze_cursor_transcripts,
 };
 

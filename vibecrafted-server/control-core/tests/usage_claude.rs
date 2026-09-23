@@ -1,13 +1,10 @@
-#[path = "../src/usage_claude.rs"]
-mod usage_claude;
-
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{TimeZone, Utc};
-use usage_claude::{
+use control_core::{
     ClaudeModelRate, ClaudePricing, ClaudeTranscriptInput, analyze_claude_transcripts,
     normalize_claude_model,
 };

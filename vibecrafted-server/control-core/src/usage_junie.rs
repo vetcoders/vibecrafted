@@ -7,7 +7,6 @@
 //! beyond reading the explicit transcript paths.
 
 use std::collections::{BTreeMap, HashSet};
-use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use std::path::PathBuf;
 
@@ -186,7 +185,9 @@ fn read_transcript(
     seen: &mut HashSet<String>,
     aggregates: &mut BTreeMap<(Option<String>, Option<String>), Aggregate>,
 ) -> io::Result<()> {
-    let mut reader = BufReader::new(File::open(&input.path)?);
+    let mut reader = BufReader::new(crate::transcript_open::open_provider_transcript(
+        &input.path,
+    )?);
     let mut identity = StreamIdentity {
         session_id: input.session_id.clone(),
         model: clean(input.model.as_deref()),

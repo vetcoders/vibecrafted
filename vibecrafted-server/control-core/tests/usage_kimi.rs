@@ -1,12 +1,9 @@
-#[path = "../src/usage_kimi.rs"]
-mod usage_kimi;
-
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use usage_kimi::{KimiModelRate, KimiPricing, KimiWireInput, analyze_kimi_wires};
+use control_core::{KimiModelRate, KimiPricing, KimiWireInput, analyze_kimi_wires};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 

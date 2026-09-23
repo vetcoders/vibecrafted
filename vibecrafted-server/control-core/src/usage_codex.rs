@@ -7,7 +7,6 @@
 //! tables are supplied by the caller.
 
 use std::collections::{BTreeMap, HashSet};
-use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use std::path::PathBuf;
 
@@ -156,7 +155,7 @@ fn read_session(
     diagnostics: &mut CodexAdapterDiagnostics,
     seen: &mut HashSet<String>,
 ) -> io::Result<Aggregate> {
-    let file = File::open(&input.path)?;
+    let file = crate::transcript_open::open_provider_transcript(&input.path)?;
     let mut reader = BufReader::new(file);
     let mut aggregate = Aggregate {
         session_id: input.session_id.clone(),

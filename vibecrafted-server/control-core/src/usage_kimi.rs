@@ -6,7 +6,6 @@
 //! rates; they are never presented as provider-reported billing.
 
 use std::collections::{BTreeMap, HashSet};
-use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
@@ -175,7 +174,7 @@ fn read_wire(
     seen: &mut HashSet<String>,
     aggregates: &mut BTreeMap<(Option<String>, Option<String>), BucketAggregate>,
 ) -> io::Result<()> {
-    let file = File::open(&input.path)?;
+    let file = crate::transcript_open::open_provider_transcript(&input.path)?;
     let mut reader = BufReader::new(file);
     let path_session = input
         .session_id

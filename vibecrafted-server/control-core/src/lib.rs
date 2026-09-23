@@ -44,6 +44,7 @@ pub mod model;
 pub mod read;
 pub mod scaffold;
 pub mod scaffold_verifiers;
+pub mod transcript_open;
 pub mod usage;
 pub mod usage_agy;
 pub mod usage_claude;

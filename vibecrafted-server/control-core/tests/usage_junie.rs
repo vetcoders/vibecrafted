@@ -1,12 +1,9 @@
-#[path = "../src/usage_junie.rs"]
-mod usage_junie;
-
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use usage_junie::{JunieModelRate, JuniePricing, JunieTranscriptInput, analyze_junie_transcripts};
+use control_core::{JunieModelRate, JuniePricing, JunieTranscriptInput, analyze_junie_transcripts};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
