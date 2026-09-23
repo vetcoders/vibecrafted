@@ -93,26 +93,28 @@ def test_classic_darwin_linker_wrapper_injects_flag_before_cargo_arguments(
     fake_clang.chmod(0o755)
     fake_ld_classic = fake_bin / "ld-classic"
     fake_ld_classic.write_text(
-        '#!/usr/bin/env bash\nprintf "%s\\n" "Fake pinned ld-classic"\n',
+        "#!/usr/bin/env bash\n"
+        'printf "%s\\n" "Fake pinned ld-classic"\n'
+        'for ((i = 0; i < 10000; i++)); do printf "%s\\n" "linker detail"; done\n',
         encoding="utf-8",
     )
     fake_ld_classic.chmod(0o755)
     fake_contract = tmp_path / "release-toolchain-contract.sh"
-    fake_contract.write_text(
-        "VIBECRAFTED_RELEASE_RUSTUP_TOOLCHAIN='test'\n"
-        "VIBECRAFTED_RELEASE_RUST_TARGETS='test-target'\n"
-        f"VIBECRAFTED_RELEASE_DARWIN_CLANG='{fake_clang}'\n"
-        "VIBECRAFTED_RELEASE_DARWIN_CLANG_VERSION='Fake pinned clang'\n"
-        f"VIBECRAFTED_RELEASE_DARWIN_LD_CLASSIC='{fake_ld_classic}'\n"
-        "VIBECRAFTED_RELEASE_DARWIN_LD_CLASSIC_VERSION='Fake pinned ld-classic'\n"
-        "vibecrafted_release_verify_darwin_linker() {\n"
-        '  actual_clang="$($VIBECRAFTED_RELEASE_DARWIN_CLANG --version | head -n 1)"\n'
-        '  actual_ld="$($VIBECRAFTED_RELEASE_DARWIN_LD_CLASSIC -v 2>&1 | head -n 1)"\n'
-        '  [ "$actual_clang" = "$VIBECRAFTED_RELEASE_DARWIN_CLANG_VERSION" ]\n'
-        '  [ "$actual_ld" = "$VIBECRAFTED_RELEASE_DARWIN_LD_CLASSIC_VERSION" ]\n'
-        "}\n",
-        encoding="utf-8",
+    contract = (REPO_ROOT / "scripts/lib/release-toolchain-contract.sh").read_text(
+        encoding="utf-8"
     )
+    for old, new in (
+        ("/Library/Developer/CommandLineTools/usr/bin/clang", str(fake_clang)),
+        ("Apple clang version 17.0.0 (clang-1700.6.3.2)", "Fake pinned clang"),
+        (
+            "/Library/Developer/CommandLineTools/usr/bin/ld-classic",
+            str(fake_ld_classic),
+        ),
+        ("@(#)PROGRAM:ld-classic  PROJECT:ld64-956.6", "Fake pinned ld-classic"),
+    ):
+        assert old in contract
+        contract = contract.replace(old, new)
+    fake_contract.write_text(contract, encoding="utf-8")
 
     env = dict(os.environ)
     env.update(
@@ -141,6 +143,26 @@ def test_classic_darwin_linker_wrapper_injects_flag_before_cargo_arguments(
         "-o",
         "product",
     ]
+
+    for tool, expected_error in (
+        ("CLANG", "release clang drift"),
+        ("LD_CLASSIC", "release ld-classic drift"),
+    ):
+        drifted_contract = contract.replace(
+            f"VIBECRAFTED_RELEASE_DARWIN_{tool}_VERSION='Fake pinned ",
+            f"VIBECRAFTED_RELEASE_DARWIN_{tool}_VERSION='Wrong ",
+        )
+        assert drifted_contract != contract
+        fake_contract.write_text(drifted_contract, encoding="utf-8")
+        result = subprocess.run(
+            [str(REPO_ROOT / "scripts/lib/rust-linker-darwin-classic.sh"), "object.o"],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode != 0
+        assert expected_error in result.stderr
 
 
 def _native_voc_build_function() -> str:

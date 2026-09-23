@@ -24,8 +24,8 @@ vibecrafted_release_verify_darwin_linker() {
     return 1
   }
 
-  actual_clang="$($VIBECRAFTED_RELEASE_DARWIN_CLANG --version | head -n 1)"
-  actual_ld="$($VIBECRAFTED_RELEASE_DARWIN_LD_CLASSIC -v </dev/null 2>&1 | head -n 1)"
+  actual_clang="$("$VIBECRAFTED_RELEASE_DARWIN_CLANG" --version | sed -n '1p')"
+  actual_ld="$("$VIBECRAFTED_RELEASE_DARWIN_LD_CLASSIC" -v </dev/null 2>&1 | sed -n '1p')"
   [ "$actual_clang" = "$VIBECRAFTED_RELEASE_DARWIN_CLANG_VERSION" ] || {
     printf 'FATAL: release clang drift: expected [%s], got [%s]\n' \
       "$VIBECRAFTED_RELEASE_DARWIN_CLANG_VERSION" "$actual_clang" >&2
