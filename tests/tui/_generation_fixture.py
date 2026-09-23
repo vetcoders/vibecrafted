@@ -110,7 +110,7 @@ def product_vc_frame_config_dir(home: Path) -> Path:
 
 
 def install_product_vc_frame_config(
-    home: Path, *, layouts: tuple[str, ...] = ("operator",)
+    home: Path, *, layouts: tuple[str, ...] = ("host", "operator")
 ) -> Path:
     """Installer-owned Frame config at the pinned product home.
 
@@ -152,3 +152,129 @@ def read_terminal_launch(capture: Path, *, timeout: float = 10.0) -> dict | None
     if not capture.exists():
         return None
     return json.loads(capture.read_text(encoding="utf-8"))
+
+
+# A session-table Frame stub for the one-host start (Founder P0, 2026-09-23):
+# the host (`vc-host`, host.kdl) and each workspace guest are separate rows.
+# Environment: CAPTURE_FILE (every argv is appended as `VC_FRAME ...`),
+# SESSION_STATE_FILE (`live` / `dead` / `missing` for the seeded session),
+# FAKE_VC_FRAME_SESSION (the seeded session's name), FAKE_VC_FRAME_CREATE_FAILURE
+# (every create is refused with that stderr and exit 2). The table lives beside the
+# state file; the state/name files mirror the last session touched so older
+# assertions on them keep their meaning. `project-workspace` fails like a
+# detached host with no connected owner: the fake never has a client.
+_SESSION_TABLE_VC_FRAME = r"""#!/usr/bin/env python3
+import json
+import os
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+capture = Path(os.environ["CAPTURE_FILE"])
+state_file = Path(os.environ["SESSION_STATE_FILE"])
+name_file = state_file.with_suffix(".name")
+table_file = state_file.with_suffix(".sessions.json")
+seed = os.environ.get("FAKE_VC_FRAME_SESSION", "@DEFAULT@")
+
+with capture.open("a", encoding="utf-8") as fh:
+    fh.write("EFFECTIVE_HOME " + os.environ.get("HOME", "") + "\n")
+    fh.write("VC_FRAME_EXECUTABLE " + str(Path(sys.argv[0]).resolve()) + "\n")
+    fh.write("VC_FRAME " + " ".join(args) + "\n")
+    fh.write("VC_FRAME_CONFIG_DIR=" + os.environ.get("VC_FRAME_CONFIG_DIR", "") + "\n")
+
+# A test resets the world by removing the state file; the table follows it.
+if table_file.exists() and state_file.exists():
+    table = json.loads(table_file.read_text(encoding="utf-8"))
+else:
+    table = {}
+    seeded = state_file.read_text(encoding="utf-8").strip() if state_file.exists() else "missing"
+    if seeded in ("live", "dead"):
+        table[seed] = {"state": seeded, "layout": ""}
+
+
+def save(touched):
+    table_file.write_text(json.dumps(table), encoding="utf-8")
+    row = table.get(touched)
+    state_file.write_text(row["state"] if row else "missing", encoding="utf-8")
+    if row:
+        name_file.write_text(touched, encoding="utf-8")
+    else:
+        name_file.unlink(missing_ok=True)
+
+
+def option(flag):
+    if flag in args:
+        i = args.index(flag)
+        if i + 1 < len(args):
+            return args[i + 1]
+    return None
+
+
+target = option("--session")
+layout = option("--new-session-with-layout") or option("--layout") or ""
+if args[:1] == ["ls"] or args[:1] == ["list-sessions"]:
+    if os.environ.get("FAKE_VC_FRAME_DUPLICATE") == "1" and args[:1] == ["ls"]:
+        print(f"{seed} [Created 2m ago]")
+        print(f"{seed} [Created 1m ago] (EXITED - attach to resurrect)")
+        sys.exit(0)
+    for name, row in table.items():
+        if row["state"] == "live":
+            print(f"{name} [Created 1m ago]")
+        elif row["state"] == "dead":
+            print(f"{name} [Created 1m ago] (EXITED - attach to resurrect)")
+    sys.exit(0)
+create_failure = os.environ.get("FAKE_VC_FRAME_CREATE_FAILURE")
+if create_failure and ("--create-background" in args or "--new-session-with-layout" in args):
+    print(create_failure, file=sys.stderr)
+    sys.exit(2)
+if "--create-background" in args:
+    name = args[-1]
+    row = table.get(name)
+    if row and row["state"] == "live":
+        print("Session already exists", file=sys.stderr)
+        sys.exit(1)
+    table[name] = {"state": "live", "layout": layout or (row or {}).get("layout", "")}
+    save(name)
+    sys.exit(0)
+if args[:1] == ["attach"] and len(args) > 1:
+    name = args[-1]
+    if "--force-run-commands" in args or name in table:
+        table.setdefault(name, {"state": "live", "layout": ""})["state"] = "live"
+        save(name)
+    sys.exit(0)
+if args[:1] in (["kill-session"], ["delete-session"]) and len(args) > 1:
+    table.pop(args[1], None)
+    save(args[1])
+    sys.exit(0)
+if "--new-session-with-layout" in args:
+    name = target or seed
+    table[name] = {"state": "live", "layout": layout}
+    save(name)
+    sys.exit(0)
+if "action" in args and "dump-layout" in args:
+    row = table.get(target or seed)
+    if not row or row["state"] != "live":
+        print("There is no active session!", file=sys.stderr)
+        sys.exit(1)
+    path = Path(row["layout"]) if row["layout"] else None
+    print(path.read_text(encoding="utf-8") if path and path.is_file() else "layout {\n}")
+    sys.exit(0)
+if "action" in args and ("new-pane" in args or "new-tab" in args):
+    row = table.get(target or seed)
+    if not row or row["state"] != "live":
+        print("There is no active session!", file=sys.stderr)
+        sys.exit(1)
+    sys.exit(0)
+if "project-workspace" in args:
+    print("Expected one connected configured projection owner, found 0", file=sys.stderr)
+    sys.exit(1)
+sys.exit(0)
+"""
+
+
+def write_session_table_vc_frame(bin_dir: Path, default_session: str) -> Path:
+    """Install the session-table Frame stub as ``<bin_dir>/vc-frame``."""
+    return write_executable(
+        bin_dir / "vc-frame",
+        _SESSION_TABLE_VC_FRAME.replace("@DEFAULT@", default_session),
+    )

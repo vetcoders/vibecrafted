@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -17,6 +18,13 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LAUNCHER = REPO_ROOT / "scripts" / "vibecrafted"
+
+_GENERATION_FIXTURE_SPEC = importlib.util.spec_from_file_location(
+    "tui_generation_fixture", Path(__file__).with_name("_generation_fixture.py")
+)
+assert _GENERATION_FIXTURE_SPEC is not None and _GENERATION_FIXTURE_SPEC.loader
+gen = importlib.util.module_from_spec(_GENERATION_FIXTURE_SPEC)
+_GENERATION_FIXTURE_SPEC.loader.exec_module(gen)
 
 
 def _write_fake_agent(bin_dir: Path, name: str, capture_file: Path) -> None:
@@ -606,57 +614,10 @@ def _write_generic_skill_helper(script_path: Path) -> None:
 def _write_stateful_vc_frame(
     bin_dir: Path, capture_file: Path, session_state_file: Path
 ) -> None:
-    default_session = _expected_operator_session()
-    script = bin_dir / "vc-frame"
-    script.write_text(
-        "\n".join(
-            [
-                "#!/usr/bin/env python3",
-                "import os",
-                "import sys",
-                "from pathlib import Path",
-                "",
-                "args = sys.argv[1:]",
-                'capture = Path(os.environ["CAPTURE_FILE"])',
-                'state_file = Path(os.environ["SESSION_STATE_FILE"])',
-                'state = state_file.read_text(encoding="utf-8").strip() if state_file.exists() else "missing"',
-                f'session = os.environ.get("FAKE_VC_FRAME_SESSION", "{default_session}")',
-                'if "--session" in args:',
-                '    idx = args.index("--session")',
-                "    if idx + 1 < len(args):",
-                "        session = args[idx + 1]",
-                'elif args[:1] == ["attach"] and len(args) > 1:',
-                "    session = args[-1]",
-                'with capture.open("a", encoding="utf-8") as fh:',
-                '    fh.write("VC_FRAME " + " ".join(args) + "\\n")',
-                'if args[:1] == ["ls"]:',
-                '    if state == "live":',
-                '        print(f"{session} [Created 1m ago]")',
-                '    elif state == "dead":',
-                '        print(f"{session} [Created 1m ago] (EXITED - attach to resurrect)")',
-                "    sys.exit(0)",
-                'if args[:1] == ["attach"]:',
-                '    if "--force-run-commands" in args:',
-                '        state_file.write_text("live", encoding="utf-8")',
-                "    sys.exit(0)",
-                'if args[:1] == ["delete-session"]:',
-                '    state_file.write_text("missing", encoding="utf-8")',
-                "    sys.exit(0)",
-                'if "--new-session-with-layout" in args:',
-                '    state_file.write_text("live", encoding="utf-8")',
-                "    sys.exit(0)",
-                'if "action" in args and ("new-pane" in args or "new-tab" in args):',
-                "    sys.exit(0)",
-                "sys.exit(0)",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    script.chmod(0o755)
-    vc_frame = bin_dir / "vc-frame"
-    vc_frame.write_text(script.read_text(encoding="utf-8"), encoding="utf-8")
-    vc_frame.chmod(0o755)
+    # One session-table stub for both files: the host and each guest are rows.
+    # Capture and state paths reach it through CAPTURE_FILE/SESSION_STATE_FILE.
+    del capture_file, session_state_file
+    gen.write_session_table_vc_frame(bin_dir, _expected_operator_session())
 
 
 def _write_fake_osascript(
@@ -2817,10 +2778,11 @@ def test_dashboard_subcommand_launches_repo_owned_vc_frame_layout(
     home = tmp_path / "home"
     fake_bin = tmp_path / "bin"
     capture_file = tmp_path / "vc_frame-args.txt"
+    session_state_file = tmp_path / "session-state.txt"
 
     home.mkdir()
     fake_bin.mkdir()
-    _write_fake_command(fake_bin, "vc-frame", capture_file)
+    _write_stateful_vc_frame(fake_bin, capture_file, session_state_file)
     generation = _installed_public_generation(tmp_path, home, fake_bin / "vc-frame")
 
     env = os.environ.copy()
@@ -2837,6 +2799,7 @@ def test_dashboard_subcommand_launches_repo_owned_vc_frame_layout(
     env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg-config")
     env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
     env["CAPTURE_FILE"] = str(capture_file)
+    env["SESSION_STATE_FILE"] = str(session_state_file)
     env["VETCODERS_SPAWN_RUNTIME"] = "headless"
     env.pop("VC_FRAME_CONFIG_DIR", None)
     env.pop("VC_FRAME", None)
@@ -2854,19 +2817,26 @@ def test_dashboard_subcommand_launches_repo_owned_vc_frame_layout(
         env=env,
     )
 
-    payload = capture_file.read_text(encoding="utf-8").splitlines()
-    assert "--session" in payload
-    # dashboard (default layout) uses the canonical operator session, no suffix.
+    payload = capture_file.read_text(encoding="utf-8")
+    # dashboard (default layout) uses the canonical operator session, no suffix,
+    # as a GUEST of the one host, which is created first (Founder P0, 23.09).
     expected_session = _resolved_workspace_session(
         env, generation / "bin" / "vibecrafted"
     )
     assert len(expected_session) <= 24
-    assert expected_session in payload
-    assert "--new-session-with-layout" in payload
-    assert (
-        str(home / ".config" / "vibecrafted" / "vc-frame" / "layouts" / "operator.kdl")
-        in payload
+    layouts = home / ".config" / "vibecrafted" / "vc-frame" / "layouts"
+    host_create = (
+        f"--new-session-with-layout {layouts / 'host.kdl'} "
+        "attach --create-background vc-host"
     )
+    guest_create = (
+        f"--guest-workspace --new-session-with-layout {layouts / 'operator.kdl'} "
+        f"attach --create-background {expected_session}"
+    )
+    assert host_create in payload
+    assert guest_create in payload
+    assert payload.index(host_create) < payload.index(guest_create)
+    assert "VC_FRAME attach vc-host" in payload
     assert (
         f"VC_FRAME_CONFIG_DIR={home / '.config' / 'vibecrafted' / 'vc-frame'}"
         in payload
@@ -3411,10 +3381,11 @@ def test_vc_dashboard_wrapper_dispatches_to_dashboard(tmp_path: Path) -> None:
     fake_bin = tmp_path / "bin"
     capture_file = tmp_path / "vc_frame-args.txt"
     wrapper = tmp_path / "vc-dashboard"
+    session_state_file = tmp_path / "session-state.txt"
 
     home.mkdir()
     fake_bin.mkdir()
-    _write_fake_command(fake_bin, "vc-frame", capture_file)
+    _write_stateful_vc_frame(fake_bin, capture_file, session_state_file)
     generation = _installed_public_generation(tmp_path, home, fake_bin / "vc-frame")
     wrapper.symlink_to(generation / "bin" / "vibecrafted")
 
@@ -3423,6 +3394,7 @@ def test_vc_dashboard_wrapper_dispatches_to_dashboard(tmp_path: Path) -> None:
     env["VIBECRAFTED_HOME"] = str(home / ".vibecrafted")
     env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
     env["CAPTURE_FILE"] = str(capture_file)
+    env["SESSION_STATE_FILE"] = str(session_state_file)
     env["VETCODERS_SPAWN_RUNTIME"] = "headless"
     env.pop("VC_FRAME", None)
     env.pop("VC_FRAME_PANE_ID", None)
@@ -3436,9 +3408,9 @@ def test_vc_dashboard_wrapper_dispatches_to_dashboard(tmp_path: Path) -> None:
         text=True,
     )
     assert result.returncode == 0, result.stderr
-    payload = capture_file.read_text(encoding="utf-8").splitlines()
-    assert "--session" in payload
-    assert "--new-session-with-layout" in payload
+    payload = capture_file.read_text(encoding="utf-8")
+    assert "attach --create-background vc-host" in payload
+    assert "--guest-workspace --new-session-with-layout" in payload
 
 
 def test_dashboard_ls_delegates_to_vc_frame_list_sessions(tmp_path: Path) -> None:

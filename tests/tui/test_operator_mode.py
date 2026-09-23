@@ -51,7 +51,7 @@ def _start_generation(tmp_path: Path, home: Path) -> tuple[Path, Path]:
     generation = gen.fake_generation(tmp_path, front_doors=("vc-start", "vibecrafted"))
     terminal_capture = tmp_path / "terminal-launch.json"
     gen.install_vc_terminal(generation, terminal_capture)
-    gen.install_product_vc_frame_config(home, layouts=("operator", "marbles"))
+    gen.install_product_vc_frame_config(home, layouts=("host", "operator", "marbles"))
     gen.install_primary_shell_launcher(home)
     return generation, terminal_capture
 
@@ -113,93 +113,10 @@ def _write_fake_claude(bin_dir: Path) -> None:
 def _write_stateful_vc_frame(
     bin_dir: Path, capture_file: Path, session_state_file: Path
 ) -> None:
-    default_session = _expected_operator_session()
-    script = bin_dir / "vc-frame"
-    script.write_text(
-        "\n".join(
-            [
-                "#!/usr/bin/env python3",
-                "import os",
-                "import sys",
-                "from pathlib import Path",
-                "",
-                "args = sys.argv[1:]",
-                'capture = Path(os.environ["CAPTURE_FILE"])',
-                'state_file = Path(os.environ["SESSION_STATE_FILE"])',
-                'name_file = state_file.with_suffix(".name")',
-                'state = state_file.read_text(encoding="utf-8").strip() if state_file.exists() else "missing"',
-                f'session = os.environ.get("FAKE_VC_FRAME_SESSION", "{default_session}")',
-                "if name_file.exists():",
-                '    session = name_file.read_text(encoding="utf-8").strip()',
-                'if "--session" in args:',
-                '    idx = args.index("--session")',
-                "    if idx + 1 < len(args):",
-                "        session = args[idx + 1]",
-                'elif args[:1] == ["attach"] and len(args) > 1:',
-                "    session = args[-1]",
-                'elif "--create-background" in args:',
-                "    session = args[-1]",
-                'with capture.open("a", encoding="utf-8") as fh:',
-                '    fh.write("EFFECTIVE_HOME " + os.environ.get("HOME", "") + "\\n")',
-                '    fh.write("VC_FRAME_EXECUTABLE " + str(Path(sys.argv[0]).resolve()) + "\\n")',
-                '    fh.write("VC_FRAME " + " ".join(args) + "\\n")',
-                'if args[:1] == ["ls"]:',
-                '    if os.environ.get("FAKE_VC_FRAME_DUPLICATE") == "1":',
-                '        print(f"{session} [Created 2m ago]")',
-                '        print(f"{session} [Created 1m ago] (EXITED - attach to resurrect)")',
-                "        sys.exit(0)",
-                '    if state == "live":',
-                '        print(f"{session} [Created 1m ago]")',
-                '    elif state == "dead":',
-                '        print(f"{session} [Created 1m ago] (EXITED - attach to resurrect)")',
-                "    sys.exit(0)",
-                # list-sessions feeds spawn_session_is_live (awk drops EXITED), so it
-                # only needs to report a LIVE session. Emitting an EXITED line here
-                # regresses the dead-session recreate tests, which rely on the
-                # ls-based recovery path; keep list-sessions live-only.
-                'if args[:1] == ["list-sessions"]:',
-                '    if state == "live":',
-                '        print(f"{session} [Created 1m ago]")',
-                "    sys.exit(0)",
-                'if "--create-background" in args:',
-                '    if state == "live" and name_file.exists() and name_file.read_text(encoding="utf-8").strip() == session:',
-                '        print("Session already exists", file=sys.stderr)',
-                "        sys.exit(1)",
-                '    state_file.write_text("live", encoding="utf-8")',
-                '    name_file.write_text(session, encoding="utf-8")',
-                "    sys.exit(0)",
-                'if args[:1] == ["attach"]:',
-                '    if "--force-run-commands" in args:',
-                '        state_file.write_text("live", encoding="utf-8")',
-                '        name_file.write_text(session, encoding="utf-8")',
-                "    sys.exit(0)",
-                'if args[:1] == ["kill-session"]:',
-                '    state_file.write_text("missing", encoding="utf-8")',
-                "    name_file.unlink(missing_ok=True)",
-                "    sys.exit(0)",
-                'if args[:1] == ["delete-session"]:',
-                '    state_file.write_text("missing", encoding="utf-8")',
-                "    name_file.unlink(missing_ok=True)",
-                "    sys.exit(0)",
-                'if "--new-session-with-layout" in args:',
-                '    state_file.write_text("live", encoding="utf-8")',
-                '    name_file.write_text(session, encoding="utf-8")',
-                "    sys.exit(0)",
-                'if "action" in args and ("new-pane" in args or "new-tab" in args):',
-                '    if state != "live":',
-                '        print("There is no active session!", file=sys.stderr)',
-                "        sys.exit(1)",
-                "    sys.exit(0)",
-                "sys.exit(0)",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    script.chmod(0o755)
-    vc_frame = bin_dir / "vc-frame"
-    vc_frame.write_text(script.read_text(encoding="utf-8"), encoding="utf-8")
-    vc_frame.chmod(0o755)
+    # One session-table stub for both files: the host and each guest are rows.
+    # Capture and state paths reach it through CAPTURE_FILE/SESSION_STATE_FILE.
+    del capture_file, session_state_file
+    gen.write_session_table_vc_frame(bin_dir, _expected_operator_session())
 
 
 def _write_implicit_gc_probe_vc_frame(bin_dir: Path) -> None:
@@ -1429,8 +1346,11 @@ def test_vc_start_resume_resurrects_dead_session(tmp_path: Path) -> None:
     assert f"Session '{expected}' is dead; preserving it" in result.stderr
     assert recovery_session != expected
     assert f"kill-session {expected}" not in payload
-    assert f"--session {recovery_session}" in payload
-    assert "--new-session-with-layout" in payload
+    host_create = "attach --create-background vc-host"
+    guest_create = f"attach --create-background {recovery_session}"
+    assert host_create in payload and guest_create in payload
+    assert payload.index(host_create) < payload.index(guest_create)
+    assert "--guest-workspace --new-session-with-layout" in payload
 
 
 def test_dead_session_recovery_failure_is_not_reported_as_prepared(
@@ -1447,20 +1367,6 @@ def test_dead_session_recovery_failure_is_not_reported_as_prepared(
     generation = gen.fake_generation(tmp_path)
     gen.install_product_vc_frame_config(home)
     _write_stateful_vc_frame(generation / "bin", capture_file, session_state_file)
-    vc_frame = generation / "bin" / "vc-frame"
-    source = vc_frame.read_text(encoding="utf-8")
-    vc_frame.write_text(
-        source.replace(
-            'if "--new-session-with-layout" in args:\n'
-            '    state_file.write_text("live", encoding="utf-8")\n'
-            '    name_file.write_text(session, encoding="utf-8")\n'
-            "    sys.exit(0)",
-            'if "--new-session-with-layout" in args:\n'
-            '    print("socket path rejected", file=sys.stderr)\n'
-            "    sys.exit(2)",
-        ),
-        encoding="utf-8",
-    )
 
     env = os.environ.copy()
     env["HOME"] = str(home)
@@ -1470,6 +1376,7 @@ def test_dead_session_recovery_failure_is_not_reported_as_prepared(
     env["CAPTURE_FILE"] = str(capture_file)
     env["SESSION_STATE_FILE"] = str(session_state_file)
     env["FAKE_VC_FRAME_SESSION"] = _expected_operator_session()
+    env["FAKE_VC_FRAME_CREATE_FAILURE"] = "socket path rejected"
     env.pop("VC_FRAME", None)
     env.pop("VC_FRAME_PANE_ID", None)
     env.pop("VC_FRAME_SESSION_NAME", None)
@@ -1687,7 +1594,7 @@ def test_vc_dashboard_recreates_dead_run_id_session_without_layout_suffix(
     fake_bin.mkdir()
     session_state_file.write_text("dead", encoding="utf-8")
     generation = gen.fake_generation(tmp_path)
-    gen.install_product_vc_frame_config(home, layouts=("operator", "marbles"))
+    gen.install_product_vc_frame_config(home, layouts=("host", "operator", "marbles"))
     _write_stateful_vc_frame(generation / "bin", capture_file, session_state_file)
 
     env = os.environ.copy()
@@ -1735,8 +1642,11 @@ def test_vc_dashboard_recreates_dead_run_id_session_without_layout_suffix(
     assert f"Session '{expected_session}' is dead; preserving it" in result.stderr
     assert recovery_session != expected_session
     assert f"kill-session {expected_session}" not in payload
-    assert f"--session {recovery_session}" in payload
-    assert "--new-session-with-layout" in payload
+    host_create = "attach --create-background vc-host"
+    guest_create = f"attach --create-background {recovery_session}"
+    assert host_create in payload and guest_create in payload
+    assert payload.index(host_create) < payload.index(guest_create)
+    assert "--guest-workspace --new-session-with-layout" in payload
     assert f"{expected_session}-marbles" not in payload
     assert run_scoped_session not in payload
 
@@ -1924,7 +1834,10 @@ def test_dashboard_alt_layout_reuses_live_repo_session_instead_of_layout_session
 
     payload = capture_file.read_text(encoding="utf-8")
     expected_session = _expected_operator_session()
+    # The live repo guest gains the marbles tabs in place; the missing host is
+    # created first and entered (Founder P0, 23.09: layouts are always guests).
     assert f"--session {expected_session} action new-tab --layout" in payload
-    assert f"attach {expected_session}" in payload
-    assert "--new-session-with-layout" not in payload
+    assert "attach --create-background vc-host" in payload
+    assert "VC_FRAME attach vc-host" in payload
+    assert f"--create-background {expected_session}" not in payload
     assert f"{expected_session}-marbles" not in payload

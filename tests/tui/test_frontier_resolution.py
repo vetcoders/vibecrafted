@@ -270,7 +270,7 @@ def test_vc_dashboard_repo_layout_arrives_with_the_repo_frame_config(
     fake_bin.mkdir()
     vc_frame_config.parent.mkdir(parents=True)
     vc_frame_config.write_text('default_layout "compact"\n', encoding="utf-8")
-    _write_capture_binary(fake_bin, "vc-frame", capture_file)
+    gen.write_session_table_vc_frame(fake_bin, _expected_operator_session())
 
     env = os.environ.copy()
     env["HOME"] = str(home)
@@ -278,6 +278,7 @@ def test_vc_dashboard_repo_layout_arrives_with_the_repo_frame_config(
     env["XDG_CONFIG_HOME"] = str(xdg_config_home)
     env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
     env["CAPTURE_FILE"] = str(capture_file)
+    env["SESSION_STATE_FILE"] = str(tmp_path / "session-state.txt")
     env.update(gen.developer_mode_env(fake_bin / "vc-frame"))
     env.pop("VC_FRAME_CONFIG_DIR", None)
     env.pop("VC_FRAME", None)
@@ -294,14 +295,24 @@ def test_vc_dashboard_repo_layout_arrives_with_the_repo_frame_config(
         env=env,
     )
 
-    payload = capture_file.read_text(encoding="utf-8").splitlines()
-    assert "--session" in payload
-    assert _expected_operator_session() in payload
-    assert f"{_expected_operator_session()}-marbles" not in payload
-    assert "--new-session-with-layout" in payload
-    assert str(REPO_VC_FRAME_CONFIG / "layouts" / "marbles.kdl") in payload
+    payload = capture_file.read_text(encoding="utf-8")
+    session = _expected_operator_session()
+    layouts = REPO_VC_FRAME_CONFIG / "layouts"
+    # One host first (host.kdl), then the place session as a guest carrying
+    # the marbles layout -- both from the repo's own Frame config.
+    host_create = (
+        f"--new-session-with-layout {layouts / 'host.kdl'} "
+        "attach --create-background vc-host"
+    )
+    guest_create = (
+        f"--guest-workspace --new-session-with-layout {layouts / 'marbles.kdl'} "
+        f"attach --create-background {session}"
+    )
+    assert host_create in payload and guest_create in payload
+    assert payload.index(host_create) < payload.index(guest_create)
+    assert f"{session}-marbles" not in payload
     assert f"VC_FRAME_CONFIG_DIR={REPO_VC_FRAME_CONFIG}" in payload
-    assert not any(str(vc_frame_config.parent) in line for line in payload)
+    assert str(vc_frame_config.parent) not in payload
 
 
 def test_vc_dashboard_uses_place_session_without_layout_suffix(
@@ -314,7 +325,7 @@ def test_vc_dashboard_uses_place_session_without_layout_suffix(
 
     home.mkdir()
     fake_bin.mkdir()
-    _write_capture_binary(fake_bin, "vc-frame", capture_file)
+    gen.write_session_table_vc_frame(fake_bin, _expected_operator_session())
 
     vc_frame_config = (
         xdg_config_home / "vetcoders" / "frontier" / "vc-frame" / "config.kdl"
@@ -328,6 +339,7 @@ def test_vc_dashboard_uses_place_session_without_layout_suffix(
     env["XDG_CONFIG_HOME"] = str(xdg_config_home)
     env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
     env["CAPTURE_FILE"] = str(capture_file)
+    env["SESSION_STATE_FILE"] = str(tmp_path / "session-state.txt")
     # The engine is no longer found on PATH; developer mode on this checkout
     # names it explicitly and supplies the checkout's marbles layout (3d9da4dc).
     env.update(gen.developer_mode_env(fake_bin / "vc-frame"))
@@ -351,11 +363,12 @@ def test_vc_dashboard_uses_place_session_without_layout_suffix(
         env=env,
     )
 
-    payload = capture_file.read_text(encoding="utf-8").splitlines()
-    assert "--session" in payload
-    assert _expected_operator_session() in payload
+    payload = capture_file.read_text(encoding="utf-8")
+    session = _expected_operator_session()
+    assert "--guest-workspace --new-session-with-layout" in payload
+    assert f"attach --create-background {session}\n" in payload
     assert env["VIBECRAFTED_RUN_ID"] not in payload
-    assert f"{_expected_operator_session()}-marbles" not in payload
+    assert f"{session}-marbles" not in payload
 
 
 def test_zsh_command_backed_skill_does_not_depend_on_external_has_agent(

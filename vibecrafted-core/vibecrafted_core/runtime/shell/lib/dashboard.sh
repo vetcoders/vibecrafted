@@ -874,6 +874,19 @@ _vetcoders_resume_as_guest() {
     printf 'vc-start: created workspace %s\n' "$(_vetcoders_shell_quote "$session_name")"
   else
     _vetcoders_record_vc_frame_attachment live "$session_name" || return $?
+    # The guest brings the layout's tabs (marbles, research, ...) into itself;
+    # its operator tabs are already there.
+    if [[ -n "$guest_layout" && "$guest_layout" != "$(_vetcoders_operator_layout_file 2>/dev/null || true)" ]]; then
+      _vetcoders_start_frame_env "$vc_frame_bin" --session "$session_name" \
+        action new-tab --layout "$guest_layout" || return $?
+    fi
+    # A live guest without a host still gets the host first. A live session
+    # that is itself a host (a pre-P0 standalone) is entered as it is.
+    if ((resolve_rc == 1)) &&
+      [[ "$(_vetcoders_start_session_projection_role "$session_name" "$vc_frame_bin" 2>/dev/null)" == guest ]]; then
+      _vetcoders_start_ensure_host "$vc_frame_bin" "$session_name" || return $?
+      _vetcoders_start_inventory_cache_valid=0
+    fi
   fi
   export VIBECRAFTED_OPERATOR_SESSION="$session_name"
   export VIBECRAFTED_PREPARED_VC_FRAME_SESSION="$session_name"
@@ -1923,14 +1936,12 @@ _vetcoders_start_host_session_name() {
   printf '%s\n' "${VIBECRAFTED_FRAME_HOST_SESSION:-vc-host}"
 }
 
-# Anything that starts without a host creates the host FIRST (host.kdl,
-# kind=chrome), then the workspace as a guest (operator.kdl). A dead host is
-# resurrected, not replaced: it holds chrome only. Returns the create codes
-# of _vetcoders_start_create_workspace_session for the guest (3 = taken).
-_vetcoders_start_create_host_then_guest() {
-  local vc_frame_bin="${1:-}" session_name="${2:-}" root="${3:-}" guest_layout="${4:-}"
-  local host="" state="" role="" role_rc=0 rc=0
-  [[ -n "$guest_layout" ]] || guest_layout="$(_vetcoders_operator_layout_file 2>/dev/null || true)"
+# Make the one host exist and be live: create it (host.kdl, kind=chrome) when
+# missing, resurrect it when dead (it holds chrome only, nothing to preserve),
+# then prove its runtime role. $2 is the workspace the host is for; the host
+# can never carry that name.
+_vetcoders_start_ensure_host() {
+  local vc_frame_bin="${1:-}" session_name="${2:-}" host="" state="" role="" role_rc=0 rc=0
   host="$(_vetcoders_start_host_session_name)"
   if [[ "$host" == "$session_name" ]]; then
     printf 'vc-start: %s is the Frame host name; pass a different workspace name.\n' \
@@ -1969,6 +1980,15 @@ _vetcoders_start_create_host_then_guest() {
       "$(_vetcoders_shell_quote "$session_name")" >&2
     return 4
   fi
+}
+
+# Anything that starts without a host creates the host FIRST, then the
+# workspace as a guest (operator.kdl). Returns the create codes of
+# _vetcoders_start_create_workspace_session for the guest (3 = taken).
+_vetcoders_start_create_host_then_guest() {
+  local vc_frame_bin="${1:-}" session_name="${2:-}" root="${3:-}" guest_layout="${4:-}"
+  [[ -n "$guest_layout" ]] || guest_layout="$(_vetcoders_operator_layout_file 2>/dev/null || true)"
+  _vetcoders_start_ensure_host "$vc_frame_bin" "$session_name" || return $?
   _vetcoders_start_create_workspace_session "$vc_frame_bin" "$session_name" \
     "$guest_layout" guest
 }
