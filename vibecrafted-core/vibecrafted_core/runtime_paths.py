@@ -50,6 +50,7 @@ VIBECRAFTED_HOME_FOUNDER_DATA = frozenset(
         "trust",
         "loctree",
         "vibecrafted",
+        "store",
         ".git",
         ".loctree",
     }
