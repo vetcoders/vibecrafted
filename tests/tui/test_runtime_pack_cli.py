@@ -925,6 +925,10 @@ def test_runtime_packager_emits_one_closed_root_and_checksum(tmp_path: Path) -> 
         "bin/scaffold-doctor",
         "bin/control-observe",
         "bin/vc-start",
+        "bin/voc",
+        "bin/vc-o",
+        "bin/vc-admin",
+        "bin/vc-procs",
         "bin/vibecrafted",
         "bin/vibecrafted-mcp",
         "vibecrafted-mcp/vibecrafted_mcp/__init__.py",
@@ -999,6 +1003,10 @@ def test_runtime_packager_emits_one_closed_root_and_checksum(tmp_path: Path) -> 
         assert "VibecraftedRuntime/bin/vc-terminal" in names
         assert "VibecraftedRuntime/bin/vc-frame" in names
         assert "VibecraftedRuntime/bin/vc-start" in names
+        assert "VibecraftedRuntime/bin/voc" in names
+        assert "VibecraftedRuntime/bin/vc-o" in names
+        assert "VibecraftedRuntime/bin/vc-admin" in names
+        assert "VibecraftedRuntime/bin/vc-procs" in names
         assert "VibecraftedRuntime/libexec/vc-frame" in names
         assert "VibecraftedRuntime/libexec/vc-terminal" in names
         assert "VibecraftedRuntime/runtime-pack-provenance.json" in names
@@ -1006,6 +1014,10 @@ def test_runtime_packager_emits_one_closed_root_and_checksum(tmp_path: Path) -> 
         assert not any(name.endswith("/.DS_Store") for name in names)
         assert not any(
             member.issym() or member.islnk() for member in archive.getmembers()
+        )
+        assert (
+            archive.extractfile("VibecraftedRuntime/bin/voc").read()
+            == archive.extractfile("VibecraftedRuntime/bin/vc-o").read()
         )
         foundations = json.load(
             archive.extractfile("VibecraftedRuntime/runtime-foundations.json")

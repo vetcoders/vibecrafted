@@ -910,6 +910,8 @@ materialize_runtime_payload() {
   local server_site="$7"
   local scaffold_doctor_source="$8"
   local control_observe_source="$9"
+  local admin_source="${10}"
+  local procs_source="${11}"
   local canonical_deck python_seed seed_python python_home
 
   log "Materializing the App-independent Runtime Pack payload"
@@ -954,6 +956,11 @@ materialize_runtime_payload() {
   /bin/cp -R "$server_site/." "$runtime/server/site/"
   install -m 0755 "$start_source" "$runtime/bin/vc-start"
   install -m 0755 "$voc_source" "$runtime/bin/voc"
+  # vc-o is the A2 public alias for Voc. Keep it as a real copy so the closed
+  # Runtime Pack never depends on symlink behavior at install time.
+  install -m 0755 "$voc_source" "$runtime/bin/vc-o"
+  install -m 0755 "$admin_source" "$runtime/bin/vc-admin"
+  install -m 0755 "$procs_source" "$runtime/bin/vc-procs"
   install -m 0755 "$server_source" "$runtime/bin/vc-server"
   install -m 0755 "$server_source" "$runtime/bin/vibecrafted-server-web"
   install -m 0755 "$scaffold_doctor_source" "$runtime/bin/scaffold-doctor"
@@ -1056,16 +1063,22 @@ materialize_runtime_payload() {
 
 build_native_voc() {
   NATIVE_VOC_BUILD_ROOT="$BUILD_DIR/cargo/vibecrafted-app"
-  log "Building the native hermetic vc-start and VOC"
+  log "Building the native hermetic vc-start and VOC operator binaries"
   (cd "$SOURCE_ROOT/vibecrafted-app" \
     && CARGO_TARGET_DIR="$NATIVE_VOC_BUILD_ROOT" \
-      cargo build --locked -p voc --bin vc-start --bin voc --release)
+      cargo build --locked -p voc --bin vc-start --bin voc --bin vc-admin --bin vc-procs --release)
   NATIVE_VC_START_SOURCE="$NATIVE_VOC_BUILD_ROOT/release/vc-start"
   [[ -x "$NATIVE_VC_START_SOURCE" ]] || die "vc-start release binary is missing"
   chmod 0755 "$NATIVE_VC_START_SOURCE"
   NATIVE_VOC_SOURCE="$NATIVE_VOC_BUILD_ROOT/release/voc"
   [[ -x "$NATIVE_VOC_SOURCE" ]] || die "VOC release binary is missing"
   chmod 0755 "$NATIVE_VOC_SOURCE"
+  NATIVE_VC_ADMIN_SOURCE="$NATIVE_VOC_BUILD_ROOT/release/vc-admin"
+  [[ -x "$NATIVE_VC_ADMIN_SOURCE" ]] || die "vc-admin release binary is missing"
+  chmod 0755 "$NATIVE_VC_ADMIN_SOURCE"
+  NATIVE_VC_PROCS_SOURCE="$NATIVE_VOC_BUILD_ROOT/release/vc-procs"
+  [[ -x "$NATIVE_VC_PROCS_SOURCE" ]] || die "vc-procs release binary is missing"
+  chmod 0755 "$NATIVE_VC_PROCS_SOURCE"
 }
 
 build_product() {
@@ -1131,6 +1144,8 @@ build_product() {
   build_native_voc
   local start_source="$NATIVE_VC_START_SOURCE"
   local voc_source="$NATIVE_VOC_SOURCE"
+  local admin_source="$NATIVE_VC_ADMIN_SOURCE"
+  local procs_source="$NATIVE_VC_PROCS_SOURCE"
 
   log "Building the bundled Vibecrafted Server and hydrated site"
   local server_build_root="$BUILD_DIR/cargo"
@@ -1154,7 +1169,7 @@ build_product() {
   materialize_runtime_payload "$RUNTIME_PAYLOAD" \
     "$terminal_source" "$frame_source" "$start_source" "$voc_source" \
     "$server_source" "$server_site" "$scaffold_doctor_source" \
-    "$control_observe_source"
+    "$control_observe_source" "$admin_source" "$procs_source"
   produce_runtime_pack
   [[ "$MODE" == "runtime-pack" ]] && return
 

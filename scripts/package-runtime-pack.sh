@@ -81,7 +81,8 @@ if find "$root" -type l -print -quit | grep -q .; then
   die "standalone Runtime Pack contains symlinks"
 fi
 for required in \
-  VERSION bin/python3 bin/vibecrafted bin/vc-start bin/vc-terminal bin/vc-frame \
+  VERSION bin/python3 bin/vibecrafted bin/vc-start bin/voc bin/vc-o \
+  bin/vc-admin bin/vc-procs bin/vc-terminal bin/vc-frame \
   bin/scaffold-doctor \
   bin/control-observe \
   libexec/vc-frame libexec/vc-terminal \

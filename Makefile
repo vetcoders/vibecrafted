@@ -518,7 +518,7 @@ install-tools-held:
 # files. Never `cargo install` here — that creates ~/.local/bin -> ~/.cargo/bin
 # symlink drift, the exact pattern the runtime contract bans in BIN.
 APP_DIR := vibecrafted-app
-APP_BINARIES := voc vc-admin
+APP_BINARIES := voc vc-admin vc-procs
 APP_BUILD_TARGET := $(CARGO_BUILD_ROOT)/vibecrafted-app
 BIN_DIR := $(HOME)/.local/bin
 VENDORED_FOUNDATION_BINARIES := vc-frame loctree-mcp loct aicx aicx-mcp
