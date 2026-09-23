@@ -75,7 +75,7 @@ layout {
 
     tab name="Voc" hide_floating_panes=true {
         pane command="bash" name="Voc" {
-            args "-lc" "if command -v voc >/dev/null 2>&1; then exec voc; fi; for c in \"$HOME/.local/bin/voc\" \"${VIBECRAFTED_LAUNCHER_BIN:-$HOME/.local/bin}/voc\" \"${VIBECRAFTED_RUNTIME_ROOT:-}/bin/voc\" \"${VIBECRAFTED_RUNTIME_BIN:-}/voc\"; do if [ -n \"$c\" ] && [ -x \"$c\" ]; then exec \"$c\"; fi; done; if command -v vibecrafted >/dev/null 2>&1; then exec vibecrafted tui; fi; printf '\\n  voc is not installed in this Runtime Pack.\\n  Install: make install-app-binaries\\n\\n'; exec \"${SHELL:-/bin/zsh}\" -l"
+            args "-lc" "for c in \"${VIBECRAFTED_RUNTIME_ROOT:+$VIBECRAFTED_RUNTIME_ROOT/bin/vc-o}\" \"${VIBECRAFTED_RUNTIME_BIN:+$VIBECRAFTED_RUNTIME_BIN/vc-o}\" \"${VIBECRAFTED_LAUNCHER_BIN:-$HOME/.local/bin}/vc-o\"; do if [ -n \"$c\" ] && [ -x \"$c\" ]; then exec \"$c\"; fi; done; if command -v voc >/dev/null 2>&1; then exec voc; fi; for c in \"$HOME/.local/bin/voc\" \"${VIBECRAFTED_LAUNCHER_BIN:-$HOME/.local/bin}/voc\" \"${VIBECRAFTED_RUNTIME_ROOT:-}/bin/voc\" \"${VIBECRAFTED_RUNTIME_BIN:-}/voc\"; do if [ -n \"$c\" ] && [ -x \"$c\" ]; then exec \"$c\"; fi; done; if command -v vibecrafted >/dev/null 2>&1; then exec vibecrafted tui; fi; printf '\\n  voc is not installed in this Runtime Pack.\\n  Install: make install-app-binaries\\n\\n'; exec \"${SHELL:-/bin/zsh}\" -l"
         }
     }
 

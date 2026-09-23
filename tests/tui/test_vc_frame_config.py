@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import os
+import re
 import shutil
 import subprocess
 import sys
@@ -243,6 +246,9 @@ def test_operator_layout_matches_vibecrafted_standard() -> None:
     assert "pane-python" in payload
     assert "VIBECRAFTED_PYTHON" in payload
     assert "$HOME/.local/bin/voc" in payload
+    assert payload.index(
+        "VIBECRAFTED_RUNTIME_ROOT:+$VIBECRAFTED_RUNTIME_ROOT/bin/vc-o"
+    ) < payload.index("command -v voc")
     assert "vibecrafted tui" in payload
     assert "session-manager" in payload
     assert "rail true" in payload
@@ -261,6 +267,34 @@ def test_operator_layout_matches_vibecrafted_standard() -> None:
     assert "strider" not in active
     assert 'tab name="Operator"' not in active
     assert "VibeCrafted" not in active
+
+
+def test_operator_voc_uses_active_generation_before_standalone_voc(
+    tmp_path: Path,
+) -> None:
+    payload = (LAYOUTS_DIR / "operator.kdl").read_text(encoding="utf-8")
+    line = next(line for line in payload.splitlines() if 'args "-lc" "for c in' in line)
+    match = re.search(r'args "-lc" (".*")', line)
+    assert match is not None
+    command = json.loads(match.group(1))
+    runtime_bin = tmp_path / "runtime/bin"
+    runtime_bin.mkdir(parents=True)
+    vc_o = runtime_bin / "vc-o"
+    vc_o.write_text("#!/bin/sh\nprintf 'active-generation\\n'\n")
+    vc_o.chmod(0o755)
+    old_bin = tmp_path / "old-bin"
+    old_bin.mkdir()
+    old_voc = old_bin / "voc"
+    old_voc.write_text("#!/bin/sh\nprintf 'old-voc\\n'\n")
+    old_voc.chmod(0o755)
+    env = os.environ.copy()
+    env["VIBECRAFTED_RUNTIME_ROOT"] = str(tmp_path / "runtime")
+    env["PATH"] = f"{old_bin}:/usr/bin:/bin"
+    result = subprocess.run(
+        ["bash", "-lc", command], env=env, capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "active-generation\n"
 
 
 def test_dashboard_and_marbles_probe_packaged_mission_control() -> None:
