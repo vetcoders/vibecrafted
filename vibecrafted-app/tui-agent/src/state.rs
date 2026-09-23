@@ -1,8 +1,8 @@
 use crate::usage::UsageDashboard;
 use chrono::{DateTime, TimeZone, Utc};
 use control_core::{
-    ControlPlane, Event as CanonicalEvent, RunStatus as CanonicalRunStatus, is_active_state,
-    is_final_state,
+    ControlPlane, Event as CanonicalEvent, RunRouting, RunStatus as CanonicalRunStatus,
+    is_active_state, is_final_state,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -33,10 +33,14 @@ impl ControlPlaneState {
             return Ok(Self::empty(requested_root));
         };
         let archived_run_ids = root.load_archived_run_ids()?;
-        let retained_runs = root.load_runs()?;
+        let mut retained_runs = root.load_runs()?;
         let usage = UsageDashboard::load(root.as_path())?;
         let canonical =
             ControlPlane::from_control_plane_home(root.as_path()).compute_view(Utc::now());
+        let run_routing = canonical.run_routing.clone();
+        for snapshot in &mut retained_runs {
+            replace_run_routing(snapshot, run_routing.get(&snapshot.run_id));
+        }
         let canonical_runtime_authority = root.as_path().join("events.jsonl").is_file()
             || !canonical.active_runs.is_empty()
             || !canonical.stalled_runs.is_empty();
@@ -53,7 +57,8 @@ impl ControlPlaneState {
             .chain(canonical.stalled_runs)
         {
             if !archived_run_ids.contains(&run.run_id) {
-                runs.insert(run.run_id.clone(), canonical_run_snapshot(run));
+                let routing = run_routing.get(&run.run_id);
+                runs.insert(run.run_id.clone(), canonical_run_snapshot(run, routing));
             }
         }
         let runs = runs.into_values().collect();
@@ -178,6 +183,18 @@ impl RunSnapshot {
             .or(self.status.as_deref())
             .unwrap_or("unknown")
             .to_string()
+    }
+
+    /// One exact routing axis projected by control-core. The source marker is
+    /// mandatory so retained snapshot extras can never masquerade as a current
+    /// canonical runtime route.
+    pub fn routing_value(&self, key: &str) -> Option<&str> {
+        (self.extra.get("routing_source").and_then(Value::as_str)
+            == Some("control-core:runtime-meta"))
+        .then(|| self.extra.get(key).and_then(Value::as_str))
+        .flatten()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
     }
 
     fn is_runtime_inflight(&self) -> bool {
@@ -614,7 +631,7 @@ impl SafeControlPlaneRoot {
     }
 }
 
-fn canonical_run_snapshot(run: CanonicalRunStatus) -> RunSnapshot {
+fn canonical_run_snapshot(run: CanonicalRunStatus, routing: Option<&RunRouting>) -> RunSnapshot {
     let mut extra = HashMap::new();
     extra.insert("health".to_string(), Value::String(run.health.clone()));
     extra.insert("source".to_string(), Value::String(run.source.clone()));
@@ -637,7 +654,7 @@ fn canonical_run_snapshot(run: CanonicalRunStatus) -> RunSnapshot {
         extra.insert("total_loops".to_string(), Value::from(total_loops));
     }
 
-    RunSnapshot {
+    let mut snapshot = RunSnapshot {
         run_id: run.run_id,
         session_id: nonempty(run.session_id),
         agent: nonempty(run.agent),
@@ -654,6 +671,50 @@ fn canonical_run_snapshot(run: CanonicalRunStatus) -> RunSnapshot {
         latest_transcript: nonempty(run.latest_transcript),
         last_error: nonempty(run.last_error),
         extra,
+    };
+    replace_run_routing(&mut snapshot, routing);
+    snapshot
+}
+
+const ROUTING_KEYS: [&str; 7] = [
+    "provider_session_id",
+    "workspace_id",
+    "workspace_instance_id",
+    "workspace_display_label",
+    "workspace_session_id",
+    "worker_host_session",
+    "worker_host_display",
+];
+
+fn replace_run_routing(snapshot: &mut RunSnapshot, routing: Option<&RunRouting>) {
+    snapshot.extra.remove("routing_source");
+    for key in ROUTING_KEYS {
+        snapshot.extra.remove(key);
+    }
+    let Some(routing) = routing else {
+        return;
+    };
+    snapshot.agent = nonempty(routing.agent.clone());
+    snapshot.root = nonempty(routing.root.clone());
+    snapshot.extra.insert(
+        "routing_source".to_string(),
+        Value::String("control-core:runtime-meta".to_string()),
+    );
+    let values = [
+        ("provider_session_id", &routing.provider_session_id),
+        ("workspace_id", &routing.workspace_id),
+        ("workspace_instance_id", &routing.workspace_instance_id),
+        ("workspace_display_label", &routing.workspace_display_label),
+        ("workspace_session_id", &routing.workspace_session_id),
+        ("worker_host_session", &routing.worker_host_session),
+        ("worker_host_display", &routing.worker_host_display),
+    ];
+    for (key, value) in values {
+        if !value.trim().is_empty() {
+            snapshot
+                .extra
+                .insert(key.to_string(), Value::String(value.clone()));
+        }
     }
 }
 

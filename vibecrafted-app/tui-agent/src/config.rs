@@ -63,6 +63,7 @@ where
     let mut options = CliOptions::default();
     let mut args = args.into_iter();
     let mut repo_selection: Option<(&'static str, PathBuf)> = None;
+    let mut attention_working_rule = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" | "-h" => {
@@ -135,6 +136,9 @@ where
             "--no-verify-gate" => {
                 options.no_verify_gate = true;
             }
+            "--attention-working-rule" => {
+                attention_working_rule = true;
+            }
             "--server" => {
                 let value = args
                     .next()
@@ -159,6 +163,9 @@ where
         }
     }
     options.repo = repo_selection.map(|(_, path)| path);
+    if attention_working_rule {
+        options.view = options.view.with_attention_working_rule()?;
+    }
     Ok(options)
 }
 
@@ -408,7 +415,10 @@ fn print_help() {
     println!();
     println!("Options:");
     println!(
-        "  --view home|observe|full  Default home: attention / work / history, then an existing conversation"
+        "  --view home|observe|full  Default home: live / needs-attention / failed, then observation"
+    );
+    println!(
+        "  --attention-working-rule  Enable the provisional blocked/[!] needs-attention predicate (home only)"
     );
     println!(
         "  --server <url>       Vibecrafted Server origin (default: VC_SERVER_URL or http://127.0.0.1:3024)"
@@ -523,6 +533,21 @@ mod tests {
             parse(&["--view", "observe"]).unwrap().view,
             ConsoleView::Observe
         );
+    }
+
+    #[test]
+    fn attention_working_rule_is_explicit_and_home_only() {
+        let options = parse(&["--attention-working-rule"]).unwrap();
+        assert_eq!(options.view, ConsoleView::HomeAttention);
+        assert!(options.view.attention_working_rule());
+
+        let reordered = parse(&["--attention-working-rule", "--view", "home"]).unwrap();
+        assert_eq!(reordered.view, ConsoleView::HomeAttention);
+
+        let error = parse(&["--view", "full", "--attention-working-rule"])
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "--attention-working-rule requires --view home");
     }
 
     #[test]

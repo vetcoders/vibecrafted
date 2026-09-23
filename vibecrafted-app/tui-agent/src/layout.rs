@@ -347,7 +347,7 @@ pub fn hit_test(
     column: u16,
     row: u16,
 ) -> Option<HitTarget> {
-    let root = if view == ConsoleView::Home {
+    let root = if view.is_home() {
         home_root_layout(area)
     } else {
         root_layout(area)
@@ -359,7 +359,7 @@ pub fn hit_test(
         return None;
     }
     match tab {
-        AppTab::Monitor if view == ConsoleView::Home => {
+        AppTab::Monitor if view.is_home() => {
             let layout = home_layout(root.body, area.width);
             if contains(layout.list, column, row) {
                 Some(HitTarget::HomeList {

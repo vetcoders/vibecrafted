@@ -16,9 +16,13 @@ pub const DEFAULT_SERVER: &str = "http://127.0.0.1:3024";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConsoleView {
-    /// Shared Home / Dashboard: attention → work → history, then an
-    /// existing conversation. This is the product landing surface.
+    /// Shared Home / Dashboard. This is the product landing surface.
     Home,
+    /// Home with the deliberately provisional needs-attention classifier.
+    /// The public selector is `--attention-working-rule`; keeping the mode in
+    /// the view makes the flag available to the pure projection without a
+    /// second source of runtime truth.
+    HomeAttention,
     Observe,
     Full,
 }
@@ -176,7 +180,20 @@ impl ConsoleView {
     }
 
     pub fn is_home(self) -> bool {
-        matches!(self, Self::Home)
+        matches!(self, Self::Home | Self::HomeAttention)
+    }
+
+    pub fn attention_working_rule(self) -> bool {
+        matches!(self, Self::HomeAttention)
+    }
+
+    pub fn with_attention_working_rule(self) -> anyhow::Result<Self> {
+        match self {
+            Self::Home | Self::HomeAttention => Ok(Self::HomeAttention),
+            Self::Observe | Self::Full => {
+                anyhow::bail!("--attention-working-rule requires --view home")
+            }
+        }
     }
 }
 

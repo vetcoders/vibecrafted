@@ -13,7 +13,7 @@
 //!   active/recent/warnings without ever depending on the Python sync having
 //!   run. This is what lets the web/TUI frontends be self-sufficient.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 #[cfg(not(unix))]
@@ -25,7 +25,7 @@ use crate::events::EventStream;
 use crate::model::{
     AgentMeta, ContinuityPolicyProjection, DeliverySealRef, Event, FINAL_STATES, Health,
     LifecycleRun, LifecycleRunSummary, OperatorAgentPolicyProjection, OperatorAgentProjection,
-    RECENT_RUN_LIMIT, RUN_STALL_SECONDS, RunStatus, SettlementBoard, SettlementTui,
+    RECENT_RUN_LIMIT, RUN_STALL_SECONDS, RunRouting, RunStatus, SettlementBoard, SettlementTui,
     SettlementVerdict, SupervisionRelationProjection, TrustReceiptV1, age_label, coerce_int_value,
     is_active_state, is_final_state, merge_status, operator_session_name, parse_iso,
     skill_from_code, state_health,
@@ -95,6 +95,9 @@ pub struct StateView {
     pub stalled_runs: Vec<RunStatus>,
     /// Up to [`RECENT_RUN_LIMIT`] most-recently-updated runs.
     pub recent_runs: Vec<RunStatus>,
+    /// Exact run-to-provider/workspace/Frame axes read only from canonical
+    /// `runtime_runs/<id>/meta.json` receipts.
+    pub run_routing: BTreeMap<String, RunRouting>,
     /// Human-readable warnings (stalls, locks without reports).
     pub warnings: Vec<String>,
     /// Newest-first event tail.
@@ -605,6 +608,51 @@ impl ControlPlane {
         runs
     }
 
+    /// Read exact routing axes from canonical runtime receipts.
+    ///
+    /// Directory names and payload `run_id` values must agree. Symlinked run
+    /// directories or metadata files are ignored, so a read-only frontend
+    /// cannot be routed outside the control-plane root. Missing or malformed
+    /// axes remain absent and force consumers to refuse rather than guess.
+    #[must_use]
+    pub fn load_run_routing(&self) -> BTreeMap<String, RunRouting> {
+        let root = self.control_plane_home().join("runtime_runs");
+        let Ok(entries) = fs::read_dir(&root) else {
+            return BTreeMap::new();
+        };
+        let mut routes = BTreeMap::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(directory_meta) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if directory_meta.file_type().is_symlink() || !directory_meta.is_dir() {
+                continue;
+            }
+            let Some(directory_run_id) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            if !is_safe_run_id(&directory_run_id) {
+                continue;
+            }
+            let meta_path = path.join("meta.json");
+            let Ok(meta) = fs::symlink_metadata(&meta_path) else {
+                continue;
+            };
+            if meta.file_type().is_symlink() || !meta.is_file() {
+                continue;
+            }
+            let Some(wire) = read_json::<RunRoutingWire>(&meta_path) else {
+                continue;
+            };
+            if wire.run_id.trim() != directory_run_id {
+                continue;
+            }
+            routes.insert(directory_run_id, wire.normalized());
+        }
+        routes
+    }
+
     /// Resolve a full nested lifecycle run from `lifecycle_runs/<id>/state.json`.
     ///
     /// Delivery-proof axes are projected onto the run and each stage (shape of
@@ -877,7 +925,7 @@ impl ControlPlane {
             events.drain(..start);
         }
         events.reverse();
-        Self::project_view_with_events(merged, settlement_counts, events)
+        Self::project_view_with_events(merged, settlement_counts, events, self.load_run_routing())
     }
 
     fn merge_derived_runs(
@@ -1041,6 +1089,7 @@ impl ControlPlane {
             runs,
             settlement_counts,
             self.read_event_tail(crate::model::EVENT_TAIL_LIMIT),
+            self.load_run_routing(),
         )
     }
 
@@ -1048,6 +1097,7 @@ impl ControlPlane {
         runs: Vec<RunStatus>,
         mut settlement_counts: SettlementBoard,
         events: Vec<Event>,
+        run_routing: BTreeMap<String, RunRouting>,
     ) -> StateView {
         let warnings = warnings_for_runs(&runs);
         let active_runs: Vec<RunStatus> = runs
@@ -1066,6 +1116,7 @@ impl ControlPlane {
             active_runs,
             stalled_runs,
             recent_runs,
+            run_routing,
             warnings,
             events,
             settlement_counts,
@@ -1102,6 +1153,51 @@ impl ControlPlane {
         rglob(&self.home.join("marbles"), &|p| {
             p.file_name().and_then(|n| n.to_str()) == Some("state.json")
         })
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RunRoutingWire {
+    #[serde(default)]
+    run_id: String,
+    #[serde(default)]
+    agent: String,
+    #[serde(default)]
+    root: String,
+    #[serde(default)]
+    provider_session_id: String,
+    #[serde(default)]
+    workspace_id: String,
+    #[serde(default)]
+    workspace_instance_id: String,
+    #[serde(default)]
+    workspace_display_label: String,
+    #[serde(default)]
+    vibecrafted_session_id: String,
+    #[serde(default)]
+    workspace_session_id: String,
+    #[serde(default)]
+    worker_host_session: String,
+    #[serde(default)]
+    worker_host_display: String,
+}
+
+impl RunRoutingWire {
+    fn normalized(self) -> RunRouting {
+        RunRouting {
+            agent: self.agent,
+            root: self.root,
+            provider_session_id: self.provider_session_id,
+            workspace_id: self.workspace_id,
+            workspace_instance_id: self.workspace_instance_id,
+            workspace_display_label: self.workspace_display_label,
+            workspace_session_id: nonempty_runtime_value(
+                &self.vibecrafted_session_id,
+                &self.workspace_session_id,
+            ),
+            worker_host_session: self.worker_host_session,
+            worker_host_display: self.worker_host_display,
+        }
     }
 }
 
@@ -2166,6 +2262,58 @@ mod tests {
             }
         }
         panic!("could not allocate an isolated fixture home")
+    }
+
+    #[test]
+    fn compute_view_projects_exact_runtime_routing_axes_without_guessing() {
+        let home = temp_home("run-routing");
+        let runtime = home.join("control_plane/runtime_runs");
+        let exact = runtime.join("route-exact");
+        let mismatched = runtime.join("route-mismatch");
+        fs::create_dir_all(&exact).expect("exact runtime dir");
+        fs::create_dir_all(&mismatched).expect("mismatched runtime dir");
+        let now = Utc::now();
+        fs::write(
+            exact.join("meta.json"),
+            serde_json::to_vec(&json!({
+                "run_id": "route-exact",
+                "status": "running",
+                "updated_at": now.to_rfc3339(),
+                "agent": "codex",
+                "root": "/work/alpha",
+                "provider_session_id": "provider-alpha",
+                "workspace_id": "0198f84e-1234-7abc-8def-1234567890ab",
+                "workspace_instance_id": "0198f84e-3333-7abc-8def-1234567890ab",
+                "workspace_display_label": "alpha",
+                "vibecrafted_session_id": "0198f84e-2222-7abc-8def-1234567890ab",
+                "worker_host_session": "frame-alpha",
+                "worker_host_display": "Alpha Frame"
+            }))
+            .expect("routing json"),
+        )
+        .expect("routing meta");
+        fs::write(
+            mismatched.join("meta.json"),
+            br#"{"run_id":"different-run","workspace_id":"wrong"}"#,
+        )
+        .expect("mismatched meta");
+
+        let view = ControlPlane::new(&home).compute_view(now);
+        let route = view
+            .run_routing
+            .get("route-exact")
+            .expect("exact route projected");
+        assert_eq!(route.agent, "codex");
+        assert_eq!(route.root, "/work/alpha");
+        assert_eq!(route.provider_session_id, "provider-alpha");
+        assert_eq!(route.workspace_id, "0198f84e-1234-7abc-8def-1234567890ab");
+        assert_eq!(
+            route.workspace_session_id,
+            "0198f84e-2222-7abc-8def-1234567890ab"
+        );
+        assert_eq!(route.worker_host_session, "frame-alpha");
+        assert!(!view.run_routing.contains_key("route-mismatch"));
+        fs::remove_dir_all(home).ok();
     }
 
     #[cfg(unix)]

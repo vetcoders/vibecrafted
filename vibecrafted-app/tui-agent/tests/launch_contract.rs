@@ -518,7 +518,7 @@ fn a_launcher_that_admits_and_keeps_running_still_reports_its_run() {
     let outcome = LaunchOutcome::from_run(
         command.preview(),
         app.launch_expectation(),
-        command.run_capturing(IMPATIENT),
+        command.run_capturing(PATIENT_ENOUGH_TO_SPEAK),
     );
 
     // The admission is real even though the wait ended first, and the run is

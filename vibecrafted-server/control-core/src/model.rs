@@ -562,6 +562,26 @@ pub struct OperatorAgentProjection {
     pub stop_actor_run_id: String,
 }
 
+/// Exact routing axes emitted by the runtime for one run.
+///
+/// This projection is deliberately separate from [`RunStatus`]: lifecycle
+/// state can be merged from snapshots, locks, and events, while routing must
+/// come from the canonical `runtime_runs/<id>/meta.json` receipt. Consumers
+/// must treat missing fields as missing evidence, never as permission to infer
+/// a workspace or Frame session from a path or command string.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunRouting {
+    pub agent: String,
+    pub root: String,
+    pub provider_session_id: String,
+    pub workspace_id: String,
+    pub workspace_instance_id: String,
+    pub workspace_display_label: String,
+    pub workspace_session_id: String,
+    pub worker_host_session: String,
+    pub worker_host_display: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunStatus {
     pub run_id: String,

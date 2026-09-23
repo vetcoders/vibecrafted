@@ -38,6 +38,7 @@ from .telemetry import (
     RunTelemetry,
     build_run_telemetry,
     parent_session_ids,
+    resolve_provider_session_id,
     usage_record,
 )
 
@@ -632,6 +633,13 @@ class AsyncSupervisor:
             model_override_skip_reason=str(
                 model_receipt.get("model_override_skip_reason") or ""
             ),
+            parent_sessions={
+                source: session
+                for session, source in parent_session_ids(
+                    merged_env,
+                    extra={"runtime_session_id": session_id},
+                ).items()
+            },
             workspace_fields=dict(workspace_fields),
             operator_stop_cursor=operator_stop_cursor,
         )
@@ -1007,7 +1015,13 @@ class AsyncSupervisor:
                     with human_path.open("ab") as human:
                         human.write(display_text.encode("utf-8"))
                 previous_agent_session_id = handle.agent_session_id
+                previous_stream_session_id = handle.stream_session_id
                 self._sync_stream_summary(handle, parser)
+                if (
+                    handle.stream_session_id
+                    and handle.stream_session_id != previous_stream_session_id
+                ):
+                    self._publish_stream_session_identity(handle)
                 if (
                     handle.report_path is not None
                     and handle.agent_session_id
@@ -1190,6 +1204,59 @@ class AsyncSupervisor:
         handle.cost_usd = parser.cost_usd
         handle.cost_source = parser.cost_source
         handle.resume_command = parser.resume_command(handle.root)
+
+    def _publish_stream_session_identity(self, handle: AsyncRunHandle) -> None:
+        """Publish a provider-reported child identity while its run is live.
+
+        The stream parser is the first canonical owner to observe this value.
+        Merge it under the shared run lock so routing readers never need to
+        recover identity from a transcript or race a terminal summary. A value
+        equal to any launch/runtime/fork parent is refused rather than guessed.
+        """
+        if handle.meta_path is None or not handle.stream_session_id.strip():
+            return
+
+        def _enrich(payload: dict[str, object]) -> dict[str, object] | None:
+            parent_fields = dict(handle.parent_sessions)
+            for key in (
+                "runtime_session_id",
+                "vibecrafted_session_id",
+                "parent_provider_session_id",
+                "fork_source_session_id",
+            ):
+                value = str(payload.get(key) or "").strip()
+                if value:
+                    parent_fields.setdefault(key, value)
+            resolved, source = resolve_provider_session_id(
+                handle.stream_session_id,
+                source="provider_stream",
+                parents=parent_session_ids({}, extra=parent_fields),
+            )
+            if not isinstance(resolved, str):
+                return None
+            payload.update(
+                {
+                    "session_id": resolved,
+                    "agent_session_id": resolved,
+                    "provider_session_id": resolved,
+                    "provider_session_source": source,
+                }
+            )
+            return payload
+
+        try:
+            mutate_run_meta(
+                control_plane_home(),
+                meta_path=handle.meta_path,
+                mutation_root=handle.meta_path.parent,
+                run_id=handle.run_id,
+                mutator=_enrich,
+            )
+        except (OSError, RunMetaMutationError, TypeError):
+            # Durable metadata is observational: losing it must not terminate
+            # an otherwise healthy provider process. Terminal settlement gets
+            # one final merge attempt through `_write_meta_summary`.
+            pass
 
     def _write_meta_summary(self, handle: AsyncRunHandle) -> None:
         """Merge a full run-state summary (status, usage, cost, failure, origin) into meta.json."""
