@@ -1781,6 +1781,10 @@ def _mock_pack_repo(tmp_path: Path, *, body: str) -> Path:
         REPO_ROOT / "scripts/lib/runtime-pack-selection.sh",
         repo / "scripts/lib/runtime-pack-selection.sh",
     )
+    shutil.copy2(
+        REPO_ROOT / "scripts/lib/release-toolchain-contract.sh",
+        repo / "scripts/lib/release-toolchain-contract.sh",
+    )
     builder = repo / "mock-builder.sh"
     builder.write_text(
         "set -euo pipefail\n"
