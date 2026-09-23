@@ -71,6 +71,7 @@ PRIMARY_SHELL = REPO_ROOT / "config" / "alacritty" / "launch-primary-shell.zsh"
 
 EXIT_USAGE = 2
 EXIT_EXISTS = 3
+HOST_SESSION = "vc-host"
 EXIT_INVENTORY = 4
 
 # A worker run exports these; pytest inherits them. The entry must derive
@@ -369,6 +370,11 @@ if rest[:1] == ["attach"]:
     if not sys.stdin.isatty():
         sys.stderr.write("vc-frame: stdin is not a terminal (TTY); cannot start an interactive session.\\n")
         sys.exit(1)
+    # A real attach is a connected client for as long as the terminal stays
+    # open; that client is what makes a host accept a guest projection.
+    if clients_file:
+        with open(clients_file, "a") as handle:
+            handle.write(target + "\\n")
     record({"attached": target})
     time.sleep(0.2)
     sys.exit(0)
@@ -670,6 +676,8 @@ class Scene:
         )
         self.config_dir = self.home / ".config" / "vibecrafted" / "vc-frame"
         _write(self.config_dir / "layouts" / "operator.kdl", "layout {\n}\n")
+        for alias in ("dashboard", "marbles", "research", "workflow"):
+            _write(self.config_dir / "layouts" / f"{alias}.kdl", "layout {\n}\n")
         _write(
             self.config_dir / "layouts" / "host.kdl",
             "layout { frame_host true; workspace_surface true; }\n",
@@ -767,6 +775,10 @@ class Scene:
 
     def live(self) -> list[str]:
         return sorted(p.name for p in (self.table / "live").iterdir())
+
+    def workspaces(self) -> list[str]:
+        """Live sessions minus the singleton Frame host."""
+        return [name for name in self.live() if name != HOST_SESSION]
 
     def dead(self) -> list[str]:
         return sorted(p.name for p in (self.table / "dead").iterdir())
@@ -1192,6 +1204,40 @@ def _creates(calls: list[dict]) -> list[dict]:
     ]
 
 
+def _wait_for_projection(
+    scene: Scene, host: str, guest: str, wait: float = 8.0
+) -> dict:
+    """The guest projector runs detached after the host attach; poll its record."""
+    deadline = time.monotonic() + wait
+    while True:
+        handled = [
+            c
+            for c in _projects(scene.calls())
+            if c.get("projected") == [host, guest]
+            and (c.get("receipt") or {}).get("status") == "Handled"
+        ]
+        if handled:
+            return handled[0]
+        if time.monotonic() > deadline:
+            raise AssertionError(("no Handled projection", host, guest, scene.calls()))
+        time.sleep(0.1)
+
+
+def _assert_host_first(scene: Scene, guest: str) -> None:
+    """One host per machine: the host (host.kdl, no --guest-workspace) is
+    created before the workspace, which is always a guest (operator.kdl)."""
+    created = [c for c in scene.calls() if c.get("created")]
+    names = [c["created"] for c in created]
+    assert HOST_SESSION in names and guest in names, names
+    host = created[names.index(HOST_SESSION)]
+    workspace = created[names.index(guest)]
+    assert host["guest_workspace"] is False, host
+    assert Path(host["layout"]).name == "host.kdl", host
+    assert workspace["guest_workspace"] is True, workspace
+    assert Path(workspace["layout"]).name == "operator.kdl", workspace
+    assert names.index(HOST_SESSION) < names.index(guest), names
+
+
 def _standalone_chrome_creates(calls: list[dict]) -> list[dict]:
     """Create attempts that did not pass --guest-workspace (a second canvas)."""
     return [
@@ -1380,7 +1426,8 @@ def test_default_name_is_the_git_toplevel_basename_from_a_subdirectory(
     result = _run(scene, "vc-start", shell=shell, cwd=deep)
 
     assert _rc(result) == 0, result.stdout + result.stderr
-    assert scene.live() == ["mlx-batch-runner"], (scene.live(), result.stderr)
+    assert scene.workspaces() == ["mlx-batch-runner"], (scene.live(), result.stderr)
+    _assert_host_first(scene, "mlx-batch-runner")
     assert "created workspace mlx-batch-runner" in result.stdout, result.stdout
     launches = scene.terminal_launches()
     assert len(launches) == 1, (launches, result.stderr)
@@ -1393,7 +1440,7 @@ def test_default_name_is_the_git_toplevel_basename_from_a_subdirectory(
     assert launch["boundary"] == "1", launch
     # The escalating parent created (no PTY needed) and did nothing else.
     calls = scene.calls()
-    assert len(_creates(calls)) == 1, calls
+    assert len(_creates(calls)) == 2, calls
     assert not _attaches(calls) and not _switches(calls) and not _destroys(calls), calls
 
 
@@ -1408,7 +1455,8 @@ def test_outside_git_the_directory_itself_is_the_root(tmp_path: Path) -> None:
     assert not scene.head
     result = _run(scene, "vc-start")
     assert _rc(result) == 0, result.stderr
-    assert scene.live() == ["plain-dir"]
+    assert scene.workspaces() == ["plain-dir"]
+    _assert_host_first(scene, "plain-dir")
     launch = scene.terminal_launches()[0]
     assert _working_directory(launch) == scene.root.resolve()
 
@@ -1423,7 +1471,8 @@ def test_explicit_repo_from_the_filesystem_root_names_that_repository(
         scene, f"vc-start {flag} {shlex.quote(str(scene.root))}", cwd=Path("/")
     )
     assert _rc(result) == 0, result.stderr
-    assert scene.live() == ["Sentry-Selfhosted"]
+    assert scene.workspaces() == ["Sentry-Selfhosted"]
+    _assert_host_first(scene, "Sentry-Selfhosted")
     launch = scene.terminal_launches()[0]
     assert _working_directory(launch) == scene.root.resolve()
     assert _hosted(launch)[2:] == ["--repo", str(scene.root.resolve())]
@@ -1437,7 +1486,8 @@ def test_the_runtime_generation_is_never_the_workspace(tmp_path: Path) -> None:
         scene, f"vc-start --repo {shlex.quote(str(scene.root))}", cwd=scene.generation
     )
     assert _rc(result) == 0, result.stderr
-    assert scene.live() == ["real-project"], scene.live()
+    assert scene.workspaces() == ["real-project"], scene.live()
+    _assert_host_first(scene, "real-project")
 
 
 # --------------------------------------------------------------------------
@@ -1450,7 +1500,8 @@ def test_explicit_name_is_used_verbatim(tmp_path: Path, shell: str) -> None:
     scene = Scene(tmp_path, project="mlx-batch-runner")
     result = _run(scene, "vc-start review-b", shell=shell)
     assert _rc(result) == 0, result.stderr
-    assert scene.live() == ["review-b"]
+    assert scene.workspaces() == ["review-b"]
+    _assert_host_first(scene, "review-b")
     launch = scene.terminal_launches()[0]
     assert _hosted(launch)[2:] == ["review-b", "--repo", str(scene.root.resolve())]
     assert launch["created"] == "review-b"
@@ -1462,7 +1513,8 @@ def test_a_spaced_name_stays_one_argument_and_is_quoted_back(tmp_path: Path) -> 
     scene = Scene(tmp_path, project="mlx-batch-runner")
     first = _run(scene, "vc-start " + shlex.quote("two words"))
     assert _rc(first) == 0, first.stderr
-    assert scene.live() == ["two words"]
+    assert scene.workspaces() == ["two words"]
+    _assert_host_first(scene, "two words")
     assert _hosted(scene.terminal_launches()[0])[2] == "two words"
 
     second = _run(scene, "vc-start " + shlex.quote("two words"))
@@ -1563,7 +1615,8 @@ def test_reserved_layout_aliases_mean_the_default_start(
     scene = Scene(tmp_path, project="mlx-batch-runner")
     result = _run(scene, f"vc-start {word}")
     assert _rc(result) == 0, result.stderr
-    assert scene.live() == ["mlx-batch-runner"], scene.live()
+    assert scene.workspaces() == ["mlx-batch-runner"], scene.live()
+    _assert_host_first(scene, "mlx-batch-runner")
     assert _hosted(scene.terminal_launches()[0])[2:] == [
         word,
         "--repo",
@@ -1728,10 +1781,7 @@ def test_engine_create_failure_is_reported_as_the_engines_words_not_as_a_conflic
         },
     )
     assert _rc(result) == EXIT_INVENTORY, result.stdout + result.stderr
-    assert (
-        "vc-frame refused to create workspace mlx-batch-runner (exit 1)"
-        in result.stderr
-    )
+    assert "vc-frame refused to create the Frame host vc-host (exit 1)" in result.stderr
     assert "could not read the layout file" in result.stderr
     assert "already exists" not in result.stderr
     assert scene.terminal_launches(wait=0.5) == []
@@ -1756,7 +1806,8 @@ def test_same_basename_from_a_different_repository_is_a_conflict_with_a_rename_o
 
     first = _run(scene, "vc-start", cwd=repo_a)
     assert _rc(first) == 0, first.stderr
-    assert scene.live() == ["mlx"]
+    assert scene.workspaces() == ["mlx"]
+    _assert_host_first(scene, "mlx")
 
     second = _run(scene, "vc-start", cwd=repo_b)
     assert _rc(second) == EXIT_EXISTS, second.stdout + second.stderr
@@ -1766,13 +1817,20 @@ def test_same_basename_from_a_different_repository_is_a_conflict_with_a_rename_o
         + shlex.quote(str(repo_b.resolve()))
         in second.stderr
     ), second.stderr
-    assert scene.live() == ["mlx"], "a suffixed or renamed session appeared"
-    assert len(_creates(scene.calls())) == 1
+    assert scene.workspaces() == ["mlx"], "a suffixed or renamed session appeared"
+    assert [c["created"] for c in scene.calls() if c.get("created")] == [
+        HOST_SESSION,
+        "mlx",
+    ]
     assert len(scene.terminal_launches()) == 1
 
     third = _run(scene, "vc-start mlx-b", cwd=repo_b)
     assert _rc(third) == 0, third.stderr
-    assert scene.live() == ["mlx", "mlx-b"]
+    assert scene.workspaces() == ["mlx", "mlx-b"]
+    # One host for both: the second workspace joins it as a guest.
+    assert [c["created"] for c in scene.calls() if c.get("created")].count(
+        HOST_SESSION
+    ) == 1
 
 
 def test_two_concurrent_starts_create_exactly_one_workspace(tmp_path: Path) -> None:
@@ -1798,9 +1856,9 @@ def test_two_concurrent_starts_create_exactly_one_workspace(tmp_path: Path) -> N
     rcs = sorted(int(o[0].split("RC=[", 1)[1].split("]", 1)[0]) for o in outs)
 
     assert rcs == [0, EXIT_EXISTS], outs
-    assert scene.live() == ["mlx-batch-runner"]
-    created = [c for c in scene.calls() if c.get("created")]
-    assert len(created) == 1, scene.calls()
+    assert scene.workspaces() == ["mlx-batch-runner"]
+    created = [c["created"] for c in scene.calls() if c.get("created")]
+    assert sorted(created) == ["mlx-batch-runner", HOST_SESSION], scene.calls()
     loser = next(o for o in outs if f"RC=[{EXIT_EXISTS}]" in o[0])
     assert "already exists in vc-frame" in loser[1], loser[1]
     assert "refused to create" not in loser[1], loser[1]
@@ -1984,7 +2042,8 @@ def test_boundary_without_a_pty_fails_closed_without_a_second_terminal(
     )
     assert "RC=[0]" not in result.stdout, result.stdout + result.stderr
     assert scene.terminal_launches(wait=0.5) == []
-    assert scene.live() == ["mlx-batch-runner"]
+    assert scene.workspaces() == ["mlx-batch-runner"]
+    _assert_host_first(scene, "mlx-batch-runner")
 
 
 def test_rejected_terminal_host_is_reported_and_the_workspace_is_named(
@@ -1999,7 +2058,8 @@ def test_rejected_terminal_host_is_reported_and_the_workspace_is_named(
         in result.stderr
     ), result.stderr
     assert "vc-dashboard attach mlx-batch-runner" in result.stderr
-    assert scene.live() == ["mlx-batch-runner"]
+    assert scene.workspaces() == ["mlx-batch-runner"]
+    _assert_host_first(scene, "mlx-batch-runner")
 
 
 # --------------------------------------------------------------------------
@@ -2026,18 +2086,20 @@ def test_tty_outside_a_frame_creates_and_attaches_without_a_terminal(
     assert "RC=[0]" in result.stdout, result.stdout + result.stderr
     assert "created workspace mlx-batch-runner" in result.stdout
     assert "TARGET=[mlx-batch-runner]" in result.stdout
+    _assert_host_first(scene, "mlx-batch-runner")
     calls = scene.calls()
-    assert len(_creates(calls)) == 1
+    assert len(_creates(calls)) == 2
     attaches = _attaches(calls)
+    # The client enters the HOST; the workspace arrives in it as a guest.
     assert len(attaches) == 1 and attaches[0]["stdin_tty"] is True, calls
+    assert attaches[0]["attached"] == HOST_SESSION, attaches[0]
     assert attaches[0]["VC_FRAME_SESSION_NAME"] is None, attaches[0]
     assert not _switches(calls)
-    assert not _projects(calls)
-    assert "--guest-workspace" not in _creates(calls)[0]["argv"]
     assert scene.terminal_launches(wait=0.5) == []
-    assert calls.index(_creates(calls)[0]) < calls.index(attaches[0]), (
+    assert calls.index(_creates(calls)[-1]) < calls.index(attaches[0]), (
         "attach before create"
     )
+    _wait_for_projection(scene, HOST_SESSION, "mlx-batch-runner")
     binds = [c for c in scene.owner_calls() if "session-attach" in c]
     assert any(
         "--state live" in b and "--runtime-session-id mlx-batch-runner" in b
@@ -2138,25 +2200,96 @@ def test_only_legacy_session_does_not_block_fresh_singleton_host(
         },
     )
     assert "RC=[0]" in result.stdout, result.stdout + result.stderr
-    creates = _creates(scene.calls())
-    assert len(creates) == 1, scene.calls()
-    assert "--guest-workspace" not in creates[0]["argv"]
-    layout_index = creates[0]["argv"].index("--new-session-with-layout") + 1
-    assert Path(creates[0]["argv"][layout_index]).name == "host.kdl"
-    created_records = [
-        call for call in scene.calls() if call.get("created") == "mlx-batch-runner"
-    ]
-    assert len(created_records) == 1, scene.calls()
-    assert created_records[0]["guest_workspace"] is False
-    assert scene.live() == ["legacy-operator", "mlx-batch-runner"]
-    assert not _projects(scene.calls()), scene.calls()
+    _assert_host_first(scene, "mlx-batch-runner")
+    assert len(_creates(scene.calls())) == 2, scene.calls()
+    assert scene.live() == ["legacy-operator", "mlx-batch-runner", HOST_SESSION]
+    projected = _wait_for_projection(scene, HOST_SESSION, "mlx-batch-runner")
+    assert projected["projected"][0] != "legacy-operator", projected
+
+
+@pytest.mark.parametrize(
+    "project", ["vibecrafted", "operator", "Workflow", "Research", "Vibecrafted"]
+)
+def test_repository_named_like_a_role_is_a_guest_of_the_one_host(
+    tmp_path: Path, project: str
+) -> None:
+    """Founder P0 (2026-09-23): one host, every workspace a guest. A repo
+    whose basename reads like a role or layout alias never becomes the host;
+    the host is a product identity created first."""
+    scene = Scene(tmp_path, project=project)
+    result = _run(
+        scene,
+        "vc-start",
+        tty=True,
+        developer_root=True,
+        extra_env={
+            "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
+            "VIBECRAFTED_VC_FRAME_BIN": str(scene.generation / "bin" / "vc-frame"),
+        },
+    )
+    assert "RC=[0]" in result.stdout, result.stdout + result.stderr
+    assert scene.workspaces() == [project], scene.live()
+    _assert_host_first(scene, project)
+    attaches = _attaches(scene.calls())
+    assert [a["attached"] for a in attaches] == [HOST_SESSION], attaches
+    _wait_for_projection(scene, HOST_SESSION, project)
+
+
+def test_the_host_name_is_not_a_workspace_name(tmp_path: Path) -> None:
+    scene = Scene(tmp_path, project="mlx-batch-runner")
+    result = _run(scene, "vc-start " + HOST_SESSION)
+    assert _rc(result) == EXIT_USAGE, result.stdout + result.stderr
+    assert "is the Frame host name" in result.stderr, result.stderr
+    assert scene.live() == [], scene.live()
+    assert scene.terminal_launches(wait=0.5) == []
+
+
+@pytest.mark.parametrize("tty", [False, True])
+def test_detached_host_is_entered_and_the_new_guest_opens_in_it(
+    tmp_path: Path, tty: bool
+) -> None:
+    """A live host nobody is looking at: no second host, no instruction-only
+    exit. The workspace is created as a guest and the caller enters the host
+    (TTY attach, or the terminal child), where the guest is projected."""
+    scene = Scene(tmp_path, project="mlx-batch-runner", live=(HOST_SESSION,))
+    if tty:
+        result = _run(
+            scene,
+            "vc-start",
+            tty=True,
+            developer_root=True,
+            extra_env={
+                "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
+                "VIBECRAFTED_VC_FRAME_BIN": str(scene.generation / "bin" / "vc-frame"),
+            },
+        )
+    else:
+        result = _run(scene, "vc-start")
+    combined = result.stdout + result.stderr
+    if tty:
+        assert "RC=[0]" in result.stdout, combined
+    else:
+        assert _rc(result) == 0, combined
+    created = [c for c in scene.calls() if c.get("created")]
+    assert [c["created"] for c in created] == ["mlx-batch-runner"], scene.calls()
+    assert created[0]["guest_workspace"] is True, created[0]
+    assert not _standalone_chrome_creates(scene.calls()), scene.calls()
+    assert scene.live() == ["mlx-batch-runner", HOST_SESSION]
+    if tty:
+        attaches = _attaches(scene.calls())
+        assert [a["attached"] for a in attaches] == [HOST_SESSION], attaches
+        _wait_for_projection(scene, HOST_SESSION, "mlx-batch-runner")
+    else:
+        launches = scene.terminal_launches()
+        assert len(launches) == 1, launches
+        assert launches[0]["created"] == "mlx-batch-runner", launches[0]
 
 
 @pytest.mark.parametrize("alias", ["dashboard", "marbles", "research", "workflow"])
 def test_layout_alias_respects_live_host(tmp_path: Path, alias: str) -> None:
-    """vc-dashboard layout aliases used to ensure a full-chrome session of
-    their own. With a live host they refuse standalone create and name the
-    host plus the guest command."""
+    """Layouts are always guests (Founder P0, 2026-09-23). A layout alias
+    with a live, viewed host becomes a guest projected into that host:
+    never a standalone chrome session, never a second client."""
     scene = Scene(
         tmp_path,
         project="mlx-batch-runner",
@@ -2172,14 +2305,45 @@ def test_layout_alias_respects_live_host(tmp_path: Path, alias: str) -> None:
         },
     )
     combined = result.stdout + result.stderr
-    assert _rc(result) == EXIT_INVENTORY, combined
-    assert "live host other-place exists" in combined, combined
-    assert "not creating a standalone chrome session" in combined, combined
-    assert "vc-frame --session other-place project-workspace" in combined, combined
+    assert _rc(result) == 0, combined
     assert not _standalone_chrome_creates(scene.calls()), scene.calls()
-    assert not _projects(scene.calls()), scene.calls()
-    assert scene.live() == ["other-place"]
+    created = [c for c in scene.calls() if c.get("created")]
+    assert len(created) == 1 and created[0]["guest_workspace"] is True, created
+    assert Path(created[0]["layout"]).name == f"{alias}.kdl", created[0]
+    guest = created[0]["created"]
+    projects = _projects(scene.calls())
+    assert projects and projects[-1]["projected"] == ["other-place", guest], projects
+    assert "into host other-place" in combined, combined
+    assert not _attaches(scene.calls()), scene.calls()
+    assert not _switches(scene.calls()), scene.calls()
     assert scene.terminal_launches(wait=0.5) == []
+
+
+@pytest.mark.parametrize("alias", ["dashboard", "marbles"])
+def test_layout_alias_without_a_host_creates_the_host_first(
+    tmp_path: Path, alias: str
+) -> None:
+    scene = Scene(tmp_path, project="mlx-batch-runner")
+    result = _run(
+        scene,
+        f"vc-dashboard {alias}",
+        tty=True,
+        developer_root=True,
+        extra_env={
+            "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
+            "VIBECRAFTED_VC_FRAME_BIN": str(scene.generation / "bin" / "vc-frame"),
+        },
+    )
+    assert "RC=[0]" in result.stdout, result.stdout + result.stderr
+    created = [c for c in scene.calls() if c.get("created")]
+    assert created[0]["created"] == HOST_SESSION, created
+    assert created[0]["guest_workspace"] is False, created[0]
+    assert Path(created[0]["layout"]).name == "host.kdl", created[0]
+    assert len(created) == 2 and created[1]["guest_workspace"] is True, created
+    assert Path(created[1]["layout"]).name == f"{alias}.kdl", created[1]
+    attaches = _attaches(scene.calls())
+    assert [a["attached"] for a in attaches] == [HOST_SESSION], attaches
+    _wait_for_projection(scene, HOST_SESSION, created[1]["created"])
 
 
 def test_tty_inside_an_attached_frame_projects_guest_no_nested_multiplexer(
@@ -3639,9 +3803,21 @@ def _session_layer_plugins(rows) -> dict[str, dict]:
 
 
 def _workspace_surface_pane(rows):
-    return _plugins_by_url(rows, (_WORKSPACE_SURFACE_PLUGIN_URL,)).get(
-        _WORKSPACE_SURFACE_PLUGIN_URL
-    )
+    """The workspace surface is the session-manager pane that shares the
+    frame-host's tab. The host's Home tab carries its own session-manager
+    (the dashboard), so plugin_url alone is ambiguous; tab identity is not."""
+    host = _plugins_by_url(rows, ("frame-host",)).get("frame-host")
+    if host is None or not isinstance(rows, list):
+        return None
+    for pane in rows:
+        if (
+            isinstance(pane, dict)
+            and bool(pane.get("is_plugin"))
+            and _pane_plugin_url(pane) == _WORKSPACE_SURFACE_PLUGIN_URL
+            and pane.get("tab_id") == host.get("tab_id")
+        ):
+            return pane
+    return None
 
 
 def _session_layer_geometry(rows) -> dict[str, tuple]:
