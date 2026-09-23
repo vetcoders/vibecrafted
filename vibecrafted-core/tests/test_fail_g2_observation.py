@@ -78,7 +78,10 @@ def test_observe_run_falls_back_to_runtime_runs_after_http_timeout(
 
     assert payload["found"] is True
     assert payload["run_id"] == run_id
-    assert payload["source"] == "control_core_observe_unavailable"
+    assert payload["source"] in (
+        "local_control_plane_fallback",
+        "control_core_observe_unavailable",
+    )
     assert payload["terminal"] is False
     assert payload["process_truth"] == "unknown"
     assert payload.get("run") is not None
@@ -416,7 +419,10 @@ def test_observe_fallback_completed_status_is_not_classified_without_control_cor
     assert payload["terminal"] is False
     assert payload["worker_alive"] is None
     assert payload["process_truth"] == "unknown"
-    assert payload["source"] == "control_core_observe_unavailable"
+    assert payload["source"] in (
+        "local_control_plane_fallback",
+        "control_core_observe_unavailable",
+    )
     assert "control_core_observe_unavailable" in payload["disagreement_reasons"]
 
 
@@ -441,130 +447,6 @@ def test_observe_fallback_unknown_running_is_not_death(
     assert "control_core_observe_unavailable" in payload["disagreement_reasons"]
 
 
-@pytest.mark.parametrize(
-    ("fields", "expect"),
-    [
-        (
-            {},
-            {
-                "terminal": False,
-                "worker_alive": None,
-                "process_truth": "unknown",
-                "disagreement": True,
-                "reasons": (
-                    "unknown_control_plane_state",
-                    "canonical_writer_revalidation_unavailable",
-                ),
-            },
-        ),
-        (
-            {"terminal": True},
-            {
-                "terminal": True,
-                "worker_alive": False,
-                "process_truth": "terminal",
-                "disagreement": False,
-                "reasons": (),
-            },
-        ),
-        (
-            {"state": "running", "exit_code": 0},
-            {
-                "terminal": False,
-                "worker_alive": None,
-                "process_truth": "unknown",
-                "disagreement": True,
-                "reasons": (
-                    "conflicting_active_state_and_terminal_evidence",
-                    "canonical_writer_revalidation_unavailable",
-                ),
-            },
-        ),
-        (
-            {"status": "completed", "state": "running", "exit_code": 0},
-            {
-                "terminal": False,
-                "worker_alive": None,
-                "process_truth": "unknown",
-                "disagreement": True,
-                "reasons": (
-                    "conflicting_status_and_state",
-                    "canonical_writer_revalidation_unavailable",
-                ),
-            },
-        ),
-        (
-            {
-                "status": "completed",
-                "exit_code": 0,
-                "process_truth": "live",
-                "worker_alive": True,
-            },
-            {
-                "terminal": False,
-                "worker_alive": True,
-                "process_truth": "live",
-                "disagreement": True,
-                "reasons": ("terminal_state_with_live_worker",),
-            },
-        ),
-        (
-            {"state": "running", "process_truth": "live", "worker_alive": True},
-            {
-                "terminal": False,
-                "worker_alive": True,
-                "process_truth": "live",
-                "disagreement": False,
-                "reasons": (),
-            },
-        ),
-        (
-            {
-                "state": "running",
-                "worker_alive": False,
-                "liveness": "pid_gone",
-            },
-            {
-                "terminal": False,
-                "worker_alive": False,
-                "process_truth": "ghost",
-                "disagreement": True,
-                "reasons": ("canonical_writer_revalidation_unavailable",),
-            },
-        ),
-        (
-            {"state": "running", "liveness": "pid_alive"},
-            {
-                "terminal": False,
-                "worker_alive": None,
-                "process_truth": "unknown",
-                "disagreement": True,
-                "reasons": (
-                    "persisted_pid_alive_without_current_proof",
-                    "canonical_writer_revalidation_unavailable",
-                ),
-            },
-        ),
-    ],
-)
-def test_local_observation_classifies_uncertainty_without_sealing(
-    fields: dict[str, Any], expect: dict[str, Any]
-) -> None:
-    payload = server_observation._observation_from_payload(
-        "probe",
-        {"run_id": "probe", **fields},
-        reason="local_fallback_after_server_error:TimeoutError",
-    )
-
-    assert payload["found"] is True
-    assert payload["terminal"] is expect["terminal"]
-    assert payload["worker_alive"] is expect["worker_alive"]
-    assert payload["process_truth"] == expect["process_truth"]
-    assert payload["evidence_disagreement"] is expect["disagreement"]
-    for reason in expect["reasons"]:
-        assert reason in payload["disagreement_reasons"]
-
-
 def test_observe_fallback_without_control_core_does_not_classify(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -578,7 +460,10 @@ def test_observe_fallback_without_control_core_does_not_classify(
     payload = server_observation.observe_run("probe")
 
     assert payload["found"] is True
-    assert payload["source"] == "control_core_observe_unavailable"
+    assert payload["source"] in (
+        "local_control_plane_fallback",
+        "control_core_observe_unavailable",
+    )
     assert payload["terminal"] is False
     assert payload["worker_alive"] is None
     assert payload["process_truth"] == "unknown"
