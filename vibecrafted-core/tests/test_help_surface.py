@@ -88,15 +88,22 @@ def test_root_help_uses_the_registered_ship_cycle() -> None:
     assert "<skill>" not in advertised
 
 
-def test_message_help_is_codex_queue_only() -> None:
+def test_message_help_names_codex_queue_and_the_inbox_honestly() -> None:
+    # bd07974d replaced "Codex queue only" with a durable inbox for every other
+    # provider. What must survive the change: no worker is started, an inbox
+    # entry is not delivery into model context, and acceptance is not an ACK.
     output = render_message_help()
     display = " ".join(output.split())
 
     assert "Codex `queue --thread`" in display
-    assert "does not start a worker" in display
-    assert "does not invent Claude" in display
+    assert "Claude/other-provider messages use the durable inbox" in display
+    assert "never starts or resumes another worker" in display
+    assert "inbox_pending is not delivery into model context" in display
+    assert "provider_accepted is not an agent ACK" in display
     assert "Claude steering" not in display
     assert "--run-id <id>" in output
+    assert "--receive" in output
+    assert "--ack <message-id>" in output
     assert "--inspect <message-id>" in output
 
 
