@@ -191,8 +191,8 @@ if ($licenseText -notmatch "Business Source License" -or $licenseText -notmatch 
     Die "License.rtf must carry the repo BUSL-1.1 LICENSE text (refusing a placeholder)"
 }
 $repoLicense = Get-Content -LiteralPath (Join-Path $repoRoot "LICENSE") -Raw
-if ($repoLicense -notmatch "Licensor:\s+LibraxisAI") {
-    Die "repo LICENSE Licensor must remain LibraxisAI"
+if ($repoLicense -notmatch "Licensor:\s+Libraxis AI Sp\. z o\.o\.") {
+    Die "repo LICENSE Licensor must remain Libraxis AI Sp. z o.o."
 }
 
 $work = Join-Path $packagingRoot ".cache\work"

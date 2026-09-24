@@ -4,7 +4,7 @@
   Does not invent a second Windows install grammar.
   Per-user portable install: payload under LocalAppData, not Program Files.
   License dialog uses packaging/windows/License.rtf generated from the repo
-  LICENSE (BUSL-1.1 / LibraxisAI). Security contact from SECURITY.md.
+  LICENSE (BUSL-1.1 / Libraxis AI Sp. z o.o.). Security contact from SECURITY.md.
   After a successful install the MSI launches vc-terminal (with frame) so the
   operator sees the product; launch never runs on uninstall.
   Limit for this cut: the voc radio is not in this installer cut because tokio's

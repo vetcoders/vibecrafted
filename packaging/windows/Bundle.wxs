@@ -14,7 +14,7 @@
       Version="$(var.ProductVersion)"
       Manufacturer="$(var.Manufacturer)"
       UpgradeCode="$(var.UpgradeCode)"
-      Copyright="(c) 2024-2026 LibraxisAI"
+      Copyright="(c) 2024-2026 Libraxis AI Sp. z o.o."
       AboutUrl="https://vibecrafted.io"
       HelpUrl="https://github.com/vetcoders/vibecrafted/blob/main/SECURITY.md">
     <BootstrapperApplicationRef Id="WixStandardBootstrapperApplication.RtfLicense">
