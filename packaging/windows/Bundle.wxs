@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Burn EXE bootstrapper. Same UpgradeCode / product name / version as Product.wxs.
+  Chains the thin MSI adapter; does not invent a second install path.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+     xmlns:bal="http://schemas.microsoft.com/wix/BalExtension">
+  <?include Identity.wxi ?>
+  <Bundle
+      Name="$(var.ProductName)"
+      Version="$(var.ProductVersion)"
+      Manufacturer="$(var.Manufacturer)"
+      UpgradeCode="$(var.UpgradeCode)"
+      Copyright="(c) 2024-2026 LibraxisAI / Vetcoders"
+      AboutUrl="https://vibecrafted.io">
+    <BootstrapperApplicationRef Id="WixStandardBootstrapperApplication.HyperlinkLicense">
+      <bal:WixStandardBootstrapperApplication
+          LicenseUrl="https://vibecrafted.io"
+          Theme="hyperlinkLicense" />
+    </BootstrapperApplicationRef>
+    <Chain>
+      <MsiPackage
+          Id="VibecraftedRuntimePackMsi"
+          SourceFile="!(bindpath.out)\Vibecrafted.msi"
+          Compressed="yes"
+          Vital="yes"
+          Visible="yes" />
+    </Chain>
+  </Bundle>
+</Wix>

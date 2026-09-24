@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Single Windows product identity for the portable Runtime Pack MSI and Burn EXE.
+  Keep UpgradeCode stable across releases so Windows Installer upgrades stay coherent.
+-->
+<Include>
+  <?define ProductName = "Vibecrafted" ?>
+  <?define Manufacturer = "Vetcoders" ?>
+  <!-- Stable Windows upgrade lineage. Do not rotate casually. -->
+  <?define UpgradeCode = "B7E4C2A1-9F3D-4B8E-A6C1-2D5E8F0A1B3C" ?>
+  <!-- Filled by scripts/build-windows-installers.ps1 from the repo VERSION file. -->
+  <?define ProductVersion = "0.0.0.0" ?>
+</Include>

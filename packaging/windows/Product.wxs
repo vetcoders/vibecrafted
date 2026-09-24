@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Thin MSI adapter over scripts/install-runtime-pack.ps1.
+  Does not invent a second Windows install grammar.
+  Limit for this cut: the voc radio is not in this installer cut because tokio's
+  Unix socket types are cfg(unix) and this cut does not switch mux-agent to a
+  Windows AF_UNIX transport. The Runtime Pack inventory remains the authority.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <?include Identity.wxi ?>
+  <Product
+      Id="*"
+      Name="$(var.ProductName)"
+      Language="1033"
+      Version="$(var.ProductVersion)"
+      Manufacturer="$(var.Manufacturer)"
+      UpgradeCode="$(var.UpgradeCode)">
+    <Package
+        InstallerVersion="500"
+        Compressed="yes"
+        InstallScope="perMachine"
+        Description="$(var.ProductName) Windows Runtime Pack installer"
+        Manufacturer="$(var.Manufacturer)" />
+
+    <MajorUpgrade
+        DowngradeErrorMessage="A newer version of $(var.ProductName) is already installed."
+        Schedule="afterInstallInitialize" />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <Feature Id="RuntimePackAdapter" Title="$(var.ProductName) Runtime Pack" Level="1">
+      <ComponentGroupRef Id="InstallerPayload" />
+    </Feature>
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLDIR" Name="Vibecrafted">
+          <Directory Id="InstallerDir" Name="Installer">
+            <Directory Id="InstallerScriptsDir" Name="scripts" />
+            <Directory Id="InstallerPackDir" Name="pack" />
+            <Directory Id="InstallerTrustDir" Name="vibecrafted-core">
+              <Directory Id="InstallerCoreDir" Name="vibecrafted_core">
+                <Directory Id="InstallerTrustLeaf" Name="trust" />
+              </Directory>
+            </Directory>
+          </Directory>
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <Property Id="VIBECRAFTED_PACK_BASENAME" Value="REPLACE_PACK_BASENAME" />
+
+    <SetProperty
+        Id="InstallRuntimePack"
+        Sequence="execute"
+        Before="InstallRuntimePack"
+        Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -ExecutionPolicy Bypass -File &quot;[InstallerDir]scripts\install-runtime-pack.ps1&quot; -Pack &quot;[InstallerDir]pack\[VIBECRAFTED_PACK_BASENAME]&quot;" />
+
+    <CustomAction
+        Id="InstallRuntimePack"
+        BinaryKey="WixCA"
+        DllEntry="WixQuietExec64"
+        Execute="deferred"
+        Return="check"
+        Impersonate="no" />
+
+    <SetProperty
+        Id="UninstallRuntimePack"
+        Sequence="execute"
+        Before="UninstallRuntimePack"
+        Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -ExecutionPolicy Bypass -File &quot;[InstallerDir]scripts\install-runtime-pack.ps1&quot; -Uninstall" />
+
+    <CustomAction
+        Id="UninstallRuntimePack"
+        BinaryKey="WixCA"
+        DllEntry="WixQuietExec64"
+        Execute="deferred"
+        Return="ignore"
+        Impersonate="no" />
+
+    <InstallExecuteSequence>
+      <Custom Action="InstallRuntimePack" After="InstallFiles">NOT REMOVE</Custom>
+      <Custom Action="UninstallRuntimePack" Before="RemoveFiles">REMOVE~="ALL"</Custom>
+    </InstallExecuteSequence>
+  </Product>
+
+  <Fragment>
+    <ComponentGroup Id="InstallerPayload" Directory="InstallerDir">
+      <Component Id="VersionFile" Guid="C1A2B3D4-E5F6-4789-A012-3456789ABCDE">
+        <File Id="VersionTxt" Source="!(bindpath.staging)\VERSION" KeyPath="yes" />
+      </Component>
+      <Component Id="InstallScript" Guid="D2B3C4E5-F6A7-4890-B123-456789ABCDEF" Directory="InstallerScriptsDir">
+        <File Id="InstallRuntimePackPs1" Source="!(bindpath.staging)\scripts\install-runtime-pack.ps1" KeyPath="yes" />
+      </Component>
+      <Component Id="SigningPub" Guid="E3C4D5F6-A7B8-4901-C234-56789ABCDEF0" Directory="InstallerTrustLeaf">
+        <File Id="SigningV1Pub" Source="!(bindpath.staging)\vibecrafted-core\vibecrafted_core\trust\vibecrafted-signing-v1.pub" KeyPath="yes" />
+      </Component>
+      <Component Id="RuntimePackCarrier" Guid="F4D5E6A7-B8C9-4012-D345-6789ABCDEF01" Directory="InstallerPackDir">
+        <File Id="RuntimePackTarGz" Source="!(bindpath.staging)\pack\REPLACE_PACK_BASENAME" Name="REPLACE_PACK_BASENAME" KeyPath="yes" />
+      </Component>
+      <Component Id="RuntimePackChecksum" Guid="A5E6F7B8-C9D0-4123-E456-789ABCDEF012" Directory="InstallerPackDir">
+        <File Id="RuntimePackSha256" Source="!(bindpath.staging)\pack\REPLACE_PACK_BASENAME.sha256" Name="REPLACE_PACK_BASENAME.sha256" KeyPath="yes" />
+      </Component>
+      <Component Id="RuntimePackSignature" Guid="B6F7A8C9-D0E1-4234-F567-89ABCDEF0123" Directory="InstallerPackDir">
+        <File Id="RuntimePackSig" Source="!(bindpath.staging)\pack\REPLACE_PACK_BASENAME.sig" Name="REPLACE_PACK_BASENAME.sig" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+</Wix>
