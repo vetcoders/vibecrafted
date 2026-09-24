@@ -79,6 +79,7 @@ vibecrafted: install
 
 RELEASE_SCRIPT := scripts/build-vibecrafted-release.sh
 PORTABLE_SCRIPT := scripts/build-portable-release.sh
+LINUX_RUNTIME_PACK_SCRIPT := scripts/build-linux-runtime-pack.sh
 RUNTIME_PACK_INSTALLER := scripts/install-runtime-pack.sh
 RUNTIME_PACK_PACKAGER := scripts/package-runtime-pack.sh
 # Owner of the build -> install handoff record. The builder writes which pack it
@@ -114,6 +115,10 @@ RELEASE_MIN_FREE_KIB ?= 6291456
 release-prereqs:
 	@set -eu; \
 	. "$(RELEASE_TOOLCHAIN_CONTRACT)"; \
+	if [ "$$(uname -s)" != Darwin ]; then \
+		printf '==> %s host: this is the macOS release toolchain contract; the Linux assembler provisions its own\n' "$$(uname -s)"; \
+		exit 0; \
+	fi; \
 	command -v rustup >/dev/null 2>&1 || { printf '%s\n' 'FATAL: rustup is required for release' >&2; exit 1; }; \
 	toolchain="$$VIBECRAFTED_RELEASE_RUSTUP_TOOLCHAIN"; \
 	if ! rustup which --toolchain "$$toolchain" rustc >/dev/null 2>&1; then \
@@ -168,8 +173,15 @@ release:
 # midnight, or VIBECRAFTED_RELEASE_DIR pointed somewhere other than dist -- and
 # then `make install` had nothing but a glob over eighteen legitimate historical
 # packs, which it correctly refused as ambiguous.
+#
+# Linux has its own assembler; its --for-install lane claims and publishes the
+# same selection record, so bare `make install` works on both systems.
 runtime-pack:
-	@VC_RELEASE_FLAGS='$(RELEASE_FLAGS)' zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" --runtime-pack-only $${=VC_RELEASE_FLAGS} 2>&1'
+	@if [ "$$(uname -s)" = Linux ]; then \
+		KEYS="$(KEYS)" bash "$(LINUX_RUNTIME_PACK_SCRIPT)" --for-install; \
+	else \
+		VC_RELEASE_FLAGS='$(RELEASE_FLAGS)' zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" --runtime-pack-only $${=VC_RELEASE_FLAGS} 2>&1'; \
+	fi
 	@bash -c '. "$(CURDIR)/$(RUNTIME_PACK_SELECTION_LIB)"; \
 	runtime_pack_selection_read "$(CURDIR)" "" "" \
 		|| { printf "%s\n" "$${RUNTIME_PACK_SELECTION_ERROR:-release builder produced no standalone Runtime Pack}" >&2; exit 1; }; \

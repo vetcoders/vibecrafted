@@ -31,6 +31,15 @@ export VIBECRAFTED_SOURCE_OWNER_REPO="${VIBECRAFTED_SOURCE_OWNER_REPO:-vetcoders
 # vc-terminal needs edition2024. Ambient cargo 1.83 fails an hour later.
 # Honor an explicit caller RUSTUP_TOOLCHAIN.
 export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-1.97.0}"
+# The toolchain this assembler pins is the one it provisions: the same two
+# commands install-linux.yml runs, both no-ops when already present. Without
+# them a host prepared by `make release-prereqs` (the macOS contract, 1.96.0)
+# reaches the vc-server wasm build with no wasm target for 1.97.0.
+if command -v rustup >/dev/null 2>&1; then
+  rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal >/dev/null
+  rustup target add --toolchain "$RUSTUP_TOOLCHAIN" \
+    wasm32-unknown-unknown wasm32-wasip1 >/dev/null
+fi
 # Host `c++` is often clang, which cannot find libstdc++ headers on Ubuntu
 # (MEASURED: c++ → clang-18, cstdlib missing). Prefer GCC when present.
 # Honor an explicit CC/CXX from the caller. aicx/loctree are npm prebuilts.
@@ -240,3 +249,22 @@ PY
   --source-revision "$source_revision" --terminal-revision "$terminal_revision" \
   --frame-revision "$frame_revision" --version "$version" \
   --platform "$platform" --architecture "$architecture"
+
+# Local install lane (build-linux-runtime-pack.sh --for-install claimed the
+# selection record before this build began). Sign with the release key, prove
+# the signature against the key the installer trusts, then publish the record
+# `make install` reads -- here, where every value it names is already known.
+if [[ -n "${VIBECRAFTED_RUNTIME_PACK_SELECTION_ATTEMPT:-}" ]]; then
+  signing_key="${VIBECRAFTED_RUNTIME_PACK_SIGNING_KEY:?the install lane passes its signing key}"
+  public_key="$repo_root/vibecrafted-core/vibecrafted_core/trust/vibecrafted-signing-v1.pub"
+  openssl dgst -sha256 -sign "$signing_key" -out "$output.sig" "$output" \
+    || die "could not sign $output with $signing_key"
+  openssl dgst -sha256 -verify "$public_key" -signature "$output.sig" "$output" >/dev/null \
+    || die "$signing_key is not the key the installer trusts ($public_key)"
+  # shellcheck source=scripts/lib/runtime-pack-selection.sh
+  . "$repo_root/scripts/lib/runtime-pack-selection.sh"
+  runtime_pack_selection_publish "$repo_root" "$VIBECRAFTED_RUNTIME_PACK_SELECTION_ATTEMPT" \
+    "$output" "$version" "$platform" "$architecture" \
+    "$source_revision" "$terminal_revision" "$frame_revision" \
+    || die "could not record $output as the built Runtime Pack"
+fi

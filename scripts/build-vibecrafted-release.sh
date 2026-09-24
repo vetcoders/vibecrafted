@@ -210,8 +210,8 @@ DMG_CHECKSUM="$DMG.sha256"
 LEGACY_DMG="$DIST_DIR/Vibecrafted.dmg"
 RUNTIME_PACK_PLATFORM="darwin-arm64"
 RUNTIME_PACK_ARCHITECTURE="$(uname -m | sed 's/^arm64$/arm64/; s/^aarch64$/arm64/; s/^x86_64$/x64/')"
-[[ "$RUNTIME_PACK_ARCHITECTURE" == "arm64" ]] \
-  || die "Vibecrafted.app release currently supports only darwin-arm64"
+[[ "$(uname -s)" == "Darwin" && "$RUNTIME_PACK_ARCHITECTURE" == "arm64" ]] \
+  || die "Vibecrafted.app release currently supports only darwin-arm64 (this host: $(uname -s) $(uname -m)); a Linux Runtime Pack comes from \`make runtime-pack\` on Linux"
 RUNTIME_PACK_NAME="Vibecrafted_RuntimePack_${VERSION}-${RELEASE_DATE}-${ROOT_SHA:0:8}-${RUNTIME_PACK_PLATFORM}.tar.gz"
 RUNTIME_PACK="$DIST_DIR/$RUNTIME_PACK_NAME"
 RUNTIME_PACK_CHECKSUM="$RUNTIME_PACK.sha256"

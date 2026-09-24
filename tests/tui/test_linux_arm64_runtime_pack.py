@@ -5,6 +5,7 @@ import stat
 import subprocess
 from pathlib import Path
 
+import pytest
 from vibecrafted_core.runtime_pack_contract import LINUX_EXECUTABLES
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -251,3 +252,80 @@ def test_linux_x86_64_host_expects_carrier_architecture_x64() -> None:
     )
     assert 'expected_architecture="x64"' in installer
     assert 'expected_architecture="x86_64"' not in installer
+
+
+def test_make_runtime_pack_on_linux_takes_the_install_lane() -> None:
+    """`make runtime-pack` on Linux used to run the macOS release builder.
+
+    That builder hard-codes darwin-arm64, so a Linux host died with
+    "supports only darwin-arm64" and bare `make install` then refused the
+    pending selection record. Linux now routes to its own assembler lane.
+    """
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    target = makefile.split("\nruntime-pack:\n", 1)[1].split("\n\n", 1)[0]
+
+    assert (
+        "LINUX_RUNTIME_PACK_SCRIPT := scripts/build-linux-runtime-pack.sh" in makefile
+    )
+    assert '[ "$$(uname -s)" = Linux ]' in target
+    assert 'bash "$(LINUX_RUNTIME_PACK_SCRIPT)" --for-install' in target
+    assert target.index("--for-install") < target.index("--runtime-pack-only")
+    assert "runtime_pack_selection_read" in target
+
+    prereqs = makefile.split("\nrelease-prereqs:\n", 1)[1].split("\n\n", 1)[0]
+    linux_exit = prereqs.index('if [ "$$(uname -s)" != Darwin ]; then')
+    assert linux_exit < prereqs.index("command -v rustup")
+    assert linux_exit < prereqs.index("Release prerequisites ready")
+
+
+def test_linux_install_lane_refuses_before_it_claims_the_record() -> None:
+    wrapper = (REPO_ROOT / "scripts/build-linux-runtime-pack.sh").read_text(
+        encoding="utf-8"
+    )
+    begin = wrapper.index("runtime_pack_selection_begin")
+    for refusal in (
+        'git -C "$repo_root" diff --quiet HEAD --',
+        "release signing key missing",
+        "missing build tools",
+    ):
+        assert wrapper.index(refusal) < begin, refusal
+    assert 'source_revision="$(git -C "$repo_root" rev-parse HEAD)"' in wrapper
+    assert 'VIBECRAFTED_RUNTIME_PACK_SELECTION_ATTEMPT="$attempt"' in wrapper
+    # The CI lane (an output path, no flag) still reaches the assembler as-is.
+    assert '[[ "${1:-}" == "--for-install" ]] || exec "$assembler" "$@"' in wrapper
+
+
+def test_linux_assembler_publishes_only_a_pack_the_installer_will_trust() -> None:
+    assembler = (REPO_ROOT / "scripts/build-linux-arm64-runtime-pack.sh").read_text(
+        encoding="utf-8"
+    )
+    lane = assembler.split(
+        'if [[ -n "${VIBECRAFTED_RUNTIME_PACK_SELECTION_ATTEMPT:-}" ]]; then', 1
+    )[1]
+    sign = lane.index("openssl dgst -sha256 -sign")
+    verify = lane.index("openssl dgst -sha256 -verify")
+    publish = lane.index("runtime_pack_selection_publish")
+    assert sign < verify < publish
+    assert "trust/vibecrafted-signing-v1.pub" in lane
+    assert (
+        'rustup target add --toolchain "$RUSTUP_TOOLCHAIN" \\\n'
+        "    wasm32-unknown-unknown wasm32-wasip1" in assembler
+    )
+
+
+def test_linux_install_lane_refuses_a_non_linux_host() -> None:
+    if os.uname().sysname == "Linux":
+        pytest.skip("the refusal under test is the non-Linux one")
+    result = subprocess.run(
+        [
+            "bash",
+            str(REPO_ROOT / "scripts/build-linux-runtime-pack.sh"),
+            "--for-install",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+        env={**os.environ, "PATH": "/usr/bin:/bin"},
+    )
+    assert result.returncode == 1
+    assert "--for-install runs natively on Linux" in result.stderr
