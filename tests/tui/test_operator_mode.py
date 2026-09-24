@@ -1505,6 +1505,66 @@ def test_legacy_frame_namespace_is_attached_to_wes_before_new_window(
     assert args[args.index("--socket-dir") + 1] == "/legacy/vc-frame-501"
 
 
+def test_legacy_import_does_not_claim_sessions_only_the_shared_cache_lists(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    fake_bin = tmp_path / "bin"
+    frame_capture = tmp_path / "frame.log"
+    wes_capture = tmp_path / "wes.log"
+    session_state_file = tmp_path / "session-state.txt"
+
+    home.mkdir()
+    fake_bin.mkdir()
+    session_state_file.write_text("dead", encoding="utf-8")
+    generation = gen.fake_generation(tmp_path)
+    _write_stateful_vc_frame(generation / "bin", frame_capture, session_state_file)
+    vibecrafted = fake_bin / "vibecrafted"
+    vibecrafted.write_text(
+        '#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "$WES_CAPTURE_FILE"\n',
+        encoding="utf-8",
+    )
+    vibecrafted.chmod(0o755)
+
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+    env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
+    env["CAPTURE_FILE"] = str(frame_capture)
+    env["WES_CAPTURE_FILE"] = str(wes_capture)
+    env["VIBECRAFTED_PRODUCT_CORE_CLI"] = str(vibecrafted)
+    env["SESSION_STATE_FILE"] = str(session_state_file)
+    env["FAKE_VC_FRAME_SESSION"] = "workspace-deadbeef"
+    env["VIBECRAFTED_WORKSPACE_ID"] = "019ca123-1234-7123-8123-123456789abc"
+    env["VIBECRAFTED_SESSION_ID"] = "019ca124-1234-7123-8123-123456789abc"
+    env["VIBECRAFTED_WORKSPACE_INSTANCE_ID"] = "019ca125-1234-7123-8123-123456789abc"
+    env["VC_FRAME_SOCKET_DIR"] = "/tmp/vc-frame-501"
+    env["ZELLIJ_SOCKET_DIR"] = "/tmp/vc-frame-501"
+    env["VIBECRAFTED_LEGACY_VC_FRAME_SOCKET_DIR"] = "/legacy/vc-frame-501"
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-lc",
+            (
+                f'source "{HELPER_SCRIPT}"; {gen.loaded_root_prelude(generation)}; '
+                "_vetcoders_import_legacy_vc_frame_sessions"
+            ),
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    # Under the legacy root `vc-frame ls` serves the shared resurrection cache:
+    # an EXITED line there says nothing about the legacy namespace, and on
+    # 2026-09-24 it recorded a session live under /tmp for 4h as dead.
+    assert not wes_capture.exists(), wes_capture.read_text(encoding="utf-8")
+
+
 def test_new_external_frame_session_is_live_in_wes_before_client_detaches(
     tmp_path: Path,
 ) -> None:

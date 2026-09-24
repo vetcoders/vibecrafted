@@ -890,6 +890,13 @@ _vetcoders_import_legacy_vc_frame_sessions() {
         break
       fi
     done <<< "$listing"
+    # `vc-frame ls` serves EXITED lines from the resurrection cache, which is
+    # shared by every socket root: under the legacy root it lists sessions that
+    # are live under the current one as EXITED. Importing those recorded live
+    # sessions as dead and attached unrelated old sessions to every new WES
+    # session (2026-09-24: locally-uncensored, alive for 4h, recorded dead).
+    # Only a live server socket proves a session belongs to the legacy root.
+    [[ "$state" == live ]] || continue
     _vetcoders_record_vc_frame_attachment \
       "$state" "$session_name" "" "$legacy_socket_dir" || return $?
   done <<< "$listing"
