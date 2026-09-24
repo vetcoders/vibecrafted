@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# vc-quick-cmd.sh — one-shot composer for the ❯_ Quick cmd chip
+# vc-quick-cmd.sh — the ❯_ Quick cmd shell behind the compact-bar chip
 #
 # Spec 1.2 §C: a clean prompt, no banner. Help stays on request
-# (`vibecrafted --help`). This wrapper is the temporary composer: it reads
-# one command, runs it in a login shell so PATH/product init load, then
-# closes THIS pane by pane-id.
+# (`vibecrafted --help`). Each command runs in a login shell so PATH/product
+# init load; its output stays on screen and the prompt comes back for the next
+# one. The pane closes itself only when the operator leaves (`exit` or
+# Ctrl-D). "One Quick cmd, not many" is the compact-bar's job: it focuses the
+# existing pane instead of opening another, and the Panels list reaches it.
 #
 # Never `close-pane` without `--pane-id`. A bare close-pane follows
 # focus and would kill whichever pane holds it — including a durable Agent the
@@ -27,26 +29,42 @@ _close_self() {
   vc-frame action close-pane --pane-id "${_pane}" >/dev/null 2>&1 || true
 }
 
-if [[ -t 0 ]]; then
-  printf '❯_ '
-fi
+# Ctrl-C reaches the whole foreground group. The running command still gets
+# the default SIGINT (a trap is not inherited by children); this shell only
+# notes it, so the pane and its output survive for the next command.
+trap ':' INT
 
-cmd=""
-if ! IFS= read -r cmd; then
-  _close_self
-  exit 0
-fi
-
-cmd="${cmd#"${cmd%%[![:space:]]*}"}"
-cmd="${cmd%"${cmd##*[![:space:]]}"}"
-if [[ -z "${cmd}" ]]; then
-  _close_self
-  exit 0
-fi
-
-set +e
-"${SHELL:-/bin/zsh}" -l -c "${cmd}"
-status=$?
-set -e
+while :; do
+  if [[ -t 0 ]]; then
+    printf '❯_ '
+  fi
+  cmd=""
+  if IFS= read -r cmd; then
+    :
+  else
+    # >128: Ctrl-C at the prompt clears the line; anything else is EOF.
+    read_status=$?
+    if (( read_status > 128 )); then
+      printf '\n'
+      continue
+    fi
+    break
+  fi
+  cmd="${cmd#"${cmd%%[![:space:]]*}"}"
+  cmd="${cmd%"${cmd##*[![:space:]]}"}"
+  if [[ -z "${cmd}" ]]; then
+    continue
+  fi
+  if [[ "${cmd}" == "exit" ]]; then
+    break
+  fi
+  set +e
+  "${SHELL:-/bin/zsh}" -l -c "${cmd}"
+  status=$?
+  set -e
+  if (( status != 0 )); then
+    printf '[exit %d]\n' "${status}"
+  fi
+done
 _close_self
-exit "${status}"
+exit 0
