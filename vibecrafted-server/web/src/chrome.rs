@@ -940,7 +940,7 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_is_five_primary_views_and_rail_keeps_catalog_routes() {
+    fn sidebar_is_six_primary_views_and_rail_keeps_catalog_routes() {
         let overview = live_layer(&render_document(&ServerDocument {
             title: "t",
             active: ServerSection::Overview,
@@ -973,11 +973,12 @@ mod tests {
         };
         assert_eq!(
             count(sidebar, "class=\"server-nav-link"),
-            5,
-            "primary nav is five views"
+            6,
+            "primary nav is six views"
         );
         assert!(sidebar.contains("href=\"/\" class=\"server-nav-link is-active\""));
         assert!(sidebar.contains("href=\"/transcripts\" class=\"server-nav-link\""));
+        assert!(sidebar.contains("href=\"/usage\" class=\"server-nav-link\""));
         assert!(sidebar.contains("href=\"/structure\" class=\"server-nav-link\""));
         assert!(sidebar.contains("href=\"/scaffold\" class=\"server-nav-link\""));
         assert!(sidebar.contains("href=\"/frame\" class=\"server-nav-link\""));
@@ -1007,6 +1008,6 @@ mod tests {
         let mobile_end =
             overview[mobile_start..].find("</nav>").expect("mobile end") + mobile_start;
         let mobile = &overview[mobile_start..mobile_end];
-        assert_eq!(count(mobile, "class=\"server-nav-link"), 5);
+        assert_eq!(count(mobile, "class=\"server-nav-link"), 6);
     }
 }

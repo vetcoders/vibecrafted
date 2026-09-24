@@ -152,9 +152,7 @@ fn lifecycle_nonce_accepts_canonical_value_forms() {
 }
 
 fn http_await_json(port: u16, run_id: &str) -> Value {
-    let path = format!(
-        "/api/control/runs/{run_id}/await?idle_timeout=5&hard_cap=10"
-    );
+    let path = format!("/api/control/runs/{run_id}/await?idle_timeout=5&hard_cap=10");
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("await connect");
     stream
         .set_read_timeout(Some(Duration::from_secs(15)))
@@ -177,7 +175,10 @@ fn http_await_json(port: u16, run_id: &str) -> Value {
         .split("\r\n\r\n")
         .nth(1)
         .expect("HTTP body after headers");
-    let json_body = if text.to_ascii_lowercase().contains("transfer-encoding: chunked") {
+    let json_body = if text
+        .to_ascii_lowercase()
+        .contains("transfer-encoding: chunked")
+    {
         decode_chunked_body(body)
     } else {
         body.trim().to_string()
@@ -267,7 +268,10 @@ fn twenty_real_http_await_clients_share_one_server_observation() {
             match std::panic::catch_unwind(|| http_await_json(port, "run-http-fanin")) {
                 Ok(payload) => Some(payload),
                 Err(panic) => {
-                    errors.lock().expect("error lock").push(format!("{panic:?}"));
+                    errors
+                        .lock()
+                        .expect("error lock")
+                        .push(format!("{panic:?}"));
                     None
                 }
             }
@@ -280,14 +284,11 @@ fn twenty_real_http_await_clients_share_one_server_observation() {
 
     let mut observations = Vec::new();
     for join in joins {
-        let payload = join
-            .join()
-            .expect("http client thread")
-            .unwrap_or_else(|| {
-                stop_child(&mut server);
-                let errs = errors.lock().expect("error lock");
-                panic!("HTTP await client failed: {errs:?}");
-            });
+        let payload = join.join().expect("http client thread").unwrap_or_else(|| {
+            stop_child(&mut server);
+            let errs = errors.lock().expect("error lock");
+            panic!("HTTP await client failed: {errs:?}");
+        });
         if payload["outcome"] != "terminal"
             || payload["subscription"]["ownership"] != "server_await_subscription"
         {
