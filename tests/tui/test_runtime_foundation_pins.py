@@ -148,6 +148,55 @@ def test_screenscribe_installer_invokes_pipx_with_the_pinned_wheel(
     ]
 
 
+def _run_screenscribe_install_with_failing_pipx(
+    tmp_path: Path, *, require_foundations: str
+) -> subprocess.CompletedProcess[str]:
+    # Ubuntu 22.04 CI, 2026-09-24: pipx's default interpreter is 3.10 while
+    # screenscribe 0.1.19 requires >=3.11, so pipx exits non-zero.
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    pipx = fake_bin / "pipx"
+    pipx.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    pipx.chmod(0o755)
+
+    env = os.environ.copy()
+    env["HOME"] = str(tmp_path / "home")
+    env["PATH"] = f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin"
+    env["REQUIRE_FOUNDATIONS"] = require_foundations
+    return subprocess.run(
+        ["bash", str(REPO_ROOT / "scripts/install-foundations.sh"), "screenscribe"],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def test_a_screenscribe_install_failure_is_named_but_does_not_abort_make_install(
+    tmp_path: Path,
+) -> None:
+    result = _run_screenscribe_install_with_failing_pipx(
+        tmp_path, require_foundations="0"
+    )
+    output = result.stdout + result.stderr
+
+    assert result.returncode == 0, output
+    assert "pipx failed to install screenscribe==0.1.19" in output
+    assert "Python >= 3.11" in output
+    assert "screenscribe unavailable" in output
+
+
+def test_strict_foundations_still_refuse_a_missing_screenscribe(
+    tmp_path: Path,
+) -> None:
+    result = _run_screenscribe_install_with_failing_pipx(
+        tmp_path, require_foundations="1"
+    )
+
+    assert result.returncode != 0, result.stdout + result.stderr
+
+
 def test_runtime_foundations_relocate_darwin_prview_onto_pinned_openssl() -> None:
     stager = STAGER.read_text(encoding="utf-8")
     relocator = (REPO_ROOT / "scripts/lib/darwin-relocate-openssl.sh").read_text(

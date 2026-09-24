@@ -471,6 +471,8 @@ install_screenscribe() {
   info "Installing screenscribe==${SCREENSCRIBE_VERSION} from PyPI via pipx..."
   pipx install --force "screenscribe==${SCREENSCRIBE_VERSION}" || {
     warn "pipx failed to install screenscribe==${SCREENSCRIBE_VERSION}."
+    warn "ScreenScribe needs Python >= 3.11; pipx uses its default interpreter unless told otherwise:"
+    warn "  pipx install --python python3.12 screenscribe==${SCREENSCRIBE_VERSION}"
     return 1
   }
   binary_runs screenscribe
@@ -821,7 +823,7 @@ for target in "${TARGETS[@]}"; do
       fi
       ;;
     prview)  install_prview  || exit_code=1 ;;
-    screenscribe) install_screenscribe || exit_code=1 ;;
+    screenscribe) install_screenscribe || foundation_optional_fail screenscribe ;;
     sandbox) install_sandbox || exit_code=1 ;;
     iterm2-plugin) install_iterm2_integration || exit_code=1 ;;
   esac
