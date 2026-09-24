@@ -137,9 +137,16 @@ def test_manifest_covers_every_file_in_the_store_by_content() -> None:
 def test_the_check_gate_runs_in_the_makefile_check_target() -> None:
     """The docs call `--check` a CI gate; `make check` is what CI runs."""
     makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
-    target = makefile.split("\ncheck:", 1)[1].split("\n\n", 1)[0]
 
-    assert "scripts/gen_skill_provenance.py --check" in target, target
+    def recipe(name: str) -> str:
+        return makefile.split(f"\n{name}:", 1)[1].split("\n\n", 1)[0]
+
+    # 35b8f666 moved the gate into its own prerequisite so UPDATE=1 regenerates.
+    check = recipe("check")
+    assert "skills-check" in check.split("\n", 1)[0].split(), check
+    skills_check = recipe("skills-check")
+    assert "scripts/gen_skill_provenance.py" in skills_check, skills_check
+    assert "--check" in skills_check, skills_check
 
 
 def test_the_installer_reads_the_shipped_manifest() -> None:
