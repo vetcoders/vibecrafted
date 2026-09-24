@@ -183,10 +183,42 @@ Copy-Item $signature (Join-Path $stagingRoot "pack\$packBasename.sig")
 $productTemplate = Join-Path $packagingRoot "Product.wxs"
 $bundleTemplate = Join-Path $packagingRoot "Bundle.wxs"
 $licenseRtf = Join-Path $packagingRoot "License.rtf"
+$licenseGenerator = Join-Path $repoRoot "scripts\windows_license_rtf.py"
+if (-not (Test-Path -LiteralPath $licenseGenerator -PathType Leaf)) {
+    Die "missing license RTF generator: $licenseGenerator"
+}
+# LICENSE is the only legal source. Plain text in License.rtf makes the MSI
+# ScrollableText box empty, so render RTF before candle even if a stale copy exists.
+$licenseRendered = $false
+$python3 = Get-Command python3 -ErrorAction SilentlyContinue
+if ($python3) {
+    & $python3.Source $licenseGenerator --write
+    if ($LASTEXITCODE -eq 0) { $licenseRendered = $true }
+}
+if (-not $licenseRendered) {
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    if ($python) {
+        & $python.Source $licenseGenerator --write
+        if ($LASTEXITCODE -eq 0) { $licenseRendered = $true }
+    }
+}
+if (-not $licenseRendered) {
+    $pyLauncher = Get-Command py -ErrorAction SilentlyContinue
+    if ($pyLauncher) {
+        & $pyLauncher.Source -3 $licenseGenerator --write
+        if ($LASTEXITCODE -eq 0) { $licenseRendered = $true }
+    }
+}
+if (-not $licenseRendered) {
+    Die "python is required to render License.rtf from LICENSE"
+}
 foreach ($path in @($productTemplate, $bundleTemplate, $identityTemplate, $licenseRtf)) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { Die "missing WiX source: $path" }
 }
 $licenseText = Get-Content -LiteralPath $licenseRtf -Raw
+if (-not $licenseText.StartsWith("{\rtf1")) {
+    Die "License.rtf is not RTF; WixUI ScrollableText would show an empty license"
+}
 if ($licenseText -notmatch "Business Source License" -or $licenseText -notmatch "Individual developers and small teams") {
     Die "License.rtf must carry the repo BUSL-1.1 LICENSE text (refusing a placeholder)"
 }

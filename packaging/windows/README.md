@@ -10,8 +10,11 @@ UpgradeCode; same-version upgrades are refused. Uninstall runs only when
 `REMOVE=ALL` and fails closed (`Return=check`).
 
 License and publisher identity come from the repo `LICENSE` (BUSL-1.1,
-Licensor Libraxis AI Sp. z o.o.) via `packaging/windows/License.rtf`. MSI shows
-`WixUI_Minimal` + `WixUILicenseRtf`; Burn uses `RtfLicense` with `LicenseFile`.
+Licensor Libraxis AI Sp. z o.o.). `scripts/windows_license_rtf.py` renders
+`packaging/windows/License.rtf` before candle; do not hand-edit that RTF or
+replace it with a copy of LICENSE (WiX ScrollableText then shows an empty box).
+MSI shows `WixUI_Minimal` + `WixUILicenseRtf`; Burn uses `RtfLicense` with
+`LicenseFile`.
 ARP help link points at `SECURITY.md` (`hello@vetcoders.io`). After a successful
 install the MSI launches `vc-terminal.cmd` (frame-backed); launch never runs on
 uninstall. Pack `.sig` + `vibecrafted-signing-v1.pub` is Runtime Pack signature

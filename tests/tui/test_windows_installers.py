@@ -281,6 +281,65 @@ def test_windows_installer_license_comes_from_repo_license() -> None:
     assert "BUSL" in readme or "LICENSE" in readme
 
 
+def test_windows_license_rtf_is_regenerated_from_repo_license() -> None:
+    """WiX ScrollableText is empty unless License.rtf is real RTF from LICENSE.
+
+    A byte copy of LICENSE contains the legal phrases and still renders as a
+    blank license box. Drift between LICENSE and License.rtf must fail.
+    """
+    from scripts.windows_license_rtf import main, normalize_rtf_text, render_license_rtf
+
+    source = REPO_LICENSE.read_text(encoding="utf-8")
+    rendered = render_license_rtf(source)
+    on_disk = normalize_rtf_text(LICENSE_RTF.read_text(encoding="utf-8"))
+    product = PRODUCT.read_text(encoding="utf-8")
+    bundle = BUNDLE.read_text(encoding="utf-8")
+    build = BUILD_SCRIPT.read_text(encoding="utf-8")
+
+    assert rendered.startswith("{\\rtf1")
+    assert rendered.isascii()
+    assert "\r" not in rendered
+    assert "\x00" not in rendered
+    assert on_disk == rendered
+    assert on_disk != source
+    for line in source.splitlines():
+        if line.isascii() and line and all(ch not in line for ch in "\\{}"):
+            assert line in rendered
+    assert "\\u-10187?" in rendered
+    assert "\\u55349?" not in rendered
+    drifted = source.replace("BUSL-1.1", "BUSL-DRIFT", 1)
+    assert drifted != source
+    assert render_license_rtf(drifted) != rendered
+    assert main(["--check"]) == 0
+
+    assert 'WixVariable Id="WixUILicenseRtf" Value="License.rtf"' in product
+    assert "WixUI_Minimal" in product
+    assert (
+        'BootstrapperApplicationRef Id="WixStandardBootstrapperApplication.RtfLicense"'
+        in bundle
+    )
+    assert 'LicenseFile="License.rtf"' in bundle
+    assert "windows_license_rtf.py" in build
+    assert "--write" in build
+    assert "License.rtf is not RTF" in build
+
+
+def test_windows_license_rtf_check_fails_when_file_is_plain_text(
+    tmp_path: Path,
+) -> None:
+    """A LICENSE byte copy must not pass the drift gate."""
+    from scripts.windows_license_rtf import main
+
+    plain = tmp_path / "License.rtf"
+    plain.write_text(REPO_LICENSE.read_text(encoding="utf-8"), encoding="utf-8")
+    assert main(["--check", "--output", str(plain)]) == 1
+    assert main(["--write", "--output", str(plain)]) == 0
+    rewritten = plain.read_text(encoding="ascii")
+    assert rewritten.startswith("{\\rtf1")
+    assert "Business Source License" in rewritten
+    assert main(["--check", "--output", str(plain)]) == 0
+
+
 def test_windows_installer_launches_vc_terminal_after_install_not_uninstall() -> None:
     """Post-install must start vc-terminal; uninstall must not."""
     product = PRODUCT.read_text(encoding="utf-8")
