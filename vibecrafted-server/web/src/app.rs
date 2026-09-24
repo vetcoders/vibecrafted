@@ -9,6 +9,9 @@ use serde::{Deserialize, Serialize};
 use crate::chrome::{ServerFrame, ServerSection};
 use crate::run_detail::RunDetailPage;
 
+// The SSR page embeds the dashboard JSON and the hydrated client reads it
+// back; the featureless build renders only the loading stub.
+#[cfg(any(feature = "ssr", feature = "hydrate"))]
 const DASHBOARD_EMBED_ID: &str = "vc-dashboard-data";
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -134,6 +137,7 @@ struct DashboardEvent {
     message: String,
 }
 
+#[cfg(feature = "ssr")]
 fn unique_runtime_labels<I, S>(labels: I) -> String
 where
     I: IntoIterator<Item = S>,
@@ -454,6 +458,7 @@ fn load_dashboard_data_from(
     }
 }
 
+#[cfg(any(feature = "ssr", feature = "hydrate"))]
 fn encode_dashboard_embed(data: &DashboardData) -> String {
     serde_json::to_string(data)
         .unwrap_or_else(|_| "{}".to_string())
@@ -462,7 +467,10 @@ fn encode_dashboard_embed(data: &DashboardData) -> String {
         .replace('\u{2029}', "\\u2029")
 }
 
-#[cfg(any(test, not(feature = "ssr")))]
+#[cfg(any(
+    all(test, feature = "ssr"),
+    all(feature = "hydrate", not(feature = "ssr"))
+))]
 fn decode_dashboard_embed(json: &str) -> Option<DashboardData> {
     let data: DashboardData = serde_json::from_str(json).ok()?;
     if data == DashboardData::default() {
@@ -471,6 +479,7 @@ fn decode_dashboard_embed(json: &str) -> Option<DashboardData> {
     Some(data)
 }
 
+#[cfg(any(feature = "ssr", feature = "hydrate"))]
 fn dashboard_embed_script(json: String) -> impl IntoView {
     view! {
         <script id=DASHBOARD_EMBED_ID type="application/json" inner_html=json></script>
