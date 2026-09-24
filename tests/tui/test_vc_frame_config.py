@@ -39,8 +39,17 @@ def test_vc_frame_config_uses_plain_ctrl_without_option_layer() -> None:
     payload = VC_FRAME_CONFIG.read_text(encoding="utf-8")
 
     assert 'unbind "Alt f" "Alt n" "Alt i" "Alt o"' in payload
-    assert 'bind "Ctrl n" { NewPane; }' in payload
+    assert 'bind "Ctrl n" { NewTab; }' in payload
     assert "Ctrl Shift" not in payload
+
+
+def test_ctrl_n_opens_a_new_tab() -> None:
+    """Founder 2026-09-24: Ctrl+N opens a real shell tab, matching the Quick cmd banner."""
+
+    payload = VC_FRAME_CONFIG.read_text(encoding="utf-8")
+
+    assert 'bind "Ctrl n" { NewTab; }' in payload
+    assert 'bind "Ctrl n" { NewPane; }' not in payload
 
 
 def test_composer_bind_does_not_enable_line_numbers() -> None:

@@ -192,10 +192,10 @@ keybinds {
         unbind "Alt =" "Alt +" "Alt -" "Alt [" "Alt ]"
         unbind "Alt p" "Alt Shift p"
 
-        // Direct new-pane on plain Ctrl+n (overrides the default resize-mode
-        // entry; resize is re-bound inside pane mode below — +/=/- uniform,
-        // Shift+H/J/K/L directional).
-        bind "Ctrl n" { NewPane; }
+        // Ctrl+N opens a new tab — a real shell — matching the Quick cmd
+        // banner. Overrides the default resize-mode entry; resize stays
+        // inside pane mode below (+/=/- uniform, Shift+H/J/K/L directional).
+        bind "Ctrl n" { NewTab; }
 
         // Unlocked muscle-memory lane: Ctrl+arrows mirror the Super switcher
         // outside LOCK. In LOCK they pass through to the pane.
