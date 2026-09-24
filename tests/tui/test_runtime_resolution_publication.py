@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -21,6 +22,14 @@ from vibecrafted_core.vc_frame_staging import (
 )
 
 from scripts import vetcoders_install as installer
+
+# The shipped `default_layout` scalar, alone or with the comment run above it.
+# Anchored on shape, not on today's value: 0ca89db1 renamed "operator" to
+# "host" and silently turned the upgrade edits below into no-op replacements.
+_DEFAULT_LAYOUT_SCALAR = re.compile(r'^default_layout "[^"\n]+"$', re.MULTILINE)
+_DEFAULT_LAYOUT_BLOCK = re.compile(
+    r'(?:^//[^\n]*\n)*^default_layout "[^"\n]+"$', re.MULTILINE
+)
 
 
 # This observer is deliberately independent of the installer's digest/receipt code.
@@ -345,12 +354,11 @@ def test_non_overlapping_kdl_upgrade_merges_user_preference_and_new_defaults(
         Path(__file__).resolve().parents[2]
         / "vibecrafted-core/vibecrafted_core/config/vc-frame/config.kdl"
     ).read_text()
+    shipped_block = _DEFAULT_LAYOUT_BLOCK.search(incoming)
+    assert shipped_block is not None
+    assert shipped_block.group(0).count("\n") >= 1, "comment run above the scalar"
     previous = incoming.replace(
-        "// compact chowal rail SESSIONS z nowego default.kdl (2026-07-07)\n"
-        "// The native default and dashboard aliases resolve to the one shipped,\n"
-        "// regular file: layouts/operator.kdl.  Runtime Packs reject symlinks, so do\n"
-        "// not point this at an unmaterialized built-in `vibecrafted` layout.\n"
-        'default_layout "operator"',
+        shipped_block.group(0),
         '// Previous layout default.\ndefault_layout "vibecrafted"',
     )
     assert previous != incoming
@@ -556,12 +564,15 @@ def test_unsupported_changed_kdl_scalar_syntax_refuses_publication(
         Path(result["root"])
         / "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame/config.kdl"
     )
+    shipped = source.read_text()
+    changed_upstream = _DEFAULT_LAYOUT_SCALAR.sub(
+        'default_layout "changed-upstream"', shipped, count=1
+    )
+    assert changed_upstream != shipped
     payload_b = seed_runtime_pack(
         tmp_path / "pack-b",
         version="9.9.10+b",
-        frame_config=source.read_text().replace(
-            'default_layout "operator"', 'default_layout "changed-upstream"'
-        ),
+        frame_config=changed_upstream,
     )
     with pytest.raises(
         RuntimeError, match="KDL edit uses unsupported changed scalar syntax"
