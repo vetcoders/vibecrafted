@@ -1163,39 +1163,39 @@ fn mission_control_aggregates_real_derived_snapshots() {
     .unwrap();
 
     let runs = vec![
-        derived_stats_snapshot(
-            "just-001",
-            "claude",
-            "just",
-            Some(0),
-            Some("claude-opus-4-7"),
-            Some(90.0),
-            "2026-05-19T12:30:00Z",
-            Some("wave-a"),
-            Some("/tmp/just-001/report.md"),
-        ),
-        derived_stats_snapshot(
-            "just-002",
-            "codex",
-            "marb",
-            Some(1),
-            Some("unknown"),
-            None,
-            "2026-05-19T12:45:00Z",
-            Some("wave-a"),
-            None,
-        ),
-        derived_stats_snapshot(
-            "just-003",
-            "claude",
-            "just",
-            Some(0),
-            Some("claude-opus-4-7"),
-            Some(45.5),
-            "2026-05-19T12:50:00Z",
-            Some("wave-b"),
-            Some("/tmp/just-003/report.md"),
-        ),
+        derived_stats_snapshot(StatsRow {
+            run_id: "just-001",
+            agent: "claude",
+            skill: "just",
+            exit_code: Some(0),
+            model: Some("claude-opus-4-7"),
+            duration_s: Some(90.0),
+            completed_at: "2026-05-19T12:30:00Z",
+            prompt_id: Some("wave-a"),
+            report: Some("/tmp/just-001/report.md"),
+        }),
+        derived_stats_snapshot(StatsRow {
+            run_id: "just-002",
+            agent: "codex",
+            skill: "marb",
+            exit_code: Some(1),
+            model: Some("unknown"),
+            duration_s: None,
+            completed_at: "2026-05-19T12:45:00Z",
+            prompt_id: Some("wave-a"),
+            report: None,
+        }),
+        derived_stats_snapshot(StatsRow {
+            run_id: "just-003",
+            agent: "claude",
+            skill: "just",
+            exit_code: Some(0),
+            model: Some("claude-opus-4-7"),
+            duration_s: Some(45.5),
+            completed_at: "2026-05-19T12:50:00Z",
+            prompt_id: Some("wave-b"),
+            report: Some("/tmp/just-003/report.md"),
+        }),
     ];
     let state = ControlPlaneState {
         root: dir.path().to_path_buf(),
@@ -1344,28 +1344,28 @@ fn mission_control_failure_board_respects_24h_window() {
     fs::create_dir_all(&artifact).unwrap();
 
     let runs = vec![
-        derived_stats_snapshot(
-            "old-fail",
-            "gemini",
-            "rev",
-            Some(2),
-            None,
-            None,
-            "2026-05-15T08:00:00Z",
-            None,
-            None,
-        ),
-        derived_stats_snapshot(
-            "fresh-fail",
-            "gemini",
-            "rev",
-            Some(2),
-            None,
-            None,
-            "2026-05-19T11:00:00Z",
-            None,
-            None,
-        ),
+        derived_stats_snapshot(StatsRow {
+            run_id: "old-fail",
+            agent: "gemini",
+            skill: "rev",
+            exit_code: Some(2),
+            model: None,
+            duration_s: None,
+            completed_at: "2026-05-15T08:00:00Z",
+            prompt_id: None,
+            report: None,
+        }),
+        derived_stats_snapshot(StatsRow {
+            run_id: "fresh-fail",
+            agent: "gemini",
+            skill: "rev",
+            exit_code: Some(2),
+            model: None,
+            duration_s: None,
+            completed_at: "2026-05-19T11:00:00Z",
+            prompt_id: None,
+            report: None,
+        }),
     ];
     let state = ControlPlaneState {
         root: dir.path().to_path_buf(),
@@ -1417,17 +1417,31 @@ fn mission_control_ignores_leftover_artifact_meta_json() {
     assert!(mission.agent_stats.is_empty());
 }
 
-fn derived_stats_snapshot(
-    run_id: &str,
-    agent: &str,
-    skill: &str,
+/// One finished run as the derived stats panels see it.
+struct StatsRow<'a> {
+    run_id: &'a str,
+    agent: &'a str,
+    skill: &'a str,
     exit_code: Option<i64>,
-    model: Option<&str>,
+    model: Option<&'a str>,
     duration_s: Option<f64>,
-    completed_at: &str,
-    prompt_id: Option<&str>,
-    report: Option<&str>,
-) -> RunSnapshot {
+    completed_at: &'a str,
+    prompt_id: Option<&'a str>,
+    report: Option<&'a str>,
+}
+
+fn derived_stats_snapshot(row: StatsRow<'_>) -> RunSnapshot {
+    let StatsRow {
+        run_id,
+        agent,
+        skill,
+        exit_code,
+        model,
+        duration_s,
+        completed_at,
+        prompt_id,
+        report,
+    } = row;
     let mut extra = HashMap::new();
     if let Some(code) = exit_code {
         extra.insert("exit_code".into(), serde_json::json!(code));
