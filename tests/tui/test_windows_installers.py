@@ -232,7 +232,10 @@ def test_windows_installer_license_comes_from_repo_license() -> None:
     assert "Licensor:             LibraxisAI\n" not in license_text
     assert "Licensor:             LibraxisAI\r" not in license_text
     assert f"Licensed Work:        {licensed_work}" in license_text
-    assert "Licensed Work:        Vibecrafted (formerly Vetcoders Skills)." not in license_text
+    assert (
+        "Licensed Work:        Vibecrafted (formerly Vetcoders Skills)."
+        not in license_text
+    )
     assert f"The Licensed Work is (c) 2024-2026 {full_licensor}" in license_text
     assert "Business Source License" in license_text
     assert "Individual developers and small teams" in license_text

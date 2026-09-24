@@ -701,9 +701,9 @@ def test_windows_inventory_accepts_screenscribe_cmd(tmp_path: Path) -> None:
 
 def test_windows_pack_builder_builds_terminal_and_frame_honestly() -> None:
     """Windows pack builder must compile donors and stamp the revisions it built."""
-    builder = (
-        REPO_ROOT / "scripts" / "build-windows-x64-runtime-pack.ps1"
-    ).read_text(encoding="utf-8")
+    builder = (REPO_ROOT / "scripts" / "build-windows-x64-runtime-pack.ps1").read_text(
+        encoding="utf-8"
+    )
     assert "d6685ead9018ad89411291d6198476666e48b0f8" in builder
     assert "7ab84069c9b7994ce0b705ccedd708aa3a35dcb6" in builder
     assert "cargo build --release --bin alacritty" in builder
