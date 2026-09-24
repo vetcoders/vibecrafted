@@ -9,6 +9,7 @@ profile name was missing from the environment.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -163,14 +164,20 @@ def _notary_submit_script(helper: str, body: str) -> str:
     submit = helper[
         helper.index("notary_submit() {") : helper.index("strip_debug_stabs() {")
     ]
-    return (
-        "set -euo pipefail\n"
-        + log_die
-        + profile
-        + submit
-        + "xcrun() { printf 'XCRUN:%s\\n' \"$*\"; }\n"
-        + body
+    # notary_profile_from_keychain admits a conventional profile only when
+    # `notarytool history` authenticates it (6b5b108f). The stub models the
+    # Keychain: a profile authenticates only if the test stored it in
+    # FAKE_KEYCHAIN_PROFILES. Every other xcrun call is recorded on stdout.
+    xcrun_stub = (
+        "xcrun() {\n"
+        '  if [[ "${1:-}" == notarytool && "${2:-}" == history ]]; then\n'
+        '    [[ " ${FAKE_KEYCHAIN_PROFILES:-} " == *" ${4:-} "* ]]\n'
+        "    return\n"
+        "  fi\n"
+        "  printf 'XCRUN:%s\\n' \"$*\"\n"
+        "}\n"
     )
+    return "set -euo pipefail\n" + log_die + profile + submit + xcrun_stub + body
 
 
 def test_fail_g1_headless_notary_uses_keychain_profile_not_raw_apple_id() -> None:
@@ -248,6 +255,28 @@ def test_fail_g1_headless_notary_does_not_invent_a_profile() -> None:
     assert "vibecrafted-notary" not in combined
 
 
+def test_fail_g1_notary_reuses_a_keychain_profile_only_after_apple_authenticates_it() -> (
+    None
+):
+    helper = RELEASE.read_text(encoding="utf-8")
+    script = _notary_submit_script(
+        helper,
+        "NOTARY_ENV=/nonexistent-notary.env\n"
+        "unset NOTARY_PROFILE NOTARY_API_KEY_PATH NOTARY_API_KEY_ID NOTARY_API_ISSUER\n"
+        "FAKE_KEYCHAIN_PROFILES=vibecrafted-notary\n"
+        "notary_submit artifact.zip\n"
+        'printf "EXPORTED:%s\\n" "$NOTARY_PROFILE"\n',
+    )
+    result = _run(script)
+    assert result.returncode == 0, result.stderr
+    assert (
+        "XCRUN:notarytool submit artifact.zip --keychain-profile vibecrafted-notary"
+        in result.stdout
+    )
+    assert "EXPORTED:vibecrafted-notary" in result.stdout
+    assert "--key " not in result.stdout
+
+
 def test_fail_g1_release_die_writes_stdout_and_release_log(tmp_path: Path) -> None:
     build_dir = tmp_path / "unified-release"
     helper = RELEASE.read_text(encoding="utf-8")
@@ -297,6 +326,19 @@ def test_fail_g1_release_prefers_rustup_cargo_before_cargo_runs() -> None:
     assert helper.index("prefer_rustup_cargo") < helper.index(
         "for command in cargo codesign"
     )
-    assert helper.index("wasm32-unknown-unknown") < helper.index(
-        'make -C "$SOURCE_ROOT" CARGO_BUILD_ROOT='
+    # 6b5b108f moved the target list into the one toolchain contract; the
+    # release script sources it and preflights every listed target before the
+    # first cargo-driven make.
+    contract = (REPO_ROOT / "scripts/lib/release-toolchain-contract.sh").read_text(
+        encoding="utf-8"
     )
+    targets = re.search(
+        r"^readonly VIBECRAFTED_RELEASE_RUST_TARGETS='([^']*)'$", contract, re.MULTILINE
+    )
+    assert targets is not None
+    assert "wasm32-unknown-unknown" in targets.group(1).split()
+    target_preflight = helper.index(
+        "for release_target in $VIBECRAFTED_RELEASE_RUST_TARGETS; do"
+    )
+    assert helper.index('. "$RELEASE_TOOLCHAIN_CONTRACT"') < target_preflight
+    assert target_preflight < helper.index('make -C "$SOURCE_ROOT" CARGO_BUILD_ROOT=')
