@@ -15,6 +15,7 @@ use voc::{
 #[derive(Debug, Parser)]
 #[command(
     name = "vc-admin",
+    version,
     about = "Standalone Mission Control snapshot renderer",
     arg_required_else_help = false
 )]
