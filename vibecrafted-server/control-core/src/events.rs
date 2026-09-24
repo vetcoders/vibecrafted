@@ -8,17 +8,61 @@
 //! replays the current file.
 
 use std::collections::{HashMap, HashSet};
-use std::ffi::CString;
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
+
+#[cfg(unix)]
+use std::ffi::CString;
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+
+/// Unix `st_dev`. Used for segment inode identity.
+#[cfg(unix)]
+fn metadata_device(metadata: &fs::Metadata) -> u64 {
+    metadata.dev()
+}
+
+#[cfg(windows)]
+fn metadata_device(_metadata: &fs::Metadata) -> u64 {
+    // Windows limitation: stable std has no st_dev equivalent (`volume_serial_number`
+    // needs unstable `windows_by_handle`). Device identity is not checked here.
+    0
+}
+
+/// Unix `st_ino`. Used for segment inode identity.
+#[cfg(unix)]
+fn metadata_inode(metadata: &fs::Metadata) -> u64 {
+    metadata.ino()
+}
+
+#[cfg(windows)]
+fn metadata_inode(_metadata: &fs::Metadata) -> u64 {
+    // Windows limitation: stable std has no st_ino equivalent (`file_index` needs
+    // unstable `windows_by_handle`). Inode identity is not checked here.
+    0
+}
+
+/// Unix owner uid. Windows has no POSIX uid — sentinel 0 skips owner checks.
+#[cfg(unix)]
+fn metadata_owner_uid(metadata: &fs::Metadata) -> u32 {
+    metadata.uid()
+}
+
+#[cfg(windows)]
+fn metadata_owner_uid(_metadata: &fs::Metadata) -> u32 {
+    // Windows limitation: POSIX uid does not exist; owner-uid identity checks
+    // are not performed (both sides compare as sentinel 0).
+    0
+}
 
 use crate::model::Event;
 
@@ -222,9 +266,9 @@ fn validate_opened_archive_file(
 ) -> io::Result<()> {
     let opened = file.metadata()?;
     if !opened.file_type().is_file()
-        || opened.uid() != owner_uid
-        || opened.dev() != expected.dev()
-        || opened.ino() != expected.ino()
+        || metadata_owner_uid(&opened) != owner_uid
+        || metadata_device(&opened) != metadata_device(expected)
+        || metadata_inode(&opened) != metadata_inode(expected)
     {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -234,6 +278,7 @@ fn validate_opened_archive_file(
     Ok(())
 }
 
+#[cfg(unix)]
 fn open_archive_child_no_follow(directory: &File, name: &Path) -> io::Result<File> {
     let encoded = CString::new(name.as_os_str().as_bytes()).map_err(|_| {
         io::Error::new(
@@ -341,8 +386,8 @@ impl EventStream {
                 }
                 None => {
                     segment.epoch.is_empty()
-                        && opened.dev() == segment.device
-                        && opened.ino() == segment.inode
+                        && metadata_device(&opened) == segment.device
+                        && metadata_inode(&opened) == segment.inode
                 }
             };
             if !identity_matches {
@@ -361,7 +406,7 @@ impl EventStream {
             .join("events_archive");
         let canonical_archive = fs::canonicalize(&archive)?;
         let expected_archive = fs::metadata(&canonical_archive)?;
-        let archive_owner = expected_archive.uid();
+        let archive_owner = metadata_owner_uid(&expected_archive);
         let name = segment.archive_name.as_ref().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -380,25 +425,64 @@ impl EventStream {
                 "invalid retained event segment name",
             ));
         }
-        let archive_directory = File::open(&canonical_archive)?;
-        let archive_metadata = archive_directory.metadata()?;
-        if !archive_metadata.file_type().is_dir()
-            || archive_metadata.uid() != archive_owner
-            || archive_metadata.dev() != expected_archive.dev()
-            || archive_metadata.ino() != expected_archive.ino()
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "invalid event archive owner",
-            ));
-        }
-        let mut file = open_archive_child_no_follow(&archive_directory, name)?;
+        #[cfg(unix)]
+        let mut file = {
+            let archive_directory = File::open(&canonical_archive)?;
+            let archive_metadata = archive_directory.metadata()?;
+            if !archive_metadata.file_type().is_dir()
+                || metadata_owner_uid(&archive_metadata) != archive_owner
+                || metadata_device(&archive_metadata) != metadata_device(&expected_archive)
+                || metadata_inode(&archive_metadata) != metadata_inode(&expected_archive)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "invalid event archive owner",
+                ));
+            }
+            open_archive_child_no_follow(&archive_directory, name)?
+        };
+        #[cfg(windows)]
+        let mut file = {
+            // Windows limitation: File::open on a directory returns ACCESS_DENIED
+            // (no dirfd for openat). Validate via fs::metadata, then open by path.
+            let archive_metadata = fs::metadata(&canonical_archive)?;
+            if !archive_metadata.file_type().is_dir()
+                || metadata_owner_uid(&archive_metadata) != archive_owner
+                || metadata_device(&archive_metadata) != metadata_device(&expected_archive)
+                || metadata_inode(&archive_metadata) != metadata_inode(&expected_archive)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "invalid event archive owner",
+                ));
+            }
+            // No openat(O_NOFOLLOW) here. The opened path comes from the
+            // canonical archive's own listing, never from joining the retained
+            // name, and DirEntry::file_type does not follow links: a symlink
+            // or reparse point is not a regular file.
+            let entry = fs::read_dir(&canonical_archive)?
+                .flatten()
+                .find(|entry| Path::new(&entry.file_name()) == name.as_path())
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "retained event segment disappeared",
+                    )
+                })?;
+            if !entry.file_type()?.is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "event archive entry is not a regular file",
+                ));
+            }
+            File::open(entry.path())?
+        };
         let opened = file.metadata()?;
         if !opened.file_type().is_file()
-            || opened.uid() != archive_owner
-            || opened.uid() != segment.owner_uid
-            || opened.dev() != segment.device
-            || opened.ino() != segment.inode
+            || metadata_owner_uid(&opened) != archive_owner
+            || metadata_owner_uid(&opened) != segment.owner_uid
+            || metadata_device(&opened) != segment.device
+            || metadata_inode(&opened) != segment.inode
         {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -683,7 +767,7 @@ impl EventStream {
             match fs::read_dir(&archive) {
                 Ok(entries) => {
                     let canonical_archive = fs::canonicalize(&archive)?;
-                    let archive_owner = fs::metadata(&canonical_archive)?.uid();
+                    let archive_owner = metadata_owner_uid(&fs::metadata(&canonical_archive)?);
                     for entry in entries.flatten() {
                         let name = entry.file_name();
                         let Some(name) = name.to_str() else {
@@ -700,7 +784,9 @@ impl EventStream {
                             continue;
                         }
                         let expected = fs::metadata(&canonical)?;
-                        if !expected.file_type().is_file() || expected.uid() != archive_owner {
+                        if !expected.file_type().is_file()
+                            || metadata_owner_uid(&expected) != archive_owner
+                        {
                             continue;
                         }
                         let mut file = File::open(&canonical)?;
@@ -768,9 +854,9 @@ impl EventStream {
             len: metadata.len(),
             active: true,
             modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-            device: metadata.dev(),
-            inode: metadata.ino(),
-            owner_uid: metadata.uid(),
+            device: metadata_device(&metadata),
+            inode: metadata_inode(&metadata),
+            owner_uid: metadata_owner_uid(&metadata),
         }))
     }
 
@@ -998,9 +1084,9 @@ fn read_v1_segment_from_file(file: &mut File, active: bool) -> io::Result<Option
         len,
         active,
         modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-        device: metadata.dev(),
-        inode: metadata.ino(),
-        owner_uid: metadata.uid(),
+        device: metadata_device(&metadata),
+        inode: metadata_inode(&metadata),
+        owner_uid: metadata_owner_uid(&metadata),
     }))
 }
 

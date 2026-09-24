@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Burn EXE bootstrapper. Same UpgradeCode / product name / version as Product.wxs.
+  Chains the thin MSI adapter; does not invent a second install path.
+  LicenseFile is packaging/windows/License.rtf from the repo LICENSE (BUSL-1.1).
+  AboutUrl remains the product homepage; security contact is hello@vetcoders.io
+  (SECURITY.md) and surfaces on the MSI ARP properties.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+     xmlns:bal="http://schemas.microsoft.com/wix/BalExtension">
+  <?include Identity.wxi ?>
+  <Bundle
+      Name="$(var.ProductName)"
+      Version="$(var.ProductVersion)"
+      Manufacturer="$(var.Manufacturer)"
+      UpgradeCode="$(var.UpgradeCode)"
+      Copyright="(c) 2024-2026 Libraxis AI Sp. z o.o."
+      AboutUrl="https://vibecrafted.io"
+      HelpUrl="https://github.com/vetcoders/vibecrafted/blob/main/SECURITY.md">
+    <BootstrapperApplicationRef Id="WixStandardBootstrapperApplication.RtfLicense">
+      <bal:WixStandardBootstrapperApplication LicenseFile="License.rtf" />
+    </BootstrapperApplicationRef>
+    <Chain>
+      <MsiPackage
+          Id="VibecraftedRuntimePackMsi"
+          SourceFile="!(bindpath.out)\Vibecrafted.msi"
+          Compressed="yes"
+          Vital="yes"
+          Visible="yes" />
+    </Chain>
+  </Bundle>
+</Wix>

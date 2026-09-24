@@ -55,6 +55,23 @@ function Write-Banner {
     Write-Host ""
 }
 
+function Test-WslAvailable {
+    # Presence + health probe for the POSIX alternative path. Native
+    # win32-x64 Runtime Pack install does not require WSL; this helper
+    # only informs the operator about install.sh inside WSL2.
+    $wsl = Get-Command wsl.exe -ErrorAction SilentlyContinue
+    if (-not $wsl) {
+        return $false
+    }
+    try {
+        $null = & wsl.exe --status 2>&1
+        return ($LASTEXITCODE -eq 0)
+    }
+    catch {
+        return $false
+    }
+}
+
 $productVersion = Get-VibecraftedVersion
 $versionLabel = if ($productVersion) { "v$productVersion" } else { "current" }
 $versionForPack = if ($productVersion) { $productVersion } else { "<version>" }
@@ -112,7 +129,14 @@ Write-Host "  Launchers:     %LOCALAPPDATA%\Vibecrafted\bin\*.cmd"
 Write-Host "  Control plane: %LOCALAPPDATA%\Vibecrafted\home"
 Write-Host "  Product config:%APPDATA%\Vibecrafted"
 Write-Host ""
-Write-Host "  POSIX alternative (not native): install WSL2 and use install.sh inside it."
+Write-Host "  For POSIX/source bootstrap, WSL2 is the supported path (install.sh inside WSL)."
+if (Test-WslAvailable) {
+    Write-Host "  WSL detected — optional handoff:"
+    Write-Host "    wsl -- bash -c 'curl -fsSL https://vibecrafted.io/install.sh | bash'" -ForegroundColor Cyan
+}
+else {
+    Write-Host "  WSL not detected. To use the POSIX path: wsl --install, then install.sh inside WSL."
+}
 Write-Host "  This script DID NOT install anything."
 Write-Host ""
 exit 1

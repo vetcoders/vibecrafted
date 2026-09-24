@@ -32,8 +32,12 @@ if ($SourceRevision -notmatch '^[0-9a-f]{40}$') {
     Die "source revision must be a full Git SHA"
 }
 $version = (Get-Content -LiteralPath (Join-Path $repoRoot "VERSION") -Raw).Trim()
+# Same donor revisions the Linux assembler builds. Provenance records these
+# only after this Windows builder actually compiles them (fail closed below).
 $terminalRevision = "d6685ead9018ad89411291d6198476666e48b0f8"
+$terminalArchiveSha256 = "3cd6670c4a80c589b945ed1b45c1f033c80745ceb34d3466e9476a1c3eeb0f71"
 $frameRevision = "7ab84069c9b7994ce0b705ccedd708aa3a35dcb6"
+$frameArchiveSha256 = "55851e094b91d3b41712edcdc66d69f97da5859118395fee497bb104714b125c"
 if (-not $Output) {
     $Output = Join-Path $repoRoot "build\Vibecrafted_RuntimePack_${version}-win32-x64.tar.gz"
 }
@@ -140,6 +144,183 @@ if ($serverExe) {
 $controlCoreToml = Join-Path $repoRoot "vibecrafted-server\control-core\Cargo.toml"
 Install-CargoBin $controlCoreToml "scaffold-doctor" "scaffold-doctor" | Out-Null
 Install-CargoBin $controlCoreToml "control-observe" "control-observe" | Out-Null
+
+function Get-Sha256File([string]$Path) {
+    return ([BitConverter]::ToString(
+        [System.Security.Cryptography.SHA256]::Create().ComputeHash(
+            [System.IO.File]::ReadAllBytes($Path)
+        )
+    ) -replace '-', '').ToLowerInvariant()
+}
+
+function Fetch-DonorSource([string]$Url, [string]$ExpectedSha256, [string]$Archive, [string]$Destination) {
+    Write-Host "Fetching donor: $Url"
+    Invoke-WebRequest -Uri $Url -OutFile $Archive
+    $actual = Get-Sha256File $Archive
+    if ($actual -ne $ExpectedSha256.ToLowerInvariant()) {
+        Die "donor archive checksum mismatch for $Url (got $actual expected $ExpectedSha256)"
+    }
+    if (Test-Path -LiteralPath $Destination) {
+        Remove-Item -LiteralPath $Destination -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    & tar -xzf $Archive -C $Destination --strip-components=1
+    if ($LASTEXITCODE -ne 0) {
+        # Windows tar may lack --strip-components; fall back to nested extract.
+        $nestedRoot = Join-Path $work ("donor-extract-" + [guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Path $nestedRoot -Force | Out-Null
+        & tar -xzf $Archive -C $nestedRoot
+        if ($LASTEXITCODE -ne 0) { Die "donor archive extract failed: $Archive" }
+        $inner = Get-ChildItem -LiteralPath $nestedRoot -Directory | Select-Object -First 1
+        if (-not $inner) { Die "donor archive produced no directory: $Archive" }
+        Get-ChildItem -LiteralPath $inner.FullName -Force | ForEach-Object {
+            Move-Item -LiteralPath $_.FullName -Destination (Join-Path $Destination $_.Name) -Force
+        }
+        Remove-Item -LiteralPath $nestedRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+    Die "cargo is required to build Windows vc-terminal and vc-frame"
+}
+if (-not (Get-Command tar -ErrorAction SilentlyContinue)) {
+    Die "tar is required to extract vc-terminal and vc-frame donor archives"
+}
+
+# vc-frame's prost-build needs protoc on PATH (fail closed with a clear hint).
+if (-not $env:PROTOC -or -not (Test-Path -LiteralPath $env:PROTOC -PathType Leaf)) {
+    $protocCmd = Get-Command protoc -ErrorAction SilentlyContinue
+    if ($protocCmd) {
+        $env:PROTOC = $protocCmd.Source
+    }
+    else {
+        $protocVersion = "29.3"
+        $protocZip = Join-Path $work "protoc-$protocVersion-win64.zip"
+        $protocRoot = Join-Path $work "protoc-$protocVersion"
+        $protocUrl = "https://github.com/protocolbuffers/protobuf/releases/download/v$protocVersion/protoc-$protocVersion-win64.zip"
+        Write-Host "Fetching protoc $protocVersion for vc-frame prost-build"
+        Invoke-WebRequest -Uri $protocUrl -OutFile $protocZip
+        if (Test-Path -LiteralPath $protocRoot) {
+            Remove-Item -LiteralPath $protocRoot -Recurse -Force
+        }
+        Expand-Archive -LiteralPath $protocZip -DestinationPath $protocRoot -Force
+        $env:PROTOC = Join-Path $protocRoot "bin\protoc.exe"
+        if (-not (Test-Path -LiteralPath $env:PROTOC -PathType Leaf)) {
+            Die "protoc download did not produce $env:PROTOC"
+        }
+        $env:PATH = "$(Join-Path $protocRoot 'bin');$env:PATH"
+    }
+}
+& $env:PROTOC --version | Out-Null
+if ($LASTEXITCODE -ne 0) { Die "protoc is required to build vc-frame on Windows" }
+
+# openssl-sys (via isahc native-tls) needs a real OpenSSL on Windows. Prefer a
+# host install; never silently skip vc-frame. Vendored openssl-src failed on
+# this host without OPENSSL_DIR.
+if (-not $env:OPENSSL_DIR) {
+    $opensslCandidates = @(
+        "C:\Program Files\OpenSSL-Win64",
+        "C:\Program Files\OpenSSL",
+        (Join-Path ${env:ProgramFiles} "OpenSSL-Win64")
+    )
+    foreach ($candidate in $opensslCandidates) {
+        if ($candidate -and (Test-Path -LiteralPath (Join-Path $candidate "include\openssl\ssl.h"))) {
+            $env:OPENSSL_DIR = $candidate
+            break
+        }
+    }
+}
+if (-not $env:OPENSSL_DIR) {
+    Die "OPENSSL_DIR is required to build vc-frame on Windows (install OpenSSL-Win64 or set OPENSSL_DIR)"
+}
+if (-not $env:OPENSSL_LIB_DIR) {
+    $libMd = Join-Path $env:OPENSSL_DIR "lib\VC\x64\MD"
+    if (Test-Path -LiteralPath $libMd) {
+        $env:OPENSSL_LIB_DIR = $libMd
+    }
+}
+if (-not $env:OPENSSL_INCLUDE_DIR) {
+    $inc = Join-Path $env:OPENSSL_DIR "include"
+    if (Test-Path -LiteralPath $inc) {
+        $env:OPENSSL_INCLUDE_DIR = $inc
+    }
+}
+$env:OPENSSL_NO_VENDOR = "1"
+Write-Host "Using OPENSSL_DIR=$env:OPENSSL_DIR"
+
+$terminalSrc = Join-Path $work "vc-terminal"
+$frameSrc = Join-Path $work "vc-frame"
+Fetch-DonorSource `
+    "https://codeload.github.com/vetcoders/vc-terminal/tar.gz/$terminalRevision" `
+    $terminalArchiveSha256 `
+    (Join-Path $work "vc-terminal.tar.gz") `
+    $terminalSrc
+Fetch-DonorSource `
+    "https://codeload.github.com/vetcoders/vc-frame/tar.gz/$frameRevision" `
+    $frameArchiveSha256 `
+    (Join-Path $work "vc-frame.tar.gz") `
+    $frameSrc
+
+Write-Host "Building vc-terminal (alacritty) for win32-x64 at $terminalRevision"
+Push-Location $terminalSrc
+try {
+    & cargo build --release --bin alacritty
+    if ($LASTEXITCODE -ne 0) { Die "vc-terminal cargo build failed" }
+}
+finally { Pop-Location }
+$terminalBuilt = Join-Path $terminalSrc "target\release\alacritty.exe"
+if (-not (Test-Path -LiteralPath $terminalBuilt -PathType Leaf)) {
+    Die "vc-terminal release binary missing: $terminalBuilt"
+}
+
+Write-Host "Building vc-frame for win32-x64 at $frameRevision"
+Push-Location $frameSrc
+try {
+    $env:VC_FRAME_GIT_SHA = $frameRevision
+    $env:VC_FRAME_GIT_DIRTY = "0"
+    & cargo xtask build --release
+    if ($LASTEXITCODE -ne 0) { Die "vc-frame cargo xtask build failed" }
+}
+finally { Pop-Location }
+$frameBuilt = Join-Path $frameSrc "target\release\vc-frame.exe"
+if (-not (Test-Path -LiteralPath $frameBuilt -PathType Leaf)) {
+    Die "vc-frame release binary missing: $frameBuilt"
+}
+
+New-Item -ItemType Directory -Path (Join-Path $payload "libexec") -Force | Out-Null
+Copy-Item $terminalBuilt (Join-Path $payload "libexec\vc-terminal.exe")
+Copy-Item $frameBuilt (Join-Path $payload "libexec\vc-frame.exe")
+# Ship the OpenSSL shared libraries next to vc-frame.exe so the frame starts on
+# hosts that do not have OpenSSL-Win64 on PATH (link against MD import libs).
+foreach ($dllName in @("libssl-3-x64.dll", "libcrypto-3-x64.dll")) {
+    $dllSrc = Join-Path $env:OPENSSL_DIR $dllName
+    if (-not (Test-Path -LiteralPath $dllSrc -PathType Leaf)) {
+        $dllSrc = Join-Path $env:OPENSSL_DIR "bin\$dllName"
+    }
+    if (-not (Test-Path -LiteralPath $dllSrc -PathType Leaf)) {
+        Die "OpenSSL shared library missing beside OPENSSL_DIR: $dllName"
+    }
+    Copy-Item $dllSrc (Join-Path $payload "libexec\$dllName")
+}
+$termEntry = Join-Path $repoRoot "scripts\vc-terminal-product-entry.cmd"
+$frameEntry = Join-Path $repoRoot "scripts\vc-frame-product-entry.cmd"
+if (-not (Test-Path -LiteralPath $termEntry -PathType Leaf)) {
+    Die "missing Windows terminal product entry: $termEntry"
+}
+if (-not (Test-Path -LiteralPath $frameEntry -PathType Leaf)) {
+    Die "missing Windows frame product entry: $frameEntry"
+}
+Copy-Item $termEntry (Join-Path $payload "scripts\vc-terminal-product-entry.cmd")
+Copy-Item $frameEntry (Join-Path $payload "scripts\vc-frame-product-entry.cmd")
+Copy-Item $termEntry (Join-Path $payload "bin\vc-terminal.cmd")
+Copy-Item $frameEntry (Join-Path $payload "bin\vc-frame.cmd")
+# Complete frame surface: product config ships with vibecrafted-core; fail closed
+# if the canonical tree is absent so a terminal without frame config cannot ship.
+$frameConfig = Join-Path $payload "vibecrafted-core\vibecrafted_core\config\vc-frame\config.kdl"
+if (-not (Test-Path -LiteralPath $frameConfig -PathType Leaf)) {
+    Die "complete vc-frame config missing from payload: $frameConfig"
+}
+Write-Host "Windows vc-terminal + vc-frame staged under libexec/ and bin/"
 
 $embedZip = Join-Path $work "python-embed.zip"
 $embedUrl = "https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip"
@@ -254,31 +435,41 @@ source_revision = os.environ["SOURCE_REVISION"]
 terminal_revision = os.environ["TERMINAL_REVISION"]
 frame_revision = os.environ["FRAME_REVISION"]
 source_manifest_sha = hashlib.sha256((root / "source-provenance.json").read_bytes()).hexdigest()
-mandatory = ["python", "loct", "loctree", "loctree-mcp", "loctree-lsp", "aicx", "aicx-mcp", "vc-server"]
+mandatory = ["python", "loct", "loctree", "loctree-mcp", "loctree-lsp", "aicx", "aicx-mcp", "vc-server", "vc-terminal", "vc-frame"]
 optional = {
     "prview": "release-blocker",
     "screenscribe": "release-blocker",
     "voc": "limited-platform-scope",
     "vc-start": "limited-platform-scope",
-    "vc-frame": "limited-platform-scope",
-    "vc-terminal": "limited-platform-scope",
     "vc-server-supervisor": "limited-platform-scope",
 }
 def exe_path(name):
     if name == "python":
         return root / "bin" / "python.exe"
-    if name == "screenscribe":
-        cmd = root / "bin" / "screenscribe.cmd"
+    if name in {"screenscribe", "vc-terminal", "vc-frame"}:
+        cmd = root / "bin" / f"{name}.cmd"
         if cmd.is_file():
             return cmd
-        return root / "bin" / "screenscribe.exe"
+        return root / "bin" / f"{name}.exe"
     return root / "bin" / f"{name}.exe"
 records = []
 unsupported = []
+donor_revisions = {"vc-terminal": terminal_revision, "vc-frame": frame_revision}
+donor_urls = {
+    "vc-terminal": f"https://github.com/vetcoders/vc-terminal/tree/{terminal_revision}",
+    "vc-frame": f"https://github.com/vetcoders/vc-frame/tree/{frame_revision}",
+}
 for name in mandatory:
     path = exe_path(name)
     if not path.is_file():
         print(f"missing mandatory executable: {path}", file=sys.stderr)
+        sys.exit(1)
+    # Native hosts must exist beside the product wrappers.
+    if name == "vc-terminal" and not (root / "libexec" / "vc-terminal.exe").is_file():
+        print("missing mandatory libexec/vc-terminal.exe", file=sys.stderr)
+        sys.exit(1)
+    if name == "vc-frame" and not (root / "libexec" / "vc-frame.exe").is_file():
+        print("missing mandatory libexec/vc-frame.exe", file=sys.stderr)
         sys.exit(1)
     argv = ["--version"]
     try:
@@ -290,13 +481,12 @@ for name in mandatory:
         "name": name, "path": path.relative_to(root).as_posix(),
         "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         "version_argv": argv, "version_output": output,
-        "source_url": "https://github.com/vetcoders/vibecrafted",
-        "source_revision": source_revision, "source_archive_sha256": source_manifest_sha,
+        "source_url": donor_urls.get(name, "https://github.com/vetcoders/vibecrafted"),
+        "source_revision": donor_revisions.get(name, source_revision),
+        "source_archive_sha256": source_manifest_sha,
         "target": "x86_64-pc-windows-msvc", "license": "MIT",
     })
 reasons = {
-    "vc-frame": "no supported Windows vc-frame binary in this pack",
-    "vc-terminal": "no supported Windows vc-terminal binary in this pack",
     "voc": "voc is not built for Windows in this pack",
     "vc-start": "vc-start is not built for Windows in this pack",
     "prview": "prview has no Windows artifact in this pack",

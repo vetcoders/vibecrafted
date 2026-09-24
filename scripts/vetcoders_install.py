@@ -23373,7 +23373,10 @@ def _runtime_pack_required_paths(generation: Path, terminal_host: Path) -> list[
             _runtime_bin_file(generation, "aicx"),
             _runtime_bin_file(generation, "aicx-mcp"),
             _runtime_bin_file(generation, "vc-server"),
+            _runtime_bin_file(generation, "vc-terminal"),
+            _runtime_bin_file(generation, "vc-frame"),
             generation / "bin" / "python.exe",
+            terminal_host,
             skills,
         ]
     return [
@@ -23625,8 +23628,13 @@ def _install_runtime_pack(
             "Runtime Pack generation is invalid: " + "; ".join(payload_errors)
         )
 
-    generation_terminal_entry = generation / "bin/vc-terminal"
-    generation_terminal_host = generation / "libexec/vc-terminal"
+    generation_terminal_entry = _runtime_bin_file(generation, "vc-terminal")
+    if sys.platform == "win32":
+        generation_terminal_host = generation / "libexec" / "vc-terminal.exe"
+        if not generation_terminal_host.is_file():
+            generation_terminal_host = generation / "libexec" / "vc-terminal"
+    else:
+        generation_terminal_host = generation / "libexec" / "vc-terminal"
     # Historical App bootstrap passes --terminal-host at a non-bundle helper.
     # A real Contents/Helpers/vc-terminal.app inner binary is the public GUI
     # host; any other hint still cannot replace generation libexec.
