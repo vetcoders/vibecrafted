@@ -50,6 +50,11 @@
 //!   (with their routes and source paths), never as independent stores; see
 //!   [`observability`].
 //!
+//! * `GET /api/usage` — canonical per-run token and cost report. Currencies
+//!   stay separate; unknown measurements stay unknown.
+//! * `GET /api/usage/quota` — live agy/kimi quota cards from the local monitor
+//!   files. Missing files are absent, not errors.
+//!
 //! The Loctree report and AICX routes are not part of this router: they carry
 //! their own boundaries and live in [`crate::tools`].
 
@@ -59,6 +64,8 @@ mod caretaker;
 mod events_sse;
 #[cfg(feature = "ssr")]
 mod observability;
+#[cfg(feature = "ssr")]
+mod quota;
 #[cfg(feature = "ssr")]
 mod run_observation;
 #[cfg(feature = "ssr")]
@@ -85,6 +92,7 @@ pub mod api {
     use super::caretaker::caretaker;
     use super::events_sse::events_sse;
     use super::observability::observability;
+    use super::quota::quota;
     use super::run_observation::{await_run as await_run_observation, observe as observe_run};
     use super::usage::usage;
 
@@ -121,6 +129,7 @@ pub mod api {
             .route("/api/control/events", get(events_sse))
             .route("/api/control/caretaker", get(caretaker))
             .route("/api/control/observability", get(observability))
+            .route("/api/usage/quota", get(quota))
             .route("/api/usage", get(usage))
     }
 

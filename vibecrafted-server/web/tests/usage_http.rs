@@ -128,3 +128,70 @@ async fn usage_api_projects_filters_totals_and_validation() {
     assert_eq!(empty["totals"]["runs"], 0);
     assert!(empty["runs"].as_array().expect("runs").is_empty());
 }
+
+#[tokio::test]
+async fn quota_dashboard_reads_monitor_snapshots_and_stays_quiet_when_absent() {
+    let _home = TestHome::new();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs();
+    let agy = json!({
+        "ts": ts,
+        "model_id": "gemini-3.1-pro-high",
+        "metrics": {"estimated_tokens": 12400, "cost_usd": 0.042},
+        "quota": {"status": "RESOURCE_EXHAUSTED", "quota_reset_in": "2h"}
+    });
+    let kimi = json!({
+        "ts": ts,
+        "kind": "ok",
+        "plan": "Coding",
+        "limit5h": {"usedRatio": 0.97},
+        "monthTotal": {"usedRatio": 0.41},
+        "monthCode": {"usedRatio": 0.12}
+    });
+    unsafe {
+        std::env::set_var("VIBECRAFTED_AGY_QUOTA_JSON", agy.to_string());
+        std::env::set_var("VIBECRAFTED_KIMI_QUOTA_JSON", kimi.to_string());
+    }
+
+    let (status, cache, board) = get("/api/usage/quota").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cache, "no-store");
+    assert_eq!(board["schema"], "vibecrafted.quota-dashboard.v1");
+    let agents = board["agents"].as_array().expect("agents");
+    assert_eq!(agents.len(), 2);
+    assert_eq!(agents[0]["id"], "agy");
+    assert_eq!(agents[0]["status"], "blocked");
+    assert_eq!(agents[0]["headline"], "EXHAUSTED");
+    assert!(
+        agents[0]["detail"]
+            .as_str()
+            .expect("detail")
+            .contains("api-equiv")
+    );
+    assert_eq!(agents[0]["tokens"], 12400);
+    assert_eq!(agents[1]["id"], "kimi");
+    assert_eq!(agents[1]["status"], "blocked");
+    assert_eq!(agents[1]["bars"][0]["label"], "5h");
+    assert_eq!(agents[1]["bars"][0]["level"], "blocked");
+    assert_eq!(agents[1]["bars"][1]["text"], "41%");
+
+    unsafe {
+        std::env::set_var("VIBECRAFTED_AGY_QUOTA_JSON", "/nonexistent/agy-quota.json");
+        std::env::set_var(
+            "VIBECRAFTED_KIMI_QUOTA_JSON",
+            "/nonexistent/kimi-quota.json",
+        );
+    }
+    let (status, _, quiet) = get("/api/usage/quota").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(quiet["agents"][0]["present"], false);
+    assert_eq!(quiet["agents"][0]["status"], "absent");
+    assert_eq!(quiet["agents"][1]["status"], "absent");
+
+    unsafe {
+        std::env::remove_var("VIBECRAFTED_AGY_QUOTA_JSON");
+        std::env::remove_var("VIBECRAFTED_KIMI_QUOTA_JSON");
+    }
+}
