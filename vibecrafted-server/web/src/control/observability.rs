@@ -25,6 +25,7 @@
 use std::path::PathBuf;
 
 use axum::Json;
+use axum::extract::Extension;
 use axum::http::header;
 use axum::response::IntoResponse;
 use control_core::ControlPlane;
@@ -52,8 +53,7 @@ fn projection(name: &str, kind: &str, route: &str, source_path: PathBuf, missing
 }
 
 /// Serve the projections index over the live control-plane home.
-pub(crate) async fn observability() -> impl IntoResponse {
-    let plane = ControlPlane::from_env();
+pub(crate) async fn observability(Extension(plane): Extension<ControlPlane>) -> impl IntoResponse {
     let control_plane = plane.control_plane_home();
     let caretaker_path = control_plane.join(CARETAKER_SNAPSHOT_NAME);
 

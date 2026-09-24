@@ -12,7 +12,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use axum::Json;
-use axum::extract::{Path, Query};
+use axum::extract::{Extension, Path, Query};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
@@ -574,7 +574,10 @@ fn verdict(
     }
 }
 
-pub(crate) async fn observe(Path(run_id): Path<String>) -> Response {
+pub(crate) async fn observe(
+    Extension(plane): Extension<ControlPlane>,
+    Path(run_id): Path<String>,
+) -> Response {
     if !is_safe_run_id(&run_id) {
         return (
             StatusCode::BAD_REQUEST,
@@ -584,7 +587,7 @@ pub(crate) async fn observe(Path(run_id): Path<String>) -> Response {
     }
     // Observe is an eye: do not block on Python revalidation. Await owns the
     // writer. A 3–6s revalidate on this path was a false "server unavailable".
-    let observation = observe_once(ControlPlane::from_env(), run_id, None, None).await;
+    let observation = observe_once(plane, run_id, None, None).await;
     let status = if observation.found {
         StatusCode::OK
     } else if observation.evidence_disagreement {
@@ -596,6 +599,7 @@ pub(crate) async fn observe(Path(run_id): Path<String>) -> Response {
 }
 
 pub(crate) async fn await_run(
+    Extension(plane): Extension<ControlPlane>,
     Path(run_id): Path<String>,
     Query(query): Query<AwaitQuery>,
 ) -> Response {
@@ -614,7 +618,6 @@ pub(crate) async fn await_run(
         .hard_cap
         .filter(|value| value.is_finite() && *value >= 0.0);
     let _requested_interval = query.interval;
-    let plane = ControlPlane::from_env();
     let mut subscription = hub().subscribe(plane, run_id).await;
     let start = Instant::now();
     let mut idle_deadline = start + Duration::from_secs_f64(idle);

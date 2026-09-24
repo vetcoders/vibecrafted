@@ -47,5 +47,5 @@ jobs:
         run: cargo test -p control-core
       - name: Check web (ssr)
         run: cargo check -p vibecrafted-server-web --features ssr
-      - name: Test web (ssr lib)
-        run: cargo test -p vibecrafted-server-web --features ssr --lib
+      - name: Test web (ssr)
+        run: cargo test -p vibecrafted-server-web --features ssr

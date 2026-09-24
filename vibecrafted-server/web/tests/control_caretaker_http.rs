@@ -22,7 +22,7 @@ use axum::http::{Request, StatusCode};
 use leptos::config::{Env, LeptosOptions};
 use serde_json::{Value, json};
 use tower::ServiceExt;
-use vibecrafted_server_web::control::api::control_routes;
+use vibecrafted_server_web::control::api::control_routes_for;
 
 struct TestHome(PathBuf);
 
@@ -37,11 +37,6 @@ impl TestHome {
                 .as_nanos()
         ));
         fs::create_dir_all(path.join("control_plane")).expect("fixture control plane");
-        // Safety: this integration binary contains one test, so the process-wide
-        // home has a single owner for the whole test lifetime.
-        unsafe {
-            std::env::set_var("VIBECRAFTED_HOME", &path);
-        }
         Self(path)
     }
 
@@ -68,14 +63,11 @@ impl TestHome {
 
 impl Drop for TestHome {
     fn drop(&mut self) {
-        unsafe {
-            std::env::remove_var("VIBECRAFTED_HOME");
-        }
         let _ = fs::remove_dir_all(&self.0);
     }
 }
 
-fn test_app() -> axum::Router {
+fn test_app(home: &std::path::Path) -> axum::Router {
     let opts = LeptosOptions::builder()
         .output_name("vibecrafted-server-web-test")
         .site_root("target/site-test")
@@ -84,11 +76,11 @@ fn test_app() -> axum::Router {
         .site_addr("127.0.0.1:0".parse::<SocketAddr>().expect("addr"))
         .reload_port(0)
         .build();
-    control_routes().with_state(opts)
+    control_routes_for(home).with_state(opts)
 }
 
-async fn get_caretaker() -> (StatusCode, Option<String>, Value) {
-    let response = test_app()
+async fn get_caretaker(home: &std::path::Path) -> (StatusCode, Option<String>, Value) {
+    let response = test_app(home)
         .oneshot(
             Request::builder()
                 .uri("/api/control/caretaker")
@@ -146,7 +138,7 @@ async fn caretaker_route_reports_publication_freshness_and_corruption() {
     // Never published: the route still answers, because answering at all is the
     // liveness proof. A 404 here would be indistinguishable from a dead server.
     home.unpublish();
-    let (status, cache_control, absent) = get_caretaker().await;
+    let (status, cache_control, absent) = get_caretaker(&home.0).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(cache_control.as_deref(), Some("no-store"));
     assert_eq!(absent["schema"], "vibecrafted.caretaker-view.v1");
@@ -172,7 +164,7 @@ async fn caretaker_route_reports_publication_freshness_and_corruption() {
     // verdict crosses the wire intact so no consumer re-derives health.
     let fixture = caretaker_fixture();
     home.publish(&fixture);
-    let (status, _, published) = get_caretaker().await;
+    let (status, _, published) = get_caretaker(&home.0).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(published["published"], true);
     assert_eq!(published["snapshot"], fixture);
@@ -187,7 +179,7 @@ async fn caretaker_route_reports_publication_freshness_and_corruption() {
     // Corrupt: distinguishable from "never published", because the two need
     // different operator responses.
     home.publish_raw("{not json");
-    let (status, _, corrupt) = get_caretaker().await;
+    let (status, _, corrupt) = get_caretaker(&home.0).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(corrupt["published"], false);
     assert_eq!(corrupt["stale"], true);
@@ -202,7 +194,7 @@ async fn caretaker_route_reports_publication_freshness_and_corruption() {
     // A non-object payload is equally unusable and equally must not masquerade
     // as a snapshot.
     home.publish_raw("[1, 2, 3]");
-    let (_, _, non_object) = get_caretaker().await;
+    let (_, _, non_object) = get_caretaker(&home.0).await;
     assert_eq!(non_object["published"], false);
     assert!(
         non_object["reason"]

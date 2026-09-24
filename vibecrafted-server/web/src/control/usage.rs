@@ -1,7 +1,7 @@
 //! HTTP projection for the canonical control-core usage report.
 
 use axum::Json;
-use axum::extract::Query;
+use axum::extract::{Extension, Query};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use chrono::{Duration, Utc};
@@ -17,7 +17,10 @@ pub struct UsageQuery {
     model: Option<String>,
 }
 
-pub async fn usage(Query(query): Query<UsageQuery>) -> Response {
+pub async fn usage(
+    Extension(plane): Extension<ControlPlane>,
+    Query(query): Query<UsageQuery>,
+) -> Response {
     let window = query.window.as_deref().unwrap_or("24h");
     let since = match window {
         "24h" => Some(Duration::hours(24)),
@@ -50,7 +53,7 @@ pub async fn usage(Query(query): Query<UsageQuery>) -> Response {
         )
             .into_response());
     }
-    let report = ControlPlane::from_env().usage_report(
+    let report = plane.usage_report(
         Utc::now(),
         UsageFilter {
             since,

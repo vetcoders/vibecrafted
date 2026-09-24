@@ -8,8 +8,10 @@
 #![cfg(feature = "ssr")]
 
 use std::fs;
+use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::{Body, to_bytes};
@@ -17,25 +19,33 @@ use axum::http::{Request, StatusCode};
 use leptos::config::{Env, LeptosOptions};
 use serde_json::{Value, json};
 use tower::ServiceExt;
-use vibecrafted_server_web::control::api::control_routes;
+use vibecrafted_server_web::control::api::control_routes_for;
 
 struct TestHome(PathBuf);
 
 impl TestHome {
     fn new() -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "vc-transcripts-http-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        ));
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = (0..100)
+            .find_map(|attempt| {
+                let nonce = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+                let candidate = std::env::temp_dir().join(format!(
+                    "vc-transcripts-http-{}-{nanos}-{nonce}-{attempt}",
+                    std::process::id()
+                ));
+                match fs::create_dir(&candidate) {
+                    Ok(()) => Some(candidate),
+                    Err(error) if error.kind() == ErrorKind::AlreadyExists => None,
+                    Err(error) => panic!("create isolated transcript home: {error}"),
+                }
+            })
+            .expect("allocate an isolated transcript home");
         fs::create_dir_all(path.join("control_plane/runs")).expect("runs dir");
         fs::create_dir_all(path.join("control_plane/runtime_runs")).expect("runtime runs");
-        unsafe {
-            std::env::set_var("VIBECRAFTED_HOME", &path);
-        }
         Self(path)
     }
 
@@ -73,14 +83,11 @@ impl TestHome {
 
 impl Drop for TestHome {
     fn drop(&mut self) {
-        unsafe {
-            std::env::remove_var("VIBECRAFTED_HOME");
-        }
         let _ = fs::remove_dir_all(&self.0);
     }
 }
 
-fn test_app() -> axum::Router {
+fn test_app(home: &std::path::Path) -> axum::Router {
     let opts = LeptosOptions::builder()
         .output_name("vibecrafted-server-web-test")
         .site_root("target/site-test")
@@ -89,20 +96,26 @@ fn test_app() -> axum::Router {
         .site_addr("127.0.0.1:0".parse::<SocketAddr>().expect("addr"))
         .reload_port(0)
         .build();
-    control_routes().with_state(opts)
+    control_routes_for(home).with_state(opts)
 }
 
-async fn get_transcripts(q: &str) -> (StatusCode, Option<String>, Value) {
-    get_transcripts_uri(&if q.is_empty() {
-        "/api/control/transcripts".to_string()
-    } else {
-        format!("/api/control/transcripts?q={q}")
-    })
+async fn get_transcripts(home: &std::path::Path, q: &str) -> (StatusCode, Option<String>, Value) {
+    get_transcripts_uri(
+        home,
+        &if q.is_empty() {
+            "/api/control/transcripts".to_string()
+        } else {
+            format!("/api/control/transcripts?q={q}")
+        },
+    )
     .await
 }
 
-async fn get_transcripts_uri(uri: &str) -> (StatusCode, Option<String>, Value) {
-    let response = test_app()
+async fn get_transcripts_uri(
+    home: &std::path::Path,
+    uri: &str,
+) -> (StatusCode, Option<String>, Value) {
+    let response = test_app(home)
         .oneshot(
             Request::builder()
                 .uri(uri)
@@ -155,7 +168,7 @@ async fn transcripts_search_finds_a_head_needle_beyond_the_tail_and_past_200_sna
         &long_log_with_head_needle(needle),
     );
 
-    let (status, cache_control, body) = get_transcripts(needle).await;
+    let (status, cache_control, body) = get_transcripts(&home.0, needle).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(cache_control.as_deref(), Some("no-store"));
     assert_eq!(body["q"], needle);
@@ -197,7 +210,7 @@ async fn transcripts_search_finds_a_needle_past_the_old_256kib_cap() {
         &long_log_with_deep_needle(needle),
     );
 
-    let (status, _, body) = get_transcripts(needle).await;
+    let (status, _, body) = get_transcripts(&home.0, needle).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["count"], 1);
     assert_eq!(body["total"], 1);
@@ -222,9 +235,10 @@ async fn transcripts_search_pages_past_two_hundred_matches() {
         );
     }
 
-    let (status, _, body) = get_transcripts_uri(&format!(
-        "/api/control/transcripts?q={needle}&offset=200&limit=200"
-    ))
+    let (status, _, body) = get_transcripts_uri(
+        &home.0,
+        &format!("/api/control/transcripts?q={needle}&offset=200&limit=200"),
+    )
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["total"], 201);
@@ -248,7 +262,7 @@ async fn transcripts_listing_pages_the_whole_corpus_without_a_query() {
         );
     }
 
-    let (status, _, first) = get_transcripts("").await;
+    let (status, _, first) = get_transcripts(&home.0, "").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(first["q"], "");
     assert_eq!(first["total"], 51);
@@ -258,7 +272,7 @@ async fn transcripts_listing_pages_the_whole_corpus_without_a_query() {
     assert_eq!(first["has_more"], true);
 
     let (status, _, second) =
-        get_transcripts_uri("/api/control/transcripts?offset=50&limit=50").await;
+        get_transcripts_uri(&home.0, "/api/control/transcripts?offset=50&limit=50").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(second["total"], 51);
     assert_eq!(second["offset"], 50);

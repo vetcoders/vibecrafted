@@ -9,7 +9,7 @@ use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::time::Duration;
 
-use axum::extract::Query;
+use axum::extract::{Extension, Query};
 use axum::http::HeaderMap;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use control_core::{
@@ -21,6 +21,39 @@ use serde::Deserialize;
 
 const DEFAULT_POLL_MS: u64 = 500;
 const DEFAULT_KEEPALIVE_MS: u64 = 15_000;
+
+/// Poll and keepalive captured when the control router is built.
+///
+/// Request handlers do not re-read `VC_CONTROL_SSE_*`. Parallel tests pass
+/// their own pace instead of publishing those variables into the process.
+#[derive(Clone, Copy, Debug)]
+pub struct SsePace {
+    pub poll: Duration,
+    pub keepalive: Duration,
+}
+
+impl SsePace {
+    /// Production defaults: 500 ms poll, 15 s keepalive.
+    #[must_use]
+    pub fn production() -> Self {
+        Self {
+            poll: Duration::from_millis(DEFAULT_POLL_MS),
+            keepalive: Duration::from_millis(DEFAULT_KEEPALIVE_MS),
+        }
+    }
+
+    /// One-shot read of `VC_CONTROL_SSE_POLL_MS` and `VC_CONTROL_SSE_KEEPALIVE_MS`.
+    #[must_use]
+    pub fn from_env() -> Self {
+        Self {
+            poll: Duration::from_millis(env_ms("VC_CONTROL_SSE_POLL_MS", DEFAULT_POLL_MS)),
+            keepalive: Duration::from_millis(env_ms(
+                "VC_CONTROL_SSE_KEEPALIVE_MS",
+                DEFAULT_KEEPALIVE_MS,
+            )),
+        }
+    }
+}
 
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct EventsQuery {
@@ -133,8 +166,8 @@ fn outbound_frame(outbound: Outbound) -> SseEvent {
     }
 }
 
-fn initial_state(query: &EventsQuery, headers: &HeaderMap) -> StreamState {
-    let stream = ControlPlane::from_env().events();
+fn initial_state(plane: &ControlPlane, query: &EventsQuery, headers: &HeaderMap) -> StreamState {
+    let stream = plane.events();
     let raw = resolve_cursor_raw(query, headers);
     let (requested, invalid) = match raw {
         Some(raw) => match raw.parse::<StreamCursor>() {
@@ -188,17 +221,22 @@ fn initial_state(query: &EventsQuery, headers: &HeaderMap) -> StreamState {
 /// Long-lived SSE response with a finite baseline and an explicit caught-up
 /// marker independent of heartbeat traffic.
 pub(crate) async fn events_sse(
+    Extension(plane): Extension<ControlPlane>,
+    Extension(pace): Extension<SsePace>,
     Query(query): Query<EventsQuery>,
     headers: HeaderMap,
 ) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
-    let poll_ms = env_ms("VC_CONTROL_SSE_POLL_MS", DEFAULT_POLL_MS);
-    let keepalive_ms = env_ms("VC_CONTROL_SSE_KEEPALIVE_MS", DEFAULT_KEEPALIVE_MS);
-    let state = initial_state(&query, &headers);
+    let poll = pace.poll;
+    let keepalive = pace.keepalive;
+    let state = initial_state(&plane, &query, &headers);
 
-    let event_stream = stream::unfold(state, move |mut state| async move {
+    let event_stream = stream::unfold((state, plane), move |(mut state, plane)| async move {
         loop {
             if let Some(outbound) = state.pending.pop_front() {
-                return Some((Ok::<_, Infallible>(outbound_frame(outbound)), state));
+                return Some((
+                    Ok::<_, Infallible>(outbound_frame(outbound)),
+                    (state, plane),
+                ));
             }
             if !state.caught_up && state.cursor.reaches(&state.high_watermark) {
                 state.caught_up = true;
@@ -206,10 +244,12 @@ pub(crate) async fn events_sse(
                     cursor: state.cursor.clone(),
                     high_watermark: state.high_watermark.clone(),
                 };
-                return Some((Ok::<_, Infallible>(outbound_frame(outbound)), state));
+                return Some((
+                    Ok::<_, Infallible>(outbound_frame(outbound)),
+                    (state, plane),
+                ));
             }
 
-            let plane = ControlPlane::from_env();
             match plane.events().read_stream(&state.cursor, &[]) {
                 Ok(batch) => {
                     state.cursor = batch.cursor;
@@ -240,21 +280,17 @@ pub(crate) async fn events_sse(
                     if state.pending.is_empty()
                         && (!state.cursor.reaches(&state.high_watermark) || state.caught_up)
                     {
-                        tokio::time::sleep(Duration::from_millis(poll_ms)).await;
+                        tokio::time::sleep(poll).await;
                     }
                 }
                 Err(_) => {
                     // Rotation has a tiny rename/publish window. Retrying the
                     // same opaque cursor lets the archive bridge resolve it.
-                    tokio::time::sleep(Duration::from_millis(poll_ms)).await;
+                    tokio::time::sleep(poll).await;
                 }
             }
         }
     });
 
-    Sse::new(event_stream).keep_alive(
-        KeepAlive::new()
-            .interval(Duration::from_millis(keepalive_ms))
-            .text("ping"),
-    )
+    Sse::new(event_stream).keep_alive(KeepAlive::new().interval(keepalive).text("ping"))
 }

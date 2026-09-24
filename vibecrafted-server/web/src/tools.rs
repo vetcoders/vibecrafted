@@ -317,12 +317,9 @@ pub mod api {
         };
         let project = match query.get("project").map(String::as_str) {
             None => None,
-            Some(raw) if raw.trim().is_empty() => {
-                return json_error(
-                    StatusCode::BAD_REQUEST,
-                    "project is required; use owner/repo or omit the parameter for all-projects search",
-                );
-            }
+            // `project=` is the same as omitting the parameter: search every
+            // project. A present but non-slug value stays a validation error.
+            Some(raw) if raw.trim().is_empty() => None,
             Some(raw) => match valid_project(raw) {
                 Some(project) => Some(project.to_string()),
                 None => {
