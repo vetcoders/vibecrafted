@@ -39,6 +39,7 @@ Four properties are load-bearing and each has a case below:
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import shlex
@@ -48,6 +49,14 @@ import time
 from pathlib import Path
 
 import pytest
+
+# --import-mode=importlib: the shared fixture module is loaded by file.
+_GENERATION_FIXTURE_SPEC = importlib.util.spec_from_file_location(
+    "tui_generation_fixture", Path(__file__).with_name("_generation_fixture.py")
+)
+assert _GENERATION_FIXTURE_SPEC is not None and _GENERATION_FIXTURE_SPEC.loader
+gen = importlib.util.module_from_spec(_GENERATION_FIXTURE_SPEC)
+_GENERATION_FIXTURE_SPEC.loader.exec_module(gen)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CORE_IMPORT_ROOT = REPO_ROOT / "vibecrafted-core"
@@ -111,6 +120,12 @@ import json, os, sys, time
 argv = sys.argv[1:]
 log = os.environ.get("VC_FRAME_LOG", "")
 live_file = os.environ.get("VC_FRAME_LIVE", "")
+# The layout each live session was created from (name -> layout path). A
+# test seeds a pre-existing session's shape here; the engine answers
+# `action dump-layout` from it, the way the real engine reports the layout it
+# materialized. A live name with no recorded layout answers nothing, which the
+# product reads as an unknown role.
+layouts_file = os.environ.get("VC_FRAME_LAYOUTS", "")
 if log:
     with open(log, "a") as handle:
         handle.write(json.dumps(argv) + "\\n")
@@ -120,6 +135,12 @@ def live_sessions():
     if live_file and os.path.exists(live_file):
         return [line.strip() for line in open(live_file) if line.strip()]
     return []
+
+
+def layouts():
+    if layouts_file and os.path.exists(layouts_file):
+        return json.load(open(layouts_file))
+    return {}
 
 
 if "--help" in argv:
@@ -132,10 +153,15 @@ if argv[:1] in (["ls"], ["list-sessions"]):
         print("%s [Created 1s ago]" % name)
     sys.exit(0)
 
-def remember(name):
+def remember(name, layout=None):
     if live_file and name:
         with open(live_file, "a") as handle:
             handle.write("%s\\n" % name)
+    if layouts_file and name and layout:
+        table = layouts()
+        table[name] = layout
+        with open(layouts_file, "w") as handle:
+            json.dump(table, handle)
 
 
 def refuse_without_tty():
@@ -150,17 +176,30 @@ def refuse_without_tty():
 
 
 session = None
-rest = argv
-if rest[:1] == ["--session"]:
-    session = rest[1]
-    rest = rest[2:]
-
 layout = None
-if rest[:1] == ["--new-session-with-layout"]:
-    layout = rest[1]
-    rest = rest[2:]
+rest = argv
+# Leading global options in any order: `--session S`, `--guest-workspace`
+# (a guest create), `--new-session-with-layout L`.
+while rest:
+    if rest[0] == "--session" and len(rest) > 1:
+        session = rest[1]
+        rest = rest[2:]
+    elif rest[0] == "--new-session-with-layout" and len(rest) > 1:
+        layout = rest[1]
+        rest = rest[2:]
+    elif rest[0] == "--guest-workspace":
+        rest = rest[1:]
+    else:
+        break
 
 if rest[:1] == ["action"]:
+    if rest[1:2] == ["dump-layout"]:
+        if session not in live_sessions():
+            sys.stderr.write("There is no active session!\\n")
+            sys.exit(1)
+        path = layouts().get(session, "")
+        if path and os.path.isfile(path):
+            print(open(path).read(), end="")
     sys.exit(0)
 
 # The native detached create: `[-n LAYOUT] attach --create-background NAME`.
@@ -178,7 +217,7 @@ if rest[:2] == ["attach", "--create-background"]:
     if name in live_sessions():
         sys.stderr.write("Session already exists\\n")
         sys.exit(1)
-    remember(name)
+    remember(name, layout)
     sys.exit(0)
 
 if rest[:1] == ["attach"]:
@@ -216,7 +255,7 @@ if layout is not None:
     # Interactive new-session client: owns the terminal until the operator
     # detaches, and cannot start at all without one.
     refuse_without_tty()
-    remember(session)
+    remember(session, layout)
     time.sleep(30)
     sys.exit(0)
 
@@ -322,12 +361,10 @@ def _run_entry(
     if with_canonical_launcher:
         _install_canonical_launcher(home)
     # Create-only start (2026-09-09): a caller without a TTY creates the
-    # workspace session BEFORE opening the terminal, so the pinned product
-    # config must carry the operator layout the create needs.
-    _write(
-        home / ".config" / "vibecrafted" / "vc-frame" / "layouts" / "operator.kdl",
-        "layout {\n}\n",
-    )
+    # workspace session BEFORE opening the terminal. Since the one-host start
+    # (e8cd9de7) that is the Frame host from host.kdl first, then the guest
+    # from operator.kdl, so the pinned product config carries both, shipped.
+    gen.install_product_vc_frame_config(home)
 
     env = os.environ.copy()
     for key in PUBLIC_ENTRY_ISOLATE_ENV:
@@ -338,6 +375,7 @@ def _run_entry(
     env["XDG_DATA_HOME"] = str(home / ".local" / "share")
     env["TEST_AICX_CAPTURE"] = str(tmp_path / "aicx-called.txt")
     env["VC_FRAME_LIVE"] = str(tmp_path / "frame-live.txt")
+    env["VC_FRAME_LAYOUTS"] = str(tmp_path / "frame-layouts.json")
     env.update(extra_env or {})
 
     lines = [f'source "{SHELL_SH}"']
@@ -2069,6 +2107,14 @@ def test_stale_operator_session_does_not_override_live_host_routing(
     workspace through the guest path instead of opening a second terminal."""
     live = tmp_path / "live-sessions.txt"
     live.write_text("host-a\n", encoding="utf-8")
+    # host-a is a Frame host by runtime role (7ecb2b2a): its materialized
+    # layout carries the singleton projection owner, the shipped host.kdl.
+    (tmp_path / "frame-layouts.json").write_text(
+        json.dumps(
+            {"host-a": str(gen.SHIPPED_VC_FRAME_CONFIG / "layouts" / "host.kdl")}
+        ),
+        encoding="utf-8",
+    )
     result, launch = _run_entry(
         tmp_path,
         "vc-start",

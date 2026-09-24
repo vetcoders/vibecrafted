@@ -832,7 +832,8 @@ _vetcoders_resume_as_guest() {
   _vetcoders_pin_vc_frame_config_dir || return $?
   vc_frame_bin="$(_vetcoders_vc_frame_bin)" || return 1
 
-  state="$(_vetcoders_start_session_inventory_state "$session_name")"
+  _vetcoders_start_read_inventory_state "$session_name"
+  state="$_vetcoders_start_inventory_state"
   case "$state" in
     error)
       _vetcoders_start_refuse_inventory "$session_name"
@@ -849,7 +850,8 @@ _vetcoders_resume_as_guest() {
       ;;
   esac
 
-  host="$(_vetcoders_start_resolve_inventory_host "$session_name")" || resolve_rc=$?
+  _vetcoders_start_resolve_inventory_host "$session_name" || resolve_rc=$?
+  host="$_vetcoders_start_resolved_host"
   case "$resolve_rc" in
     2)
       _vetcoders_start_refuse_inventory "$session_name"
@@ -892,7 +894,10 @@ _vetcoders_resume_as_guest() {
   export VIBECRAFTED_PREPARED_VC_FRAME_SESSION="$session_name"
 
   if _vetcoders_in_vc_frame; then
-    [[ -z "$host" ]] && host="$(_vetcoders_start_resolve_inventory_host "$session_name" 2>/dev/null || true)"
+    if [[ -z "$host" ]]; then
+      _vetcoders_start_resolve_inventory_host "$session_name" 2>/dev/null || true
+      host="$_vetcoders_start_resolved_host"
+    fi
     if [[ -z "$host" ]]; then
       printf 'vc-start: no Frame host to show %s in; open it from a terminal with: vc-start resume --repo <project>\n' \
         "$(_vetcoders_shell_quote "$session_name")" >&2
@@ -1009,25 +1014,30 @@ _vetcoders_start_frame_env() {
   )
 }
 
-# Authoritative inventory state for ONE name. Prints exactly one of:
+# Authoritative inventory state for ONE name, read in the CALLER's shell.
+# Sets _vetcoders_start_inventory_state to exactly one of:
 #   live     -- a running server owns the name (attached or detached alike)
 #   dead     -- an EXITED resurrection record owns the name (not running)
 #   missing  -- the name is free
 #   error    -- the inventory could not be read or parsed; the reason is left
 #               in _vetcoders_start_inventory_error
+# and caches the live names for _vetcoders_start_live_inventory_hosts.
+# Never call it in a command substitution: the reason and the cache are
+# shell variables, and a subshell drops both -- that is how a refusal ended
+# up saying "unknown reason" and every outside door paid a second listing.
 # `list-sessions --no-formatting` prints `NAME [Created … ago] SUFFIX`, where
 # SUFFIX is `(EXITED - attach to resurrect)` for a record (zellij-utils/src/
 # sessions.rs print_sessions), and exits 1 with "No active vc-frame sessions
 # found." when both lists are empty -- that one non-zero exit IS an answer.
 # Unlike _vetcoders_vc_frame_session_state, nothing here is swallowed into
-# "missing": every other failure is `error`.
-_vetcoders_start_session_inventory_state() {
+# "missing": every other failure is `error`. Always returns 0.
+_vetcoders_start_read_inventory_state() {
   local session_name="${1:-}" vc_frame_bin="" listing="" rc=0 line="" name="" found="missing"
   _vetcoders_start_inventory_error=""
+  _vetcoders_start_inventory_state="error"
   vc_frame_bin="$(_vetcoders_vc_frame_bin 2>/dev/null)" || {
     _vetcoders_start_inventory_error="the selected vc-frame engine is unavailable"
     printf 'vc-start: %s\n' "$_vetcoders_start_inventory_error" >&2
-    printf 'error\n'
     return 0
   }
   listing="$(_vetcoders_start_frame_env "$vc_frame_bin" list-sessions --no-formatting 2>&1)" || rc=$?
@@ -1036,12 +1046,11 @@ _vetcoders_start_session_inventory_state() {
   if ((rc != 0)); then
     if [[ "$listing" == *"No active vc-frame sessions found."* ]]; then
       _vetcoders_start_inventory_cache_valid=1
-      printf 'missing\n'
+      _vetcoders_start_inventory_state="missing"
       return 0
     fi
     _vetcoders_start_inventory_error="list-sessions exited ${rc}${listing:+: ${listing%%$'\n'*}}"
     printf 'vc-start: %s\n' "$_vetcoders_start_inventory_error" >&2
-    printf 'error\n'
     return 0
   fi
   while IFS= read -r line; do
@@ -1052,7 +1061,7 @@ _vetcoders_start_session_inventory_state() {
       *)
         _vetcoders_start_inventory_error="unrecognized inventory line: ${line}"
         printf 'vc-start: %s\n' "$_vetcoders_start_inventory_error" >&2
-    printf 'error\n'
+        _vetcoders_start_cached_live_hosts=""
         return 0
         ;;
     esac
@@ -1068,13 +1077,22 @@ _vetcoders_start_session_inventory_state() {
     fi
   done <<<"$listing"
   _vetcoders_start_inventory_cache_valid=1
-  printf '%s\n' "$found"
+  _vetcoders_start_inventory_state="$found"
+}
+
+# Printing form of _vetcoders_start_read_inventory_state for probes and
+# tests (`STATE=[$(...)]`). Product callers use the direct form so that a
+# refusal can name the reason.
+_vetcoders_start_session_inventory_state() {
+  _vetcoders_start_read_inventory_state "${1:-}"
+  printf '%s\n' "$_vetcoders_start_inventory_state"
 }
 
 # Live (non-EXITED) session names from the same inventory as
-# `_vetcoders_start_session_inventory_state`. One name per line. Empty
-# inventory is success with no lines. Parse/engine failure is 2; the
-# reason is left in `_vetcoders_start_inventory_error`.
+# `_vetcoders_start_read_inventory_state`, left one per line in
+# `_vetcoders_start_cached_live_hosts` (nothing is printed; call it in the
+# caller's shell). Empty inventory is success with no lines. Parse/engine
+# failure is 2; the reason is left in `_vetcoders_start_inventory_error`.
 _vetcoders_start_live_inventory_hosts() {
   local vc_frame_bin="" listing="" rc=0 line="" name=""
   _vetcoders_start_inventory_error=""
@@ -1082,7 +1100,6 @@ _vetcoders_start_live_inventory_hosts() {
   # list-sessions per outside door was extra RPC against whatever socket
   # start_frame_env pins (including ambient Darwin when SOCKET_DIR leaks).
   if [[ "${_vetcoders_start_inventory_cache_valid:-0}" == 1 ]]; then
-    printf '%s' "${_vetcoders_start_cached_live_hosts}"
     return 0
   fi
   vc_frame_bin="$(_vetcoders_vc_frame_bin 2>/dev/null)" || {
@@ -1109,12 +1126,12 @@ _vetcoders_start_live_inventory_hosts() {
       *)
         _vetcoders_start_inventory_error="unrecognized inventory line: ${line}"
         printf 'vc-start: %s\n' "$_vetcoders_start_inventory_error" >&2
+        _vetcoders_start_cached_live_hosts=""
         return 2
         ;;
     esac
     name="${line%% \[Created *}"
     if [[ "$line" != *"(EXITED"* ]]; then
-      printf '%s\n' "$name"
       _vetcoders_start_cached_live_hosts+="${name}"$'\n'
     fi
   done <<<"$listing"
@@ -1154,26 +1171,33 @@ else:
 }
 
 # Pick the live product host for an outside caller. $1 is the workspace
-# about to be created and is never chosen. Returns:
-#   0  printed one host name
+# about to be created and is never chosen. The host is left in
+# _vetcoders_start_resolved_host (nothing is printed); call it in the
+# caller's shell so the reason survives to the refusal. Returns:
+#   0  one host name resolved
 #   1  no role-valid live host (first-session host create is legal)
-#   2  inventory/layout truth unreadable
+#   2  inventory/layout truth unreadable; reason in _vetcoders_start_inventory_error
 #   3  more than one role-valid host and no unique-client owner
 _vetcoders_start_resolve_inventory_host() {
   local exclude="${1:-}" sessions="" valid_hosts="" line="" role=""
   local count=0 chosen="" unique="" uniq_count=0 vc_frame_bin="" listing_rc=0 role_rc=0
-  sessions="$(_vetcoders_start_live_inventory_hosts)" || listing_rc=$?
+  _vetcoders_start_resolved_host=""
+  _vetcoders_start_live_inventory_hosts || listing_rc=$?
   if ((listing_rc != 0)); then
     return 2
   fi
-  vc_frame_bin="$(_vetcoders_vc_frame_bin 2>/dev/null)" || return 2
+  sessions="${_vetcoders_start_cached_live_hosts:-}"
+  vc_frame_bin="$(_vetcoders_vc_frame_bin 2>/dev/null)" || {
+    _vetcoders_start_inventory_error="the selected vc-frame engine is unavailable"
+    return 2
+  }
   while IFS= read -r line; do
     [[ -n "$line" && "$line" != "$exclude" ]] || continue
     role=""
     role_rc=0
     role="$(_vetcoders_start_session_projection_role "$line" "$vc_frame_bin")" || role_rc=$?
     if ((role_rc != 0)); then
-      _vetcoders_start_inventory_error="could not determine the runtime role of live session $line"
+      _vetcoders_start_inventory_error="the runtime role of live session ${line} is unreadable: vc-frame --session ${line} action dump-layout returned no parsable layout"
       return 2
     fi
     [[ "$role" == host ]] || continue
@@ -1187,7 +1211,7 @@ _vetcoders_start_resolve_inventory_host() {
     return 1
   fi
   if ((count == 1)); then
-    printf '%s\n' "$chosen"
+    _vetcoders_start_resolved_host="$chosen"
     return 0
   fi
   while IFS= read -r line; do
@@ -1198,7 +1222,7 @@ _vetcoders_start_resolve_inventory_host() {
     fi
   done <<<"$valid_hosts"
   if ((uniq_count == 1)); then
-    printf '%s\n' "$unique"
+    _vetcoders_start_resolved_host="$unique"
     return 0
   fi
   _vetcoders_start_inventory_error="multiple role-valid Frame hosts; refusing an ambiguous canvas"
@@ -1349,7 +1373,17 @@ _vetcoders_start_create_workspace_session() {
   local create_argv=() state=""
   [[ -n "$vc_frame_bin" && -n "$session_name" ]] || return 4
   if [[ -z "$layout_file" || ! -f "$layout_file" ]]; then
-    printf 'vc-start: operator layout missing under: %s\n' "$(_vetcoders_vc_frame_config_dir 2>/dev/null || printf '?')" >&2
+    # Name the file this create needed. The host is created from host.kdl,
+    # a guest from its selected layout (operator.kdl unless a layout alias
+    # chose another); "operator layout missing" for a missing host.kdl sent
+    # the reader after a file that was there.
+    local layouts_dir=""
+    layouts_dir="$(_vetcoders_vc_frame_config_dir 2>/dev/null || printf '?')/layouts"
+    if [[ "$kind" == chrome ]]; then
+      printf 'vc-start: Frame host layout missing: %s\n' "${layout_file:-$layouts_dir/host.kdl}" >&2
+    else
+      printf 'vc-start: workspace layout missing: %s\n' "${layout_file:-$layouts_dir/operator.kdl}" >&2
+    fi
     printf 'Install explicitly: python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack>\n' >&2
     return 4
   fi
@@ -1360,9 +1394,11 @@ _vetcoders_start_create_workspace_session() {
   fi
   create_argv+=(attach --create-background "$session_name")
   _vetcoders_start_acquire_create_lock "$session_name" || return $?
-  state="$(_vetcoders_start_session_inventory_state "$session_name")"
+  _vetcoders_start_read_inventory_state "$session_name"
+  state="$_vetcoders_start_inventory_state"
   if [[ "$state" == error ]]; then
     _vetcoders_start_release_create_lock
+    _vetcoders_start_refuse_inventory "$session_name"
     return 4
   fi
   if [[ "$state" != missing ]]; then
@@ -1447,7 +1483,8 @@ _vetcoders_start_frame_guest_api_supported() {
 _vetcoders_start_resolve_attached_host() {
   local host="${VC_FRAME_SESSION_NAME:-}" state=""
   [[ -n "$host" ]] || return 1
-  state="$(_vetcoders_start_session_inventory_state "$host")"
+  _vetcoders_start_read_inventory_state "$host"
+  state="$_vetcoders_start_inventory_state"
   [[ "$state" == live ]] || return 1
   printf '%s\n' "$host"
 }
@@ -1751,7 +1788,8 @@ _vetcoders_start_create_guest_and_project() {
   layout_file="$(_vetcoders_operator_layout_file 2>/dev/null || true)"
   _vetcoders_start_create_workspace_session "$vc_frame_bin" "$session_name" "$layout_file" guest || rc=$?
   if ((rc == 3)); then
-    state="$(_vetcoders_start_session_inventory_state "$session_name")"
+    _vetcoders_start_read_inventory_state "$session_name"
+    state="$_vetcoders_start_inventory_state"
     [[ "$state" == dead ]] || state="live"
     _vetcoders_start_refuse_existing_workspace "$session_name" "$state" "$root"
     return $?
@@ -1871,7 +1909,8 @@ _vetcoders_start_outside_join_live_host() {
   layout_file="$(_vetcoders_operator_layout_file 2>/dev/null || true)"
   _vetcoders_start_create_workspace_session "$vc_frame_bin" "$session_name" "$layout_file" guest || rc=$?
   if ((rc == 3)); then
-    state="$(_vetcoders_start_session_inventory_state "$session_name")"
+    _vetcoders_start_read_inventory_state "$session_name"
+    state="$_vetcoders_start_inventory_state"
     [[ "$state" == dead ]] || state="live"
     _vetcoders_start_refuse_existing_workspace "$session_name" "$state" "$root"
     return $?
@@ -1907,7 +1946,8 @@ _vetcoders_start_maybe_join_outside_live_host() {
   if _vetcoders_in_vc_frame; then
     return 1
   fi
-  host="$(_vetcoders_start_resolve_inventory_host "$session_name")" || resolve_rc=$?
+  _vetcoders_start_resolve_inventory_host "$session_name" || resolve_rc=$?
+  host="$_vetcoders_start_resolved_host"
   case "$resolve_rc" in
     2)
       _vetcoders_start_refuse_inventory "$session_name"
@@ -1948,7 +1988,8 @@ _vetcoders_start_ensure_host() {
       "$(_vetcoders_shell_quote "$host")" >&2
     return 2
   fi
-  state="$(_vetcoders_start_session_inventory_state "$host")"
+  _vetcoders_start_read_inventory_state "$host"
+  state="$_vetcoders_start_inventory_state"
   case "$state" in
     error)
       _vetcoders_start_refuse_inventory "$host"
@@ -2033,7 +2074,8 @@ _vetcoders_start_enter_via_host() {
     return $?
   fi
   _vetcoders_start_inventory_cache_valid=0
-  host="$(_vetcoders_start_resolve_inventory_host "$session_name")" || resolve_rc=$?
+  _vetcoders_start_resolve_inventory_host "$session_name" || resolve_rc=$?
+  host="$_vetcoders_start_resolved_host"
   if ((resolve_rc != 0)) || [[ -z "$host" ]]; then
     _vetcoders_start_enter_workspace_session "$vc_frame_bin" "$session_name"
     return $?
@@ -2067,7 +2109,8 @@ _vetcoders_start_create_before_terminal() {
   vc_frame_bin="$(_vetcoders_vc_frame_bin)" || return 1
   _vetcoders_start_create_host_then_guest "$vc_frame_bin" "$session_name" "$root" || rc=$?
   if ((rc == 3)); then
-    state="$(_vetcoders_start_session_inventory_state "$session_name")"
+    _vetcoders_start_read_inventory_state "$session_name"
+    state="$_vetcoders_start_inventory_state"
     [[ "$state" == dead ]] || state="live"
     _vetcoders_start_refuse_existing_workspace "$session_name" "$state" "$root"
     return $?
@@ -2098,7 +2141,8 @@ _vetcoders_start_launch_workspace() {
   }
   _vetcoders_load_frontier_sidecars
 
-  state="$(_vetcoders_start_session_inventory_state "$session_name")"
+  _vetcoders_start_read_inventory_state "$session_name"
+  state="$_vetcoders_start_inventory_state"
   case "$state" in
     error)
       _vetcoders_start_refuse_inventory "$session_name"
@@ -2126,7 +2170,8 @@ _vetcoders_start_launch_workspace() {
       if ((join_rc == 1)); then
         _vetcoders_start_create_host_then_guest "$vc_frame_bin" "$session_name" "$root" || rc=$?
         if ((rc == 3)); then
-          state="$(_vetcoders_start_session_inventory_state "$session_name")"
+          _vetcoders_start_read_inventory_state "$session_name"
+          state="$_vetcoders_start_inventory_state"
           [[ "$state" == dead ]] || state="live"
           _vetcoders_start_refuse_existing_workspace "$session_name" "$state" "$root"
           return $?
@@ -2189,7 +2234,8 @@ _vetcoders_start_entry() {
   fi
 
   # 3. The authoritative inventory, before any window, record or provider.
-  state="$(_vetcoders_start_session_inventory_state "$session_name")"
+  _vetcoders_start_read_inventory_state "$session_name"
+  state="$_vetcoders_start_inventory_state"
   case "$state" in
     error)
       _vetcoders_start_refuse_inventory "$session_name"
