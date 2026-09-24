@@ -1,11 +1,12 @@
 //! Control-plane read surface for the `vibecrafted server`.
 //!
 //! Mirrors the `scaffold::api` shape: an `ssr`-gated axum sub-router merged into
-//! the Leptos app in `main.rs`. Every route is a **read** over the live
-//! `~/.vibecrafted/control_plane/` (or `$VIBECRAFTED_HOME`) via
-//! [`control_core::ControlPlane`] — the same typed read-model the future TUI
-//! shares. Nothing here writes; this is remote observability of what the Python
-//! runtime already produced.
+//! the Leptos app in `main.rs`. Every route is a **read** over one
+//! [`control_core::ControlPlane`]. [`api::control_routes`] roots that plane at
+//! [`control_core::vibecrafted_home`] when the process builds the router;
+//! [`api::control_routes_for`] takes an explicit home so tests do not publish
+//! `VIBECRAFTED_HOME` into the process. Nothing here writes; this is remote
+//! observability of what the Python runtime already produced.
 //!
 //! Routes:
 //! * `GET /api/health` — constant-time process readiness; never scans the
@@ -89,7 +90,7 @@ pub mod api {
 
     use axum::Json;
     use axum::Router;
-    use axum::extract::{Path, Query};
+    use axum::extract::{Extension, Path, Query};
     use axum::http::{StatusCode, header};
     use axum::response::IntoResponse;
     use axum::routing::get;
@@ -105,6 +106,8 @@ pub mod api {
     use super::run_observation::{await_run as await_run_observation, observe as observe_run};
     use super::usage::usage;
 
+    pub use super::events_sse::SsePace;
+
     const STATE_CACHE_TTL: Duration = Duration::from_secs(15);
 
     #[derive(Clone)]
@@ -119,7 +122,27 @@ pub mod api {
 
     /// The control-plane read router, keyed to the same `LeptosOptions` state the
     /// app router carries so it merges without a state-type mismatch.
+    ///
+    /// The home and SSE pace are captured here, once. `VC_CONTROL_SSE_POLL_MS`
+    /// and `VC_CONTROL_SSE_KEEPALIVE_MS` are read at this call, not per request.
     pub fn control_routes() -> Router<leptos::config::LeptosOptions> {
+        control_routes_with(control_core::vibecrafted_home(), SsePace::from_env())
+    }
+
+    /// Same router as [`control_routes`], rooted at an explicit Vibecrafted home.
+    ///
+    /// SSE pace stays at the production defaults (500 ms poll, 15 s keepalive)
+    /// so a test cannot change another test's pace through process env.
+    pub fn control_routes_for(home: impl Into<PathBuf>) -> Router<leptos::config::LeptosOptions> {
+        control_routes_with(home, SsePace::production())
+    }
+
+    /// [`control_routes_for`] with an explicit SSE poll and keepalive.
+    pub fn control_routes_with(
+        home: impl Into<PathBuf>,
+        pace: SsePace,
+    ) -> Router<leptos::config::LeptosOptions> {
+        let plane = ControlPlane::new(home);
         Router::<leptos::config::LeptosOptions>::new()
             .route("/api/health", get(health))
             .route("/api/control/state", get(state))
@@ -140,6 +163,8 @@ pub mod api {
             .route("/api/control/observability", get(observability))
             .route("/api/usage/quota", get(quota))
             .route("/api/usage", get(usage))
+            .layer(Extension(pace))
+            .layer(Extension(plane))
     }
 
     /// Cheap liveness/readiness contract for the local process supervisor.
@@ -229,8 +254,7 @@ pub mod api {
     /// Snapshot-backed state view. A complete projection is cached in-process;
     /// stale data is returned immediately while one background refresh reads
     /// the durable snapshots. This keeps filesystem latency out of HTTP.
-    async fn state() -> impl IntoResponse {
-        let plane = ControlPlane::from_env();
+    async fn state(Extension(plane): Extension<ControlPlane>) -> impl IntoResponse {
         let payload = state_payload(&plane, Utc::now());
         if cache_is_stale(&plane)
             && STATE_REFRESHING
@@ -247,8 +271,7 @@ pub mod api {
     }
 
     /// Every derived run, newest-first. Same merge as detail / observe.
-    async fn runs() -> impl IntoResponse {
-        let plane = ControlPlane::from_env();
+    async fn runs(Extension(plane): Extension<ControlPlane>) -> impl IntoResponse {
         let runs = plane.derived_runs(Utc::now());
         Json(json!({
             "control_plane": plane.control_plane_home().display().to_string(),
@@ -261,7 +284,10 @@ pub mod api {
     ///
     /// The filesystem confinement, symlink refusal, byte cap, line cap, and
     /// terminal escape stripping are shared with the initial SSR render.
-    async fn transcript(Path(run_id): Path<String>) -> impl IntoResponse {
+    async fn transcript(
+        Extension(plane): Extension<ControlPlane>,
+        Path(run_id): Path<String>,
+    ) -> impl IntoResponse {
         if !is_safe_run_id(&run_id) {
             return (
                 StatusCode::BAD_REQUEST,
@@ -270,7 +296,7 @@ pub mod api {
                 .into_response();
         }
 
-        let preview = crate::run_detail::load_human_transcript(&ControlPlane::from_env(), &run_id);
+        let preview = crate::run_detail::load_human_transcript(&plane, &run_id);
         (
             [(header::CACHE_CONTROL, "no-store")],
             Json(json!({
@@ -293,10 +319,12 @@ pub mod api {
     /// Host-wide human-transcript search. Derived runs are scanned newest-first;
     /// matching results are paginated. Each log is streamed from the start so
     /// a needle that lives only past a previous byte cap is still found.
-    async fn transcripts(Query(query): Query<TranscriptSearchQuery>) -> impl IntoResponse {
+    async fn transcripts(
+        Extension(plane): Extension<ControlPlane>,
+        Query(query): Query<TranscriptSearchQuery>,
+    ) -> impl IntoResponse {
         const DEFAULT_LIMIT: usize = 50;
         const MAX_LIMIT: usize = 200;
-        let plane = ControlPlane::from_env();
         let needle = query.q.as_deref().unwrap_or("").trim().to_string();
         let needle_l = needle.to_ascii_lowercase();
         let offset = query.offset.unwrap_or(0);
@@ -345,8 +373,7 @@ pub mod api {
     }
 
     /// Lifecycle run summaries, newest-first by `state.json` mtime.
-    async fn lifecycle() -> impl IntoResponse {
-        let plane = ControlPlane::from_env();
+    async fn lifecycle(Extension(plane): Extension<ControlPlane>) -> impl IntoResponse {
         let lifecycle_runs = plane.load_lifecycle_run_summaries();
         Json(json!({
             "control_plane": plane.control_plane_home().display().to_string(),
@@ -360,8 +387,10 @@ pub mod api {
     /// The payload includes projected delivery-proof axes on the run and each
     /// stage (`execution_state` / `proof_state` / `delivery_state`). Projection
     /// is owned by `control_core` and never maps `completed` → delivered/sealed.
-    async fn lifecycle_run(Path(run_id): Path<String>) -> impl IntoResponse {
-        let plane = ControlPlane::from_env();
+    async fn lifecycle_run(
+        Extension(plane): Extension<ControlPlane>,
+        Path(run_id): Path<String>,
+    ) -> impl IntoResponse {
         match plane.resolve_lifecycle_run(&run_id) {
             Some(run) => Json(json!(run)).into_response(),
             None => (
@@ -376,8 +405,10 @@ pub mod api {
     ///
     /// Serialises typed delivery axes and seal when the snapshot/receipt carries
     /// them; omits those keys for legacy runs (no completed→delivery guess).
-    async fn run(Path(run_id): Path<String>) -> impl IntoResponse {
-        let plane = ControlPlane::from_env();
+    async fn run(
+        Extension(plane): Extension<ControlPlane>,
+        Path(run_id): Path<String>,
+    ) -> impl IntoResponse {
         match plane.derived_run(&run_id, Utc::now()) {
             Some(run) => Json(json!(run)).into_response(),
             None => (

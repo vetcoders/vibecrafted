@@ -1,28 +1,41 @@
 #![cfg(feature = "ssr")]
 
 use std::fs;
+use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use leptos::config::{Env, LeptosOptions};
 use serde_json::{Value, json};
 use tower::ServiceExt;
-use vibecrafted_server_web::control::api::control_routes;
+use vibecrafted_server_web::control::api::control_routes_for;
 
 struct TestHome(PathBuf);
 
 impl TestHome {
     fn new() -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "vc-usage-http-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        ));
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = (0..100)
+            .find_map(|attempt| {
+                let nonce = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+                let candidate = std::env::temp_dir().join(format!(
+                    "vc-usage-http-{}-{nanos}-{nonce}-{attempt}",
+                    std::process::id()
+                ));
+                match fs::create_dir(&candidate) {
+                    Ok(()) => Some(candidate),
+                    Err(error) if error.kind() == ErrorKind::AlreadyExists => None,
+                    Err(error) => panic!("create isolated usage home: {error}"),
+                }
+            })
+            .expect("allocate an isolated usage home");
         fs::create_dir_all(path.join("control_plane/runtime_runs/run-usd")).expect("run dir");
         fs::write(
             path.join("control_plane/runtime_runs/run-usd/meta.json"),
@@ -50,20 +63,17 @@ impl TestHome {
             .expect("json"),
         )
         .expect("meta");
-        // Safety: this dedicated integration binary owns the process-wide home.
-        unsafe { std::env::set_var("VIBECRAFTED_HOME", &path) };
         Self(path)
     }
 }
 
 impl Drop for TestHome {
     fn drop(&mut self) {
-        unsafe { std::env::remove_var("VIBECRAFTED_HOME") };
         fs::remove_dir_all(&self.0).ok();
     }
 }
 
-fn test_app() -> axum::Router {
+fn test_app(home: &std::path::Path) -> axum::Router {
     let opts = LeptosOptions::builder()
         .output_name("vibecrafted-server-web-test")
         .site_root("target/site-test")
@@ -72,11 +82,11 @@ fn test_app() -> axum::Router {
         .site_addr("127.0.0.1:0".parse::<SocketAddr>().expect("addr"))
         .reload_port(0)
         .build();
-    control_routes().with_state(opts)
+    control_routes_for(home).with_state(opts)
 }
 
-async fn get(uri: &str) -> (StatusCode, String, Value) {
-    let response = test_app()
+async fn get(home: &std::path::Path, uri: &str) -> (StatusCode, String, Value) {
+    let response = test_app(home)
         .oneshot(
             Request::builder()
                 .uri(uri)
@@ -104,9 +114,9 @@ async fn get(uri: &str) -> (StatusCode, String, Value) {
 
 #[tokio::test]
 async fn usage_api_projects_filters_totals_and_validation() {
-    let _home = TestHome::new();
+    let home = TestHome::new();
 
-    let (status, cache, report) = get("/api/usage?window=24h&agent=codex").await;
+    let (status, cache, report) = get(&home.0, "/api/usage?window=24h&agent=codex").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(cache, "no-store");
     assert_eq!(report["schema"], "vibecrafted.usage-report.v1");
@@ -118,12 +128,12 @@ async fn usage_api_projects_filters_totals_and_validation() {
     assert_eq!(report["dimensions"]["providers"][0]["name"], "openai");
     assert_eq!(report["runs"][0]["run_id"], "run-usd");
 
-    let (status, cache, error) = get("/api/usage?window=yesterday").await;
+    let (status, cache, error) = get(&home.0, "/api/usage?window=yesterday").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(cache, "no-store");
     assert!(error["error"].as_str().expect("error").contains("24h"));
 
-    let (status, _, empty) = get("/api/usage?window=24h&agent=kimi").await;
+    let (status, _, empty) = get(&home.0, "/api/usage?window=24h&agent=kimi").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(empty["totals"]["runs"], 0);
     assert!(empty["runs"].as_array().expect("runs").is_empty());
@@ -131,7 +141,7 @@ async fn usage_api_projects_filters_totals_and_validation() {
 
 #[tokio::test]
 async fn quota_dashboard_reads_monitor_snapshots_and_stays_quiet_when_absent() {
-    let _home = TestHome::new();
+    let home = TestHome::new();
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock")
@@ -155,7 +165,7 @@ async fn quota_dashboard_reads_monitor_snapshots_and_stays_quiet_when_absent() {
         std::env::set_var("VIBECRAFTED_KIMI_QUOTA_JSON", kimi.to_string());
     }
 
-    let (status, cache, board) = get("/api/usage/quota").await;
+    let (status, cache, board) = get(&home.0, "/api/usage/quota").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(cache, "no-store");
     assert_eq!(board["schema"], "vibecrafted.quota-dashboard.v1");
@@ -184,7 +194,7 @@ async fn quota_dashboard_reads_monitor_snapshots_and_stays_quiet_when_absent() {
             "/nonexistent/kimi-quota.json",
         );
     }
-    let (status, _, quiet) = get("/api/usage/quota").await;
+    let (status, _, quiet) = get(&home.0, "/api/usage/quota").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(quiet["agents"][0]["present"], false);
     assert_eq!(quiet["agents"][0]["status"], "absent");

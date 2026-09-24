@@ -487,8 +487,10 @@ fn dashboard_embed_script(json: String) -> impl IntoView {
 }
 
 #[cfg(feature = "ssr")]
-pub(crate) async fn dashboard_api() -> axum::Json<DashboardData> {
-    axum::Json(load_dashboard_data())
+pub(crate) async fn dashboard_api(
+    axum::extract::Extension(plane): axum::extract::Extension<control_core::ControlPlane>,
+) -> axum::Json<DashboardData> {
+    axum::Json(load_dashboard_data_from(&plane, chrono::Utc::now()))
 }
 
 #[cfg(all(feature = "hydrate", not(feature = "ssr")))]
@@ -2101,10 +2103,8 @@ mod tests {
         operator_active_runs, run_cards, runs_dashboard, session_cards, unique_runtime_labels,
         workspaces_dashboard,
     };
-    use crate::control::api::{control_routes, state_payload};
+    use crate::control::api::{control_routes_for, state_payload};
     use crate::theme::provide_theme_context;
-
-    static DASHBOARD_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn temp_home() -> PathBuf {
         static NEXT_ID: AtomicU64 = AtomicU64::new(0);
@@ -2588,7 +2588,6 @@ mod tests {
 
     #[tokio::test]
     async fn state_route_marks_stale_ownerless_lifecycle_abandoned_without_approve() {
-        let _guard = DASHBOARD_ENV_LOCK.lock().await;
         let home = temp_home();
         let runs_dir = home.join("control_plane/runs");
         fs::create_dir_all(&runs_dir).expect("runs dir");
@@ -2628,10 +2627,6 @@ mod tests {
             "run_id=raw-only\nstatus=running\nagent=codex\n",
         )
         .expect("write raw lock");
-        // Safety: process-global env is serialised by DASHBOARD_ENV_LOCK.
-        unsafe {
-            std::env::set_var("VIBECRAFTED_HOME", &home);
-        }
 
         let opts = LeptosOptions::builder()
             .output_name("vibecrafted-server-web-test")
@@ -2641,7 +2636,7 @@ mod tests {
             .site_addr("127.0.0.1:0".parse::<SocketAddr>().expect("addr"))
             .reload_port(0)
             .build();
-        let response = control_routes()
+        let response = control_routes_for(&home)
             .with_state(opts)
             .oneshot(
                 Request::builder()
@@ -2685,9 +2680,6 @@ mod tests {
             "the state route reads Python-owned snapshots, never raw locks"
         );
 
-        unsafe {
-            std::env::remove_var("VIBECRAFTED_HOME");
-        }
         fs::remove_dir_all(home).ok();
     }
 
@@ -2916,17 +2908,12 @@ mod tests {
 
     #[tokio::test]
     async fn dashboard_http_route_returns_ssr_payload_not_default() {
-        let _guard = DASHBOARD_ENV_LOCK.lock().await;
         let home = temp_home();
         let runs_dir = home.join("control_plane/runs");
         fs::create_dir_all(&runs_dir).expect("runs dir");
         write_snapshot(&runs_dir, "finalized", "finalized", "f");
         write_snapshot(&runs_dir, "failed", "failed", "x");
         write_snapshot(&runs_dir, "attention", "needs_attention", "n");
-        // Safety: process-global env is serialised by DASHBOARD_ENV_LOCK.
-        unsafe {
-            std::env::set_var("VIBECRAFTED_HOME", &home);
-        }
 
         let opts = LeptosOptions::builder()
             .output_name("vibecrafted-server-web-test")
@@ -2936,7 +2923,7 @@ mod tests {
             .site_addr("127.0.0.1:0".parse::<SocketAddr>().expect("addr"))
             .reload_port(0)
             .build();
-        let response = control_routes()
+        let response = control_routes_for(&home)
             .with_state(opts)
             .oneshot(
                 Request::builder()
@@ -2960,9 +2947,6 @@ mod tests {
             Some(&payload)
         );
 
-        unsafe {
-            std::env::remove_var("VIBECRAFTED_HOME");
-        }
         fs::remove_dir_all(home).ok();
     }
 

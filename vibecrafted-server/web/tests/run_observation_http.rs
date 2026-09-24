@@ -14,9 +14,9 @@ use axum::http::{Request, StatusCode};
 use leptos::config::{Env, LeptosOptions};
 use serde_json::{Value, json};
 use tower::ServiceExt;
-use vibecrafted_server_web::control::api::control_routes;
+use vibecrafted_server_web::control::api::control_routes_for;
 
-struct TestHome(PathBuf);
+struct TestHome(PathBuf, Option<std::ffi::OsString>);
 
 impl TestHome {
     fn new() -> Self {
@@ -50,23 +50,24 @@ impl TestHome {
             .permissions();
         permissions.set_mode(0o755);
         fs::set_permissions(&writer, permissions).expect("writer executable");
-        // Safety: this integration binary contains one test, so its process-wide
-        // observation configuration has a single owner for the test lifetime.
-        // The production writer name is the constant "vibecrafted"; the fixture
-        // shadows it on PATH with this script.
-        let path_env = format!(
-            "{}:{}",
-            bin.display(),
-            std::env::var("PATH").unwrap_or_default()
-        );
+        // The spawned writer is the constant name "vibecrafted", so this
+        // fixture shadows it on PATH. The await poller also reads its
+        // timeouts from process env. This binary has one test, so those
+        // variables have a single owner; they are restored on drop.
+        // The control-plane home is passed into the router and is not env.
+        let previous_path = std::env::var_os("PATH");
+        let mut path_env = std::ffi::OsString::from(bin.as_os_str());
+        path_env.push(":");
+        if let Some(previous) = &previous_path {
+            path_env.push(previous);
+        }
         unsafe {
-            std::env::set_var("VIBECRAFTED_HOME", &path);
             std::env::set_var("PATH", path_env);
             std::env::set_var("VC_RUN_OBSERVATION_WRITER_TIMEOUT_SECONDS", "5");
             std::env::set_var("VC_RUN_AWAIT_POLL_SECONDS", "0.02");
             std::env::set_var("VC_RUN_AWAIT_EMPTY_GRACE_SECONDS", "0.03");
         }
-        Self(path)
+        Self(path, previous_path)
     }
 
     fn block_writer(&self) {
@@ -119,7 +120,10 @@ impl TestHome {
 impl Drop for TestHome {
     fn drop(&mut self) {
         unsafe {
-            std::env::remove_var("VIBECRAFTED_HOME");
+            match self.1.take() {
+                Some(path) => std::env::set_var("PATH", path),
+                None => std::env::remove_var("PATH"),
+            }
             std::env::remove_var("VC_RUN_OBSERVATION_WRITER_TIMEOUT_SECONDS");
             std::env::remove_var("VC_RUN_AWAIT_POLL_SECONDS");
             std::env::remove_var("VC_RUN_AWAIT_EMPTY_GRACE_SECONDS");
@@ -137,7 +141,7 @@ fn process_exists(pid: u32) -> bool {
         .is_ok_and(|status| status.success())
 }
 
-fn test_app() -> axum::Router {
+fn test_app(home: &std::path::Path) -> axum::Router {
     let opts = LeptosOptions::builder()
         .output_name("vibecrafted-server-web-test")
         .site_root("target/site-test")
@@ -146,11 +150,11 @@ fn test_app() -> axum::Router {
         .site_addr("127.0.0.1:0".parse::<SocketAddr>().expect("addr"))
         .reload_port(0)
         .build();
-    control_routes().with_state(opts)
+    control_routes_for(home).with_state(opts)
 }
 
-async fn get_json(uri: &str) -> (StatusCode, Value) {
-    let response = test_app()
+async fn get_json(home: &std::path::Path, uri: &str) -> (StatusCode, Value) {
+    let response = test_app(home)
         .oneshot(
             Request::builder()
                 .uri(uri)
@@ -174,8 +178,11 @@ async fn http_contract_names_timeouts_unknown_and_terminal_fast_path() {
     let home = TestHome::new();
     home.write_meta("running", None);
 
-    let (status, idle) =
-        get_json("/api/control/runs/run-http/await?idle_timeout=0.08&hard_cap=2").await;
+    let (status, idle) = get_json(
+        &home.0,
+        "/api/control/runs/run-http/await?idle_timeout=0.08&hard_cap=2",
+    )
+    .await;
     assert_eq!(status, StatusCode::REQUEST_TIMEOUT);
     assert_eq!(idle["outcome"], "idle_stall");
     assert_eq!(idle["idle_timeout_seconds"], 0.08);
@@ -183,8 +190,11 @@ async fn http_contract_names_timeouts_unknown_and_terminal_fast_path() {
 
     tokio::time::sleep(Duration::from_millis(100)).await;
     home.block_writer();
-    let (status, hard) =
-        get_json("/api/control/runs/run-http/await?idle_timeout=2&hard_cap=0.08").await;
+    let (status, hard) = get_json(
+        &home.0,
+        "/api/control/runs/run-http/await?idle_timeout=2&hard_cap=0.08",
+    )
+    .await;
     assert_eq!(status, StatusCode::REQUEST_TIMEOUT);
     assert_eq!(hard["outcome"], "hard_cap");
     assert_eq!(hard["idle_timeout_seconds"], 2.0);
@@ -199,15 +209,18 @@ async fn http_contract_names_timeouts_unknown_and_terminal_fast_path() {
     .expect("HTTP hard-cap terminates and reaps writer child");
     home.allow_writer();
 
-    let (status, missing) = get_json("/api/control/runs/run-does-not-exist/observe").await;
+    let (status, missing) = get_json(&home.0, "/api/control/runs/run-does-not-exist/observe").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(missing["found"], false);
     assert_eq!(missing["schema"], "vibecrafted.run-observation.v1");
 
     tokio::time::sleep(Duration::from_millis(100)).await;
     home.write_meta("report_validated", Some(0));
-    let (status, terminal) =
-        get_json("/api/control/runs/run-http/await?idle_timeout=2&hard_cap=2").await;
+    let (status, terminal) = get_json(
+        &home.0,
+        "/api/control/runs/run-http/await?idle_timeout=2&hard_cap=2",
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(terminal["outcome"], "terminal");
     assert_eq!(terminal["completed"], true);

@@ -25,6 +25,11 @@ use vibecrafted_server_web::tools::api::{
     loctree_report_redirect,
 };
 
+struct SavedEnv {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
 struct Fixture {
     home: PathBuf,
     extract: PathBuf,
@@ -36,6 +41,21 @@ struct Fixture {
     loct_mode: PathBuf,
     loct_argv: PathBuf,
     loct_cwd: PathBuf,
+    saved_env: Vec<SavedEnv>,
+}
+
+fn set_process_env(
+    saved: &mut Vec<SavedEnv>,
+    key: &'static str,
+    value: impl AsRef<std::ffi::OsStr>,
+) {
+    saved.push(SavedEnv {
+        key,
+        previous: std::env::var_os(key),
+    });
+    unsafe {
+        std::env::set_var(key, value);
+    }
 }
 
 impl Fixture {
@@ -137,17 +157,16 @@ impl Fixture {
         loct_permissions.set_mode(0o755);
         fs::set_permissions(&loct_script, loct_permissions).expect("loct exec");
 
-        // Safety: this integration binary holds one test, so it is the single
-        // owner of process-wide environment for its lifetime.
-        unsafe {
-            std::env::set_var("VIBECRAFTED_HOME", &home);
-            std::env::set_var("HOME", home.join("never-used-home"));
-            std::env::set_var("AICX_HOME", &aicx_home);
-            std::env::set_var("VC_AICX_BIN", &script);
-            std::env::set_var("VC_AICX_TIMEOUT_SECONDS", "0.3");
-            std::env::set_var("VC_LOCT_BIN", &loct_script);
-            std::env::set_var("VC_LOCT_TIMEOUT_SECONDS", "0.3");
-        }
+        // Handlers and the aicx/loct stubs read these from the process.
+        // This binary has one test, so no lock is required. Drop restores them.
+        let mut saved_env = Vec::new();
+        set_process_env(&mut saved_env, "VIBECRAFTED_HOME", &home);
+        set_process_env(&mut saved_env, "HOME", home.join("never-used-home"));
+        set_process_env(&mut saved_env, "AICX_HOME", &aicx_home);
+        set_process_env(&mut saved_env, "VC_AICX_BIN", &script);
+        set_process_env(&mut saved_env, "VC_AICX_TIMEOUT_SECONDS", "0.3");
+        set_process_env(&mut saved_env, "VC_LOCT_BIN", &loct_script);
+        set_process_env(&mut saved_env, "VC_LOCT_TIMEOUT_SECONDS", "0.3");
         Self {
             home,
             extract,
@@ -159,6 +178,7 @@ impl Fixture {
             loct_mode,
             loct_argv,
             loct_cwd,
+            saved_env,
         }
     }
 
@@ -179,6 +199,14 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
+        for saved in self.saved_env.drain(..).rev() {
+            unsafe {
+                match saved.previous {
+                    Some(value) => std::env::set_var(saved.key, value),
+                    None => std::env::remove_var(saved.key),
+                }
+            }
+        }
         let _ = fs::remove_dir_all(&self.home);
     }
 }
@@ -581,9 +609,12 @@ async fn tool_surfaces_keep_their_boundaries() {
     let payload: Value = serde_json::from_slice(&body).expect("generate json");
     assert_eq!(payload["schema"], "vibecrafted.loctree-report.v1");
     assert_eq!(payload["href"], "/structure/report/");
+    let recorded_cwd = fs::read_to_string(&fixture.loct_cwd).expect("cwd");
+    let canonical_repo = fs::canonicalize(fixture.home.join("repo")).expect("canonical repo");
     assert_eq!(
-        fs::read_to_string(&fixture.loct_cwd).expect("cwd").trim(),
-        fixture.home.join("repo").to_string_lossy()
+        recorded_cwd.trim(),
+        canonical_repo.to_string_lossy().as_ref(),
+        "loct runs in the canonical workspace root"
     );
     let argv = fs::read_to_string(&fixture.loct_argv).expect("argv");
     assert!(argv.contains("report"), "{argv}");

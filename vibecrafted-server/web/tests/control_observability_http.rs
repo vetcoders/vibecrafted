@@ -24,7 +24,7 @@ use axum::http::{Request, StatusCode};
 use leptos::config::{Env, LeptosOptions};
 use serde_json::Value;
 use tower::ServiceExt;
-use vibecrafted_server_web::control::api::control_routes;
+use vibecrafted_server_web::control::api::control_routes_for;
 
 struct TestHome(PathBuf);
 
@@ -39,11 +39,6 @@ impl TestHome {
                 .as_nanos()
         ));
         fs::create_dir_all(path.join("control_plane")).expect("fixture control plane");
-        // Safety: this integration binary contains one test, so the process-wide
-        // home has a single owner for the whole test lifetime.
-        unsafe {
-            std::env::set_var("VIBECRAFTED_HOME", &path);
-        }
         Self(path)
     }
 
@@ -54,14 +49,11 @@ impl TestHome {
 
 impl Drop for TestHome {
     fn drop(&mut self) {
-        unsafe {
-            std::env::remove_var("VIBECRAFTED_HOME");
-        }
         let _ = fs::remove_dir_all(&self.0);
     }
 }
 
-fn test_app() -> axum::Router {
+fn test_app(home: &std::path::Path) -> axum::Router {
     let opts = LeptosOptions::builder()
         .output_name("vibecrafted-server-web-test")
         .site_root("target/site-test")
@@ -70,11 +62,11 @@ fn test_app() -> axum::Router {
         .site_addr("127.0.0.1:0".parse::<SocketAddr>().expect("addr"))
         .reload_port(0)
         .build();
-    control_routes().with_state(opts)
+    control_routes_for(home).with_state(opts)
 }
 
-async fn get_observability() -> (StatusCode, Option<String>, Value) {
-    let response = test_app()
+async fn get_observability(home: &std::path::Path) -> (StatusCode, Option<String>, Value) {
+    let response = test_app(home)
         .oneshot(
             Request::builder()
                 .uri("/api/control/observability")
@@ -105,7 +97,7 @@ async fn observability_index_names_projections_of_one_control_plane() {
 
     // An empty plane still gets a 200: answering is the liveness proof, and
     // "nothing published yet" must stay distinguishable from "server down".
-    let (status, cache_control, body) = get_observability().await;
+    let (status, cache_control, body) = get_observability(&home.0).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(cache_control.as_deref(), Some("no-store"));
     assert_eq!(body["schema"], "vibecrafted.observability-view.v1");
@@ -170,7 +162,7 @@ async fn observability_index_names_projections_of_one_control_plane() {
     )
     .expect("caretaker snapshot");
 
-    let (status, _, body) = get_observability().await;
+    let (status, _, body) = get_observability(&home.0).await;
     assert_eq!(status, StatusCode::OK);
     let projections = body["projections"].as_array().expect("projections");
     for row in projections {

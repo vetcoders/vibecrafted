@@ -25,6 +25,7 @@ use std::path::Path;
 use std::time::SystemTime;
 
 use axum::Json;
+use axum::extract::Extension;
 use axum::http::header;
 use axum::response::IntoResponse;
 use control_core::ControlPlane;
@@ -79,8 +80,7 @@ fn read_snapshot(path: &Path) -> (Option<Value>, String) {
 }
 
 /// Serve the published caretaker envelope with transport-level freshness.
-pub(crate) async fn caretaker() -> impl IntoResponse {
-    let plane = ControlPlane::from_env();
+pub(crate) async fn caretaker(Extension(plane): Extension<ControlPlane>) -> impl IntoResponse {
     let control_plane = plane.control_plane_home();
     let path = control_plane.join(CARETAKER_SNAPSHOT_NAME);
 
