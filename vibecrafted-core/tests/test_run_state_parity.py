@@ -4,6 +4,7 @@ import datetime as dt
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -16,7 +17,56 @@ from vibecrafted_core import control_plane
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CORE_ROOT = REPO_ROOT / "vibecrafted-core"
 SCRIPT_DIR = CORE_ROOT / "vibecrafted_core" / "runtime" / "scripts"
+SERVER_ROOT = REPO_ROOT / "vibecrafted-server"
 SESSION_PLACEHOLDERS = {"", "pending", "none", "null", "unknown"}
+
+
+def _build_control_observe() -> Path:
+    """Build control-observe from this checkout; return the path cargo reports.
+
+    The reading-path gate compares the Python reader with the compute_view
+    binary of the same source tree. Nothing upstream of pytest builds it
+    (`make test-core` is pytest only), a prebuilt binary can be stale, and only
+    cargo knows where CARGO_TARGET_DIR puts it. Same invocation as the release
+    builder, debug profile.
+    """
+    cargo = shutil.which("cargo")
+    assert cargo is not None, (
+        "cargo is required: the reading-path parity gate builds control-observe "
+        "from vibecrafted-server/control-core"
+    )
+    built = subprocess.run(
+        [
+            cargo,
+            "build",
+            "--locked",
+            "--quiet",
+            "-p",
+            "control-core",
+            "--bin",
+            "control-observe",
+            "--message-format=json",
+        ],
+        cwd=SERVER_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert built.returncode == 0, f"cargo build control-observe failed:\n{built.stderr}"
+    for line in built.stdout.splitlines():
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        target = message.get("target") or {}
+        executable = message.get("executable")
+        if (
+            message.get("reason") == "compiler-artifact"
+            and target.get("name") == "control-observe"
+            and executable
+        ):
+            return Path(executable)
+    raise AssertionError("cargo build reported no control-observe executable")
 
 
 def _child_env(home: Path) -> dict[str, str]:
@@ -513,11 +563,7 @@ def test_reading_paths_run_state_parity(
     home = tmp_path / "home"
     monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
 
-    control_observe_bin = (
-        REPO_ROOT / "target" / "debug" / "control-observe"
-        if (REPO_ROOT / "target" / "debug" / "control-observe").is_file()
-        else REPO_ROOT / "target" / "release" / "control-observe"
-    )
+    control_observe_bin = _build_control_observe()
     assert control_observe_bin.is_file(), (
         f"control-observe binary must exist at {control_observe_bin}"
     )
