@@ -2496,6 +2496,111 @@ mod tests {
         fs::remove_dir_all(home).ok();
     }
 
+    #[tokio::test]
+    async fn state_route_marks_stale_ownerless_lifecycle_abandoned_without_approve() {
+        let _guard = DASHBOARD_ENV_LOCK.lock().await;
+        let home = temp_home();
+        let runs_dir = home.join("control_plane/runs");
+        fs::create_dir_all(&runs_dir).expect("runs dir");
+        write_snapshot(&runs_dir, "finalized", "finalized", "f");
+        let run_id = "life-stale-ownerless";
+        let lifecycle_dir = home.join("control_plane/lifecycle_runs").join(run_id);
+        fs::create_dir_all(&lifecycle_dir).expect("lifecycle run dir");
+        let state_path = lifecycle_dir.join("state.json");
+        fs::write(
+            &state_path,
+            serde_json::to_vec_pretty(&json!({
+                "run_id": run_id,
+                "workflow": "vc-ship",
+                "agent": "codex",
+                "root": "/tmp/repo",
+                "status": "launching",
+                "pid": 4_000_000,
+                "owner_pid": 4_000_001,
+                "launcher_pid": 4_000_002,
+                "updated_at": "2026-09-01T00:00:00+00:00",
+                "human_controls": ["approve_transition", "interrupt_workflow"],
+            }))
+            .expect("lifecycle state JSON"),
+        )
+        .expect("write lifecycle state");
+        let stale = std::time::SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(7 * 24 * 60 * 60))
+            .expect("stale clock");
+        fs::File::open(&state_path)
+            .expect("state file")
+            .set_modified(stale)
+            .expect("stale mtime");
+        let locks_dir = home.join("locks");
+        fs::create_dir_all(&locks_dir).expect("locks dir");
+        fs::write(
+            locks_dir.join("raw-only.lock"),
+            "run_id=raw-only\nstatus=running\nagent=codex\n",
+        )
+        .expect("write raw lock");
+        // Safety: process-global env is serialised by DASHBOARD_ENV_LOCK.
+        unsafe {
+            std::env::set_var("VIBECRAFTED_HOME", &home);
+        }
+
+        let opts = LeptosOptions::builder()
+            .output_name("vibecrafted-server-web-test")
+            .site_root("target/site-test")
+            .site_pkg_dir("pkg")
+            .env(Env::PROD)
+            .site_addr("127.0.0.1:0".parse::<SocketAddr>().expect("addr"))
+            .reload_port(0)
+            .build();
+        let response = control_routes()
+            .with_state(opts)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/control/state")
+                    .body(Body::empty())
+                    .expect("state request"),
+            )
+            .await
+            .expect("state response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("state body");
+        let payload: Value = serde_json::from_slice(&body).expect("state JSON");
+        let recent = payload["recent_runs"].as_array().expect("recent runs");
+        let container = recent
+            .iter()
+            .find(|run| run["run_id"] == run_id)
+            .expect("stale lifecycle container stays discoverable");
+        assert_eq!(
+            container["state"], "abandoned",
+            "the snapshot-backed state route must carry the liveness overlay"
+        );
+        assert_eq!(container["health"], "stalled");
+        assert_eq!(container["last_error"], "no live owner");
+        assert!(
+            payload["active_runs"]
+                .as_array()
+                .expect("active runs")
+                .iter()
+                .all(|run| run["run_id"] != run_id),
+            "an ownerless lifecycle container must never advertise launching"
+        );
+        let raw = String::from_utf8(body.to_vec()).expect("state body utf8");
+        assert!(
+            !raw.contains("approve_transition"),
+            "an abandoned run must not keep approve_transition as a human control"
+        );
+        assert!(
+            recent.iter().all(|run| run["run_id"] != "raw-only"),
+            "the state route reads Python-owned snapshots, never raw locks"
+        );
+
+        unsafe {
+            std::env::remove_var("VIBECRAFTED_HOME");
+        }
+        fs::remove_dir_all(home).ok();
+    }
+
     #[test]
     fn navigation_uses_dedicated_views_and_run_cards_open_human_transcripts() {
         let owner = Owner::new();

@@ -885,6 +885,11 @@ impl ControlPlane {
     /// Build a [`StateView`] from the on-disk snapshots plus the event tail.
     /// The cheap path: assumes `runs/<id>.json` are already merged by the
     /// Python writer. Read-only.
+    ///
+    /// Lifecycle containers appended here pass through
+    /// `Self::project_lifecycle_read`, the same liveness overlay
+    /// [`Self::compute_view`] derives: a stale ownerless container reads
+    /// `abandoned` (health `stalled`, `no live owner`), never `launching`.
     #[must_use]
     pub fn read_state_view(&self) -> StateView {
         let mut runs = self.load_snapshots();

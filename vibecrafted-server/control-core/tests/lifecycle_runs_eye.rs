@@ -393,6 +393,56 @@ fn stale_launching_lifecycle_without_pid_is_abandoned_not_approve() {
 }
 
 #[test]
+fn read_state_view_marks_stale_ownerless_lifecycle_abandoned() {
+    let home = temp_home("lifecycle-snapshot-abandoned");
+    let run_id = "life-audi-stale-snapshot";
+    write_lifecycle_run(&home, run_id, None);
+    let state_path = home
+        .join("control_plane")
+        .join("lifecycle_runs")
+        .join(run_id)
+        .join("state.json");
+    let stale = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(7 * 24 * 60 * 60))
+        .expect("stale clock");
+    fs::File::open(&state_path)
+        .expect("state file")
+        .set_modified(stale)
+        .expect("mtime");
+
+    let plane = ControlPlane::new(&home);
+    let view = plane.read_state_view();
+
+    let recent = view
+        .recent_runs
+        .iter()
+        .find(|run| run.run_id == run_id)
+        .expect("snapshot view keeps the stale lifecycle container discoverable");
+    assert_eq!(
+        recent.state, "abandoned",
+        "the snapshot read must carry the same liveness overlay as compute_view"
+    );
+    assert_eq!(recent.health, "stalled");
+    assert_eq!(recent.last_error, "no live owner");
+    assert!(
+        view.active_runs.iter().all(|run| run.run_id != run_id),
+        "an ownerless lifecycle container must never read as launching/active"
+    );
+    assert!(
+        view.stalled_runs
+            .iter()
+            .any(|run| run.run_id == run_id && run.state == "abandoned"),
+        "the abandoned container reads stalled, not active"
+    );
+    assert!(
+        !serde_json::to_string(&view.recent_runs)
+            .expect("recent runs JSON")
+            .contains("approve_transition"),
+        "the state payload must not advertise approve_transition for an ownerless run"
+    );
+}
+
+#[test]
 fn fresh_launching_lifecycle_without_pid_is_not_abandoned() {
     let home = temp_home("lifecycle-fresh-launching");
     let run_id = "life-audi-fresh-launching";
