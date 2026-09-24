@@ -2,6 +2,7 @@
 <!--
   Thin MSI adapter over scripts/install-runtime-pack.ps1.
   Does not invent a second Windows install grammar.
+  Per-user portable install: payload under LocalAppData, not Program Files.
   Limit for this cut: the voc radio is not in this installer cut because tokio's
   Unix socket types are cfg(unix) and this cut does not switch mux-agent to a
   Windows AF_UNIX transport. The Runtime Pack inventory remains the authority.
@@ -18,13 +19,15 @@
     <Package
         InstallerVersion="500"
         Compressed="yes"
-        InstallScope="perMachine"
+        InstallScope="perUser"
         Description="$(var.ProductName) Windows Runtime Pack installer"
         Manufacturer="$(var.Manufacturer)" />
 
+    <!-- Explicit upgrade lineage via stable UpgradeCode; refuse silent downgrade. -->
     <MajorUpgrade
         DowngradeErrorMessage="A newer version of $(var.ProductName) is already installed."
-        Schedule="afterInstallInitialize" />
+        Schedule="afterInstallInitialize"
+        AllowSameVersionUpgrades="no" />
 
     <MediaTemplate EmbedCab="yes" />
 
@@ -33,7 +36,7 @@
     </Feature>
 
     <Directory Id="TARGETDIR" Name="SourceDir">
-      <Directory Id="ProgramFiles64Folder">
+      <Directory Id="LocalAppDataFolder">
         <Directory Id="INSTALLDIR" Name="Vibecrafted">
           <Directory Id="InstallerDir" Name="Installer">
             <Directory Id="InstallerScriptsDir" Name="scripts" />
@@ -62,7 +65,7 @@
         DllEntry="WixQuietExec64"
         Execute="deferred"
         Return="check"
-        Impersonate="no" />
+        Impersonate="yes" />
 
     <SetProperty
         Id="UninstallRuntimePack"
@@ -75,34 +78,49 @@
         BinaryKey="WixCA"
         DllEntry="WixQuietExec64"
         Execute="deferred"
-        Return="ignore"
-        Impersonate="no" />
+        Return="check"
+        Impersonate="yes" />
 
     <InstallExecuteSequence>
+      <!-- Install only on fresh install / upgrade payload; never on pure uninstall. -->
       <Custom Action="InstallRuntimePack" After="InstallFiles">NOT REMOVE</Custom>
+      <!-- Uninstall only when the product is fully removed (explicit REMOVE=ALL). -->
       <Custom Action="UninstallRuntimePack" Before="RemoveFiles">REMOVE~="ALL"</Custom>
     </InstallExecuteSequence>
   </Product>
 
   <Fragment>
-    <ComponentGroup Id="InstallerPayload" Directory="InstallerDir">
-      <Component Id="VersionFile" Guid="C1A2B3D4-E5F6-4789-A012-3456789ABCDE">
-        <File Id="VersionTxt" Source="!(bindpath.staging)\VERSION" KeyPath="yes" />
+    <ComponentGroup Id="InstallerPayload">
+      <Component Id="VersionFile" Guid="C1A2B3D4-E5F6-4789-A012-3456789ABCDE" Directory="InstallerDir">
+        <RegistryValue Root="HKCU" Key="Software\Vetcoders\Vibecrafted\Installer" Name="VersionFile" Type="integer" Value="1" KeyPath="yes" />
+        <File Id="VersionTxt" Source="!(bindpath.staging)\VERSION" />
+        <RemoveFolder Id="RemoveInstallerDir" Directory="InstallerDir" On="uninstall" />
+        <RemoveFolder Id="RemoveInstallDir" Directory="INSTALLDIR" On="uninstall" />
       </Component>
       <Component Id="InstallScript" Guid="D2B3C4E5-F6A7-4890-B123-456789ABCDEF" Directory="InstallerScriptsDir">
-        <File Id="InstallRuntimePackPs1" Source="!(bindpath.staging)\scripts\install-runtime-pack.ps1" KeyPath="yes" />
+        <RegistryValue Root="HKCU" Key="Software\Vetcoders\Vibecrafted\Installer" Name="InstallScript" Type="integer" Value="1" KeyPath="yes" />
+        <File Id="InstallRuntimePackPs1" Source="!(bindpath.staging)\scripts\install-runtime-pack.ps1" />
+        <RemoveFolder Id="RemoveInstallerScriptsDir" Directory="InstallerScriptsDir" On="uninstall" />
       </Component>
       <Component Id="SigningPub" Guid="E3C4D5F6-A7B8-4901-C234-56789ABCDEF0" Directory="InstallerTrustLeaf">
-        <File Id="SigningV1Pub" Source="!(bindpath.staging)\vibecrafted-core\vibecrafted_core\trust\vibecrafted-signing-v1.pub" KeyPath="yes" />
+        <RegistryValue Root="HKCU" Key="Software\Vetcoders\Vibecrafted\Installer" Name="SigningPub" Type="integer" Value="1" KeyPath="yes" />
+        <File Id="SigningV1Pub" Source="!(bindpath.staging)\vibecrafted-core\vibecrafted_core\trust\vibecrafted-signing-v1.pub" />
+        <RemoveFolder Id="RemoveInstallerTrustLeaf" Directory="InstallerTrustLeaf" On="uninstall" />
+        <RemoveFolder Id="RemoveInstallerCoreDir" Directory="InstallerCoreDir" On="uninstall" />
+        <RemoveFolder Id="RemoveInstallerTrustDir" Directory="InstallerTrustDir" On="uninstall" />
       </Component>
       <Component Id="RuntimePackCarrier" Guid="F4D5E6A7-B8C9-4012-D345-6789ABCDEF01" Directory="InstallerPackDir">
-        <File Id="RuntimePackTarGz" Source="!(bindpath.staging)\pack\REPLACE_PACK_BASENAME" Name="REPLACE_PACK_BASENAME" KeyPath="yes" />
+        <RegistryValue Root="HKCU" Key="Software\Vetcoders\Vibecrafted\Installer" Name="RuntimePackCarrier" Type="integer" Value="1" KeyPath="yes" />
+        <File Id="RuntimePackTarGz" Source="!(bindpath.staging)\pack\REPLACE_PACK_BASENAME" Name="REPLACE_PACK_BASENAME" />
+        <RemoveFolder Id="RemoveInstallerPackDir" Directory="InstallerPackDir" On="uninstall" />
       </Component>
       <Component Id="RuntimePackChecksum" Guid="A5E6F7B8-C9D0-4123-E456-789ABCDEF012" Directory="InstallerPackDir">
-        <File Id="RuntimePackSha256" Source="!(bindpath.staging)\pack\REPLACE_PACK_BASENAME.sha256" Name="REPLACE_PACK_BASENAME.sha256" KeyPath="yes" />
+        <RegistryValue Root="HKCU" Key="Software\Vetcoders\Vibecrafted\Installer" Name="RuntimePackChecksum" Type="integer" Value="1" KeyPath="yes" />
+        <File Id="RuntimePackSha256" Source="!(bindpath.staging)\pack\REPLACE_PACK_BASENAME.sha256" Name="REPLACE_PACK_BASENAME.sha256" />
       </Component>
       <Component Id="RuntimePackSignature" Guid="B6F7A8C9-D0E1-4234-F567-89ABCDEF0123" Directory="InstallerPackDir">
-        <File Id="RuntimePackSig" Source="!(bindpath.staging)\pack\REPLACE_PACK_BASENAME.sig" Name="REPLACE_PACK_BASENAME.sig" KeyPath="yes" />
+        <RegistryValue Root="HKCU" Key="Software\Vetcoders\Vibecrafted\Installer" Name="RuntimePackSignature" Type="integer" Value="1" KeyPath="yes" />
+        <File Id="RuntimePackSig" Source="!(bindpath.staging)\pack\REPLACE_PACK_BASENAME.sig" Name="REPLACE_PACK_BASENAME.sig" />
       </Component>
     </ComponentGroup>
   </Fragment>

@@ -14,9 +14,7 @@
       Copyright="(c) 2024-2026 LibraxisAI / Vetcoders"
       AboutUrl="https://vibecrafted.io">
     <BootstrapperApplicationRef Id="WixStandardBootstrapperApplication.HyperlinkLicense">
-      <bal:WixStandardBootstrapperApplication
-          LicenseUrl="https://vibecrafted.io"
-          Theme="hyperlinkLicense" />
+      <bal:WixStandardBootstrapperApplication LicenseUrl="https://vibecrafted.io" />
     </BootstrapperApplicationRef>
     <Chain>
       <MsiPackage

@@ -4,6 +4,11 @@ Thin adapters over `scripts/install-runtime-pack.ps1`. One product identity
 (`Identity.wxi`: name, VERSION-driven ProductVersion, stable UpgradeCode) drives
 both the MSI (`Product.wxs`) and the Burn EXE (`Bundle.wxs`).
 
+Per-user portable MSI: `InstallScope=perUser`, payload under `LocalAppDataFolder`
+(`%LOCALAPPDATA%\Vibecrafted\Installer`). MajorUpgrade uses the stable
+UpgradeCode; same-version upgrades are refused. Uninstall runs only when
+`REMOVE=ALL` and fails closed (`Return=check`).
+
 Limit for this cut: the voc radio is not in this installer cut because tokio's
 Unix socket types are `cfg(unix)` and this cut does not switch mux-agent to a
 Windows AF_UNIX transport.

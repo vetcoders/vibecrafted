@@ -31,14 +31,33 @@ function Die([string]$Message) {
     exit 1
 }
 
+function Write-Utf8NoBom([string]$Path, [string]$Content) {
+    $encoding = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText($Path, $Content, $encoding)
+}
+
+function Assert-NonEmptyFile([string]$Path, [string]$Label) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        Die "$Label missing after WiX link: $Path"
+    }
+    $info = Get-Item -LiteralPath $Path
+    if ($info.Length -lt 1) {
+        Die "$Label is empty after WiX link: $Path"
+    }
+}
+
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $packagingRoot = Join-Path $repoRoot "packaging\windows"
 $cacheRoot = Join-Path $packagingRoot ".cache\wix314"
 $stagingRoot = Join-Path $packagingRoot "staging"
 $wixObjRoot = Join-Path $packagingRoot ".cache\obj"
+$stableUpgradeCode = "B7E4C2A1-9F3D-4B8E-A6C1-2D5E8F0A1B3C"
 if (-not $OutDir) { $OutDir = Join-Path $packagingRoot "out" }
 
-if (-not (Test-Path -LiteralPath $Pack)) {
+if ([string]::IsNullOrWhiteSpace($Pack)) {
+    Die "Runtime Pack tarball is missing: (empty -Pack) (build the win32-x64 pack first; refusing to invent one)"
+}
+if (-not (Test-Path -LiteralPath $Pack -PathType Leaf)) {
     Die "Runtime Pack tarball is missing: $Pack (build the win32-x64 pack first; refusing to invent one)"
 }
 $Pack = (Resolve-Path -LiteralPath $Pack).Path
@@ -47,8 +66,8 @@ if ($Pack -notlike "*.tar.gz") {
 }
 $checksum = "$Pack.sha256"
 $signature = "$Pack.sig"
-if (-not (Test-Path -LiteralPath $checksum)) { Die "missing checksum beside pack: $checksum" }
-if (-not (Test-Path -LiteralPath $signature)) { Die "missing signature beside pack: $signature" }
+if (-not (Test-Path -LiteralPath $checksum -PathType Leaf)) { Die "missing checksum beside pack: $checksum" }
+if (-not (Test-Path -LiteralPath $signature -PathType Leaf)) { Die "missing signature beside pack: $signature" }
 
 $versionRaw = (Get-Content -LiteralPath (Join-Path $repoRoot "VERSION") -Raw).Trim()
 if ($versionRaw -notmatch '^\d+\.\d+\.\d+') {
@@ -59,24 +78,55 @@ while ($versionParts.Count -lt 4) { $versionParts += "0" }
 $productVersion = ($versionParts[0..3] -join ".")
 $packBasename = [System.IO.Path]::GetFileName($Pack)
 
+$identityTemplate = Join-Path $packagingRoot "Identity.wxi"
+$identityText = Get-Content -LiteralPath $identityTemplate -Raw
+if ($identityText -notmatch [regex]::Escape($stableUpgradeCode)) {
+    Die "Identity.wxi UpgradeCode drifted from stable lineage $stableUpgradeCode"
+}
+
 $wixZip = Join-Path (Split-Path $cacheRoot) "wix314-binaries.zip"
 $wixUrl = "https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip"
 if (-not (Test-Path -LiteralPath (Join-Path $cacheRoot "candle.exe"))) {
     New-Item -ItemType Directory -Path (Split-Path $cacheRoot) -Force | Out-Null
-    if (-not (Test-Path -LiteralPath $wixZip)) {
+    if (-not (Test-Path -LiteralPath $wixZip -PathType Leaf)) {
         Write-Host "Fetching WiX 3.14 binaries..."
-        Invoke-WebRequest -Uri $wixUrl -OutFile $wixZip
+        try {
+            Invoke-WebRequest -Uri $wixUrl -OutFile $wixZip
+        }
+        catch {
+            Die "WiX 3.14 download failed from $wixUrl : $($_.Exception.Message)"
+        }
+    }
+    $zipInfo = Get-Item -LiteralPath $wixZip -ErrorAction SilentlyContinue
+    if (-not $zipInfo -or $zipInfo.Length -lt 1) {
+        Die "WiX 3.14 zip missing or empty: $wixZip"
     }
     if (Test-Path -LiteralPath $cacheRoot) {
         Remove-Item -LiteralPath $cacheRoot -Recurse -Force
     }
     New-Item -ItemType Directory -Path $cacheRoot -Force | Out-Null
-    Expand-Archive -LiteralPath $wixZip -DestinationPath $cacheRoot -Force
+    try {
+        Expand-Archive -LiteralPath $wixZip -DestinationPath $cacheRoot -Force
+    }
+    catch {
+        Die "WiX 3.14 zip extract failed: $($_.Exception.Message)"
+    }
 }
 $candle = Join-Path $cacheRoot "candle.exe"
 $light = Join-Path $cacheRoot "light.exe"
-if (-not (Test-Path -LiteralPath $candle)) { Die "WiX candle.exe missing under $cacheRoot" }
-if (-not (Test-Path -LiteralPath $light)) { Die "WiX light.exe missing under $cacheRoot" }
+if (-not (Test-Path -LiteralPath $candle -PathType Leaf)) { Die "WiX candle.exe missing under $cacheRoot" }
+if (-not (Test-Path -LiteralPath $light -PathType Leaf)) { Die "WiX light.exe missing under $cacheRoot" }
+
+$requiredStaging = @(
+    (Join-Path $repoRoot "VERSION"),
+    (Join-Path $repoRoot "scripts\install-runtime-pack.ps1"),
+    (Join-Path $repoRoot "vibecrafted-core\vibecrafted_core\trust\vibecrafted-signing-v1.pub")
+)
+foreach ($required in $requiredStaging) {
+    if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+        Die "required installer payload missing: $required"
+    }
+}
 
 if (Test-Path -LiteralPath $stagingRoot) {
     Remove-Item -LiteralPath $stagingRoot -Recurse -Force
@@ -94,9 +144,8 @@ Copy-Item $signature (Join-Path $stagingRoot "pack\$packBasename.sig")
 
 $productTemplate = Join-Path $packagingRoot "Product.wxs"
 $bundleTemplate = Join-Path $packagingRoot "Bundle.wxs"
-$identityTemplate = Join-Path $packagingRoot "Identity.wxi"
 foreach ($path in @($productTemplate, $bundleTemplate, $identityTemplate)) {
-    if (-not (Test-Path -LiteralPath $path)) { Die "missing WiX source: $path" }
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { Die "missing WiX source: $path" }
 }
 
 $work = Join-Path $packagingRoot ".cache\work"
@@ -105,45 +154,66 @@ New-Item -ItemType Directory -Path $work -Force | Out-Null
 New-Item -ItemType Directory -Path $wixObjRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
 
+# Stamp ProductVersion into Identity only. Do not also redefine it on the candle command line.
 $identityWork = Join-Path $work "Identity.wxi"
 $identityBody = Get-Content -LiteralPath $identityTemplate -Raw
+if ($identityBody -notmatch 'ProductVersion = "0\.0\.0\.0"') {
+    Die "Identity.wxi must keep ProductVersion placeholder 0.0.0.0 for the builder stamp"
+}
 $identityBody = $identityBody -replace 'ProductVersion = "0\.0\.0\.0"', ("ProductVersion = `"{0}`"" -f $productVersion)
-Set-Content -LiteralPath $identityWork -Value $identityBody -Encoding utf8
+Write-Utf8NoBom -Path $identityWork -Content $identityBody
 
 $productWork = Join-Path $work "Product.wxs"
 $productBody = Get-Content -LiteralPath $productTemplate -Raw
+if ($productBody -notmatch "REPLACE_PACK_BASENAME") {
+    Die "Product.wxs missing REPLACE_PACK_BASENAME placeholders"
+}
+if ($productBody -notmatch 'InstallScope="perUser"') {
+    Die "Product.wxs must stay InstallScope=perUser for portable installs"
+}
+if ($productBody -notmatch "LocalAppDataFolder") {
+    Die "Product.wxs must install under LocalAppDataFolder (per-user portable)"
+}
 $productBody = $productBody.Replace("REPLACE_PACK_BASENAME", $packBasename)
-Set-Content -LiteralPath $productWork -Value $productBody -Encoding utf8
+Write-Utf8NoBom -Path $productWork -Content $productBody
 Copy-Item $bundleTemplate (Join-Path $work "Bundle.wxs")
+
+$msiOut = Join-Path $OutDir "Vibecrafted.msi"
+$exeOut = Join-Path $OutDir "Vibecrafted.exe"
+foreach ($stale in @($msiOut, $exeOut)) {
+    if (Test-Path -LiteralPath $stale) {
+        Remove-Item -LiteralPath $stale -Force
+    }
+}
 
 Push-Location $work
 try {
+    # Bindpaths are light-only: use spaced binder path args (name=path).
     & $candle -nologo -ext WixUtilExtension -ext WixBalExtension `
-        "-dProductVersion=$productVersion" `
-        "-bstaging=$stagingRoot" `
-        "-bout=$OutDir" `
         Product.wxs Bundle.wxs -out "$wixObjRoot\"
-    if ($LASTEXITCODE -ne 0) { Die "candle failed" }
+    if ($LASTEXITCODE -ne 0) { Die "candle failed (exit $LASTEXITCODE)" }
 
     & $light -nologo -ext WixUtilExtension -ext WixBalExtension `
-        "-bstaging=$stagingRoot" `
-        "-bout=$OutDir" `
+        -b "staging=$stagingRoot" `
+        -b "out=$OutDir" `
         (Join-Path $wixObjRoot "Product.wixobj") `
-        -out (Join-Path $OutDir "Vibecrafted.msi")
-    if ($LASTEXITCODE -ne 0) { Die "light MSI failed" }
+        -out $msiOut
+    if ($LASTEXITCODE -ne 0) { Die "light MSI failed (exit $LASTEXITCODE)" }
+    Assert-NonEmptyFile -Path $msiOut -Label "MSI"
 
     & $light -nologo -ext WixUtilExtension -ext WixBalExtension `
-        "-bstaging=$stagingRoot" `
-        "-bout=$OutDir" `
+        -b "staging=$stagingRoot" `
+        -b "out=$OutDir" `
         (Join-Path $wixObjRoot "Bundle.wixobj") `
-        -out (Join-Path $OutDir "Vibecrafted.exe")
-    if ($LASTEXITCODE -ne 0) { Die "light Burn EXE failed" }
+        -out $exeOut
+    if ($LASTEXITCODE -ne 0) { Die "light Burn EXE failed (exit $LASTEXITCODE)" }
+    Assert-NonEmptyFile -Path $exeOut -Label "Burn EXE"
 }
 finally {
     Pop-Location
 }
 
-Write-Host "MSI: $(Join-Path $OutDir 'Vibecrafted.msi')"
-Write-Host "EXE: $(Join-Path $OutDir 'Vibecrafted.exe')"
-Write-Host "ProductVersion=$productVersion UpgradeCode=B7E4C2A1-9F3D-4B8E-A6C1-2D5E8F0A1B3C"
+Write-Host "MSI: $msiOut"
+Write-Host "EXE: $exeOut"
+Write-Host "ProductVersion=$productVersion UpgradeCode=$stableUpgradeCode"
 Write-Host "Adapter: scripts/install-runtime-pack.ps1 (no install performed by this build)."
