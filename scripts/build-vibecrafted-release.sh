@@ -56,22 +56,6 @@ prefer_rustup_cargo() {
     fi
   fi
 }
-# Pin the complete build, including donor subprocesses and proc-macro hosts.
-# Notarize-only consumes already-built, already-signed bytes and must not depend
-# on Cargo or WASM targets that cannot change those bytes.
-if [[ "$MODE" != "notarize" ]]; then
-  export RUSTUP_TOOLCHAIN="$VIBECRAFTED_RELEASE_RUSTUP_TOOLCHAIN"
-  prefer_rustup_cargo
-  require rustup
-  rustup which --toolchain "$RUSTUP_TOOLCHAIN" rustc >/dev/null \
-    || die "install the release toolchain: rustup toolchain install $RUSTUP_TOOLCHAIN --profile minimal"
-  for release_target in $VIBECRAFTED_RELEASE_RUST_TARGETS; do
-    rustup target list --installed --toolchain "$RUSTUP_TOOLCHAIN" 2>/dev/null \
-      | grep -Fxq "$release_target" \
-      || die "rustup target $release_target is missing from $RUSTUP_TOOLCHAIN; run: rustup target add --toolchain $RUSTUP_TOOLCHAIN $release_target"
-  done
-fi
-
 # A --remap-path-prefix whose prefix still contains `..` never matches the path
 # the compiler actually sees, because the match is textual. The donor roots used
 # to be plain concatenations ("$REPO_ROOT/../vc-terminal"), so both donor remaps
@@ -212,6 +196,25 @@ RUNTIME_PACK_PLATFORM="darwin-arm64"
 RUNTIME_PACK_ARCHITECTURE="$(uname -m | sed 's/^arm64$/arm64/; s/^aarch64$/arm64/; s/^x86_64$/x64/')"
 [[ "$(uname -s)" == "Darwin" && "$RUNTIME_PACK_ARCHITECTURE" == "arm64" ]] \
   || die "Vibecrafted.app release currently supports only darwin-arm64 (this host: $(uname -s) $(uname -m)); a Linux Runtime Pack comes from \`make runtime-pack\` on Linux"
+# The toolchain pin is a preflight like any other, so it runs after the claim
+# above: a host without it must leave the record pending, not the previous
+# success standing. It follows the platform gate so a Linux host hears that
+# first.
+# Pin the complete build, including donor subprocesses and proc-macro hosts.
+# Notarize-only consumes already-built, already-signed bytes and must not depend
+# on Cargo or WASM targets that cannot change those bytes.
+if [[ "$MODE" != "notarize" ]]; then
+  export RUSTUP_TOOLCHAIN="$VIBECRAFTED_RELEASE_RUSTUP_TOOLCHAIN"
+  prefer_rustup_cargo
+  require rustup
+  rustup which --toolchain "$RUSTUP_TOOLCHAIN" rustc >/dev/null \
+    || die "install the release toolchain: rustup toolchain install $RUSTUP_TOOLCHAIN --profile minimal"
+  for release_target in $VIBECRAFTED_RELEASE_RUST_TARGETS; do
+    rustup target list --installed --toolchain "$RUSTUP_TOOLCHAIN" 2>/dev/null \
+      | grep -Fxq "$release_target" \
+      || die "rustup target $release_target is missing from $RUSTUP_TOOLCHAIN; run: rustup target add --toolchain $RUSTUP_TOOLCHAIN $release_target"
+  done
+fi
 RUNTIME_PACK_NAME="Vibecrafted_RuntimePack_${VERSION}-${RELEASE_DATE}-${ROOT_SHA:0:8}-${RUNTIME_PACK_PLATFORM}.tar.gz"
 RUNTIME_PACK="$DIST_DIR/$RUNTIME_PACK_NAME"
 RUNTIME_PACK_CHECKSUM="$RUNTIME_PACK.sha256"

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -276,6 +277,15 @@ def _isolated_repo_install(
     # without that library keeps the pre-handoff single-archive behaviour, which
     # is exactly what the App-embedded copy relies on.
     shutil.copy2(SELECTION_LIBRARY, scripts / "lib" / SELECTION_LIBRARY.name)
+    # `make install` continues into the foundation step and the LaunchAgent
+    # reconcile. Both have their own tests; here a real foundation run would
+    # reach PyPI, and a real HOME would let the reconcile drive the developer's
+    # installed server service.
+    foundations = scripts / "install-foundations.sh"
+    foundations.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    foundations.chmod(0o755)
+    home = root / "home"
+    home.mkdir(exist_ok=True)
     fake_bin = root / "fake-bin"
     fake_bin.mkdir()
     uname = fake_bin / "uname"
@@ -297,6 +307,7 @@ def _isolated_repo_install(
         check=False,
         env={
             **os.environ,
+            "HOME": str(home),
             "PATH": f"{fake_bin}:{os.environ['PATH']}",
             **(env or {}),
         },
@@ -1427,12 +1438,14 @@ def test_signed_carrier_rejects_selected_architecture_mismatch_before_installer(
 # under test, never an unrelated failure that happens to be non-zero too.
 
 RELEASE_BUILDER = REPO_ROOT / "scripts/build-vibecrafted-release.sh"
+TOOLCHAIN_CONTRACT = REPO_ROOT / "scripts/lib/release-toolchain-contract.sh"
 
 
 def _preflight_builder_repo(tmp_path: Path) -> tuple[Path, str, Path]:
     """A repo where the real release builder runs as far as its preflight.
 
-    Only the builder and the record's owner are copied. That is not a shortcut:
+    Only the builder, its pinned toolchain contract (sourced before the first
+    argument is parsed) and the record's owner are copied. That is not a shortcut:
     every failure exercised here happens before the remaining libraries are even
     sourced, which is precisely the property under test -- the attempt must be
     claimed before them.
@@ -1443,20 +1456,34 @@ def _preflight_builder_repo(tmp_path: Path) -> tuple[Path, str, Path]:
     (repo / "dist").mkdir()
     shutil.copy2(RELEASE_BUILDER, repo / "scripts" / RELEASE_BUILDER.name)
     shutil.copy2(SELECTION_LIBRARY, repo / "scripts/lib" / SELECTION_LIBRARY.name)
+    shutil.copy2(TOOLCHAIN_CONTRACT, repo / "scripts/lib" / TOOLCHAIN_CONTRACT.name)
     shutil.copy2(
         REPO_ROOT / "scripts/lib/release-single-flight.sh",
         repo / "scripts/lib/release-single-flight.sh",
     )
     (repo / "VERSION").write_text(f"{VERSION}\n", encoding="utf-8")
-    # The builder prefers a rustup cargo before it parses a single argument.
-    # HOME is a fresh directory here, so a real rustup would find no toolchain
-    # under it and spend the test installing one over the network -- silently,
-    # because that probe is `|| true`. Stub it: which cargo wins is irrelevant
-    # to a preflight that dies long before anything compiles.
+    # The builder pins its rustup toolchain and targets as a preflight. A real
+    # rustup under this fresh HOME would find no toolchain and try to install
+    # one over the network. The stub reports the pinned toolchain and targets
+    # present, unless a case withholds the toolchain, and resolves no cargo, so
+    # PATH stays as it is: nothing here compiles.
+    targets = re.search(
+        r"VIBECRAFTED_RELEASE_RUST_TARGETS='([^']*)'",
+        TOOLCHAIN_CONTRACT.read_text(encoding="utf-8"),
+    )
+    assert targets is not None
     fake_bin = repo / "fake-bin"
     fake_bin.mkdir()
     rustup = fake_bin / "rustup"
-    rustup.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    rustup.write_text(
+        "#!/bin/sh\n"
+        'case "$1 ${2:-}" in\n'
+        '  "which --toolchain") [ -z "${FAKE_RUSTUP_TOOLCHAIN_MISSING:-}" ] ;;\n'
+        f"  \"target list\") printf '%s\\n' {targets.group(1)} ;;\n"
+        "  *) exit 1 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
     rustup.chmod(0o755)
     # 5d41de86: the builder reads VERSION from the bound ROOT_SHA
     # (`git show "$ROOT_SHA:VERSION"`), not from the working tree, so the
@@ -1509,6 +1536,15 @@ def _record(repo: Path) -> dict[str, str]:
             id="invalid-release-date",
         ),
         pytest.param(
+            {"FAKE_RUSTUP_TOOLCHAIN_MISSING": "1"},
+            "install the release toolchain",
+            id="missing-release-toolchain",
+            marks=pytest.mark.skipif(
+                sys.platform != "darwin",
+                reason="the toolchain pin follows the darwin-arm64 platform gate",
+            ),
+        ),
+        pytest.param(
             {"DEVELOPER_DIR": "/nonexistent/Xcode.app/Contents/Developer"},
             "no usable Xcode developer dir",
             id="unusable-xcode",
@@ -1524,8 +1560,9 @@ def test_a_failed_preflight_invalidates_the_previous_ready_selection(
 ) -> None:
     """A build that dies before it starts still has to void yesterday's answer.
 
-    These three die in the builder's executable top level, above everything that
-    looks like "the build": donor roots, the release date, the Xcode toolchain.
+    These die in the builder's executable top level, above everything that
+    looks like "the build": donor roots, the release date, the pinned rustup
+    toolchain, the Xcode toolchain.
     Claiming the attempt just before `build_product` left all of them outside
     the protection, so a failed retry -- at the very same source SHA, where no
     name derived from HEAD can tell the runs apart -- left the previous success

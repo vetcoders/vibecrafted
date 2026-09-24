@@ -19,6 +19,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RELEASE_BUILDER = REPO_ROOT / "scripts/build-vibecrafted-release.sh"
+# The builder sources its pinned toolchain before it parses an argument, so the
+# contract travels with the builder into every fixture checkout.
+TOOLCHAIN_CONTRACT = REPO_ROOT / "scripts/lib/release-toolchain-contract.sh"
 DRIVER = REPO_ROOT / "tests/tui/fixtures/release_single_flight_driver.sh"
 SELECTION_LIBRARY = REPO_ROOT / "scripts/lib/runtime-pack-selection.sh"
 FLIGHT_LIBRARY = REPO_ROOT / "scripts/lib/release-single-flight.sh"
@@ -44,6 +47,7 @@ def _stage_repo(tmp_path: Path, name: str = "checkout") -> tuple[Path, str]:
     for src in (
         RELEASE_BUILDER,
         SELECTION_LIBRARY,
+        TOOLCHAIN_CONTRACT,
         FLIGHT_LIBRARY,
         DONOR_LIBRARY,
         KEYCHAIN_LIBRARY,
