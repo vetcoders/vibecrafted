@@ -294,6 +294,7 @@ fn mux_health_deep_actions_surface_per_known_service() {
         interaction: Default::default(),
         repo_edit: Default::default(),
         refresh: Default::default(),
+        home_rows_memo: Default::default(),
     };
 
     // No mux summaries → only per-run actions. Existing surface preserved.
@@ -448,6 +449,7 @@ fn mux_status_lines_render_healthy_and_attention_headers() {
         interaction: Default::default(),
         repo_edit: Default::default(),
         refresh: Default::default(),
+        home_rows_memo: Default::default(),
     };
 
     // No mux services → empty render, never a misleading "0 healthy" header.
@@ -592,6 +594,7 @@ fn deep_controls_expose_attach_resume_and_artifacts() {
         interaction: Default::default(),
         repo_edit: Default::default(),
         refresh: Default::default(),
+        home_rows_memo: Default::default(),
     };
 
     let actions = app.deep_actions();
@@ -697,6 +700,7 @@ fn native_artifact_viewer_reads_files_and_clipboard_payload_prefers_resume_comma
         interaction: Default::default(),
         repo_edit: Default::default(),
         refresh: Default::default(),
+        home_rows_memo: Default::default(),
     };
 
     assert_eq!(
@@ -759,6 +763,7 @@ fn empty_state_detail_lines_offer_human_quick_start() {
         interaction: Default::default(),
         repo_edit: Default::default(),
         refresh: Default::default(),
+        home_rows_memo: Default::default(),
     };
 
     let lines = app.detail_lines();
@@ -817,6 +822,7 @@ fn prompt_lines_include_human_kind_copy_and_command_preview() {
         interaction: Default::default(),
         repo_edit: Default::default(),
         refresh: Default::default(),
+        home_rows_memo: Default::default(),
     };
 
     let lines = app.prompt_lines();
@@ -884,6 +890,7 @@ fn tab_navigation_wraps_and_dispatch_focus_tracks_selected_field() {
         interaction: Default::default(),
         repo_edit: Default::default(),
         refresh: Default::default(),
+        home_rows_memo: Default::default(),
     };
 
     app.previous_tab();
@@ -982,6 +989,7 @@ fn tab_labels_surface_monitor_dispatch_and_controls_context() {
         interaction: Default::default(),
         repo_edit: Default::default(),
         refresh: Default::default(),
+        home_rows_memo: Default::default(),
     };
 
     let labels = app.tab_labels();
@@ -1112,6 +1120,7 @@ fn changing_launch_kind_reorients_the_operator_into_dispatch() {
         interaction: Default::default(),
         repo_edit: Default::default(),
         refresh: Default::default(),
+        home_rows_memo: Default::default(),
     };
 
     app.set_launch_kind(LaunchKind::Review);

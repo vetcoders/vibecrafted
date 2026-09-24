@@ -1744,6 +1744,12 @@ fn control_plane_watch_roots(state_root: &Path) -> Vec<PathBuf> {
     ]
 }
 
+/// A watcher event is worth a refresh only when it can move
+/// [`projection_revision`], whose inputs are exactly `events.jsonl`, the JSON
+/// snapshots in `runs/` and `runs/.archived/`, and the entry names directly in
+/// `runtime_runs/`. Anything else in the watched roots cannot change the board:
+/// `caretaker.json`, rewritten every five seconds by the server's caretaker,
+/// used to wake every console into a refresh pass around the clock.
 fn is_projection_path(path: &Path) -> bool {
     let name = path
         .file_name()
@@ -1752,16 +1758,21 @@ fn is_projection_path(path: &Path) -> bool {
     if name.ends_with(".log") || name.ends_with(".tmp") {
         return false;
     }
-    if name == "events.jsonl" {
-        return true;
+    let parent = path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    match parent {
+        "runtime_runs" => true,
+        "runs" | ".archived" => name.ends_with(".json"),
+        _ => {
+            name == "events.jsonl"
+                && !path
+                    .components()
+                    .any(|component| component.as_os_str() == "runtime_runs")
+        }
     }
-    if name.ends_with(".json") {
-        return !path
-            .components()
-            .any(|component| component.as_os_str() == "runtime_runs");
-    }
-    path.components()
-        .any(|component| component.as_os_str() == "runtime_runs")
 }
 
 fn projection_revision(root: &Path) -> u64 {
@@ -1907,6 +1918,7 @@ mod tests {
             interaction: Default::default(),
             repo_edit: Default::default(),
             refresh: Default::default(),
+            home_rows_memo: Default::default(),
         }
     }
 
@@ -2424,6 +2436,30 @@ mod tests {
         assert!(is_projection_path(&PathBuf::from(
             "/tmp/control_plane/runtime_runs/impl-1"
         )));
+    }
+
+    #[test]
+    fn only_revision_inputs_wake_the_control_plane_refresh() {
+        for moved in [
+            "/tmp/control_plane/events.jsonl",
+            "/tmp/control_plane/runs/impl-1.json",
+            "/tmp/control_plane/runs/.archived/impl-0.json",
+            "/tmp/control_plane/runtime_runs/impl-2",
+        ] {
+            assert!(is_projection_path(&PathBuf::from(moved)), "{moved}");
+        }
+        // None of these feed projection_revision, so none can change the board.
+        for inert in [
+            "/tmp/control_plane/caretaker.json",
+            "/tmp/control_plane/.triage-reconciliation-cursor.json",
+            "/tmp/control_plane/.DS_Store",
+            "/tmp/control_plane/runtime_runs/impl-1/meta.json",
+            "/tmp/control_plane/runtime_runs/impl-1/report.md",
+            "/tmp/control_plane/runtime_runs/impl-1/events.jsonl",
+            "/tmp/control_plane/runs/impl-1.json.tmp",
+        ] {
+            assert!(!is_projection_path(&PathBuf::from(inert)), "{inert}");
+        }
     }
 
     #[test]

@@ -2235,6 +2235,7 @@ mod tests {
             interaction: Default::default(),
             repo_edit: Default::default(),
             refresh: Default::default(),
+            home_rows_memo: Default::default(),
         }
     }
 

@@ -1,7 +1,7 @@
 use crate::catalog::CatalogState;
 use crate::config::{AppConfig, path_display, resolve_destination_repo_from_env};
 use crate::home::{
-    HomeCounts, HomeNavigation, HomeRow, HomeSurface, project_home_with_options,
+    HomeCounts, HomeNavigation, HomeRow, HomeScope, HomeSurface, project_home_with_options,
     wrap_transcript_words,
 };
 use crate::launch::{
@@ -20,12 +20,13 @@ use crate::skills_catalog::{self, SkillPayloadKind};
 use crate::state::{
     ControlPlaneState, RenderedRun, RunKind, is_actionable_kind, render_runs, workspace_matches,
 };
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppTab {
@@ -427,6 +428,50 @@ pub struct App {
     pub repo_edit: RepoEdit,
     /// Control-plane reads requested from, and answered by, the refresh worker.
     pub refresh: RefreshState,
+    /// Last Home projection, reused between draws (see [`HomeRowsMemo`]).
+    pub home_rows_memo: HomeRowsMemo,
+}
+
+/// Everything a Home projection depends on besides the clock. The run vectors
+/// are identified by address and length: a new board (or a test replacing
+/// `state.runs`) is a new allocation, so it can never match a stale entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HomeRowsKey {
+    scope: HomeScope,
+    query: String,
+    attention_working_rule: bool,
+    repo: PathBuf,
+    runs: (usize, usize),
+    retained: (usize, usize),
+}
+
+/// The console draws four times a second and asks for Home rows twice per
+/// frame; each ask cloned and classified every run (4.3% of a core on an idle
+/// console with 945 runs). Rows are kept for at most [`HOME_ROWS_TTL`] -- the
+/// age thresholds they classify by move in minutes -- and dropped whenever a
+/// refresh lands, so a new board is never older than the refresh that made it.
+#[derive(Debug, Default)]
+pub struct HomeRowsMemo(RefCell<Option<(HomeRowsKey, Instant, Vec<HomeRow>)>>);
+
+const HOME_ROWS_TTL: Duration = Duration::from_secs(1);
+
+impl HomeRowsMemo {
+    fn rows(&self, key: HomeRowsKey, project: impl FnOnce() -> Vec<HomeRow>) -> Vec<HomeRow> {
+        let mut slot = self.0.borrow_mut();
+        if let Some((cached, at, rows)) = slot.as_ref()
+            && *cached == key
+            && at.elapsed() < HOME_ROWS_TTL
+        {
+            return rows.clone();
+        }
+        let rows = project();
+        *slot = Some((key, Instant::now(), rows.clone()));
+        rows
+    }
+
+    fn clear(&self) {
+        self.0.borrow_mut().take();
+    }
 }
 
 /// Text typed as the next destination repository. The current destination
@@ -492,6 +537,7 @@ impl App {
             interaction: InteractionState::default(),
             repo_edit: RepoEdit::default(),
             refresh: RefreshState::default(),
+            home_rows_memo: HomeRowsMemo::default(),
         };
         apply_run_filters(
             &mut app.runs,
@@ -611,6 +657,7 @@ impl App {
                 }
             }
         }
+        self.home_rows_memo.clear();
         let mut runs = render_runs(&self.state);
         apply_run_filters(
             &mut runs,
@@ -869,13 +916,26 @@ impl App {
             .input
             .strip_prefix('/')
             .unwrap_or_default();
-        project_home_with_options(
-            &self.state,
-            self.observe.home.scope,
-            &self.config.repo,
-            self.config.view.attention_working_rule(),
-            query,
-        )
+        let key = HomeRowsKey {
+            scope: self.observe.home.scope,
+            query: query.to_string(),
+            attention_working_rule: self.config.view.attention_working_rule(),
+            repo: self.config.repo.clone(),
+            runs: (self.state.runs.as_ptr() as usize, self.state.runs.len()),
+            retained: (
+                self.state.retained_runs.as_ptr() as usize,
+                self.state.retained_runs.len(),
+            ),
+        };
+        self.home_rows_memo.rows(key, || {
+            project_home_with_options(
+                &self.state,
+                self.observe.home.scope,
+                &self.config.repo,
+                self.config.view.attention_working_rule(),
+                query,
+            )
+        })
     }
 
     pub fn home_counts(&self) -> HomeCounts {
@@ -2653,4 +2713,48 @@ fn safe_artifact_path(path: &Path, run_root: Option<&str>) -> anyhow::Result<Pat
         );
     }
     Ok(canonical)
+}
+
+#[cfg(test)]
+mod home_rows_memo_tests {
+    use super::{HomeRowsKey, HomeRowsMemo};
+    use crate::home::HomeScope;
+    use std::cell::Cell;
+    use std::path::PathBuf;
+
+    fn key(runs: (usize, usize)) -> HomeRowsKey {
+        HomeRowsKey {
+            scope: HomeScope::default(),
+            query: String::new(),
+            attention_working_rule: false,
+            repo: PathBuf::from("/tmp/repo"),
+            runs,
+            retained: (0, 0),
+        }
+    }
+
+    #[test]
+    fn draws_share_one_projection_until_the_board_changes() {
+        let memo = HomeRowsMemo::default();
+        let projections = Cell::new(0);
+        let project = || {
+            projections.set(projections.get() + 1);
+            Vec::new()
+        };
+
+        memo.rows(key((1, 3)), project);
+        memo.rows(key((1, 3)), project);
+        assert_eq!(projections.get(), 1, "a second draw reuses the projection");
+
+        memo.rows(key((2, 3)), project);
+        assert_eq!(projections.get(), 2, "a replaced run vector is a new board");
+
+        memo.clear();
+        memo.rows(key((2, 3)), project);
+        assert_eq!(
+            projections.get(),
+            3,
+            "a landed refresh drops the projection"
+        );
+    }
 }
