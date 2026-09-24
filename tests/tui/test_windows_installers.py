@@ -75,14 +75,14 @@ def test_windows_installer_upgrade_and_uninstall_are_explicit() -> None:
     product = PRODUCT.read_text(encoding="utf-8")
     assert "<MajorUpgrade" in product
     assert 'AllowSameVersionUpgrades="no"' in product
-    assert 'DowngradeErrorMessage=' in product
+    assert "DowngradeErrorMessage=" in product
     assert 'Return="check"' in product
     assert product.count('Return="check"') >= 2
     assert 'Impersonate="yes"' in product
     assert 'Impersonate="no"' not in product
     assert 'REMOVE~="ALL"' in product
     assert "NOT REMOVE" in product
-    assert "Return=\"ignore\"" not in product
+    assert 'Return="ignore"' not in product
 
 
 def test_windows_installer_delegates_to_install_runtime_pack() -> None:
