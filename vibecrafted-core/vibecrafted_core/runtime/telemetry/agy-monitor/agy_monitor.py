@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import re
 import signal
@@ -23,9 +24,10 @@ import subprocess
 import sys
 import tempfile
 import time
-import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
+
+import tomllib
 
 # ---------------------------------------------------------------- config
 
@@ -97,7 +99,7 @@ def load_config(path: str | None = None) -> dict:
     try:
         with open(path, "rb") as fh:
             return tomllib.load(fh)
-    except Exception:
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
         return tomllib.loads(DEFAULT_CONFIG)
 
 
@@ -106,7 +108,10 @@ def expand(p: str) -> Path:
 
 
 def quota_path(cfg: dict) -> Path:
-    return expand(cfg.get("paths", {}).get("runtime_dir", "~/.gemini/agy-monitor/runtime")) / "quota.json"
+    return (
+        expand(cfg.get("paths", {}).get("runtime_dir", "~/.gemini/agy-monitor/runtime"))
+        / "quota.json"
+    )
 
 
 def write_json_atomic(path: Path, payload: dict) -> None:
@@ -128,7 +133,7 @@ def read_json(path: Path) -> dict | None:
     try:
         if path.exists():
             return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         pass
     return None
 
@@ -176,13 +181,21 @@ def get_model_rates(model_id: str, pricing_cfg: dict) -> dict | None:
 # ---------------------------------------------------------------- session discovery
 
 
-def find_active_conversation(cfg: dict, preferred_id: str | None = None) -> tuple[Path | None, str, str]:
+def find_active_conversation(
+    cfg: dict, preferred_id: str | None = None
+) -> tuple[Path | None, str, str]:
     """Finds the most recently modified transcript across IDE and CLI.
 
     Returns: (transcript_path, conversation_id, surface)
     """
-    ide_brain = expand(cfg.get("paths", {}).get("ide_app_data", "~/.gemini/antigravity-ide")) / "brain"
-    cli_brain = expand(cfg.get("paths", {}).get("cli_app_data", "~/.gemini/antigravity-cli")) / "brain"
+    ide_brain = (
+        expand(cfg.get("paths", {}).get("ide_app_data", "~/.gemini/antigravity-ide"))
+        / "brain"
+    )
+    cli_brain = (
+        expand(cfg.get("paths", {}).get("cli_app_data", "~/.gemini/antigravity-cli"))
+        / "brain"
+    )
 
     candidates = []
     for brain_dir, surface in [(ide_brain, "ide"), (cli_brain, "cli")]:
@@ -215,7 +228,7 @@ def get_git_branch(workspace_dir: str | None) -> str:
             timeout=1,
         )
         return res.decode("utf-8").strip()
-    except Exception:
+    except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
         return ""
 
 
@@ -270,14 +283,21 @@ class AgyTranscriptTracker:
                     cached_agg = cdata.get("agg")
                     if isinstance(cached_agg, dict):
                         agg.update(cached_agg)
-            except Exception:
+            except (OSError, ValueError, AttributeError):
                 offset = 0
 
         try:
             file_size = self.path.stat().st_size
             if file_size < offset:
                 offset = 0
-                for k in ("steps_count", "user_turns", "planner_turns", "tool_calls", "total_chars", "cost_usd"):
+                for k in (
+                    "steps_count",
+                    "user_turns",
+                    "planner_turns",
+                    "tool_calls",
+                    "total_chars",
+                    "cost_usd",
+                ):
                     agg[k] = 0
 
             with open(self.path, "r", encoding="utf-8", errors="ignore") as f:
@@ -295,7 +315,7 @@ class AgyTranscriptTracker:
 
                     try:
                         d = json.loads(line_str)
-                    except Exception:
+                    except json.JSONDecodeError:
                         continue
 
                     agg["steps_count"] += 1
@@ -307,13 +327,16 @@ class AgyTranscriptTracker:
                         try:
                             dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
                             ev_ts = int(dt.timestamp() * 1000)
-                        except Exception:
+                        except (AttributeError, ValueError):
                             ev_ts = int(time.time() * 1000)
 
                     content = d.get("content") or ""
                     # Model extraction
                     if "Model Selection" in content:
-                        m = re.search(r"Model Selection`\s+from\s+.*?\s+to\s+(.*?)\.\s*(?:No need|<)", content)
+                        m = re.search(
+                            r"Model Selection`\s+from\s+.*?\s+to\s+(.*?)\.\s*(?:No need|<)",
+                            content,
+                        )
                         if m:
                             agg["model_raw"] = m.group(1).strip()
                             agg["model_id"] = normalize_model_name(agg["model_raw"])
@@ -330,24 +353,26 @@ class AgyTranscriptTracker:
                         agg["planner_turns"] += 1
                         tc = d.get("tool_calls") or []
                         agg["tool_calls"] += len(tc)
-                        if ev_ts > agg["last_success_ts"]:
-                            agg["last_success_ts"] = ev_ts
+                        agg["last_success_ts"] = max(agg["last_success_ts"], ev_ts)
                     elif st == "ERROR_MESSAGE" or d.get("status") == "ERROR":
                         err_text = str(d.get("error") or content or "")
                         if ev_ts > agg["last_error_ts"]:
                             agg["last_error_ts"] = ev_ts
                             agg["last_error_msg"] = err_text[:200]
-                        if "429" in err_text or "RESOURCE_EXHAUSTED" in err_text or "quota" in err_text.lower():
-                            if ev_ts > agg["last_429_ts"]:
-                                agg["last_429_ts"] = ev_ts
-                                agg["last_429_msg"] = err_text[:200]
-                                m_reset = re.search(r"Resets in ([0-9a-zA-Z]+)\.", err_text)
-                                if m_reset:
-                                    agg["quota_reset_in"] = m_reset.group(1)
+                        if (
+                            "429" in err_text
+                            or "RESOURCE_EXHAUSTED" in err_text
+                            or "quota" in err_text.lower()
+                        ) and ev_ts > agg["last_429_ts"]:
+                            agg["last_429_ts"] = ev_ts
+                            agg["last_429_msg"] = err_text[:200]
+                            m_reset = re.search(r"Resets in ([0-9a-zA-Z]+)\.", err_text)
+                            if m_reset:
+                                agg["quota_reset_in"] = m_reset.group(1)
 
                 offset = f.tell()
 
-        except Exception:
+        except (OSError, ValueError, TypeError, AttributeError):
             pass
 
         # Estimate tokens (~4 characters per token for multi-modal code + json)
@@ -359,16 +384,23 @@ class AgyTranscriptTracker:
             # Assume 80% prompt / context tokens, 20% output tokens
             in_toks = int(agg["estimated_tokens"] * 0.80)
             out_toks = int(agg["estimated_tokens"] * 0.20)
-            agg["cost_usd"] = (in_toks * rates["fresh_in"] + out_toks * rates["output"]) / 1_000_000
+            agg["cost_usd"] = (
+                in_toks * rates["fresh_in"] + out_toks * rates["output"]
+            ) / 1_000_000
             agg["has_cost"] = True
 
         # Fallback workspace lookup from sqlite conversation db if not found in transcript
         if not agg["workspace"]:
-            surface_dir = self.path.parents[4].name # antigravity-ide or antigravity-cli
-            db_path = expand(f"~/.gemini/{surface_dir}/conversations/{self.conversation_id}.db")
+            surface_dir = self.path.parents[
+                4
+            ].name  # antigravity-ide or antigravity-cli
+            db_path = expand(
+                f"~/.gemini/{surface_dir}/conversations/{self.conversation_id}.db"
+            )
             if db_path.exists():
                 try:
                     import sqlite3
+
                     conn = sqlite3.connect(db_path)
                     cur = conn.cursor()
                     cur.execute("SELECT * FROM trajectory_metadata_blob")
@@ -380,15 +412,20 @@ class AgyTranscriptTracker:
                         if m:
                             agg["workspace"] = m.group(1).strip()
                     conn.close()
-                except Exception:
+                except ImportError:
+                    # Listed first: when the lazy import fails, `sqlite3` is unbound.
+                    pass
+                except (sqlite3.Error, AttributeError):
                     pass
 
         if agg["workspace"]:
             agg["git_branch"] = get_git_branch(agg["workspace"])
 
         try:
-            cache_file.write_text(json.dumps({"v": 1, "offset": offset, "agg": agg}), encoding="utf-8")
-        except Exception:
+            cache_file.write_text(
+                json.dumps({"v": 1, "offset": offset, "agg": agg}), encoding="utf-8"
+            )
+        except OSError:
             pass
 
         return agg
@@ -407,7 +444,9 @@ def inspect_agy_processes() -> dict:
         "language_server_port": None,
     }
     try:
-        out = subprocess.check_output(["ps", "aux"], stderr=subprocess.DEVNULL, timeout=2).decode("utf-8")
+        out = subprocess.check_output(
+            ["ps", "aux"], stderr=subprocess.DEVNULL, timeout=2
+        ).decode("utf-8")
         for line in out.splitlines():
             if "language_server_macos_arm" in line:
                 m_port = re.search(r"--extension_server_port\s+([0-9]+)", line)
@@ -422,7 +461,7 @@ def inspect_agy_processes() -> dict:
                 if len(parts) > 1 and parts[1].isdigit():
                     res["cli_pid"] = int(parts[1])
                     res["cli_running"] = True
-    except Exception:
+    except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
         pass
     return res
 
@@ -430,7 +469,7 @@ def inspect_agy_processes() -> dict:
 # ---------------------------------------------------------------- statusline formatting
 
 
-def _fmt_tokens(n: int | float) -> str:
+def _fmt_tokens(n: float) -> str:
     if n >= 1_000_000:
         return f"{n / 1_000_000:.1f}M"
     if n >= 1000:
@@ -438,11 +477,15 @@ def _fmt_tokens(n: int | float) -> str:
     return str(int(n))
 
 
-def render_statusline(cfg: dict | None = None, conversation_id: str | None = None) -> str:
+def render_statusline(
+    cfg: dict | None = None, conversation_id: str | None = None
+) -> str:
     if cfg is None:
         cfg = load_config()
 
-    transcript_path, cid, surface = find_active_conversation(cfg, preferred_id=conversation_id)
+    transcript_path, cid, surface = find_active_conversation(
+        cfg, preferred_id=conversation_id
+    )
     if not transcript_path or not transcript_path.exists():
         return "agy  ·  no active session"
 
@@ -453,8 +496,7 @@ def render_statusline(cfg: dict | None = None, conversation_id: str | None = Non
 
     # 1. Surface & Model
     model_display = agg.get("model_id", "gemini-3.8-flash")
-    if model_display.startswith("gemini-"):
-        model_display = model_display[len("gemini-"):]
+    model_display = model_display.removeprefix("gemini-")
     parts.append(f"agy[{surface}] ({model_display})")
 
     # 2. Workspace & Git
@@ -485,7 +527,7 @@ def render_statusline(cfg: dict | None = None, conversation_id: str | None = Non
     # 6. Quota Health & Error Detector
     last_429 = agg.get("last_429_ts", 0)
     last_succ = agg.get("last_success_ts", 0)
-    is_active_429 = (last_429 > 0 and last_429 > last_succ)
+    is_active_429 = last_429 > 0 and last_429 > last_succ
 
     if is_active_429:
         reset_in = agg.get("quota_reset_in") or ""
@@ -510,7 +552,9 @@ def cmd_line(cfg: dict, conversation_id: str | None = None) -> int:
 
 
 def cmd_once(cfg: dict, conversation_id: str | None = None) -> int:
-    transcript_path, cid, surface = find_active_conversation(cfg, preferred_id=conversation_id)
+    transcript_path, cid, surface = find_active_conversation(
+        cfg, preferred_id=conversation_id
+    )
     if not transcript_path or not transcript_path.exists():
         print(json.dumps({"status": "no_active_session"}, indent=2))
         return 1
@@ -537,7 +581,9 @@ def cmd_once(cfg: dict, conversation_id: str | None = None) -> int:
             "cost_usd": round(agg.get("cost_usd", 0.0), 4),
         },
         "quota": {
-            "status": "RESOURCE_EXHAUSTED" if (agg.get("last_429_ts", 0) > agg.get("last_success_ts", 0)) else "OK",
+            "status": "RESOURCE_EXHAUSTED"
+            if (agg.get("last_429_ts", 0) > agg.get("last_success_ts", 0))
+            else "OK",
             "last_success_ts": agg.get("last_success_ts"),
             "last_error_ts": agg.get("last_error_ts"),
             "last_429_ts": agg.get("last_429_ts"),
@@ -563,7 +609,10 @@ def cmd_daemon(cfg: dict) -> int:
     signal.signal(signal.SIGINT, _sig)
     signal.signal(signal.SIGTERM, _sig)
 
-    print(f"[agy-monitor] daemon watching AGY sessions (every {interval}s) -> {out}", flush=True)
+    print(
+        f"[agy-monitor] daemon watching AGY sessions (every {interval}s) -> {out}",
+        flush=True,
+    )
 
     while not stop:
         try:
@@ -573,7 +622,7 @@ def cmd_daemon(cfg: dict) -> int:
                 agg = tracker.update()
                 procs = inspect_agy_processes()
 
-                is_429 = (agg.get("last_429_ts", 0) > agg.get("last_success_ts", 0))
+                is_429 = agg.get("last_429_ts", 0) > agg.get("last_success_ts", 0)
                 snap = {
                     "ts": int(time.time()),
                     "ts_iso": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -598,9 +647,13 @@ def cmd_daemon(cfg: dict) -> int:
                 }
                 write_json_atomic(out, snap)
                 q_stat = "⚠429 EXHAUSTED" if is_429 else "quota OK"
-                print(f"[agy-monitor] {snap['ts_iso']} session={cid[:8]} turns={agg['user_turns']} {q_stat}", flush=True)
-        except Exception as e:
-            print(f"[agy-monitor] watch error: {e}", file=sys.stderr, flush=True)
+                print(
+                    f"[agy-monitor] {snap['ts_iso']} session={cid[:8]} turns={agg['user_turns']} {q_stat}",
+                    flush=True,
+                )
+        except Exception:
+            # Top-level daemon loop: survive any poll failure, but log it with traceback.
+            logging.getLogger(__name__).exception("[agy-monitor] watch error")
 
         for _ in range(int(interval * 4)):
             if stop:
@@ -611,8 +664,14 @@ def cmd_daemon(cfg: dict) -> int:
 
 
 def cmd_sessions(cfg: dict) -> int:
-    ide_brain = expand(cfg.get("paths", {}).get("ide_app_data", "~/.gemini/antigravity-ide")) / "brain"
-    cli_brain = expand(cfg.get("paths", {}).get("cli_app_data", "~/.gemini/antigravity-cli")) / "brain"
+    ide_brain = (
+        expand(cfg.get("paths", {}).get("ide_app_data", "~/.gemini/antigravity-ide"))
+        / "brain"
+    )
+    cli_brain = (
+        expand(cfg.get("paths", {}).get("cli_app_data", "~/.gemini/antigravity-cli"))
+        / "brain"
+    )
 
     sessions = []
     for brain_dir, surface in [(ide_brain, "ide"), (cli_brain, "cli")]:
@@ -631,12 +690,18 @@ def cmd_sessions(cfg: dict) -> int:
         return 0
 
     sessions.sort(key=lambda x: x[0], reverse=True)
-    print(f"{'MODIFIED':<20} {'SURFACE':<8} {'TURNS':<7} {'EST. TOKENS':<12} {'COST (API-EQ)':<14} {'ID'}")
+    print(
+        f"{'MODIFIED':<20} {'SURFACE':<8} {'TURNS':<7} {'EST. TOKENS':<12} {'COST (API-EQ)':<14} {'ID'}"
+    )
     print("-" * 80)
     for mtime, p, cid, surface in sessions[:15]:
         tracker = AgyTranscriptTracker(p, cid, cfg)
         agg = tracker.update()
-        dt = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+        dt = (
+            datetime.fromtimestamp(mtime, tz=timezone.utc)
+            .astimezone()
+            .strftime("%Y-%m-%d %H:%M")
+        )
         u_turns = agg.get("user_turns", 0)
         toks = _fmt_tokens(agg.get("estimated_tokens", 0))
         cost = f"≈${agg.get('cost_usd', 0.0):.3f}" if agg.get("has_cost") else "-"
@@ -648,10 +713,24 @@ def cmd_sessions(cfg: dict) -> int:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Google Antigravity (AGY) Quota & Session Monitor")
-    ap.add_argument("mode", nargs="?", default="line", choices=["line", "once", "daemon", "sessions"])
-    ap.add_argument("--conversation", "-c", help="Conversation ID to inspect (default: auto-detect active)")
-    ap.add_argument("--config", help="Path to TOML config (default: ~/.gemini/agy-monitor/agy-monitor.toml)")
+    ap = argparse.ArgumentParser(
+        description="Google Antigravity (AGY) Quota & Session Monitor"
+    )
+    ap.add_argument(
+        "mode",
+        nargs="?",
+        default="line",
+        choices=["line", "once", "daemon", "sessions"],
+    )
+    ap.add_argument(
+        "--conversation",
+        "-c",
+        help="Conversation ID to inspect (default: auto-detect active)",
+    )
+    ap.add_argument(
+        "--config",
+        help="Path to TOML config (default: ~/.gemini/agy-monitor/agy-monitor.toml)",
+    )
     args = ap.parse_args()
 
     cfg = load_config(args.config)

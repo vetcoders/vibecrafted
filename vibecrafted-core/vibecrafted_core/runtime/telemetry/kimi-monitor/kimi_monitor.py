@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import argparse
 import glob
+import http.client
 import json
+import logging
 import os
 import signal
 import socket
@@ -22,10 +24,10 @@ import subprocess
 import sys
 import tempfile
 import time
-import tomllib
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+
+import tomllib
 
 # ---------------------------------------------------------------- config
 
@@ -80,7 +82,7 @@ def load_config(path: str | None = None) -> dict:
     try:
         with open(path, "rb") as fh:
             return tomllib.load(fh)
-    except Exception:
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
         return tomllib.loads(DEFAULT_CONFIG)
 
 
@@ -89,7 +91,10 @@ def expand(p: str) -> Path:
 
 
 def quota_path(cfg: dict) -> Path:
-    return expand(cfg.get("paths", {}).get("runtime_dir", "~/.kimi-code/runtime")) / "quota.json"
+    return (
+        expand(cfg.get("paths", {}).get("runtime_dir", "~/.kimi-code/runtime"))
+        / "quota.json"
+    )
 
 
 def write_json_atomic(path: Path, payload: dict) -> None:
@@ -111,7 +116,7 @@ def read_json(path: Path) -> dict | None:
     try:
         if path.exists():
             return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         pass
     return None
 
@@ -121,7 +126,7 @@ def get_model_rates(model_name: str, pricing_cfg: dict) -> dict | None:
         return None
     p = pricing_cfg.get(model_name)
     if not p and model_name.startswith("kimi-"):
-        p = pricing_cfg.get(model_name[len("kimi-"):])
+        p = pricing_cfg.get(model_name[len("kimi-") :])
     if isinstance(p, dict) and p.get("fresh", 0.0) > 0:
         return {
             "fresh_in": float(p.get("fresh", 0.0)),
@@ -148,15 +153,26 @@ class KimiWebProbe:
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.proc: subprocess.Popen | None = None
-        self.base = ""
+        self.port = 0
 
     def start(self) -> None:
         port = _free_port()
-        self.base = f"http://127.0.0.1:{port}"
-        binary = str(expand(self.cfg.get("paths", {}).get("kimi_binary", "~/.kimi-code/bin/kimi")))
+        self.port = port
+        binary = str(
+            expand(
+                self.cfg.get("paths", {}).get("kimi_binary", "~/.kimi-code/bin/kimi")
+            )
+        )
         timeout = float(self.cfg.get("quota", {}).get("startup_timeout_s", 20))
         self.proc = subprocess.Popen(
-            [binary, "web", "--port", str(port), "--no-open", "--dangerous-bypass-auth"],
+            [
+                binary,
+                "web",
+                "--port",
+                str(port),
+                "--no-open",
+                "--dangerous-bypass-auth",
+            ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -167,15 +183,24 @@ class KimiWebProbe:
             try:
                 self._req("/api/v1/healthz")
                 return
-            except Exception:
+            except (OSError, ValueError, http.client.HTTPException):
                 time.sleep(0.20)
         self.stop()
         raise RuntimeError("timeout waiting for kimi web healthz")
 
     def _req(self, path: str, method: str = "GET") -> dict:
-        r = urllib.request.Request(self.base + path, method=method)
-        with urllib.request.urlopen(r, timeout=10) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+        # Loopback only: a fixed host and the port this process just bound, so
+        # neither scheme nor host can ever come from data.
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        try:
+            conn.request(method, path)
+            resp = conn.getresponse()
+            body = resp.read()
+        finally:
+            conn.close()
+        if resp.status >= 400:
+            raise OSError(f"kimi web {method} {path} -> HTTP {resp.status}")
+        return json.loads(body.decode("utf-8"))
 
     def req_data(self, path: str, method: str = "GET") -> dict:
         res = self._req(path, method=method)
@@ -185,7 +210,7 @@ class KimiWebProbe:
         if self.proc:
             try:
                 self._req("/api/v1/shutdown", method="POST")
-            except Exception:
+            except (OSError, ValueError, http.client.HTTPException):
                 pass
             try:
                 self.proc.wait(timeout=3)
@@ -216,7 +241,10 @@ def build_snapshot(auth_data: dict, info_data: dict, usage_data: dict) -> dict:
         snap[key] = {"usedRatio": u.get("usedRatio"), "resetAt": u.get("resetAt")}
 
     if usage_data.get("kind") != "ok":
-        snap["error"] = {"status": usage_data.get("status"), "message": usage_data.get("message")}
+        snap["error"] = {
+            "status": usage_data.get("status"),
+            "message": usage_data.get("message"),
+        }
     return snap
 
 
@@ -248,7 +276,10 @@ def cmd_daemon(cfg: dict) -> int:
     signal.signal(signal.SIGINT, _sig)
     signal.signal(signal.SIGTERM, _sig)
 
-    print(f"[kimi-monitor] daemon started (ephemeral probe every {interval}s) -> {out}", flush=True)
+    print(
+        f"[kimi-monitor] daemon started (ephemeral probe every {interval}s) -> {out}",
+        flush=True,
+    )
 
     last_known_good = read_json(out) or {}
     last_userinfo_ts = 0
@@ -264,11 +295,22 @@ def cmd_daemon(cfg: dict) -> int:
             if (now - last_userinfo_ts > 3600) or not cached_userinfo:
                 try:
                     auth_data = probe.req_data("/api/v1/auth")
-                    cached_auth = (auth_data.get("managed_provider") or {}).get("status", "unknown")
+                    cached_auth = (auth_data.get("managed_provider") or {}).get(
+                        "status", "unknown"
+                    )
                     info_data = probe.req_data("/api/v1/oauth/userinfo")
-                    cached_userinfo = (info_data.get("userInfo") or {}) if isinstance(info_data, dict) else {}
+                    cached_userinfo = (
+                        (info_data.get("userInfo") or {})
+                        if isinstance(info_data, dict)
+                        else {}
+                    )
                     last_userinfo_ts = now
-                except Exception:
+                except (
+                    OSError,
+                    ValueError,
+                    http.client.HTTPException,
+                    AttributeError,
+                ):
                     pass
 
             usage_data = probe.req_data("/api/v1/oauth/usage")
@@ -289,13 +331,21 @@ def cmd_daemon(cfg: dict) -> int:
                 }
                 for key in ("limit5h", "monthTotal", "monthCode"):
                     u = usages.get(key) or {}
-                    snap[key] = {"usedRatio": u.get("usedRatio"), "resetAt": u.get("resetAt")}
+                    snap[key] = {
+                        "usedRatio": u.get("usedRatio"),
+                        "resetAt": u.get("resetAt"),
+                    }
                 last_known_good = snap
                 write_json_atomic(out, snap)
                 r5 = (snap.get("limit5h") or {}).get("usedRatio")
-                print(f"[kimi-monitor] {snap['ts_iso']} 5h={r5} auth={snap['auth']}", flush=True)
+                print(
+                    f"[kimi-monitor] {snap['ts_iso']} 5h={r5} auth={snap['auth']}",
+                    flush=True,
+                )
             else:
-                err_msg = usage_data.get("message") or usage_data.get("kind") or "unknown"
+                err_msg = (
+                    usage_data.get("message") or usage_data.get("kind") or "unknown"
+                )
                 raise RuntimeError(f"usage API error: {err_msg}")
 
         except Exception as e:
@@ -307,14 +357,18 @@ def cmd_daemon(cfg: dict) -> int:
                 snap["last_poll_error_ts"] = int(time.time())
                 write_json_atomic(out, snap)
             else:
-                write_json_atomic(out, {
-                    "ts": int(time.time()),
-                    "kind": "error",
-                    "error": str(e),
-                    "last_poll_error": str(e),
-                    "last_poll_error_ts": int(time.time()),
-                })
-            print(f"[kimi-monitor] poll error: {e}", file=sys.stderr, flush=True)
+                write_json_atomic(
+                    out,
+                    {
+                        "ts": int(time.time()),
+                        "kind": "error",
+                        "error": str(e),
+                        "last_poll_error": str(e),
+                        "last_poll_error_ts": int(time.time()),
+                    },
+                )
+            # Top-level daemon loop: survive any poll failure, but log it with traceback.
+            logging.getLogger(__name__).exception("[kimi-monitor] poll error")
 
         for _ in range(int(interval * 4)):
             if stop:
@@ -341,7 +395,7 @@ def _find_latest_session_id(sessions_dir: Path) -> str | None:
     candidates.sort(reverse=True)
     latest_name = candidates[0][1]
     if latest_name.startswith("session_"):
-        return latest_name[len("session_"):]
+        return latest_name[len("session_") :]
     return latest_name
 
 
@@ -351,11 +405,13 @@ class SessionWireTracker:
     def __init__(self, cfg: dict, session_id: str | None = None):
         self.cfg = cfg
         self.pricing_cfg = cfg.get("pricing", {})
-        self.sessions_dir = expand(cfg.get("paths", {}).get("sessions_dir", "~/.kimi-code/sessions"))
+        self.sessions_dir = expand(
+            cfg.get("paths", {}).get("sessions_dir", "~/.kimi-code/sessions")
+        )
         if not session_id:
             session_id = _find_latest_session_id(self.sessions_dir) or ""
         self.session_id = session_id
-        self.session_dir_id = session_id[len("session_"):] if session_id.startswith("session_") else session_id
+        self.session_dir_id = session_id.removeprefix("session_")
 
     def update(self) -> dict:
         agg = {
@@ -388,10 +444,17 @@ class SessionWireTracker:
                 cdata = json.loads(cache_file.read_text(encoding="utf-8"))
                 if cdata.get("v") == 3:
                     files_cache = cdata.get("files", {})
-            except Exception:
+            except (OSError, ValueError, AttributeError):
                 files_cache = {}
 
-        pattern = str(self.sessions_dir / "*" / f"session_{self.session_dir_id}" / "agents" / "*" / "wire.jsonl")
+        pattern = str(
+            self.sessions_dir
+            / "*"
+            / f"session_{self.session_dir_id}"
+            / "agents"
+            / "*"
+            / "wire.jsonl"
+        )
         wires = glob.glob(pattern)
 
         for wire_path in wires:
@@ -426,16 +489,22 @@ class SessionWireTracker:
                         if not line or not line.endswith("\n"):
                             f.seek(pos)
                             break
-                        if '"usage.record"' not in line and '"turn.ended"' not in line and '"token_counting' not in line:
+                        if (
+                            '"usage.record"' not in line
+                            and '"turn.ended"' not in line
+                            and '"token_counting' not in line
+                        ):
                             continue
                         try:
                             d = json.loads(line)
-                        except Exception:
+                        except json.JSONDecodeError:
                             continue
                         ev_type = d.get("type")
                         if ev_type == "usage.record" and d.get("usageScope") == "turn":
                             u = d.get("usage") or {}
-                            rec_model = str(d.get("model", "")).replace("kimi-code/", "")
+                            rec_model = str(d.get("model", "")).replace(
+                                "kimi-code/", ""
+                            )
                             if rec_model:
                                 f_model = rec_model
                             rates = get_model_rates(rec_model, self.pricing_cfg)
@@ -446,7 +515,11 @@ class SessionWireTracker:
                             f_cache += ci
                             f_out += ot
                             if rates:
-                                f_cost += (fi * rates["fresh_in"] + ci * rates["cache_in"] + ot * rates["output"]) / 1_000_000
+                                f_cost += (
+                                    fi * rates["fresh_in"]
+                                    + ci * rates["cache_in"]
+                                    + ot * rates["output"]
+                                ) / 1_000_000
                                 agg["has_cost"] = True
                         elif ev_type == "token_counting.turn_recorded":
                             f_ctx_tokens = max(f_ctx_tokens, d.get("tokens") or 0)
@@ -458,17 +531,22 @@ class SessionWireTracker:
                             err = d.get("error") or {}
                             msg = str(err.get("message") or "")
                             if reason == "completed":
-                                if ev_time > f_last_succ:
-                                    f_last_succ = ev_time
+                                f_last_succ = max(f_last_succ, ev_time)
                             elif reason == "failed":
                                 if ev_time > f_last_err:
                                     f_last_err = ev_time
                                     f_last_err_status = 403 if "403" in msg else 500
                                     f_last_err_msg = msg[:200]
-                                if "403" in msg and any(k in msg.lower() for k in ("5-hour", "5h", "limit", "quota")):
-                                    if ev_time > f_last_403:
-                                        f_last_403 = ev_time
-                                        f_last_403_msg = msg[:200]
+                                if (
+                                    "403" in msg
+                                    and any(
+                                        k in msg.lower()
+                                        for k in ("5-hour", "5h", "limit", "quota")
+                                    )
+                                    and ev_time > f_last_403
+                                ):
+                                    f_last_403 = ev_time
+                                    f_last_403_msg = msg[:200]
 
                     files_cache[wire_path] = {
                         "offset": f.tell(),
@@ -486,7 +564,7 @@ class SessionWireTracker:
                         "last_403": f_last_403,
                         "last_403_msg": f_last_403_msg,
                     }
-            except Exception:
+            except (OSError, ValueError, TypeError, AttributeError):
                 pass
 
             agg["fresh_in"] += f_fresh
@@ -499,8 +577,7 @@ class SessionWireTracker:
             agg["ctx_max"] = max(agg["ctx_max"], f_ctx_max)
 
             # Chronological global tracking across all wires
-            if f_last_succ > agg["last_success_ts"]:
-                agg["last_success_ts"] = f_last_succ
+            agg["last_success_ts"] = max(agg["last_success_ts"], f_last_succ)
             if f_last_err > agg["last_error_ts"]:
                 agg["last_error_ts"] = f_last_err
                 agg["last_error_status"] = f_last_err_status
@@ -510,8 +587,10 @@ class SessionWireTracker:
                 agg["last_403_msg"] = f_last_403_msg
 
         try:
-            cache_file.write_text(json.dumps({"v": 3, "files": files_cache}), encoding="utf-8")
-        except Exception:
+            cache_file.write_text(
+                json.dumps({"v": 3, "files": files_cache}), encoding="utf-8"
+            )
+        except OSError:
             pass
 
         return agg
@@ -520,7 +599,7 @@ class SessionWireTracker:
 # ---------------------------------------------------------------- statusline formatting
 
 
-def _fmt_tokens(n: int | float) -> str:
+def _fmt_tokens(n: float) -> str:
     if n >= 1_000_000:
         return f"{n / 1_000_000:.1f}M"
     if n >= 1000:
@@ -536,7 +615,7 @@ def _reset_in(reset_at: str | None) -> str:
         delta = dt - datetime.now(timezone.utc)
         secs = max(0, int(delta.total_seconds()))
         return f"{secs // 3600}:{(secs % 3600) // 60:02d}"
-    except Exception:
+    except (AttributeError, TypeError, ValueError):
         return "?"
 
 
@@ -600,7 +679,9 @@ def render_statusline(payload: dict | None = None, cfg: dict | None = None) -> s
 
     # 3. Context Window
     if max_ctx > 0:
-        parts.append(f"ctx: {_fmt_tokens(ctx_tokens)}/{_fmt_tokens(max_ctx)} ({ctx_pct:.1f}%)")
+        parts.append(
+            f"ctx: {_fmt_tokens(ctx_tokens)}/{_fmt_tokens(max_ctx)} ({ctx_pct:.1f}%)"
+        )
 
     # 4. Cumulative tokens & Cache efficiency
     if total_tokens > 0:
@@ -642,7 +723,7 @@ def render_statusline(payload: dict | None = None, cfg: dict | None = None) -> s
         # and has NOT been superseded by a subsequent successful inference turn!
         last_403 = agg.get("last_403_ts", 0)
         last_succ = agg.get("last_success_ts", 0)
-        is_active_403 = (last_403 > 0 and last_403 > last_succ)
+        is_active_403 = last_403 > 0 and last_403 > last_succ
 
         if is_active_403:
             if r5 < desync_ceiling:
@@ -674,7 +755,7 @@ def cmd_tui(cfg: dict | None = None) -> int:
     try:
         raw = sys.stdin.read().strip()
         payload = json.loads(raw) if raw else None
-    except Exception:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         payload = None
     line = render_statusline(payload=payload, cfg=cfg)
     print(line)
@@ -686,8 +767,12 @@ def cmd_tui(cfg: dict | None = None) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Kimi Code Quota Monitor & Statusline")
-    ap.add_argument("mode", nargs="?", default="line", choices=["daemon", "once", "line", "tui"])
-    ap.add_argument("--config", help="path to TOML config (default: ~/.kimi-code/kimi-monitor.toml)")
+    ap.add_argument(
+        "mode", nargs="?", default="line", choices=["daemon", "once", "line", "tui"]
+    )
+    ap.add_argument(
+        "--config", help="path to TOML config (default: ~/.kimi-code/kimi-monitor.toml)"
+    )
     args = ap.parse_args()
     cfg = load_config(args.config)
     if args.mode == "daemon":
