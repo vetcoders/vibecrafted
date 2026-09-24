@@ -495,35 +495,41 @@ Words:
 def render_message_help() -> str:
     """Render the fixed help text for ``vibecrafted message``.
 
-    Codex ``queue --thread`` is the only supported provider steering
-    primitive. Do not advertise Claude or other-provider steering.
+    Codex has a native queue. Other providers use the run inbox and must
+    explicitly read and acknowledge messages; queuing is not execution.
     """
     return """
 ⚒  message
 ─────────────────────────────────────────
-  Persist and inspect run-addressed Codex queue receipts.
+  Send to a tracked run, or read its durable provider inbox.
 
 Usage:
-  vibecrafted message --run-id <id> --file <path> \\
+  vibecrafted message (--run-id <id> | --session <id>) --file <path> \\
     [--idempotency-key <key>] [--retry] [--json]
+  vibecrafted message --run-id <id> --receive
+  vibecrafted message --run-id <id> --ack <message-id>
   vibecrafted message --inspect <message-id>
 
 Options:
-  --run-id <id>            Tracked run that already has a Codex thread
-  --file <path>            UTF-8 message body (kept out of argv)
+  --run-id <id>            Exact tracked run
+  --session <id>           Exact runtime or provider session (must be unique)
+  --file <path>            UTF-8 message body file
+  --receive                Read pending inbox messages without consuming them
+  --ack <message-id>       Recipient claims receipt of one inbox message
   --idempotency-key <key>  Replay key; same body+run is a receipt replay
   --retry                  Resubmit only unresolved or failed receipts
   --inspect <message-id>   Read one durable receipt (JSON)
   --json                   Machine-readable send receipt
 
 Contract:
-  Codex `queue --thread` is the only supported steering primitive.
-  This command does not start a worker, does not exec-resume, and does
-  not invent Claude (or any other provider) steering. A missing provider
-  session is a bounded refusal. provider_accepted is never an agent ACK.
+  Codex `queue --thread` is used once its thread is known; earlier messages
+  and Claude/other-provider messages use the durable inbox.
+  Inbox messages require explicit polling; inbox_pending is not delivery into
+  model context. This command never starts or resumes another worker.
+  provider_accepted is not an agent ACK; --ack is a recipient claim only.
 
 Example:
-  vibecrafted message --run-id work-... --file ./note.txt --json
+  vibecrafted message --session 01a0... --file ./note.txt --json
 """.lstrip("\n")
 
 

@@ -1991,6 +1991,11 @@ Contract:
 - Preserve an honest blocked/partial/failed status.
 - Let stdout/stderr form the transcript captured at VIBECRAFTED_TRANSCRIPT_PATH ({transcript_hint}).
 - Do not create, overwrite, or summarize run metadata yourself. The runtime owns VIBECRAFTED_META_PATH.
+- Your message inbox is attached to this run. At useful checkpoints and before
+  finishing, run `vibecrafted message --run-id "$VIBECRAFTED_RUN_ID" --receive`.
+  Handle each pending message in this run and then acknowledge it with
+  `vibecrafted message --run-id "$VIBECRAFTED_RUN_ID" --ack MESSAGE_ID`.
+  An inbox receipt does not itself mean you saw or acted on the message.
 {WORKER_SIGNAL_DISCIPLINE.rstrip()}
 
 Step 0 — orient before you touch (the vc-init pass).

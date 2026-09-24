@@ -466,6 +466,10 @@ def test_clean_ledger_stays_silent(
     )
     assert "Resume payload" not in result["prompt"]
     assert "settled `n`" not in result["prompt"]
+    assert (
+        'vibecrafted message --run-id "$VIBECRAFTED_RUN_ID" --receive'
+        in result["prompt"]
+    )
     assert init_resume_block(result["root"]) == ""
 
 
@@ -537,6 +541,7 @@ def test_headless_workflow_keeps_runtime_prompt_assembler(
     prompt = workflow._runtime_prompt(spec)
     assert prompt.startswith("You are running under Vibecrafted core runtime.")
     assert "Step 0 — orient before you touch (the vc-init pass)." in prompt
+    assert 'vibecrafted message --run-id "$VIBECRAFTED_RUN_ID" --receive' in prompt
     assert "Operator prompt:\nship the slice" in prompt
     assert "You are in an interactive Vibecrafted session." not in prompt
     assert inspect_native_resume_stays_on_launch_workflow()

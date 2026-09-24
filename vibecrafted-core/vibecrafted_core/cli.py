@@ -610,7 +610,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="persist and inspect run-addressed provider steering receipts",
     )
     message.add_argument("--run-id", default="")
+    message.add_argument(
+        "--session", default="", help="exact recorded runtime or provider session ID"
+    )
     message.add_argument("--file", default="", help="UTF-8 message body file")
+    message.add_argument(
+        "--receive", action="store_true", help="read pending inbox messages"
+    )
+    message.add_argument(
+        "--ack", metavar="MESSAGE_ID", default="", help="acknowledge one inbox message"
+    )
     message.add_argument("--idempotency-key", default="")
     message.add_argument(
         "--retry",
@@ -2522,7 +2531,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(line)
         return 0
     if args.command == "message":
-        from .message_control import MessageControlError, inspect_message, send_message
+        from .message_control import (
+            MessageControlError,
+            acknowledge_message,
+            inspect_message,
+            pending_messages,
+            send_message,
+        )
 
         if args.inspect:
             try:
@@ -2535,7 +2550,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 1
             print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
             return 0
-        if args.run_id and args.file:
+        if args.receive or args.ack:
+            try:
+                if args.receive and args.ack:
+                    raise MessageControlError("choose_receive_or_ack")
+                if args.file or args.inspect:
+                    raise MessageControlError(
+                        "inbox_action_conflicts_with_send_or_inspect"
+                    )
+                result = (
+                    pending_messages(run_id=args.run_id, session=args.session)
+                    if args.receive
+                    else acknowledge_message(
+                        args.ack, run_id=args.run_id, session=args.session
+                    )
+                )
+            except MessageControlError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
+            print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
+        if (args.run_id or args.session) and args.file:
             try:
                 raw = Path(args.file).expanduser().read_bytes()
             except OSError as exc:
@@ -2552,6 +2587,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             try:
                 result = send_message(
                     run_id=args.run_id,
+                    session=args.session,
                     text=text,
                     idempotency_key=args.idempotency_key,
                     retry=bool(args.retry),
@@ -2569,9 +2605,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"delivery_state: {result['delivery_state']}\n"
                     f"agent_ack_state: {result.get('agent_ack_state', 'unobserved')}"
                 )
-            return 0 if result["delivery_state"] == "provider_accepted" else 1
+            return (
+                0
+                if result["delivery_state"]
+                in {"provider_accepted", "inbox_pending", "agent_acknowledged"}
+                else 1
+            )
         print(
-            "usage: vibecrafted message --run-id ID --file FILE | --inspect MESSAGE_ID",
+            "usage: vibecrafted message (--run-id ID | --session ID) --file FILE | --receive | --ack MESSAGE_ID | --inspect MESSAGE_ID",
             file=sys.stderr,
         )
         return 2

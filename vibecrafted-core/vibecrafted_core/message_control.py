@@ -29,9 +29,11 @@ from .spawn import _resolve_agent_command
 MESSAGE_SCHEMA = "vibecrafted.provider-message.v1"
 MAX_MESSAGE_BYTES = 64 * 1024
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_PLACEHOLDER_IDS = frozenset({"pending", "none", "null", "unknown"})
 _UNRESOLVED_OR_FAILED = frozenset(
     {"recorded", "retryable_failure", "permanent_failure"}
 )
+_INBOX_PROVIDERS = frozenset({"claude", "agy", "grok", "junie", "kimi", "cursor"})
 
 
 class MessageControlError(ValueError):
@@ -74,8 +76,8 @@ def _idempotency_path(key: str) -> Path:
     return directory / f"{_digest(key)}.json"
 
 
-def _native_identity(run_id: str) -> tuple[str, str]:
-    """Resolve only the runtime-recorded provider and native provider session."""
+def _run_identity(run_id: str) -> tuple[str, str, str]:
+    """Read the provider, native session and runtime session from one run."""
 
     try:
         resolved = resolve_run(run_id)
@@ -91,11 +93,107 @@ def _native_identity(run_id: str) -> tuple[str, str]:
     ).strip()
     if not agent:
         raise MessageControlError("provider_missing")
-    if not session or session.lower() in {"pending", "none", "null", "unknown"}:
-        raise MessageControlError("provider_session_missing")
+    if session.lower() in _PLACEHOLDER_IDS:
+        session = ""
     if runtime_session and session == runtime_session:
         raise MessageControlError("provider_session_is_runtime_session")
-    return agent, session
+    return agent, session, runtime_session
+
+
+def resolve_message_run(*, run_id: str = "", session: str = "") -> str:
+    """Bind a public selector to exactly one recorded run.
+
+    A provider session can span several resumed runs. Never guess which
+    executor owns it; callers can use the exact run id in that case.
+    """
+    target = str(run_id or "").strip()
+    token = str(session or "").strip()
+    if not target and not token:
+        raise MessageControlError("run_id_or_session_required")
+    if target and not _SAFE_ID.fullmatch(target):
+        raise MessageControlError("invalid_run_id")
+    if token and not _SAFE_ID.fullmatch(token):
+        raise MessageControlError("invalid_session_id")
+    if token.lower() in _PLACEHOLDER_IDS:
+        raise MessageControlError("invalid_session_id")
+    if target:
+        _, native, runtime = _run_identity(target)
+        resolved = resolve_run(target)
+        meta = _read_json(resolved.meta) if resolved.meta else {}
+        identities = {
+            native,
+            runtime,
+            str(meta.get("session_id") or "").strip(),
+            str(meta.get("vibecrafted_session_id") or "").strip(),
+        }
+        if token and token not in identities:
+            raise MessageControlError("session_run_mismatch")
+        return target
+    root = control_plane_home() / "runtime_runs"
+    matches: set[str] = set()
+    if root.is_dir():
+        for path in root.glob("*/meta.json"):
+            if not _SAFE_ID.fullmatch(path.parent.name):
+                continue
+            meta = _read_json(path)
+            identities = {
+                str(meta.get(key) or "").strip()
+                for key in (
+                    "agent_session_id",
+                    "runtime_session_id",
+                    "vibecrafted_session_id",
+                    "session_id",
+                )
+            }
+            if token in identities:
+                matches.add(path.parent.name)
+    if not matches:
+        raise MessageControlError("session_not_resolved")
+    if len(matches) != 1:
+        raise MessageControlError("session_ambiguous_use_run_id")
+    return matches.pop()
+
+
+def pending_messages(*, run_id: str = "", session: str = "") -> list[dict[str, Any]]:
+    """Read unacknowledged inbox messages without consuming them."""
+    target = resolve_message_run(run_id=run_id, session=session)
+    result: list[dict[str, Any]] = []
+    for path in _outbox_root().glob("msg-*.json"):
+        record = _read_json(path)
+        if record.get("run_id") != target:
+            continue
+        if record.get("delivery_state") != "inbox_pending":
+            continue
+        result.append(record)
+    return sorted(
+        result, key=lambda row: (str(row.get("created_at")), str(row.get("message_id")))
+    )
+
+
+def acknowledge_message(
+    message_id: str, *, run_id: str = "", session: str = ""
+) -> dict[str, Any]:
+    """Record explicit recipient acknowledgement, without claiming execution."""
+    target = resolve_message_run(run_id=run_id, session=session)
+    with run_mutation_locks(control_plane_home(), run_id=target):
+        record = inspect_message(message_id)
+        if record is None:
+            raise MessageControlError("message_not_found")
+        if record.get("run_id") != target:
+            raise MessageControlError("message_target_mismatch")
+        if record.get("delivery_state") not in {"inbox_pending", "agent_acknowledged"}:
+            raise MessageControlError("message_not_in_inbox")
+        if record.get("delivery_state") == "agent_acknowledged":
+            return record
+        updated = {
+            **record,
+            "delivery_state": "agent_acknowledged",
+            "agent_ack_state": "claimed_by_recipient",
+            "updated_at": _now(),
+            "acknowledged_at": _now(),
+        }
+        _write_json_durable(_message_path(message_id), updated)
+        return updated
 
 
 def _provider_argv(provider: str, session: str, text: str) -> list[str]:
@@ -149,7 +247,8 @@ def inspect_message(message_id: str) -> dict[str, Any] | None:
 
 def send_message(
     *,
-    run_id: str,
+    run_id: str = "",
+    session: str = "",
     text: str,
     idempotency_key: str = "",
     retry: bool = False,
@@ -165,12 +264,8 @@ def send_message(
     ambiguous: the typed reason does not claim exactly-once delivery.
     """
 
-    target = str(run_id or "").strip()
+    target = resolve_message_run(run_id=run_id, session=session)
     body = str(text or "")
-    if not target:
-        raise MessageControlError("run_id_required")
-    if not _SAFE_ID.fullmatch(target):
-        raise MessageControlError("invalid_run_id")
     if not body.strip():
         raise MessageControlError("message_empty")
     if len(body.encode("utf-8")) > MAX_MESSAGE_BYTES:
@@ -197,7 +292,10 @@ def send_message(
                 return {**prior, "idempotent_replay": True}
             record = prior
         else:
-            provider, session = _native_identity(target)
+            provider, native_session, runtime_session = _run_identity(target)
+            if provider not in _INBOX_PROVIDERS and provider != "codex":
+                raise MessageControlError(f"provider_steering_unsupported:{provider}")
+            inbox = provider in _INBOX_PROVIDERS or not native_session
             message_id = f"msg-{uuid.uuid4()}"
             record = {
                 "schema": MESSAGE_SCHEMA,
@@ -205,11 +303,12 @@ def send_message(
                 "idempotency_key": key,
                 "run_id": target,
                 "provider": provider,
-                "provider_session_id": session,
+                "provider_session_id": native_session,
+                "runtime_session_id": runtime_session,
                 "text": body,
                 "text_digest": _digest(body),
                 "text_preview": f"sha256:{_digest(body)[:12]}; bytes={len(body.encode('utf-8'))}",
-                "delivery_state": "recorded",
+                "delivery_state": "inbox_pending" if inbox else "recorded",
                 "agent_ack_state": "unobserved",
                 "created_at": _now(),
                 "updated_at": _now(),
@@ -227,6 +326,8 @@ def send_message(
 
         provider = str(record.get("provider") or "")
         session = str(record.get("provider_session_id") or "")
+        if record.get("delivery_state") in {"inbox_pending", "agent_acknowledged"}:
+            return record
         try:
             argv = _provider_argv(provider, session, body)
         except MessageControlError as exc:

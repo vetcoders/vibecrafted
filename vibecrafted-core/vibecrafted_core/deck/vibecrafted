@@ -5079,7 +5079,7 @@ cmd_help_full() {
   printf '  %bvibecrafted telemetry%b [agy|kimi|line|once|smoke]  Agent quota engines + marbles smoke\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted resume%b <agent> [flags]    Resume an existing agent session\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted resume-session%b <agent> --agent-session-id <id>  Tracked headless continue\n' "$_cyan" "$_reset"
-  printf '  %bvibecrafted message%b --run-id <id> --file <path>            Codex queue only; no worker spawn\n' "$_cyan" "$_reset"
+  printf '  %bvibecrafted message%b --session <id> --file <path>           Send to tracked run inbox\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted relocate%b snapshot|restore                      Machine-move session snapshot\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted claims%b acquire|heartbeat|status|list|release   Living Tree path claims\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted settlements%b summary|list|inspect               Read-only f/x/n ledger\n' "$_cyan" "$_reset"
