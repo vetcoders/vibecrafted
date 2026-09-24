@@ -764,8 +764,7 @@ fn doctor_r12_refuses_forged_founder_signature() {
     assert!(!report.valid);
     assert!(
         report.errors.iter().any(|error| {
-            error.code == "reception_matrix"
-                && error.message.contains("acceptance/founder.json")
+            error.code == "reception_matrix" && error.message.contains("acceptance/founder.json")
         }),
         "errors={:?}",
         report.errors

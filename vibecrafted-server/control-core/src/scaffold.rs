@@ -2169,9 +2169,8 @@ fn validate_reception_matrix(
     if !has_section {
         missing.push("an `Odbiór (matryca wyników)` section");
     }
-    let has_triple = lower.contains("worker [")
-        && lower.contains("operator [")
-        && lower.contains("founder [");
+    let has_triple =
+        lower.contains("worker [") && lower.contains("operator [") && lower.contains("founder [");
     if !has_triple {
         missing.push("the `Worker [ ] Operator [ ] Founder [ ]` signature line");
     }
