@@ -33,7 +33,7 @@ ANSI = re.compile(r"\x1b\[[0-9;]*m")
 UNKNOWN = "not in the command deck"
 CORE_HELP_MARKERS = {
     "claims": ("acquire", "heartbeat"),
-    "message": ("Codex `queue --thread`", "does not invent Claude"),
+    "message": ("Codex `queue --thread`", "never starts or resumes another worker"),
     "relocate": ("snapshot", "restore"),
     "resume-session": ("--agent-session-id", "always headless"),
     "settlements": ("summary", "inspect"),

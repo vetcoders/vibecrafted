@@ -100,7 +100,8 @@ def test_full_help_examples_keep_decorate_between_dou_and_hydrate(
     assert "Create a vc-frame workspace (create-only)" in output
     assert "uno|duo|trio" in output
     assert "resume-session" in output
-    assert "Codex queue only" in output
+    assert "Send to tracked run inbox" in output
+    assert "Codex queue only" not in output
     assert "relocate" in output
     assert "claims" in output
 
