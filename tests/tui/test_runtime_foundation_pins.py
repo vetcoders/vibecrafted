@@ -89,6 +89,21 @@ def test_runtime_foundations_never_compile_external_tools() -> None:
     )
 
 
+def test_linux_pack_provenance_names_the_public_channel_it_used() -> None:
+    # 2026-09-24: loctree/aicx come from npm, prview from its GitHub release,
+    # screenscribe from PyPI. The Linux pack recorded prview as a crates.io
+    # source download and defaulted unknown tools to "crates.io"/"registry".
+    assembler = (REPO_ROOT / "scripts/build-linux-arm64-runtime-pack.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "crates.io" not in assembler
+    assert "registry-integrity" not in assembler
+    assert 'foundation["source_archives"][owner]' in assembler
+    assert "files.pythonhosted.org/packages" in assembler
+    assert "stage-runtime-foundations.sh" in assembler
+
+
 def test_install_path_uses_published_foundations_and_pipx_screenscribe() -> None:
     makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
     installer = (REPO_ROOT / "scripts/install-foundations.sh").read_text(
