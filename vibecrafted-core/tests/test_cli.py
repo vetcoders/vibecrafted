@@ -112,7 +112,7 @@ def test_message_help_topic_matches_direct_flag(capsys) -> None:
     assert topic_output == direct_output
     display = " ".join(topic_output.split())
     assert "Codex `queue --thread`" in display
-    assert "Claude and other providers receive" in display
+    assert "Claude/other-provider messages use the durable inbox" in display
 
 
 def test_relocate_and_claims_help_reach_owned_parsers(capsys) -> None:
