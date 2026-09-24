@@ -239,6 +239,59 @@ def test_runtime_foundations_relocate_darwin_prview_onto_pinned_openssl() -> Non
     assert "published-foundation-digests.json" in stager
 
 
+@pytest.mark.parametrize("caller_developer_dir", [None, "/pinned/by/release/builder"])
+def test_minos_stamp_lets_xcrun_follow_the_callers_toolchain(
+    tmp_path: Path, caller_developer_dir: str | None
+) -> None:
+    """vtool resolves through xcrun: the release builder's pin, else xcode-select.
+
+    The relocator must not invent a developer dir. A host with Command Line
+    Tools or a differently named Xcode has no /Applications/Xcode.app, and a
+    made-up DEVELOPER_DIR turns every xcrun shim into "missing DEVELOPER_DIR".
+    """
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    capture = tmp_path / "developer-dir.txt"
+    xcrun = fake_bin / "xcrun"
+    xcrun.write_text(
+        "#!/bin/sh\n"
+        'printf "%s\\n" "${DEVELOPER_DIR-unset}" > "$XCRUN_CAPTURE"\n'
+        "while [ $# -gt 0 ]; do\n"
+        '  if [ "$1" = "-output" ]; then shift; : > "$1"; fi\n'
+        "  shift\n"
+        "done\n",
+        encoding="utf-8",
+    )
+    xcrun.chmod(0o755)
+    binary = tmp_path / "libssl.3.dylib"
+    binary.write_bytes(b"not-a-real-dylib")
+
+    env = {key: value for key, value in os.environ.items() if key != "DEVELOPER_DIR"}
+    env["PATH"] = f"{fake_bin}:/usr/bin:/bin"
+    env["XCRUN_CAPTURE"] = str(capture)
+    if caller_developer_dir is not None:
+        env["DEVELOPER_DIR"] = caller_developer_dir
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; _darwin_set_macos_minos "$2"',
+            "minos-toolchain",
+            str(REPO_ROOT / "scripts/lib/darwin-relocate-openssl.sh"),
+            str(binary),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert capture.read_text(encoding="utf-8").strip() == (
+        caller_developer_dir or "unset"
+    )
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="Darwin OpenSSL relocation")
 def test_relocated_openssl_dylibs_are_macos_14_minos(tmp_path: Path) -> None:
     relocator = REPO_ROOT / "scripts/lib/darwin-relocate-openssl.sh"
@@ -249,8 +302,9 @@ def test_relocated_openssl_dylibs_are_macos_14_minos(tmp_path: Path) -> None:
 
     lib_dir = tmp_path / "lib"
     license_dir = tmp_path / "licenses"
+    # The host toolchain decides, exactly as for the release builder: an
+    # exported DEVELOPER_DIR, else xcode-select. Never an invented Xcode path.
     env = os.environ.copy()
-    env.setdefault("DEVELOPER_DIR", "/Applications/Xcode.app/Contents/Developer")
 
     def stage() -> subprocess.CompletedProcess[str]:
         return subprocess.run(

@@ -43,12 +43,13 @@ _darwin_set_macos_minos() {
   local binary="$1"
   local tmp
   tmp="$(mktemp "${TMPDIR:-/tmp}/vtool.XXXXXX")"
-  DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}" \
-    xcrun vtool \
-      -set-build-version macos "$DARWIN_MACOS_MINOS" "$DARWIN_MACOS_SDK" \
-      -replace \
-      -output "$tmp" \
-      "$binary" \
+  # xcrun decides: the DEVELOPER_DIR the release builder exports, else
+  # xcode-select (Command Line Tools ship vtool too). Never invent an Xcode path.
+  xcrun vtool \
+    -set-build-version macos "$DARWIN_MACOS_MINOS" "$DARWIN_MACOS_SDK" \
+    -replace \
+    -output "$tmp" \
+    "$binary" \
     || die "vtool failed to stamp macOS ${DARWIN_MACOS_MINOS} on $binary"
   mv -f "$tmp" "$binary"
 }
