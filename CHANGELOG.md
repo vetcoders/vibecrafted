@@ -10,7 +10,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - Agent quota telemetry on the owned `telemetry` PATH name. Hatch ships
   `runtime/telemetry/{agy,kimi}-monitor/` (local-only quota/statusline
   engines; shadow prices stay `api-equiv`). `telemetry agy|kimi
-  line|once|daemon` plus `telemetry line` / `telemetry once` run those
+line|once|daemon` plus `telemetry line` / `telemetry once` run those
   engines; `telemetry smoke` is unchanged. voc Mission Control reads
   `~/.gemini/agy-monitor/runtime/quota.json` and
   `~/.kimi-code/runtime/quota.json` (override with

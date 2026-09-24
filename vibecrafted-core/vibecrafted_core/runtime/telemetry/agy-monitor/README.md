@@ -44,6 +44,7 @@ cd agy-monitor
 ```
 
 Instalator automatycznie:
+
 1. Sprawdza obecność interpretera Python >= 3.11 (ze wsparciem `tomllib`).
 2. Tworzy strukturę `~/.gemini/agy-monitor/{runtime,logs}`.
 3. Kopiuje silnik oraz konfigurację (zachowując istniejący plik `.toml`, chyba że podano `--force`).
@@ -52,6 +53,7 @@ Instalator automatycznie:
 6. Wykonuje testowy przebieg `once` i wyświetla przykładowy statusline.
 
 Opcje instalatora:
+
 - `--force`, `-f` — nadpisuje istniejącą konfigurację `agy-monitor.toml` (robiąc wcześniej kopię `.bak`).
 - `--no-daemon` — pomija instalację LaunchAgenta w tle.
 
@@ -62,11 +64,13 @@ Opcje instalatora:
 ### Statusline (`agy-monitor line`)
 
 Normalny stan:
+
 ```text
 agy[ide] (3.8-flash-high) · vibecrafted:stack/command-bridge-on-pr-96 · turn 67 (821 tools) · ~573k toks · ≈$0.137 api-equiv · quota: OK
 ```
 
 Gdy limit 429 zostanie osiągnięty:
+
 ```text
 agy[ide] (3.8-flash-high) · vibecrafted:main · turn 12 · ~120k toks · ≈$0.029 api-equiv · ⚠429: Individual quota reached. Resets in 166h (4m temu)
 ```
@@ -88,6 +92,7 @@ CLI      8a9b2c3d-1234-4567-890a-bcdef0123456  gemini-3.8-flash-...     15      
 ### Pełny snapshot JSON (`agy-monitor once`)
 
 Zwraca kompletny obiekt JSON zawierający m.in.:
+
 - `timestamp`
 - `active_session` (id, surface, model, workspace_path, workspace_name, git_branch, turns, tool_calls, tokens, shadow_cost_usd)
 - `quota` (status, last_429_at, error_snippet, reset_duration, reset_at_est)

@@ -4,10 +4,10 @@ Owned PATH name: **`telemetry`** (see AGENTS.md: `vc-*` / `vibecrafted*` / `vibe
 
 This directory vendors the local quota / statusline engines:
 
-| Engine | Agent | Writes |
-| --- | --- | --- |
-| `agy-monitor/` | Google Antigravity (`agy`) | `~/.gemini/agy-monitor/runtime/quota.json` |
-| `kimi-monitor/` | Kimi Code CLI | `~/.kimi-code/runtime/quota.json` |
+| Engine          | Agent                      | Writes                                     |
+| --------------- | -------------------------- | ------------------------------------------ |
+| `agy-monitor/`  | Google Antigravity (`agy`) | `~/.gemini/agy-monitor/runtime/quota.json` |
+| `kimi-monitor/` | Kimi Code CLI              | `~/.kimi-code/runtime/quota.json`          |
 
 Both engines are **local-only**. They do not send usage to a Vibecrafted backend.
 Shadow prices are labeled `api-equiv` so they cannot be mistaken for a
