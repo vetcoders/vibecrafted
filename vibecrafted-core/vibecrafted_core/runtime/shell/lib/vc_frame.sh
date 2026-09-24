@@ -1150,14 +1150,17 @@ _vetcoders_create_vc_frame_session_detached() {
 # Record the intent to hand this terminal over, once everything else is ready.
 # Only for a caller that HAS a terminal to give and is not already inside a
 # frame: either we just created the session, or this very window was opened by
-# _vetcoders_open_entry_in_vc_terminal so the operator could land in it.
+# _vetcoders_open_entry_in_vc_terminal so the operator could land in it. That
+# window is proven by the owned re-entry boundary, which the facade consumes
+# into this shell on load (fca8d070) -- the exported marker is gone by now, so
+# reading it here never handed the product's own terminal to a live session.
 _vetcoders_mark_pending_vc_frame_attach() {
   local session_name="${1:-}"
   local created="${2:-0}"
   [[ -n "$session_name" ]] || return 0
   [[ -t 0 && -t 1 ]] || return 0
   ! _vetcoders_in_vc_frame || return 0
-  if ((created)) || [[ "${VIBECRAFTED_TERMINAL_ENTRY:-}" == "1" ]]; then
+  if ((created)) || _vetcoders_has_owned_vc_terminal_entry; then
     export VIBECRAFTED_PENDING_VC_FRAME_ATTACH="$session_name"
   fi
   return 0
