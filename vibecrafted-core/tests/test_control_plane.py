@@ -3229,3 +3229,33 @@ def test_append_last_error_collapses_repeated_watchdog_notes() -> None:
     chain = control_plane._append_last_error(chain, "artifact contract failed")
     assert "artifact contract failed" in chain
     assert "no worker activity for 9616s" in chain
+
+
+def test_a_growing_transcript_alone_is_not_a_refreshed_transition(monkeypatch) -> None:
+    """A live worker's transcript grows between syncs; that is not a lifecycle change.
+
+    With transcript_bytes in the comparison, every sync of a talking run appended
+    an active->active "refreshed" event (1819 from one kimi run on 2026-09-24),
+    and each append woke every control-plane reader into a full reload.
+    """
+    emitted: list[dict[str, Any]] = []
+    monkeypatch.setattr(control_plane, "_append_event", emitted.append)
+    previous = {
+        "run_id": "work-talking",
+        "state": "active",
+        "heartbeat_at": "2026-09-24T10:52:14+00:00",
+        "transcript_bytes": 1_000,
+        "transcript_growth": 40,
+    }
+    current = {
+        **previous,
+        "heartbeat_at": "2026-09-24T10:52:47+00:00",
+        "transcript_bytes": 1_080,
+        "transcript_growth": 80,
+    }
+
+    control_plane._record_transition(previous, current)
+    assert emitted == []
+
+    control_plane._record_transition(previous, {**current, "state": "completed"})
+    assert [event["message"] for event in emitted] == ["work-talking entered completed"]

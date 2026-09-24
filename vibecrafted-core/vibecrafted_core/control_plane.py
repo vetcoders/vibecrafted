@@ -2951,6 +2951,12 @@ _VOLATILE_TRANSITION_KEYS = frozenset(
         "heartbeat_at",
         "generated_at",
         "source",
+        # A live worker's transcript grows between almost every pass; its byte
+        # count is the counter transcript_growth is derived from. Left in the
+        # comparison it made every sync of a talking run a "refreshed" event
+        # (1819 active->active events from one kimi run, ~25% of events.jsonl),
+        # and each append wakes every reader into a full projection reload.
+        "transcript_bytes",
         "transcript_growth",
     }
 )
