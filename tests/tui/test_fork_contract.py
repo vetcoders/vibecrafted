@@ -280,7 +280,11 @@ def test_claude_fork_by_session_from_outside_git_with_repo(world: _World) -> Non
     What the deck owes it is unchanged: the explicit repository from outside
     Git, the native `--resume <id> --fork-session`, the model and permission
     mapping, the prompt delivered -- now on stdin, never argv -- and no
-    renamed or resumed source session."""
+    renamed or resumed source session.
+
+    The prompt below is what makes this the task fork: merge 2c06fbfe kept
+    88e0330d's task-fork assertions but took 17b4b033's bare argv, so the
+    fork opened a pane and no task run ever settled."""
     result = world.fork(
         "claude",
         "--session",
@@ -291,6 +295,8 @@ def test_claude_fork_by_session_from_outside_git_with_repo(world: _World) -> Non
         "claude-fable-5-1",
         "--permissions",
         "accept-edits",
+        "-p",
+        "try the other approach",
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
