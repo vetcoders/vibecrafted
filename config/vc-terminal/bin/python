@@ -11,10 +11,19 @@
 #   3. with no product interpreter on this host, the next python on PATH.
 # Resolution is silent: python3 simply works. A wrong pin is a product defect
 # for `vibecrafted doctor`, not a message on every python3 call.
+#
+# A candidate is probed as a child. A candidate whose own launcher finds
+# python3 through PATH (`#!/usr/bin/env python3`) lands back here during that
+# probe; probing it again would recurse one shell per level until the host
+# runs out of processes. Such a candidate needs the door to find an
+# interpreter, so it is not the product interpreter: the probe fails at once.
+if [ -n "${VIBECRAFTED_PYTHON_DOOR_PROBE:-}" ]; then
+  exit 1
+fi
 name="${0##*/}"
 product_python() {
   [ -n "$1" ] && [ "${1#/}" != "$1" ] && [ -x "$1" ] && [ ! -d "$1" ] \
-    && "$1" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1
+    && VIBECRAFTED_PYTHON_DOOR_PROBE=1 "$1" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1
 }
 pin="${VIBECRAFTED_PYTHON:-}"
 if product_python "$pin"; then
@@ -24,16 +33,30 @@ current="${VIBECRAFTED_RUNTIME_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/vibecr
 if product_python "$current"; then
   exec "$current" "$@"
 fi
+# Another copy of this door on PATH (a checkout's config/vc-terminal/bin) is
+# not a host interpreter. The doors already passed through ride along, so two
+# copies never exec each other forever.
 door="$(cd "$(dirname "$0")" 2>/dev/null && pwd -P)"
+seen="${VIBECRAFTED_PYTHON_DOORS:-}"
+# Outside the command substitution below: macOS /bin/sh (bash 3.2) misreads a
+# case pattern's `)` inside `$(...)`.
+passed_door() {
+  case ":$seen:" in *":$1:"*) return 0 ;; esac
+  return 1
+}
 host="$(printf '%s\n' "$PATH" | tr ':' '\n' | while IFS= read -r entry; do
   [ -n "$entry" ] || continue
-  [ "$(cd "$entry" 2>/dev/null && pwd -P)" = "$door" ] && continue
+  resolved="$(cd "$entry" 2>/dev/null && pwd -P)"
+  [ "$resolved" = "$door" ] && continue
+  passed_door "$resolved" && continue
   if [ -x "$entry/$name" ] && [ ! -d "$entry/$name" ]; then
     printf '%s\n' "$entry/$name"
     break
   fi
 done)"
 if [ -n "$host" ]; then
+  VIBECRAFTED_PYTHON_DOORS="${seen:+$seen:}$door"
+  export VIBECRAFTED_PYTHON_DOORS
   exec "$host" "$@"
 fi
 printf 'Vibecrafted: no product interpreter (%s) and no other %s on PATH.\n' "$current" "$name" >&2

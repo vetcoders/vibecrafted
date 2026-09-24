@@ -939,6 +939,84 @@ def test_door_python_silently_skips_a_pin_below_3_11(tmp_path: Path) -> None:
     assert Path(used).resolve() == generation_python.resolve()
 
 
+def _door_python_bounded(
+    home: Path, *arguments: str, path: str, extra_env: dict[str, str] | None = None
+) -> tuple[int | None, str]:
+    """Run the door in its own process group and kill the whole group on
+    timeout: a door that recurses leaves a chain of shells that outlives a
+    plain subprocess timeout and exhausts the host's process table."""
+
+    environment = {"HOME": str(home), "PATH": path}
+    if extra_env:
+        environment.update(extra_env)
+    process = subprocess.Popen(
+        [str(home / ".config/vibecrafted/vc-terminal/bin/python3"), *arguments],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=environment,
+        cwd=home,
+        start_new_session=True,
+    )
+    try:
+        output, _ = process.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        output, _ = process.communicate()
+        return None, output
+    return process.returncode, output
+
+
+def test_door_python_refuses_a_pin_that_resolves_python3_back_through_the_door(
+    tmp_path: Path,
+) -> None:
+    """2026-09-25: a pinned launcher script with `#!/usr/bin/env python3` found
+    the door on PATH while the door was probing it. The door probed the pin
+    again, one child shell per level, until the Mac ran out of processes
+    (11k /bin/sh). A candidate that needs the door to find its interpreter is
+    not the product interpreter; the door passes it over at once."""
+
+    product = _stage_product_profile(tmp_path)
+    hostile_bin = tmp_path / "hostile-bin"
+    _write_hostile_host_python(hostile_bin)
+    launcher = tmp_path / "generation-python"
+    launcher.write_text("#!/usr/bin/env python3\nprint('LAUNCHER_RAN')\n")
+    launcher.chmod(0o755)
+
+    returncode, output = _door_python_bounded(
+        tmp_path,
+        "--version",
+        path=f"{product / 'bin'}:{hostile_bin}:/usr/bin:/bin",
+        extra_env={"VIBECRAFTED_PYTHON": str(launcher)},
+    )
+    assert returncode is not None, "the door recursed instead of refusing the pin"
+    assert "HOST_PYTHON_SELECTED" in output
+    assert returncode == 79
+
+
+def test_door_python_does_not_bounce_between_two_door_copies_on_path(
+    tmp_path: Path,
+) -> None:
+    """A second copy of the door on PATH (a checkout's config/vc-terminal/bin)
+    is not a host interpreter. Without a record of the doors already passed
+    through, each copy execs the other forever."""
+
+    product = _stage_product_profile(tmp_path)
+    other_door = tmp_path / "checkout-door"
+    shutil.copytree(product / "bin", other_door)
+    hostile_bin = tmp_path / "hostile-bin"
+    _write_hostile_host_python(hostile_bin)
+
+    returncode, output = _door_python_bounded(
+        tmp_path,
+        "--version",
+        path=f"{product / 'bin'}:{other_door}:{hostile_bin}:/usr/bin:/bin",
+    )
+    assert returncode is not None, "the two doors exec'd each other forever"
+    assert "HOST_PYTHON_SELECTED" in output
+    assert returncode == 79
+
+
 def test_two_line_prompt_without_starship_and_with_fake_starship(
     tmp_path: Path,
 ) -> None:
