@@ -75,7 +75,7 @@ cp "$SCRIPT_DIR/kimi_monitor.py" "$KIMI_HOME/kimi_monitor.py"
 chmod +x "$KIMI_HOME/kimi_monitor.py"
 echo -e "  ${GREEN}✓${RESET} Zainstalowano $KIMI_HOME/kimi_monitor.py"
 
-cp "$SCRIPT_DIR/statusline.sh" "$KIMI_HOME/statusline.sh"
+cp "$SCRIPT_DIR/statusline.py" "$KIMI_HOME/statusline.sh"
 chmod +x "$KIMI_HOME/statusline.sh"
 echo -e "  ${GREEN}✓${RESET} Zainstalowano $KIMI_HOME/statusline.sh"
 

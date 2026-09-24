@@ -9,7 +9,7 @@ Standalone quota monitor, token accounting engine, and low-latency statusline ru
    - **`once`**: Jednorazowy snapshot limitów 5h i miesięcznych, zwraca sformatowany JSON i zapisuje do `quota.json`.
    - **`line`**: Superszybki (<80ms) renderer stopki TUI czytający stan z plików lokalnych (`wire.jsonl` + `quota.json`) bez zapytań sieciowych.
 2. **`kimi-monitor.toml`** — pojedyncze źródło prawdy (Single Source of Truth) dla stawek cennika per model (k3, kimi-k3, kimi-for-coding, highspeed), progów alarmowych i interwałów odpytywania.
-3. **`statusline.sh`** — runner dla Kimi TUI (`tui.toml`), który:
+3. **`statusline.py`** (instalowany jako `~/.kimi-code/statusline.sh`) — runner dla Kimi TUI (`tui.toml`), który:
    - Dynamicznie czyta cennik z `kimi-monitor.toml` przez `tomllib` (brak redundancji stawek).
    - Oznacza estymowany koszt API jako shadow pricing (`≈$X.XXX api-equiv`), uniemożliwiając pomylenie go z opłatą subskrypcyjną.
    - Posiada wbudowany **Quota & Desync Detector**: wychwytuje błędy 403 z `turn.ended` przy niskim użyciu i natychmiast alarmuje `⚠QUOTA-DESYNC` (a także `⚠NEAR-5H-LIMIT`, `⚠MONTHLY-HIGH`, `⚠STALE-QUOTA`).
@@ -29,6 +29,7 @@ cd kimi-monitor
 ```
 
 Instalator automatycznie:
+
 - Sprawdza dostępność Python >= 3.11.
 - Kopiuje skrypty do `~/.kimi-code/`.
 - Tworzy symlink `~/.local/bin/kimi-monitor`.
@@ -48,11 +49,12 @@ command = "~/.kimi-code/statusline.sh"
 ```
 
 Wynik w stopce terminala:
+
 ```text
 kimi-k3 (manual) · git:main · ctx: 686k/1.0M (65.4%) · 620.9M toks (95% cache) · ≈$296.919 api-equiv · 5h 0%↻3:34 · M 0%
 ```
-*(Gdy wystąpi desync lub limit, pojawi się np. `⚠QUOTA-DESYNC` lub `⚠NEAR-5H-LIMIT`)*
 
+_(Gdy wystąpi desync lub limit, pojawi się np. `⚠QUOTA-DESYNC` lub `⚠NEAR-5H-LIMIT`)_
 
 ---
 
