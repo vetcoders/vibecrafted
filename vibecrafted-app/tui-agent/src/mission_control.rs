@@ -1814,10 +1814,7 @@ fn agy_quota_signal_from_json(raw: &str) -> FleetHealthSignal {
             FleetHealthStatus::Unknown,
             "quota snapshot missing status".to_string(),
         ),
-        other => (
-            FleetHealthStatus::Unknown,
-            format!("quota status {other}"),
-        ),
+        other => (FleetHealthStatus::Unknown, format!("quota status {other}")),
     };
     status = apply_quota_staleness(status, json_unix_ts(&value), &mut detail);
     FleetHealthSignal {
@@ -1869,7 +1866,7 @@ fn kimi_quota_signal_from_json(raw: &str) -> FleetHealthSignal {
             .pointer("/error/message")
             .and_then(Value::as_str)
             .or_else(|| value.get("error").and_then(Value::as_str))
-            .or_else(|| poll_error)
+            .or(poll_error)
             .unwrap_or("quota snapshot error");
         (FleetHealthStatus::Warn, format!("error: {message}"))
     };
@@ -2743,18 +2740,34 @@ mod tests {
         }
     }
 
-    fn stats_snapshot(
-        run_id: &str,
-        agent: &str,
-        skill: &str,
+    /// One finished run as the stats panels see it.
+    #[derive(Default)]
+    struct StatsRow<'a> {
+        run_id: &'a str,
+        agent: &'a str,
+        skill: &'a str,
         exit_code: Option<i64>,
-        model: Option<&str>,
+        model: Option<&'a str>,
         duration_s: Option<f64>,
-        completed_at: &str,
-        prompt_id: Option<&str>,
-        status: Option<&str>,
-        report: Option<&str>,
-    ) -> RunSnapshot {
+        completed_at: &'a str,
+        prompt_id: Option<&'a str>,
+        status: Option<&'a str>,
+        report: Option<&'a str>,
+    }
+
+    fn stats_snapshot(row: StatsRow<'_>) -> RunSnapshot {
+        let StatsRow {
+            run_id,
+            agent,
+            skill,
+            exit_code,
+            model,
+            duration_s,
+            completed_at,
+            prompt_id,
+            status,
+            report,
+        } = row;
         let mut extra = HashMap::new();
         if let Some(code) = exit_code {
             extra.insert("exit_code".into(), serde_json::json!(code));
@@ -2827,42 +2840,42 @@ mod tests {
         let dir = tempdir().unwrap();
         let artifact = dir.path().join("artifacts");
         let runs = vec![
-            stats_snapshot(
-                "run-a",
-                "claude",
-                "owne",
-                Some(0),
-                Some("claude-opus-4-7"),
-                Some(120.5),
-                "2026-05-19T10:00:00Z",
-                Some("wave-1"),
-                Some("completed"),
-                Some("/tmp/report-a.md"),
-            ),
-            stats_snapshot(
-                "run-b",
-                "claude",
-                "owne",
-                Some(1),
-                Some("unknown"),
-                None,
-                "2026-05-19T11:00:00Z",
-                Some("wave-1"),
-                Some("failed"),
-                None,
-            ),
-            stats_snapshot(
-                "run-c",
-                "codex",
-                "marb",
-                Some(0),
-                Some("gpt-5-codex"),
-                Some(60.0),
-                "2026-05-19T12:00:00Z",
-                Some("wave-2"),
-                Some("completed"),
-                None,
-            ),
+            stats_snapshot(StatsRow {
+                run_id: "run-a",
+                agent: "claude",
+                skill: "owne",
+                exit_code: Some(0),
+                model: Some("claude-opus-4-7"),
+                duration_s: Some(120.5),
+                completed_at: "2026-05-19T10:00:00Z",
+                prompt_id: Some("wave-1"),
+                status: Some("completed"),
+                report: Some("/tmp/report-a.md"),
+            }),
+            stats_snapshot(StatsRow {
+                run_id: "run-b",
+                agent: "claude",
+                skill: "owne",
+                exit_code: Some(1),
+                model: Some("unknown"),
+                duration_s: None,
+                completed_at: "2026-05-19T11:00:00Z",
+                prompt_id: Some("wave-1"),
+                status: Some("failed"),
+                report: None,
+            }),
+            stats_snapshot(StatsRow {
+                run_id: "run-c",
+                agent: "codex",
+                skill: "marb",
+                exit_code: Some(0),
+                model: Some("gpt-5-codex"),
+                duration_s: Some(60.0),
+                completed_at: "2026-05-19T12:00:00Z",
+                prompt_id: Some("wave-2"),
+                status: Some("completed"),
+                report: None,
+            }),
         ];
         let now = ts("2026-05-19T13:00:00Z");
         let state = state_with(dir.path(), runs);
@@ -2916,30 +2929,30 @@ mod tests {
         let dir = tempdir().unwrap();
         let artifact = dir.path().join("artifacts");
         let runs = vec![
-            stats_snapshot(
-                "run-fail",
-                "codex",
-                "marb",
-                Some(1),
-                None,
-                None,
-                "2026-05-19T11:00:00Z",
-                Some("wave-dup"),
-                Some("failed"),
-                None,
-            ),
-            stats_snapshot(
-                "run-ok",
-                "claude",
-                "impl",
-                Some(0),
-                None,
-                None,
-                "2026-05-19T10:00:00Z",
-                Some("wave-dup"),
-                Some("completed"),
-                None,
-            ),
+            stats_snapshot(StatsRow {
+                run_id: "run-fail",
+                agent: "codex",
+                skill: "marb",
+                exit_code: Some(1),
+                model: None,
+                duration_s: None,
+                completed_at: "2026-05-19T11:00:00Z",
+                prompt_id: Some("wave-dup"),
+                status: Some("failed"),
+                report: None,
+            }),
+            stats_snapshot(StatsRow {
+                run_id: "run-ok",
+                agent: "claude",
+                skill: "impl",
+                exit_code: Some(0),
+                model: None,
+                duration_s: None,
+                completed_at: "2026-05-19T10:00:00Z",
+                prompt_id: Some("wave-dup"),
+                status: Some("completed"),
+                report: None,
+            }),
         ];
         let now = ts("2026-05-19T13:00:00Z");
         let state = state_with(dir.path(), runs);
@@ -2966,30 +2979,30 @@ mod tests {
         let dir = tempdir().unwrap();
         let artifact = dir.path().join("artifacts");
         let runs = vec![
-            stats_snapshot(
-                "recent-fail",
-                "gemini",
-                "rev",
-                Some(2),
-                None,
-                None,
-                "2026-05-19T12:30:00Z",
-                None,
-                Some("failed"),
-                None,
-            ),
-            stats_snapshot(
-                "old-fail",
-                "gemini",
-                "rev",
-                Some(1),
-                None,
-                None,
-                "2026-05-15T08:00:00Z",
-                None,
-                Some("failed"),
-                None,
-            ),
+            stats_snapshot(StatsRow {
+                run_id: "recent-fail",
+                agent: "gemini",
+                skill: "rev",
+                exit_code: Some(2),
+                model: None,
+                duration_s: None,
+                completed_at: "2026-05-19T12:30:00Z",
+                prompt_id: None,
+                status: Some("failed"),
+                report: None,
+            }),
+            stats_snapshot(StatsRow {
+                run_id: "old-fail",
+                agent: "gemini",
+                skill: "rev",
+                exit_code: Some(1),
+                model: None,
+                duration_s: None,
+                completed_at: "2026-05-15T08:00:00Z",
+                prompt_id: None,
+                status: Some("failed"),
+                report: None,
+            }),
         ];
         let now = ts("2026-05-19T13:00:00Z");
         let state = state_with(dir.path(), runs);
@@ -3095,32 +3108,32 @@ mod tests {
         // "2m ago") used to keep exactly these and evict the fresh one.
         let mut runs: Vec<RunSnapshot> = (0..22)
             .map(|index| {
-                stats_snapshot(
-                    &format!("stale-{index}"),
-                    "codex",
-                    "impl",
-                    Some(1),
-                    None,
-                    None,
-                    "2026-05-19T02:00:00Z",
-                    None,
-                    Some("failed"),
-                    None,
-                )
+                stats_snapshot(StatsRow {
+                    run_id: &format!("stale-{index}"),
+                    agent: "codex",
+                    skill: "impl",
+                    exit_code: Some(1),
+                    model: None,
+                    duration_s: None,
+                    completed_at: "2026-05-19T02:00:00Z",
+                    prompt_id: None,
+                    status: Some("failed"),
+                    report: None,
+                })
             })
             .collect();
-        runs.push(stats_snapshot(
-            "fresh-fail",
-            "gemini",
-            "rvew",
-            Some(2),
-            None,
-            None,
-            "2026-05-19T12:58:00Z",
-            None,
-            Some("failed"),
-            None,
-        ));
+        runs.push(stats_snapshot(StatsRow {
+            run_id: "fresh-fail",
+            agent: "gemini",
+            skill: "rvew",
+            exit_code: Some(2),
+            model: None,
+            duration_s: None,
+            completed_at: "2026-05-19T12:58:00Z",
+            prompt_id: None,
+            status: Some("failed"),
+            report: None,
+        }));
         let mut state = state_with(dir.path(), runs);
         state.runs.push(RunSnapshot {
             run_id: "fresh-fail".to_string(),
@@ -3332,18 +3345,18 @@ mod tests {
         fs::create_dir_all(&artifact).unwrap();
         let runs = (0..3)
             .map(|idx| {
-                stats_snapshot(
-                    &format!("run-{idx}"),
-                    "claude",
-                    "owne",
-                    Some(0),
-                    None,
-                    None,
-                    "2026-05-19T10:00:00Z",
-                    None,
-                    Some("completed"),
-                    None,
-                )
+                stats_snapshot(StatsRow {
+                    run_id: &format!("run-{idx}"),
+                    agent: "claude",
+                    skill: "owne",
+                    exit_code: Some(0),
+                    model: None,
+                    duration_s: None,
+                    completed_at: "2026-05-19T10:00:00Z",
+                    prompt_id: None,
+                    status: Some("completed"),
+                    report: None,
+                })
             })
             .collect();
         let state = state_with(dir.path(), runs);
