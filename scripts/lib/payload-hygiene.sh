@@ -162,9 +162,10 @@ import sys
 
 payload = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 for item in payload.get("artifacts", []):
-    digest = item.get("sha256", "")
-    if digest:
-        print(digest)
+    for key in ("sha256", "sha256_unsigned"):
+        digest = item.get(key, "")
+        if digest:
+            print(digest)
 PY
     )
   fi

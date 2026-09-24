@@ -53,7 +53,10 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 # Read in chunks so a multi-hundred-megabyte payload never has to fit in RAM at
@@ -82,6 +85,56 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(CHUNK), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+CODESIGN = shutil.which("codesign")
+
+# Mach-O magics: 32/64-bit in both endiannesses, plus both fat headers.
+_MACHO_MAGICS = frozenset(
+    {
+        b"\xfe\xed\xfa\xce",
+        b"\xce\xfa\xed\xfe",
+        b"\xfe\xed\xfa\xcf",
+        b"\xcf\xfa\xed\xfe",
+        b"\xca\xfe\xba\xbe",
+        b"\xbe\xba\xfe\xca",
+        b"\xca\xfe\xba\xbf",
+        b"\xbf\xba\xfe\xca",
+    }
+)
+
+
+def sha256_file_without_signature(path: Path) -> str:
+    """Digest of a Mach-O with its code signature removed, or "" when N/A.
+
+    The release pipeline re-signs pinned upstream foundations with the
+    operator's identity and a fresh timestamp, so shipped bytes never hash to
+    the published digest and a raw-bytes pin can never match a DMG. Stripping
+    the signature is deterministic — the published artifact and every
+    re-signed copy of it converge to one digest, which is what the
+    `sha256_unsigned` pins in published-foundation-digests.json name.
+    """
+    if CODESIGN is None:
+        return ""
+    try:
+        with path.open("rb") as handle:
+            magic = handle.read(4)
+    except OSError:
+        return ""
+    if magic not in _MACHO_MAGICS:
+        return ""
+    with tempfile.TemporaryDirectory() as scratch:
+        unsigned = Path(scratch) / path.name
+        try:
+            unsigned.write_bytes(path.read_bytes())
+            subprocess.run(
+                [CODESIGN, "--remove-signature", str(unsigned)],
+                check=True,
+                capture_output=True,
+            )
+        except (OSError, subprocess.CalledProcessError):
+            return ""
+        return sha256_file(unsigned)
 
 
 def count_in_file(path: Path, needles: list[bytes]) -> dict[bytes, int]:
@@ -133,6 +186,11 @@ def scan(
             continue
         digest = sha256_file(path) if found and accepted else ""
         upstream = bool(digest) and digest.lower() in accepted
+        if found and accepted and not upstream:
+            unsigned = sha256_file_without_signature(path)
+            if unsigned and unsigned.lower() in accepted:
+                digest = unsigned
+                upstream = True
         for needle, count in found.items():
             offenders.append(
                 {

@@ -14,9 +14,12 @@ reaches exactly one of them.
 from __future__ import annotations
 
 import hashlib
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCANNER = REPO_ROOT / "scripts/payload_hygiene.py"
@@ -259,6 +262,76 @@ def test_hygiene_library_loads_published_foundation_digests() -> None:
     library = LIBRARY.read_text(encoding="utf-8")
     assert "published-foundation-digests.json" in library
     assert "--accept-digest" in library
+    assert "sha256_unsigned" in library
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="codesign is macOS-only")
+def test_scanner_accepts_a_re_signed_pinned_upstream_binary(tmp_path: Path) -> None:
+    """A pinned foundation re-signed by the release keeps its provenance.
+
+    sign_macho_tree re-signs the published foundation bytes with the
+    operator's identity and a fresh timestamp, so the shipped digest can never
+    equal the published one. The digest over signature-stripped bytes is the
+    stable pin: published and re-signed copies converge to it.
+    """
+    clang = shutil.which("clang")
+    codesign = shutil.which("codesign")
+    if not clang or not codesign:
+        pytest.skip("clang and codesign are required to build a signed probe")
+
+    needle = "/Users/someone"
+    probe = tmp_path / "probe-bin"
+    (tmp_path / "probe.c").write_text(
+        f'const char *marker = "{needle}";\nint main(void) {{ return marker[0] == 0; }}\n',
+        encoding="utf-8",
+    )
+    subprocess.run(
+        [clang, "-o", str(probe), str(tmp_path / "probe.c")],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run([codesign, "-s", "-", str(probe)], check=True, capture_output=True)
+
+    unsigned = tmp_path / "probe-unsigned"
+    unsigned.write_bytes(probe.read_bytes())
+    subprocess.run(
+        [codesign, "--remove-signature", str(unsigned)], check=True, capture_output=True
+    )
+    unsigned_digest = hashlib.sha256(unsigned.read_bytes()).hexdigest()
+    # The test only proves something if the signed bytes hash differently.
+    assert hashlib.sha256(probe.read_bytes()).hexdigest() != unsigned_digest
+
+    payload = tmp_path / "payload"
+    payload.mkdir()
+    (payload / "probe-bin").write_bytes(probe.read_bytes())
+
+    refused = run_scanner("--root", str(payload), "--forbid", needle)
+    assert refused.returncode == 1, refused.stdout + refused.stderr
+
+    accepted = run_scanner(
+        "--root",
+        str(payload),
+        "--forbid",
+        needle,
+        "--accept-digest",
+        unsigned_digest,
+        "--json",
+    )
+    assert accepted.returncode == 0, accepted.stdout + accepted.stderr
+    assert "upstream_provenance" in accepted.stdout
+    assert "probe-bin" in accepted.stdout
+
+
+def test_scanner_unsigned_digest_ignores_non_macho(tmp_path: Path) -> None:
+    probe = tmp_path / "plain.bin"
+    probe.write_bytes(b"\x00\x01/Users/someone\x00")
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+    try:
+        import payload_hygiene
+
+        assert payload_hygiene.sha256_file_without_signature(probe) == ""
+    finally:
+        sys.path.remove(str(REPO_ROOT / "scripts"))
 
 
 def run_library(snippet: str, **environment: str) -> str:
