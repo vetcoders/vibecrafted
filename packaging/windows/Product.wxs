@@ -3,6 +3,10 @@
   Thin MSI adapter over scripts/install-runtime-pack.ps1.
   Does not invent a second Windows install grammar.
   Per-user portable install: payload under LocalAppData, not Program Files.
+  License dialog uses packaging/windows/License.rtf generated from the repo
+  LICENSE (BUSL-1.1 / Vetcoders). Security contact from SECURITY.md.
+  After a successful install the MSI launches vc-terminal (with frame) so the
+  operator sees the product; launch never runs on uninstall.
   Limit for this cut: the voc radio is not in this installer cut because tokio's
   Unix socket types are cfg(unix) and this cut does not switch mux-agent to a
   Windows AF_UNIX transport. The Runtime Pack inventory remains the authority.
@@ -30,6 +34,16 @@
         AllowSameVersionUpgrades="no" />
 
     <MediaTemplate EmbedCab="yes" />
+
+    <!-- ARP identity from LICENSE Licensor + SECURITY.md reporting contact. -->
+    <Property Id="ARPURLINFOABOUT" Value="https://vibecrafted.io" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/vetcoders/vibecrafted/blob/main/SECURITY.md" />
+    <Property Id="ARPCONTACT" Value="hello@vetcoders.io" />
+    <Property Id="ARPURLUPDATEINFO" Value="https://github.com/vetcoders/vibecrafted/blob/main/LICENSE" />
+
+    <!-- WixUI_Minimal shows the BUSL-1.1 license RTF before install (per-user). -->
+    <UIRef Id="WixUI_Minimal" />
+    <WixVariable Id="WixUILicenseRtf" Value="License.rtf" />
 
     <Feature Id="RuntimePackAdapter" Title="$(var.ProductName) Runtime Pack" Level="1">
       <ComponentGroupRef Id="InstallerPayload" />
@@ -81,11 +95,22 @@
         Return="check"
         Impersonate="yes" />
 
+    <!-- After successful install, start vc-terminal (frame-backed). Never on uninstall.
+         Type-34 Directory+ExeCommand under INSTALLDIR (already RemoveFolder-owned). -->
+    <CustomAction
+        Id="LaunchVcTerminal"
+        Directory="INSTALLDIR"
+        ExeCommand="bin\vc-terminal.cmd"
+        Execute="immediate"
+        Return="asyncNoWait"
+        Impersonate="yes" />
+
     <InstallExecuteSequence>
       <!-- Install only on fresh install / upgrade payload; never on pure uninstall. -->
       <Custom Action="InstallRuntimePack" After="InstallFiles">NOT REMOVE</Custom>
       <!-- Uninstall only when the product is fully removed (explicit REMOVE=ALL). -->
       <Custom Action="UninstallRuntimePack" Before="RemoveFiles">REMOVE~="ALL"</Custom>
+      <Custom Action="LaunchVcTerminal" After="InstallFinalize">NOT REMOVE</Custom>
     </InstallExecuteSequence>
   </Product>
 

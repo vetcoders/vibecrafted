@@ -128,9 +128,17 @@ def test_windows_inventory_requires_mandatory_and_declares_unsupported(
     (root / "bin").mkdir(parents=True)
     records = []
     for name in sorted(WINDOWS_X64_MANDATORY_EXECUTABLES):
-        relative = "bin/python.exe" if name == "python" else f"bin/{name}.exe"
+        if name == "python":
+            relative = "bin/python.exe"
+        elif name in {"vc-terminal", "vc-frame"}:
+            relative = f"bin/{name}.cmd"
+        else:
+            relative = f"bin/{name}.exe"
         path = root / relative
-        path.write_bytes(name.encode("utf-8"))
+        if name in {"vc-terminal", "vc-frame"}:
+            path.write_text(f"@echo off\r\necho {name} 0\r\n", encoding="utf-8")
+        else:
+            path.write_bytes(name.encode("utf-8"))
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         records.append(
             {
@@ -168,16 +176,6 @@ def test_windows_inventory_requires_mandatory_and_declares_unsupported(
             "reason": "no Windows artifact",
         },
         {
-            "name": "vc-frame",
-            "classification": "limited-platform-scope",
-            "reason": "no Windows artifact",
-        },
-        {
-            "name": "vc-terminal",
-            "classification": "limited-platform-scope",
-            "reason": "no Windows artifact",
-        },
-        {
             "name": "vc-server-supervisor",
             "classification": "limited-platform-scope",
             "reason": "no Windows artifact",
@@ -202,8 +200,6 @@ def test_windows_inventory_requires_mandatory_and_declares_unsupported(
         "screenscribe",
         "voc",
         "vc-start",
-        "vc-frame",
-        "vc-terminal",
         "vc-server-supervisor",
     }
 
@@ -249,6 +245,16 @@ def _windows_payload(root: Path, *, include_server: bool = True) -> Path:
         payload / "bin" / "vibecrafted.cmd",
         "@echo off\r\necho vibecrafted fixture\r\n",
     )
+    _write_file(
+        payload / "bin" / "vc-terminal.cmd",
+        "@echo off\r\necho vc-terminal fixture\r\n",
+    )
+    _write_file(
+        payload / "bin" / "vc-frame.cmd",
+        "@echo off\r\necho vc-frame fixture\r\n",
+    )
+    _write_file(payload / "libexec" / "vc-terminal.exe", "MZ")
+    _write_file(payload / "libexec" / "vc-frame.exe", "MZ")
     _write_file(payload / "vibecrafted-core/vibecrafted_core/deck/vibecrafted")
     _write_file(payload / "VERSION", f"{VERSION}+g12345678\n")
     skills = payload / "vibecrafted-core/vibecrafted_core/skills/vc-audit"
@@ -622,9 +628,17 @@ def test_windows_inventory_accepts_screenscribe_cmd(tmp_path: Path) -> None:
     (root / "bin").mkdir(parents=True)
     records = []
     for name in sorted(WINDOWS_X64_MANDATORY_EXECUTABLES):
-        relative = "bin/python.exe" if name == "python" else f"bin/{name}.exe"
+        if name == "python":
+            relative = "bin/python.exe"
+        elif name in {"vc-terminal", "vc-frame"}:
+            relative = f"bin/{name}.cmd"
+        else:
+            relative = f"bin/{name}.exe"
         path = root / relative
-        path.write_bytes(name.encode("utf-8"))
+        if name in {"vc-terminal", "vc-frame"}:
+            path.write_text(f"@echo off\r\necho {name} 0\r\n", encoding="utf-8")
+        else:
+            path.write_bytes(name.encode("utf-8"))
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         records.append(
             {
@@ -666,8 +680,6 @@ def test_windows_inventory_accepts_screenscribe_cmd(tmp_path: Path) -> None:
             ("prview", "release-blocker"),
             ("voc", "limited-platform-scope"),
             ("vc-start", "limited-platform-scope"),
-            ("vc-frame", "limited-platform-scope"),
-            ("vc-terminal", "limited-platform-scope"),
             ("vc-server-supervisor", "limited-platform-scope"),
         )
     ]
@@ -685,6 +697,29 @@ def test_windows_inventory_accepts_screenscribe_cmd(tmp_path: Path) -> None:
     names = {item["name"] for item in loaded["executables"]}
     assert "screenscribe" in names
     assert "prview" in {item["name"] for item in loaded["unsupported"]}
+
+
+def test_windows_pack_builder_builds_terminal_and_frame_honestly() -> None:
+    """Windows pack builder must compile donors and stamp the revisions it built."""
+    builder = (
+        REPO_ROOT / "scripts" / "build-windows-x64-runtime-pack.ps1"
+    ).read_text(encoding="utf-8")
+    assert "d6685ead9018ad89411291d6198476666e48b0f8" in builder
+    assert "7ab84069c9b7994ce0b705ccedd708aa3a35dcb6" in builder
+    assert "cargo build --release --bin alacritty" in builder
+    assert "cargo xtask build --release" in builder
+    assert "libexec\\vc-terminal.exe" in builder
+    assert "libexec\\vc-frame.exe" in builder
+    assert "libssl-3-x64.dll" in builder
+    assert "OPENSSL_DIR" in builder
+    assert "vc-terminal-product-entry.cmd" in builder
+    assert "vc-frame-product-entry.cmd" in builder
+    assert "missing mandatory libexec/vc-terminal.exe" in builder
+    assert "no supported Windows vc-terminal binary in this pack" not in builder
+    # Provenance SHAs are only stamped after the Windows binaries exist.
+    build_at = builder.index("cargo build --release --bin alacritty")
+    stamp_at = builder.index("-TerminalRevision $terminalRevision")
+    assert build_at < stamp_at
 
 
 def test_windows_release_key_probe_does_not_require_usr_bin() -> None:

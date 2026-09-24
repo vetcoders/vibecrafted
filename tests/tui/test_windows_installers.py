@@ -19,12 +19,23 @@ IDENTITY = PACKAGING / "Identity.wxi"
 PRODUCT = PACKAGING / "Product.wxs"
 BUNDLE = PACKAGING / "Bundle.wxs"
 README = PACKAGING / "README.md"
+LICENSE_RTF = PACKAGING / "License.rtf"
+REPO_LICENSE = REPO_ROOT / "LICENSE"
+SECURITY_MD = REPO_ROOT / "SECURITY.md"
 
 STABLE_UPGRADE_CODE = "B7E4C2A1-9F3D-4B8E-A6C1-2D5E8F0A1B3C"
 
 
 def test_windows_installer_sources_exist() -> None:
-    for path in (IDENTITY, PRODUCT, BUNDLE, BUILD_SCRIPT, INSTALL_SCRIPT, README):
+    for path in (
+        IDENTITY,
+        PRODUCT,
+        BUNDLE,
+        LICENSE_RTF,
+        BUILD_SCRIPT,
+        INSTALL_SCRIPT,
+        README,
+    ):
         assert path.is_file(), path
 
 
@@ -197,3 +208,70 @@ def test_windows_installer_bundle_chains_same_msi() -> None:
     assert "$(var.ProductVersion)" in bundle
     assert 'UpgradeCode="$(var.UpgradeCode)"' in bundle
     assert 'Name="$(var.ProductName)"' in product
+
+
+def test_windows_installer_license_comes_from_repo_license() -> None:
+    """MSI/Burn must show the repo BUSL text, not a invented EULA placeholder."""
+    assert REPO_LICENSE.is_file()
+    assert LICENSE_RTF.is_file()
+    assert SECURITY_MD.is_file()
+    license_text = REPO_LICENSE.read_text(encoding="utf-8")
+    rtf = LICENSE_RTF.read_text(encoding="utf-8")
+    product = PRODUCT.read_text(encoding="utf-8")
+    bundle = BUNDLE.read_text(encoding="utf-8")
+    identity = IDENTITY.read_text(encoding="utf-8")
+    build = BUILD_SCRIPT.read_text(encoding="utf-8")
+    readme = README.read_text(encoding="utf-8")
+
+    assert "Licensor:" in license_text and "Vetcoders" in license_text
+    assert "Business Source License" in license_text
+    assert "Individual developers and small teams" in license_text
+    assert "fewer than 5" in license_text
+    assert "production free of" in license_text
+    assert "Business Source License" in rtf
+    assert "Individual developers and small teams" in rtf
+    assert "fewer than 5" in rtf
+    assert "PLACEHOLDER" not in rtf.upper()
+    assert "EULA" not in rtf
+
+    assert 'Manufacturer = "Vetcoders"' in identity
+    assert "WixUI_Minimal" in product
+    assert "WixUILicenseRtf" in product
+    assert "License.rtf" in product
+    assert "ARPHELPLINK" in product
+    assert "SECURITY.md" in product
+    assert "hello@vetcoders.io" in product
+    assert "ARPCONTACT" in product
+    assert "hello@vetcoders.io" in SECURITY_MD.read_text(encoding="utf-8")
+
+    assert "RtfLicense" in bundle
+    assert 'LicenseFile="License.rtf"' in bundle
+    assert "HyperlinkLicense" not in bundle
+
+    assert "License.rtf" in build
+    assert "WixUIExtension" in build
+    assert "Business Source License" in build
+    assert "License.rtf" in readme
+    assert "BUSL" in readme or "LICENSE" in readme
+
+
+def test_windows_installer_launches_vc_terminal_after_install_not_uninstall() -> None:
+    """Post-install must start vc-terminal; uninstall must not."""
+    product = PRODUCT.read_text(encoding="utf-8")
+    build = BUILD_SCRIPT.read_text(encoding="utf-8")
+    readme = README.read_text(encoding="utf-8")
+    assert 'Id="LaunchVcTerminal"' in product
+    assert "vc-terminal.cmd" in product
+    assert 'Directory="INSTALLDIR"' in product
+    assert 'After="InstallFinalize"' in product
+    assert "LaunchVcTerminal" in product
+    # Launch is gated on NOT REMOVE; uninstall path stays REMOVE~="ALL" only.
+    launch_line = [
+        line
+        for line in product.splitlines()
+        if "LaunchVcTerminal" in line and "Custom" in line
+    ]
+    assert launch_line, product
+    assert any("NOT REMOVE" in line for line in launch_line)
+    assert "LaunchVcTerminal" in build
+    assert "vc-terminal" in readme.lower()

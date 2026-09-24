@@ -182,8 +182,17 @@ Copy-Item $signature (Join-Path $stagingRoot "pack\$packBasename.sig")
 
 $productTemplate = Join-Path $packagingRoot "Product.wxs"
 $bundleTemplate = Join-Path $packagingRoot "Bundle.wxs"
-foreach ($path in @($productTemplate, $bundleTemplate, $identityTemplate)) {
+$licenseRtf = Join-Path $packagingRoot "License.rtf"
+foreach ($path in @($productTemplate, $bundleTemplate, $identityTemplate, $licenseRtf)) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { Die "missing WiX source: $path" }
+}
+$licenseText = Get-Content -LiteralPath $licenseRtf -Raw
+if ($licenseText -notmatch "Business Source License" -or $licenseText -notmatch "Individual developers and small teams") {
+    Die "License.rtf must carry the repo BUSL-1.1 LICENSE text (refusing a placeholder)"
+}
+$repoLicense = Get-Content -LiteralPath (Join-Path $repoRoot "LICENSE") -Raw
+if ($repoLicense -notmatch "Licensor:\s+Vetcoders") {
+    Die "repo LICENSE Licensor must remain Vetcoders"
 }
 
 $work = Join-Path $packagingRoot ".cache\work"
@@ -212,9 +221,16 @@ if ($productBody -notmatch 'InstallScope="perUser"') {
 if ($productBody -notmatch "LocalAppDataFolder") {
     Die "Product.wxs must install under LocalAppDataFolder (per-user portable)"
 }
+if ($productBody -notmatch "WixUILicenseRtf" -or $productBody -notmatch "WixUI_Minimal") {
+    Die "Product.wxs must wire WixUI_Minimal + WixUILicenseRtf for the BUSL license dialog"
+}
+if ($productBody -notmatch "LaunchVcTerminal") {
+    Die "Product.wxs must launch vc-terminal after install"
+}
 $productBody = $productBody.Replace("REPLACE_PACK_BASENAME", $packBasename)
 Write-Utf8NoBom -Path $productWork -Content $productBody
 Copy-Item $bundleTemplate (Join-Path $work "Bundle.wxs")
+Copy-Item $licenseRtf (Join-Path $work "License.rtf")
 
 $msiOut = Join-Path $OutDir "Vibecrafted.msi"
 $exeOut = Join-Path $OutDir "Vibecrafted.exe"
@@ -227,11 +243,12 @@ foreach ($stale in @($msiOut, $exeOut)) {
 Push-Location $work
 try {
     # Bindpaths are light-only: use spaced binder path args (name=path).
-    & $candle -nologo -ext WixUtilExtension -ext WixBalExtension `
+    # WixUIExtension supplies the MSI license dialog; BalExtension supplies Burn RtfLicense.
+    & $candle -nologo -ext WixUtilExtension -ext WixBalExtension -ext WixUIExtension `
         Product.wxs Bundle.wxs -out "$wixObjRoot\"
     if ($LASTEXITCODE -ne 0) { Die "candle failed (exit $LASTEXITCODE)" }
 
-    & $light -nologo -ext WixUtilExtension -ext WixBalExtension `
+    & $light -nologo -ext WixUtilExtension -ext WixBalExtension -ext WixUIExtension `
         -b "staging=$stagingRoot" `
         -b "out=$OutDir" `
         (Join-Path $wixObjRoot "Product.wixobj") `
@@ -239,7 +256,7 @@ try {
     if ($LASTEXITCODE -ne 0) { Die "light MSI failed (exit $LASTEXITCODE)" }
     Assert-NonEmptyFile -Path $msiOut -Label "MSI"
 
-    & $light -nologo -ext WixUtilExtension -ext WixBalExtension `
+    & $light -nologo -ext WixUtilExtension -ext WixBalExtension -ext WixUIExtension `
         -b "staging=$stagingRoot" `
         -b "out=$OutDir" `
         (Join-Path $wixObjRoot "Bundle.wixobj") `

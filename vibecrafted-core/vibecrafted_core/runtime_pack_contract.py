@@ -50,6 +50,8 @@ WINDOWS_X64_MANDATORY_EXECUTABLES = frozenset(
         "aicx",
         "aicx-mcp",
         "vc-server",
+        "vc-frame",
+        "vc-terminal",
     }
 )
 WINDOWS_X64_OPTIONAL_EXECUTABLES = frozenset(
@@ -58,14 +60,10 @@ WINDOWS_X64_OPTIONAL_EXECUTABLES = frozenset(
         "screenscribe",
         "voc",
         "vc-start",
-        "vc-frame",
-        "vc-terminal",
         "vc-server-supervisor",
     }
 )
 WINDOWS_X64_CLASSIFICATIONS = {
-    "vc-frame": "limited-platform-scope",
-    "vc-terminal": "limited-platform-scope",
     "voc": "limited-platform-scope",
     "vc-start": "limited-platform-scope",
     "prview": "release-blocker",
@@ -453,8 +451,8 @@ def _linux_inventory(root: Path, *, platform: str, architecture: str) -> dict[st
 def _windows_executable_path(name: str) -> str:
     if name == "python":
         return "bin/python.exe"
-    if name == "screenscribe":
-        return "bin/screenscribe.cmd"
+    if name in {"screenscribe", "vc-terminal", "vc-frame"}:
+        return f"bin/{name}.cmd"
     return f"bin/{name}.exe"
 
 
