@@ -114,7 +114,7 @@ def seed_runtime_pack(
             REPO_ROOT / relative,
             payload / relative,
             dirs_exist_ok=True,
-            ignore=shutil.ignore_patterns("__pycache__", "*.py[co]"),
+            ignore=shutil.ignore_patterns("__pycache__", "*.py[co]", ".DS_Store"),
         )
     for relative in (
         "vibecrafted-core/vibecrafted_core/deck/vibecrafted",

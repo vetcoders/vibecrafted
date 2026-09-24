@@ -1781,9 +1781,33 @@ def _mock_pack_repo(tmp_path: Path, *, body: str) -> Path:
         REPO_ROOT / "scripts/lib/runtime-pack-selection.sh",
         repo / "scripts/lib/runtime-pack-selection.sh",
     )
-    shutil.copy2(
-        REPO_ROOT / "scripts/lib/release-toolchain-contract.sh",
-        repo / "scripts/lib/release-toolchain-contract.sh",
+    # The release toolchain contract is pinned to absolute CLT paths; hosts
+    # whose CLT dropped ld-classic (27.x) cannot satisfy it. The mock builder
+    # proves Make-target wiring, not the operator's toolchain, so the contract
+    # keeps its pinned version strings but points at stub binaries that report
+    # them.
+    toolchain = repo / "mock-toolchain"
+    toolchain.mkdir()
+    stub_clang = toolchain / "clang"
+    stub_clang.write_text(
+        "#!/bin/sh\nprintf '%s\\n' 'Apple clang version 17.0.0 (clang-1700.6.3.2)'\n",
+        encoding="utf-8",
+    )
+    stub_clang.chmod(0o755)
+    stub_ld = toolchain / "ld-classic"
+    stub_ld.write_text(
+        "#!/bin/sh\nprintf '%s\\n' '@(#)PROGRAM:ld-classic  PROJECT:ld64-956.6'\n",
+        encoding="utf-8",
+    )
+    stub_ld.chmod(0o755)
+    contract = (REPO_ROOT / "scripts/lib/release-toolchain-contract.sh").read_text(
+        encoding="utf-8"
+    )
+    contract = contract.replace(
+        "/Library/Developer/CommandLineTools/usr/bin/clang", str(stub_clang)
+    ).replace("/Library/Developer/CommandLineTools/usr/bin/ld-classic", str(stub_ld))
+    (repo / "scripts/lib/release-toolchain-contract.sh").write_text(
+        contract, encoding="utf-8"
     )
     builder = repo / "mock-builder.sh"
     builder.write_text(
