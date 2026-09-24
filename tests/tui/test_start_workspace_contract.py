@@ -1747,15 +1747,60 @@ def test_unreadable_inventory_refuses_instead_of_creating(
 
     assert _rc(result) == EXIT_INVENTORY, result.stdout + result.stderr
     err = result.stderr
-    assert "could not read the live vc-frame session inventory" in err, err
-    assert "refusing to create mlx-batch-runner" in err
+    # The refusal itself names the reason. The inventory is read in the
+    # caller's shell, so the reason survives to the sentence that refuses;
+    # "unknown reason" was a reason lost in a command substitution.
     if "VC_FRAME_INVENTORY_ERROR" in fault:
-        assert "cannot connect" in err, err
+        reason = "list-sessions exited 2: IPC error: cannot connect"
     else:
-        assert "unrecognized inventory line" in err, err
+        reason = "unrecognized inventory line"
+    assert f"could not read the live vc-frame session inventory ({reason}" in err, err
+    assert "unknown reason" not in err, err
+    assert "refusing to create mlx-batch-runner" in err
     assert "vc-frame list-sessions --no-formatting" in err
     _assert_nothing_mutated(scene.calls())
     _assert_no_workspace_record(scene)
+    assert scene.live() == []
+    assert scene.terminal_launches(wait=0.5) == []
+
+
+def test_unreadable_host_role_names_the_session_in_the_refusal(
+    tmp_path: Path,
+) -> None:
+    """A live session whose materialized layout cannot be read has no provable
+    role. Start refuses (a duplicate host cannot be ruled out) and says which
+    session and which probe failed -- never "unknown reason"."""
+    scene = Scene(tmp_path, project="mlx-batch-runner", live=("host-a",))
+    (scene.table / "live" / "host-a").write_text("", encoding="utf-8")
+    result = _run(scene, "vc-start")
+
+    assert _rc(result) == EXIT_INVENTORY, result.stdout + result.stderr
+    err = result.stderr
+    assert (
+        "could not read the live vc-frame session inventory "
+        "(the runtime role of live session host-a is unreadable"
+    ) in err, err
+    assert "action dump-layout" in err, err
+    assert "unknown reason" not in err, err
+    assert "refusing to create mlx-batch-runner" in err, err
+    _assert_nothing_mutated(scene.calls())
+    assert scene.live() == ["host-a"]
+    assert scene.terminal_launches(wait=0.5) == []
+
+
+def test_missing_host_layout_names_the_host_layout(tmp_path: Path) -> None:
+    """With no host the start creates the host first from layouts/host.kdl.
+    When that file is missing the refusal names it; "operator layout missing"
+    sent the Founder after a file that was present."""
+    scene = Scene(tmp_path, project="mlx-batch-runner")
+    (scene.config_dir / "layouts" / "host.kdl").unlink()
+    result = _run(scene, "vc-start")
+
+    assert _rc(result) == EXIT_INVENTORY, result.stdout + result.stderr
+    err = result.stderr
+    host_layout = scene.config_dir / "layouts" / "host.kdl"
+    assert f"Frame host layout missing: {host_layout}" in err, err
+    assert "operator layout missing" not in err, err
     assert scene.live() == []
     assert scene.terminal_launches(wait=0.5) == []
 

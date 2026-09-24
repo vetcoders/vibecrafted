@@ -1,4 +1,10 @@
-"""PTY admission verifier for W1-02 shared Home console."""
+"""PTY admission verifier for the shared Home console (ZEN landing).
+
+W1-02 (1e07c96d) introduced the Home board; a82a5f64 turned it into the ZEN
+landing: bands Live / Needs attention (working rule) / Failed, one always
+focused input line, arrows select, Enter observes, Esc and H return Home, and
+`r` is a real resume -- so navigation never types into the input or presses r.
+"""
 
 from __future__ import annotations
 
@@ -161,6 +167,9 @@ class VocPty:
                     "--tick-ms",
                     "50",
                     "--no-verify-gate",
+                    # The fixture's waiting/needs-attention runs belong in the
+                    # attention band only under the explicit working rule.
+                    "--attention-working-rule",
                 ],
                 env,
             )
@@ -245,54 +254,53 @@ def test_command_bridge_home_console_pty(voc_binary: Path, tmp_path: Path) -> No
     env = _prepare(tmp_path)
     launch_side = Path(str(Path(env["VOC_LAUNCH_LOG"])) + ".launches")
     session = VocPty(voc_binary, env, 24, 80)
+    down = b"\x1b[B"
     try:
         first = session.drain(2.0)
-        assert "Needs attention" in first, first
-        assert "In progress" in first, first
-        assert "History" in first, first
+        for band in ("Live", "Needs attention", "Failed"):
+            assert band in first, first
         assert "[Global]" in first, first
         assert "waiting on operator" in first, first
+        # Settled history is not an operational row on the ZEN landing.
+        assert "hist-1" not in first, first
         assert "cost 0" not in first.replace("cost —", ""), first
 
         session.send(b"f")
         scoped = session.drain(0.6)
-        assert "[Local]" in scoped, scoped
+        assert _has(scoped, "[Local]"), scoped
         session.send(b"f")
         session.drain(0.4)
 
-        # Global sort: ask-beta, ask-1, work-1 (pane-2), headless-1, hist-1.
-        session.send(b"jj")
-        session.drain(0.2)
-        session.send(b"r")
+        # Global order is band, then agent: work-1 (claude, pane-2) is first.
         started = time.monotonic()
         session.send(b"\r")
         elapsed = None
         screen = ""
         for _ in range(20):
-            screen = session.drain(0.05)
-            if "navigate existing panel" in screen or "Conversation" in screen:
+            screen += session.drain(0.05)
+            if "Conversation" in screen:
                 elapsed = time.monotonic() - started
                 break
-        assert elapsed is not None, session.drain(0.2)
+        screen += session.drain(0.3)
+        assert elapsed is not None, screen + session.drain(0.2)
         assert elapsed <= NAV_BUDGET_S, f"home navigation took {elapsed:.3f}s"
-        assert "no launch" in screen, screen
+        assert _has(screen, "implementing the shared"), screen
+        assert _has(screen, "no launch"), screen
         assert not launch_side.exists()
 
         session.send(b"\x1b")
         home_again = session.drain(0.6)
-        assert "returned to Home" in home_again or "Needs attention" in home_again, (
-            home_again
-        )
+        # Only changed cells are redrawn: the landing's own key hints are
+        # what reappears in full when the conversation pane closes.
+        assert _has(home_again, "Enter observe"), home_again
 
         session.resize(20, 40)
         compact = session.drain(0.8)
         assert _has(compact, "Needs attention"), compact
-        assert _has(compact, "History"), compact
+        assert _has(compact, "Failed"), compact
         session.send(b"\r")
         compact_open = session.drain(0.6)
-        assert _has(compact_open, "Conversation") or _has(
-            compact_open, "navigate existing panel"
-        ), compact_open
+        assert _has(compact_open, "Conversation"), compact_open
         assert _has(compact_open, "implementing the shared") or _has(
             compact_open, "without wrapping"
         ), compact_open
@@ -301,11 +309,12 @@ def test_command_bridge_home_console_pty(voc_binary: Path, tmp_path: Path) -> No
 
         session.resize(24, 80)
         session.drain(0.4)
-        session.send(b"j\r")
+        # headless-1 has no panel route: observing it says so and launches
+        # nothing.
+        session.send(down + b"\r")
         missing = session.drain(0.8)
-        assert _has(missing, "no existing panel") or _has(missing, "not launching"), (
-            missing
-        )
+        assert _has(missing, "no panel route yet"), missing
+        assert _has(missing, "no launch"), missing
         assert not launch_side.exists()
     finally:
         session.close()

@@ -462,11 +462,14 @@ def test_face_child_without_a_terminal_fails_closed(tmp_path: Path, verb: str) -
     calls = scene.calls()
 
     assert "RC=[0]" not in result.stdout, result.stdout + result.stderr
-    # 36614036 gives every face its admitted root as the declared root, so the
-    # child fails closed in the declared-workspace owner with that owner's
-    # words (fac246a7), before vc_frame.sh's later "refusing to start" guard.
-    assert "cannot be entered from this process" in result.stderr, result.stderr
-    assert "nothing was created or launched" in result.stderr, result.stderr
+    # A bare face declares no workspace: only an explicit --root/--repo routes
+    # through the declared-workspace owner (vc_frame.sh
+    # _vetcoders_prepare_operator_runtime). The child drops the stale marker,
+    # finds no live target and no TTY, and the launch owner refuses to start
+    # the tab in a session nobody can see.
+    assert "refusing to start codex in a session nobody can see" in result.stderr, (
+        result.stderr
+    )
     assert "launched in workspace session" not in result.stdout, result.stdout
     assert scene.terminal_launch(wait=1.0) is None
     assert not any(_started(scene, a) for a in _admitted(scene)), _admitted(scene)
