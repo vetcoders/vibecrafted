@@ -5,6 +5,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Added
+
+- Agent quota telemetry on the owned `telemetry` PATH name. Hatch ships
+  `runtime/telemetry/{agy,kimi}-monitor/` (local-only quota/statusline
+  engines; shadow prices stay `api-equiv`). `telemetry agy|kimi
+  line|once|daemon` plus `telemetry line` / `telemetry once` run those
+  engines; `telemetry smoke` is unchanged. voc Mission Control reads
+  `~/.gemini/agy-monitor/runtime/quota.json` and
+  `~/.kimi-code/runtime/quota.json` (override with
+  `VIBECRAFTED_AGY_QUOTA_JSON` / `VIBECRAFTED_KIMI_QUOTA_JSON`). Missing
+  files are silent. Optional LaunchAgents are
+  `com.vetcoders.telemetry.{agy,kimi}` — not Google or Moonshot DNS.
+
 ### Fixed
 
 - Run-state readers now share one derivation: events + snapshot + liveness at

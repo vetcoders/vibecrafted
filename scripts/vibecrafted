@@ -1327,18 +1327,177 @@ cmd_telemetry_help() {
   printf '\n'
   printf '%b⚒%b  %btelemetry%b\n' "$_copper" "$_reset" "$_bold" "$_reset"
   printf '%b─────────────────────────────────────────%b\n' "$_steel" "$_reset"
-  printf '  Smoke the marbles telemetry path through the installed command deck.\n'
+  printf '  Local agent quota engines and the marbles smoke path.\n'
+  printf '  Engines write quota.json on the host; voc reads those files.\n'
+  printf '  Nothing is shipped to a Vibecrafted backend.\n'
   printf '\n'
   printf '%bUsage:%b\n' "$_bold" "$_reset"
+  printf '  telemetry agy line|once|sessions|daemon\n'
+  printf '  telemetry kimi line|once|daemon\n'
+  printf '  telemetry line                        Both statuslines (present engines)\n'
+  printf '  telemetry once                        JSON union { "agy": …, "kimi": … }\n'
   printf '  telemetry smoke [--agent <claude|codex|agy|junie|grok|cursor|kimi>] [--count <n>] [--repo <path>] [--no-watch|--watch]\n'
-  printf '  vibecrafted telemetry smoke [--agent <claude|codex|agy|junie|grok|cursor|kimi>] [--count <n>] [--repo <path>] [--no-watch|--watch]\n'
+  printf '  vibecrafted telemetry <same>\n'
   printf '  (--root is the legacy spelling of --repo; the smoke root may be created on demand)\n'
   printf '\n'
   printf '%bExamples:%b\n' "$_bold" "$_reset"
+  printf '  telemetry agy line\n'
+  printf '  telemetry kimi daemon\n'
+  printf '  telemetry line\n'
   printf '  telemetry smoke --count 1 --no-watch\n'
-  printf '  telemetry smoke --agent claude --count 2 --watch\n'
   printf '\n'
 }
+
+_telemetry_engine_script() {
+  local engine="${1:-}"
+  local package_root script
+  case "$engine" in
+    agy|kimi) ;;
+    *) return 1 ;;
+  esac
+  package_root="$(_package_resource_root 2>/dev/null || true)"
+  [[ -n "$package_root" ]] || return 1
+  script="$package_root/runtime/telemetry/${engine}-monitor/${engine}_monitor.py"
+  [[ -f "$script" ]] || return 1
+  printf '%s\n' "$script"
+}
+
+_telemetry_python() {
+  local candidate
+  for candidate in \
+    "$(_vibecrafted_python 2>/dev/null || true)" \
+    "${VIBECRAFTED_PYTHON:-}" \
+    python3.13 python3.12 python3.11 python3; do
+    [[ -n "$candidate" ]] || continue
+    if [[ "$candidate" == /* ]]; then
+      [[ -x "$candidate" ]] || continue
+    else
+      command -v "$candidate" >/dev/null 2>&1 || continue
+    fi
+    "$candidate" -c 'import tomllib' >/dev/null 2>&1 || continue
+    printf '%s\n' "$candidate"
+    return 0
+  done
+  printf '%b✗%b telemetry requires Python 3.11+ (tomllib).\n' "$_red" "$_reset" >&2
+  return 1
+}
+
+_telemetry_run_engine() {
+  local engine="$1"
+  local mode="${2:-line}"
+  shift 2 || true
+  local script python_bin
+  script="$(_telemetry_engine_script "$engine")" || {
+    printf '%b✗%b telemetry engine not found: %s\n' "$_red" "$_reset" "$engine" >&2
+    return 1
+  }
+  python_bin="$(_telemetry_python)" || return 1
+  if [[ "$mode" == "daemon" ]]; then
+    exec "$python_bin" "$script" "$mode" "$@"
+  fi
+  "$python_bin" "$script" "$mode" "$@"
+}
+
+_telemetry_engine_mode_ok() {
+  local engine="$1"
+  local mode="$2"
+  case "$engine:$mode" in
+    agy:line|agy:once|agy:sessions|agy:daemon) return 0 ;;
+    kimi:line|kimi:once|kimi:daemon|kimi:tui) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+cmd_telemetry_engine() {
+  local engine="$1"
+  local mode
+  shift || true
+  mode="${1:-line}"
+  case "$mode" in
+    help|-h|--help)
+      cmd_telemetry_help
+      return 0
+      ;;
+    -*)
+      mode="line"
+      ;;
+    *)
+      _telemetry_engine_mode_ok "$engine" "$mode" || {
+        printf '%b✗%b unknown %s mode: %s\n' "$_red" "$_reset" "$engine" "$mode" >&2
+        printf '\n' >&2
+        cmd_telemetry_help >&2
+        return 1
+      }
+      shift || true
+      ;;
+  esac
+  _telemetry_run_engine "$engine" "$mode" "$@"
+}
+
+cmd_telemetry_line() {
+  local engine ran=0 rc=0
+  for engine in agy kimi; do
+    _telemetry_engine_script "$engine" >/dev/null 2>&1 || continue
+    ran=1
+    _telemetry_run_engine "$engine" line "$@" || rc=$?
+  done
+  if ((ran == 0)); then
+    printf '%b✗%b telemetry engines not installed in this generation.\n' "$_red" "$_reset" >&2
+    return 1
+  fi
+  return "$rc"
+}
+
+cmd_telemetry_once() {
+  local python_bin tmpdir agy_script kimi_script ran=0
+  python_bin="$(_telemetry_python)" || return 1
+  mkdir -p "$crafted_home/tmp"
+  tmpdir="$(mktemp -d "$crafted_home/tmp/telemetry-once.XXXXXX")"
+  printf 'null\n' > "$tmpdir/agy.json"
+  printf 'null\n' > "$tmpdir/kimi.json"
+  if agy_script="$(_telemetry_engine_script agy)"; then
+    ran=1
+    "$python_bin" "$agy_script" once "$@" > "$tmpdir/agy.json" 2>/dev/null || true
+    [[ -s "$tmpdir/agy.json" ]] || printf 'null\n' > "$tmpdir/agy.json"
+  fi
+  if kimi_script="$(_telemetry_engine_script kimi)"; then
+    ran=1
+    "$python_bin" "$kimi_script" once "$@" > "$tmpdir/kimi.json" 2>/dev/null || true
+    [[ -s "$tmpdir/kimi.json" ]] || printf 'null\n' > "$tmpdir/kimi.json"
+  fi
+  if ((ran == 0)); then
+    rm -rf "$tmpdir"
+    printf '%b✗%b telemetry engines not installed in this generation.\n' "$_red" "$_reset" >&2
+    return 1
+  fi
+  AGY_FILE="$tmpdir/agy.json" KIMI_FILE="$tmpdir/kimi.json" "$python_bin" - <<'PY'
+import json, os, pathlib
+
+def load(path: str):
+    raw = pathlib.Path(path).read_text(encoding="utf-8").strip()
+    if not raw or raw == "null":
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return {"error": "invalid engine output"}
+
+print(
+    json.dumps(
+        {
+            "agy": load(os.environ["AGY_FILE"]),
+            "kimi": load(os.environ["KIMI_FILE"]),
+        },
+        indent=2,
+        ensure_ascii=False,
+    )
+)
+PY
+  local rc=$?
+  rm -rf "$tmpdir"
+  return "$rc"
+}
+
 
 _telemetry_smoke_root() {
   local requested_root="${1:-}"
@@ -1512,6 +1671,15 @@ cmd_telemetry() {
       ;;
     smoke)
       cmd_telemetry_smoke "$@"
+      ;;
+    agy|kimi)
+      cmd_telemetry_engine "$subcommand" "$@"
+      ;;
+    line)
+      cmd_telemetry_line "$@"
+      ;;
+    once)
+      cmd_telemetry_once "$@"
       ;;
     *)
       printf '%b✗%b Unknown telemetry subcommand: %s\n' "$_red" "$_reset" "$subcommand" >&2
@@ -4860,8 +5028,12 @@ cmd_help_full() {
   printf '\n'
   printf '%b=== TELEMETRY ===%b\n' "$_bold" "$_reset"
   printf '\n'
-  printf '  %btelemetry smoke%b [flags]                Smoke the headless marbles telemetry path\n' "$_cyan" "$_reset"
-  printf '  %bvibecrafted telemetry smoke%b [flags]    Same entrypoint through the main deck\n' "$_cyan" "$_reset"
+  printf '  %btelemetry agy%b line|once|sessions|daemon   Google Antigravity quota / statusline\n' "$_cyan" "$_reset"
+  printf '  %btelemetry kimi%b line|once|daemon           Kimi Code quota / statusline\n' "$_cyan" "$_reset"
+  printf '  %btelemetry line%b                            Both statuslines (present engines)\n' "$_cyan" "$_reset"
+  printf '  %btelemetry once%b                            JSON union of both quota snapshots\n' "$_cyan" "$_reset"
+  printf '  %btelemetry smoke%b [flags]                   Smoke the headless marbles telemetry path\n' "$_cyan" "$_reset"
+  printf '  %bvibecrafted telemetry%b <same>               Same entrypoint through the main deck\n' "$_cyan" "$_reset"
   printf '\n'
   printf '%b=== OPERATOR SURFACE ===%b\n' "$_bold" "$_reset"
   printf '\n'
@@ -4904,7 +5076,7 @@ cmd_help_full() {
   printf '  %bvibecrafted tui%b                       Launch the Rust operator console\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted dispatch%b <file.toml>      Deterministic dispatch.v1 supervisor\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted dispatch%b run ...          Async lifecycle supervisor for one worker\n' "$_cyan" "$_reset"
-  printf '  %bvibecrafted telemetry smoke%b [flags]  Smoke the marbles telemetry path\n' "$_cyan" "$_reset"
+  printf '  %bvibecrafted telemetry%b [agy|kimi|line|once|smoke]  Agent quota engines + marbles smoke\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted resume%b <agent> [flags]    Resume an existing agent session\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted resume-session%b <agent> --agent-session-id <id>  Tracked headless continue\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted message%b --run-id <id> --file <path>            Codex queue only; no worker spawn\n' "$_cyan" "$_reset"
@@ -4951,6 +5123,8 @@ cmd_help_full() {
   printf '  vibecrafted dashboard workflow\n'
   printf '  vibecrafted dispatch analyzer-truth.dispatch.toml --doctor\n'
   printf '  vibecrafted dispatch run --run-id demo --root . --report report.md --transcript trace.log -- bash worker.sh\n'
+  printf '  telemetry agy line\n'
+  printf '  telemetry kimi line\n'
   printf '  vibecrafted telemetry smoke --count 1 --no-watch\n'
   printf '  vibecrafted workflow claude --prompt "Plan and implement auth"\n'
   printf '  vibecrafted workflow claude --file /path/to/brief.md\n'
