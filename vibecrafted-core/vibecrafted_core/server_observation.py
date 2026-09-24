@@ -17,6 +17,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from .runtime_paths import vibecrafted_home
 from .server_config import load_server_config
 
 # The /observe endpoint can take >3s when the server revalidates a busy run
@@ -32,8 +33,37 @@ class ServerObservationError(RuntimeError):
     """The configured vc-server could not satisfy an observation request."""
 
 
+class ForeignControlPlaneError(ServerObservationError):
+    """The configured vc-server answers for a control plane that is not ours."""
+
+
 def _origin() -> str:
     return load_server_config().public_url.rstrip("/")
+
+
+def _require_own_control_plane(payload: dict[str, Any]) -> dict[str, Any]:
+    """Accept a server answer only when it speaks for this caller's home.
+
+    The origin comes from the operator-wide ``~/.config/vibecrafted/config.toml``
+    while ``VIBECRAFTED_HOME`` is per caller (isolated homes, ``vc_run_observe``
+    with a ``home`` override, tests). A vc-server serving another home cannot
+    know this caller's runs, so its ``found: false`` is not evidence. Every
+    ``/api/control`` payload stamps ``control_plane``; a missing stamp is not
+    proof of identity either.
+    """
+    expected = (vibecrafted_home() / "control_plane").resolve(strict=False)
+    reported = str(payload.get("control_plane") or "").strip()
+    if not reported:
+        raise ForeignControlPlaneError(
+            f"vc-server at {_origin()} omitted its control_plane identity; "
+            f"expected {expected}"
+        )
+    actual = Path(reported).expanduser().resolve(strict=False)
+    if actual != expected:
+        raise ForeignControlPlaneError(
+            f"vc-server at {_origin()} serves control plane {actual}, not {expected}"
+        )
+    return payload
 
 
 def observe_timeout_seconds() -> float:
@@ -85,7 +115,7 @@ def _observation_from_control_core(run_id: str) -> dict[str, Any] | None:
     binary = _control_observe_bin()
     if binary is None:
         return None
-    home = str(os.environ.get("VIBECRAFTED_HOME") or Path.home() / ".vibecrafted")
+    home = str(vibecrafted_home())
     try:
         completed = subprocess.run(
             [
@@ -177,14 +207,14 @@ def _request_json(path: str, *, timeout: float | None) -> dict[str, Any]:
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             body = {}
         if exc.code == 404 and isinstance(body, dict):
-            return body
+            return _require_own_control_plane(body)
         # 503 used to mean "server down". After writer-revalidation fail-closed
         # it also meant "projection lag on a live run". If the body still names
         # the run, return it; otherwise let the caller fall back locally.
         if isinstance(body, dict) and (
             body.get("found") is True or isinstance(body.get("run"), dict)
         ):
-            return body
+            return _require_own_control_plane(body)
         raise ServerObservationError(
             f"vc-server observation endpoint returned HTTP {exc.code}"
         ) from exc
@@ -194,6 +224,7 @@ def _request_json(path: str, *, timeout: float | None) -> dict[str, Any]:
         ) from exc
     if not isinstance(payload, dict):
         raise ServerObservationError("vc-server returned a non-object observation")
+    _require_own_control_plane(payload)
     payload.setdefault("source", "vc-server-compute_view")
     return payload
 

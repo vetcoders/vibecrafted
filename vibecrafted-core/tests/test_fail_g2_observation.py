@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 from pathlib import Path
@@ -514,3 +515,165 @@ def test_observe_http_stamps_source_when_server_omits_it(
 
     assert payload["source"] == "vc-server-compute_view"
     assert (payload.get("run") or {}).get("state") == "active"
+
+
+def _serve_http_payload(
+    monkeypatch: pytest.MonkeyPatch, payload: dict[str, Any]
+) -> None:
+    """Answer every observation request with ``payload`` as a vc-server would."""
+
+    def _respond(*_args: Any, **_kwargs: Any) -> io.BytesIO:
+        return io.BytesIO(json.dumps(payload).encode("utf-8"))
+
+    monkeypatch.setattr(server_observation, "_origin", lambda: "http://127.0.0.1:9")
+    monkeypatch.setattr(server_observation.urllib.request, "urlopen", _respond)
+
+
+def _fake_control_observe(tmp_path: Path, run_id: str) -> Path:
+    binary = tmp_path / "control-observe"
+    binary.write_text(
+        "#!/bin/sh\n"
+        "cat <<'EOF'\n"
+        '{"schema":"vibecrafted.run-observation.v1","run_id":"' + run_id + '",'
+        '"found":true,"terminal":false,"worker_alive":true,"process_truth":"live",'
+        '"run":{"run_id":"' + run_id + '","state":"active"}}\n'
+        "EOF\n",
+        encoding="utf-8",
+    )
+    binary.chmod(0o755)
+    return binary
+
+
+def test_observe_refuses_a_server_that_serves_another_control_plane(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The server origin is operator-wide; VIBECRAFTED_HOME is per caller.
+
+    A vc-server that answers for a different control plane cannot know this
+    caller's runs, so its ``found: false`` is not evidence. The reader must
+    fall back to control-core against its own home instead of reporting a
+    live run as missing.
+    """
+    home = tmp_path / "caller" / ".vibecrafted"
+    (home / "control_plane").mkdir(parents=True)
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    foreign = tmp_path / "operator" / ".vibecrafted" / "control_plane"
+    _serve_http_payload(
+        monkeypatch,
+        {
+            "schema": "vibecrafted.run-observation.v1",
+            "run_id": "probe",
+            "control_plane": str(foreign),
+            "found": False,
+            "terminal": False,
+            "worker_alive": None,
+            "process_truth": "unknown",
+            "run": None,
+        },
+    )
+    monkeypatch.setenv(
+        "VIBECRAFTED_CONTROL_OBSERVE", str(_fake_control_observe(tmp_path, "probe"))
+    )
+
+    payload = server_observation.observe_run("probe")
+
+    assert payload["found"] is True
+    assert payload["source"] == "control_core_compute_view"
+    assert payload["process_truth"] == "live"
+    assert "ForeignControlPlaneError" in payload["writer_revalidation"]
+
+
+def test_observe_refuses_a_server_answer_without_control_plane_identity(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = tmp_path / ".vibecrafted"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    _serve_http_payload(
+        monkeypatch,
+        {"schema": "vibecrafted.run-observation.v1", "run_id": "probe", "found": False},
+    )
+    monkeypatch.setenv(
+        "VIBECRAFTED_CONTROL_OBSERVE", str(_fake_control_observe(tmp_path, "probe"))
+    )
+
+    payload = server_observation.observe_run("probe")
+
+    assert payload["found"] is True
+    assert payload["source"] == "control_core_compute_view"
+
+
+def test_observe_trusts_the_server_that_serves_this_control_plane(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = tmp_path / ".vibecrafted"
+    (home / "control_plane").mkdir(parents=True)
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    _disable_control_observe(monkeypatch)
+    _serve_http_payload(
+        monkeypatch,
+        {
+            "schema": "vibecrafted.run-observation.v1",
+            "run_id": "probe",
+            "control_plane": str(home / "control_plane"),
+            "found": True,
+            "terminal": False,
+            "worker_alive": True,
+            "process_truth": "live",
+            "run": {"run_id": "probe", "state": "active"},
+        },
+    )
+
+    payload = server_observation.observe_run("probe")
+
+    assert payload["source"] == "vc-server-compute_view"
+    assert payload["found"] is True
+    assert (payload.get("run") or {}).get("state") == "active"
+
+
+def test_list_runs_refuses_runs_from_another_control_plane(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``--last`` must never pick a run that lives in someone else's home."""
+    home = tmp_path / "caller" / ".vibecrafted"
+    (home / "control_plane").mkdir(parents=True)
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    _serve_http_payload(
+        monkeypatch,
+        {
+            "control_plane": str(
+                tmp_path / "operator" / ".vibecrafted" / "control_plane"
+            ),
+            "count": 1,
+            "runs": [{"run_id": "foreign-run", "agent": "codex"}],
+        },
+    )
+    monkeypatch.setattr(
+        control_plane,
+        "sync_state",
+        lambda: {"active_runs": [{"run_id": "own-run", "agent": "codex"}]},
+    )
+
+    assert server_observation.resolve_run_id("codex", "", last=True) == "own-run"
+
+
+def test_control_core_fallback_observes_the_home_the_identity_check_uses(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The fallback eye and the server identity check read one home, not two."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("VIBECRAFTED_HOME", "~/vc-home-probe")
+    _boom_observe(monkeypatch)
+    binary = tmp_path / "control-observe"
+    binary.write_text(
+        "#!/bin/sh\n"
+        'printf \'{"schema":"vibecrafted.run-observation.v1","run_id":"probe",'
+        '"found":true,"run":{"run_id":"probe","home":"%s"}}\\n\' "$2"\n',
+        encoding="utf-8",
+    )
+    binary.chmod(0o755)
+    monkeypatch.setenv("VIBECRAFTED_CONTROL_OBSERVE", str(binary))
+
+    payload = server_observation.observe_run("probe")
+
+    assert payload["source"] == "control_core_compute_view"
+    assert (payload.get("run") or {}).get("home") == str(tmp_path / "vc-home-probe")
