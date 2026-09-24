@@ -25,6 +25,17 @@ APP = REPO_ROOT / "vibecrafted-app/shell-agent/app/Vibecrafted"
 SHELL = REPO_ROOT / "vibecrafted-app/shell-agent"
 HELPER = REPO_ROOT / "scripts/vc-app-update.sh"
 
+# tests/conftest.py strips every VIBECRAFTED_* variable before each test
+# (fe814585), so the signed-fixture roots named in _fail_missing_fixture never
+# reached _signed_search_roots. They are deliberate launch-time inputs, never
+# ambient launcher env: capture them at import, before that isolation runs.
+_FIXTURE_ROOT_KEYS = (
+    "VIBECRAFTED_UPDATE_FIXTURE_ROOT",
+    "VIBECRAFTED_UPDATE_PRIOR_FIXTURE_ROOT",
+)
+_LAUNCH_FIXTURE_ROOTS = {key: os.environ.get(key, "") for key in _FIXTURE_ROOT_KEYS}
+
+
 _FRAME_IDENTITY_ENV = (
     "VIBECRAFTED_OPERATOR_SESSION",
     "VIBECRAFTED_WORKER_SESSION",
@@ -687,11 +698,9 @@ def _fail_missing_fixture(detail: str) -> None:
 
 def _signed_search_roots() -> list[Path]:
     roots: list[Path] = []
-    for key in (
-        "VIBECRAFTED_UPDATE_FIXTURE_ROOT",
-        "VIBECRAFTED_UPDATE_PRIOR_FIXTURE_ROOT",
-    ):
-        configured = os.environ.get(key)
+    for key in _FIXTURE_ROOT_KEYS:
+        # A root a test sets itself wins over the launch-time value.
+        configured = os.environ.get(key) or _LAUNCH_FIXTURE_ROOTS[key]
         if configured:
             roots.append(Path(configured))
     roots.append(REPO_ROOT / "dist")
