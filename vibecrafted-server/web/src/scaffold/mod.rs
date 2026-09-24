@@ -446,12 +446,15 @@ pub mod api {
             }
         };
         if !doctor_output.status.success() {
-            let detail = [doctor_output.stderr.as_slice(), doctor_output.stdout.as_slice()]
-                .into_iter()
-                .find(|bytes| !bytes.is_empty())
-                .map(|bytes| String::from_utf8_lossy(bytes).trim().to_string())
-                .filter(|text| !text.is_empty())
-                .unwrap_or_else(|| "dispatch doctor refused the plan".to_string());
+            let detail = [
+                doctor_output.stderr.as_slice(),
+                doctor_output.stdout.as_slice(),
+            ]
+            .into_iter()
+            .find(|bytes| !bytes.is_empty())
+            .map(|bytes| String::from_utf8_lossy(bytes).trim().to_string())
+            .filter(|text| !text.is_empty())
+            .unwrap_or_else(|| "dispatch doctor refused the plan".to_string());
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
@@ -464,10 +467,8 @@ pub mod api {
 
         let spawn_python = python.clone();
         let spawn_file = file.clone();
-        match tokio::task::spawn_blocking(move || {
-            spawn_dispatch_door(&spawn_python, &spawn_file)
-        })
-        .await
+        match tokio::task::spawn_blocking(move || spawn_dispatch_door(&spawn_python, &spawn_file))
+            .await
         {
             Ok(Ok(pid)) => (
                 StatusCode::ACCEPTED,
@@ -515,12 +516,8 @@ pub mod api {
         if !path.is_absolute() {
             return Err("generation Python must be an absolute path".to_string());
         }
-        let metadata = std::fs::metadata(&path).map_err(|_| {
-            format!(
-                "generation Python is not available: {}",
-                path.display()
-            )
-        })?;
+        let metadata = std::fs::metadata(&path)
+            .map_err(|_| format!("generation Python is not available: {}", path.display()))?;
         if !metadata.is_file() {
             return Err(format!(
                 "generation Python is not a file: {}",
@@ -617,10 +614,7 @@ pub mod api {
 
     fn dispatch_command(python: &Path, file: &Path, doctor: bool) -> Command {
         let mut command = Command::new(python);
-        command
-            .arg("-c")
-            .arg(DISPATCH_BOOTSTRAP)
-            .arg("dispatch");
+        command.arg("-c").arg(DISPATCH_BOOTSTRAP).arg("dispatch");
         if doctor {
             command.arg("--doctor");
         }
@@ -2932,13 +2926,13 @@ button.md-status.md-status-done .md-status-glyph{color:var(--status-success)}
             let html = render_editor(&fixture());
 
             assert!(
-                html.contains(
-                    "white-space:nowrap;overflow-wrap:normal;word-break:normal"
-                ),
+                html.contains("white-space:nowrap;overflow-wrap:normal;word-break:normal"),
                 "the chip itself must never wrap, whatever the column width"
             );
             assert!(
-                html.contains("button.md-status{display:inline-flex;align-items:center;flex:0 0 auto;"),
+                html.contains(
+                    "button.md-status{display:inline-flex;align-items:center;flex:0 0 auto;"
+                ),
                 "the chip must not shrink below its content inside a table cell"
             );
             assert!(
@@ -2946,7 +2940,9 @@ button.md-status.md-status-done .md-status-glyph{color:var(--status-success)}
                 "the bracket glyph must be non-shrinking and keep its literal spacing"
             );
             assert!(
-                html.contains("button.md-status .md-status-label{flex:0 0 auto;white-space:nowrap;"),
+                html.contains(
+                    "button.md-status .md-status-label{flex:0 0 auto;white-space:nowrap;"
+                ),
                 "the state label must not wrap away from its glyph"
             );
             // Belt and braces: even with the stylesheet stripped, the todo glyph
@@ -3057,11 +3053,15 @@ button.md-status.md-status-done .md-status-glyph{color:var(--status-success)}
             let html = render_editor(&fixture());
 
             assert!(
-                html.contains("@media (prefers-reduced-motion: reduce){button.md-status{transition:none}}"),
+                html.contains(
+                    "@media (prefers-reduced-motion: reduce){button.md-status{transition:none}}"
+                ),
                 "chip motion must be opt-out"
             );
             assert!(
-                html.contains("@media (prefers-contrast: more){button.md-status{border-width:1.5px}}"),
+                html.contains(
+                    "@media (prefers-contrast: more){button.md-status{border-width:1.5px}}"
+                ),
                 "increased contrast must thicken the chip stroke, as the native deck does"
             );
             assert!(
@@ -3091,12 +3091,14 @@ button.md-status.md-status-done .md-status-glyph{color:var(--status-success)}
             let css = editor_css();
 
             for fossil in [
-                "#5e7f47", "#22321f", // hand-mixed checkpoint green
-                "#4d7041",            // hand-mixed done green
-                "rgba(184,239,125",   // lime accent of a previous brand
-                "rgba(77,155,142",    // teal accent of a previous brand
-                "rgba(43,48,51",      // slab rule
-                "#1b1914", "#1b1617", // slab card fills
+                "#5e7f47",
+                "#22321f",          // hand-mixed checkpoint green
+                "#4d7041",          // hand-mixed done green
+                "rgba(184,239,125", // lime accent of a previous brand
+                "rgba(77,155,142",  // teal accent of a previous brand
+                "rgba(43,48,51",    // slab rule
+                "#1b1914",
+                "#1b1617", // slab card fills
             ] {
                 assert!(
                     !css.contains(fossil),
@@ -3237,7 +3239,9 @@ button.md-status.md-status-done .md-status-glyph{color:var(--status-success)}
                 "checkpoint and save carry the same fill weight"
             );
             assert!(
-                css.contains("border-radius:var(--radius-surface);padding:8px 12px;font-weight:700"),
+                css.contains(
+                    "border-radius:var(--radius-surface);padding:8px 12px;font-weight:700"
+                ),
                 "the commit action takes the deck's 8px radius"
             );
         }
@@ -3273,14 +3277,14 @@ button.md-status.md-status-done .md-status-glyph{color:var(--status-success)}
             let html = render_editor(&fixture());
 
             for contract in [
-                "replaceStatusOcc",   // rewrites the raw markdown occurrence
-                "statusRequestSeq",   // reconciles out-of-order status POSTs
-                "STATUS_CYCLE",       // the state machine, unchanged
-                "data-mark",          // the source marker read back off the DOM
+                "replaceStatusOcc", // rewrites the raw markdown occurrence
+                "statusRequestSeq", // reconciles out-of-order status POSTs
+                "STATUS_CYCLE",     // the state machine, unchanged
+                "data-mark",        // the source marker read back off the DOM
                 "nextMark",
                 "save-artifact-btn",
                 "checkpoint-form",
-                "name=note",          // the checkpoint note actually posted
+                "name=note", // the checkpoint note actually posted
             ] {
                 assert!(
                     html.contains(contract),
