@@ -1,13 +1,18 @@
-"""Quick cmd is one quiet, lasting command shell; help stays on request."""
+"""Quick cmd is one shot unless the pane is pinned; help stays on request."""
 
 from __future__ import annotations
 
+import json
 import signal
 import subprocess
 import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+BANNER_LINES = (
+    "01 This is one shot ephemeral shell unless you PIN ● it. Type command and forget.",
+    "02 You can open a real shell by pressing [+] in the tab bar or using a Ctrl+N anytime.",
+)
 WRAPPER = (
     REPO_ROOT
     / "vibecrafted-core"
@@ -19,7 +24,101 @@ WRAPPER = (
 PROFILE = REPO_ROOT / "config" / "vc-terminal" / "interactive.zsh"
 
 
-def test_quick_cmd_wrapper_exports_quiet_start_and_prints_no_banner(
+def _assert_banner_once(stdout: str) -> None:
+    for line in BANNER_LINES:
+        assert stdout.count(line) == 1, stdout
+    first = stdout.index(BANNER_LINES[0])
+    second = stdout.index(BANNER_LINES[1])
+    assert first < second
+    assert "in ~" not in stdout
+    assert "op@" not in stdout
+    assert "Explore commands" not in stdout
+    assert "Vibecrafted --help" not in stdout
+
+
+def _install_frame(
+    bin_dir: Path,
+    log: Path,
+    panes: object | None,
+    *,
+    exit_code: int = 0,
+) -> None:
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    listed = ""
+    if panes is not None:
+        payload = bin_dir / "panes.json"
+        payload.write_text(json.dumps(panes, indent=2) + "\n", encoding="utf-8")
+        listed = f'  *" list-panes "*) cat "{payload}" ;;\n'
+    frame = bin_dir / "vc-frame"
+    frame.write_text(
+        "#!/bin/sh\n"
+        f'printf "frame %s\\n" "$*" >> "{log}"\n'
+        'case " $* " in\n'
+        f"{listed}"
+        "esac\n"
+        f"exit {exit_code}\n"
+    )
+    frame.chmod(0o755)
+
+
+def _install_probe(path: Path, log: Path, *, interrupt: bool = False) -> None:
+    killer = ""
+    if interrupt:
+        killer = 'case "$3" in tail*) kill -INT "$PPID"; kill -INT $$ ;; esac\n'
+    path.write_text(
+        "#!/bin/sh\n"
+        f'printf "output of %s\\n" "$3"\n'
+        f'printf "ran %s\\n" "$3" >> "{log}"\n'
+        f"{killer}"
+        'case "$3" in fail) exit 3 ;; esac\n'
+        "exit 0\n"
+    )
+    path.chmod(0o755)
+
+
+def _run_quick_cmd(
+    tmp_path: Path,
+    typed: str,
+    *,
+    panes: object | None = None,
+    pane_id: str | None = "terminal_18",
+    pane_env: str = "VC_FRAME_PANE_ID",
+    install_frame: bool = True,
+    frame_exit: int = 0,
+    interrupt: bool = False,
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    """Drive the wrapper with a probe shell and a vc-frame list-panes stub."""
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "events.log"
+    if install_frame:
+        _install_frame(bin_dir, log, panes, exit_code=frame_exit)
+    probe = tmp_path / "probe-shell"
+    _install_probe(probe, log, interrupt=interrupt)
+    env = {
+        "HOME": str(tmp_path),
+        "USER": "op",
+        "SHELL": str(probe),
+        "PATH": f"{bin_dir}:/usr/bin:/bin" if install_frame else "/usr/bin:/bin",
+    }
+    if pane_id is not None:
+        env[pane_env] = pane_id
+    result = subprocess.run(
+        ["bash", str(WRAPPER)],
+        input=typed,
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=tmp_path,
+        timeout=10,
+        check=False,
+    )
+    events = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+    return result, events
+
+
+def test_quick_cmd_wrapper_exports_quiet_start_and_prints_the_banner(
     tmp_path: Path,
 ) -> None:
     probe = tmp_path / "probe-shell"
@@ -29,7 +128,7 @@ def test_quick_cmd_wrapper_exports_quiet_start_and_prints_no_banner(
     probe.chmod(0o755)
     result = subprocess.run(
         ["bash", str(WRAPPER)],
-        input=":\n",
+        input=":\nsecond\n",
         capture_output=True,
         text=True,
         env={
@@ -43,11 +142,9 @@ def test_quick_cmd_wrapper_exports_quiet_start_and_prints_no_banner(
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert "QUIET=1" in result.stdout
-    assert "in ~" not in result.stdout
-    assert "op@" not in result.stdout
-    assert "Explore commands" not in result.stdout
-    assert "Vibecrafted --help" not in result.stdout
+    assert result.stdout.count("QUIET=1") == 1
+    _assert_banner_once(result.stdout)
+    assert result.stdout.index(BANNER_LINES[0]) < result.stdout.index("QUIET=1")
 
 
 def test_quick_cmd_wrapper_closes_own_pane_by_id_when_input_ends(
@@ -79,7 +176,9 @@ def test_quick_cmd_wrapper_closes_own_pane_by_id_when_input_ends(
         check=False,
     )
     assert result.returncode == 0, result.stderr
+    _assert_banner_once(result.stdout)
     recorded = log.read_text(encoding="utf-8")
+    assert "action list-panes --json --state" in recorded
     assert "action close-pane --pane-id terminal_18" in recorded
     assert "action close-pane\n" not in recorded
 
@@ -87,153 +186,221 @@ def test_quick_cmd_wrapper_closes_own_pane_by_id_when_input_ends(
 def test_quick_cmd_wrapper_does_not_close_focus_when_pane_id_is_absent(
     tmp_path: Path,
 ) -> None:
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    frame = bin_dir / "vc-frame"
-    log = tmp_path / "frame.log"
-    frame.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{log}"\nexit 0\n')
-    frame.chmod(0o755)
-    probe = tmp_path / "probe-shell"
-    probe.write_text("#!/bin/sh\nexit 0\n")
-    probe.chmod(0o755)
-    result = subprocess.run(
-        ["bash", str(WRAPPER)],
-        input="true\n",
-        capture_output=True,
-        text=True,
-        env={
-            "HOME": str(tmp_path),
-            "USER": "op",
-            "SHELL": str(probe),
-            "PATH": f"{bin_dir}:/usr/bin:/bin",
-        },
-        cwd=tmp_path,
-        timeout=10,
-        check=False,
+    result, events = _run_quick_cmd(
+        tmp_path,
+        "true\nsecond\n",
+        panes=[{"id": "terminal_18", "is_pinned": True}],
+        pane_id=None,
     )
-    assert result.returncode == 0, result.stderr
-    assert not log.exists()
-
-
-def _run_quick_cmd(
-    tmp_path: Path, typed: str
-) -> tuple[subprocess.CompletedProcess[str], list[str]]:
-    """Drive the wrapper with a probe shell and a vc-frame stub sharing one log."""
-
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    log = tmp_path / "events.log"
-    frame = bin_dir / "vc-frame"
-    frame.write_text(f'#!/bin/sh\nprintf "frame %s\\n" "$*" >> "{log}"\nexit 0\n')
-    frame.chmod(0o755)
-    probe = tmp_path / "probe-shell"
-    # Invoked as: probe -l -c "<command>"; prints its output and records the run.
-    probe.write_text(
-        f'#!/bin/sh\nprintf "output of %s\\n" "$3"\nprintf "ran %s\\n" "$3" >> "{log}"\n'
-        'case "$3" in fail) exit 3 ;; esac\nexit 0\n'
-    )
-    probe.chmod(0o755)
-    result = subprocess.run(
-        ["bash", str(WRAPPER)],
-        input=typed,
-        capture_output=True,
-        text=True,
-        env={
-            "HOME": str(tmp_path),
-            "USER": "op",
-            "SHELL": str(probe),
-            "PATH": f"{bin_dir}:/usr/bin:/bin",
-            "VC_FRAME_PANE_ID": "terminal_18",
-        },
-        cwd=tmp_path,
-        timeout=10,
-        check=False,
-    )
-    events = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
-    return result, events
-
-
-def test_quick_cmd_keeps_its_pane_after_a_command_so_the_output_stays_readable(
-    tmp_path: Path,
-) -> None:
-    """2026-09-24, Founder: "not multiplying" is one thing; killing the quick
-    shell right after a command that returns output is another. The pane stays
-    for the next command and closes only when the operator leaves it."""
-
-    result, events = _run_quick_cmd(tmp_path, "git status\nfail\nls\n")
 
     assert result.returncode == 0, result.stderr
+    _assert_banner_once(result.stdout)
+    assert events == ["ran true"]
+    assert "close-pane" not in "\n".join(events)
+    assert "list-panes" not in "\n".join(events)
+
+
+def test_unpinned_quick_cmd_closes_after_one_command(tmp_path: Path) -> None:
+    panes = [{"id": "terminal_18", "is_pinned": False, "is_plugin": False}]
+    result, events = _run_quick_cmd(tmp_path, "git status\nls\n", panes=panes)
+
+    assert result.returncode == 0, result.stderr
+    _assert_banner_once(result.stdout)
     assert events == [
         "ran git status",
-        "ran fail",
-        "ran ls",
+        "frame action list-panes --json --state",
         "frame action close-pane --pane-id terminal_18",
     ]
     assert "output of git status" in result.stdout
-    assert "output of ls" in result.stdout
-    # A failing command is reported and does not end the shell.
-    assert "exit 3" in result.stdout
+    assert "output of ls" not in result.stdout
+    assert "action close-pane\n" not in "\n".join(events) + "\n"
 
 
-def test_quick_cmd_exit_leaves_and_closes_only_its_own_pane(tmp_path: Path) -> None:
-    result, events = _run_quick_cmd(tmp_path, "pwd\nexit\nnever\n")
+def test_pinned_quick_cmd_keeps_two_commands(tmp_path: Path) -> None:
+    panes = [{"id": "terminal_18", "is_pinned": True, "is_plugin": False}]
+    result, events = _run_quick_cmd(tmp_path, "git status\nls\n", panes=panes)
 
     assert result.returncode == 0, result.stderr
-    assert events == ["ran pwd", "frame action close-pane --pane-id terminal_18"]
-
-
-def test_ctrl_c_stops_the_command_not_the_quick_cmd_shell(tmp_path: Path) -> None:
-    """Ctrl-C reaches the whole foreground group: the running command and the
-    wrapper. The command stops; the shell and its pane stay for the next one."""
-
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    log = tmp_path / "events.log"
-    frame = bin_dir / "vc-frame"
-    frame.write_text(f'#!/bin/sh\nprintf "frame %s\\n" "$*" >> "{log}"\nexit 0\n')
-    frame.chmod(0o755)
-    probe = tmp_path / "probe-shell"
-    probe.write_text(
-        f'#!/bin/sh\nprintf "ran %s\\n" "$3" >> "{log}"\n'
-        'case "$3" in tail*) kill -INT "$PPID"; kill -INT $$ ;; esac\nexit 0\n'
+    _assert_banner_once(result.stdout)
+    assert result.stdout.index(BANNER_LINES[1]) < result.stdout.index(
+        "output of git status"
     )
-    probe.chmod(0o755)
-    result = subprocess.run(
-        ["bash", str(WRAPPER)],
-        input="tail -f log\nls\n",
-        capture_output=True,
-        text=True,
-        env={
-            "HOME": str(tmp_path),
-            "USER": "op",
-            "SHELL": str(probe),
-            "PATH": f"{bin_dir}:/usr/bin:/bin",
-            "VC_FRAME_PANE_ID": "terminal_18",
-        },
-        cwd=tmp_path,
-        timeout=10,
-        check=False,
+    assert events == [
+        "ran git status",
+        "frame action list-panes --json --state",
+        "ran ls",
+        "frame action list-panes --json --state",
+        "frame action close-pane --pane-id terminal_18",
+    ]
+    assert "output of ls" in result.stdout
+
+
+def test_missing_is_pinned_field_is_unpinned(tmp_path: Path) -> None:
+    panes = [{"id": "terminal_18", "is_plugin": False, "title": "shell"}]
+    result, events = _run_quick_cmd(tmp_path, "one\ntwo\n", panes=panes)
+
+    assert result.returncode == 0, result.stderr
+    assert events == [
+        "ran one",
+        "frame action list-panes --json --state",
+        "frame action close-pane --pane-id terminal_18",
+    ]
+    assert "ran two" not in events
+
+
+def test_duplicate_pane_id_follows_the_terminal_not_the_plugin(
+    tmp_path: Path,
+) -> None:
+    """Live list-panes repeats an id: a plugin first, then the shell pane."""
+
+    panes = [
+        {"id": "terminal_18", "is_plugin": True, "is_pinned": True, "title": "bar"},
+        {"id": "terminal_18", "is_plugin": False, "is_pinned": False, "title": "sh"},
+    ]
+    _result, events = _run_quick_cmd(tmp_path, "one\ntwo\n", panes=panes)
+
+    assert events == [
+        "ran one",
+        "frame action list-panes --json --state",
+        "frame action close-pane --pane-id terminal_18",
+    ]
+
+
+def test_numeric_pane_id_matches_list_panes_and_stays_when_pinned(
+    tmp_path: Path,
+) -> None:
+    panes = [
+        {"id": 0, "is_plugin": True, "is_pinned": False, "title": "link"},
+        {"id": 0, "is_plugin": False, "is_pinned": True, "title": "shell"},
+    ]
+    _result, events = _run_quick_cmd(
+        tmp_path,
+        "one\ntwo\n",
+        panes=panes,
+        pane_id="0",
     )
 
-    events = log.read_text(encoding="utf-8").splitlines()
+    assert events == [
+        "ran one",
+        "frame action list-panes --json --state",
+        "ran two",
+        "frame action list-panes --json --state",
+        "frame action close-pane --pane-id 0",
+    ]
+
+
+def test_quick_cmd_exit_on_a_pinned_pane_closes_only_its_own_pane(
+    tmp_path: Path,
+) -> None:
+    panes = [{"id": "terminal_18", "is_pinned": True, "is_plugin": False}]
+    result, events = _run_quick_cmd(tmp_path, "pwd\nexit\nnever\n", panes=panes)
+
+    assert result.returncode == 0, result.stderr
+    assert events == [
+        "ran pwd",
+        "frame action list-panes --json --state",
+        "frame action close-pane --pane-id terminal_18",
+    ]
+
+
+def test_failing_command_prints_exit_status_then_unpinned_pane_closes(
+    tmp_path: Path,
+) -> None:
+    panes = [{"id": "terminal_18", "is_pinned": False}]
+    result, events = _run_quick_cmd(tmp_path, "fail\nls\n", panes=panes)
+
+    assert result.returncode == 0, result.stderr
+    assert "[exit 3]" in result.stdout
+    assert events == [
+        "ran fail",
+        "frame action list-panes --json --state",
+        "frame action close-pane --pane-id terminal_18",
+    ]
+
+
+def test_missing_vc_frame_is_unpinned_and_skips_the_second_command(
+    tmp_path: Path,
+) -> None:
+    result, events = _run_quick_cmd(
+        tmp_path,
+        "one\ntwo\n",
+        install_frame=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    _assert_banner_once(result.stdout)
+    assert events == ["ran one"]
+
+
+def test_zellij_pane_id_closes_that_pane_when_vc_frame_pane_id_is_unset(
+    tmp_path: Path,
+) -> None:
+    panes = [{"id": "terminal_9", "is_pinned": False, "is_plugin": False}]
+    _result, events = _run_quick_cmd(
+        tmp_path,
+        "one\ntwo\n",
+        panes=panes,
+        pane_id="terminal_9",
+        pane_env="ZELLIJ_PANE_ID",
+    )
+
+    assert events == [
+        "ran one",
+        "frame action list-panes --json --state",
+        "frame action close-pane --pane-id terminal_9",
+    ]
+
+
+def test_ctrl_c_stops_the_command_and_an_unpinned_pane_closes(
+    tmp_path: Path,
+) -> None:
+    """Ctrl-C stops the running command. It does not kill the wrapper; the
+    one-shot rule then closes an unpinned pane instead of reading the next line."""
+
+    panes = [{"id": "terminal_18", "is_pinned": False, "is_plugin": False}]
+    result, events = _run_quick_cmd(
+        tmp_path,
+        "tail -f log\nls\n",
+        panes=panes,
+        interrupt=True,
+    )
+
     assert result.returncode == 0, result.stderr
     assert events == [
         "ran tail -f log",
+        "frame action list-panes --json --state",
+        "frame action close-pane --pane-id terminal_18",
+    ]
+
+
+def test_ctrl_c_on_a_pinned_pane_stops_only_the_running_command(
+    tmp_path: Path,
+) -> None:
+    panes = [{"id": "terminal_18", "is_pinned": True, "is_plugin": False}]
+    result, events = _run_quick_cmd(
+        tmp_path,
+        "tail -f log\nls\n",
+        panes=panes,
+        interrupt=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert events == [
+        "ran tail -f log",
+        "frame action list-panes --json --state",
         "ran ls",
+        "frame action list-panes --json --state",
         "frame action close-pane --pane-id terminal_18",
     ]
 
 
 def test_ctrl_c_at_an_empty_prompt_keeps_the_quick_cmd_shell(tmp_path: Path) -> None:
     bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
     log = tmp_path / "events.log"
-    frame = bin_dir / "vc-frame"
-    frame.write_text(f'#!/bin/sh\nprintf "frame %s\\n" "$*" >> "{log}"\nexit 0\n')
-    frame.chmod(0o755)
+    panes = [{"id": "terminal_18", "is_pinned": False, "is_plugin": False}]
+    _install_frame(bin_dir, log, panes)
     probe = tmp_path / "probe-shell"
-    probe.write_text(f'#!/bin/sh\nprintf "ran %s\\n" "$3" >> "{log}"\nexit 0\n')
-    probe.chmod(0o755)
+    _install_probe(probe, log)
     process = subprocess.Popen(
         ["bash", str(WRAPPER)],
         stdin=subprocess.PIPE,
@@ -251,11 +418,12 @@ def test_ctrl_c_at_an_empty_prompt_keeps_the_quick_cmd_shell(tmp_path: Path) -> 
     )
     time.sleep(0.5)  # let the wrapper reach its read
     process.send_signal(signal.SIGINT)
-    _, stderr = process.communicate(input="ls\n", timeout=10)
+    _stdout, stderr = process.communicate(input="ls\n", timeout=10)
 
     assert process.returncode == 0, stderr
     assert log.read_text(encoding="utf-8").splitlines() == [
         "ran ls",
+        "frame action list-panes --json --state",
         "frame action close-pane --pane-id terminal_18",
     ]
 
@@ -264,6 +432,8 @@ def test_quick_cmd_wrapper_is_a_command_loop_not_an_exec_login_shell() -> None:
     text = WRAPPER.read_text(encoding="utf-8")
     assert "VIBECRAFTED_QUIET_START=1" in text
     assert "close-pane --pane-id" in text
+    assert "list-panes --json --state" in text
+    assert "is_pinned" in text
     assert 'exec "${SHELL:-/bin/zsh}" -l' not in text
     assert "action close-pane\n" not in text
 
