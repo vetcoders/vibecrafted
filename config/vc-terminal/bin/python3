@@ -1,15 +1,40 @@
 #!/bin/sh
-# Product-door python3: exec the generation interpreter already pinned by
-# vc-terminal-product-entry (VIBECRAFTED_PYTHON). Not host /usr/bin/python3
-# 3.9.6. Lives under ZDOTDIR/bin so env/command/shebang see it without putting
-# generation bin or a public ~/.local/bin/python3 on PATH.
-bin="${VIBECRAFTED_PYTHON:-}"
-if [ -z "$bin" ] || [ "${bin#/}" = "$bin" ] || [ ! -x "$bin" ] || [ -d "$bin" ]; then
-  printf '%s\n' 'Vibecrafted: python3 needs VIBECRAFTED_PYTHON as an absolute generation interpreter (>=3.11). Host python3 (macOS 3.9.6) is not a product interpreter.' >&2
-  exit 127
+# Product-door python3: the product's own CPython (>=3.11), not host
+# /usr/bin/python3 3.9.6. Lives under ZDOTDIR/bin so env/command/shebang see it
+# without putting generation bin or a public ~/.local/bin/python3 on PATH.
+#
+# The door brings its own interpreter; it never takes python away from the host:
+#   1. VIBECRAFTED_PYTHON, pinned by vc-terminal-product-entry;
+#   2. the active generation named by the runtime pointer -- a copied PATH (a
+#      Frame pane, an IDE, an agent's shell snapshot) carries this directory but
+#      not the pin, and a pin can outlive a pruned generation;
+#   3. with no product interpreter on this host, the next python on PATH.
+# Resolution is silent: python3 simply works. A wrong pin is a product defect
+# for `vibecrafted doctor`, not a message on every python3 call.
+name="${0##*/}"
+product_python() {
+  [ -n "$1" ] && [ "${1#/}" != "$1" ] && [ -x "$1" ] && [ ! -d "$1" ] \
+    && "$1" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1
+}
+pin="${VIBECRAFTED_PYTHON:-}"
+if product_python "$pin"; then
+  exec "$pin" "$@"
 fi
-if ! "$bin" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
-  printf '%s\n' 'Vibecrafted: VIBECRAFTED_PYTHON is not Python >=3.11. Host python3 (macOS 3.9.6) is not a product interpreter.' >&2
-  exit 127
+current="${VIBECRAFTED_RUNTIME_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted}/tools/vibecrafted-current/bin/python3"
+if product_python "$current"; then
+  exec "$current" "$@"
 fi
-exec "$bin" "$@"
+door="$(cd "$(dirname "$0")" 2>/dev/null && pwd -P)"
+host="$(printf '%s\n' "$PATH" | tr ':' '\n' | while IFS= read -r entry; do
+  [ -n "$entry" ] || continue
+  [ "$(cd "$entry" 2>/dev/null && pwd -P)" = "$door" ] && continue
+  if [ -x "$entry/$name" ] && [ ! -d "$entry/$name" ]; then
+    printf '%s\n' "$entry/$name"
+    break
+  fi
+done)"
+if [ -n "$host" ]; then
+  exec "$host" "$@"
+fi
+printf 'Vibecrafted: no product interpreter (%s) and no other %s on PATH.\n' "$current" "$name" >&2
+exit 127

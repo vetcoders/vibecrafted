@@ -51,25 +51,25 @@ _vc_terminal_apply_fallback_prompt() {
 _vc_terminal_python_door="$HOME/.config/vibecrafted/vc-terminal/bin"
 
 _vc_terminal_bind_owned_python() {
-  # Typed python / python3 exec VIBECRAFTED_PYTHON (generation CPython >=3.11).
-  # env/command/shebang use ZDOTDIR/bin wrappers on PATH. Do not prepend
-  # generation bin. Do not write python3 into ~/.local/bin.
+  # Typed python / python3 go through the same door as env/command/shebang:
+  # the ZDOTDIR/bin wrapper resolves the product interpreter (pin, then the
+  # active generation) and steps aside for the host when there is none. Do not
+  # prepend generation bin. Do not write python3 into ~/.local/bin.
+  #
+  # A door shell reached without the product entry (a Frame pane, a copied
+  # environment) pins the active generation it can see, so children inherit a
+  # working interpreter instead of a PATH whose python3 has nothing behind it.
+  if [[ -z "${VIBECRAFTED_PYTHON:-}" || ! -x "${VIBECRAFTED_PYTHON:-}" ]]; then
+    local vc_current="${VIBECRAFTED_RUNTIME_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted}/tools/vibecrafted-current/bin/python3"
+    [[ -x "$vc_current" ]] && export VIBECRAFTED_PYTHON="${vc_current:A}"
+  fi
 
   unalias python python3 2>/dev/null || true
   python3() {
-    local bin="${VIBECRAFTED_PYTHON:-}"
-    if [[ -z "$bin" || "$bin" != /* || ! -x "$bin" || -d "$bin" ]]; then
-      print -u2 -r -- 'Vibecrafted: typed python3 needs VIBECRAFTED_PYTHON as an absolute generation interpreter (>=3.11). Host python3 (macOS 3.9.6) is not a product interpreter.'
-      return 127
-    fi
-    if ! "$bin" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
-      print -u2 -r -- 'Vibecrafted: VIBECRAFTED_PYTHON is not Python >=3.11. Host python3 (macOS 3.9.6) is not a product interpreter.'
-      return 127
-    fi
-    "$bin" "$@"
+    "$_vc_terminal_python_door/python3" "$@"
   }
   python() {
-    python3 "$@"
+    "$_vc_terminal_python_door/python" "$@"
   }
 }
 

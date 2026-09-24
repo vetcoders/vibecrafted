@@ -798,46 +798,145 @@ def test_product_shell_typed_python3_uses_generation_not_host(
     assert door_python_after.st_mtime_ns == door_python_before.st_mtime_ns
 
 
-def test_product_shell_typed_python3_refuses_host_without_generation(
+def _install_active_generation(home: Path, version: str = "4.3.1") -> Path:
+    """The runtime pointer the installer publishes: tools/vibecrafted-current."""
+
+    runtime = home / ".local/share/vibecrafted"
+    python = runtime / "releases" / version / "bin" / "python3"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    (runtime / "tools").mkdir(parents=True, exist_ok=True)
+    (runtime / "tools/vibecrafted-current").symlink_to(runtime / "releases" / version)
+    return python
+
+
+def _door_python(
+    home: Path,
+    *arguments: str,
+    path: str,
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run the door shim the way a copied PATH does: no product shell, no pin."""
+
+    environment = {"HOME": str(home), "PATH": path}
+    if extra_env:
+        environment.update(extra_env)
+    return subprocess.run(
+        [str(home / ".config/vibecrafted/vc-terminal/bin/python3"), *arguments],
+        capture_output=True,
+        text=True,
+        env=environment,
+        cwd=home,
+        timeout=15,
+        check=False,
+    )
+
+
+@_NEEDS_GENERATION_PYTHON
+def test_door_python_resolves_the_active_generation_when_the_pin_did_not_travel(
     tmp_path: Path,
 ) -> None:
-    """Missing or host-old VIBECRAFTED_PYTHON must not exec macOS 3.9.6."""
+    """2026-09-24: an agent's shell snapshot carried the door on PATH but not
+    VIBECRAFTED_PYTHON, and every python3 -- Claude Code hooks, pre-commit --
+    exited 127. The door owns its interpreter; it must not depend on one
+    environment variable surviving every copy of PATH."""
+
+    product = _stage_product_profile(tmp_path)
+    hostile_bin = tmp_path / "hostile-bin"
+    _write_hostile_host_python(hostile_bin)
+    generation_python = _install_active_generation(tmp_path)
+    probe = "import sys; print('used=' + sys.executable)"
+
+    copied_path = _door_python(
+        tmp_path, "-c", probe, path=f"{product / 'bin'}:{hostile_bin}:/usr/bin:/bin"
+    )
+    assert copied_path.returncode == 0, copied_path.stderr
+    used = copied_path.stdout.split("used=", 1)[1].strip()
+    assert Path(used).resolve() == generation_python.resolve()
+
+    # A pin to a generation that was since pruned is not an answer either.
+    stale_pin = _door_python(
+        tmp_path,
+        "-c",
+        probe,
+        path=f"{product / 'bin'}:{hostile_bin}:/usr/bin:/bin",
+        extra_env={"VIBECRAFTED_PYTHON": str(tmp_path / "releases/gone/bin/python3")},
+    )
+    assert stale_pin.returncode == 0, stale_pin.stderr
+    used = stale_pin.stdout.split("used=", 1)[1].strip()
+    assert Path(used).resolve() == generation_python.resolve()
+
+    typed = _zsh_profile(
+        tmp_path,
+        (
+            'source "$HOME/.config/vibecrafted/vc-terminal/interactive.zsh"; '
+            f'python3 -c "{probe}"; '
+            'print -r -- "pin=$VIBECRAFTED_PYTHON"'
+        ),
+        path=f"{hostile_bin}:/usr/bin:/bin",
+    )
+    assert typed.returncode == 0, typed.stderr
+    assert "HOST_PYTHON_SELECTED" not in typed.stdout + typed.stderr
+    used = typed.stdout.split("used=", 1)[1].splitlines()[0]
+    assert Path(used).resolve() == generation_python.resolve()
+    # The door shell pins what it resolved, so its children inherit it.
+    pin = typed.stdout.split("pin=", 1)[1].splitlines()[0]
+    assert Path(pin).resolve() == generation_python.resolve()
+
+
+def test_door_python_steps_aside_on_a_host_without_any_generation(
+    tmp_path: Path,
+) -> None:
+    """Isolation, not confiscation: with no generation installed the door hands
+    python3 to the next interpreter on PATH instead of refusing it."""
+
+    product = _stage_product_profile(tmp_path)
+    hostile_bin = tmp_path / "hostile-bin"
+    _write_hostile_host_python(hostile_bin)
+
+    result = _door_python(
+        tmp_path, "--version", path=f"{product / 'bin'}:{hostile_bin}:/usr/bin:/bin"
+    )
+    assert "HOST_PYTHON_SELECTED" in result.stdout
+    assert result.returncode == 79
+
+    typed = _zsh_profile(
+        tmp_path,
+        (
+            'source "$HOME/.config/vibecrafted/vc-terminal/interactive.zsh"; '
+            "python3 --version; "
+            'print -r -- "typed_exit=$?"'
+        ),
+        path=f"{hostile_bin}:/usr/bin:/bin",
+    )
+    assert "HOST_PYTHON_SELECTED" in typed.stdout
+    assert "typed_exit=79" in typed.stdout
+
+
+def test_door_python_silently_skips_a_pin_below_3_11(tmp_path: Path) -> None:
+    """A pin to an old interpreter is passed over for the next candidate without
+    a message on every call; python3 keeps working."""
 
     _stage_product_profile(tmp_path)
     hostile_bin = tmp_path / "hostile-bin"
     hostile = _write_hostile_host_python(hostile_bin)
-    missing = _zsh_profile(
+    generation_python = _install_active_generation(tmp_path)
+    old_pin = _zsh_profile(
         tmp_path,
         (
             'source "$HOME/.config/vibecrafted/vc-terminal/interactive.zsh"; '
-            "python3 -c 'print(1)'; "
-            'print -r -- "missing_exit=$?"; '
-            "/usr/bin/env python3 -c 'print(1)'; "
-            'print -r -- "env_missing_exit=$?"'
-        ),
-        path=f"{hostile_bin}:/usr/bin:/bin",
-    )
-    assert missing.returncode == 0, missing.stderr
-    assert "missing_exit=127" in missing.stdout
-    assert "env_missing_exit=127" in missing.stdout
-    assert "HOST_PYTHON_SELECTED" not in missing.stdout + missing.stderr
-    assert "VIBECRAFTED_PYTHON" in missing.stderr
-    assert "3.9.6" in missing.stderr
-
-    host_pin = _zsh_profile(
-        tmp_path,
-        (
-            'source "$HOME/.config/vibecrafted/vc-terminal/interactive.zsh"; '
-            "python3 -c 'print(1)'; "
-            'print -r -- "host_pin_exit=$?"'
+            'python3 -c "import sys; print(\\"used=\\" + sys.executable)"; '
+            'print -r -- "old_pin_exit=$?"'
         ),
         path=f"{hostile_bin}:/usr/bin:/bin",
         extra_env={"VIBECRAFTED_PYTHON": str(hostile)},
     )
-    assert host_pin.returncode == 0, host_pin.stderr
-    assert "host_pin_exit=127" in host_pin.stdout
-    assert "HOST_PYTHON_SELECTED" not in host_pin.stdout + host_pin.stderr
-    assert "not Python >=3.11" in host_pin.stderr
+    assert "old_pin_exit=0" in old_pin.stdout, old_pin.stderr
+    assert "HOST_PYTHON_SELECTED" not in old_pin.stdout + old_pin.stderr
+    assert "VIBECRAFTED_PYTHON" not in old_pin.stderr
+    assert "interpreter" not in old_pin.stderr
+    used = old_pin.stdout.split("used=", 1)[1].splitlines()[0]
+    assert Path(used).resolve() == generation_python.resolve()
 
 
 def test_two_line_prompt_without_starship_and_with_fake_starship(
