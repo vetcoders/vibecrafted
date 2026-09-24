@@ -22,8 +22,8 @@ _pane="${VC_FRAME_PANE_ID:-${ZELLIJ_PANE_ID:-}}"
 
 _banner() {
   printf '%s\n' \
-    '01 This is one shot ephemeral shell unless you PIN ● it. Type command and forget.' \
-    '02 You can open a real shell by pressing [+] in the tab bar or using a Ctrl+N anytime.'
+    'This is one shot ephemeral shell unless you PIN ● it. Type command and forget.' \
+    'You can open a real shell by pressing [+] in the tab bar or using a Ctrl+N anytime.'
 }
 
 _close_self() {

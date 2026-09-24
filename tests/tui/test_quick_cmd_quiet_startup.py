@@ -10,8 +10,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BANNER_LINES = (
-    "01 This is one shot ephemeral shell unless you PIN ● it. Type command and forget.",
-    "02 You can open a real shell by pressing [+] in the tab bar or using a Ctrl+N anytime.",
+    "This is one shot ephemeral shell unless you PIN ● it. Type command and forget.",
+    "You can open a real shell by pressing [+] in the tab bar or using a Ctrl+N anytime.",
 )
 WRAPPER = (
     REPO_ROOT
@@ -25,8 +25,10 @@ PROFILE = REPO_ROOT / "config" / "vc-terminal" / "interactive.zsh"
 
 
 def _assert_banner_once(stdout: str) -> None:
+    # Whole lines, exactly as the Founder wrote them: no numbering, no prefix.
+    lines = stdout.splitlines()
     for line in BANNER_LINES:
-        assert stdout.count(line) == 1, stdout
+        assert lines.count(line) == 1, stdout
     first = stdout.index(BANNER_LINES[0])
     second = stdout.index(BANNER_LINES[1])
     assert first < second
