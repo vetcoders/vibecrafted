@@ -78,6 +78,44 @@ while ($versionParts.Count -lt 4) { $versionParts += "0" }
 $productVersion = ($versionParts[0..3] -join ".")
 $packBasename = [System.IO.Path]::GetFileName($Pack)
 
+function Get-BaseSemVer([string]$Value) {
+    $trimmed = ($Value -replace '[\r\n]+', '').Trim()
+    if ($trimmed -match '^(\d+\.\d+\.\d+)') { return $Matches[1] }
+    return $null
+}
+
+$repoVersion = Get-BaseSemVer $versionRaw
+if (-not $repoVersion) {
+    Die "VERSION must be SemVer major.minor.patch: $versionRaw"
+}
+# Carrier identity: basename SemVer and payload VibecraftedRuntime/VERSION must
+# both agree with repo VERSION. Never stamp ProductVersion onto a skew carrier.
+if ($packBasename -notmatch '^Vibecrafted_RuntimePack_(\d+\.\d+\.\d+(?:[+-][0-9A-Za-z.-]+)?)-') {
+    Die "Runtime Pack basename must carry SemVer after Vibecrafted_RuntimePack_: $packBasename"
+}
+$packNameVersion = Get-BaseSemVer $Matches[1]
+if (-not $packNameVersion) {
+    Die "Runtime Pack basename SemVer unreadable: $packBasename"
+}
+$tar = Get-Command tar -ErrorAction SilentlyContinue
+if (-not $tar) {
+    Die "tar is required to read Runtime Pack payload VERSION (VibecraftedRuntime/VERSION)"
+}
+$payloadVersionRaw = & $tar.Source -xOf $Pack "VibecraftedRuntime/VERSION" 2>$null
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace([string]$payloadVersionRaw)) {
+    Die "Runtime Pack payload VERSION missing or unreadable: VibecraftedRuntime/VERSION in $Pack"
+}
+$payloadVersion = Get-BaseSemVer ([string]$payloadVersionRaw)
+if (-not $payloadVersion) {
+    Die "Runtime Pack payload VERSION must be SemVer major.minor.patch: $payloadVersionRaw"
+}
+if ($packNameVersion -ne $payloadVersion) {
+    Die "Runtime Pack basename version ($packNameVersion) disagrees with payload VERSION ($payloadVersion)"
+}
+if ($payloadVersion -ne $repoVersion) {
+    Die "Runtime Pack VERSION ($payloadVersion) disagrees with repo VERSION ($repoVersion); refusing to stamp ProductVersion=$productVersion onto a $payloadVersion carrier"
+}
+
 $identityTemplate = Join-Path $packagingRoot "Identity.wxi"
 $identityText = Get-Content -LiteralPath $identityTemplate -Raw
 if ($identityText -notmatch [regex]::Escape($stableUpgradeCode)) {

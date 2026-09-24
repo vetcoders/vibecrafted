@@ -6,6 +6,9 @@ operator LOCALAPPDATA Vibecrafted home.
 
 from __future__ import annotations
 
+import os
+import subprocess
+import tarfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -101,6 +104,73 @@ def test_windows_installer_fails_closed_without_pack() -> None:
     assert "light MSI failed" in build
     assert "light Burn EXE failed" in build
     assert "WiX 3.14 download failed" in build
+
+
+def test_windows_installer_fails_closed_on_pack_version_skew() -> None:
+    """Builder must refuse stamping repo ProductVersion onto a skew carrier."""
+    build = BUILD_SCRIPT.read_text(encoding="utf-8")
+    assert "VibecraftedRuntime/VERSION" in build
+    assert "Get-BaseSemVer" in build
+    assert "disagrees with repo VERSION" in build
+    assert "refusing to stamp ProductVersion=" in build
+    assert "disagrees with payload VERSION" in build
+    assert "Vibecrafted_RuntimePack_" in build
+    # Gate runs before WiX candle so a skew pack never reaches the linker.
+    gate_at = build.index("refusing to stamp ProductVersion=")
+    candle_at = build.index("& $candle")
+    assert gate_at < candle_at
+
+
+def test_windows_installer_refuses_skewed_pack_tarball(tmp_path: Path) -> None:
+    """Behavioral lock: pack 9.9.9 must not stamp against repo VERSION."""
+    if os.name != "nt":
+        return
+    repo_version = (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    assert repo_version
+    skew = "9.9.9"
+    assert skew != repo_version.split("+", 1)[0].split("-", 1)[0]
+
+    pack = tmp_path / f"Vibecrafted_RuntimePack_{skew}-win32-x64.tar.gz"
+    root = tmp_path / "payload"
+    (root / "VibecraftedRuntime").mkdir(parents=True)
+    (root / "VibecraftedRuntime" / "VERSION").write_text(f"{skew}\n", encoding="ascii")
+    with tarfile.open(pack, "w:gz") as archive:
+        archive.add(
+            root / "VibecraftedRuntime",
+            arcname="VibecraftedRuntime",
+            recursive=True,
+        )
+    (tmp_path / f"{pack.name}.sha256").write_text(
+        f"{'0' * 64}  {pack.name}\n", encoding="ascii"
+    )
+    (tmp_path / f"{pack.name}.sig").write_bytes(b"\x00" * 64)
+
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(BUILD_SCRIPT),
+            "-Pack",
+            str(pack),
+            "-OutDir",
+            str(tmp_path / "out"),
+        ],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    blob = (result.stdout or "") + (result.stderr or "")
+    compact = "".join(blob.split())
+    assert result.returncode != 0, blob
+    assert "disagreeswithrepoVERSION" in compact, blob
+    assert "refusingtostampProductVersion=" in compact, blob
+    assert skew in compact, blob
+    assert not (tmp_path / "out" / "Vibecrafted.msi").exists()
+    assert not (tmp_path / "out" / "Vibecrafted.exe").exists()
 
 
 def test_windows_installer_cut_does_not_require_voc_radio() -> None:
