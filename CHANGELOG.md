@@ -17,6 +17,8 @@ line|once|daemon` plus `telemetry line` / `telemetry once` run those
   `VIBECRAFTED_AGY_QUOTA_JSON` / `VIBECRAFTED_KIMI_QUOTA_JSON`). Missing
   files are silent. Optional LaunchAgents are
   `com.vetcoders.telemetry.{agy,kimi}` — not Google or Moonshot DNS.
+  The usage page (`/usage`) now leads with a live quota board over those
+  same files (`GET /api/usage/quota`). Cost & usage underneath is unchanged.
 
 ### Fixed
 

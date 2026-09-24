@@ -968,6 +968,15 @@ pub fn UsagePage() -> impl IntoView {
                     "Cost & usage",
                     "Canonical per-run usage and cost from runtime metadata. Missing measurements remain unknown; currencies and provider credits are never combined.",
                 )}
+                <section class="quota-board" aria-label="Live agent quota" data-quota-board>
+                    <div class="control-panel-head">
+                        <h2>"Live quota"</h2>
+                        <span id="quota-status">"local monitors"</span>
+                    </div>
+                    <div id="quota-agents" class="quota-agents"></div>
+                    <p class="control-plane-meta">"agy-monitor and kimi-monitor. Prices are api-equiv, not a bill. A missing file stays quiet."</p>
+                    <script inner_html=quota_dashboard_script()></script>
+                </section>
                 <form id="usage-filter-form" class="usage-filter-bar" aria-label="Usage filters">
                     <label><span>"Window"</span><select id="usage-window" name="window">
                         <option value="24h">"24 hours"</option>
@@ -1009,6 +1018,87 @@ pub fn UsagePage() -> impl IntoView {
             </div>
         </ServerFrame>
     }
+}
+
+fn quota_dashboard_script() -> &'static str {
+    r#"(() => {
+  const root = document.querySelector('[data-quota-board]');
+  const host = document.getElementById('quota-agents');
+  const status = document.getElementById('quota-status');
+  if (!root || !host || !status) return;
+  const ageText = (seconds) => {
+    if (seconds === null || seconds === undefined) return '';
+    if (seconds < 60) return seconds + 's ago';
+    if (seconds < 3600) return Math.floor(seconds / 60) + 'm ago';
+    return Math.floor(seconds / 3600) + 'h ago';
+  };
+  const money = (value) => value === null || value === undefined ? '' : '≈$' + Number(value).toFixed(3) + ' api-equiv';
+  const card = (agent) => {
+    const article = document.createElement('article');
+    article.className = 'quota-card';
+    article.dataset.status = agent.status || 'unknown';
+    const head = document.createElement('div');
+    head.className = 'quota-card-head';
+    const name = document.createElement('h3');
+    name.textContent = agent.name || agent.id;
+    const pill = document.createElement('span');
+    pill.className = 'quota-pill';
+    pill.dataset.status = agent.status || 'unknown';
+    pill.textContent = agent.status || 'unknown';
+    head.append(name, pill);
+    const headline = document.createElement('p');
+    headline.className = 'quota-headline';
+    headline.textContent = agent.headline || '—';
+    const detail = document.createElement('p');
+    detail.className = 'quota-detail';
+    detail.textContent = agent.detail || '';
+    article.append(head, headline, detail);
+    const bars = document.createElement('div');
+    bars.className = 'quota-bars';
+    for (const bar of agent.bars || []) {
+      const row = document.createElement('div');
+      row.className = 'quota-bar';
+      const label = document.createElement('span');
+      label.textContent = bar.label || bar.id;
+      const track = document.createElement('div');
+      track.className = 'quota-track';
+      track.dataset.level = bar.level || 'unknown';
+      const fill = document.createElement('div');
+      fill.className = 'quota-fill';
+      const ratio = typeof bar.ratio === 'number' ? Math.max(0, Math.min(1, bar.ratio)) : 0;
+      fill.style.setProperty('--ratio', String(ratio));
+      track.append(fill);
+      const text = document.createElement('span');
+      text.textContent = bar.text || '';
+      row.append(label, track, text);
+      bars.append(row);
+    }
+    if ((agent.bars || []).length) article.append(bars);
+    const meta = document.createElement('p');
+    meta.className = 'quota-meta';
+    const bits = [agent.model, agent.tokens !== null && agent.tokens !== undefined ? String(agent.tokens) + ' tok' : '', money(agent.cost_usd), ageText(agent.age_s), agent.source].filter(Boolean);
+    meta.textContent = bits.join(' · ');
+    article.append(meta);
+    return article;
+  };
+  const render = (payload) => {
+    host.replaceChildren();
+    for (const agent of payload.agents || []) host.append(card(agent));
+    status.textContent = payload.generated_at ? 'Updated ' + payload.generated_at : 'local monitors';
+  };
+  const load = async () => {
+    try {
+      const response = await fetch('/api/usage/quota', { credentials: 'same-origin', cache: 'no-store' });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || ('HTTP ' + response.status));
+      render(payload);
+    } catch (error) {
+      status.textContent = 'Live quota unavailable: ' + error.message;
+    }
+  };
+  load();
+  setInterval(load, 15000);
+})();"#
 }
 
 fn usage_dashboard_script() -> &'static str {
@@ -2573,6 +2663,10 @@ mod tests {
         assert!(usage.contains("Cost &amp; usage"));
         assert!(usage.contains("id=\"usage-filter-form\""));
         assert!(usage.contains("/api/usage?"));
+        assert!(usage.contains("data-quota-board"));
+        assert!(usage.contains("/api/usage/quota"));
+        assert!(usage.contains("Live quota"));
+        assert!(usage.contains("api-equiv"));
         assert!(usage.contains("vibecrafted.usage-report.v1"));
         assert!(usage.contains("No canonical runtime runs match this window and filter."));
         assert!(!usage.contains("innerHTML"));

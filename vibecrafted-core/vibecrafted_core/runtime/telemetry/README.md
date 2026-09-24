@@ -34,6 +34,12 @@ Mission Control fleet health reads the quota JSON files on-read (no daemon
 required for the panel). Missing files are silent — the operator may not run
 that agent. Daemons keep the files fresh.
 
+## Web
+
+`vc-server` `/usage` leads with the same files: two cards (Antigravity, Kimi)
+above Cost & usage. `GET /api/usage/quota`. Shadow prices stay `api-equiv`.
+A missing file is a quiet card, not an alarm.
+
 ## LaunchAgents (optional)
 
 Templates:
