@@ -10,7 +10,7 @@ UpgradeCode; same-version upgrades are refused. Uninstall runs only when
 `REMOVE=ALL` and fails closed (`Return=check`).
 
 License and publisher identity come from the repo `LICENSE` (BUSL-1.1,
-Licensor Vetcoders) via `packaging/windows/License.rtf`. MSI shows
+Licensor LibraxisAI) via `packaging/windows/License.rtf`. MSI shows
 `WixUI_Minimal` + `WixUILicenseRtf`; Burn uses `RtfLicense` with `LicenseFile`.
 ARP help link points at `SECURITY.md` (`hello@vetcoders.io`). After a successful
 install the MSI launches `vc-terminal.cmd` (frame-backed); launch never runs on

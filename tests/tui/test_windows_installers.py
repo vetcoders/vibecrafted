@@ -223,18 +223,26 @@ def test_windows_installer_license_comes_from_repo_license() -> None:
     build = BUILD_SCRIPT.read_text(encoding="utf-8")
     readme = README.read_text(encoding="utf-8")
 
-    assert "Licensor:" in license_text and "Vetcoders" in license_text
+    assert "Licensor:" in license_text and "LibraxisAI" in license_text
+    assert "Licensor:             LibraxisAI" in license_text
+    assert "Licensor:             Vetcoders" not in license_text
+    assert "The Licensed Work is (c) 2024-2026 LibraxisAI." in license_text
     assert "Business Source License" in license_text
     assert "Individual developers and small teams" in license_text
     assert "fewer than 5" in license_text
     assert "production free of" in license_text
+    assert "Licensor:             LibraxisAI" in rtf
+    assert "Licensor:             Vetcoders" not in rtf
     assert "Business Source License" in rtf
     assert "Individual developers and small teams" in rtf
     assert "fewer than 5" in rtf
     assert "PLACEHOLDER" not in rtf.upper()
     assert "EULA" not in rtf
 
-    assert 'Manufacturer = "Vetcoders"' in identity
+    assert 'Manufacturer = "LibraxisAI"' in identity
+    assert 'Manufacturer = "Vetcoders"' not in identity
+    assert 'Copyright="(c) 2024-2026 LibraxisAI"' in bundle
+    assert 'Copyright="(c) 2024-2026 Vetcoders"' not in bundle
     assert "WixUI_Minimal" in product
     assert "WixUILicenseRtf" in product
     assert "License.rtf" in product
