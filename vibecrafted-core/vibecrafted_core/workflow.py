@@ -5435,16 +5435,25 @@ def resolve_session_selection(
     if selection is not None:
         # Transport the original resolution, never reinterpret current/last
         # after handoff. Revalidate the exact target against current ownership.
+        # The fork handoff pins the identity in the receipt and passes no
+        # token (native identity stays pending), so an empty token adopts the
+        # receipt's agent_session_id instead of comparing against "".
+        pinned = (
+            str(selection.get("agent_session_id") or "")
+            if isinstance(selection, dict)
+            else ""
+        )
         if (
             not isinstance(selection, dict)
             or selection.get("agent") != provider
-            or selection.get("agent_session_id") != token
+            or not pinned
+            or (token and pinned != token)
             or selection.get("selection_root") != selected_root
             or not selection.get("session_selector")
             or not selection.get("identity_source")
         ):
             raise ValueError("session selection receipt does not match admission")
-        resolve_session_selection(provider, token, selected_root)
+        resolve_session_selection(provider, pinned, selected_root)
         return dict(selection)
     if token == "previous":
         raise ValueError(

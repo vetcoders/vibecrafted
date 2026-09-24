@@ -123,6 +123,7 @@ def _write_implicit_gc_probe_vc_frame(bin_dir: Path) -> None:
     script = bin_dir / "vc-frame"
     script.write_text(
         """#!/usr/bin/env python3
+import json
 import os
 import sys
 from pathlib import Path
@@ -130,8 +131,30 @@ from pathlib import Path
 args = sys.argv[1:]
 capture = Path(os.environ["CAPTURE_FILE"])
 state_file = capture.with_suffix(".session")
+layouts_file = capture.with_suffix(".layouts")
 with capture.open("a", encoding="utf-8") as fh:
     fh.write("VC_FRAME " + " ".join(args) + "\\n")
+
+def option(flag):
+    if flag in args:
+        i = args.index(flag)
+        if i + 1 < len(args):
+            return args[i + 1]
+    return None
+
+def record_layout(name, layout):
+    table = json.loads(layouts_file.read_text(encoding="utf-8")) if layouts_file.exists() else {}
+    table[name] = layout or ""
+    layouts_file.write_text(json.dumps(table), encoding="utf-8")
+
+# The role proof reads the created session's layout back; a create that does
+# not record its layout makes the host read as role-less and vc-start refuses.
+if "action" in args and "dump-layout" in args:
+    target = option("--session") or ""
+    table = json.loads(layouts_file.read_text(encoding="utf-8")) if layouts_file.exists() else {}
+    path = Path(table.get(target) or "")
+    print(path.read_text(encoding="utf-8") if path.is_file() else "layout {\\n}")
+    sys.exit(0)
 if args[:1] == ["ls"]:
     if state_file.exists():
         print(f"{state_file.read_text(encoding='utf-8').strip()} [Created now]")
@@ -139,10 +162,13 @@ if args[:1] == ["ls"]:
 if args[:1] == ["list-sessions"]:
     print("abandoned-evidence [Created 72h ago] (EXITED - attach to resurrect)")
 if "--new-session-with-layout" in args and "--session" in args:
-    state_file.write_text(args[args.index("--session") + 1], encoding="utf-8")
+    name = args[args.index("--session") + 1]
+    state_file.write_text(name, encoding="utf-8")
+    record_layout(name, option("--new-session-with-layout"))
 # Frame's detached create, the form create-only vc-start uses.
 if args[-2:-1] == ["--create-background"]:
     state_file.write_text(args[-1], encoding="utf-8")
+    record_layout(args[-1], option("--layout") or option("--new-session-with-layout"))
 sys.exit(0)
 """,
         encoding="utf-8",
@@ -243,17 +269,26 @@ def test_vc_start_launches_operator_entrypoint_layout(tmp_path: Path) -> None:
         env=env,
     )
 
-    # Create-only start: the operator layout comes from the pinned product
-    # config (3d9da4dc) and the workspace is created with Frame's detached
-    # create -- the one create that needs no PTY -- instead of a foreground
-    # `--session <name> --new-session-with-layout` client. The caller without a
-    # terminal then gets the product terminal, which enters that very session.
+    # Create-only start under the one-host contract (Founder P0, 2026-09-23):
+    # the Frame host is created first with host.kdl, then the workspace follows
+    # as a guest with the pinned operator layout (3d9da4dc) — both detached
+    # (`attach --create-background`, the one create that needs no PTY). The
+    # caller without a terminal then gets the product terminal, which enters
+    # that very session.
     payload = capture_file.read_text(encoding="utf-8")
     layout = gen.product_vc_frame_config_dir(home) / "layouts" / "operator.kdl"
-    assert (
-        f"VC_FRAME --new-session-with-layout {layout} "
+    host_layout = gen.product_vc_frame_config_dir(home) / "layouts" / "host.kdl"
+    host_create = (
+        f"VC_FRAME --new-session-with-layout {host_layout} "
+        f"attach --create-background vc-host"
+    )
+    guest_create = (
+        f"VC_FRAME --guest-workspace --new-session-with-layout {layout} "
         f"attach --create-background {expected_session}"
-    ) in payload
+    )
+    assert host_create in payload
+    assert guest_create in payload
+    assert payload.index(host_create) < payload.index(guest_create)
     launch = gen.read_terminal_launch(terminal_capture)
     assert launch is not None, payload
     hosted = _hosted_entry(launch)
