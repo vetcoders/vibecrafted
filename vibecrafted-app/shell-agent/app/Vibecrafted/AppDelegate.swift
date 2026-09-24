@@ -561,6 +561,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   }
 
   @objc private func goHome() { selectedNavigationHandler()?.navigate(.home) }
+  @objc private func toggleCommandDeckSidebar() {
+    NotificationCenter.default.post(name: .commandDeckToggleSidebar, object: nil)
+  }
+  @objc private func toggleCommandDeckInspector() {
+    NotificationCenter.default.post(name: .commandDeckToggleInspector, object: nil)
+  }
   @objc private func goBack() { selectedNavigationHandler()?.navigate(.back) }
   @objc private func goForward() { selectedNavigationHandler()?.navigate(.forward) }
   @objc private func openSelectedPageInBrowser() { selectedNavigationHandler()?.navigate(.openInBrowser) }
@@ -3043,6 +3049,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       let item = viewMenu.addItem(withTitle: title, action: selector, keyEquivalent: key)
       item.target = self
     }
+    viewMenu.addItem(.separator())
+    let toggleSidebar = viewMenu.addItem(
+      withTitle: "Toggle Sidebar", action: #selector(toggleCommandDeckSidebar), keyEquivalent: "s")
+    toggleSidebar.keyEquivalentModifierMask = [.command, .control]
+    toggleSidebar.target = self
+    let toggleInspector = viewMenu.addItem(
+      withTitle: "Toggle Inspector", action: #selector(toggleCommandDeckInspector), keyEquivalent: "i")
+    toggleInspector.keyEquivalentModifierMask = [.command, .option]
+    toggleInspector.target = self
     viewMenu.addItem(.separator())
     // History verbs act on the selected tab only; validation reads its state.
     let home = viewMenu.addItem(withTitle: "Home", action: #selector(goHome), keyEquivalent: "h")

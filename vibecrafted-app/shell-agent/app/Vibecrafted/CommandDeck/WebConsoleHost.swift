@@ -197,6 +197,13 @@ final class WebConsoleSession: NSObject {
     configuration.websiteDataStore = websiteDataStore
     // Reference tabs display machine documents; they run no page script.
     configuration.defaultWebpagePreferences.allowsContentJavaScript = role.allowsContentJavaScript
+    // Marks the document so the page can hide its own sidebar and titlebar.
+    // Not a script-message handler: the page cannot call back into the App.
+    let nativeShell = WKUserScript(
+      source: "document.documentElement.dataset.nativeShell='1';",
+      injectionTime: .atDocumentStart,
+      forMainFrameOnly: true)
+    configuration.userContentController.addUserScript(nativeShell)
     // INVARIANT: no `WKScriptMessageHandler` is registered here or anywhere
     // else in this file. The App exposes no JavaScript-to-native channel, so
     // no page can name an action for the App to perform. Native actions are

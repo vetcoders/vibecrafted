@@ -711,6 +711,7 @@ fn run_table(
                             let live = run.health == "active";
                             let beat = if live { "live" } else { "none" };
                             let beat_class = if live { "run-beat is-live" } else { "run-beat" };
+                            let meta = format!("{} · {} · {}", run.agent, run.skill, run.updated_at);
                             view! {
                                 <tr
                                     data-ppm="run"
@@ -720,6 +721,7 @@ fn run_table(
                                     data-transcript-url=transcript_url
                                     data-report=run.latest_report.clone()
                                     data-error=run.last_error.clone()
+                                    data-meta=meta
                                 >
                                     <td>
                                         <a class="control-run-id" href=detail_href.clone() data-copy=run.run_id.clone()>{run.run_id.clone()}</a>
@@ -954,39 +956,60 @@ pub fn UsagePage() -> impl IntoView {
         <Meta name="description" content="Provider-neutral Vibecrafted token and cost telemetry." />
         <ServerFrame active=ServerSection::Usage status="usage telemetry".to_string()>
             <div class="server-console-shell route-page-shell usage-dashboard" data-usage-dashboard>
-                {route_header(
-                    "Telemetry",
-                    "Cost & usage",
-                    "Canonical per-run usage and cost from runtime metadata. Missing measurements remain unknown; currencies and provider credits are never combined.",
-                )}
-                <form id="usage-filter-form" class="usage-filter-bar" aria-label="Usage filters">
-                    <label><span>"Window"</span><select id="usage-window" name="window">
-                        <option value="24h">"24 hours"</option>
-                        <option value="7d">"7 days"</option>
-                        <option value="30d">"30 days"</option>
-                        <option value="all">"All recorded"</option>
-                    </select></label>
-                    <label><span>"Provider"</span><input id="usage-provider" name="provider" maxlength="128" placeholder="all" /></label>
-                    <label><span>"Agent"</span><input id="usage-agent" name="agent" maxlength="128" placeholder="all" /></label>
-                    <label><span>"Model"</span><input id="usage-model" name="model" maxlength="128" placeholder="all" /></label>
-                    <button type="submit" class="server-console-link server-console-link-primary">"Apply"</button>
-                </form>
-                <p id="usage-status" class="control-plane-meta" role="status">"Loading canonical telemetry…"</p>
+                <header class="usage-toolbar">
+                    <div class="usage-toolbar-title">
+                        <h1>"Cost & usage"</h1>
+                        <p id="usage-status" role="status">"Loading canonical telemetry…"</p>
+                    </div>
+                    <form id="usage-filter-form" class="usage-filter-bar" aria-label="Usage filters">
+                        <label><span>"Window"</span><select id="usage-window" name="window">
+                            <option value="24h">"24 hours"</option>
+                            <option value="7d">"7 days"</option>
+                            <option value="30d">"30 days"</option>
+                            <option value="all">"All recorded"</option>
+                        </select></label>
+                        <label><span>"Provider"</span><input id="usage-provider" name="provider" maxlength="128" placeholder="all" /></label>
+                        <label><span>"Agent"</span><input id="usage-agent" name="agent" maxlength="128" placeholder="all" /></label>
+                        <label><span>"Model"</span><input id="usage-model" name="model" maxlength="128" placeholder="all" /></label>
+                        <button type="submit" class="server-console-link server-console-link-primary">"Apply"</button>
+                    </form>
+                </header>
                 <dl class="usage-summary-grid" aria-label="Usage totals">
-                    <div><dt>"Runs"</dt><dd id="usage-total-runs">"—"</dd></div>
-                    <div><dt>"Failed"</dt><dd id="usage-total-failed">"—"</dd></div>
-                    <div><dt>"Known tokens"</dt><dd id="usage-total-tokens">"—"</dd></div>
-                    <div><dt>"Token unknowns"</dt><dd id="usage-total-token-unknown">"—"</dd></div>
+                    <div class="usage-attention"><dt>"Failed"</dt><dd id="usage-total-failed">"—"</dd></div>
+                    <div class="usage-attention"><dt>"Cost unknowns"</dt><dd id="usage-total-cost-unknown">"—"</dd></div>
+                    <div class="usage-attention"><dt>"Token unknowns"</dt><dd id="usage-total-token-unknown">"—"</dd></div>
                     <div class="usage-summary-cost"><dt>"Cost by unit"</dt><dd id="usage-total-cost">"—"</dd></div>
-                    <div><dt>"Cost unknowns"</dt><dd id="usage-total-cost-unknown">"—"</dd></div>
+                    <div><dt>"Runs"</dt><dd id="usage-total-runs">"—"</dd></div>
+                    <div><dt>"Known tokens"</dt><dd id="usage-total-tokens">"—"</dd></div>
                 </dl>
-                <section class="usage-dimensions" aria-label="Usage dimensions">
-                    <div class="usage-dimension-card"><h2>"Providers"</h2><div id="usage-providers" class="usage-dimension-list"></div></div>
-                    <div class="usage-dimension-card"><h2>"Agents"</h2><div id="usage-agents" class="usage-dimension-list"></div></div>
-                    <div class="usage-dimension-card"><h2>"Models"</h2><div id="usage-models" class="usage-dimension-list"></div></div>
+                <section class="usage-charts" aria-label="Usage over time">
+                    <div class="usage-hero">
+                        <p class="usage-hero-kicker">"Known tokens"</p>
+                        <p class="usage-hero-figure" id="usage-hero-tokens">"—"</p>
+                        <p class="usage-hero-caption" id="usage-hero-caption"></p>
+                    </div>
+                    <figure class="usage-chart" id="usage-chart-heat">
+                        <figcaption id="usage-chart-heat-title">"Days"</figcaption>
+                        <div class="usage-chart-plot" id="usage-chart-heat-plot"></div>
+                    </figure>
+                    <figure class="usage-chart" id="usage-chart-cost">
+                        <figcaption id="usage-chart-cost-title">"Cost"</figcaption>
+                        <div class="usage-chart-plot" id="usage-chart-cost-plot"></div>
+                    </figure>
                 </section>
-                <section class="control-panel control-panel-wide usage-runs-panel" aria-label="Recent usage runs">
-                    <div class="control-panel-head"><h2>"Recent runs"</h2><span id="usage-run-count">"0"</span></div>
+                <section class="usage-breakdown" aria-label="Usage dimensions">
+                    <div class="usage-breakdown-switch" role="tablist" aria-label="Breakdown">
+                        <button type="button" role="tab" aria-selected="true" data-usage-dim="providers">"Providers"</button>
+                        <button type="button" role="tab" aria-selected="false" data-usage-dim="agents">"Agents"</button>
+                        <button type="button" role="tab" aria-selected="false" data-usage-dim="models">"Models"</button>
+                    </div>
+                    <div id="usage-providers" class="usage-dimension-list is-active" role="tabpanel"></div>
+                    <div id="usage-agents" class="usage-dimension-list" role="tabpanel" hidden></div>
+                    <div id="usage-models" class="usage-dimension-list" role="tabpanel" hidden></div>
+                </section>
+                <div class="usage-split">
+                <section class="usage-runs-panel" aria-label="Recent usage runs">
+                    <div class="usage-runs-head"><h2>"Recent runs"</h2><span id="usage-run-count">"0"</span></div>
                     <div class="usage-table-scroll">
                         <table class="usage-runs-table">
                             <thead><tr><th>"Run"</th><th>"Provider / agent"</th><th>"Model"</th><th>"Tokens"</th><th>"Cost"</th><th>"State"</th></tr></thead>
@@ -994,8 +1017,32 @@ pub fn UsagePage() -> impl IntoView {
                         </table>
                     </div>
                     <p id="usage-empty" class="control-empty" hidden>"No canonical runtime runs match this window and filter."</p>
+                    <p class="usage-footnote"><span id="usage-schema">"vibecrafted.usage-report.v1"</span><span id="usage-generated"></span><span>"Unknowns stay visible. Currencies are never combined."</span></p>
                 </section>
-                <p class="control-plane-meta"><span id="usage-schema">"vibecrafted.usage-report.v1"</span><span id="usage-generated"></span></p>
+                <aside class="overview-inspector doc-pane" id="overview-inspector" aria-label="Run document">
+                    <div class="doc-tabs" role="tablist" aria-label="Document">
+                        <button type="button" data-doc-tab="transcript" class="is-active">"Transcript"</button>
+                        <button type="button" data-doc-tab="report">"Report"</button>
+                        <button type="button" data-doc-tab="structure">"Structure"</button>
+                    </div>
+                    <article class="doc-sheet" data-doc-panel="transcript">
+                        <p class="doc-kicker">"Run"</p>
+                        <h2 data-inspector-id>"Nothing selected"</h2>
+                        <p class="doc-meta" data-inspector-meta>"Select a run."</p>
+                        <pre class="inspector-tail" data-inspector-tail>"Select a run."</pre>
+                    </article>
+                    <article class="doc-sheet" data-doc-panel="report" hidden>
+                        <p class="doc-kicker">"Report"</p>
+                        <p data-inspector-report>"No report on a usage row."</p>
+                        <p class="control-run-error" data-inspector-error hidden></p>
+                    </article>
+                    <article class="doc-sheet" data-doc-panel="structure" hidden>
+                        <p class="doc-kicker">"Path"</p>
+                        <p data-inspector-root>"Select a run."</p>
+                        <a class="doc-path" data-inspector-open href="/structure">"Open structure"</a>
+                    </article>
+                </aside>
+                </div>
                 <script inner_html=usage_dashboard_script()></script>
             </div>
         </ServerFrame>
@@ -1037,11 +1084,35 @@ fn usage_dashboard_script() -> &'static str {
     }
     for (const item of values) {
       const row = document.createElement('div'); row.className = 'usage-dimension-row';
+      const failed = item.runs_failed || 0;
+      const tokenUnknown = item.runs_tokens_unknown || 0;
+      const costUnknown = item.runs_cost_unknown || 0;
+      if (failed || tokenUnknown || costUnknown) row.classList.add('needs-attention');
       const name = document.createElement('strong'); name.textContent = item.name;
-      const detail = document.createElement('span'); detail.textContent = item.runs + ' runs · ' + number.format(item.tokens_total_known) + ' tokens · ' + costsText(item.cost_by_unit);
-      row.append(name, detail); target.append(row);
+      const runs = document.createElement('span'); runs.textContent = number.format(item.runs || 0);
+      const fail = document.createElement('span'); fail.textContent = number.format(failed); if (failed) fail.className = 'is-signal';
+      const tokens = document.createElement('span'); tokens.textContent = number.format(item.tokens_total_known || 0);
+      const unk = document.createElement('span'); unk.textContent = number.format(tokenUnknown + costUnknown); if (tokenUnknown || costUnknown) unk.className = 'is-signal';
+      const cost = document.createElement('span'); cost.textContent = costsText(item.cost_by_unit);
+      row.append(name, runs, fail, tokens, unk, cost); target.append(row);
     }
   };
+  const showDimension = (name) => {
+    for (const key of ['providers', 'agents', 'models']) {
+      const list = byId('usage-' + key);
+      const on = key === name;
+      if (list) list.hidden = !on;
+      if (list) list.classList.toggle('is-active', on);
+    }
+    root.querySelectorAll('[data-usage-dim]').forEach((button) => {
+      const on = button.getAttribute('data-usage-dim') === name;
+      button.classList.toggle('is-active', on);
+      button.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+  };
+  root.querySelectorAll('[data-usage-dim]').forEach((button) => {
+    button.addEventListener('click', () => showDimension(button.getAttribute('data-usage-dim')));
+  });
   const render = (report) => {
     const totals = report.totals || {};
     set('usage-total-runs', number.format(totals.runs || 0));
@@ -1057,6 +1128,10 @@ fn usage_dashboard_script() -> &'static str {
     const runs = report.runs || [];
     for (const run of runs) {
       const tr = document.createElement('tr');
+      tr.setAttribute('data-run-id', run.run_id || '');
+      tr.setAttribute('data-href', '/run/' + encodeURIComponent(run.run_id || ''));
+      tr.setAttribute('data-transcript-url', '/api/control/runs/' + encodeURIComponent(run.run_id || '') + '/transcript');
+      tr.setAttribute('data-meta', label(run.provider) + ' / ' + label(run.agent) + ' · ' + label(run.model) + ' · ' + (run.status || ''));
       const runCell = document.createElement('td');
       const link = document.createElement('a'); link.href = '/run/' + encodeURIComponent(run.run_id); link.textContent = run.run_id; link.className = 'control-run-open';
       const stamp = document.createElement('small'); stamp.textContent = run.recorded_at || ''; runCell.append(link, stamp);
@@ -1066,13 +1141,238 @@ fn usage_dashboard_script() -> &'static str {
       const cost = document.createElement('td'); cost.textContent = costText(run.cost); if (run.cost && reason(run.cost.amount)) cost.title = reason(run.cost.amount);
       const state = document.createElement('td'); state.textContent = run.failure_kind ? run.status + ' · ' + run.failure_kind : run.status;
       if (run.failure) state.title = run.failure;
+      if (run.failure_kind || (run.status && run.status !== 'completed' && run.status !== 'ok')) tr.className = 'is-attention';
+      if (unknown(run.tokens && run.tokens.tokens_total) || (run.cost && unknown(run.cost.amount))) tr.classList.add('is-unknown');
       tr.append(runCell, identity, model, tokens, cost, state); body.append(tr);
     }
     empty.hidden = runs.length !== 0;
     set('usage-run-count', String(runs.length));
+    const first = body.querySelector('tr[data-run-id]');
+    if (first) first.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     set('usage-schema', report.schema || 'unknown schema');
     set('usage-generated', report.generated_at ? 'Generated ' + report.generated_at : '');
     status.textContent = runs.length ? 'Live read-only projection · ' + runs.length + ' matching run(s)' : 'Live read-only projection · empty window';
+    drawCharts(report);
+  };
+  const knownAmount = (cost) => {
+    if (!cost || unknown(cost.amount)) return null;
+    const amount = Number(cost.amount);
+    return Number.isFinite(amount) ? amount : null;
+  };
+  const stampOf = (run) => {
+    const ms = Date.parse(run.recorded_at || '');
+    return Number.isFinite(ms) ? ms : null;
+  };
+  const grainFor = (since) => since === '24h' ? 'hour' : 'day';
+  const bucketStart = (ms, grain) => {
+    const date = new Date(ms);
+    if (grain === 'hour') date.setUTCMinutes(0, 0, 0);
+    else date.setUTCHours(0, 0, 0, 0);
+    return date.getTime();
+  };
+  const stepMs = (grain) => grain === 'hour' ? 3600000 : 86400000;
+  const axisLabel = (ms, grain) => {
+    const date = new Date(ms);
+    const hh = String(date.getUTCHours()).padStart(2, '0');
+    const dd = String(date.getUTCDate()).padStart(2, '0');
+    const mo = String(date.getUTCMonth() + 1).padStart(2, '0');
+    return grain === 'hour' ? dd + ' ' + hh + ':00' : mo + '-' + dd;
+  };
+  const bucketSeries = (rows, since, pick) => {
+    const grain = grainFor(since);
+    const points = [];
+    for (const run of rows) {
+      const ms = stampOf(run);
+      const value = pick(run);
+      if (ms == null || value == null) continue;
+      points.push({ ms, value });
+    }
+    if (!points.length) return null;
+    let min = bucketStart(points[0].ms, grain);
+    let max = min;
+    for (const point of points) {
+      const at = bucketStart(point.ms, grain);
+      if (at < min) min = at;
+      if (at > max) max = at;
+    }
+    const width = stepMs(grain);
+    const buckets = [];
+    for (let at = min; at <= max; at += width) buckets.push({ t: at, value: 0 });
+    const index = new Map(buckets.map((bucket, i) => [bucket.t, i]));
+    for (const point of points) {
+      const slot = index.get(bucketStart(point.ms, grain));
+      if (slot != null) buckets[slot].value += point.value;
+    }
+    return { grain, buckets };
+  };
+  const paintChart = (plotId, titleId, caption, built, color) => {
+    const host = byId(plotId);
+    const title = byId(titleId);
+    if (title) title.textContent = caption;
+    if (!host) return;
+    host.replaceChildren();
+    const values = built ? built.buckets.map((bucket) => bucket.value) : [];
+    const sum = values.reduce((total, value) => total + value, 0);
+    if (!built || !values.length || sum === 0) {
+      const note = document.createElement('p');
+      note.className = 'usage-chart-empty';
+      note.textContent = 'No measured points in this window.';
+      host.append(note);
+      return;
+    }
+    const w = 640;
+    const h = 148;
+    const pad = 10;
+    const max = Math.max(...values);
+    const n = values.length;
+    const xAt = (i) => n === 1 ? w / 2 : pad + (i / (n - 1)) * (w - pad * 2);
+    const yAt = (value) => h - pad - (value / max) * (h - pad * 2);
+    const coords = values.map((value, i) => xAt(i).toFixed(1) + ',' + yAt(value).toFixed(1));
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
+    svg.setAttribute('role', 'img');
+    const area = document.createElementNS(svg.namespaceURI, 'polygon');
+    area.setAttribute('points', xAt(0).toFixed(1) + ',' + (h - pad) + ' ' + coords.join(' ') + ' ' + xAt(n - 1).toFixed(1) + ',' + (h - pad));
+    area.setAttribute('fill', color);
+    area.setAttribute('fill-opacity', '0.16');
+    const line = document.createElementNS(svg.namespaceURI, 'polyline');
+    line.setAttribute('points', coords.join(' '));
+    line.setAttribute('fill', 'none');
+    line.setAttribute('stroke', color);
+    line.setAttribute('stroke-width', '1.5');
+    svg.append(area, line);
+    host.append(svg);
+    const axis = document.createElement('p');
+    axis.className = 'usage-chart-axis';
+    const first = built.buckets[0];
+    const last = built.buckets[built.buckets.length - 1];
+    axis.textContent = axisLabel(first.t, built.grain) + '  ·  ' + axisLabel(last.t, built.grain);
+    host.append(axis);
+  };
+  const dayStart = (ms) => {
+    const date = new Date(ms);
+    return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+  };
+  const windowDays = (since, generated, rows) => {
+    const end = dayStart(Date.parse(generated) || Date.now());
+    let start = end;
+    if (since === '7d') start = end - 6 * 86400000;
+    else if (since === '30d') start = end - 29 * 86400000;
+    else if (since !== '24h') {
+      let earliest = end;
+      for (const run of rows) {
+        const ms = stampOf(run);
+        if (ms != null) earliest = Math.min(earliest, dayStart(ms));
+      }
+      start = Math.max(earliest, end - 370 * 86400000);
+    }
+    const days = [];
+    for (let at = start; at <= end; at += 86400000) days.push(at);
+    return days;
+  };
+  const paintHeat = (rows, since, generated) => {
+    const host = byId('usage-chart-heat-plot');
+    const title = byId('usage-chart-heat-title');
+    const windowName = since || 'window';
+    if (title) title.textContent = 'Days · ' + windowName;
+    if (!host) return;
+    host.replaceChildren();
+    const days = windowDays(since, generated, rows);
+    const counts = new Map(days.map((day) => [day, 0]));
+    for (const run of rows) {
+      const ms = stampOf(run);
+      if (ms == null) continue;
+      const day = dayStart(ms);
+      if (counts.has(day)) counts.set(day, counts.get(day) + 1);
+    }
+    const light = document.documentElement.dataset.theme === 'light';
+    const emptyFill = light ? '#d5d5d5' : '#242424';
+    const active = light ? '#2f6b32' : '#90a959';
+    const max = Math.max(1, ...counts.values());
+    const cell = 11;
+    const gap = 3;
+    const labelH = 14;
+    const cols = [];
+    let column = [];
+    for (const day of days) {
+      const weekday = new Date(day).getUTCDay();
+      if (weekday === 0 && column.length) { cols.push(column); column = []; }
+      column.push(day);
+    }
+    if (column.length) cols.push(column);
+    const w = Math.max(cols.length, 1) * (cell + gap);
+    const h = labelH + 7 * (cell + gap);
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
+    svg.setAttribute('role', 'img');
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    let lastMonth = -1;
+    cols.forEach((week, col) => {
+      const first = new Date(week[0]);
+      if (first.getUTCDate() <= 7 && first.getUTCMonth() !== lastMonth) {
+        lastMonth = first.getUTCMonth();
+        const label = document.createElementNS(svg.namespaceURI, 'text');
+        label.setAttribute('x', String(col * (cell + gap)));
+        label.setAttribute('y', '9');
+        label.setAttribute('fill', light ? '#6b6b6b' : '#6b6b6b');
+        label.setAttribute('font-size', '9');
+        label.textContent = months[lastMonth];
+        svg.append(label);
+      }
+      week.forEach((day) => {
+        const count = counts.get(day) || 0;
+        const rect = document.createElementNS(svg.namespaceURI, 'rect');
+        const row = new Date(day).getUTCDay();
+        rect.setAttribute('x', String(col * (cell + gap)));
+        rect.setAttribute('y', String(labelH + row * (cell + gap)));
+        rect.setAttribute('width', String(cell));
+        rect.setAttribute('height', String(cell));
+        rect.setAttribute('rx', '2');
+        if (count === 0) rect.setAttribute('fill', emptyFill);
+        else {
+          rect.setAttribute('fill', active);
+          rect.setAttribute('fill-opacity', String(0.35 + 0.65 * (count / max)));
+        }
+        const stamp = new Date(day).toISOString().slice(0, 10);
+        rect.setAttribute('title', stamp + ' · ' + count);
+        svg.append(rect);
+      });
+    });
+    host.append(svg);
+  };
+  const drawCharts = (report) => {
+    const rows = report.runs || [];
+    const totals = report.totals || {};
+    const since = (report.filter && report.filter.since) || '';
+    const windowName = since || 'window';
+    set('usage-hero-tokens', number.format(totals.tokens_total_known || 0));
+    const unknownRuns = (totals.runs_tokens_unknown || 0) + (totals.runs_cost_unknown || 0);
+    set('usage-hero-caption', windowName + ' · ' + number.format(unknownRuns) + ' unknown');
+    paintHeat(rows, since, report.generated_at || '');
+    const byUnit = new Map();
+    for (const run of rows) {
+      const amount = knownAmount(run.cost);
+      if (amount == null) continue;
+      const unit = (run.cost && (run.cost.unit || run.cost.currency)) || 'USD';
+      const list = byUnit.get(unit) || [];
+      list.push(run);
+      byUnit.set(unit, list);
+    }
+    let bestUnit = '';
+    let bestSum = -1;
+    let bestRows = [];
+    for (const [unit, list] of byUnit) {
+      const sum = list.reduce((total, run) => total + knownAmount(run.cost), 0);
+      if (sum > bestSum) { bestSum = sum; bestUnit = unit; bestRows = list; }
+    }
+    const costBuilt = bestRows.length ? bucketSeries(bestRows, since, (run) => knownAmount(run.cost)) : null;
+    paintChart(
+      'usage-chart-cost-plot',
+      'usage-chart-cost-title',
+      bestUnit ? 'Cost · ' + bestUnit + ' · ' + windowName : 'Cost · ' + windowName,
+      costBuilt,
+      '#6a9fb5'
+    );
   };
   const load = async () => {
     status.textContent = 'Loading canonical telemetry…';
@@ -1247,59 +1547,20 @@ fn console_dashboard(dashboard: DashboardData) -> impl IntoView {
                     hidden
                 ></div>
                 <header class="overview-head">
-                    <div class="overview-head-copy">
-                        <h1>"Overview"</h1>
-                        <p class="overview-generated">{format!("Generated {generated_at}")}</p>
-                    </div>
+                    <p class="overview-context">{format!("{server_status} · {workspace_status}")}</p>
                     <dl class="overview-head-stats">
                         <div><dt>"live"</dt><dd>{active_count}</dd></div>
                         <div><dt>"failures"</dt><dd>{stalled_count}</dd></div>
+                        <div><dt>"next"</dt><dd>{action_count}</dd></div>
+                        <div><dt>"warnings"</dt><dd>{warning_count}</dd></div>
                         <div><dt>"recent"</dt><dd>{recent_count}</dd></div>
+                        <div data-live-workspaces=live_workspace_count><dt>"workspaces"</dt><dd>{live_workspace_count}</dd></div>
                     </dl>
+                    <p class="overview-generated">{format!("Generated {generated_at}")}</p>
                 </header>
 
                 <div class="overview-desk-body">
                     <div class="overview-desk-main">
-                        <aside class="server-console-panel" aria-label="Console status preview">
-                            <div class="server-console-panel-head">
-                                <span class="mono-cap">"Right now"</span>
-                                <span class="server-console-panel-state">"live projection"</span>
-                            </div>
-                            <dl class="operator-now-cells">
-                                <a class="operator-summary-cell" href="/runs">
-                                    <dt>"alive"</dt>
-                                    <dd>{active_count}</dd>
-                                </a>
-                                <a class="operator-summary-cell" href="/lifecycle">
-                                    <dt>"next"</dt>
-                                    <dd>{action_count}</dd>
-                                </a>
-                                <a class="operator-summary-cell" href="/activity">
-                                    <dt>"warnings"</dt>
-                                    <dd>{warning_count}</dd>
-                                </a>
-                                <a class="operator-summary-cell" href="/runs">
-                                    <dt>"stalled"</dt>
-                                    <dd>{stalled_count}</dd>
-                                </a>
-                                <a class="operator-summary-cell" href="/runs">
-                                    <dt>"recent"</dt>
-                                    <dd>{recent_count}</dd>
-                                </a>
-                                <a
-                                    class="operator-summary-cell"
-                                    href="/workspaces"
-                                    title="Workspaces with a running vc-frame session"
-                                    data-live-workspaces=live_workspace_count
-                                >
-                                    <dt>"workspaces"</dt>
-                                    <dd>{live_workspace_count}</dd>
-                                </a>
-                            </dl>
-                            <p class="control-plane-meta">
-                                <span>"workspace data"</span><span>{workspace_status}</span>
-                            </p>
-                        </aside>
                         {run_table("Active dispatches", "Active dispatches", "active", active_runs)}
                         {run_table("Failures", "Failures", "failures", stalled_runs)}
                         {run_table("Recent", "Recent", "recent", recent_runs)}
@@ -1311,17 +1572,28 @@ fn console_dashboard(dashboard: DashboardData) -> impl IntoView {
                             <a href="/scaffold">"Plans"</a>
                         </p>
                     </div>
-                    <aside class="overview-inspector" id="overview-inspector" aria-label="Run inspector">
-                        <header>
-                            <p class="section-eyebrow">"Run"</p>
+                    <aside class="overview-inspector doc-pane" id="overview-inspector" aria-label="Run document">
+                        <div class="doc-tabs" role="tablist" aria-label="Document">
+                            <button type="button" data-doc-tab="transcript" class="is-active">"Transcript"</button>
+                            <button type="button" data-doc-tab="report">"Report"</button>
+                            <button type="button" data-doc-tab="structure">"Structure"</button>
+                        </div>
+                        <article class="doc-sheet" data-doc-panel="transcript">
+                            <p class="doc-kicker">"Run"</p>
                             <h2 data-inspector-id>"Nothing selected"</h2>
-                        </header>
-                        <a class="inspector-open" data-inspector-open href="/runs" hidden>"Open transcript →"</a>
-                        <p class="section-eyebrow">"Report"</p>
-                        <p data-inspector-report>"Select a row."</p>
-                        <p class="control-run-error" data-inspector-error hidden></p>
-                        <p class="section-eyebrow">"Transcript tail"</p>
-                        <pre class="inspector-tail" data-inspector-tail>"Select a row."</pre>
+                            <p class="doc-meta" data-inspector-meta>"Select a row."</p>
+                            <pre class="inspector-tail" data-inspector-tail>"Select a row."</pre>
+                        </article>
+                        <article class="doc-sheet" data-doc-panel="report" hidden>
+                            <p class="doc-kicker">"Report"</p>
+                            <p data-inspector-report>"Select a row."</p>
+                            <p class="control-run-error" data-inspector-error hidden></p>
+                        </article>
+                        <article class="doc-sheet" data-doc-panel="structure" hidden>
+                            <p class="doc-kicker">"Path"</p>
+                            <p data-inspector-root>"Select a row."</p>
+                            <a class="doc-path" data-inspector-open href="/structure">"Open structure"</a>
+                        </article>
                     </aside>
                 </div>
             </div>
@@ -2566,6 +2838,8 @@ mod tests {
         assert!(usage.contains("/api/usage?"));
         assert!(usage.contains("vibecrafted.usage-report.v1"));
         assert!(usage.contains("No canonical runtime runs match this window and filter."));
+        assert!(usage.contains("id=\"usage-chart-cost\""));
+        assert!(usage.contains("recorded_at"));
         assert!(!usage.contains("innerHTML"));
     }
 
