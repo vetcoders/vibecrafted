@@ -225,10 +225,14 @@ def test_windows_installer_license_comes_from_repo_license() -> None:
 
     # Full legal company name from vista-win LICENSE Company definition.
     full_licensor = "Libraxis AI Sp. z o.o."
+    # Stylized brand (mathematical sans-serif bold) + Framework; keep former name.
+    licensed_work = "𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Framework (formerly Vetcoders Skills)."
     assert f"Licensor:             {full_licensor}" in license_text
     assert "Licensor:             Vetcoders" not in license_text
     assert "Licensor:             LibraxisAI\n" not in license_text
     assert "Licensor:             LibraxisAI\r" not in license_text
+    assert f"Licensed Work:        {licensed_work}" in license_text
+    assert "Licensed Work:        Vibecrafted (formerly Vetcoders Skills)." not in license_text
     assert f"The Licensed Work is (c) 2024-2026 {full_licensor}" in license_text
     assert "Business Source License" in license_text
     assert "Individual developers and small teams" in license_text
@@ -237,6 +241,11 @@ def test_windows_installer_license_comes_from_repo_license() -> None:
     assert f"Licensor:             {full_licensor}" in rtf
     assert "Licensor:             Vetcoders" not in rtf
     assert "Licensor:             LibraxisAI\\par" not in rtf
+    # RTF must carry signed UTF-16 surrogate \\u escapes (not plain ASCII brand).
+    assert "\\u-10187?" in rtf
+    assert "\\u55349?" not in rtf
+    assert "Framework (formerly Vetcoders Skills)." in rtf
+    assert "Licensed Work:        Vibecrafted (formerly Vetcoders Skills)." not in rtf
     assert "Business Source License" in rtf
     assert "Individual developers and small teams" in rtf
     assert "fewer than 5" in rtf
