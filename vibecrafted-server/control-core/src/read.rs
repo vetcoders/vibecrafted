@@ -13,11 +13,13 @@
 //!   active/recent/warnings without ever depending on the Python sync having
 //!   run. This is what lets the web/TUI frontends be self-sufficient.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 #[cfg(not(unix))]
 use std::process::{Command, Stdio};
+use std::sync::{LazyLock, Mutex, PoisonError};
+use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, Utc};
 
@@ -1138,21 +1140,19 @@ impl ControlPlane {
     }
 
     fn iter_meta_files(&self) -> Vec<PathBuf> {
-        rglob(&self.home.join("artifacts"), &|p| {
-            p.to_str().is_some_and(|s| s.ends_with(".meta.json"))
+        rglob(&self.home.join("artifacts"), &|name| {
+            name.ends_with(".meta.json")
         })
     }
 
     fn iter_lock_files(&self) -> Vec<PathBuf> {
-        rglob(&self.home.join("locks"), &|p| {
-            p.extension().and_then(|e| e.to_str()) == Some("lock")
+        rglob(&self.home.join("locks"), &|name| {
+            Path::new(name).extension().and_then(|e| e.to_str()) == Some("lock")
         })
     }
 
     fn iter_marbles_state_files(&self) -> Vec<PathBuf> {
-        rglob(&self.home.join("marbles"), &|p| {
-            p.file_name().and_then(|n| n.to_str()) == Some("state.json")
-        })
+        rglob(&self.home.join("marbles"), &|name| name == "state.json")
     }
 }
 
@@ -1969,24 +1969,101 @@ fn parse_nonnegative_i64(raw: &str) -> Option<i64> {
     coerce_int_value(&serde_json::Value::String(value.to_string())).filter(|item| *item >= 0)
 }
 
-/// Recursively collect files under `root` matching `pred`. Empty when `root`
-/// is absent. A small std-only stand-in for `Path.rglob`.
-fn rglob(root: &Path, pred: &dyn Fn(&Path) -> bool) -> Vec<PathBuf> {
+/// One directory as `rglob` last listed it. A directory's mtime moves when an
+/// entry is added, removed or renamed in it -- exactly the changes that alter
+/// what `rglob` returns -- so an unchanged stamp lets the walk reuse the
+/// listing instead of reading the directory again.
+struct DirListing {
+    stamp: SystemTime,
+    /// Entry names only: full paths for 126k files cost ~70 MB per console.
+    dirs: Vec<std::ffi::OsString>,
+    /// UTF-8 file names; a name that is not UTF-8 matches no `rglob` caller.
+    files: Vec<String>,
+    seen: u64,
+}
+
+#[derive(Default)]
+struct RglobListings {
+    generation: u64,
+    listings: HashMap<PathBuf, DirListing>,
+}
+
+/// Listings shared by every walk in this process. Long-lived readers (voc,
+/// vc-server) recompute the view on every control-plane change; relisting the
+/// artifact tree each time (22,684 directories on the Founder's Mac, ~1.1 s of
+/// CPU per view) held every idle voc near a third of a core while any run was
+/// writing events (thermal report, Silver, 2026-09-23).
+static RGLOB_LISTINGS: LazyLock<Mutex<RglobListings>> = LazyLock::new(Mutex::default);
+
+/// A directory modified this recently may change again within the same
+/// timestamp tick, so its listing is read afresh rather than trusted.
+const RGLOB_TRUST_AFTER: Duration = Duration::from_secs(2);
+
+/// Recursively collect files under `root` whose file name matches `pred`.
+/// Empty when `root` is absent. A small std-only stand-in for `Path.rglob`:
+/// symlinked entries are neither followed nor returned, as `read_dir` file
+/// types report them.
+fn rglob(root: &Path, pred: &dyn Fn(&str) -> bool) -> Vec<PathBuf> {
+    let now = SystemTime::now();
+    let mut cache = RGLOB_LISTINGS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    cache.generation += 1;
+    let generation = cache.generation;
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&dir) else {
+        let Ok(stamp) = fs::metadata(&dir).and_then(|meta| meta.modified()) else {
             continue;
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            match entry.file_type() {
-                Ok(ft) if ft.is_dir() => stack.push(path),
-                Ok(ft) if ft.is_file() && pred(&path) => out.push(path),
-                _ => {}
+        let trusted = now
+            .duration_since(stamp)
+            .is_ok_and(|age| age >= RGLOB_TRUST_AFTER);
+        let reusable = trusted
+            && cache
+                .listings
+                .get(&dir)
+                .is_some_and(|listing| listing.stamp == stamp);
+        if !reusable {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            let mut listing = DirListing {
+                stamp,
+                dirs: Vec::new(),
+                files: Vec::new(),
+                seen: generation,
+            };
+            for entry in entries.flatten() {
+                match entry.file_type() {
+                    Ok(ft) if ft.is_dir() => listing.dirs.push(entry.file_name()),
+                    Ok(ft) if ft.is_file() => {
+                        if let Ok(name) = entry.file_name().into_string() {
+                            listing.files.push(name);
+                        }
+                    }
+                    _ => {}
+                }
             }
+            cache.listings.insert(dir.clone(), listing);
         }
+        let Some(listing) = cache.listings.get_mut(&dir) else {
+            continue;
+        };
+        listing.seen = generation;
+        stack.extend(listing.dirs.iter().map(|name| dir.join(name)));
+        out.extend(
+            listing
+                .files
+                .iter()
+                .filter(|name| pred(name))
+                .map(|name| dir.join(name)),
+        );
     }
+    // Forget directories under this root that the walk no longer reaches.
+    cache
+        .listings
+        .retain(|path, listing| listing.seen == generation || !path.starts_with(root));
     out
 }
 
@@ -3220,5 +3297,82 @@ mod tests {
         assert_eq!(projected.settlement_revision, 9);
 
         fs::remove_dir_all(home).ok();
+    }
+}
+
+#[cfg(test)]
+mod rglob_listing_tests {
+    use super::rglob;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, SystemTime};
+
+    fn age(dir: &Path) {
+        // An hour-old stamp puts the directory past RGLOB_TRUST_AFTER, so the
+        // next walk reuses its listing unless the stamp moves again.
+        fs::File::open(dir)
+            .and_then(|handle| handle.set_modified(SystemTime::now() - Duration::from_secs(3600)))
+            .expect("age directory");
+    }
+
+    fn metas(root: &Path) -> Vec<String> {
+        let mut found: Vec<String> = rglob(root, &|name| name.ends_with(".meta.json"))
+            .into_iter()
+            .map(|path| path.strip_prefix(root).unwrap().display().to_string())
+            .collect();
+        found.sort();
+        found
+    }
+
+    #[test]
+    fn a_trusted_listing_still_sees_entries_added_and_removed_later() {
+        let root: PathBuf = std::env::temp_dir().join(format!(
+            "control-core-rglob-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let reports = root.join("org/repo/2026_0924/reports");
+        fs::create_dir_all(&reports).unwrap();
+        fs::write(reports.join("a.meta.json"), "{}").unwrap();
+        for dir in [
+            &reports,
+            &root.join("org/repo/2026_0924"),
+            &root.join("org/repo"),
+            &root.join("org"),
+            &root,
+        ] {
+            age(dir);
+        }
+        assert_eq!(metas(&root), ["org/repo/2026_0924/reports/a.meta.json"]);
+        // Reused: nothing moved, so the answer is identical.
+        assert_eq!(metas(&root), ["org/repo/2026_0924/reports/a.meta.json"]);
+
+        fs::write(reports.join("b.meta.json"), "{}").unwrap();
+        assert_eq!(
+            metas(&root),
+            [
+                "org/repo/2026_0924/reports/a.meta.json",
+                "org/repo/2026_0924/reports/b.meta.json"
+            ]
+        );
+
+        fs::remove_file(reports.join("a.meta.json")).unwrap();
+        fs::create_dir(root.join("org/repo/2026_0925")).unwrap();
+        fs::write(root.join("org/repo/2026_0925/c.meta.json"), "{}").unwrap();
+        assert_eq!(
+            metas(&root),
+            [
+                "org/repo/2026_0924/reports/b.meta.json",
+                "org/repo/2026_0925/c.meta.json"
+            ]
+        );
+
+        fs::remove_dir_all(root.join("org/repo/2026_0924")).unwrap();
+        assert_eq!(metas(&root), ["org/repo/2026_0925/c.meta.json"]);
+        fs::remove_dir_all(&root).unwrap();
+        assert!(metas(&root).is_empty());
     }
 }
