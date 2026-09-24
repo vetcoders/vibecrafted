@@ -229,7 +229,35 @@ print(serverCaretakerArguments().joined(separator: " "))
 let logs = decodeServerLogs(
   data: #"{"directory":"/tmp/vc-home/server","stdout":"/tmp/vc-home/server/supervisor.stdout.log","stderr":"/tmp/vc-home/server/supervisor.stderr.log"}"#.data(using: .utf8)!)!
 print(logs.directory.path)
-print(caretakerDiagnosticsLines(data: caretaker).joined(separator: " | "))
+// 9e333175 replaced the diagnostics NSAlert (caretakerDiagnosticsLines) with
+// ServerStatusView, which renders decodeCaretakerEnvelope's result and runs
+// last_error through conciseCaretakerLine. Print exactly what the window
+// receives from this policy file, so the decoded server leg stays pinned.
+func statusWindowReading(_ envelope: CaretakerEnvelope?) -> String {
+  guard let envelope else { return "envelope: nil" }
+  var parts: [String] = []
+  if let verdict = envelope.verdict { parts.append(verdict.header) }
+  if let server = envelope.server {
+    parts.append("State: \((server.state ?? "unknown").uppercased())")
+    parts.append("Supervisor PID: \(server.supervisorPID.map(String.init) ?? "—")")
+    parts.append("Server PID: \(server.managedPair?.serverPID.map(String.init) ?? "—")")
+    parts.append("Guardian PID: \(server.managedPair?.guardianPID.map(String.init) ?? "—")")
+    if let endpoint = server.endpoint, let host = endpoint.host, let port = endpoint.port {
+      parts.append("Endpoint: \(host):\(port)")
+    }
+    if let reason = conciseCaretakerLine(server.lastError) {
+      parts.append("Last error: \(reason)")
+    }
+    if let path = server.receipt?.path, !path.isEmpty {
+      parts.append("Status receipt: \(path)")
+    }
+  }
+  for finding in envelope.verdict?.findings ?? [] {
+    parts.append("[\(finding.severity)] \(finding.code): \(finding.detail)")
+  }
+  return parts.joined(separator: " | ")
+}
+print(statusWindowReading(decodeCaretakerEnvelope(data: caretaker)))
 let navigation = resolveServerNavigation(caretakerData: caretaker)
 print(navigation.server?.absoluteString ?? "nil")
 print(navigation.workspaces?.absoluteString ?? "nil")
@@ -310,6 +338,9 @@ def test_server_menu_exposes_the_server_when_it_is_down(policy_binary: Path) -> 
         "true,false,true",
     ]
     assert "[error] server_unreachable: worker failed" in lines[9]
+    # The status window shows only the first line of the owner's error.
+    assert "Last error: worker failed |" in lines[9]
+    assert "trace" not in lines[9]
     assert lines[10:12] == ["nil", "nil"]
     assert "not answering" in lines[12]
 
@@ -353,7 +384,15 @@ def test_server_menu_is_honest_when_the_caretaker_is_absent(
         "failed",
         "false,false,false",
     ]
-    assert "has not published a reading" in lines[9]
+    # No envelope reaches the status window; the window owns the honest
+    # sentence for that case (ServerStatusView, 9e333175).
+    assert lines[9] == "envelope: nil"
+    view = (POLICY.parent / "ServerStatusView.swift").read_text(encoding="utf-8")
+    absent_branch = view[view.index("if envelope == nil {") :]
+    assert (
+        "The caretaker has not published a reading for the installed runtime."
+        in absent_branch.split("}", 1)[0]
+    )
 
 
 def test_server_menu_is_honest_when_the_envelope_is_garbage(
