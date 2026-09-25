@@ -545,44 +545,44 @@ def test_publication_boundary_step_still_asserts_all_carrier_names() -> None:
         assert target in workflow, f"boundary step stopped covering {target}"
 
 
-def test_native_carrier_embeds_every_required_agent_foundation() -> None:
+def test_native_carrier_records_its_own_executables_and_no_channel_tool() -> None:
     builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
-        encoding="utf-8"
-    )
-    stager = (REPO_ROOT / "scripts/stage-runtime-foundations.sh").read_text(
         encoding="utf-8"
     )
     installer = (REPO_ROOT / "scripts/vetcoders_install.py").read_text(encoding="utf-8")
 
-    foundation_stage = builder.index('stage-runtime-foundations.sh" "$runtime/bin"')
+    manifest = builder.index("runtime_pack_contract write-foundations")
     for required_runtime_install in (
         '"$runtime/bin/vc-start"',
         '"$runtime/bin/vc-server"',
         '"$runtime/bin/vibecrafted-server-web"',
     ):
-        assert builder.index(required_runtime_install) < foundation_stage
-    assert "'screenscribe==0.1.19'" in builder
-    assert '"$runtime/bin/screenscribe" --version' in builder
+        assert builder.index(required_runtime_install) < manifest
     assert '"$runtime/source-provenance.json"' in builder
     assert 'carrier --source "$SOURCE_ROOT"' in builder
     assert "provenance_stage" not in builder
     assert '"$runtime/scripts/vc-frame-product-entry.sh"' in builder
-    for command in ("loct", "loctree-mcp", "aicx", "aicx-mcp", "prview"):
-        assert command in stager
-        assert f'generation / "bin/{command}"' in installer
-    assert 'generation / "bin/screenscribe"' in installer
+    # Loctree, AICX, PRView and ScreenScribe ship through npm / GitHub
+    # releases / PyPI; the carrier neither stages nor requires them.
+    assert "stage-runtime-foundations" not in builder
+    assert "screenscribe==" not in builder
+    assert "bin/screenscribe" not in builder
+    required = installer.split("def _runtime_pack_required_paths(", 1)[1].split(
+        "\ndef ", 1
+    )[0]
+    for command in (
+        "loct",
+        "loctree",
+        "loctree-mcp",
+        "aicx",
+        "aicx-mcp",
+        "prview",
+        "screenscribe",
+    ):
+        assert f'"bin/{command}"' not in required, command
+        assert f'"{command}")' not in required, command
     assert 'generation / "libexec/vc-frame"' in installer
     assert "_write_runtime_generation_manifest(" in installer
-    assert "runtime-foundations.json" in stager
-    assert "npm pack" in stager
-    assert "@loctree/aicx-darwin-arm64" in stager
-    assert "published PRView v" not in stager
-    assert "darwin-relocate-openssl.sh" in stager
-    assert "libexec/prview" in stager
-    assert "cargo install" not in stager
-    assert "cargo build" not in stager
-    assert "remap-path-prefix" not in stager
-    assert 'rm -rf "$WORK" 2>/dev/null || true' in stager
 
 
 def test_macos_publisher_cold_verifies_exact_uploaded_bytes() -> None:

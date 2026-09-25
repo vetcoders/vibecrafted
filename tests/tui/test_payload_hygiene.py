@@ -258,11 +258,12 @@ def test_scanner_passes_when_only_pinned_upstream_bytes_name_the_host(
     assert "bin/aicx" in result.stdout
 
 
-def test_hygiene_library_loads_published_foundation_digests() -> None:
+def test_hygiene_library_accepts_no_upstream_digest_for_the_pack() -> None:
+    # The Runtime Pack no longer carries channel foundations, so the release
+    # gate has no published third-party bytes to excuse: every literal is fatal.
     library = LIBRARY.read_text(encoding="utf-8")
-    assert "published-foundation-digests.json" in library
-    assert "--accept-digest" in library
-    assert "sha256_unsigned" in library
+    assert "published-foundation-digests.json" not in library
+    assert "--accept-digest" not in library
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="codesign is macOS-only")

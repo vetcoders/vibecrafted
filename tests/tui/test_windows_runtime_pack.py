@@ -156,16 +156,6 @@ def test_windows_inventory_requires_mandatory_and_declares_unsupported(
         )
     unsupported = [
         {
-            "name": "prview",
-            "classification": "release-blocker",
-            "reason": "no Windows artifact",
-        },
-        {
-            "name": "screenscribe",
-            "classification": "release-blocker",
-            "reason": "no Windows artifact",
-        },
-        {
             "name": "voc",
             "classification": "limited-platform-scope",
             "reason": "no Windows artifact",
@@ -196,8 +186,6 @@ def test_windows_inventory_requires_mandatory_and_declares_unsupported(
         WINDOWS_X64_MANDATORY_EXECUTABLES
     )
     assert {item["name"] for item in loaded["unsupported"]} == {
-        "prview",
-        "screenscribe",
         "voc",
         "vc-start",
         "vc-server-supervisor",
@@ -228,18 +216,8 @@ def _write_file(path: Path, body: str = "fixture\n") -> None:
 
 def _windows_payload(root: Path, *, include_server: bool = True) -> Path:
     payload = root / "runtime-pack"
-    names = [
-        "loct",
-        "loctree",
-        "loctree-mcp",
-        "loctree-lsp",
-        "aicx",
-        "aicx-mcp",
-    ]
     if include_server:
-        names.append("vc-server")
-    for name in names:
-        _write_file(payload / "bin" / f"{name}.exe", "MZ")
+        _write_file(payload / "bin" / "vc-server.exe", "MZ")
     _write_file(payload / "bin" / "python.exe", "MZ")
     _write_file(
         payload / "bin" / "vibecrafted.cmd",
@@ -623,7 +601,9 @@ def test_ps1_installer_refuses_bad_signature_before_extract(tmp_path: Path) -> N
     assert not (tmp_path / "runtime" / "active.json").exists()
 
 
-def test_windows_inventory_accepts_screenscribe_cmd(tmp_path: Path) -> None:
+def test_windows_inventory_refuses_a_carried_screenscribe(tmp_path: Path) -> None:
+    # ScreenScribe ships through PyPI; a Windows pack that carries it lists an
+    # executable the contract no longer declares.
     root = tmp_path / "payload"
     (root / "bin").mkdir(parents=True)
     records = []
@@ -677,7 +657,6 @@ def test_windows_inventory_accepts_screenscribe_cmd(tmp_path: Path) -> None:
             "reason": "no Windows artifact",
         }
         for name, classification in (
-            ("prview", "release-blocker"),
             ("voc", "limited-platform-scope"),
             ("vc-start", "limited-platform-scope"),
             ("vc-server-supervisor", "limited-platform-scope"),
@@ -693,10 +672,8 @@ def test_windows_inventory_accepts_screenscribe_cmd(tmp_path: Path) -> None:
     (root / "runtime-inventory.json").write_text(
         json.dumps(inventory, sort_keys=True, indent=2) + "\n", encoding="utf-8"
     )
-    loaded = _windows_x64_inventory(root)
-    names = {item["name"] for item in loaded["executables"]}
-    assert "screenscribe" in names
-    assert "prview" in {item["name"] for item in loaded["unsupported"]}
+    with pytest.raises(RuntimePackContractError, match="undeclared executable"):
+        _windows_x64_inventory(root)
 
 
 def test_windows_pack_builder_builds_terminal_and_frame_honestly() -> None:

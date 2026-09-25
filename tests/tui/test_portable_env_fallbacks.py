@@ -47,8 +47,11 @@ def test_install_foundations_check_falls_back_to_home_without_vibecrafted_root(
 
     assert str(home / ".local" / "share" / "vibecrafted" / "bin") in result.stdout
     assert str(home / ".local" / "bin") in result.stdout
-    assert "Would install Loctree foundations from canonical installer" in result.stdout
-    assert "curl -fsSL https://loct.io/install.sh | sh" in result.stdout
+    assert (
+        "Would install Loctree from npm: npm install -g @loctree/loctree"
+        in result.stdout
+    )
+    assert "Would install AICX from npm: npm install -g @loctree/aicx" in result.stdout
 
 
 def test_install_foundations_default_treats_agent_cli_bootstrap_as_best_effort(

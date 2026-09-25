@@ -1239,7 +1239,9 @@ def test_make_version_bump_updates_configured_version_file(tmp_path: Path) -> No
     assert version_file.read_text(encoding="utf-8") == "1.5.0\n"
 
 
-def test_foundations_product_binaries_are_validation_only() -> None:
+def test_foundations_product_binaries_come_from_npm_only() -> None:
+    # Founder, 2026-09-25: "npm dla loctree i aicx". The product binaries come
+    # from their npm packages; never crates, local checkouts or pinned copies.
     text = (REPO_ROOT / "scripts" / "install-foundations.sh").read_text(
         encoding="utf-8"
     )
@@ -1260,8 +1262,8 @@ def test_foundations_product_binaries_are_validation_only() -> None:
         "AICX_VERSION",
         "install_from_bundled",
         "install_from_cargo",
-        "install_from_npm",
         "github_release_asset_url",
+        "loct.io",
         "cargo install",
         "LOCTREE_SOURCE",
         "AICX_SOURCE",
@@ -1272,12 +1274,10 @@ def test_foundations_product_binaries_are_validation_only() -> None:
         assert needle not in loctree_block
         assert needle not in aicx_block
 
-    assert "curl -fsSL $LOCTREE_INSTALL_URL | sh" in loctree_block
-    assert "curl -fsSL $LOCTREE_INSTALL_URL | sh" in aicx_block
-    assert (
-        "will not guess crates, npm packages, or local checkout paths" in loctree_block
-    )
-    assert "will not guess crates, npm packages, or local checkout paths" in aicx_block
+    assert 'install_from_npm "$LOCTREE_NPM_PACKAGE" loct' in loctree_block
+    assert 'install_from_npm "$AICX_NPM_PACKAGE" aicx' in aicx_block
+    assert "npm install -g $LOCTREE_NPM_PACKAGE" in loctree_block
+    assert "npm install -g $AICX_NPM_PACKAGE" in aicx_block
 
 
 @pytest.mark.parametrize("available", [True, False])
@@ -1320,7 +1320,7 @@ def test_foundations_never_overwrite_uv_owned_python_entrypoints() -> None:
     assert 'for src in "$source_bin"/vc-*' not in text
 
 
-def test_setup_installer_uses_canonical_foundation_action_only() -> None:
+def test_setup_installer_points_each_foundation_at_its_channel() -> None:
     installer = (REPO_ROOT / "scripts" / "vetcoders_install.py").read_text(
         encoding="utf-8"
     )
@@ -1333,13 +1333,21 @@ def test_setup_installer_uses_canonical_foundation_action_only() -> None:
         / "skills_sync.sh"
     ).read_text(encoding="utf-8")
 
-    for name in ("aicx-mcp", "loct", "loctree", "loctree-mcp"):
+    channels = {
+        "aicx": ("npm", "@loctree/aicx"),
+        "aicx-mcp": ("npm", "@loctree/aicx"),
+        "loct": ("npm", "@loctree/loctree"),
+        "loctree": ("npm", "@loctree/loctree"),
+        "loctree-mcp": ("npm", "@loctree/loctree"),
+        "prview": ("github", "https://github.com/vetcoders/prview-rs/releases"),
+        "screenscribe": ("pip", "screenscribe"),
+    }
+    for name, (channel, package) in channels.items():
         block = installer.split(f'name="{name}"', 1)[1].split("verify_cmd=", 1)[0]
-        assert 'channels=["canonical"]' in block
-        assert "curl -fsSL https://loct.io/install.sh | sh" in block
+        assert f'channels=["{channel}"]' in block, name
+        assert f'"{channel}": "{package}"' in block, name
+        assert "loct.io" not in block
         assert '"crates"' not in block
-        assert '"npm"' not in block
-        assert '"github"' not in block
         assert "LOCTREE_SOURCE" not in block
         assert "AICX_SOURCE" not in block
         assert "../loctree-suite" not in block
@@ -1356,6 +1364,9 @@ def test_setup_installer_uses_canonical_foundation_action_only() -> None:
     for needle in forbidden:
         assert needle not in installer
         assert needle not in skills_sync
+    assert "npm install -g @loctree/aicx" in skills_sync
+    assert "npm install -g @loctree/loctree" in skills_sync
+    assert "loct.io" not in skills_sync
 
 
 def test_installer_publishes_async_dispatch_wrapper() -> None:
