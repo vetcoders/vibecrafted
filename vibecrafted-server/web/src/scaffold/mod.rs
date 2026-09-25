@@ -89,6 +89,7 @@ pub mod api {
             .route("/scaffold/", get(editor))
             .route("/scaffold/editor", get(editor))
             .route("/scaffold/library", get(library))
+            .route("/artifacts", get(library))
             .route("/api/scaffold/plans", get(plans))
             .route("/api/scaffold/artifacts", get(artifacts))
             .route("/api/scaffold/export", get(export))
@@ -2743,10 +2744,10 @@ button.md-status.md-status-done .md-status-glyph{color:var(--status-success)}
             assert_eq!(
                 count(
                     html,
-                    r#"href="/scaffold" class="server-nav-link is-active""#
+                    r#"href="/artifacts" class="server-nav-link is-active""#
                 ),
                 2,
-                "{state}: Plans active in sidebar and mobile nav"
+                "{state}: Artifacts active in sidebar and mobile nav"
             );
             assert!(
                 html.contains(r#"href="/" aria-label="Vibecrafted server overview""#),

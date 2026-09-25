@@ -3853,3 +3853,31 @@ a.control-run-id:focus-visible {
 .overview-desk-body:has(.overview-inspector[hidden]) {
   grid-template-columns: minmax(0, 1fr);
 }
+
+/* prompt web-nav (w1-02): quiet Help and About sit with the phase line.
+   Group labels after the first door shelf need air. The phase note keeps
+   its row; the footer above it takes the bottom push. */
+.server-sidebar-nav .server-nav-label:not(:first-child) {
+  margin-top: 14px;
+}
+
+.server-sidebar-footer {
+  display: grid;
+  gap: 0;
+  margin-top: auto;
+  padding: 4px 8px 0;
+}
+
+.server-sidebar-footer .server-nav-link {
+  min-height: 24px;
+  color: var(--text-muted);
+}
+
+.server-sidebar-footer .server-nav-link strong {
+  font-size: 11px;
+  font-weight: 450;
+}
+
+.server-sidebar-note {
+  margin-top: 0;
+}

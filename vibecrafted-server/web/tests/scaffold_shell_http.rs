@@ -245,18 +245,18 @@ fn assert_shared_chrome(state: &str, content_type: &str, html: &str) {
     assert_eq!(
         count(
             html,
-            r#"href="/scaffold" class="server-nav-link is-active""#
+            r#"href="/artifacts" class="server-nav-link is-active""#
         ),
         2,
-        "{state}: Plans active in sidebar + mobile nav"
+        "{state}: Artifacts active in sidebar + mobile nav"
     );
     assert!(
         html.contains(r#"href="/" aria-label="Vibecrafted server overview""#),
         "{state}: Home"
     );
     assert!(
-        html.contains(r#"href="/transcripts" class="server-nav-link""#),
-        "{state}: five primary views stay in chrome"
+        html.contains(r#"href="/runs" class="server-nav-link""#),
+        "{state}: sibling doors stay in chrome"
     );
     assert!(
         html.contains(r#"class="server-theme-toggle""#),

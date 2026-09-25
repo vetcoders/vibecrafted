@@ -953,6 +953,8 @@ pub fn App() -> impl IntoView {
                 <Route path=path!("/aicx") view=AicxPage />
                 <Route path=path!("/frame") view=FramePage />
                 <Route path=path!("/guide") view=GuidePage />
+                <Route path=path!("/help") view=HelpPage />
+                <Route path=path!("/about") view=AboutPage />
                 <Route path=path!("/run/:run_id") view=RunDetailPage />
             </Routes>
         </Router>
@@ -2331,6 +2333,43 @@ pub fn GuidePage() -> impl IntoView {
                     <a class="server-console-link" href="/runs">"Open Agent Manager"</a>
                     <a class="server-console-link" href="/scaffold">"Open plans"</a>
                 </p>
+            </div>
+        </ServerFrame>
+    }
+}
+
+#[component]
+pub fn HelpPage() -> impl IntoView {
+    view! {
+        <Title text="Help & docs - vc-server" />
+        <Meta name="description" content="Help for someone already stuck." />
+        <ServerFrame active=ServerSection::Help status="help".to_string()>
+            <div class="server-console-shell route-page-shell">
+                {route_header(
+                    "Help",
+                    "Help & docs",
+                    "For someone already stuck. The operator guide stays its own page.",
+                )}
+                <p class="server-console-links">
+                    <a class="server-console-link" href="/guide">"Operator guide"</a>
+                </p>
+            </div>
+        </ServerFrame>
+    }
+}
+
+#[component]
+pub fn AboutPage() -> impl IntoView {
+    view! {
+        <Title text="About - vc-server" />
+        <Meta name="description" content="What this server window is." />
+        <ServerFrame active=ServerSection::About status="about".to_string()>
+            <div class="server-console-shell route-page-shell">
+                {route_header(
+                    "About",
+                    "About",
+                    "This window is the Vibecrafted server console for one workspace.",
+                )}
             </div>
         </ServerFrame>
     }

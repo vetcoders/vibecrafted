@@ -23,38 +23,25 @@ pub enum ServerSection {
     Scaffold,
     Guide,
     Frame,
+    /// Twelve-door vocabulary. Retired catalog variants above stay so existing
+    /// pages still compile; only the doors are rendered.
+    Projects,
+    Skills,
+    History,
+    Settings,
+    Diagnostics,
+    Help,
+    About,
 }
 
 impl ServerSection {
-    /// Six primary views. Catalog pages (workspaces, sessions, agents, live
-    /// runs, control, activity, guide) stay reachable — they highlight Overview
-    /// in the primary nav and themselves in the rail. AICX lives under Structure.
-    fn family(self) -> Self {
-        match self {
-            Self::Workspaces
-            | Self::Sessions
-            | Self::Agents
-            | Self::Runs
-            | Self::Lifecycle
-            | Self::Activity
-            | Self::Guide => Self::Overview,
-            other => other,
-        }
-    }
-
+    /// One door lights itself. Retired catalog pages are not doors, so they
+    /// do not borrow Overview.
     fn nav_class(self, section: Self) -> &'static str {
-        if self.family() == section {
+        if self == section {
             "server-nav-link is-active"
         } else {
             "server-nav-link"
-        }
-    }
-
-    fn rail_class(self, section: Self) -> &'static str {
-        if self == section {
-            "server-rail-link is-active"
-        } else {
-            "server-rail-link"
         }
     }
 }
@@ -100,81 +87,44 @@ pub fn ServerFrame(active: ServerSection, status: String, children: Children) ->
                         <a class=active.nav_class(ServerSection::Overview) href="/">
                             <strong>"Overview"</strong>
                         </a>
-                        <a class=active.nav_class(ServerSection::Transcripts) href="/transcripts">
-                            <strong>"Transcripts"</strong>
+                        <a class=active.nav_class(ServerSection::Runs) href="/runs">
+                            <strong>"Runs"</strong>
+                        </a>
+                        <a class=active.nav_class(ServerSection::Projects) href="/projects">
+                            <strong>"Projects"</strong>
                         </a>
                         <a class=active.nav_class(ServerSection::Usage) href="/usage">
-                            <strong>"Usage"</strong>
+                            <strong>"Costs & usage"</strong>
+                        </a>
+                        <p class="server-nav-label">"Trace"</p>
+                        <a class=active.nav_class(ServerSection::Skills) href="/skills">
+                            <strong>"Skills"</strong>
+                        </a>
+                        <a class=active.nav_class(ServerSection::Scaffold) href="/artifacts">
+                            <strong>"Artifacts"</strong>
                         </a>
                         <a class=active.nav_class(ServerSection::Structure) href="/structure">
-                            <strong>"Structure"</strong>
+                            <strong>"Code intelligence"</strong>
                         </a>
-                        <a class=active.nav_class(ServerSection::Scaffold) href="/scaffold">
-                            <strong>"Plans"</strong>
+                        <a class=active.nav_class(ServerSection::History) href="/history">
+                            <strong>"History & context"</strong>
                         </a>
-                        <a class=active.nav_class(ServerSection::Frame) href="/frame">
-                            <strong>"Frame"</strong>
+                        <p class="server-nav-label">"Machine"</p>
+                        <a class=active.nav_class(ServerSection::Settings) href="/settings">
+                            <strong>"Settings & config"</strong>
+                        </a>
+                        <a class=active.nav_class(ServerSection::Diagnostics) href="/diagnostics">
+                            <strong>"Diagnostics"</strong>
                         </a>
                     </nav>
-                    <ul class="server-sidebar-rail" aria-label="Overview filters and catalogs">
-                        <li class="server-rail-label">"Observe"</li>
-                        <li>
-                            <a class="server-rail-link" href="/?rail=active" data-rail-filter="active">
-                                <span>"Active"</span>
-                            </a>
-                        </li>
-                        <li>
-                            <a class="server-rail-link" href="/?rail=failures" data-rail-filter="failures">
-                                <span>"Failures"</span>
-                            </a>
-                        </li>
-                        <li>
-                            <a class="server-rail-link" href="/?rail=health" data-rail-filter="health">
-                                <span>"Health"</span>
-                            </a>
-                        </li>
-                        <li>
-                            <a class=active.rail_class(ServerSection::Workspaces) href="/workspaces">
-                                <span>"Workspaces"</span>
-                            </a>
-                        </li>
-                        <li>
-                            <a class=active.rail_class(ServerSection::Sessions) href="/sessions">
-                                <span>"Sessions"</span>
-                            </a>
-                        </li>
-                        <li>
-                            <a class=active.rail_class(ServerSection::Agents) href="/agents">
-                                <span>"Agents"</span>
-                            </a>
-                        </li>
-                        <li>
-                            <a class=active.rail_class(ServerSection::Runs) href="/runs">
-                                <span>"Live"</span>
-                            </a>
-                        </li>
-                        <li class="server-rail-label">"Control"</li>
-                        <li>
-                            <a class=active.rail_class(ServerSection::Usage) href="/usage">
-                                <span>"Cost & usage"</span>
-                            </a>
-                        </li>
-                        <li>
-                            <a class=active.rail_class(ServerSection::Lifecycle) href="/lifecycle">
-                                <span>"Control"</span>
-                            </a>
-                        </li>
-                        <li>
-                            <a class=active.rail_class(ServerSection::Activity) href="/activity">
-                                <span>"Activity"</span>
-                            </a>
-                        </li>
-                        <li>
-                            <a class=active.rail_class(ServerSection::Guide) href="/guide">
-                                <span>"Guide"</span>
-                            </a>
-                        </li>
-                    </ul>
+                    <nav class="server-sidebar-footer" aria-label="Help and about">
+                        <a class=active.nav_class(ServerSection::Help) href="/help">
+                            <strong>"Help & docs"</strong>
+                        </a>
+                        <a class=active.nav_class(ServerSection::About) href="/about">
+                            <strong>"About"</strong>
+                        </a>
+                    </nav>
                     <div class="server-sidebar-note">
                         <span class="server-status-dot" aria-hidden="true"></span>
                         <p>
@@ -191,20 +141,38 @@ pub fn ServerFrame(active: ServerSection, status: String, children: Children) ->
                 <a class=active.nav_class(ServerSection::Overview) href="/">
                     <strong>"Overview"</strong>
                 </a>
-                <a class=active.nav_class(ServerSection::Transcripts) href="/transcripts">
-                    <strong>"Logs"</strong>
+                <a class=active.nav_class(ServerSection::Runs) href="/runs">
+                    <strong>"Runs"</strong>
+                </a>
+                <a class=active.nav_class(ServerSection::Projects) href="/projects">
+                    <strong>"Projects"</strong>
                 </a>
                 <a class=active.nav_class(ServerSection::Usage) href="/usage">
-                    <strong>"Usage"</strong>
+                    <strong>"Costs & usage"</strong>
+                </a>
+                <a class=active.nav_class(ServerSection::Skills) href="/skills">
+                    <strong>"Skills"</strong>
+                </a>
+                <a class=active.nav_class(ServerSection::Scaffold) href="/artifacts">
+                    <strong>"Artifacts"</strong>
                 </a>
                 <a class=active.nav_class(ServerSection::Structure) href="/structure">
-                    <strong>"Structure"</strong>
+                    <strong>"Code intelligence"</strong>
                 </a>
-                <a class=active.nav_class(ServerSection::Scaffold) href="/scaffold">
-                    <strong>"Plans"</strong>
+                <a class=active.nav_class(ServerSection::History) href="/history">
+                    <strong>"History & context"</strong>
                 </a>
-                <a class=active.nav_class(ServerSection::Frame) href="/frame">
-                    <strong>"Frame"</strong>
+                <a class=active.nav_class(ServerSection::Settings) href="/settings">
+                    <strong>"Settings & config"</strong>
+                </a>
+                <a class=active.nav_class(ServerSection::Diagnostics) href="/diagnostics">
+                    <strong>"Diagnostics"</strong>
+                </a>
+                <a class=active.nav_class(ServerSection::Help) href="/help">
+                    <strong>"Help & docs"</strong>
+                </a>
+                <a class=active.nav_class(ServerSection::About) href="/about">
+                    <strong>"About"</strong>
                 </a>
             </nav>
             <div id="vc-ppm" class="vc-ppm" hidden>
@@ -679,7 +647,7 @@ mod tests {
         assert_eq!(count(&html, "class=\"server-sidebar\""), 1);
         assert_eq!(count(&html, "<main class=\"server-route-main\">"), 1);
         assert_eq!(count(&html, "<main"), 1, "the frame owns the only <main>");
-        assert!(html.contains("href=\"/scaffold\" class=\"server-nav-link is-active\""));
+        assert!(html.contains("href=\"/artifacts\" class=\"server-nav-link is-active\""));
         assert!(html.contains(
             "<div class=\"server-route-document\"><div class=\"canvas\">hello</div></div>"
         ));
@@ -996,9 +964,112 @@ mod tests {
         assert!(theme_control_script().contains("localStorage.setItem('loct-theme', next)"));
     }
 
-    #[test]
-    fn sidebar_is_six_primary_views_and_rail_keeps_catalog_routes() {
-        let overview = live_layer(&render_document(&ServerDocument {
+    fn sidebar_html(active: ServerSection) -> String {
+        let html = live_layer(&render_document(&ServerDocument {
+            title: "t",
+            active,
+            status: "ok",
+            head_html: "",
+            body_html: "",
+            tail_html: "",
+        }));
+        let start = html.find("class=\"server-sidebar\"").expect("sidebar");
+        let end = html[start..].find("</aside>").expect("aside") + start;
+        html[start..end].to_string()
+    }
+
+    fn door(sidebar: &str, href: &str, name: &str) {
+        assert!(
+            sidebar.contains(&format!("href=\"{href}\"")),
+            "missing href {href} for {name}"
+        );
+        assert!(
+            sidebar.contains(&format!("<strong>{name}</strong>")),
+            "missing door {name}"
+        );
+    }
+
+    fn link_is_active(sidebar: &str, href: &str) -> bool {
+        let needle = format!("href=\"{href}\"");
+        let Some(at) = sidebar.find(&needle) else {
+            return false;
+        };
+        let start = at.saturating_sub(96);
+        let end = (at + needle.len() + 96).min(sidebar.len());
+        sidebar[start..end].contains("server-nav-link is-active")
+    }
+
+    pub(super) fn sidebar_groups_work_trace_machine() {
+        let overview = sidebar_html(ServerSection::Overview);
+        let help = sidebar_html(ServerSection::Help);
+        let about = sidebar_html(ServerSection::About);
+        let structure = sidebar_html(ServerSection::Structure);
+
+        for label in ["Work", "Trace", "Machine"] {
+            assert!(
+                overview.contains(&format!("class=\"server-nav-label\">{label}</p>")),
+                "missing group {label}"
+            );
+        }
+        let work_at = overview.find(">Work</p>").expect("work");
+        let trace_at = overview.find(">Trace</p>").expect("trace");
+        let machine_at = overview.find(">Machine</p>").expect("machine");
+        assert!(work_at < trace_at && trace_at < machine_at);
+
+        for (href, name) in [
+            ("/", "Overview"),
+            ("/runs", "Runs"),
+            ("/projects", "Projects"),
+            ("/usage", "Costs &amp; usage"),
+            ("/skills", "Skills"),
+            ("/artifacts", "Artifacts"),
+            ("/structure", "Code intelligence"),
+            ("/history", "History &amp; context"),
+            ("/settings", "Settings &amp; config"),
+            ("/diagnostics", "Diagnostics"),
+            ("/help", "Help &amp; docs"),
+            ("/about", "About"),
+        ] {
+            door(&overview, href, name);
+        }
+        assert_eq!(
+            count(&overview, "class=\"server-nav-link"),
+            12,
+            "twelve doors, not the old rail"
+        );
+
+        let footer_at = overview
+            .find("class=\"server-sidebar-footer\"")
+            .expect("footer");
+        let note_at = overview
+            .find("class=\"server-sidebar-note\"")
+            .expect("phase");
+        assert!(footer_at > machine_at && footer_at < note_at);
+        let footer = &overview[footer_at..note_at];
+        assert!(footer.contains("Help &amp; docs"));
+        assert!(footer.contains(">About</strong>"));
+        assert!(!overview[work_at..trace_at].contains("Help"));
+        assert!(overview[note_at..].contains("server-focus-caption"));
+
+        assert!(!overview.contains("href=\"/frame\""));
+        assert!(!overview.contains(">Frame</strong>"));
+        assert!(!overview.contains("server-sidebar-rail"));
+        assert!(!overview.contains(">Observe<"));
+        assert!(!overview.contains(">Active<"));
+        assert!(!overview.contains("Cost &amp; usage"));
+        assert!(!overview.contains("<strong>Plans</strong>"));
+        assert!(!overview.contains("<strong>Usage</strong>"));
+        assert!(!overview.contains("<strong>Structure</strong>"));
+
+        assert!(link_is_active(&overview, "/"));
+        assert!(!link_is_active(&overview, "/help"));
+        assert!(link_is_active(&help, "/help"));
+        assert!(!link_is_active(&help, "/"));
+        assert!(link_is_active(&about, "/about"));
+        assert!(!link_is_active(&about, "/"));
+        assert!(link_is_active(&structure, "/structure"));
+
+        let html = live_layer(&render_document(&ServerDocument {
             title: "t",
             active: ServerSection::Overview,
             status: "ok",
@@ -1006,65 +1077,18 @@ mod tests {
             body_html: "",
             tail_html: "",
         }));
-        let workspaces = live_layer(&render_document(&ServerDocument {
-            title: "t",
-            active: ServerSection::Workspaces,
-            status: "ok",
-            head_html: "",
-            body_html: "",
-            tail_html: "",
-        }));
-        let aicx = live_layer(&render_document(&ServerDocument {
-            title: "t",
-            active: ServerSection::Structure,
-            status: "ok",
-            head_html: "",
-            body_html: "",
-            tail_html: "",
-        }));
-
-        let sidebar = {
-            let start = overview.find("class=\"server-sidebar\"").expect("sidebar");
-            let end = overview[start..].find("</aside>").expect("aside") + start;
-            &overview[start..end]
-        };
-        assert_eq!(
-            count(sidebar, "class=\"server-nav-link"),
-            6,
-            "primary nav is six views"
-        );
-        assert!(sidebar.contains("href=\"/\" class=\"server-nav-link is-active\""));
-        assert!(sidebar.contains("href=\"/transcripts\" class=\"server-nav-link\""));
-        assert!(sidebar.contains("href=\"/usage\" class=\"server-nav-link\""));
-        assert!(sidebar.contains("href=\"/structure\" class=\"server-nav-link\""));
-        assert!(sidebar.contains("href=\"/scaffold\" class=\"server-nav-link\""));
-        assert!(sidebar.contains("href=\"/frame\" class=\"server-nav-link\""));
-        assert!(sidebar.contains("<strong>Plans</strong>"));
-        assert!(!sidebar.contains("Plans / Scaffold"));
-        assert!(!sidebar.contains(">01<"));
-        assert!(!sidebar.contains("Open scaffold"));
-        assert!(!sidebar.contains("href=\"/workspaces\" class=\"server-nav-link"));
-        assert!(sidebar.contains("href=\"/workspaces\" class=\"server-rail-link\""));
-        assert!(sidebar.contains("href=\"/sessions\" class=\"server-rail-link\""));
-        assert!(sidebar.contains("href=\"/agents\" class=\"server-rail-link\""));
-        assert!(sidebar.contains("href=\"/runs\" class=\"server-rail-link\""));
-        assert!(sidebar.contains("href=\"/lifecycle\" class=\"server-rail-link\""));
-        assert!(sidebar.contains("href=\"/activity\" class=\"server-rail-link\""));
-        assert!(sidebar.contains("href=\"/guide\" class=\"server-rail-link\""));
-
-        assert!(!overview.contains("href=\"/aicx\" class=\"server-navbar-action\""));
-        assert!(!overview.contains("Open scaffold"));
-
-        assert!(workspaces.contains("href=\"/\" class=\"server-nav-link is-active\""));
-        assert!(workspaces.contains("href=\"/workspaces\" class=\"server-rail-link is-active\""));
-        assert!(aicx.contains("href=\"/structure\" class=\"server-nav-link is-active\""));
-        assert_eq!(count(&overview, "class=\"server-mobile-nav\""), 1);
-        let mobile_start = overview
-            .find("class=\"server-mobile-nav\"")
-            .expect("mobile");
-        let mobile_end =
-            overview[mobile_start..].find("</nav>").expect("mobile end") + mobile_start;
-        let mobile = &overview[mobile_start..mobile_end];
-        assert_eq!(count(mobile, "class=\"server-nav-link"), 6);
+        assert!(!html.contains("href=\"/frame\""));
+        let mobile_start = html.find("class=\"server-mobile-nav\"").expect("mobile");
+        let mobile_end = html[mobile_start..].find("</nav>").expect("mobile end") + mobile_start;
+        let mobile = &html[mobile_start..mobile_end];
+        assert_eq!(count(mobile, "class=\"server-nav-link"), 12);
+        assert!(mobile.contains("Help &amp; docs"));
+        assert!(!mobile.contains("href=\"/frame\""));
+        assert!(!mobile.contains("<strong>Plans</strong>"));
     }
+}
+
+#[cfg(all(test, feature = "ssr"))]
+pub(crate) fn assert_sidebar_groups_work_trace_machine() {
+    tests::sidebar_groups_work_trace_machine();
 }
