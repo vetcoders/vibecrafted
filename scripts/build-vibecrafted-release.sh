@@ -1153,7 +1153,13 @@ build_product() {
 
   log "Building the bundled Vibecrafted Server and hydrated site"
   local server_build_root="$BUILD_DIR/cargo"
-  make -C "$SOURCE_ROOT" CARGO_BUILD_ROOT="$server_build_root" build-server-release
+  # Rust 1.96 mangles crate symbols the legacy way, which spells the whole
+  # Leptos view type into drop glue: MEASURED 2026-09-25, 111k-character
+  # core::ptr::drop_in_place<...View<(Doctype, Html<...>)>> symbols, past the
+  # name limit Apple ld enforces (makeSymbolStringInPlace, ld-27036.1 on the
+  # xcode pair). v0 is what the server's own pin (1.97.0) emits by default.
+  RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C symbol-mangling-version=v0" \
+    make -C "$SOURCE_ROOT" CARGO_BUILD_ROOT="$server_build_root" build-server-release
   local server_source="$server_build_root/vibecrafted-server/release/vibecrafted-server-web"
   local server_site="$server_build_root/vibecrafted-server/site"
   [[ -x "$server_source" ]] || die "Vibecrafted Server release binary is missing"

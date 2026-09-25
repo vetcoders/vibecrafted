@@ -74,6 +74,14 @@ def test_make_release_bootstraps_exact_rust_targets_and_uses_classic_ld() -> Non
     assert builder.count('if [[ "$MODE" != "notarize" ]]; then') >= 2
     assert "release-toolchain-contract.sh" in linker
     assert 'exec "$VIBECRAFTED_RELEASE_DARWIN_CLANG" -Wl,-ld_classic "$@"' in linker
+    # Legacy mangling spells Leptos view types into 111k-character drop-glue
+    # symbols that Apple ld refuses; the server build is mangled v0.
+    server_build = builder[
+        builder.index('log "Building the bundled Vibecrafted Server') : builder.index(
+            "build-server-release\n"
+        )
+    ]
+    assert '-C symbol-mangling-version=v0" \\\n' in server_build
 
 
 def test_classic_darwin_linker_wrapper_injects_flag_before_cargo_arguments(
