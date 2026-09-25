@@ -34,6 +34,14 @@ fn projects_filter_deduped_shelf() {
     app::projects_filter_deduped_shelf();
 }
 
+#[cfg(all(test, feature = "ssr"))]
+#[test]
+fn code_intelligence_is_not_a_plan_library() {
+    // `--lib code_intelligence_is_not_a_plan_library -- --exact` matches this
+    // crate-root name, not `app::tests::…`.
+    app::code_intelligence_is_not_a_plan_library();
+}
+
 #[cfg(feature = "hydrate")]
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn hydrate() {

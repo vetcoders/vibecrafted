@@ -939,6 +939,7 @@ pub fn shell(_options: leptos::config::LeptosOptions) -> impl IntoView {
                 <style>{STYLE_MAIN}</style>
             </head>
             <body>
+                <script id=CODE_REPORTS_EMBED_ID type="application/json" inner_html=code_reports_embed_json()></script>
                 <App/>
                 <script inner_html=theme_control_script()></script>
                 <script inner_html=operator_desk_script()></script>
@@ -966,6 +967,7 @@ pub fn App() -> impl IntoView {
                 <Route path=path!("/lifecycle") view=LifecyclePage />
                 <Route path=path!("/activity") view=ActivityPage />
                 <Route path=path!("/structure") view=StructurePage />
+                <Route path=path!("/code") view=StructurePage />
                 <Route path=path!("/aicx") view=AicxPage />
                 <Route path=path!("/frame") view=FramePage />
                 <Route path=path!("/guide") view=GuidePage />
@@ -2394,86 +2396,209 @@ fn activity_dashboard(dashboard: DashboardData) -> impl IntoView {
     }
 }
 
-#[component]
-pub fn StructurePage() -> impl IntoView {
-    view! {
-        <Title text="structure - vc-server" />
-        <Meta name="description" content="Current structural evidence and scaffold entry points." />
-        {control_dashboard(|dashboard| structure_dashboard(dashboard).into_any())}
+#[cfg(any(feature = "ssr", feature = "hydrate"))]
+const CODE_REPORTS_EMBED_ID: &str = "vc-code-reports";
+
+/// Report documents are a different noun from scaffold plans.
+/// `VIBECRAFTED_LOCTREE_REPORTS`, then `loctree_reports` in the operator
+/// config, then the Loctree checkout `reports` directory measured for this room.
+#[cfg(feature = "ssr")]
+fn configured_loctree_reports_dir() -> std::path::PathBuf {
+    #[cfg(all(test, feature = "ssr"))]
+    if let Some(path) = code_reports_override() {
+        return path;
     }
+    if let Some(value) = std::env::var_os("VIBECRAFTED_LOCTREE_REPORTS") {
+        let path = std::path::PathBuf::from(value);
+        if !path.as_os_str().is_empty() {
+            return path;
+        }
+    }
+    if let Some(path) = loctree_reports_from_operator_config() {
+        return path;
+    }
+    std::path::PathBuf::from("/Volumes/vc-workspace/Loctree/loctree/reports")
 }
 
-fn structure_dashboard(dashboard: DashboardData) -> impl IntoView {
-    let report = dashboard.loctree_report;
-    let has_report = !report.is_empty();
-    let selected_root = dashboard
-        .workspaces
-        .iter()
-        .find(|workspace| workspace.selected)
-        .map(|workspace| workspace.root.clone())
-        .unwrap_or_default();
+#[cfg(all(test, feature = "ssr"))]
+std::thread_local! {
+    static CODE_REPORTS_OVERRIDE: std::cell::RefCell<Option<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(all(test, feature = "ssr"))]
+fn code_reports_override() -> Option<std::path::PathBuf> {
+    CODE_REPORTS_OVERRIDE.with(|slot| slot.borrow().clone())
+}
+
+#[cfg(all(test, feature = "ssr"))]
+fn set_code_reports_override(path: Option<std::path::PathBuf>) {
+    CODE_REPORTS_OVERRIDE.with(|slot| *slot.borrow_mut() = path);
+}
+
+#[cfg(feature = "ssr")]
+fn loctree_reports_from_operator_config() -> Option<std::path::PathBuf> {
+    let config_home = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".config"))
+        })?;
+    let text = std::fs::read_to_string(config_home.join("vibecrafted/config.toml")).ok()?;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with('[') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "loctree_reports" {
+            continue;
+        }
+        let value = value.trim().trim_matches('"').trim_matches('\'').trim();
+        if value.is_empty() {
+            return None;
+        }
+        return Some(std::path::PathBuf::from(value));
+    }
+    None
+}
+
+#[cfg(feature = "ssr")]
+fn is_loctree_report_document(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".md")
+        || lower.ends_with(".markdown")
+        || lower.ends_with(".html")
+        || lower.ends_with(".htm")
+}
+
+/// Top-level report documents only. Directories, symlinks, and non-documents
+/// stay out so a checkout's source tree cannot masquerade as the list.
+#[cfg(feature = "ssr")]
+fn list_loctree_report_documents(dir: &std::path::Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !meta.is_file() || meta.file_type().is_symlink() {
+            continue;
+        }
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if name.starts_with('.') || !is_loctree_report_document(&name) {
+            continue;
+        }
+        names.push(name);
+    }
+    names.sort_by(|left, right| {
+        left.to_ascii_lowercase()
+            .cmp(&right.to_ascii_lowercase())
+            .then_with(|| left.cmp(right))
+    });
+    names
+}
+
+#[cfg(feature = "ssr")]
+fn code_reports_embed_json() -> String {
+    let names = list_loctree_report_documents(&configured_loctree_reports_dir());
+    serde_json::to_string(&names)
+        .unwrap_or_else(|_| "[]".to_string())
+        .replace('<', "\\u003c")
+}
+
+#[cfg(feature = "ssr")]
+fn code_intelligence_report_names() -> Vec<String> {
+    list_loctree_report_documents(&configured_loctree_reports_dir())
+}
+
+#[cfg(all(feature = "hydrate", not(feature = "ssr")))]
+fn code_intelligence_report_names() -> Vec<String> {
+    let Some(window) = web_sys::window() else {
+        return Vec::new();
+    };
+    let Some(document) = window.document() else {
+        return Vec::new();
+    };
+    let Some(element) = document.get_element_by_id(CODE_REPORTS_EMBED_ID) else {
+        return Vec::new();
+    };
+    let Some(json) = element.text_content() else {
+        return Vec::new();
+    };
+    serde_json::from_str(&json).unwrap_or_default()
+}
+
+#[cfg(not(any(feature = "ssr", feature = "hydrate")))]
+fn code_intelligence_report_names() -> Vec<String> {
+    Vec::new()
+}
+
+#[cfg(all(test, feature = "ssr"))]
+pub fn code_intelligence_is_not_a_plan_library() {
+    tests::code_intelligence_is_not_a_plan_library();
+}
+
+fn code_report_rows(names: Vec<String>) -> impl IntoView {
+    names
+        .into_iter()
+        .map(|name| {
+            let label = name.clone();
+            view! { <li data-code-report=name>{label}</li> }
+        })
+        .collect_view()
+}
+
+#[component]
+pub fn StructurePage() -> impl IntoView {
+    let names = code_intelligence_report_names();
+    let count = names.len();
+    let status = if count == 0 {
+        "no reports".to_string()
+    } else {
+        format!("{count} reports")
+    };
+    let body = if names.is_empty() {
+        view! {
+            <p class="control-empty" data-code-empty>
+                "Code intelligence has no report documents in the configured directory."
+            </p>
+        }
+        .into_any()
+    } else {
+        view! {
+            <ul class="control-warning-list" data-code-reports aria-label="Loctree reports">
+                {code_report_rows(names)}
+            </ul>
+        }
+        .into_any()
+    };
     view! {
-        <ServerFrame active=ServerSection::Structure status="structural evidence".to_string()>
+        <Title text="Code intelligence - vc-server" />
+        <Meta name="description" content="Loctree report documents. Not a plan shelf." />
+        <ServerFrame active=ServerSection::Structure status=status>
             <div class="server-console-shell route-page-shell">
-                <div
-                    id="vc-focus-context"
-                    data-selected-workspace-root=selected_root
-                    hidden
-                ></div>
-                {route_header("Repository", "Structure", "Loctree report for the selected workspace. Generate it here; tabs never start this process. Local filesystem paths are never emitted as broken browser links.")}
-                <section class="control-panel control-panel-wide" aria-label="Structural evidence">
-                    <div class="control-panel-head"><h2>"Latest Loctree report"</h2><span>{if has_report { "available" } else { "not found" }}</span></div>
-                    <p class="run-detail-artifact-path" hidden={!has_report}>{report}</p>
-                    <p class="server-console-links" hidden={!has_report}>
-                        <a class="server-console-link server-console-link-primary" href="/structure/report" target="_blank" rel="noopener noreferrer">"Open Loctree report ↗"</a>
-                    </p>
-                    <p class="control-empty" hidden=has_report>"No Loctree report is known for the roots in the canonical state view."</p>
-                    <p class="server-console-links">
-                        <button id="loctree-generate" class="server-console-link server-console-link-primary" type="button">"Generate Loctree report"</button>
-                    </p>
-                    <p id="loctree-generate-status" class="control-empty"></p>
-                    <p class="control-plane-meta" hidden={!has_report}>"The report opens sandboxed: its scripts run, but it holds no control-plane authority."</p>
-                    {aicx_search_panel()}
-                    <script inner_html=loctree_generate_script()></script>
+                {route_header(
+                    "Loctree",
+                    "Code intelligence",
+                    "Report documents from the configured Loctree reports directory. File names only — this room is not a plan shelf.",
+                )}
+                <section class="control-panel control-panel-wide" aria-label="Code intelligence">
+                    <div class="control-panel-head">
+                        <h2>"Loctree reports"</h2>
+                        <span>{count}</span>
+                    </div>
+                    {body}
                 </section>
             </div>
         </ServerFrame>
     }
-}
-
-fn loctree_generate_script() -> &'static str {
-    r#"(() => {
-  const btn = document.getElementById('loctree-generate');
-  const status = document.getElementById('loctree-generate-status');
-  if (!btn || !status) return;
-  btn.addEventListener('click', async () => {
-    let root = '';
-    try { root = localStorage.getItem('vc-focus-root') || ''; } catch (_) {}
-    const ctx = document.getElementById('vc-focus-context');
-    const live = ctx && ctx.getAttribute('data-selected-workspace-root');
-    if (live) root = live;
-    status.textContent = 'Generating…';
-    btn.disabled = true;
-    try {
-      const response = await fetch('/api/structure/report', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(root ? { root } : {}),
-      });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || ('HTTP ' + response.status));
-      if (payload.href) {
-        location.href = payload.href;
-        return;
-      }
-      location.reload();
-    } catch (error) {
-      status.textContent = 'Generate failed: ' + error.message;
-      btn.disabled = false;
-    }
-  });
-})();"#
 }
 
 #[component]
@@ -3841,16 +3966,133 @@ pub(crate) mod tests {
         assert!(lifecycle.contains("Action plan"));
         assert!(activity.contains("Runtime context"));
         assert!(activity.contains("Warnings"));
-        assert!(structure.contains("Latest Loctree report"));
-        assert!(structure.contains("id=\"loctree-generate\""));
-        assert!(structure.contains("/api/structure/report"));
-        assert!(structure.contains("id=\"aicx-search-form\""));
-        assert!(structure.contains("/api/aicx/search"));
+        assert!(structure.contains("Code intelligence"));
+        assert!(structure.contains("Loctree reports") || structure.contains("data-code-empty"));
+        assert!(!structure.contains("id=\"loctree-generate\""));
+        assert!(!structure.contains("id=\"aicx-search-form\""));
         assert!(!structure.contains("href=\"/Volumes/"));
         assert!(card.contains("href=\"/run/impl-live-agent\""));
         assert!(!card.contains("Open transcript"));
         assert!(card.contains("data-ppm=\"run\""));
         assert!(card.contains("control-copy"));
+    }
+
+    pub(super) fn code_intelligence_is_not_a_plan_library() {
+        let home = temp_home();
+        let plan_id = "shelf-plan-not-a-row";
+        let plan_root = home
+            .join("artifacts/vetcoders/vibecrafted/2026_0925/plans")
+            .join(plan_id);
+        fs::create_dir_all(&plan_root).expect("plan root");
+        fs::write(
+            plan_root.join("manifest.json"),
+            r#"{
+                "schema_version": "1",
+                "plan_id": "shelf-plan-not-a-row",
+                "org": "vetcoders",
+                "repo": "vibecrafted",
+                "day": "2026_0925",
+                "artifacts": []
+            }"#,
+        )
+        .expect("manifest");
+        let shelf = control_core::ScaffoldArtifactStore::new(&home).catalog_detailed();
+        assert!(
+            shelf.plans.iter().any(|plan| plan.plan_id == plan_id),
+            "catalog_detailed must see the planted plan so a leaked row can fail this test"
+        );
+
+        let reports = home.join("reports");
+        fs::create_dir_all(reports.join("nested")).expect("nested");
+        fs::write(reports.join("beta-notes.html"), "<p>report</p>").expect("html");
+        fs::write(reports.join("alpha-project.md"), "# report\n").expect("md");
+        fs::write(reports.join("notes.txt"), "not a report document").expect("txt");
+        fs::write(reports.join("Cargo.toml"), "[package]\n").expect("toml");
+        fs::create_dir_all(reports.join(plan_id)).expect("plan-named dir");
+        std::os::unix::fs::symlink("alpha-project.md", reports.join("linked.md")).expect("symlink");
+
+        super::set_code_reports_override(Some(reports.clone()));
+        let _override = CodeReportsOverrideGuard;
+        let html = render_structure_page();
+        super::set_code_reports_override(None);
+
+        let rows = code_report_rows_from(&html);
+        assert_eq!(
+            rows,
+            vec![
+                "alpha-project.md".to_string(),
+                "beta-notes.html".to_string()
+            ]
+        );
+        assert!(html.contains("Code intelligence"));
+        assert!(
+            html.contains("<h1 class=\"run-detail-title\">Code intelligence</h1>")
+                || html.contains(">Code intelligence<")
+        );
+        for plan in &shelf.plans {
+            assert!(
+                !rows.iter().any(|row| row == &plan.plan_id),
+                "plan_id {} rendered as a row on Code intelligence",
+                plan.plan_id
+            );
+        }
+        assert!(!html.contains(plan_id));
+        assert!(!html.contains("catalog_detailed"));
+        assert!(!html.contains("id=\"aicx-search-form\""));
+
+        let empty = home.join("empty-reports");
+        fs::create_dir_all(&empty).expect("empty reports");
+        super::set_code_reports_override(Some(empty));
+        let empty_html = render_structure_page();
+        super::set_code_reports_override(None);
+        assert!(empty_html.contains("Code intelligence"));
+        assert!(empty_html.contains("data-code-empty"));
+        assert!(
+            code_report_rows_from(&empty_html).is_empty(),
+            "an empty reports directory must not invent rows"
+        );
+
+        let missing = home.join("missing-reports");
+        super::set_code_reports_override(Some(missing));
+        let missing_html = render_structure_page();
+        super::set_code_reports_override(None);
+        assert!(missing_html.contains("Code intelligence"));
+        assert!(missing_html.contains("data-code-empty"));
+        assert!(code_report_rows_from(&missing_html).is_empty());
+
+        fs::remove_dir_all(home).ok();
+    }
+
+    struct CodeReportsOverrideGuard;
+
+    impl Drop for CodeReportsOverrideGuard {
+        fn drop(&mut self) {
+            super::set_code_reports_override(None);
+        }
+    }
+
+    fn render_structure_page() -> String {
+        let owner = Owner::new();
+        owner.with(|| {
+            leptos_meta::provide_meta_context();
+            provide_theme_context();
+            StructurePage().to_html()
+        })
+    }
+
+    fn code_report_rows_from(html: &str) -> Vec<String> {
+        let needle = "data-code-report=\"";
+        let mut rows = Vec::new();
+        let mut rest = html;
+        while let Some(start) = rest.find(needle) {
+            let after = &rest[start + needle.len()..];
+            let Some(end) = after.find('"') else {
+                break;
+            };
+            rows.push(after[..end].to_string());
+            rest = &after[end + 1..];
+        }
+        rows
     }
 
     #[test]
