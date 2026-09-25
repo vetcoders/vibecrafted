@@ -103,6 +103,7 @@ struct CommandDeckView<Canvas: View>: View {
   var actions: (any CommandDeckActionHandling)?
   var navigation: WebTabNavigation?
   var navigationHandler: (any CommandDeckNavigationHandling)?
+  var openPath: ((String) -> Void)?
 
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -111,17 +112,20 @@ struct CommandDeckView<Canvas: View>: View {
     actions: (any CommandDeckActionHandling)? = nil,
     navigation: WebTabNavigation? = nil,
     navigationHandler: (any CommandDeckNavigationHandling)? = nil,
+    openPath: ((String) -> Void)? = nil,
     @ViewBuilder canvas: () -> Canvas
   ) {
     self.presentation = presentation
     self.actions = actions
     self.navigation = navigation
     self.navigationHandler = navigationHandler
+    self.openPath = openPath
     self.canvas = canvas()
   }
 
   var body: some View {
-    CommandDeckCanvasStage(
+    CommandDeckShell(phase: presentation.phase, openPath: openPath) {
+      CommandDeckCanvasStage(
       phase: presentation.phase,
       problem: presentation.problem,
       availableActions: presentation.recoveryCardActions,
@@ -143,6 +147,7 @@ struct CommandDeckView<Canvas: View>: View {
     }
     .accessibilityElement(children: .contain)
     .accessibilityLabel("Command Deck")
+    }
   }
 }
 
@@ -199,29 +204,6 @@ struct CommandDeckToolbar: ToolbarContent {
   var navigationHandler: (any CommandDeckNavigationHandling)?
 
   var body: some ToolbarContent {
-    ToolbarItemGroup(placement: .navigation) {
-      if let navigationHandler {
-        Button("Back", systemImage: "chevron.left") { navigationHandler.navigate(.back) }
-          .keyboardShortcut("[", modifiers: .command)
-          .disabled(!(navigation?.canGoBack ?? false))
-          .help("Show the previous page in this tab.")
-        Button("Forward", systemImage: "chevron.right") { navigationHandler.navigate(.forward) }
-          .keyboardShortcut("]", modifiers: .command)
-          .disabled(!(navigation?.canGoForward ?? false))
-          .help("Show the next page in this tab.")
-        Button("Home", systemImage: "house") { navigationHandler.navigate(.home) }
-          .keyboardShortcut("h", modifiers: [.command, .shift])
-          .help("Return this tab to its product overview. Works while a page shows an error or raw data.")
-          .accessibilityHint("Returns to the overview of the connected runtime without restarting it.")
-      }
-    }
-    ToolbarItem(placement: .principal) {
-      CommandDeckStatusBadge(
-        phase: presentation.phase,
-        endpointCaption: presentation.endpointCaption,
-        isLoading: navigation?.isLoading ?? false
-      )
-    }
     ToolbarItemGroup(placement: .primaryAction) {
       if shows(.retryConnection) {
         Button("Retry Connection", systemImage: "arrow.clockwise") { actions?.handle(.retryConnection) }

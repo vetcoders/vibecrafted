@@ -66,13 +66,14 @@ pub fn ServerFrame(active: ServerSection, status: String, children: Children) ->
             <header class="server-navbar">
                 <div class="server-navbar-inner">
                     <a class="server-navbar-brand" href="/" aria-label="Vibecrafted server overview">
-                        <span class="server-brand-mark" aria-hidden="true">"⌁"</span>
                         <span class="server-brand-copy">
                             <strong>"Vibecrafted"</strong>
                             <small>{env!("VC_SERVER_VERSION")}</small>
                         </span>
                     </a>
                     <div class="server-navbar-actions">
+                        <button type="button" class="server-sidebar-toggle" data-sidebar-toggle aria-label="Hide Sidebar">"Hide"</button>
+                        <button type="button" class="server-sidebar-toggle" data-inspector-toggle aria-label="Hide Inspector">"Inspector"</button>
                         <span class="server-status-pill">
                             <span class="server-status-dot" aria-hidden="true"></span>
                             {status}
@@ -95,6 +96,7 @@ pub fn ServerFrame(active: ServerSection, status: String, children: Children) ->
             <div class="server-app-body">
                 <aside class="server-sidebar" aria-label="Vibecrafted server navigation">
                     <nav class="server-sidebar-nav">
+                        <p class="server-nav-label">"Work"</p>
                         <a class=active.nav_class(ServerSection::Overview) href="/">
                             <strong>"Overview"</strong>
                         </a>
@@ -115,6 +117,7 @@ pub fn ServerFrame(active: ServerSection, status: String, children: Children) ->
                         </a>
                     </nav>
                     <ul class="server-sidebar-rail" aria-label="Overview filters and catalogs">
+                        <li class="server-rail-label">"Observe"</li>
                         <li>
                             <a class="server-rail-link" href="/?rail=active" data-rail-filter="active">
                                 <span>"Active"</span>
@@ -150,6 +153,7 @@ pub fn ServerFrame(active: ServerSection, status: String, children: Children) ->
                                 <span>"Live"</span>
                             </a>
                         </li>
+                        <li class="server-rail-label">"Control"</li>
                         <li>
                             <a class=active.rail_class(ServerSection::Usage) href="/usage">
                                 <span>"Cost & usage"</span>
@@ -172,9 +176,10 @@ pub fn ServerFrame(active: ServerSection, status: String, children: Children) ->
                         </li>
                     </ul>
                     <div class="server-sidebar-note">
+                        <span class="server-status-dot" aria-hidden="true"></span>
                         <p>
-                            <strong>"Focus"</strong>
-                            <small class="server-focus-caption">"Fleet · all workspaces"</small>
+                            <strong class="server-focus-caption">"Fleet"</strong>
+                            <small class="server-focus-status"></small>
                         </p>
                     </div>
                 </aside>
@@ -304,11 +309,12 @@ pub fn operator_desk_script() -> &'static str {
     });
     const root = selectedRoot();
     try { localStorage.setItem(FOCUS_KEY, next); } catch (_) {}
-    if (caption) {
-      caption.textContent = next === 'project'
-        ? (root ? ('Project · ' + root) : 'Project · pick a workspace')
-        : 'Fleet · all workspaces';
-    }
+    const name = repoName(root);
+    const note = document.querySelector('.server-sidebar-note');
+    const status = document.querySelector('.server-focus-status');
+    if (caption) caption.textContent = name || (next === 'project' ? 'Project' : 'Fleet');
+    if (status) status.textContent = name && next === 'project' ? 'project' : (name ? 'fleet' : '');
+    if (note) note.title = root || '';
     const repo = repoName(root);
     document.querySelectorAll('[data-focus-root], [data-focus-repo]').forEach((el) => {
       const searchMiss = el.getAttribute('data-search-hit') === '0';
@@ -341,6 +347,45 @@ pub fn operator_desk_script() -> &'static str {
   document.documentElement.addEventListener('vc-focus-refresh', () => applyFocus(html.dataset.focus));
   document.querySelectorAll('[data-focus-mode]').forEach((btn) => {
     btn.addEventListener('click', () => applyFocus(btn.getAttribute('data-focus-mode')));
+  });
+
+  const SIDEBAR_KEY = 'vc-sidebar';
+  const INSPECTOR_KEY = 'vc-inspector';
+  const applyChrome = () => {
+    let sidebar = 'shown';
+    let inspector = 'shown';
+    try {
+      sidebar = sessionStorage.getItem(SIDEBAR_KEY) === 'hidden' ? 'hidden' : 'shown';
+      inspector = sessionStorage.getItem(INSPECTOR_KEY) === 'hidden' ? 'hidden' : 'shown';
+    } catch (_) {}
+    html.dataset.sidebar = sidebar;
+    html.dataset.inspector = inspector;
+    const sideBtn = document.querySelector('[data-sidebar-toggle]');
+    const paneBtn = document.querySelector('[data-inspector-toggle]');
+    if (sideBtn) {
+      const hidden = sidebar === 'hidden';
+      sideBtn.textContent = hidden ? 'Show' : 'Hide';
+      sideBtn.setAttribute('aria-label', hidden ? 'Show Sidebar' : 'Hide Sidebar');
+    }
+    if (paneBtn) {
+      const hidden = inspector === 'hidden';
+      paneBtn.setAttribute('aria-label', hidden ? 'Show Inspector' : 'Hide Inspector');
+    }
+  };
+  applyChrome();
+  document.querySelectorAll('[data-sidebar-toggle]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const next = html.dataset.sidebar === 'hidden' ? 'shown' : 'hidden';
+      try { sessionStorage.setItem(SIDEBAR_KEY, next); } catch (_) {}
+      applyChrome();
+    });
+  });
+  document.querySelectorAll('[data-inspector-toggle]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const next = html.dataset.inspector === 'hidden' ? 'shown' : 'hidden';
+      try { sessionStorage.setItem(INSPECTOR_KEY, next); } catch (_) {}
+      applyChrome();
+    });
   });
 
   const copyText = async (text) => {
@@ -454,6 +499,10 @@ pub fn operator_desk_script() -> &'static str {
     const open = pane.querySelector('[data-inspector-open]');
     const tail = pane.querySelector('[data-inspector-tail]');
     if (title) title.textContent = id || 'Nothing selected';
+    const meta = pane.querySelector('[data-inspector-meta]');
+    const rootEl = pane.querySelector('[data-inspector-root]');
+    if (meta) meta.textContent = row.getAttribute('data-meta') || row.getAttribute('data-error') || 'No extra fields on this row.';
+    if (rootEl) rootEl.textContent = row.getAttribute('data-focus-root') || report || 'No path on this row.';
     if (reportEl) reportEl.textContent = report || 'No report.md yet';
     if (errorEl) {
       errorEl.textContent = error;
@@ -477,13 +526,26 @@ pub fn operator_desk_script() -> &'static str {
       }
     }
   };
-  document.querySelectorAll('.run-table tbody tr[data-run-id]').forEach((row, index) => {
-    row.addEventListener('click', (event) => {
-      if (event.target.closest('a, button')) return;
-      fillInspector(row);
-    });
-    if (index === 0) fillInspector(row);
+  document.addEventListener('click', (event) => {
+    const tab = event.target.closest('[data-doc-tab]');
+    if (tab) {
+      const pane = tab.closest('.doc-pane');
+      if (!pane) return;
+      const name = tab.getAttribute('data-doc-tab');
+      pane.querySelectorAll('[data-doc-tab]').forEach((button) => {
+        button.classList.toggle('is-active', button === tab);
+      });
+      pane.querySelectorAll('[data-doc-panel]').forEach((panel) => {
+        panel.hidden = panel.getAttribute('data-doc-panel') !== name;
+      });
+      return;
+    }
+    const row = event.target.closest('tr[data-run-id]');
+    if (!row || event.target.closest('a, button')) return;
+    fillInspector(row);
   });
+  const first = document.querySelector('.run-table tbody tr[data-run-id]');
+  if (first) fillInspector(first);
 
   if (menu) {
     menu.addEventListener('click', async (event) => {
@@ -692,24 +754,18 @@ mod tests {
     #[test]
     fn console_tokens_transcribe_the_native_command_deck_palette() {
         for (role, hex) in [
-            ("surface (dark)", "#21211f"),
-            ("surfaceRaised (dark)", "#2e2b29"),
-            ("ink (dark)", "#ede6d6"),
-            ("muted (dark)", "#b3ab9e"),
-            ("amber", "#e39e38"),
-            ("destructive (dark)", "#db5247"),
-            ("stroke (dark)", "#524d45"),
-            ("surface (light)", "#f5f0e3"),
-            ("surfaceRaised (light)", "#fcfaf2"),
-            ("ink (light)", "#2e2b26"),
-            (
-                "amber (light, increased variant — see tokens.css)",
-                "#945705",
-            ),
-            ("stroke (light)", "#c7bdad"),
-            ("surface (dark, increased)", "#12120f"),
-            ("ink (dark, increased)", "#faf5eb"),
-            ("amber (increased)", "#ffb82e"),
+            ("workspace (dark, vc-terminal background)", "#181818"),
+            ("sidebar (dark)", "#101010"),
+            ("text (dark, vc-terminal foreground)", "#d8d8d8"),
+            ("muted (dark, vc-terminal bright black)", "#6b6b6b"),
+            ("accent (dark, vc-terminal blue)", "#6a9fb5"),
+            ("failure (dark, vc-terminal red)", "#ac4242"),
+            ("stroke (dark)", "#3a3a3a"),
+            ("workspace (light)", "#f4f4f4"),
+            ("sidebar (light)", "#e8e8e8"),
+            ("text (light, terminal background as ink)", "#181818"),
+            ("accent (light)", "#3d6f86"),
+            ("stroke (light)", "#c8c8c8"),
         ] {
             assert!(
                 STYLE_TOKENS.contains(hex),
@@ -733,7 +789,7 @@ mod tests {
             !STYLE_TOKENS.contains("#d4d4d8"),
             "the dead grey accent must not survive anywhere in the token layer"
         );
-        assert!(STYLE_TOKENS.contains("--amber: #e39e38;"));
+        assert!(STYLE_TOKENS.contains("--amber: #6a9fb5;"));
         assert!(
             STYLE_TOKENS.contains("--teal: var(--amber);"),
             "the second accent name must converge on the one accent, not hold a rival value"
@@ -880,7 +936,7 @@ mod tests {
             tail_html: "",
         });
         assert!(
-            html.contains("#21211f"),
+            html.contains("#181818"),
             "the native surface reaches the document"
         );
         assert!(html.contains("--focus-ring: var(--accent);"));

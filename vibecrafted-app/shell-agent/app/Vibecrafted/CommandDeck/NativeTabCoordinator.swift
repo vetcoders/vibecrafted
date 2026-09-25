@@ -133,7 +133,8 @@ private struct ToolTabRootView: View {
   var body: some View {
     CommandDeckView(
       presentation: model.presentation, actions: model,
-      navigation: session.navigation, navigationHandler: navigationHandler
+      navigation: session.navigation, navigationHandler: navigationHandler,
+      openPath: { session.navigate(path: $0) }
     ) {
       WebConsoleHost(session: session)
     }

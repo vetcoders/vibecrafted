@@ -23,17 +23,17 @@
 
 :root {
   /* Surfaces — CommandDeckPalette.surface / .surfaceRaised */
-  --ink: #21211f;
-  --ink2: #2e2b29;
-  --ink3: #38342f; /* extrapolated one step above surfaceRaised */
+  --ink: #181818;
+  --ink2: #101010;
+  --ink3: #242424;
 
   /* Foreground — CommandDeckPalette.ink / .muted / .stroke.
    * The native card runs warm bone on warm graphite; --bone-mute is the one
    * interpolation between `muted` and `stroke`, for third-rank labels. */
-  --bone: #ede6d6;
-  --bone-dim: #b3ab9e;
-  --bone-mute: #8f8879;
-  --bone-faint: #524d45;
+  --bone: #d8d8d8;
+  --bone-dim: #a3a3a3;
+  --bone-mute: #6b6b6b;
+  --bone-faint: #3a3a3a;
 
   /* Nav-specific themable surfaces (sticky nav has slight transparency).
    * Light theme override below flips ink → parchment. */
@@ -51,7 +51,7 @@
    * one dead grey on both names, so it is resolved here in the
    * direction the native reference already took: --teal is an alias, kept so
    * existing consumers converge instead of being overridden. */
-  --amber: #e39e38;
+  --amber: #6a9fb5;
   --teal: var(--amber);
   --accent: var(--amber);
 
@@ -80,10 +80,10 @@
    * Warned and danger are the native `amber` and `destructive`. Success has
    * no native counterpart, so it is tuned to sit inside the same warm family
    * rather than the previous neon #4ade80 — my call, not a transcript. */
-  --status-success: #8fbf6a;
-  --status-warning: var(--amber);
+  --status-success: #90a959;
+  --status-warning: #f4bf75;
   --status-info: var(--bone-dim);
-  --status-danger: #db5247;
+  --status-danger: #ac4242;
 
   /* Elevation — the native card has NO shadow. It is one raised surface plus
    * one 1px stroke, and that is the whole elevation vocabulary the console
@@ -93,8 +93,8 @@
   --shadow-hover:
     0 1px 0 rgba(255, 255, 255, 0.04), 0 12px 40px rgba(0, 0, 0, 0.45);
   --shadow-modal: 0 24px 80px rgba(0, 0, 0, 0.62);
-  --border-subtle: #524d45;
-  --border-active: #6b6459;
+  --border-subtle: #3a3a3a;
+  --border-active: #6b6b6b;
 
   /* Stroke + radius — CommandDeckMetrics.strokeWidth / .cornerRadius.
    * One radius for every console surface, chip and control: 8px. */
@@ -303,14 +303,14 @@ em.cool {
  * page, exactly as the native card does it. Surfaces are opaque here (they
  * used to be alpha), so a sticky header no longer bleeds its rows through. */
 :root[data-theme="light"] {
-  --ink: #f5f0e3;
-  --ink2: #fcfaf2;
-  --ink3: #fffdf7; /* extrapolated one step above surfaceRaised */
+  --ink: #f4f4f4;
+  --ink2: #e8e8e8;
+  --ink3: #dcdcdc;
 
-  --bone: #2e2b26;
-  --bone-dim: #4a463f;
-  --bone-mute: #6b665e;
-  --bone-faint: #c7bdad;
+  --bone: #181818;
+  --bone-dim: #3a3a3a;
+  --bone-mute: #6b6b6b;
+  --bone-faint: #b0b0b0;
 
   --nav-bg: rgba(245, 240, 227, 0.92);
   --nav-bg-mobile: rgba(245, 240, 227, 0.96);
@@ -319,18 +319,11 @@ em.cool {
   --btn-bg-hover: rgba(46, 43, 38, 0.05);
   --modal-backdrop: rgba(245, 240, 227, 0.82);
 
-  /* Deliberate deviation from the 1:1 transcript, and the only one in this
-   * file. The native LIGHT standard amber (#b87314) measures 3.36:1 against
-   * this parchment — fine for the symbol it tints natively, but below 4.5:1
-   * the moment the web console uses the accent as text or as the label on a
-   * filled accent button. So light adopts the *increased-contrast* amber from
-   * the very same palette: #945705 → 5.09:1 on the page, 5.54:1 on a card.
-   * Same reference, readable role. (The native accent button has the same
-   * shortfall in light mode; recorded for the app lane, not fixed here.) */
-  --amber: #945705;
+  /* Light accent is the terminal blue darkened so text clears 4.5:1 on #f4f4f4. */
+  --amber: #3d6f86;
 
-  --border-subtle: #c7bdad;
-  --border-active: #ab9f8c;
+  --border-subtle: #c8c8c8;
+  --border-active: #6b6b6b;
   --card-border-color: var(--border-subtle);
   --card-border-hover: var(--border-active);
 

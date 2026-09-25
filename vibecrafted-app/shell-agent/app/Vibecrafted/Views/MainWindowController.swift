@@ -94,7 +94,8 @@ private struct CommandDeckRootView: View {
   var body: some View {
     CommandDeckView(
       presentation: model.presentation, actions: actions,
-      navigation: session.navigation, navigationHandler: navigationHandler
+      navigation: session.navigation, navigationHandler: navigationHandler,
+      openPath: { session.navigate(path: $0) }
     ) {
       WebConsoleHost(session: session)
     }
