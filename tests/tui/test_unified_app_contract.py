@@ -1065,8 +1065,8 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
         "Workspaces",
         "Help & Diagnostics…",
         "Advanced",
-        "Stop Runtime Service…",
-        "Repair Runtime…",
+        "Stop Server…",
+        "Reinitialize…",
         "Quit Vibecrafted",
     ]:
         assert title in tray
@@ -1289,9 +1289,9 @@ def test_tray_menu_supervises_runtime_pack_carrier_drift() -> None:
     # supervision actions (reveal home, reveal control files, copy identity).
     tray = (app_dir / "CommandDeck/StatusItemController.swift").read_text()
     for title in [
-        "Open Runtime Folder",
-        "Open Control Plane Folder",
-        "Copy Runtime Identity",
+        "Open Server Folder",
+        "Open State Folder",
+        "Copy Address",
     ]:
         assert title in tray
     assert "case .revealRuntime: revealRuntimeHomeFromStatusItem()" in delegate

@@ -118,8 +118,8 @@ final class AppModel {
     return CommandDeckPresentation(
       phase: phase,
       problem: reason.map { CommandDeckProblem(
-        title: "Connection needs attention", summary: "\($0)", receipt: nil) },
-      endpointCaption: endpoint.map { ($0.host ?? "Runtime") + (isNavigating ? " · Loading" : "") },
+        title: "Couldn't reach the server", summary: "\($0)", receipt: nil) },
+      endpointCaption: endpoint.map { ($0.host ?? "Server") + (isNavigating ? " · Loading" : "") },
       availableActions: availableActions)
   }
 

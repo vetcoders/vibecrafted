@@ -19,7 +19,7 @@ enum CommandDeckPhase: String, Equatable, Sendable {
     case .bootstrapping: "Preparing"
     case .connecting: "Connecting"
     case .online: "Connected"
-    case .recovering: "Recovering"
+    case .recovering: "Starting…"
     case .blocked: "Blocked"
     }
   }
@@ -206,14 +206,14 @@ struct CommandDeckToolbar: ToolbarContent {
   var body: some ToolbarContent {
     ToolbarItemGroup(placement: .primaryAction) {
       if shows(.retryConnection) {
-        Button("Retry Connection", systemImage: "arrow.clockwise") { actions?.handle(.retryConnection) }
+        Button("Try Again", systemImage: "arrow.clockwise") { actions?.handle(.retryConnection) }
           .keyboardShortcut("r", modifiers: .command)
-          .help("Retry Connection (⌘R). Tries the current runtime endpoint again.")
+          .help("Try Again (⌘R). Connects to the server again.")
       }
       if shows(.repairRuntime) {
-        Button("Repair Runtime", systemImage: "wrench.and.screwdriver") { actions?.handle(.repairRuntime) }
+        Button("Reinitialize", systemImage: "wrench.and.screwdriver") { actions?.handle(.repairRuntime) }
           .keyboardShortcut("r", modifiers: [.command, .shift])
-          .help("Repair Runtime (⇧⌘R). Repairs or reinstalls through the installed runtime owner.")
+          .help("Reinitialize (⇧⌘R). Sets the server up again from the installed copy.")
       }
       if shows(.openTerminal) {
         Button("Open Terminal", systemImage: "terminal") { actions?.handle(.openTerminal) }

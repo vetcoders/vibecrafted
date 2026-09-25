@@ -97,15 +97,15 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
   static let advancedCommands: [StatusItemMenuCommand] = [
     .init(action: .retryConnection, title: "Reconnect"),
-    .init(action: .repairRuntime, title: "Repair Runtime…"),
-    .init(action: .showServer, title: "Open Runtime Server"),
-    .init(action: .startServer, title: "Start Runtime Service"),
-    .init(action: .restartServer, title: "Restart Runtime Service"),
-    .init(action: .stopRuntime, title: "Stop Runtime Service…"),
-    .init(action: .showLogs, title: "Open Runtime Logs"),
-    .init(action: .revealRuntime, title: "Open Runtime Folder"),
-    .init(action: .revealControlPlane, title: "Open Control Plane Folder"),
-    .init(action: .copyRuntimeIdentity, title: "Copy Runtime Identity")
+    .init(action: .repairRuntime, title: "Reinitialize…"),
+    .init(action: .showServer, title: "Open Server"),
+    .init(action: .startServer, title: "Start Server"),
+    .init(action: .restartServer, title: "Restart Server"),
+    .init(action: .stopRuntime, title: "Stop Server…"),
+    .init(action: .showLogs, title: "Open Logs"),
+    .init(action: .revealRuntime, title: "Open Server Folder"),
+    .init(action: .revealControlPlane, title: "Open State Folder"),
+    .init(action: .copyRuntimeIdentity, title: "Copy Address")
   ]
 
   init(

@@ -42,7 +42,7 @@ struct RecoveryView: View {
     .focusSection()
     .defaultFocus($focusedControl, phase == .blocked ? .repairRuntime : .retryConnection)
     .accessibilityElement(children: .contain)
-    .accessibilityLabel(phase == .blocked ? "Runtime blocked" : "Runtime recovery")
+    .accessibilityLabel(phase == .blocked ? "Server blocked" : "Server starting")
   }
 }
 
@@ -54,7 +54,7 @@ private struct RecoveryIdentity: View {
 
   var body: some View {
     Label {
-      Text(phase == .blocked ? "Blocked" : "Recovering")
+      Text(phase == .blocked ? "Blocked" : "Starting…")
         .font(.title2)
         .foregroundStyle(theme.palette.ink)
     } icon: {
@@ -98,14 +98,14 @@ private struct RecoveryCopy: View {
 
   private var fallbackTitle: LocalizedStringResource {
     phase == .blocked
-      ? "The runtime is blocked"
-      : "The product canvas cannot connect"
+      ? "The server is blocked"
+      : "The server is not up yet"
   }
 
   private var fallbackSummary: LocalizedStringResource {
     phase == .blocked
-      ? "Repair through the installed runtime owner. Closing this window does not stop the runtime."
-      : "Retry against the current endpoint. Repair Runtime, Open Terminal and Diagnostics stay in the toolbar above. Workspaces return to this canvas once it is connected."
+      ? "Set the server up again from the installed copy. Closing this window does not stop it."
+      : "The server is still starting. Try again in a moment."
   }
 }
 
@@ -128,22 +128,22 @@ private struct RecoveryActionRow: View {
   @ViewBuilder
   private func actionButtons() -> some View {
     if shows(.retryConnection) {
-      Button("Retry Connection", systemImage: "arrow.clockwise") {
+      Button("Try Again", systemImage: "arrow.clockwise") {
         actions?.handle(.retryConnection)
       }
       .buttonStyle(.commandDeckAccent)
       .focused(focusedControl, equals: .retryConnection)
-      .accessibilityHint("Tries the current runtime endpoint again.")
-      .accessibilityInputLabels(["Retry", "Retry Connection"])
+      .accessibilityHint("Connects to the server again.")
+      .accessibilityInputLabels(["Try Again", "Retry"])
     }
     if shows(.repairRuntime) {
-      Button("Repair Runtime", systemImage: "wrench.and.screwdriver") {
+      Button("Reinitialize", systemImage: "wrench.and.screwdriver") {
         actions?.handle(.repairRuntime)
       }
       .buttonStyle(.commandDeckAccent)
       .focused(focusedControl, equals: .repairRuntime)
-      .accessibilityHint("Repairs or reinstalls through the installed runtime owner.")
-      .accessibilityInputLabels(["Repair", "Repair Runtime"])
+      .accessibilityHint("Sets the server up again from the installed copy.")
+      .accessibilityInputLabels(["Reinitialize"])
     }
     if shows(.openTerminal) {
       Button("Open Terminal", systemImage: "terminal") {
@@ -159,13 +159,13 @@ private struct RecoveryActionRow: View {
         .focused(focusedControl, equals: .showDiagnostics)
     }
     if shows(.requestStopRuntime) {
-      Button("Stop Runtime", systemImage: "stop.circle") {
+      Button("Stop Server", systemImage: "stop.circle") {
         actions?.handle(.requestStopRuntime)
       }
       .buttonStyle(.commandDeckDestructive)
       .focused(focusedControl, equals: .requestStopRuntime)
-      .accessibilityHint("Confirms stopping the shared Runtime service. Does not quit the App or stop agents.")
-      .accessibilityInputLabels(["Stop Runtime"])
+      .accessibilityHint("Stops the server. Does not quit the app or stop agents.")
+      .accessibilityInputLabels(["Stop Server"])
     }
   }
 
