@@ -186,6 +186,20 @@ pub fn ServerFrame(active: ServerSection, status: String, children: Children) ->
     }
 }
 
+/// Overview's one welcome line, read from the status string [`ServerFrame`]
+/// already receives. Empty or `loading` means the server has not come up yet.
+pub(crate) fn overview_welcome_line(status: &str) -> &'static str {
+    let status = status.trim();
+    if status.is_empty()
+        || status.eq_ignore_ascii_case("loading")
+        || status.eq_ignore_ascii_case("starting")
+    {
+        "still starting"
+    } else {
+        "server up"
+    }
+}
+
 /// Document-level assets every vc-server HTML route shares. The Leptos shell
 /// in `app.rs` and raw-HTML routes read the same bytes, so the product has
 /// exactly one stylesheet set and one theme script.

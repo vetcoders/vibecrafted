@@ -6,7 +6,7 @@ use leptos_router::components::{Route, Router, Routes};
 use leptos_router::path;
 use serde::{Deserialize, Serialize};
 
-use crate::chrome::{ServerFrame, ServerSection};
+use crate::chrome::{ServerFrame, ServerSection, overview_welcome_line};
 use crate::run_detail::RunDetailPage;
 
 // The SSR page embeds the dashboard JSON and the hydrated client reads it
@@ -684,75 +684,6 @@ fn run_cards(runs: Vec<DashboardRun>) -> impl IntoView {
             }
         })
         .collect_view()
-}
-
-fn run_table(
-    title: &'static str,
-    aria: &'static str,
-    band: &'static str,
-    runs: Vec<DashboardRun>,
-) -> impl IntoView {
-    let count = runs.len();
-    let empty = count == 0;
-    view! {
-        <section class="overview-band run-table-band" aria-label=aria data-rail-band=band hidden=empty>
-            <header class="run-table-head">
-                <h2>{title}</h2>
-                <span>{count}</span>
-            </header>
-            <div class="run-table-wrap">
-                <table class="run-table">
-                    <thead>
-                        <tr>
-                            <th>"Run"</th>
-                            <th>"Agent"</th>
-                            <th>"Skill"</th>
-                            <th>"Age"</th>
-                            <th>"Heartbeat"</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <tr class="run-table-empty" hidden={!empty}>
-                            <td colspan="5">"None."</td>
-                        </tr>
-                        {runs.into_iter().map(|run| {
-                            let detail_href = format!("/run/{}", run.run_id);
-                            let transcript_url = format!("/api/control/runs/{}/transcript", run.run_id);
-                            let live = run.health == "active";
-                            let beat = if live { "live" } else { "none" };
-                            let beat_class = if live { "run-beat is-live" } else { "run-beat" };
-                            let meta = format!("{} · {} · {}", run.agent, run.skill, run.updated_at);
-                            view! {
-                                <tr
-                                    data-ppm="run"
-                                    data-run-id=run.run_id.clone()
-                                    data-href=detail_href.clone()
-                                    data-focus-root=run.root.clone()
-                                    data-transcript-url=transcript_url
-                                    data-report=run.latest_report.clone()
-                                    data-error=run.last_error.clone()
-                                    data-meta=meta
-                                >
-                                    <td>
-                                        <a class="control-run-id" href=detail_href.clone() data-copy=run.run_id.clone()>{run.run_id.clone()}</a>
-                                    </td>
-                                    <td>{run.agent}</td>
-                                    <td>{run.skill}</td>
-                                    <td>{run.updated_at}</td>
-                                    <td>
-                                        <span class=beat_class>
-                                            <i aria-hidden="true"></i>
-                                            {beat}
-                                        </span>
-                                    </td>
-                                </tr>
-                            }
-                        }).collect_view()}
-                    </tbody>
-                </table>
-            </div>
-        </section>
-    }
 }
 
 fn is_terminal_state(state: &str) -> bool {
@@ -1608,96 +1539,50 @@ pub fn ConsolePage() -> impl IntoView {
 }
 
 fn console_dashboard(dashboard: DashboardData) -> impl IntoView {
-    let active_runs = operator_active_runs(dashboard.active_runs);
-    let stalled_runs = dashboard.stalled_runs;
-    let recent_runs = dashboard.recent_runs;
-    let generated_at = dashboard.generated_at.clone();
-    let loctree_report = dashboard.loctree_report;
-
-    let active_count = active_runs.len();
-    let stalled_count = stalled_runs.len();
-    let recent_count = recent_runs.len();
-    let warning_count = dashboard.warnings.len();
-    let action_count = operator_action_runs(dashboard.lifecycle_runs).len();
-    // Workspaces with a running vc-frame session, not the durable catalog:
-    // the catalog keeps every identity ever registered (worker worktrees and
-    // test roots included) and lives on /workspaces as history.
+    let runs_live = operator_active_runs(dashboard.active_runs).len();
+    // Running vc-frame sessions, not the durable catalog. The attribute stays
+    // so home still counts frames; the catalog itself is not this page.
     let live_workspace_count = dashboard.live_frame_sessions.len();
-    let workspace_status = dashboard.workspace_status;
-    let server_status = dashboard.server_status;
+    let welcome = overview_welcome_line(&dashboard.server_status).to_string();
     let selected_root = dashboard
         .workspaces
         .iter()
         .find(|workspace| workspace.selected)
         .map(|workspace| workspace.root.clone())
         .unwrap_or_default();
-    let has_loctree_report = !loctree_report.is_empty();
-    let loctree_note = if has_loctree_report {
-        "Loctree report available"
-    } else {
-        "Loctree empty"
-    };
     view! {
         <ServerFrame
             active=ServerSection::Overview
-            status=format!("{server_status} · {active_count} live")
+            status=welcome.clone()
         >
-            <div class="server-console-shell overview-desk">
+            <div
+                class="server-console-shell overview-desk"
+                data-live-workspaces=live_workspace_count
+            >
                 <div
                     id="vc-focus-context"
                     data-selected-workspace-root=selected_root
                     hidden
                 ></div>
                 <header class="overview-head">
-                    <p class="overview-context">{format!("{server_status} · {workspace_status}")}</p>
-                    <dl class="overview-head-stats">
-                        <div><dt>"live"</dt><dd>{active_count}</dd></div>
-                        <div><dt>"failures"</dt><dd>{stalled_count}</dd></div>
-                        <div><dt>"next"</dt><dd>{action_count}</dd></div>
-                        <div><dt>"warnings"</dt><dd>{warning_count}</dd></div>
-                        <div><dt>"recent"</dt><dd>{recent_count}</dd></div>
-                        <div data-live-workspaces=live_workspace_count><dt>"workspaces"</dt><dd>{live_workspace_count}</dd></div>
-                    </dl>
-                    <p class="overview-generated">{format!("Generated {generated_at}")}</p>
+                    <h1 class="run-detail-title">"Overview"</h1>
+                    <p id="overview-status" class="overview-status" role="status">{welcome}</p>
                 </header>
-
-                <div class="overview-desk-body">
-                    <div class="overview-desk-main">
-                        {run_table("Active dispatches", "Active dispatches", "active", active_runs)}
-                        {run_table("Failures", "Failures", "failures", stalled_runs)}
-                        {run_table("Recent", "Recent", "recent", recent_runs)}
-                        <p class="overview-structure-line" aria-label="Structure">
-                            <a href="/structure">"Structure"</a>
-                            " · "
-                            {loctree_note}
-                            " · "
-                            <a href="/scaffold">"Plans"</a>
-                        </p>
-                    </div>
-                    <aside class="overview-inspector doc-pane" id="overview-inspector" aria-label="Run document" hidden>
-                        <div class="doc-tabs" role="tablist" aria-label="Document">
-                            <button type="button" data-doc-tab="transcript" class="is-active">"Transcript"</button>
-                            <button type="button" data-doc-tab="report">"Report"</button>
-                            <button type="button" data-doc-tab="structure">"Structure"</button>
-                        </div>
-                        <article class="doc-sheet" data-doc-panel="transcript">
-                            <p class="doc-kicker">"Run"</p>
-                            <h2 data-inspector-id></h2>
-                            <p class="doc-meta" data-inspector-meta>"Select a row."</p>
-                            <pre class="inspector-tail" data-inspector-tail>"Select a row."</pre>
-                        </article>
-                        <article class="doc-sheet" data-doc-panel="report" hidden>
-                            <p class="doc-kicker">"Report"</p>
-                            <p data-inspector-report>"Select a row."</p>
-                            <p class="control-run-error" data-inspector-error hidden></p>
-                        </article>
-                        <article class="doc-sheet" data-doc-panel="structure" hidden>
-                            <p class="doc-kicker">"Path"</p>
-                            <p data-inspector-root>"Select a row."</p>
-                            <a class="doc-path" data-inspector-open href="/structure">"Open structure"</a>
-                        </article>
-                    </aside>
-                </div>
+                <nav class="overview-doors" aria-label="Work">
+                    <a class="overview-door" href="/" aria-current="page">
+                        <strong>"Overview"</strong>
+                    </a>
+                    <a class="overview-door" href="/runs">
+                        <strong>"Runs"</strong>
+                        <small>{runs_live}</small>
+                    </a>
+                    <a class="overview-door" href="/projects">
+                        <strong>"Projects"</strong>
+                    </a>
+                    <a class="overview-door" href="/usage">
+                        <strong>"Costs & usage"</strong>
+                    </a>
+                </nav>
             </div>
         </ServerFrame>
     }
@@ -2869,8 +2754,10 @@ mod tests {
         assert!(!html.contains("data-total-settled"));
         assert!(html.contains("aria-label=\"Switch to light theme\""));
         assert!(html.contains("href=\"/structure\""));
-        assert!(html.contains("id=\"overview-inspector\""));
-        assert!(html.contains("class=\"run-table\""));
+        assert!(html.contains("id=\"overview-status\""));
+        assert!(!html.contains("id=\"overview-inspector\""));
+        assert!(!html.contains("class=\"run-table\""));
+        assert!(!html.contains("id=\"usage-chart-heat\""));
         assert!(!html.contains("http://127.0.0.1:8033/"));
         assert!(!html.contains("AICX desk"));
         assert!(!html.contains("Choose the truth"));
@@ -2882,7 +2769,8 @@ mod tests {
         assert!(html.contains("href=\"/activity\""));
         assert!(html.contains("href=\"/scaffold\""));
         assert!(!html.contains("href=\"#fleet\""));
-        assert!(html.contains("aria-label=\"Structure\""));
+        assert!(html.contains("aria-label=\"Work\""));
+        assert!(!html.contains("aria-label=\"Structure\""));
         assert!(!html.contains("aria-label=\"Active runs\""));
         assert!(!html.contains("aria-label=\"Warnings\""));
         assert!(!html.contains("aria-label=\"Action plan\""));
@@ -3277,4 +3165,71 @@ mod tests {
         let catch = script.split("catch (error)").nth(1).expect("catch");
         assert!(catch.contains("AICX unavailable:"));
     }
+}
+
+#[cfg(all(test, feature = "ssr"))]
+pub(crate) fn overview_welcome_status_and_miniatures() {
+    use leptos::prelude::*;
+
+    use crate::theme::provide_theme_context;
+
+    fn work_door(html: &str, href: &str, label: &str) -> bool {
+        html.split("<a ").any(|chunk| {
+            let anchor = chunk.split("</a>").next().unwrap_or("");
+            anchor.contains("overview-door")
+                && anchor.contains(&format!("href=\"{href}\""))
+                && anchor.contains(label)
+        })
+    }
+
+    assert_eq!(overview_welcome_line(""), "still starting");
+    assert_eq!(overview_welcome_line("loading"), "still starting");
+    assert_eq!(overview_welcome_line("starting"), "still starting");
+    assert_eq!(overview_welcome_line("healthy"), "server up");
+    assert_eq!(overview_welcome_line("healthy · 2 live"), "server up");
+
+    let owner = Owner::new();
+    let (welcome, starting, usage) = owner.with(|| {
+        leptos_meta::provide_meta_context();
+        provide_theme_context();
+        let mut up = DashboardData::default();
+        up.server_status = "healthy".into();
+        up.active_runs = vec![DashboardRun {
+            run_id: "impl-live".into(),
+            state: "running".into(),
+            health: "active".into(),
+            ..DashboardRun::default()
+        }];
+        let welcome = console_dashboard(up).to_html();
+        let starting = console_dashboard(DashboardData {
+            server_status: "loading".into(),
+            ..DashboardData::default()
+        })
+        .to_html();
+        (welcome, starting, UsagePage().to_html())
+    });
+
+    assert_eq!(welcome.matches("id=\"overview-status\"").count(), 1);
+    assert!(welcome.contains("server up"));
+    assert!(!welcome.contains("still starting"));
+    assert_eq!(welcome.matches("class=\"overview-door\"").count(), 4);
+    assert!(work_door(&welcome, "/", "Overview"));
+    assert!(work_door(&welcome, "/runs", "Runs"));
+    assert!(work_door(&welcome, "/projects", "Projects"));
+    assert!(work_door(&welcome, "/usage", "Costs &amp; usage"));
+    assert!(!welcome.contains("id=\"usage-chart-heat\""));
+    assert!(!welcome.contains("usage-chart-heat"));
+    assert!(!welcome.contains("class=\"run-table\""));
+    assert!(
+        welcome.contains(">1<"),
+        "runs miniature keeps a short count"
+    );
+
+    assert_eq!(starting.matches("id=\"overview-status\"").count(), 1);
+    assert!(starting.contains("still starting"));
+    assert!(!starting.contains("usage-chart-heat"));
+
+    assert!(usage.contains("id=\"usage-chart-heat\""));
+    assert!(usage.contains("Known tokens"));
+    assert!(usage.contains("id=\"usage-total-tokens\""));
 }

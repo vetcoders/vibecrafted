@@ -3881,3 +3881,50 @@ a.control-run-id:focus-visible {
 .server-sidebar-note {
   margin-top: 0;
 }
+
+/* w2-01 overview welcome: one status line and four Work miniatures.
+   The costs door is a link to /usage, not a second usage-chart-heat. */
+.overview-status {
+  margin: 0;
+  color: var(--text-muted);
+  font: 13px/1.4 var(--font-body);
+}
+
+.overview-doors {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 8px 16px 16px;
+}
+
+.overview-door {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 12px;
+  border: var(--stroke-width) solid var(--border-subtle);
+  border-radius: var(--radius-surface);
+  color: inherit;
+  text-decoration: none;
+}
+
+.overview-door strong {
+  font: 600 14px/1.2 var(--font-body);
+}
+
+.overview-door small {
+  color: var(--text-muted);
+  font: 11px/1.3 var(--font-mono);
+}
+
+.overview-door[aria-current="page"] {
+  border-color: var(--text-muted);
+}
+
+@media (max-width: 720px) {
+  .overview-doors {
+    grid-template-columns: 1fr 1fr;
+  }
+}

@@ -8,6 +8,12 @@ pub mod scaffold;
 pub mod theme;
 pub mod tools;
 
+#[cfg(all(test, feature = "ssr"))]
+#[test]
+fn overview_welcome_status_and_miniatures() {
+    app::overview_welcome_status_and_miniatures();
+}
+
 #[cfg(feature = "hydrate")]
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn hydrate() {
