@@ -27,16 +27,33 @@ struct CommandDeckSidebar: View {
   }
 
   private var footer: some View {
-    HStack(spacing: 6) {
-      Image(systemName: phase.statusSymbol)
-      Text(phase.statusTitle)
-    }
-      .font(.caption)
-      .foregroundStyle(.secondary)
-      .frame(maxWidth: .infinity, alignment: .leading)
-      .padding(.horizontal, 12)
-      .padding(.vertical, 8)
+    VStack(alignment: .leading, spacing: 2) {
+      footerDoor(.help, "Help & docs")
+      footerDoor(.about, "About")
+      HStack(spacing: 6) {
+        Image(systemName: phase.statusSymbol)
+        Text(phase.statusTitle)
+      }
       .accessibilityElement(children: .combine)
       .accessibilityLabel(Text(phase.statusTitle))
+    }
+    .font(.caption)
+    .foregroundStyle(.secondary)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .padding(.horizontal, 12)
+    .padding(.vertical, 8)
+  }
+
+  private func footerDoor(_ destination: CommandDeckDestination, _ title: String) -> some View {
+    Button {
+      selection = destination
+    } label: {
+      Text(title)
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+    .buttonStyle(.plain)
+    .accessibilityLabel(title)
   }
 }

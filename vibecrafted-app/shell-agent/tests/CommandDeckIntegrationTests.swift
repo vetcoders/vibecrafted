@@ -1064,6 +1064,45 @@ struct CommandDeckIntegrationTests {
     controller.close()
   }
 
+  /// Three shelves and a quiet footer. Retired peer titles are not destinations.
+  static func sidebarGroupsContract() throws {
+    try require(CommandDeckDestinationSection.allCases.map(\.title) == ["Work", "Trace", "Machine"],
+      "CommandDeckDestinationSection titles are not Work, Trace, Machine")
+    let peers = CommandDeckDestinationSection.allCases.flatMap { CommandDeckDestination.inSection($0) }
+    try require(peers.map(\.title) == [
+      "Overview", "Runs", "Projects", "Costs & usage",
+      "Skills", "Artifacts", "Code intelligence", "History & context",
+      "Settings & config", "Diagnostics",
+    ], "Section rows are not the ten shelf doors")
+    try require(peers.map(\.path) == [
+      "/", "/runs", "/projects", "/usage",
+      "/skills", "/artifacts", "/structure", "/history",
+      "/settings", "/diagnostics",
+    ], "Shelf paths drifted")
+    try require(CommandDeckDestination.footerCases.map(\.title) == ["Help & docs", "About"],
+      "Help & docs and About are not the footer")
+    try require(CommandDeckDestination.footerCases.map(\.path) == ["/help", "/about"],
+      "Footer paths drifted")
+    try require(Set(peers).isDisjoint(with: CommandDeckDestination.footerCases),
+      "Footer rows are section peers")
+    let banned = [
+      "Frame", "Active", "Sessions", "Agents", "Live", "Activity", "Plans", "Guide",
+      "Transcripts", "Structure", "Workspaces", "Failures", "Health", "Lifecycle",
+    ]
+    for title in CommandDeckDestination.allCases.map(\.title) {
+      try require(!banned.contains(title), "Retired sidebar title remained: \(title)")
+    }
+    try require(CommandDeckDestination.usage.title == "Costs & usage"
+      && CommandDeckDestination.usage.path == "/usage",
+      "Costs & usage is not /usage")
+    try require(CommandDeckDestination.structure.title == "Code intelligence"
+      && CommandDeckDestination.structure.path == "/structure",
+      "Code intelligence is not /structure")
+    try require(CommandDeckDestination.help.title == "Help & docs"
+      && CommandDeckDestination.about.title == "About",
+      "Footer titles drifted from the sidebar labels")
+  }
+
   static func main() async throws {
     _ = NSApplication.shared
     let endpoint = URL(string: CommandLine.arguments[1])!
@@ -1072,6 +1111,7 @@ struct CommandDeckIntegrationTests {
       "Only a loopback fixture endpoint is permitted")
     try require(reconnectEndpoint.scheme == "http" && reconnectEndpoint.host == "127.0.0.1" && reconnectEndpoint.port != nil,
       "Only a loopback reconnect endpoint is permitted")
+    try sidebarGroupsContract()
     try stateContract(endpoint)
     try trayMenuContract()
     try policyContract(endpoint)
