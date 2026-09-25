@@ -141,7 +141,7 @@ release-prereqs:
 		printf 'FATAL: release needs at least %s KiB free; only %s KiB remain\n' '$(RELEASE_MIN_FREE_KIB)' "$$free_kib" >&2; \
 		exit 1; \
 	fi; \
-	printf '==> Release prerequisites ready: Rust %s, targets [%s], linker [%s -> %s], free %s KiB\n' "$$toolchain" "$$VIBECRAFTED_RELEASE_RUST_TARGETS" "$$VIBECRAFTED_RELEASE_DARWIN_CLANG" "$$VIBECRAFTED_RELEASE_DARWIN_LD_CLASSIC" "$$free_kib"
+	printf '==> Release prerequisites ready: Rust %s, targets [%s], linker %s [%s -> %s], free %s KiB\n' "$$toolchain" "$$VIBECRAFTED_RELEASE_RUST_TARGETS" "$$VIBECRAFTED_RELEASE_DARWIN_LINKER_MODE" "$$VIBECRAFTED_RELEASE_DARWIN_RUST_CLANG" "$$VIBECRAFTED_RELEASE_DARWIN_RUST_LD" "$$free_kib"
 
 app dmg dmg-signed release-local release runtime-pack: release-prereqs
 

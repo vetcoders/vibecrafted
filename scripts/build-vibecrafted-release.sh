@@ -261,9 +261,10 @@ echo "==> Xcode developer dir: $DEVELOPER_DIR ($(xcrun --find strip 2>/dev/null 
 export MACOSX_DEPLOYMENT_TARGET=14.0
 # Apple ld64 1230.1 and 27037.1 both assert in makeSymbolStringInPlace while
 # linking the generated Vibecrafted Server entry object. The exact captured
-# linker input succeeds under ld-classic 956.6. Scope the workaround to Cargo's
-# native Apple target: WASM keeps rust-lld, while Swift, signing and notarization
-# keep using the selected Xcode toolchain.
+# linker input succeeds under ld-classic 956.6; on a CLT 27 host, which ships no
+# ld-classic, the contract selects the measured Xcode clang/ld pair instead.
+# Scope the linker to Cargo's native Apple target: WASM keeps rust-lld, while
+# Swift, signing and notarization keep using the selected Xcode toolchain.
 if [[ "$MODE" != "notarize" ]]; then
   DARWIN_RUST_LINKER="$REPO_ROOT/scripts/lib/rust-linker-darwin-classic.sh"
   [[ -x "$DARWIN_RUST_LINKER" ]] || die "missing executable Darwin Rust linker wrapper: $DARWIN_RUST_LINKER"
@@ -271,7 +272,7 @@ if [[ "$MODE" != "notarize" ]]; then
     || die "the pinned Darwin Rust linker contract is not satisfied"
   export VIBECRAFTED_RELEASE_TOOLCHAIN_CONTRACT="$RELEASE_TOOLCHAIN_CONTRACT"
   export CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER="${CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER:-$DARWIN_RUST_LINKER}"
-  echo "==> Rust Darwin linker: $CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER ($VIBECRAFTED_RELEASE_DARWIN_CLANG -> $VIBECRAFTED_RELEASE_DARWIN_LD_CLASSIC)"
+  echo "==> Rust Darwin linker: $CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER ($VIBECRAFTED_RELEASE_DARWIN_LINKER_MODE: $VIBECRAFTED_RELEASE_DARWIN_RUST_CLANG -> $VIBECRAFTED_RELEASE_DARWIN_RUST_LD)"
 fi
 # Keep host proc-macro dylibs loadable under the Xcode beta linker/strip pair.
 # Strip only packaged Mach-O payloads through the existing signing pipeline.

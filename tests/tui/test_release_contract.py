@@ -165,6 +165,102 @@ def test_classic_darwin_linker_wrapper_injects_flag_before_cargo_arguments(
         assert expected_error in result.stderr
 
 
+def test_darwin_linker_wrapper_uses_measured_xcode_pair_without_ld_classic(
+    tmp_path: Path,
+) -> None:
+    """CLT 27 ships no ld-classic; the contract then links with the Xcode pair.
+
+    Only an absent ld-classic selects the Xcode pair, the pair is
+    version-exact, and the -ld_classic flag is never forwarded to it.
+    """
+    captured = tmp_path / "clang-arguments"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    xcode_clang = fake_bin / "xcode-clang"
+    xcode_clang.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'if [[ "${1:-}" == --version ]]; then printf "%s\\n" "Fake xcode clang"; exit 0; fi\n'
+        'printf "%s\\n" "$@" > "$CAPTURED"\n',
+        encoding="utf-8",
+    )
+    xcode_ld = fake_bin / "xcode-ld"
+    xcode_ld.write_text(
+        '#!/usr/bin/env bash\nprintf "%s\\n" "Fake xcode ld"\n', encoding="utf-8"
+    )
+    fake_xcrun = fake_bin / "xcrun"
+    fake_xcrun.write_text(
+        "#!/usr/bin/env bash\n"
+        'case "$2" in\n'
+        f'  clang) printf "%s\\n" "{xcode_clang}" ;;\n'
+        f'  ld) printf "%s\\n" "{xcode_ld}" ;;\n'
+        "  *) exit 1 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    for tool in (xcode_clang, xcode_ld, fake_xcrun):
+        tool.chmod(0o755)
+    contract = (REPO_ROOT / "scripts/lib/release-toolchain-contract.sh").read_text(
+        encoding="utf-8"
+    )
+    for old, new in (
+        (
+            "/Library/Developer/CommandLineTools/usr/bin/ld-classic",
+            str(tmp_path / "absent" / "ld-classic"),
+        ),
+        ("Apple clang version 21.0.0 (clang-2100.3.27.1)", "Fake xcode clang"),
+        ("@(#)PROGRAM:ld PROJECT:ld-27036.1", "Fake xcode ld"),
+    ):
+        assert old in contract
+        contract = contract.replace(old, new)
+    fake_contract = tmp_path / "release-toolchain-contract.sh"
+    fake_contract.write_text(contract, encoding="utf-8")
+    env = dict(os.environ)
+    env.update(
+        {
+            "CAPTURED": str(captured),
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "VIBECRAFTED_RELEASE_TOOLCHAIN_CONTRACT": str(fake_contract),
+        }
+    )
+    linker = REPO_ROOT / "scripts/lib/rust-linker-darwin-classic.sh"
+
+    result = subprocess.run(
+        [str(linker), "object.o", "-o", "product"],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert captured.read_text(encoding="utf-8").splitlines() == [
+        "object.o",
+        "-o",
+        "product",
+    ]
+
+    # The CLT 27 pair (ld-27037.1) is not the measured one: exact versions only.
+    for key, expected_error in (
+        ("XCODE_CLANG_VERSION='Fake", "release xcode clang drift"),
+        ("XCODE_LD_VERSION='Fake", "release xcode ld drift"),
+    ):
+        drifted = contract.replace(key, key.replace("'Fake", "'Wrong"))
+        assert drifted != contract
+        fake_contract.write_text(drifted, encoding="utf-8")
+        captured.unlink(missing_ok=True)
+        result = subprocess.run(
+            [str(linker), "object.o"],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode != 0
+        assert expected_error in result.stderr
+        assert not captured.exists()
+
+
 def _native_voc_build_function() -> str:
     """Extract the builder helper so this test executes its actual command path."""
     builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
