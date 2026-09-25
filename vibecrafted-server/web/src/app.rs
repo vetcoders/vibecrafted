@@ -695,7 +695,7 @@ fn run_table(
     let count = runs.len();
     let empty = count == 0;
     view! {
-        <section class="overview-band run-table-band" aria-label=aria data-rail-band=band>
+        <section class="overview-band run-table-band" aria-label=aria data-rail-band=band hidden=empty>
             <header class="run-table-head">
                 <h2>{title}</h2>
                 <span>{count}</span>
@@ -1672,7 +1672,7 @@ fn console_dashboard(dashboard: DashboardData) -> impl IntoView {
                             <a href="/scaffold">"Plans"</a>
                         </p>
                     </div>
-                    <aside class="overview-inspector doc-pane" id="overview-inspector" aria-label="Run document">
+                    <aside class="overview-inspector doc-pane" id="overview-inspector" aria-label="Run document" hidden>
                         <div class="doc-tabs" role="tablist" aria-label="Document">
                             <button type="button" data-doc-tab="transcript" class="is-active">"Transcript"</button>
                             <button type="button" data-doc-tab="report">"Report"</button>
@@ -1680,7 +1680,7 @@ fn console_dashboard(dashboard: DashboardData) -> impl IntoView {
                         </div>
                         <article class="doc-sheet" data-doc-panel="transcript">
                             <p class="doc-kicker">"Run"</p>
-                            <h2 data-inspector-id>"Nothing selected"</h2>
+                            <h2 data-inspector-id></h2>
                             <p class="doc-meta" data-inspector-meta>"Select a row."</p>
                             <pre class="inspector-tail" data-inspector-tail>"Select a row."</pre>
                         </article>

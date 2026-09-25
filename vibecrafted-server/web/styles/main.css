@@ -3830,3 +3830,26 @@ a.control-run-id:focus-visible {
 .vc-ppm button:focus-visible {
   background: var(--surface-elevated);
 }
+
+/* Other routes read as one list. Cost & usage keeps its own cards. */
+.route-page-shell:not(.usage-dashboard) > .control-panel {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.workspace-card,
+.operator-action-row,
+.operator-guide-list li {
+  border: 0;
+  border-bottom: var(--stroke-width) solid var(--border-subtle);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.overview-desk-body:has(.overview-inspector[hidden]) {
+  grid-template-columns: minmax(0, 1fr);
+}

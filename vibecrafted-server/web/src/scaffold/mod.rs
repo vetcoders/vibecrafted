@@ -2295,9 +2295,9 @@ pub mod api {
 .review-library-link:hover,.review-library-link:focus-visible{border-color:var(--line-strong);background:var(--panel-lift);color:var(--text)}
 .summary{display:grid;gap:3px;color:var(--muted);flex:0 0 auto}.summary strong{color:var(--text);font-size:16px}
 .tabs{display:flex;flex-direction:column;gap:6px;overflow:auto;padding-right:4px;min-height:0;flex:1 1 auto}
-.tab{display:grid;gap:2px;text-decoration:none;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:9px 10px;background:var(--panel-lift)}
-.tab:hover,.tab:focus{border-color:var(--accent)}
-.tab.is-active{border-color:var(--teal);background:var(--panel-lift);box-shadow:inset 2px 0 0 var(--accent)}
+.tab{display:grid;gap:2px;text-decoration:none;color:var(--text);border:0;border-bottom:1px solid var(--line);border-radius:0;padding:8px 4px;background:transparent}
+.tab:hover,.tab:focus{color:var(--text)}
+.tab.is-active{border-color:var(--line);background:transparent;box-shadow:inset 2px 0 0 var(--accent)}
 .tab small{color:var(--muted);font:11px var(--font-mono)}.tab-done{border-color:color-mix(in srgb,var(--status-success) 55%,transparent)}
 .tab-done.is-active{border-color:var(--accent)}
 .api-link{display:block;color:var(--accent);font:12px var(--font-mono);text-decoration:none;margin:6px 0}

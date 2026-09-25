@@ -498,7 +498,8 @@ pub fn operator_desk_script() -> &'static str {
     const errorEl = pane.querySelector('[data-inspector-error]');
     const open = pane.querySelector('[data-inspector-open]');
     const tail = pane.querySelector('[data-inspector-tail]');
-    if (title) title.textContent = id || 'Nothing selected';
+    if (id) pane.hidden = false;
+    if (title) title.textContent = id || '';
     const meta = pane.querySelector('[data-inspector-meta]');
     const rootEl = pane.querySelector('[data-inspector-root]');
     if (meta) meta.textContent = row.getAttribute('data-meta') || row.getAttribute('data-error') || 'No extra fields on this row.';
