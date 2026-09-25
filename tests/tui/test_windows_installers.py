@@ -7,6 +7,7 @@ operator LOCALAPPDATA Vibecrafted home.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import tarfile
 from pathlib import Path
@@ -225,13 +226,15 @@ def test_windows_installer_license_comes_from_repo_license() -> None:
 
     # Full legal company name from vista-win LICENSE Company definition.
     full_licensor = "Libraxis AI Sp. z o.o."
-    # Stylized brand (mathematical sans-serif bold) + Framework; keep former name.
-    licensed_work = "𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Framework (formerly Vetcoders Skills)."
+    # ASCII brand + Framework for WiX RichEdit; keep former name. No math-sans.
+    licensed_work = "Vibecrafted. Framework (formerly Vetcoders Skills)."
+    math_sans_brand = "𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍"
     assert f"Licensor:             {full_licensor}" in license_text
     assert "Licensor:             Vetcoders" not in license_text
     assert "Licensor:             LibraxisAI\n" not in license_text
     assert "Licensor:             LibraxisAI\r" not in license_text
     assert f"Licensed Work:        {licensed_work}" in license_text
+    assert math_sans_brand not in license_text
     assert (
         "Licensed Work:        Vibecrafted (formerly Vetcoders Skills)."
         not in license_text
@@ -244,8 +247,10 @@ def test_windows_installer_license_comes_from_repo_license() -> None:
     assert f"Licensor:             {full_licensor}" in rtf
     assert "Licensor:             Vetcoders" not in rtf
     assert "Licensor:             LibraxisAI\\par" not in rtf
-    # RTF must carry signed UTF-16 surrogate \\u escapes (not plain ASCII brand).
-    assert "\\u-10187?" in rtf
+    # RTF must be plain ASCII for MSI/Burn RichEdit (no surrogate \\u brand).
+    assert f"Licensed Work:        {licensed_work}" in rtf
+    assert math_sans_brand not in rtf
+    assert "\\u-10187?" not in rtf
     assert "\\u55349?" not in rtf
     assert "Framework (formerly Vetcoders Skills)." in rtf
     assert "Licensed Work:        Vibecrafted (formerly Vetcoders Skills)." not in rtf
@@ -254,6 +259,7 @@ def test_windows_installer_license_comes_from_repo_license() -> None:
     assert "fewer than 5" in rtf
     assert "PLACEHOLDER" not in rtf.upper()
     assert "EULA" not in rtf
+    assert all(ord(ch) < 128 for ch in rtf)
 
     assert f'Manufacturer = "{full_licensor}"' in identity
     assert 'Manufacturer = "Vetcoders"' not in identity
@@ -305,8 +311,11 @@ def test_windows_license_rtf_is_regenerated_from_repo_license() -> None:
     for line in source.splitlines():
         if line.isascii() and line and all(ch not in line for ch in "\\{}"):
             assert line in rendered
-    assert "\\u-10187?" in rendered
-    assert "\\u55349?" not in rendered
+    # LICENSE is ASCII now; the escape path still has to be signed UTF-16.
+    assert re.search(r"\\u-?\d", rendered) is None
+    escaped = render_license_rtf("Licensed Work:        \U0001d685.\n")
+    assert "\\u-10187?\\u-8571?" in escaped
+    assert "\\u55349?" not in escaped
     drifted = source.replace("BUSL-1.1", "BUSL-DRIFT", 1)
     assert drifted != source
     assert render_license_rtf(drifted) != rendered

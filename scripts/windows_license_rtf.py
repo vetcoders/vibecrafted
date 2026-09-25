@@ -5,10 +5,11 @@ WiX WixUI ScrollableText and Burn RtfLicense paint an empty license box when
 the file is plain text. LICENSE stays the only legal source. This renderer
 is deterministic: same LICENSE bytes, same ASCII RTF.
 
-MSI's license control reads ANSI RTF. Characters outside ASCII, including
-the mathematical-monospace brand in LICENSE, are signed UTF-16 ``\\uN?``
-escapes (RTF spec). The unsigned form (``\\u55349?``) is rejected by the
-installer contract. No BOM, no raw UTF-8, no Word stylesheet.
+MSI's license control reads ANSI RTF. LICENSE writes the brand in ASCII
+because the WiX/Burn RichEdit dialog did not render the mathematical-monospace
+brand. Any other character outside ASCII is a signed UTF-16 ``\\uN?`` escape
+(RTF spec); the unsigned form (``\\u55349?``) is rejected by the installer
+contract. No BOM, no raw UTF-8, no Word stylesheet.
 """
 
 from __future__ import annotations
@@ -21,12 +22,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_LICENSE = REPO_ROOT / "LICENSE"
 DEFAULT_RTF = REPO_ROOT / "packaging" / "windows" / "License.rtf"
 
-# WordPad-simple header. Word stylesheets make WixUI_Minimal's first dialog
+# WordPad-simple Arial header, the shape the Windows session saw render in the
+# WixUI_Minimal and Burn license dialogs. Word stylesheets make the first dialog
 # look empty until the user scrolls; keep this header free of them.
 _HEADER = (
     "{\\rtf1\\ansi\\ansicpg1252\\deff0"
-    "{\\fonttbl{\\f0\\fmodern\\fprq1\\fcharset0 Consolas;}}\n"
-    "\\viewkind4\\uc1\\pard\\f0\\fs16\n"
+    "{\\fonttbl{\\f0\\fnil\\fcharset0 Arial;}}\n"
+    "\\uc1\\pard\\f0\\fs16\n"
 )
 
 
