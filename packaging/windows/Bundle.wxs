@@ -18,7 +18,9 @@
       AboutUrl="https://vibecrafted.io"
       HelpUrl="https://github.com/vetcoders/vibecrafted/blob/main/SECURITY.md">
     <BootstrapperApplicationRef Id="WixStandardBootstrapperApplication.RtfLicense">
-      <bal:WixStandardBootstrapperApplication LicenseFile="License.rtf" />
+      <bal:WixStandardBootstrapperApplication
+          LicenseFile="License.rtf"
+          LogoFile="burn-logo.bmp" />
     </BootstrapperApplicationRef>
     <Chain>
       <MsiPackage

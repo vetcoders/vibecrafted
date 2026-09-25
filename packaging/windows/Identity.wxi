@@ -4,7 +4,7 @@
   Keep UpgradeCode stable across releases so Windows Installer upgrades stay coherent.
 -->
 <Include>
-  <?define ProductName = "Vibecrafted" ?>
+  <?define ProductName = "Vibecrafted. Framework" ?>
   <?define Manufacturer = "Libraxis AI Sp. z o.o." ?>
   <!-- Stable Windows upgrade lineage. Do not rotate casually. -->
   <?define UpgradeCode = "B7E4C2A1-9F3D-4B8E-A6C1-2D5E8F0A1B3C" ?>

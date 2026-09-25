@@ -22,13 +22,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_LICENSE = REPO_ROOT / "LICENSE"
 DEFAULT_RTF = REPO_ROOT / "packaging" / "windows" / "License.rtf"
 
-# WordPad-simple Arial header, the shape the Windows session saw render in the
-# WixUI_Minimal and Burn license dialogs. Word stylesheets make the first dialog
-# look empty until the user scrolls; keep this header free of them.
+# WordPad-simple Arial header for WixUI_Minimal / Burn RichEdit.
+# No \\uc1: MSI's license RichEdit has aborted the wizard on that token even
+# when the body is pure ASCII (no \\uN escapes). No Word stylesheet.
 _HEADER = (
     "{\\rtf1\\ansi\\ansicpg1252\\deff0"
     "{\\fonttbl{\\f0\\fnil\\fcharset0 Arial;}}\n"
-    "\\uc1\\pard\\f0\\fs16\n"
+    "\\pard\\f0\\fs16\n"
 )
 
 
