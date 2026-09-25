@@ -2557,7 +2557,8 @@ const CODE_REPORTS_EMBED_ID: &str = "vc-code-reports";
 
 /// Report documents are a different noun from scaffold plans.
 /// `VIBECRAFTED_LOCTREE_REPORTS`, then `loctree_reports` in the operator
-/// config, then the Loctree checkout `reports` directory measured for this room.
+/// config, then `$VIBECRAFTED_HOME/loctree/reports`. Never a build-host path:
+/// the release payload gate refuses binaries that name the operator's checkout.
 #[cfg(feature = "ssr")]
 fn configured_loctree_reports_dir() -> std::path::PathBuf {
     #[cfg(all(test, feature = "ssr"))]
@@ -2573,7 +2574,7 @@ fn configured_loctree_reports_dir() -> std::path::PathBuf {
     if let Some(path) = loctree_reports_from_operator_config() {
         return path;
     }
-    std::path::PathBuf::from("/Volumes/vc-workspace/Loctree/loctree/reports")
+    control_core::vibecrafted_home().join("loctree/reports")
 }
 
 #[cfg(all(test, feature = "ssr"))]
@@ -3227,7 +3228,8 @@ fn product_skill_roots() -> Vec<std::path::PathBuf> {
     use std::path::PathBuf;
 
     // Installer search, not a new catalog: canonical `~/.agents/skills`,
-    // each runtime view, `$VIBECRAFTED_HOME/skills`, then the package tree.
+    // each runtime view, then `$VIBECRAFTED_HOME/skills`. No `env!("CARGO_MANIFEST_DIR")`
+    // root: it bakes the build checkout into the signed binary.
     let mut roots = Vec::new();
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
         roots.push(home.join(".agents/skills"));
@@ -3236,10 +3238,6 @@ fn product_skill_roots() -> Vec<std::path::PathBuf> {
         }
     }
     roots.push(control_core::vibecrafted_home().join("skills"));
-    roots.push(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../vibecrafted-core/vibecrafted_core/skills"),
-    );
     let mut unique = Vec::new();
     for root in roots {
         if !unique.iter().any(|seen: &PathBuf| seen == &root) {
