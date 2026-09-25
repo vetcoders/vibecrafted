@@ -978,6 +978,7 @@ pub fn App() -> impl IntoView {
                 <Route path=path!("/projects/:org/:repo") view=ProjectPlansPage />
                 <Route path=path!("/skills") view=SkillsPage />
                 <Route path=path!("/skills/:name") view=SkillEditorPage />
+                <Route path=path!("/settings") view=SettingsPage />
                 <Route path=path!("/run/:run_id") view=RunDetailPage />
             </Routes>
         </Router>
@@ -3516,6 +3517,883 @@ async fn save_skill_form(
 #[cfg(feature = "ssr")]
 pub fn skills_routes() -> axum::Router<leptos::config::LeptosOptions> {
     axum::Router::new().route("/api/skills/file", axum::routing::post(save_skill_form))
+}
+
+/// `/settings` reads and writes the one product file, `config.toml`.
+mod settings_config {
+    use std::path::{Path, PathBuf};
+
+    #[derive(Clone, Debug)]
+    pub(super) struct SettingsView {
+        pub config_path: String,
+        pub state_home: String,
+        pub runtime_home: String,
+        pub frame_url: String,
+        pub slack_url: String,
+        pub agents: String,
+        pub permissions: String,
+        pub default_runtime: String,
+        pub isolation: String,
+        pub artifacts_root: String,
+        pub git_repos: Vec<(String, String)>,
+        pub read_error: String,
+    }
+
+    #[cfg(feature = "ssr")]
+    #[derive(Debug, Clone, serde::Deserialize)]
+    pub(crate) struct SettingsWrite {
+        pub vc_frame_url: String,
+        pub slack_console_url: String,
+        pub agents: String,
+        pub permissions: String,
+        pub runtime: String,
+        pub isolation: String,
+        pub git_identity: String,
+        pub git_remote: String,
+    }
+
+    pub(crate) fn canonical_artifacts_root() -> String {
+        display_path(&state_home().join("artifacts"))
+    }
+
+    pub(super) fn load() -> SettingsView {
+        #[cfg(feature = "ssr")]
+        {
+            load_from_disk()
+        }
+        #[cfg(not(feature = "ssr"))]
+        {
+            shell()
+        }
+    }
+
+    fn shell() -> SettingsView {
+        SettingsView {
+            config_path: display_path(&product_config_path()),
+            state_home: display_path(&state_home()),
+            runtime_home: display_path(&runtime_home()),
+            frame_url: String::new(),
+            slack_url: String::new(),
+            agents: String::new(),
+            permissions: String::new(),
+            default_runtime: String::new(),
+            isolation: String::new(),
+            artifacts_root: canonical_artifacts_root(),
+            git_repos: Vec::new(),
+            read_error: String::new(),
+        }
+    }
+
+    #[cfg(feature = "ssr")]
+    fn load_from_disk() -> SettingsView {
+        let mut view = shell();
+        let path = product_config_path();
+        match read_config_text(&path) {
+            Ok(text) => {
+                view.frame_url = table_value(&text, "tools.vc-frame", "url").unwrap_or_default();
+                view.slack_url =
+                    table_value(&text, "tools.slack-console", "url").unwrap_or_default();
+                view.agents = table_value(&text, "runtime.picking.research", "default_agents")
+                    .unwrap_or_default();
+                view.permissions =
+                    table_value(&text, "runtime.picking", "permissions").unwrap_or_default();
+                view.default_runtime =
+                    table_value(&text, "runtime.picking", "runtime").unwrap_or_default();
+                view.isolation =
+                    table_value(&text, "runtime.picking", "isolation").unwrap_or_default();
+                view.git_repos = repository_remotes(&text);
+            }
+            Err(error) => view.read_error = error,
+        }
+        view
+    }
+
+    #[cfg(feature = "ssr")]
+    pub(crate) fn save_settings_file(path: &Path, write: &SettingsWrite) -> Result<(), String> {
+        let frame = write.vc_frame_url.trim();
+        let slack = write.slack_console_url.trim();
+        let agents = parse_agents(&write.agents)?;
+        let permissions = optional_token("Default permissions", &write.permissions)?;
+        let runtime = optional_token("Default runtime", &write.runtime)?;
+        let isolation = normalize_isolation(&write.isolation)?;
+        let git_identity = write.git_identity.trim();
+        let git_remote = write.git_remote.trim();
+        if git_identity.is_empty() != git_remote.is_empty() {
+            return Err("connect git needs both org/name and a remote".into());
+        }
+        if !git_identity.is_empty() {
+            if let Some(error) = identity_rejected(git_identity) {
+                return Err(error.into());
+            }
+            if let Some(error) = remote_rejected(git_remote) {
+                return Err(error.into());
+            }
+        }
+        if let Some(error) = tool_url_rejected(frame) {
+            return Err(error.into());
+        }
+        if let Some(error) = tool_url_rejected(slack) {
+            return Err(error.into());
+        }
+
+        let mut text = read_config_text(path)?;
+        text = upsert_tool(&text, "tools.vc-frame", frame);
+        text = upsert_tool(&text, "tools.slack-console", slack);
+        text = upsert(
+            &text,
+            "runtime.picking.research",
+            "default_agents",
+            &toml_string_array(&agents),
+        );
+        text = upsert(
+            &text,
+            "runtime.picking",
+            "permissions",
+            &toml_basic_string(&permissions),
+        );
+        text = upsert(
+            &text,
+            "runtime.picking",
+            "runtime",
+            &toml_basic_string(&runtime),
+        );
+        text = upsert(
+            &text,
+            "runtime.picking",
+            "isolation",
+            &toml_basic_string(&isolation),
+        );
+        if !git_identity.is_empty() {
+            let table = format!("repositories.{}", toml_basic_string(git_identity));
+            text = upsert(&text, &table, "remote", &toml_basic_string(git_remote));
+        }
+        atomic_write(path, &text)
+    }
+
+    #[cfg(feature = "ssr")]
+    pub fn settings_routes() -> axum::Router<leptos::config::LeptosOptions> {
+        use axum::extract::Form;
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+        use axum::Router;
+
+        async fn save_settings(Form(form): Form<SettingsWrite>) -> impl IntoResponse {
+            match save_settings_file(&product_config_path(), &form) {
+                Ok(()) => axum::response::Redirect::to("/settings").into_response(),
+                Err(error) => (axum::http::StatusCode::BAD_REQUEST, error).into_response(),
+            }
+        }
+
+        Router::new().route("/api/settings", post(save_settings))
+    }
+
+    fn env_nonempty(name: &str) -> Option<std::ffi::OsString> {
+        std::env::var_os(name).filter(|value| !value.is_empty())
+    }
+
+    fn home_dir() -> PathBuf {
+        #[cfg(windows)]
+        if let Some(profile) = env_nonempty("USERPROFILE") {
+            return PathBuf::from(profile);
+        }
+        env_nonempty("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    fn product_config_path() -> PathBuf {
+        let base = env_nonempty("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home_dir().join(".config"));
+        base.join("vibecrafted").join("config.toml")
+    }
+
+    fn state_home() -> PathBuf {
+        if let Some(home) = env_nonempty("VIBECRAFTED_HOME") {
+            return PathBuf::from(home);
+        }
+        #[cfg(windows)]
+        {
+            return windows_local_app_data().join("Vibecrafted").join("home");
+        }
+        #[cfg(not(windows))]
+        {
+            home_dir().join(".vibecrafted")
+        }
+    }
+
+    fn runtime_home() -> PathBuf {
+        if let Some(home) = env_nonempty("VIBECRAFTED_RUNTIME_HOME") {
+            return PathBuf::from(home);
+        }
+        if let Some(data) = env_nonempty("XDG_DATA_HOME") {
+            return PathBuf::from(data).join("vibecrafted");
+        }
+        #[cfg(windows)]
+        {
+            return windows_local_app_data().join("Vibecrafted");
+        }
+        #[cfg(not(windows))]
+        {
+            home_dir().join(".local").join("share").join("vibecrafted")
+        }
+    }
+
+    #[cfg(windows)]
+    fn windows_local_app_data() -> PathBuf {
+        env_nonempty("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home_dir().join("AppData").join("Local"))
+    }
+
+    fn display_path(path: &Path) -> String {
+        path.to_string_lossy().into_owned()
+    }
+
+    #[cfg(feature = "ssr")]
+    fn read_config_text(path: &Path) -> Result<String, String> {
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    return Err("config.toml is a symlink; refusing to follow it".into());
+                }
+                if !meta.is_file() {
+                    return Err("config.toml is not a regular file".into());
+                }
+                std::fs::read_to_string(path)
+                    .map_err(|err| format!("cannot read config.toml: {err}"))
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+            Err(err) => Err(format!("cannot inspect config.toml: {err}")),
+        }
+    }
+
+    #[cfg(feature = "ssr")]
+    fn atomic_write(path: &Path, contents: &str) -> Result<(), String> {
+        use std::io::Write;
+
+        let parent = path
+            .parent()
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .ok_or_else(|| "config path has no directory".to_string())?;
+        std::fs::create_dir_all(parent)
+            .map_err(|err| format!("cannot create config directory: {err}"))?;
+
+        let mut mode = 0o600;
+        if std::fs::symlink_metadata(path).is_ok() {
+            let meta = std::fs::symlink_metadata(path)
+                .map_err(|err| format!("cannot inspect config.toml: {err}"))?;
+            if meta.file_type().is_symlink() {
+                return Err("config.toml is a symlink; refusing to replace it".into());
+            }
+            if !meta.is_file() {
+                return Err("config.toml is not a regular file".into());
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                mode = meta.permissions().mode() & 0o777;
+            }
+        }
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let tmp = parent.join(format!(
+            ".config.toml.{}.{}",
+            std::process::id(),
+            nanos
+        ));
+        let write_tmp = || -> Result<(), String> {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)
+                .map_err(|err| format!("cannot create config tempfile: {err}"))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                file.set_permissions(std::fs::Permissions::from_mode(mode))
+                    .map_err(|err| format!("cannot set config mode: {err}"))?;
+            }
+            file.write_all(contents.as_bytes())
+                .map_err(|err| format!("cannot write config.toml: {err}"))?;
+            file.sync_all()
+                .map_err(|err| format!("cannot sync config.toml: {err}"))?;
+            Ok(())
+        };
+        if let Err(error) = write_tmp() {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(error);
+        }
+        if let Err(err) = std::fs::rename(&tmp, path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!("cannot replace config.toml: {err}"));
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "ssr")]
+    fn split_lines(source: &str) -> Vec<String> {
+        if source.is_empty() {
+            return Vec::new();
+        }
+        let mut lines: Vec<String> = source
+            .split('\n')
+            .map(|line| line.trim_end_matches('\r').to_string())
+            .collect();
+        if lines.last().is_some_and(String::is_empty) {
+            lines.pop();
+        }
+        lines
+    }
+
+    #[cfg(feature = "ssr")]
+    fn join_lines(lines: &[String]) -> String {
+        if lines.is_empty() {
+            return String::new();
+        }
+        let mut text = lines.join("\n");
+        text.push('\n');
+        text
+    }
+
+    #[cfg(feature = "ssr")]
+    fn strip_unquoted_comment(input: &str) -> &str {
+        let mut quote: Option<char> = None;
+        let mut escaped = false;
+        for (index, ch) in input.char_indices() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if quote == Some('"') && ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == '"' || ch == '\'' {
+                quote = match quote {
+                    Some(current) if current == ch => None,
+                    Some(_) => quote,
+                    None => Some(ch),
+                };
+                continue;
+            }
+            if ch == '#' && quote.is_none() {
+                return &input[..index];
+            }
+        }
+        input
+    }
+
+    #[cfg(feature = "ssr")]
+    fn header_of(line: &str) -> Option<String> {
+        let trimmed = strip_unquoted_comment(line).trim();
+        let inner = trimmed.strip_prefix('[')?.strip_suffix(']')?.trim();
+        if inner.is_empty() || inner.contains('[') || inner.contains(']') {
+            return None;
+        }
+        Some(inner.to_string())
+    }
+
+    #[cfg(feature = "ssr")]
+    fn assignment_key(line: &str) -> Option<String> {
+        let trimmed = strip_unquoted_comment(line).trim();
+        if trimmed.is_empty() || trimmed.starts_with('[') {
+            return None;
+        }
+        let (key, _) = trimmed.split_once('=')?;
+        let key = key.trim();
+        if key.is_empty()
+            || !key
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+        {
+            return None;
+        }
+        Some(key.to_string())
+    }
+
+    #[cfg(feature = "ssr")]
+    fn table_end(lines: &[String], header_at: usize) -> usize {
+        lines
+            .iter()
+            .enumerate()
+            .skip(header_at + 1)
+            .find_map(|(index, line)| header_of(line).map(|_| index))
+            .unwrap_or(lines.len())
+    }
+
+    #[cfg(feature = "ssr")]
+    fn table_value(source: &str, table: &str, key: &str) -> Option<String> {
+        let lines = split_lines(source);
+        let header_at = lines
+            .iter()
+            .position(|line| header_of(line).as_deref() == Some(table))?;
+        let end = table_end(&lines, header_at);
+        for line in &lines[header_at + 1..end] {
+            if assignment_key(line).as_deref() == Some(key) {
+                let raw = line.split_once('=')?.1;
+                return Some(decode_toml_value(raw));
+            }
+        }
+        None
+    }
+
+    #[cfg(feature = "ssr")]
+    fn decode_toml_value(raw: &str) -> String {
+        let value = strip_unquoted_comment(raw).trim();
+        if let Some(inner) = value.strip_prefix('"').and_then(|rest| rest.strip_suffix('"')) {
+            return unescape_basic(inner);
+        }
+        if let Some(inner) = value.strip_prefix('\'').and_then(|rest| rest.strip_suffix('\'')) {
+            return inner.to_string();
+        }
+        if let Some(inner) = value.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')) {
+            return decode_string_array(inner).join(", ");
+        }
+        value.to_string()
+    }
+
+    #[cfg(feature = "ssr")]
+    fn unescape_basic(input: &str) -> String {
+        let mut out = String::with_capacity(input.len());
+        let mut chars = input.chars();
+        while let Some(ch) = chars.next() {
+            if ch != '\\' {
+                out.push(ch);
+                continue;
+            }
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('r') => out.push('\r'),
+                Some('t') => out.push('\t'),
+                Some('\\') => out.push('\\'),
+                Some('"') => out.push('"'),
+                Some('u') => {
+                    let hex: String = chars.by_ref().take(4).collect();
+                    match u32::from_str_radix(&hex, 16)
+                        .ok()
+                        .and_then(char::from_u32)
+                    {
+                        Some(decoded) => out.push(decoded),
+                        None => {
+                            out.push('u');
+                            out.push_str(&hex);
+                        }
+                    }
+                }
+                Some(other) => out.push(other),
+                None => out.push('\\'),
+            }
+        }
+        out
+    }
+
+    #[cfg(feature = "ssr")]
+    fn decode_string_array(inner: &str) -> Vec<String> {
+        let mut items = Vec::new();
+        let mut chars = inner.chars().peekable();
+        while chars.peek().is_some() {
+            match chars.next() {
+                Some('"') => items.push(take_basic_string(&mut chars)),
+                Some('\'') => {
+                    let mut literal = String::new();
+                    for ch in chars.by_ref() {
+                        if ch == '\'' {
+                            break;
+                        }
+                        literal.push(ch);
+                    }
+                    items.push(literal);
+                }
+                _ => {}
+            }
+        }
+        items
+    }
+
+    #[cfg(feature = "ssr")]
+    fn take_basic_string(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> String {
+        let mut out = String::new();
+        let mut escaped = false;
+        for ch in chars.by_ref() {
+            if escaped {
+                match ch {
+                    'n' => out.push('\n'),
+                    'r' => out.push('\r'),
+                    't' => out.push('\t'),
+                    '\\' => out.push('\\'),
+                    '"' => out.push('"'),
+                    other => out.push(other),
+                }
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == '"' {
+                break;
+            }
+            out.push(ch);
+        }
+        out
+    }
+
+    #[cfg(feature = "ssr")]
+    fn repository_identity(header: &str) -> Option<String> {
+        let rest = header.strip_prefix("repositories.")?;
+        if let Some(inner) = rest.strip_prefix('"').and_then(|value| value.strip_suffix('"')) {
+            return Some(unescape_basic(inner));
+        }
+        rest.strip_prefix('\'')
+            .and_then(|value| value.strip_suffix('\''))
+            .map(ToOwned::to_owned)
+    }
+
+    #[cfg(feature = "ssr")]
+    fn repository_remotes(source: &str) -> Vec<(String, String)> {
+        let lines = split_lines(source);
+        let mut repos = Vec::new();
+        let mut index = 0;
+        while index < lines.len() {
+            let Some(header) = header_of(&lines[index]) else {
+                index += 1;
+                continue;
+            };
+            let end = table_end(&lines, index);
+            if let Some(identity) = repository_identity(&header) {
+                let mut remote = None;
+                for line in &lines[index + 1..end] {
+                    if assignment_key(line).as_deref() == Some("remote") {
+                        remote = line.split_once('=').map(|(_, raw)| decode_toml_value(raw));
+                    }
+                }
+                if let Some(remote) = remote.filter(|value| !value.is_empty()) {
+                    repos.push((identity, redact_remote(&remote)));
+                }
+            }
+            index = end;
+        }
+        repos.truncate(64);
+        repos
+    }
+
+    #[cfg(feature = "ssr")]
+    fn redact_remote(remote: &str) -> String {
+        if remote_has_userinfo(remote) {
+            "[redacted]".into()
+        } else {
+            remote.to_string()
+        }
+    }
+
+    #[cfg(feature = "ssr")]
+    fn remote_has_userinfo(remote: &str) -> bool {
+        let Some((_, rest)) = remote.split_once("://") else {
+            return false;
+        };
+        rest.split(['/', '?', '#'])
+            .next()
+            .unwrap_or("")
+            .contains('@')
+    }
+
+    #[cfg(feature = "ssr")]
+    fn table_exists(source: &str, table: &str) -> bool {
+        split_lines(source)
+            .iter()
+            .any(|line| header_of(line).as_deref() == Some(table))
+    }
+
+    #[cfg(feature = "ssr")]
+    fn upsert(source: &str, table: &str, key: &str, value_toml: &str) -> String {
+        let mut lines = split_lines(source);
+        let assignment = format!("{key} = {value_toml}");
+        if let Some(header_at) = lines
+            .iter()
+            .position(|line| header_of(line).as_deref() == Some(table))
+        {
+            let end = table_end(&lines, header_at);
+            let mut found = false;
+            for line in &mut lines[header_at + 1..end] {
+                if assignment_key(line).as_deref() == Some(key) {
+                    *line = assignment.clone();
+                    found = true;
+                }
+            }
+            if !found {
+                lines.insert(header_at + 1, assignment);
+            }
+        } else {
+            if !lines.is_empty() {
+                lines.push(String::new());
+            }
+            lines.push(format!("[{table}]"));
+            lines.push(assignment);
+        }
+        join_lines(&lines)
+    }
+
+    #[cfg(feature = "ssr")]
+    fn upsert_tool(source: &str, table: &str, url: &str) -> String {
+        if url.is_empty() && !table_exists(source, table) {
+            return source.to_string();
+        }
+        upsert(source, table, "url", &toml_basic_string(url))
+    }
+
+    #[cfg(feature = "ssr")]
+    fn toml_basic_string(value: &str) -> String {
+        let mut out = String::from("\"");
+        for ch in value.chars() {
+            match ch {
+                '\\' => out.push_str("\\\\"),
+                '"' => out.push_str("\\\""),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                other if other.is_control() => {
+                    out.push_str(&format!("\\u{:04x}", other as u32));
+                }
+                other => out.push(other),
+            }
+        }
+        out.push('"');
+        out
+    }
+
+    #[cfg(feature = "ssr")]
+    fn toml_string_array(tokens: &[String]) -> String {
+        let parts: Vec<String> = tokens.iter().map(|token| toml_basic_string(token)).collect();
+        format!("[{}]", parts.join(", "))
+    }
+
+    #[cfg(feature = "ssr")]
+    fn parse_agents(raw: &str) -> Result<Vec<String>, String> {
+        let mut agents = Vec::new();
+        for token in raw.split(|ch: char| ch == ',' || ch.is_whitespace()) {
+            if token.is_empty() {
+                continue;
+            }
+            if !token
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '-'))
+            {
+                return Err(format!("agent name is not a token: {token}"));
+            }
+            let agent = token.to_ascii_lowercase();
+            if !agents.contains(&agent) {
+                agents.push(agent);
+            }
+        }
+        Ok(agents)
+    }
+
+    #[cfg(feature = "ssr")]
+    fn optional_token(label: &str, raw: &str) -> Result<String, String> {
+        let value = raw.trim();
+        if value.is_empty() {
+            return Ok(String::new());
+        }
+        if value.len() > 64
+            || !value
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '-'))
+        {
+            return Err(format!("{label} must be a short token"));
+        }
+        Ok(value.to_string())
+    }
+
+    #[cfg(feature = "ssr")]
+    fn normalize_isolation(raw: &str) -> Result<String, String> {
+        match raw.trim() {
+            "Worktrees" => Ok("Worktrees".into()),
+            "vm" => Ok("vm".into()),
+            "cloud" => Ok("cloud".into()),
+            _ => Err("isolation must be Worktrees, vm, or cloud".into()),
+        }
+    }
+
+    #[cfg(feature = "ssr")]
+    fn identity_rejected(identity: &str) -> Option<&'static str> {
+        let Some((org, name)) = identity.split_once('/') else {
+            return Some("repository identity must be org/name");
+        };
+        if identity.matches('/').count() != 1 || !identity_token(org) || !identity_token(name) {
+            return Some("repository identity must be org/name");
+        }
+        None
+    }
+
+    #[cfg(feature = "ssr")]
+    fn identity_token(value: &str) -> bool {
+        let mut chars = value.chars();
+        match chars.next() {
+            Some(first) if first.is_ascii_alphanumeric() => {}
+            _ => return false,
+        }
+        chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '-'))
+    }
+
+    #[cfg(feature = "ssr")]
+    fn remote_rejected(remote: &str) -> Option<&'static str> {
+        if remote.is_empty() {
+            return Some("git remote is empty");
+        }
+        if remote.starts_with('-') || remote.chars().any(|ch| ch.is_control() || ch.is_whitespace())
+        {
+            return Some("git remote contains whitespace, control characters, or starts with -");
+        }
+        if remote.contains('?') || remote.contains('#') {
+            return Some("git remote must not contain a query or fragment");
+        }
+        if let Some((scheme, rest)) = remote.split_once("://") {
+            if !matches!(scheme, "https" | "http" | "ssh" | "file") {
+                return Some("unsupported Git remote transport");
+            }
+            let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+            if let Some((userinfo, _)) = authority.rsplit_once('@') {
+                if userinfo.contains(':') || (matches!(scheme, "https" | "http") && !userinfo.is_empty())
+                {
+                    return Some("git remote must not contain credentials");
+                }
+            }
+        }
+        None
+    }
+
+    #[cfg(feature = "ssr")]
+    fn tool_url_rejected(url: &str) -> Option<&'static str> {
+        if url.is_empty() {
+            return None;
+        }
+        if url.chars().any(|ch| ch.is_control() || ch.is_whitespace()) {
+            return Some("tool url contains whitespace or control characters");
+        }
+        let Some((scheme, rest)) = url.split_once("://") else {
+            return Some("tool url must be http or https");
+        };
+        if !matches!(scheme, "http" | "https") {
+            return Some("tool url must be http or https");
+        }
+        if rest.contains('?') || rest.contains('#') || rest.contains('@') {
+            return Some("tool url must not contain credentials, a query, or a fragment");
+        }
+        if rest.is_empty() || rest.starts_with('/') {
+            return Some("tool url must include a host");
+        }
+        None
+    }
+}
+
+#[cfg(feature = "ssr")]
+pub use settings_config::settings_routes;
+
+#[cfg(all(test, feature = "ssr"))]
+pub(crate) use settings_config::{SettingsWrite, canonical_artifacts_root, save_settings_file};
+
+fn settings_git_list(repos: Vec<(String, String)>) -> impl IntoView {
+    repos
+        .into_iter()
+        .map(|(identity, remote)| {
+            view! {
+                <li><code>{identity}</code><span>" "{remote}</span></li>
+            }
+        })
+        .collect_view()
+}
+
+#[component]
+pub fn SettingsPage() -> impl IntoView {
+    let view_model = settings_config::load();
+    let isolation_worktrees = view_model.isolation == "Worktrees";
+    let isolation_vm = view_model.isolation == "vm";
+    let isolation_cloud = view_model.isolation == "cloud";
+    let settings_config::SettingsView {
+        config_path,
+        state_home,
+        runtime_home,
+        frame_url,
+        slack_url,
+        agents,
+        permissions,
+        default_runtime,
+        artifacts_root,
+        git_repos,
+        read_error,
+        ..
+    } = view_model;
+
+    view! {
+        <Title text="Settings & config - vc-server" />
+        <Meta name="description" content="Paths, MCP, agents, defaults, artifacts, and git in the existing Vibecrafted config file." />
+        <ServerFrame active=ServerSection::Overview status="settings".to_string()>
+            <div
+                class="server-console-shell route-page-shell"
+                data-settings-room="/settings"
+                data-settings-path="/settings"
+            >
+                {route_header(
+                    "Machine",
+                    "Settings & config",
+                    "One room for the config file this product already reads and writes.",
+                )}
+                <p id="settings-read-error" class="control-plane-meta">{read_error}</p>
+                <form method="post" action="/api/settings">
+                    <section class="control-panel control-panel-wide" aria-label="Paths">
+                        <div class="control-panel-head"><h2 id="settings-paths">"Paths"</h2></div>
+                        <p><span>"Config file"</span>" "<code>{config_path}</code></p>
+                        <p><span>"State home"</span>" "<code>{state_home}</code></p>
+                        <p><span>"Runtime home"</span>" "<code>{runtime_home}</code></p>
+                    </section>
+                    <section class="control-panel control-panel-wide" aria-label="MCP">
+                        <div class="control-panel-head"><h2 id="settings-mcp">"MCP"</h2></div>
+                        <p class="control-plane-meta">"Served tool origins already stored in the [tools] table."</p>
+                        <label><span>"vc-frame"</span><input name="vc_frame_url" value=frame_url maxlength="2048" /></label>
+                        <label><span>"slack-console"</span><input name="slack_console_url" value=slack_url maxlength="2048" /></label>
+                    </section>
+                    <section class="control-panel control-panel-wide" aria-label="Agents">
+                        <div class="control-panel-head"><h2 id="settings-agents">"Agents"</h2></div>
+                        <p class="control-plane-meta">"Default research agents. Stored as runtime.picking.research.default_agents."</p>
+                        <label><span>"Default agents"</span><input name="agents" value=agents maxlength="400" /></label>
+                    </section>
+                    <section class="control-panel control-panel-wide" aria-label="Defaults">
+                        <div class="control-panel-head"><h2 id="settings-defaults">"Defaults"</h2></div>
+                        <label><span>"Default permissions"</span><input name="permissions" value=permissions maxlength="64" /></label>
+                        <label><span>"Default runtime"</span><input name="runtime" value=default_runtime maxlength="64" /></label>
+                        <label>
+                            <span>"Isolation"</span>
+                            <select name="isolation">
+                                <option value="Worktrees" selected=isolation_worktrees>"Worktrees"</option>
+                                <option value="vm" selected=isolation_vm>"vm"</option>
+                                <option value="cloud" selected=isolation_cloud>"cloud"</option>
+                            </select>
+                        </label>
+                    </section>
+                    <section class="control-panel control-panel-wide" aria-label="Artifacts location">
+                        <div class="control-panel-head"><h2 id="settings-artifacts">"Artifacts location"</h2></div>
+                        <p class="control-plane-meta">"Canonical artifacts root."</p>
+                        <p><code id="artifacts-location">{artifacts_root}</code></p>
+                    </section>
+                    <section class="control-panel control-panel-wide" aria-label="Git">
+                        <div class="control-panel-head"><h2 id="settings-git">"Git"</h2></div>
+                        <p class="control-plane-meta">"Repository remotes already stored as repositories.\"org/name\".remote."</p>
+                        <ul>{settings_git_list(git_repos)}</ul>
+                        <label><span>"org/name"</span><input name="git_identity" value="" maxlength="200" /></label>
+                        <label><span>"remote"</span><input name="git_remote" value="" maxlength="2048" /></label>
+                    </section>
+                    <p class="server-console-links">
+                        <button type="submit" class="server-console-link server-console-link-primary">"Save"</button>
+                    </p>
+                </form>
+            </div>
+        </ServerFrame>
+    }
 }
 
 #[component]
