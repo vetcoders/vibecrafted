@@ -1,6 +1,6 @@
 #[cfg(feature = "ssr")]
 pub mod api {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::path::{Component, Path, PathBuf};
     use std::process::{Command, Stdio};
     use std::time::Duration;
@@ -758,6 +758,94 @@ pub mod api {
                 plan,
             })
             .collect()
+    }
+
+    /// One catalog row after alias paths that share `(org, repo, day, plan_id)`
+    /// have been folded. The canonical display path wins; this does not walk
+    /// the filesystem — callers pass `catalog_detailed` plans.
+    pub(crate) struct ProjectShelfGroup {
+        pub org: String,
+        pub repo: String,
+        pub last_activity: String,
+        pub plans: Vec<ScaffoldPlanSummary>,
+    }
+
+    pub(crate) fn project_shelf(plans: &[ScaffoldPlanSummary]) -> Vec<ProjectShelfGroup> {
+        let mut groups: BTreeMap<(String, String), ProjectShelfGroup> = BTreeMap::new();
+        for plan in collapse_catalog(plans) {
+            let key = (plan.org.clone(), plan.repo.clone());
+            let group = groups.entry(key).or_insert_with(|| ProjectShelfGroup {
+                org: plan.org.clone(),
+                repo: plan.repo.clone(),
+                last_activity: plan.day.clone(),
+                plans: Vec::new(),
+            });
+            if plan.day > group.last_activity {
+                group.last_activity = plan.day.clone();
+            }
+            group.plans.push(plan);
+        }
+        let mut rows: Vec<_> = groups.into_values().collect();
+        rows.sort_by(|left, right| {
+            right
+                .last_activity
+                .cmp(&left.last_activity)
+                .then_with(|| left.org.cmp(&right.org))
+                .then_with(|| left.repo.cmp(&right.repo))
+        });
+        for group in &mut rows {
+            group.plans.sort_by(|left, right| {
+                right
+                    .day
+                    .cmp(&left.day)
+                    .then_with(|| left.plan_id.cmp(&right.plan_id))
+            });
+        }
+        rows
+    }
+
+    fn collapse_catalog(plans: &[ScaffoldPlanSummary]) -> Vec<ScaffoldPlanSummary> {
+        let mut best: BTreeMap<(String, String, String, String), ScaffoldPlanSummary> =
+            BTreeMap::new();
+        for plan in plans {
+            let key = (
+                plan.org.clone(),
+                plan.repo.clone(),
+                plan.day.clone(),
+                plan.plan_id.clone(),
+            );
+            match best.get(&key) {
+                Some(current)
+                    if canonical_plan_display(current) || !canonical_plan_display(plan) => {}
+                _ => {
+                    best.insert(key, plan.clone());
+                }
+            }
+        }
+        best.into_values().collect()
+    }
+
+    fn canonical_plan_display(plan: &ScaffoldPlanSummary) -> bool {
+        let root = plan.plan_root.replace('\\', "/");
+        let needle = format!(
+            "/artifacts/{}/{}/{}/plans/{}",
+            plan.org, plan.repo, plan.day, plan.plan_id
+        );
+        root.contains(&needle)
+    }
+
+    pub(crate) fn plan_display_title(plan_id: &str) -> String {
+        humanize_plan_id(plan_id)
+    }
+
+    pub(crate) fn scaffold_document_href(plan: &ScaffoldPlanSummary) -> String {
+        format!(
+            "/scaffold?org={}&repo={}&day={}&plan_id={}",
+            url_component(&plan.org),
+            url_component(&plan.repo),
+            url_component(&plan.day),
+            url_component(&plan.plan_id),
+        )
     }
 
     fn scaffold_error_response(error: ScaffoldError) -> Response {

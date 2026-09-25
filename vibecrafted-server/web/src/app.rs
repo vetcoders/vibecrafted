@@ -971,6 +971,8 @@ pub fn App() -> impl IntoView {
                 <Route path=path!("/guide") view=GuidePage />
                 <Route path=path!("/help") view=HelpPage />
                 <Route path=path!("/about") view=AboutPage />
+                <Route path=path!("/projects") view=ProjectsPage />
+                <Route path=path!("/projects/:org/:repo") view=ProjectPlansPage />
                 <Route path=path!("/run/:run_id") view=RunDetailPage />
             </Routes>
         </Router>
@@ -2500,6 +2502,364 @@ pub fn GuidePage() -> impl IntoView {
     }
 }
 
+const PROJECTS_EMBED_ID: &str = "vc-projects-canvas";
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+struct ProjectsSnapshot {
+    kind: String,
+    org: String,
+    repo: String,
+    projects: Vec<ProjectShelfView>,
+    plans: Vec<ProjectPlanView>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct ProjectShelfView {
+    org: String,
+    repo: String,
+    last_activity: String,
+    needs_attention: bool,
+    plan_count: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct ProjectPlanView {
+    plan_id: String,
+    title: String,
+    day: String,
+    href: String,
+    needs_attention: bool,
+}
+
+#[cfg(any(feature = "ssr", feature = "hydrate"))]
+fn encode_projects_embed(snapshot: &ProjectsSnapshot) -> String {
+    serde_json::to_string(snapshot)
+        .unwrap_or_else(|_| "{}".to_string())
+        .replace('<', "\\u003c")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
+}
+
+#[cfg(all(feature = "hydrate", not(feature = "ssr")))]
+fn decode_projects_embed(json: &str) -> Option<ProjectsSnapshot> {
+    serde_json::from_str(json).ok()
+}
+
+#[cfg(all(feature = "hydrate", not(feature = "ssr")))]
+fn read_embedded_projects() -> Option<ProjectsSnapshot> {
+    let document = web_sys::window()?.document()?;
+    let json = document
+        .get_element_by_id(PROJECTS_EMBED_ID)?
+        .text_content()
+        .filter(|text| !text.trim().is_empty())?;
+    decode_projects_embed(&json)
+}
+
+#[cfg(feature = "ssr")]
+fn load_projects_snapshot(org: Option<&str>, repo: Option<&str>) -> ProjectsSnapshot {
+    use control_core::ScaffoldArtifactStore;
+
+    let store = ScaffoldArtifactStore::new(control_core::vibecrafted_home());
+    let detailed = store.catalog_detailed();
+    snapshot_from_plans(&detailed.plans, org, repo, |plan| {
+        !store.is_plan_reviewable(&plan.org, &plan.repo, &plan.day, &plan.plan_id)
+    })
+}
+
+#[cfg(feature = "ssr")]
+fn snapshot_from_plans(
+    plans: &[control_core::ScaffoldPlanSummary],
+    org: Option<&str>,
+    repo: Option<&str>,
+    needs_attention: impl Fn(&control_core::ScaffoldPlanSummary) -> bool,
+) -> ProjectsSnapshot {
+    use crate::scaffold::api::{plan_display_title, project_shelf, scaffold_document_href};
+
+    let shelf = project_shelf(plans);
+    if let (Some(org), Some(repo)) = (org, repo) {
+        let plans = shelf
+            .into_iter()
+            .find(|group| group.org == org && group.repo == repo)
+            .map(|group| {
+                group
+                    .plans
+                    .iter()
+                    .map(|plan| ProjectPlanView {
+                        plan_id: plan.plan_id.clone(),
+                        title: plan_display_title(&plan.plan_id),
+                        day: plan.day.clone(),
+                        href: scaffold_document_href(plan),
+                        needs_attention: needs_attention(plan),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        return ProjectsSnapshot {
+            kind: "project".into(),
+            org: org.to_string(),
+            repo: repo.to_string(),
+            projects: Vec::new(),
+            plans,
+        };
+    }
+    let projects = shelf
+        .iter()
+        .map(|group| ProjectShelfView {
+            org: group.org.clone(),
+            repo: group.repo.clone(),
+            last_activity: group.last_activity.clone(),
+            needs_attention: group.plans.iter().any(&needs_attention),
+            plan_count: group.plans.len(),
+        })
+        .collect();
+    ProjectsSnapshot {
+        kind: "index".into(),
+        org: String::new(),
+        repo: String::new(),
+        projects,
+        plans: Vec::new(),
+    }
+}
+
+#[cfg(feature = "ssr")]
+fn projects_snapshot(org: Option<String>, repo: Option<String>) -> ProjectsSnapshot {
+    load_projects_snapshot(org.as_deref(), repo.as_deref())
+}
+
+#[cfg(all(feature = "hydrate", not(feature = "ssr")))]
+fn projects_snapshot(org: Option<String>, repo: Option<String>) -> ProjectsSnapshot {
+    let _ = (org, repo);
+    read_embedded_projects().unwrap_or_default()
+}
+
+#[cfg(not(any(feature = "ssr", feature = "hydrate")))]
+fn projects_snapshot(org: Option<String>, repo: Option<String>) -> ProjectsSnapshot {
+    let _ = (org, repo);
+    ProjectsSnapshot::default()
+}
+
+fn activity_label(day: &str) -> String {
+    let mut parts = day.split('_');
+    let year = parts.next();
+    let month_day = parts.next();
+    if let (Some(year), Some(month_day), None) = (year, month_day, parts.next())
+        && year.len() == 4
+        && month_day.len() == 4
+        && year.chars().all(|character| character.is_ascii_digit())
+        && month_day
+            .chars()
+            .all(|character| character.is_ascii_digit())
+    {
+        return format!("{year}-{}-{}", &month_day[..2], &month_day[2..]);
+    }
+    if day.is_empty() {
+        "No activity".to_string()
+    } else {
+        day.replace('_', " · ")
+    }
+}
+
+fn path_segment(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+fn owned_route_header(eyebrow: String, title: String, description: String) -> impl IntoView {
+    view! {
+        <section class="run-detail-header route-page-header">
+            <div>
+                <p class="section-eyebrow">{eyebrow}</p>
+                <h1 class="run-detail-title">{title}</h1>
+                <p class="route-page-description">{description}</p>
+            </div>
+        </section>
+    }
+}
+
+fn project_rows(projects: Vec<ProjectShelfView>) -> impl IntoView {
+    projects
+        .into_iter()
+        .map(|project| {
+            let href = format!(
+                "/projects/{}/{}",
+                path_segment(&project.org),
+                path_segment(&project.repo)
+            );
+            let name = project.repo.clone();
+            let org = project.org.clone();
+            let project_key = format!("{org}/{name}");
+            let activity = activity_label(&project.last_activity);
+            let attention = if project.needs_attention {
+                "Needs attention"
+            } else {
+                "Clear"
+            };
+            let plan_count = project.plan_count;
+            view! {
+                <a class="workspace-card project-row" href=href data-project=project_key>
+                    <div class="control-run-primary">
+                        <strong class="project-name">{name}</strong>
+                    </div>
+                    <div class="control-run-meta">
+                        <span class="project-org">{org}</span>
+                        <span class="project-activity">{activity}</span>
+                        <span class="project-attention">{attention}</span>
+                        <span>{format!("{plan_count} plans")}</span>
+                    </div>
+                </a>
+            }
+        })
+        .collect_view()
+}
+
+fn plan_rows(plans: Vec<ProjectPlanView>) -> impl IntoView {
+    plans
+        .into_iter()
+        .map(|plan| {
+            let activity = activity_label(&plan.day);
+            let attention = if plan.needs_attention {
+                "Needs attention"
+            } else {
+                "Clear"
+            };
+            let plan_id = plan.plan_id.clone();
+            view! {
+                <a class="workspace-card project-plan" href=plan.href data-plan-id=plan_id>
+                    <div class="control-run-primary">
+                        <strong class="project-plan-name">{plan.title}</strong>
+                    </div>
+                    <div class="control-run-meta">
+                        <span class="project-activity">{activity}</span>
+                        <span class="project-attention">{attention}</span>
+                    </div>
+                </a>
+            }
+        })
+        .collect_view()
+}
+
+fn projects_frame(snapshot: ProjectsSnapshot) -> impl IntoView {
+    let project_page = snapshot.kind == "project";
+    let plan_count = snapshot.plans.len();
+    let project_count = snapshot.projects.len();
+    let status = if project_page {
+        format!("{plan_count} plans")
+    } else {
+        format!("{project_count} repositories")
+    };
+    let header = if project_page {
+        let title = if snapshot.repo.is_empty() {
+            "Project".to_string()
+        } else {
+            snapshot.repo.clone()
+        };
+        owned_route_header(
+            snapshot.org.clone(),
+            title,
+            "Plans in this repository. Opening one uses the studio document. Checkpoint and status stay in the inspector.".to_string(),
+        )
+        .into_any()
+    } else {
+        route_header(
+            "Work",
+            "Projects",
+            "A project is one repository. Open it to see that repository's plans, not a filesystem path.",
+        )
+        .into_any()
+    };
+    let body = if project_page {
+        let empty = snapshot.plans.is_empty();
+        view! {
+            <section class="control-panel control-panel-wide" aria-label="Plans">
+                <div class="control-panel-head">
+                    <h2>"Plans"</h2>
+                    <span>{plan_count}</span>
+                </div>
+                <p class="server-console-links">
+                    <a class="server-console-link" href="/projects">"All projects"</a>
+                </p>
+                {empty.then(|| view! {
+                    <p class="control-empty">"This project has no plans."</p>
+                })}
+                <div class="project-plan-list">{plan_rows(snapshot.plans)}</div>
+            </section>
+        }
+        .into_any()
+    } else {
+        let empty = snapshot.projects.is_empty();
+        view! {
+            <section class="control-panel control-panel-wide" aria-label="Projects">
+                <div class="control-panel-head">
+                    <h2>"Repositories"</h2>
+                    <span>{project_count}</span>
+                </div>
+                {empty.then(|| view! {
+                    <p class="control-empty">"No projects yet. A project is one repository."</p>
+                })}
+                <div class="project-list">{project_rows(snapshot.projects)}</div>
+            </section>
+        }
+        .into_any()
+    };
+    view! {
+        <ServerFrame active=ServerSection::Overview status=status>
+            <div class="server-console-shell route-page-shell">
+                {header}
+                {body}
+            </div>
+        </ServerFrame>
+    }
+}
+
+#[cfg(any(feature = "ssr", feature = "hydrate"))]
+fn projects_room(snapshot: ProjectsSnapshot) -> impl IntoView {
+    let embed = encode_projects_embed(&snapshot);
+    view! {
+        <script id=PROJECTS_EMBED_ID type="application/json" inner_html=embed></script>
+        {projects_frame(snapshot)}
+    }
+}
+
+#[cfg(not(any(feature = "ssr", feature = "hydrate")))]
+fn projects_room(snapshot: ProjectsSnapshot) -> impl IntoView {
+    projects_frame(snapshot)
+}
+
+#[component]
+pub fn ProjectsPage() -> impl IntoView {
+    let snapshot = projects_snapshot(None, None);
+    view! {
+        <Title text="Projects - vc-server" />
+        <Meta name="description" content="Repositories, then the plans that belong to each one." />
+        {projects_room(snapshot)}
+    }
+}
+
+#[component]
+pub fn ProjectPlansPage() -> impl IntoView {
+    let params = leptos_router::hooks::use_params_map();
+    let org = params.read_untracked().get("org").unwrap_or_default();
+    let repo = params.read_untracked().get("repo").unwrap_or_default();
+    let snapshot = projects_snapshot(Some(org), Some(repo));
+    let title = if snapshot.repo.is_empty() {
+        "Projects - vc-server".to_string()
+    } else {
+        format!("{} - Projects - vc-server", snapshot.repo)
+    };
+    view! {
+        <Title text=title />
+        <Meta name="description" content="Plans for one repository, filtered from the artifact shelf." />
+        {projects_room(snapshot)}
+    }
+}
+
 #[component]
 pub fn HelpPage() -> impl IntoView {
     view! {
@@ -2572,10 +2932,11 @@ pub(crate) mod tests {
         DashboardSessionRun, FramePage, LifecyclePage, RunsPage, SessionsPage, StructurePage,
         TranscriptsPage, UsagePage, WorkspacesPage, aicx_page_script, console_dashboard,
         decode_dashboard_embed, encode_dashboard_embed, git_repo_name, load_dashboard_data_from,
-        operator_active_runs, run_cards, runs_dashboard, session_cards, unique_runtime_labels,
-        workspaces_dashboard,
+        operator_active_runs, projects_frame, run_cards, runs_dashboard, session_cards,
+        snapshot_from_plans, unique_runtime_labels, workspaces_dashboard,
     };
     use crate::control::api::{control_routes_for, state_payload};
+    use crate::scaffold::api::project_shelf;
     use crate::theme::provide_theme_context;
 
     fn temp_home() -> PathBuf {
@@ -3702,6 +4063,184 @@ pub(crate) mod tests {
 
         fs::remove_dir_all(home).ok();
     }
+
+    fn write_catalog_plan(home: &Path, repo: &str, day: &str, plan_id: &str) -> PathBuf {
+        let root = home
+            .join("artifacts/vetcoders")
+            .join(repo)
+            .join(day)
+            .join("plans")
+            .join(plan_id);
+        fs::create_dir_all(&root).expect("plan root");
+        let manifest = json!({
+            "schema_version": "1",
+            "plan_id": plan_id,
+            "org": "vetcoders",
+            "repo": repo,
+            "day": day,
+            "artifacts": [{
+                "id": "driver",
+                "role": "driver",
+                "path": "DRIVER.md",
+                "editable": true,
+                "required": true
+            }]
+        });
+        fs::write(
+            root.join("manifest.json"),
+            serde_json::to_vec_pretty(&manifest).expect("manifest json"),
+        )
+        .expect("manifest");
+        root
+    }
+
+    /// Two symlink aliases of one plan_id stay one row under the repository.
+    /// The list is `catalog_detailed` after the repo predicate, not a second walk.
+    pub(crate) fn projects_filter_deduped_shelf() {
+        let home = temp_home();
+        let real = write_catalog_plan(&home, "vibecrafted", "2026_0925", "one-plan");
+        write_catalog_plan(&home, "vibecrafted", "2026_0925", "two-plan");
+        write_catalog_plan(&home, "loctree", "2026_0901", "other-plan");
+        let repo_dir = real
+            .parent()
+            .and_then(|plans| plans.parent())
+            .and_then(|day| day.parent())
+            .expect("repo dir");
+        let suite_alias = repo_dir.with_file_name("vibecrafted-suite");
+        let local_org = home.join("artifacts/local");
+        fs::create_dir_all(&local_org).expect("local org");
+        let local_alias = local_org.join("vibecrafted-suite");
+        std::os::unix::fs::symlink(repo_dir, &suite_alias).expect("suite alias");
+        std::os::unix::fs::symlink(repo_dir, &local_alias).expect("local alias");
+        assert!(
+            suite_alias
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            local_alias
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+
+        let store = control_core::ScaffoldArtifactStore::new(&home);
+        let detailed = store.catalog_detailed();
+        let raw_one = detailed
+            .plans
+            .iter()
+            .filter(|plan| plan.plan_id == "one-plan")
+            .count();
+        assert_eq!(
+            raw_one, 3,
+            "alias fixture produced {raw_one} catalog rows for one-plan"
+        );
+        let shelf = project_shelf(&detailed.plans);
+        let vibecrafted = shelf
+            .iter()
+            .find(|group| group.org == "vetcoders" && group.repo == "vibecrafted")
+            .expect("vibecrafted project");
+        assert_eq!(
+            vibecrafted
+                .plans
+                .iter()
+                .filter(|plan| plan.plan_id == "one-plan")
+                .count(),
+            1,
+            "alias-tripled plan_id must appear once"
+        );
+        assert_eq!(vibecrafted.plans.len(), 2);
+        let loctree = shelf
+            .iter()
+            .find(|group| group.repo == "loctree")
+            .expect("loctree project");
+        assert_eq!(loctree.plans.len(), 1);
+
+        let attention = |plan: &control_core::ScaffoldPlanSummary| {
+            !store.is_plan_reviewable(&plan.org, &plan.repo, &plan.day, &plan.plan_id)
+        };
+        let index = snapshot_from_plans(&detailed.plans, None, None, &attention);
+        let detail = snapshot_from_plans(
+            &detailed.plans,
+            Some("vetcoders"),
+            Some("vibecrafted"),
+            &attention,
+        );
+        assert_eq!(detail.plans.len(), vibecrafted.plans.len());
+        assert_eq!(
+            detail
+                .plans
+                .iter()
+                .filter(|plan| plan.plan_id == "one-plan")
+                .count(),
+            1
+        );
+        assert!(
+            detail
+                .plans
+                .iter()
+                .all(|plan| plan.href.starts_with("/scaffold?"))
+        );
+        assert!(
+            detail
+                .plans
+                .iter()
+                .all(|plan| !plan.href.contains(&real.display().to_string()))
+        );
+
+        let owner = Owner::new();
+        let (index_html, detail_html) = owner.with(|| {
+            provide_theme_context();
+            (
+                projects_frame(index).to_html(),
+                projects_frame(detail).to_html(),
+            )
+        });
+
+        assert_eq!(
+            index_html
+                .matches("aria-label=\"Vibecrafted server navigation\"")
+                .count(),
+            1
+        );
+        assert_eq!(
+            detail_html
+                .matches("aria-label=\"Vibecrafted server navigation\"")
+                .count(),
+            1
+        );
+        assert!(!index_html.contains("review-sidebar"));
+        assert!(!detail_html.contains("review-sidebar"));
+        assert!(!detail_html.contains("aria-label=\"Scaffold artifacts\""));
+        assert!(
+            index_html.contains("<h1 class=\"run-detail-title\">Projects</h1>")
+                || index_html.contains(">Projects<")
+        );
+        assert!(index_html.contains("class=\"project-name\">vibecrafted<"));
+        assert!(index_html.contains("class=\"project-name\">loctree<"));
+        assert!(!index_html.contains("vibecrafted-suite"));
+        assert!(!index_html.contains("artifacts/vetcoders"));
+        assert!(!detail_html.contains("vibecrafted-suite"));
+        assert!(!detail_html.contains("artifacts/vetcoders"));
+        assert!(!detail_html.contains(&real.display().to_string()));
+        assert_eq!(detail_html.matches("data-plan-id=\"one-plan\"").count(), 1);
+        assert_eq!(detail_html.matches("data-plan-id=\"two-plan\"").count(), 1);
+        assert!(!detail_html.contains("data-plan-id=\"other-plan\""));
+        assert!(detail_html.contains("/scaffold?"));
+        assert!(detail_html.contains("plan_id=one-plan"));
+        assert!(detail_html.contains("Needs attention"));
+        assert!(
+            detail_html.contains("<h1 class=\"run-detail-title\">vibecrafted</h1>")
+                || detail_html.contains(">vibecrafted<")
+        );
+        assert!(!detail_html.contains("id=\"plan-search\""));
+        assert!(index_html.contains("href=\"/projects/vetcoders/vibecrafted\""));
+
+        fs::remove_dir_all(home).ok();
+    }
 }
 
 #[cfg(all(test, feature = "ssr"))]
@@ -3770,3 +4309,8 @@ pub(crate) fn overview_welcome_status_and_miniatures() {
     assert!(usage.contains("Known tokens"));
     assert!(usage.contains("id=\"usage-total-tokens\""));
 }
+
+// The delivery gate filters `--exact projects_filter_deduped_shelf`.
+// Nested module paths never match that literal, so the crate root re-exports the proof.
+#[cfg(all(test, feature = "ssr"))]
+pub(crate) use tests::projects_filter_deduped_shelf;

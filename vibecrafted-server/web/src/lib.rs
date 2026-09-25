@@ -22,6 +22,12 @@ fn runs_five_buckets_use_settlement() {
     app::tests::runs_five_buckets_use_settlement();
 }
 
+#[cfg(all(test, feature = "ssr"))]
+#[test]
+fn projects_filter_deduped_shelf() {
+    app::projects_filter_deduped_shelf();
+}
+
 #[cfg(feature = "hydrate")]
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn hydrate() {
