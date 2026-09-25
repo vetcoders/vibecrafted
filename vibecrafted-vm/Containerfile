@@ -78,7 +78,7 @@ RUN test -n "$RUNTIME_PACK_CARRIER_BASENAME" \
 
 COPY vibecrafted-vm/runtime-entry.sh /usr/local/bin/runtime-entry
 RUN chmod 0755 /usr/local/bin/runtime-entry \
- && for binary in vibecrafted vc-server loct loctree loctree-mcp loctree-lsp aicx aicx-mcp prview screenscribe vc-frame vc-terminal voc; do \
+ && for binary in vibecrafted vc-server vc-frame vc-terminal voc; do \
       test -x "/opt/vibecrafted-runtime/bin/$binary"; \
     done
 

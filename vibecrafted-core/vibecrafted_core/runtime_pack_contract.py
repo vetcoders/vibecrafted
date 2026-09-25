@@ -24,14 +24,6 @@ LINUX_EXECUTABLES = frozenset(
     {
         "vibecrafted",
         "vc-server",
-        "loct",
-        "loctree",
-        "loctree-mcp",
-        "loctree-lsp",
-        "aicx",
-        "aicx-mcp",
-        "prview",
-        "screenscribe",
         "vc-frame",
         "vc-terminal",
         "voc",
@@ -43,12 +35,6 @@ LINUX_EXECUTABLES = frozenset(
 WINDOWS_X64_MANDATORY_EXECUTABLES = frozenset(
     {
         "python",
-        "loct",
-        "loctree",
-        "loctree-mcp",
-        "loctree-lsp",
-        "aicx",
-        "aicx-mcp",
         "vc-server",
         "vc-frame",
         "vc-terminal",
@@ -56,8 +42,6 @@ WINDOWS_X64_MANDATORY_EXECUTABLES = frozenset(
 )
 WINDOWS_X64_OPTIONAL_EXECUTABLES = frozenset(
     {
-        "prview",
-        "screenscribe",
         "voc",
         "vc-start",
         "vc-server-supervisor",
@@ -66,8 +50,6 @@ WINDOWS_X64_OPTIONAL_EXECUTABLES = frozenset(
 WINDOWS_X64_CLASSIFICATIONS = {
     "voc": "limited-platform-scope",
     "vc-start": "limited-platform-scope",
-    "prview": "release-blocker",
-    "screenscribe": "release-blocker",
     "vc-server-supervisor": "limited-platform-scope",
 }
 WINDOWS_X64_TARGET = "x86_64-pc-windows-msvc"
@@ -88,6 +70,18 @@ RUNTIME_INSTALLER_EXECUTABLES = frozenset(
 )
 REQUIRED_FOUNDATION_EXECUTABLES = frozenset(
     {
+        "vc-server",
+        "vc-start",
+        "vibecrafted-server-web",
+    }
+)
+# Tools with their own public channel: npm (@loctree/loctree, @loctree/aicx),
+# PyPI (screenscribe) and GitHub releases (vetcoders/prview-rs). Agents reach
+# the host copies by design (runtime_paths.agent_tool_search_path strips the
+# generation bin), so a carried copy is dead weight that lags its channel.
+# The pack refuses to carry them on every platform.
+CHANNEL_FOUNDATION_EXECUTABLES = frozenset(
+    {
         "aicx",
         "aicx-mcp",
         "loct",
@@ -95,9 +89,7 @@ REQUIRED_FOUNDATION_EXECUTABLES = frozenset(
         "loctree-lsp",
         "loctree-mcp",
         "prview",
-        "vc-server",
-        "vc-start",
-        "vibecrafted-server-web",
+        "screenscribe",
     }
 )
 FORBIDDEN_PAYLOAD_NAMES = frozenset({".DS_Store"})
@@ -239,6 +231,52 @@ def _runtime_product_payload(root: Path) -> None:
             "Runtime Pack canonical vc-frame config is incomplete under "
             f"{VC_FRAME_CONFIG_ROOT.as_posix()}"
         )
+
+
+def _no_channel_foundations(root: Path) -> None:
+    """Refuse a payload that carries a tool its own channel publishes."""
+    carried = sorted(
+        relative
+        for name in CHANNEL_FOUNDATION_EXECUTABLES
+        for relative in (
+            f"bin/{name}",
+            f"bin/{name}.exe",
+            f"bin/{name}.cmd",
+            f"libexec/{name}",
+            f"python-site/{name}",
+        )
+        if (root / relative).exists() or (root / relative).is_symlink()
+    )
+    if carried:
+        raise RuntimePackContractError(
+            "Runtime Pack carries tools that ship through their own channel "
+            "(npm / PyPI / GitHub releases): " + ", ".join(carried)
+        )
+
+
+def write_runtime_foundations(root: str | Path) -> dict[str, Any]:
+    """Write the closed executable manifest for everything already in bin/."""
+    payload_root = Path(root).resolve(strict=True)
+    _no_channel_foundations(payload_root)
+    files = {
+        path.name: _sha256(path)
+        for path in sorted((payload_root / "bin").iterdir())
+        if path.is_file()
+        and not path.is_symlink()
+        and stat.S_IMODE(path.stat().st_mode) & 0o111
+    }
+    payload = {
+        "schema": FOUNDATIONS_SCHEMA,
+        "versions": {},
+        "source_revisions": {},
+        "source_archives": {},
+        "licenses": {},
+        "files": files,
+    }
+    (payload_root / FOUNDATIONS_NAME).write_text(
+        _canonical_json(payload), encoding="utf-8"
+    )
+    return _runtime_foundations(payload_root)
 
 
 def _runtime_foundations(root: Path, *, verify_hashes: bool = True) -> dict[str, Any]:
@@ -589,6 +627,7 @@ def write_provenance(
         raise RuntimePackContractError(
             "Runtime Pack platform must be the canonical <os>-<architecture> target slug"
         )
+    _no_channel_foundations(payload_root)
     if _is_windows_pack_platform(platform):
         if platform == WINDOWS_PACK_PLATFORM and architecture == "x64":
             _windows_x64_inventory(payload_root)
@@ -708,6 +747,7 @@ def verify_provenance(
         raise RuntimePackContractError(
             "Runtime Pack platform must be the canonical <os>-<architecture> target slug"
         )
+    _no_channel_foundations(payload_root)
     if _is_windows_pack_platform(str(provenance["platform"])):
         if (
             provenance["platform"] == WINDOWS_PACK_PLATFORM
@@ -792,6 +832,8 @@ def main(argv: list[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     write = commands.add_parser("write")
     verify = commands.add_parser("verify")
+    write_foundations = commands.add_parser("write-foundations")
+    write_foundations.add_argument("--root", type=Path, required=True)
     refresh_foundations = commands.add_parser("refresh-foundations")
     refresh_foundations.add_argument("--root", type=Path, required=True)
     agree = commands.add_parser("helpers-agree")
@@ -815,7 +857,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "helpers-agree":
         return 0 if helpers_agree(args.app_copy, args.pack_copy) else 1
-    if args.command == "refresh-foundations":
+    if args.command == "write-foundations":
+        payload = write_runtime_foundations(args.root)
+    elif args.command == "refresh-foundations":
         payload = refresh_runtime_foundations(args.root)
     elif args.command == "write":
         payload = write_provenance(

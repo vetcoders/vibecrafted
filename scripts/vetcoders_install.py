@@ -466,55 +466,54 @@ FOUNDATIONS: list[Foundation] = [
     Foundation(
         name="aicx",
         description="AICX CLI for session history and memory recovery",
-        channels=["canonical"],
+        channels=["npm"],
         packages={
-            "canonical": "curl -fsSL https://loct.io/install.sh | sh",
+            "npm": "@loctree/aicx",
         },
         verify_cmd="aicx --version",
     ),
     Foundation(
         name="aicx-mcp",
         description="AICX MCP server for session history and memory recovery",
-        channels=["canonical"],
+        channels=["npm"],
         packages={
-            "canonical": "curl -fsSL https://loct.io/install.sh | sh",
+            "npm": "@loctree/aicx",
         },
         verify_cmd="aicx-mcp --version",
     ),
     Foundation(
         name="loct",
         description="Loctree operator CLI short command",
-        channels=["canonical"],
+        channels=["npm"],
         packages={
-            "canonical": "curl -fsSL https://loct.io/install.sh | sh",
+            "npm": "@loctree/loctree",
         },
         verify_cmd="loct --version",
     ),
     Foundation(
         name="loctree",
         description="Loctree structural code mapping CLI",
-        channels=["canonical"],
+        channels=["npm"],
         packages={
-            "canonical": "curl -fsSL https://loct.io/install.sh | sh",
+            "npm": "@loctree/loctree",
         },
         verify_cmd="loctree --version",
     ),
     Foundation(
         name="loctree-mcp",
         description="Structural code mapping MCP server",
-        channels=["canonical"],
+        channels=["npm"],
         packages={
-            "canonical": "curl -fsSL https://loct.io/install.sh | sh",
+            "npm": "@loctree/loctree",
         },
         verify_cmd="loctree-mcp --version",
     ),
     Foundation(
         name="prview",
         description="PR review artifact generator",
-        channels=["crates", "github"],
+        channels=["github"],
         packages={
-            "crates": "prview",
-            "github": "https://github.com/vetcoders/prview/releases",
+            "github": "https://github.com/vetcoders/prview-rs/releases",
         },
         verify_cmd="prview --version",
         required=False,
@@ -522,10 +521,9 @@ FOUNDATIONS: list[Foundation] = [
     Foundation(
         name="screenscribe",
         description="Screencast analysis — turns narrated recordings into structured engineering findings",
-        channels=["pip", "source"],
+        channels=["pip"],
         packages={
             "pip": "screenscribe",
-            "source": "https://github.com/vetcoders/Screenscribe/releases",
         },
         verify_cmd="screenscribe --version",
         required=False,
@@ -23366,12 +23364,6 @@ def _runtime_pack_required_paths(generation: Path, terminal_host: Path) -> list[
     if sys.platform == "win32":
         return [
             _runtime_bin_file(generation, "vibecrafted"),
-            _runtime_bin_file(generation, "loct"),
-            _runtime_bin_file(generation, "loctree"),
-            _runtime_bin_file(generation, "loctree-mcp"),
-            _runtime_bin_file(generation, "loctree-lsp"),
-            _runtime_bin_file(generation, "aicx"),
-            _runtime_bin_file(generation, "aicx-mcp"),
             _runtime_bin_file(generation, "vc-server"),
             _runtime_bin_file(generation, "vc-terminal"),
             _runtime_bin_file(generation, "vc-frame"),
@@ -23382,12 +23374,6 @@ def _runtime_pack_required_paths(generation: Path, terminal_host: Path) -> list[
     return [
         generation / "bin/vibecrafted",
         generation / "bin/vibecrafted-mcp",
-        generation / "bin/loct",
-        generation / "bin/loctree-mcp",
-        generation / "bin/aicx",
-        generation / "bin/aicx-mcp",
-        generation / "bin/prview",
-        generation / "bin/screenscribe",
         generation / "bin/vc-frame",
         generation / "libexec/vc-frame",
         generation / "bin/vc-server",

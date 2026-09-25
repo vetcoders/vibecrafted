@@ -23,7 +23,6 @@ from vibecrafted_core import runtime_pack_contract
 _DECLARED_CODE = {
     "Contents/Helpers/vc-frame",
     "Contents/Resources/runtime/bin/vc-start",
-    "Contents/Resources/runtime/libexec/prview",
     *(f"{bundle}/Contents/MacOS/alacritty" for bundle in contract.TERMINAL_APP_BUNDLES),
 }
 

@@ -42,7 +42,7 @@ if command -v rustup >/dev/null 2>&1; then
 fi
 # Host `c++` is often clang, which cannot find libstdc++ headers on Ubuntu
 # (MEASURED: c++ → clang-18, cstdlib missing). Prefer GCC when present.
-# Honor an explicit CC/CXX from the caller. aicx/loctree are npm prebuilts.
+# Honor an explicit CC/CXX from the caller.
 if command -v gcc >/dev/null 2>&1; then
   export CC="${CC:-gcc}"
 fi
@@ -150,7 +150,10 @@ cp -R "$repo_root/config/." "$payload/config/"
 python3 "$repo_root/scripts/distribution_manifest.py" carrier \
   --source "$repo_root" --output "$payload/source-provenance.json" \
   --owner-repo vetcoders/vibecrafted --source-revision "$source_revision"
-"$repo_root/scripts/stage-runtime-foundations.sh" "$payload/bin"
+# Loctree, AICX, PRView and ScreenScribe ship through their own channels
+# (npm / GitHub releases / PyPI); the pack records only its own executables.
+PYTHONPATH="$payload/vibecrafted-core" python3 \
+  -m vibecrafted_core.runtime_pack_contract write-foundations --root "$payload" >/dev/null
 
 # shellcheck source=/dev/null
 . "$repo_root/scripts/lib/portable-python.sh"
@@ -160,11 +163,8 @@ seed_python="$(install_portable_python "$work/python-seed")"
 python_home="$(cd "$(dirname "$seed_python")/.." && pwd -P)"
 mkdir -p "$payload/python" "$payload/python-site"
 cp -RL "$python_home/." "$payload/python/"
-# Public channel is `pipx install screenscribe`. The pack vendors the same
-# pinned PyPI wheel into the sealed CPython so the payload stays closed.
 uv pip install --python "$seed_python" --target "$payload/python-site" \
-  'jsonschema>=4.23,<5' 'PyYAML>=6.0,<7' 'screenscribe==0.1.19' \
-  'fastmcp>=2.0,<3'
+  'jsonschema>=4.23,<5' 'PyYAML>=6.0,<7' 'fastmcp>=2.0,<3'
 rm -rf "$payload/python-site/bin"
 cat > "$payload/bin/python3" <<EOF
 #!/usr/bin/env bash
@@ -179,13 +179,6 @@ python3 "$repo_root/scripts/render-python-entrypoint-launchers.py" \
   --pyproject "$repo_root/vibecrafted-core/pyproject.toml" --bin-dir "$payload/bin"
 python3 "$repo_root/scripts/render-python-entrypoint-launchers.py" \
   --pyproject "$repo_root/vibecrafted-mcp/pyproject.toml" --bin-dir "$payload/bin"
-cat > "$payload/bin/screenscribe" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-runtime_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-exec "$runtime_root/bin/python3" -c 'from screenscribe.bootstrap import main; main()' "$@"
-EOF
-chmod 0755 "$payload/bin/screenscribe"
 
 find "$payload" -type f -name '*.py[co]' -delete
 find "$payload" -depth -type d -name __pycache__ -exec rm -rf {} +
@@ -199,43 +192,27 @@ from pathlib import Path
 
 root = Path(os.environ["PAYLOAD"])
 source_manifest_sha = hashlib.sha256((root / "source-provenance.json").read_bytes()).hexdigest()
-foundation = json.loads((root / "runtime-foundations.json").read_text())
 sources = {
     "vibecrafted": ("https://github.com/vetcoders/vibecrafted", os.environ["SOURCE_REVISION"], source_manifest_sha, "MIT"),
     "vc-terminal": (f"https://codeload.github.com/vetcoders/vc-terminal/tar.gz/{os.environ['TERMINAL_REVISION']}", os.environ["TERMINAL_REVISION"], "3cd6670c4a80c589b945ed1b45c1f033c80745ceb34d3466e9476a1c3eeb0f71", "Apache-2.0"),
     "vc-frame": (f"https://codeload.github.com/vetcoders/vc-frame/tar.gz/{os.environ['FRAME_REVISION']}", os.environ["FRAME_REVISION"], "55851e094b91d3b41712edcdc66d69f97da5859118395fee497bb104714b125c", "MIT"),
-    "screenscribe": ("https://files.pythonhosted.org/packages/a2/8e/53e22fc84d28246c0316ab03bd26904fd80c545170466bd2cb926204f965/screenscribe-0.1.19-py3-none-any.whl", "0.1.19", "9988fe819443e2b47d949e737e1325bc755b31c18f1348a5b7b709c7cf155323", "BUSL-1.1"),
 }
 owners = {
     "vibecrafted": "vibecrafted", "vc-server": "vibecrafted", "voc": "vibecrafted",
     "vc-o": "vibecrafted", "vc-admin": "vibecrafted", "vc-procs": "vibecrafted",
-    "vc-terminal": "vc-terminal", "vc-frame": "vc-frame", "screenscribe": "screenscribe",
-    "loct": "loctree", "loctree": "loctree", "loctree-mcp": "loctree", "loctree-lsp": "loctree",
-    "aicx": "aicx", "aicx-mcp": "aicx", "prview": "prview",
+    "vc-terminal": "vc-terminal", "vc-frame": "vc-frame",
 }
 commands = {
     "vibecrafted": ["--version"], "vc-server": ["--version"], "voc": ["--version"],
     "vc-o": ["--version"], "vc-admin": ["--version"], "vc-procs": ["--version"],
-    "vc-terminal": ["--version"], "vc-frame": ["--version"], "screenscribe": ["--version"],
-    "loct": ["--version"], "loctree": ["--version"], "loctree-mcp": ["--version"],
-    "loctree-lsp": ["--version"], "aicx": ["--version"], "aicx-mcp": ["--version"],
-    "prview": ["--version"],
+    "vc-terminal": ["--version"], "vc-frame": ["--version"],
 }
 records = []
 for name, argv in commands.items():
     path = root / "bin" / name
     output = subprocess.run([str(path), *argv], text=True, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, timeout=30, check=True).stdout.strip().splitlines()[0]
-    owner = owners[name]
-    if owner in sources:
-        url, revision, archive_sha, license_name = sources[owner]
-    else:
-        revision = foundation.get("source_revisions", {}).get(owner, foundation["versions"].get(owner, "registry"))
-        # The public channel the stager actually used (npm tarball, GitHub
-        # release asset); a tool without one is a staging defect, not "registry".
-        archive = foundation["source_archives"][owner]
-        url, archive_sha = archive["url"], archive["sha256"]
-        license_name = foundation.get("licenses", {}).get(owner, "upstream-package-metadata")
+    url, revision, archive_sha, license_name = sources[owners[name]]
     records.append({"name": name, "path": f"bin/{name}", "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
                     "version_argv": argv, "version_output": output, "source_url": url,
                     "source_revision": revision, "source_archive_sha256": archive_sha,

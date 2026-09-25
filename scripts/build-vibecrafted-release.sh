@@ -987,7 +987,12 @@ materialize_runtime_payload() {
     "$runtime/bin/vc-frame"
   # The foundation manifest is a closed inventory of the complete executable
   # surface. Generate it only after every required runtime executable exists.
-  "$SOURCE_ROOT/scripts/stage-runtime-foundations.sh" "$runtime/bin"
+  # Loctree, AICX, PRView and ScreenScribe are not in it: each ships through
+  # its own channel (npm / GitHub releases / PyPI) and agents resolve the host
+  # copies; the contract refuses a payload that carries them.
+  PYTHONPATH="$runtime/vibecrafted-core" "$SOURCE_ROOT/scripts/project-python" \
+    -m vibecrafted_core.runtime_pack_contract write-foundations \
+    --root "$runtime" >/dev/null
 
   find "$runtime/vibecrafted-core" \
     -type d -name __pycache__ -prune -exec rm -rf {} +
@@ -1009,8 +1014,7 @@ materialize_runtime_payload() {
   prune_embedded_python_unreachable "$runtime/python" \
     "$PORTABLE_PYTHON_BIN" "$PORTABLE_PYTHON_DYLIB"
   uv pip install --python "$seed_python" --target "$runtime/python-site" \
-    'jsonschema>=4.23,<5' 'PyYAML>=6.0,<7' 'screenscribe==0.1.19' \
-    'fastmcp>=2.0,<3'
+    'jsonschema>=4.23,<5' 'PyYAML>=6.0,<7' 'fastmcp>=2.0,<3'
   if [[ -f "$runtime/python/lib/${PORTABLE_PYTHON_DYLIB}" ]]; then
     install_name_tool -id "@loader_path/${PORTABLE_PYTHON_DYLIB}" \
       "$runtime/python/lib/${PORTABLE_PYTHON_DYLIB}"
@@ -1040,19 +1044,9 @@ materialize_runtime_payload() {
     "$SOURCE_ROOT/scripts/render-python-entrypoint-launchers.py" \
     --pyproject "$SOURCE_ROOT/vibecrafted-mcp/pyproject.toml" \
     --bin-dir "$runtime/bin"
-  # shellcheck disable=SC2016  # writes a launcher; expansions belong to the generated script
-  printf '%s\n' \
-    '#!/bin/bash' \
-    'set -euo pipefail' \
-    'runtime_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"' \
-    'exec "$runtime_root/bin/python3" -c '\''from screenscribe.bootstrap import main; main()'\'' "$@"' \
-    > "$runtime/bin/screenscribe"
-  chmod 0755 "$runtime/bin/screenscribe"
-  "$runtime/bin/screenscribe" --version >/dev/null
 
-  # Every executable this payload carries — the ones compiled above, the ones
-  # stage-runtime-foundations built from pinned sources, and the donors' — goes
-  # through one debug-record boundary before the gate reads the bytes and
+  # Every executable this payload carries — the ones compiled above and the
+  # donors' — goes through one debug-record boundary before the gate reads the bytes and
   # before the packager signs them. MEASURED 2026-09-08 on the f131b81b
   # candidate: two named files here left six others carrying the rustup
   # sysroot and the Cargo target directory in linker stabs.
