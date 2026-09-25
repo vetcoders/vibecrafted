@@ -111,7 +111,16 @@ def test_single_native_host_source_contract() -> None:
     assert "configuration.websiteDataStore = websiteDataStore" in host
     assert "WKScriptMessageHandler" not in bridge
     assert "func receive(" not in bridge and "func decode(" not in bridge
-    assert "userContentController.add" not in host
+    # No JavaScript-to-native channel: no script message handler of any kind.
+    # The one user script only marks the document for the native shell; it
+    # runs at document start and can call nothing back.
+    assert "userContentController.add(" not in host
+    assert "addScriptMessageHandler" not in host
+    assert "WKScriptMessageHandler" not in host.replace(
+        "no `WKScriptMessageHandler` is registered", ""
+    )
+    assert host.count("userContentController.addUserScript(") == 1
+    assert "source: \"document.documentElement.dataset.nativeShell='1';\"" in host
     assert 'openRoute("/workspaces")' in delegate
     assert 'openRoute("/run/\\(runID)")' in delegate
     assert "getServerStatus()" not in delegate
