@@ -25,6 +25,10 @@ REPO_LICENSE = REPO_ROOT / "LICENSE"
 SECURITY_MD = REPO_ROOT / "SECURITY.md"
 
 STABLE_UPGRADE_CODE = "B7E4C2A1-9F3D-4B8E-A6C1-2D5E8F0A1B3C"
+STABLE_PRODUCT_CODE = "2B1BF36C-C680-48EE-BDCA-648C09D41BB3"
+_GUID_RE = re.compile(
+    r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+)
 
 
 def test_windows_installer_sources_exist() -> None:
@@ -49,6 +53,7 @@ def test_windows_installer_identity_matches_version_and_upgrade_code() -> None:
     build = BUILD_SCRIPT.read_text(encoding="utf-8")
 
     assert f'UpgradeCode = "{STABLE_UPGRADE_CODE}"' in identity
+    assert f'ProductCode = "{STABLE_PRODUCT_CODE}"' in identity
     assert 'ProductName = "Vibecrafted. Framework"' in identity
     assert 'ProductName = "Vibecrafted"' not in identity
     assert 'ProductVersion = "0.0.0.0"' in identity
@@ -56,6 +61,11 @@ def test_windows_installer_identity_matches_version_and_upgrade_code() -> None:
     assert "<?include Identity.wxi ?>" in bundle
     assert 'UpgradeCode="$(var.UpgradeCode)"' in product
     assert 'UpgradeCode="$(var.UpgradeCode)"' in bundle
+    # Same-version rebuilds must keep ProductCode fixed; Id="*" mints a new
+    # GUID every candle and MajorUpgrade then dies with WIX_DOWNGRADE_DETECTED.
+    assert 'Id="$(var.ProductCode)"' in product
+    assert 'Id="*"' not in product
+    assert _GUID_RE.match(STABLE_PRODUCT_CODE), STABLE_PRODUCT_CODE
     assert "ProductVersion" in build
     assert "VERSION" in build
     assert "Write-Utf8NoBom" in build

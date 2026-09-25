@@ -14,7 +14,7 @@
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <?include Identity.wxi ?>
   <Product
-      Id="*"
+      Id="$(var.ProductCode)"
       Name="$(var.ProductName)"
       Language="1033"
       Version="$(var.ProductVersion)"
