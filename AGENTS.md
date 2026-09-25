@@ -440,13 +440,15 @@ re-assess thousands of runtime binaries on first execution (observed:
 ## Own Only Your Namespace
 
 The runtime install publishes launchers only for names Vibecrafted owns
-(`vc-*`, `vibecrafted*`, `vibecraft`, `telemetry`). Bundled public tools
-(loct, loctree*, aicx*, prview, screenscribe) stay generation-private, full
-stop — never a `vibecrafted-<name>` wrapper on the user's PATH. Vibecrafted
-is a guest on the operator's machine, not its landlord: the user's own PATH
-install always wins, and when a foundation is missing the fix is its
-canonical upstream release (e.g. `curl -fsSL https://loct.io/install.sh |
-sh`), not a vendored copy or shim from us. Never overwrite another product's
+(`vc-*`, `vibecrafted*`, `vibecraft`, `telemetry`). Public tools with their
+own channel (loct, loctree*, aicx*, prview, screenscribe) are not carried by
+the Runtime Pack at all — the pack contract refuses them — and never get a
+`vibecrafted-<name>` wrapper on the user's PATH. Vibecrafted is a guest on
+the operator's machine, not its landlord: the user's own PATH install always
+wins, and when a foundation is missing the fix is its own channel — npm
+(`@loctree/loctree`, `@loctree/aicx`), GitHub releases (`vetcoders/prview-rs`)
+or PyPI (`screenscribe`), which `scripts/install-foundations.sh` drives — not
+a vendored copy or shim from us. Never overwrite another product's
 command; reclaim retired launchers strictly by receipt path+digest, restore
 collision backups, and never leave dependents (LaunchAgents, MCP configs)
 dangling.

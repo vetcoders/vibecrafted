@@ -371,7 +371,7 @@ install-auto: install
 # revision it proved (RUNTIME_PACK_EXPECTED_SOURCE_REVISION).
 install:
 	@VIBECRAFTED_RUNTIME_PACK="$(RUNTIME_PACK)" bash "$(RUNTIME_PACK_INSTALLER)" $(if $(RUNTIME_PACK_EXPECTED_SOURCE_REVISION),--expected-source-revision "$(RUNTIME_PACK_EXPECTED_SOURCE_REVISION)")
-	@bash scripts/install-foundations.sh screenscribe
+	@bash scripts/install-foundations.sh loctree aicx prview screenscribe
 	@$(MAKE) --no-print-directory reconcile-server-service
 
 # Retained public spelling: configuration and runtime publication have one

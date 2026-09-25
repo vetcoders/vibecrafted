@@ -38,13 +38,13 @@ if command -v aicx >/dev/null 2>&1; then
   printf "  [ok] aicx -> %s\\n" "$(command -v aicx)"
 else
   printf "  [missing] aicx\\n"
-  printf "    fix: use canonical foundations installer from https://loct.io/install.sh\\n"
+  printf "    fix: npm install -g @loctree/aicx\\n"
 fi
 if command -v loctree-mcp >/dev/null 2>&1; then
   printf "  [ok] loctree-mcp -> %s\\n" "$(command -v loctree-mcp)"
 else
   printf "  [missing] loctree-mcp\\n"
-  printf "    fix: use canonical foundations installer from https://loct.io/install.sh\\n"
+  printf "    fix: npm install -g @loctree/loctree\\n"
 fi
 if command -v prview >/dev/null 2>&1; then
   printf "  [ok] prview -> %s\\n" "$(command -v prview)"
