@@ -4449,7 +4449,7 @@ pub(crate) fn diagnostics_room() -> impl IntoView {
             <section class="control-panel control-panel-wide" id="diagnostics-process-stats" aria-label="Process stats">
                 <div class="control-panel-head"><h2>"Process stats"</h2><span>"vc-monitor"</span></div>
                 <p class="route-page-description">
-                    "Process stats stay on vc-monitor. Run observation already records that witness and does not project a second process table onto this page."
+                    "Process stats stay on vc-monitor. Run observation records that witness as unavailable in this server generation, and this page does not draw a second process table."
                 </p>
                 <pre class="control-plane-meta" data-monitor-source="vc-monitor">"vc-monitor"</pre>
                 <p class="server-console-links">
