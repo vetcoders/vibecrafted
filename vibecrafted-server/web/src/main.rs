@@ -14,7 +14,7 @@ async fn main() {
     use leptos::config::{Env, LeptosOptions};
     use leptos::logging::log;
     use leptos_axum::{LeptosRoutes, generate_route_list};
-    use vibecrafted_server_web::app::{App, shell};
+    use vibecrafted_server_web::app::{App, shell, skills_routes};
     use vibecrafted_server_web::control::api::control_routes;
     use vibecrafted_server_web::scaffold::api::scaffold_routes;
     use vibecrafted_server_web::tools::api::{
@@ -222,6 +222,7 @@ Examples:
         })
         .route("/favicon.ico", get(favicon))
         .merge(scaffold_routes())
+        .merge(skills_routes())
         .merge(control_routes())
         .fallback(leptos_axum::file_and_error_handler(shell))
         .with_state(leptos_options);

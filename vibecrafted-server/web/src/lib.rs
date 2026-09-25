@@ -2,6 +2,12 @@
 
 pub mod app;
 pub mod chrome;
+
+#[cfg(all(test, feature = "ssr"))]
+#[test]
+fn skills_one_list_then_one_editor() {
+    app::skills_one_list_then_one_editor();
+}
 pub mod control;
 pub mod run_detail;
 pub mod scaffold;
