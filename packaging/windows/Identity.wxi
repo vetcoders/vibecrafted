@@ -2,12 +2,17 @@
 <!--
   Single Windows product identity for the portable Runtime Pack MSI and Burn EXE.
   Keep UpgradeCode stable across releases so Windows Installer upgrades stay coherent.
+  Keep ProductCode fixed for a given ProductVersion line: Id="*" mints a new
+  ProductCode every rebuild, and AllowSameVersionUpgrades="no" then rejects the
+  second 4.x.y install as WIX_DOWNGRADE_DETECTED (exit 1603).
 -->
 <Include>
   <?define ProductName = "Vibecrafted. Framework" ?>
   <?define Manufacturer = "Libraxis AI Sp. z o.o." ?>
   <!-- Stable Windows upgrade lineage. Do not rotate casually. -->
   <?define UpgradeCode = "B7E4C2A1-9F3D-4B8E-A6C1-2D5E8F0A1B3C" ?>
+  <!-- Stable product identity for same-version rebuild/repair/reinstall. -->
+  <?define ProductCode = "2B1BF36C-C680-48EE-BDCA-648C09D41BB3" ?>
   <!-- Filled by scripts/build-windows-installers.ps1 from the repo VERSION file. -->
   <?define ProductVersion = "0.0.0.0" ?>
 </Include>
