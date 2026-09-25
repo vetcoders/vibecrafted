@@ -52,7 +52,7 @@ fn usage_heatmap_lock() {
     );
 
     let sidebar = region_from_class(&html, "server-sidebar", "</aside>");
-    let usage_doors = anchors(&sidebar)
+    let usage_doors = anchors(sidebar)
         .into_iter()
         .filter(|(href, _)| href == "/usage")
         .collect::<Vec<_>>();

@@ -711,66 +711,6 @@ fn control_dashboard(
     dashboard_loading().into_any()
 }
 
-fn settlement_badge(tui: &str) -> String {
-    if tui.is_empty() {
-        "settle:—".to_string()
-    } else {
-        format!("settle:{tui}")
-    }
-}
-
-fn run_cards(runs: Vec<DashboardRun>) -> impl IntoView {
-    runs.into_iter()
-        .map(|run| {
-            let report_label = if run.latest_report.is_empty() {
-                "no report".to_string()
-            } else {
-                run.latest_report.clone()
-            };
-            // Civilized console link: every run id opens its observability page.
-            let detail_href = format!("/run/{}", run.run_id);
-            let transcript_url = format!("/api/control/runs/{}/transcript", run.run_id);
-            let run_id = run.run_id.clone();
-            let root = run.root.clone();
-            let run_id_attr = run_id.clone();
-            let run_id_copy = run_id.clone();
-            let root_attr = root.clone();
-            let href_attr = detail_href.clone();
-            let href_link = detail_href.clone();
-            let href_copy = detail_href.clone();
-            view! {
-                <article
-                    class="control-run-row"
-                    data-ppm="run"
-                    data-run-id=run_id_attr
-                    data-href=href_attr
-                    data-focus-root=root_attr
-                    data-transcript-url=transcript_url
-                >
-                    <div class="control-run-primary">
-                        <a class="control-run-id" href=href_link data-copy=run_id_copy>{run_id}</a>
-                        <span class="control-run-root">{root}</span>
-                    </div>
-                    <div class="control-run-tags">
-                        <span class="control-badge">{run.state}</span>
-                        <span class="control-badge">{run.health}</span>
-                        <span class="control-badge">{settlement_badge(&run.settlement_tui)}</span>
-                        <span class="control-badge">{run.agent}</span>
-                        <span class="control-badge">{run.skill}</span>
-                        <span class="control-badge">{run.mode}</span>
-                    </div>
-                    <div class="control-run-meta">
-                        <span>{run.updated_at}</span>
-                        <span>{report_label}</span>
-                        <span class="control-run-error">{run.last_error}</span>
-                        <button type="button" class="control-copy" data-copy=href_copy>"Copy"</button>
-                    </div>
-                </article>
-            }
-        })
-        .collect_view()
-}
-
 fn is_terminal_state(state: &str) -> bool {
     matches!(
         state.to_ascii_lowercase().as_str(),
@@ -3250,6 +3190,7 @@ struct SkillsSnapshot {
 }
 
 impl SkillsSnapshot {
+    #[cfg(any(test, feature = "hydrate", not(feature = "ssr")))]
     fn empty() -> Self {
         Self {
             names: Vec::new(),
@@ -3332,10 +3273,7 @@ fn discover_skill_files(roots: &[std::path::PathBuf]) -> Vec<SkillFile> {
             if !seen_paths.insert(canonical) || !seen_names.insert(name.clone()) {
                 continue;
             }
-            found.push(SkillFile {
-                name,
-                path: file,
-            });
+            found.push(SkillFile { name, path: file });
         }
     }
     found.sort_by(|left, right| left.name.cmp(&right.name));
@@ -3403,21 +3341,21 @@ fn read_embedded_skills_snapshot() -> SkillsSnapshot {
         .unwrap_or_else(|_| SkillsSnapshot::empty())
 }
 
+#[cfg(feature = "hydrate")]
 fn skills_snapshot(open: Option<String>) -> SkillsSnapshot {
-    #[cfg(feature = "hydrate")]
-    {
-        let _ = open;
-        return read_embedded_skills_snapshot();
-    }
-    #[cfg(all(feature = "ssr", not(feature = "hydrate")))]
-    {
-        return build_skills_snapshot(open.as_deref());
-    }
-    #[cfg(not(any(feature = "ssr", feature = "hydrate")))]
-    {
-        let _ = open;
-        SkillsSnapshot::empty()
-    }
+    let _ = open;
+    read_embedded_skills_snapshot()
+}
+
+#[cfg(all(feature = "ssr", not(feature = "hydrate")))]
+fn skills_snapshot(open: Option<String>) -> SkillsSnapshot {
+    build_skills_snapshot(open.as_deref())
+}
+
+#[cfg(not(any(feature = "ssr", feature = "hydrate")))]
+fn skills_snapshot(open: Option<String>) -> SkillsSnapshot {
+    let _ = open;
+    SkillsSnapshot::empty()
 }
 
 fn skills_room(snapshot: SkillsSnapshot) -> impl IntoView {
@@ -3673,10 +3611,10 @@ mod settings_config {
 
     #[cfg(feature = "ssr")]
     pub fn settings_routes() -> axum::Router<leptos::config::LeptosOptions> {
+        use axum::Router;
         use axum::extract::Form;
         use axum::response::IntoResponse;
         use axum::routing::post;
-        use axum::Router;
 
         async fn save_settings(Form(form): Form<SettingsWrite>) -> impl IntoResponse {
             match save_settings_file(&product_config_path(), &form) {
@@ -3801,11 +3739,7 @@ mod settings_config {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_nanos())
             .unwrap_or(0);
-        let tmp = parent.join(format!(
-            ".config.toml.{}.{}",
-            std::process::id(),
-            nanos
-        ));
+        let tmp = parent.join(format!(".config.toml.{}.{}", std::process::id(), nanos));
         let write_tmp = || -> Result<(), String> {
             let mut file = std::fs::OpenOptions::new()
                 .write(true)
@@ -3945,13 +3879,22 @@ mod settings_config {
     #[cfg(feature = "ssr")]
     fn decode_toml_value(raw: &str) -> String {
         let value = strip_unquoted_comment(raw).trim();
-        if let Some(inner) = value.strip_prefix('"').and_then(|rest| rest.strip_suffix('"')) {
+        if let Some(inner) = value
+            .strip_prefix('"')
+            .and_then(|rest| rest.strip_suffix('"'))
+        {
             return unescape_basic(inner);
         }
-        if let Some(inner) = value.strip_prefix('\'').and_then(|rest| rest.strip_suffix('\'')) {
+        if let Some(inner) = value
+            .strip_prefix('\'')
+            .and_then(|rest| rest.strip_suffix('\''))
+        {
             return inner.to_string();
         }
-        if let Some(inner) = value.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')) {
+        if let Some(inner) = value
+            .strip_prefix('[')
+            .and_then(|rest| rest.strip_suffix(']'))
+        {
             return decode_string_array(inner).join(", ");
         }
         value.to_string()
@@ -3974,10 +3917,7 @@ mod settings_config {
                 Some('"') => out.push('"'),
                 Some('u') => {
                     let hex: String = chars.by_ref().take(4).collect();
-                    match u32::from_str_radix(&hex, 16)
-                        .ok()
-                        .and_then(char::from_u32)
-                    {
+                    match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
                         Some(decoded) => out.push(decoded),
                         None => {
                             out.push('u');
@@ -4047,7 +3987,10 @@ mod settings_config {
     #[cfg(feature = "ssr")]
     fn repository_identity(header: &str) -> Option<String> {
         let rest = header.strip_prefix("repositories.")?;
-        if let Some(inner) = rest.strip_prefix('"').and_then(|value| value.strip_suffix('"')) {
+        if let Some(inner) = rest
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+        {
             return Some(unescape_basic(inner));
         }
         rest.strip_prefix('\'')
@@ -4169,7 +4112,10 @@ mod settings_config {
 
     #[cfg(feature = "ssr")]
     fn toml_string_array(tokens: &[String]) -> String {
-        let parts: Vec<String> = tokens.iter().map(|token| toml_basic_string(token)).collect();
+        let parts: Vec<String> = tokens
+            .iter()
+            .map(|token| toml_basic_string(token))
+            .collect();
         format!("[{}]", parts.join(", "))
     }
 
@@ -4246,7 +4192,10 @@ mod settings_config {
         if remote.is_empty() {
             return Some("git remote is empty");
         }
-        if remote.starts_with('-') || remote.chars().any(|ch| ch.is_control() || ch.is_whitespace())
+        if remote.starts_with('-')
+            || remote
+                .chars()
+                .any(|ch| ch.is_control() || ch.is_whitespace())
         {
             return Some("git remote contains whitespace, control characters, or starts with -");
         }
@@ -4259,7 +4208,8 @@ mod settings_config {
             }
             let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
             if let Some((userinfo, _)) = authority.rsplit_once('@') {
-                if userinfo.contains(':') || (matches!(scheme, "https" | "http") && !userinfo.is_empty())
+                if userinfo.contains(':')
+                    || (matches!(scheme, "https" | "http") && !userinfo.is_empty())
                 {
                     return Some("git remote must not contain credentials");
                 }
@@ -4503,7 +4453,12 @@ pub(crate) mod tests {
 
     use super::{
         ActivityPage, AicxPage, ConsolePage, DashboardData, DashboardRun, DashboardSession,
-        DashboardSessionRun, FramePage, HistoryMemory, HistoryPage, LifecyclePage, RunsPage, SessionsPage, StructurePage, TranscriptsPage, UsagePage, WorkspacesPage, aicx_page_script, console_dashboard, decode_dashboard_embed, encode_dashboard_embed, git_repo_name, history_view, load_dashboard_data_from, operator_active_runs, projects_frame, run_cards, runs_dashboard, session_cards, snapshot_from_plans, unique_runtime_labels, workspaces_dashboard,
+        DashboardSessionRun, FramePage, HistoryMemory, HistoryPage, LifecyclePage, RunsPage,
+        SessionsPage, StructurePage, TranscriptsPage, UsagePage, WorkspacesPage, aicx_page_script,
+        console_dashboard, decode_dashboard_embed, encode_dashboard_embed, git_repo_name,
+        history_view, load_dashboard_data_from, operator_active_runs, projects_frame,
+        runs_dashboard, session_cards, snapshot_from_plans, unique_runtime_labels,
+        workspaces_dashboard,
     };
     use crate::control::api::{control_routes_for, state_payload};
     use crate::scaffold::api::project_shelf;
@@ -4972,10 +4927,11 @@ pub(crate) mod tests {
         assert!(!html.contains("Open scaffold"));
         assert!(html.contains("Vibecrafted server navigation"));
         assert!(html.contains("server-sidebar"));
+        // zen-rooms nav (w1-02): Work / Trace / Machine doors replace the old rail.
         assert!(html.contains("href=\"/runs\""));
-        assert!(html.contains("href=\"/lifecycle\""));
-        assert!(html.contains("href=\"/activity\""));
-        assert!(html.contains("href=\"/scaffold\""));
+        assert!(html.contains("href=\"/projects\""));
+        assert!(html.contains("href=\"/artifacts\""));
+        assert!(html.contains("href=\"/diagnostics\""));
         assert!(!html.contains("href=\"#fleet\""));
         assert!(html.contains("aria-label=\"Work\""));
         assert!(!html.contains("aria-label=\"Structure\""));
@@ -5095,13 +5051,13 @@ pub(crate) mod tests {
         let (workspaces, sessions, runs, lifecycle, activity, structure, card) = owner.with(|| {
             leptos_meta::provide_meta_context();
             provide_theme_context();
-            let card = run_cards(vec![DashboardRun {
+            let card = super::run_bucket_row(DashboardRun {
                 run_id: "impl-live-agent".into(),
                 agent: "codex".into(),
                 health: "active".into(),
                 state: "running".into(),
                 ..DashboardRun::default()
-            }])
+            })
             .to_html();
             (
                 WorkspacesPage().to_html(),
@@ -5137,7 +5093,7 @@ pub(crate) mod tests {
         assert!(card.contains("href=\"/run/impl-live-agent\""));
         assert!(!card.contains("Open transcript"));
         assert!(card.contains("data-ppm=\"run\""));
-        assert!(card.contains("control-copy"));
+        assert!(card.contains("data-copy=\"impl-live-agent\""));
     }
 
     pub(super) fn code_intelligence_is_not_a_plan_library() {
@@ -5433,8 +5389,9 @@ pub(crate) mod tests {
         assert!(html.contains("type=\"application/json\""));
         assert!(!html.contains("Loading control plane"));
         assert!(html.contains("Overview"));
-        assert!(html.contains("href=\"/transcripts\""));
-        assert!(html.contains("href=\"/frame\""));
+        // zen-rooms: History & context is a door; Frame is a projection, not a nav row.
+        assert!(html.contains("href=\"/history\""));
+        assert!(!html.contains("href=\"/frame\""));
         assert!(!html.contains("Control plane"));
     }
 
@@ -5513,7 +5470,8 @@ pub(crate) mod tests {
         let home = temp_home();
         let runs_dir = home.join("control_plane/runs");
         fs::create_dir_all(&runs_dir).expect("runs dir");
-        let plan_report = "/var/artifacts/vetcoders/vibecrafted/2026_0925/plans/zen-rooms-ia/reports/w2-02.md";
+        let plan_report =
+            "/var/artifacts/vetcoders/vibecrafted/2026_0925/plans/zen-rooms-ia/reports/w2-02.md";
 
         let write = |run_id: &str,
                      state: &str,
@@ -5821,8 +5779,10 @@ pub(crate) mod tests {
             .iter()
             .filter(|plan| plan.plan_id == "one-plan")
             .count();
+        // w3-01 collapses symlink aliases in the catalog itself; Projects filters that
+        // collapsed catalog (Decision 3), it does not dedupe a tripled one.
         assert_eq!(
-            raw_one, 3,
+            raw_one, 1,
             "alias fixture produced {raw_one} catalog rows for one-plan"
         );
         let shelf = project_shelf(&detailed.plans);
@@ -5849,12 +5809,12 @@ pub(crate) mod tests {
         let attention = |plan: &control_core::ScaffoldPlanSummary| {
             !store.is_plan_reviewable(&plan.org, &plan.repo, &plan.day, &plan.plan_id)
         };
-        let index = snapshot_from_plans(&detailed.plans, None, None, &attention);
+        let index = snapshot_from_plans(&detailed.plans, None, None, attention);
         let detail = snapshot_from_plans(
             &detailed.plans,
             Some("vetcoders"),
             Some("vibecrafted"),
-            &attention,
+            attention,
         );
         assert_eq!(detail.plans.len(), vibecrafted.plans.len());
         assert_eq!(
@@ -5932,11 +5892,7 @@ pub(crate) mod tests {
     fn skills_room_html(html: &str) -> &str {
         let marker_at = html.find("data-skills-room").expect("skills room");
         let start = html[..marker_at].rfind("<main").expect("skills main");
-        let end = html[start..]
-            .find("</main>")
-            .expect("skills room end")
-            + start
-            + "</main>".len();
+        let end = html[start..].find("</main>").expect("skills room end") + start + "</main>".len();
         &html[start..end]
     }
 
@@ -6036,8 +5992,12 @@ pub(crate) mod tests {
             fs::read_to_string(root.join("vc-beta/SKILL.md")).expect("beta stays"),
             "beta body"
         );
-        assert!(super::save_named_skill_in(&[root.clone()], "../vc-alpha", "nope").is_err());
-        assert!(super::save_named_skill_in(&[root.clone()], "vc-missing", "nope").is_err());
+        assert!(
+            super::save_named_skill_in(std::slice::from_ref(&root), "../vc-alpha", "nope").is_err()
+        );
+        assert!(
+            super::save_named_skill_in(std::slice::from_ref(&root), "vc-missing", "nope").is_err()
+        );
         assert!(super::save_named_skill_in(&[root], "not-a-skill", "nope").is_err());
 
         fs::remove_dir_all(home).ok();
@@ -6118,14 +6078,16 @@ pub(crate) fn overview_welcome_status_and_miniatures() {
     let (welcome, starting, usage) = owner.with(|| {
         leptos_meta::provide_meta_context();
         provide_theme_context();
-        let mut up = DashboardData::default();
-        up.server_status = "healthy".into();
-        up.active_runs = vec![DashboardRun {
-            run_id: "impl-live".into(),
-            state: "running".into(),
-            health: "active".into(),
-            ..DashboardRun::default()
-        }];
+        let up = DashboardData {
+            server_status: "healthy".into(),
+            active_runs: vec![DashboardRun {
+                run_id: "impl-live".into(),
+                state: "running".into(),
+                health: "active".into(),
+                ..DashboardRun::default()
+            }],
+            ..DashboardData::default()
+        };
         let welcome = console_dashboard(up).to_html();
         let starting = console_dashboard(DashboardData {
             server_status: "loading".into(),
