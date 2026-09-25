@@ -679,7 +679,6 @@ fn run_cards(runs: Vec<DashboardRun>) -> impl IntoView {
                         <span>{report_label}</span>
                         <span class="control-run-error">{run.last_error}</span>
                         <button type="button" class="control-copy" data-copy=href_copy>"Copy"</button>
-                        <a class="control-run-open" href=detail_href>"Open transcript →"</a>
                     </div>
                 </article>
             }
@@ -1879,11 +1878,11 @@ fn transcripts_search_script() -> &'static str {
       copy.className = 'control-copy';
       copy.setAttribute('data-copy', id);
       copy.textContent = 'Copy';
-      const open = document.createElement('a');
-      open.className = 'control-run-open';
-      open.href = '/run/' + encodeURIComponent(id);
-      open.textContent = 'Open transcript →';
-      meta.append(updated, snippet, copy, open);
+      meta.append(updated, snippet, copy);
+      row.addEventListener('click', (event) => {
+        if (event.target.closest('a, button')) return;
+        location.href = row.getAttribute('data-href');
+      });
       row.append(primary, meta);
       list.append(row);
     }
@@ -1933,7 +1932,7 @@ pub fn TranscriptsPage() -> impl IntoView {
         <ServerFrame active=ServerSection::Transcripts status="transcripts".to_string()>
             <div class="server-console-shell route-page-shell">
                 {route_header("Runtime", "Transcripts", "Every canonical transcript.human.log on this host. Search streams each log from the start; pages of 50 keep the whole corpus reachable.")}
-                <section class="control-panel control-panel-wide" aria-label="Transcript search">
+                <section class="control-panel control-panel-wide transcript-list" aria-label="Transcript search">
                     <form id="transcript-search-form" class="server-console-links">
                         <input id="transcript-search-query" name="q" type="search" maxlength="512" placeholder="Search transcripts" />
                         <button class="server-console-link server-console-link-primary" type="submit">"Search"</button>
@@ -2995,7 +2994,7 @@ mod tests {
         assert!(structure.contains("/api/aicx/search"));
         assert!(!structure.contains("href=\"/Volumes/"));
         assert!(card.contains("href=\"/run/impl-live-agent\""));
-        assert!(card.contains("Open transcript"));
+        assert!(!card.contains("Open transcript"));
         assert!(card.contains("data-ppm=\"run\""));
         assert!(card.contains("control-copy"));
     }

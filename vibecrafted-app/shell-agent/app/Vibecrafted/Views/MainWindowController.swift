@@ -53,6 +53,10 @@ enum CommandDeckWindowFactory {
 final class MainWindowController: NSWindowController, CommandDeckNavigationHandling {
   let session: WebConsoleSession
   private let openExternally: @MainActor (URL) -> Void
+  /// Configured `vc-frame web` origin, when `[tools.vc-frame]` names one.
+  /// Sidebar Frame loads it in this window's web view. Absent, Frame stays
+  /// the product `/frame` page. Never a second window.
+  var frameWebURL: (() -> URL?)?
 
   init(
     model: AppModel, session: WebConsoleSession, actions: any CommandDeckActionHandling,
@@ -64,8 +68,20 @@ final class MainWindowController: NSWindowController, CommandDeckNavigationHandl
       title: "Vibecrafted", frameAutosaveName: "VibecraftedCommandDeck")
     super.init(window: window)
     CommandDeckWindowFactory.mount(
-      CommandDeckRootView(model: model, session: session, actions: actions, navigationHandler: self),
+      CommandDeckRootView(model: model, session: session, actions: actions, navigationHandler: self,
+        openPath: { [weak self] path in self?.openWorkspacePath(path) }),
       in: window)
+  }
+
+  /// Sidebar selection. Frame, when configured, is the Zellij web client in
+  /// this web view. Every other destination returns to the product console.
+  func openWorkspacePath(_ path: String) {
+    if path == CommandDeckDestination.frame.path, let url = frameWebURL?() {
+      session.present(service: url)
+      return
+    }
+    if session.restoreProduct(route: path) { return }
+    session.navigate(path: path)
   }
 
   @available(*, unavailable)
@@ -90,12 +106,13 @@ private struct CommandDeckRootView: View {
   let session: WebConsoleSession
   let actions: any CommandDeckActionHandling
   let navigationHandler: any CommandDeckNavigationHandling
+  var openPath: (String) -> Void
 
   var body: some View {
     CommandDeckView(
       presentation: model.presentation, actions: actions,
       navigation: session.navigation, navigationHandler: navigationHandler,
-      openPath: { session.navigate(path: $0) }
+      openPath: openPath
     ) {
       WebConsoleHost(session: session)
     }

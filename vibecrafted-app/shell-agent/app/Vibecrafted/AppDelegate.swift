@@ -194,6 +194,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     if mainWindow == nil {
       mainWindow = MainWindowController(model: model, session: webSession, actions: self,
         openExternally: { [unowned self] url in self.openExternalURL(url) })
+      mainWindow?.frameWebURL = { [weak self] in
+        guard let self, let destination = ToolDestination.named("vc-frame"),
+          case .available(let url, .service) = self.tabs.resolve(destination)
+        else { return nil }
+        return url
+      }
     }
     mainWindow?.showWindow(nil)
     mainWindow?.window?.makeKeyAndOrderFront(nil)

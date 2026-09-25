@@ -98,6 +98,9 @@ final class WebConsoleSession: NSObject {
   /// `apply(endpoint:route:home:)` / `present(service:)`. The first route a
   /// tab shows never becomes its home on its own.
   private var homeRoute = URLComponents(string: "/")!
+  /// The product console origin, kept while Frame temporarily occupies this
+  /// same web view. Leaving Frame restores it; the TUI is untouched.
+  private var productEndpoint: URL?
 
   /// Native entrypoints select a route, never another window or origin.
   func navigate(path: String) {
@@ -237,6 +240,7 @@ final class WebConsoleSession: NSObject {
     }
     lastCommittedURL = nil
     appliedEndpoint = endpoint
+    productEndpoint = endpoint
     scope = .runtime(origin)
     didAutoRecoverFromTermination = false
     navigationReceipt("endpoint-apply", generation: loadGeneration, url: endpoint)
@@ -282,6 +286,16 @@ final class WebConsoleSession: NSObject {
     scope = .service(origin)
     didAutoRecoverFromTermination = false
     if let target = routeURL { load(target) }
+  }
+
+  /// Frame occupied this web view. Put the product console back on `route`
+  /// in the same view. Returns false when the view is already the product.
+  @discardableResult
+  func restoreProduct(route: String) -> Bool {
+    guard case .service = scope, let productEndpoint else { return false }
+    appliedEndpoint = nil
+    apply(endpoint: productEndpoint, route: route, home: .runtimeOverview)
+    return true
   }
 
   /// Shows exactly one local HTML document. WebKit read access is granted to

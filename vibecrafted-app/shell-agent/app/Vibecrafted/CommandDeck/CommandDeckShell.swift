@@ -18,7 +18,7 @@ struct CommandDeckShell<Workspace: View>: View {
 
   @State private var selection: CommandDeckDestination? = .overview
   @State private var columnVisibility = NavigationSplitViewVisibility.all
-  @State private var inspectorPresented = true
+  @State private var inspectorPresented = false
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   var body: some View {

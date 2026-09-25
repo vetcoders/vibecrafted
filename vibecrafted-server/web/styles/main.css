@@ -2147,8 +2147,9 @@ button:hover > .icon-box {
 }
 
 .control-run-list {
-  display: grid;
-  gap: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: 0;
 }
 
 .operator-action-list {
@@ -2193,13 +2194,16 @@ button:hover > .icon-box {
 }
 
 .control-run-row {
-  display: grid;
-  gap: var(--space-3);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 16px;
   min-width: 0;
-  padding: var(--space-4);
-  background: var(--surface-elevated);
-  border: var(--stroke-width) solid var(--border-subtle);
-  border-radius: var(--radius-surface);
+  padding: 8px 2px;
+  background: transparent;
+  border: 0;
+  border-bottom: var(--stroke-width) solid var(--border-subtle);
+  border-radius: 0;
 }
 
 .control-run-primary,
@@ -3095,9 +3099,12 @@ html[data-native-shell] [data-inspector-toggle] {
 }
 
 .control-run-row {
-  gap: 10px;
-  padding: 12px;
-  border-radius: var(--radius-surface);
+  gap: 8px 16px;
+  padding: 8px 2px;
+  border: 0;
+  border-bottom: var(--stroke-width) solid var(--border-subtle);
+  border-radius: 0;
+  background: transparent;
 }
 
 .control-run-id {
@@ -3767,15 +3774,28 @@ a.control-run-id:focus-visible {
 .control-copy {
   display: inline-flex;
   align-items: center;
-  margin: 0;
-  padding: 0 8px;
-  min-height: 22px;
-  border: var(--stroke-width) solid var(--border-subtle);
-  border-radius: var(--radius-surface);
-  background: var(--surface-elevated);
-  color: var(--text-primary);
-  font: 550 11px / 1 var(--font-body);
+  margin: 0 0 0 auto;
+  padding: 0;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font: 12px / 1 var(--font-body);
   cursor: default;
+}
+
+.control-copy:hover,
+.control-copy:focus-visible {
+  color: var(--text-primary);
+}
+
+.transcript-list.control-panel {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
 .vc-ppm {
