@@ -109,6 +109,20 @@ struct DashboardRun {
     updated_at: String,
     /// Settlement tui cell when Python wrote one (`f`/`x`/`n`), else empty.
     settlement_tui: String,
+    /// Python settlement verdict (`finalized` / `failed` / `needs_attention` /
+    /// `invalid`). Empty when the snapshot omitted one. Never derived from
+    /// an exit code or from the tui cell.
+    #[serde(default)]
+    settlement_verdict: String,
+    /// Plan id already present on the recorded report path. Empty hides the plan door.
+    #[serde(default)]
+    plan_id: String,
+    /// Scaffold href for [`Self::plan_id`], with org/repo/day when the path has them.
+    #[serde(default)]
+    plan_href: String,
+    /// True only when a transcript file can actually be opened.
+    #[serde(default)]
+    transcript_open: bool,
     last_error: String,
 }
 
@@ -127,6 +141,16 @@ struct DashboardLifecycleRun {
     operator_actions_count: usize,
     next_action: String,
     updated_at: String,
+    #[serde(default)]
+    report_path: String,
+    #[serde(default)]
+    transcript_path: String,
+    #[serde(default)]
+    plan_id: String,
+    #[serde(default)]
+    plan_href: String,
+    #[serde(default)]
+    transcript_open: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -153,6 +177,35 @@ where
         .join(", ")
 }
 
+/// Serde is the naming authority for the Python verdict. The tui cell is not
+/// a substitute: `x` covers both `failed` and `invalid`.
+#[cfg(feature = "ssr")]
+fn settlement_verdict_wire(value: &Option<control_core::SettlementVerdict>) -> String {
+    value
+        .as_ref()
+        .and_then(|inner| serde_json::to_value(inner).ok())
+        .and_then(|json| json.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
+/// A transcript door exists only when a log file can be opened. A recorded
+/// path that is missing, or a symlink `transcript_open` refuses, stays hidden.
+#[cfg(feature = "ssr")]
+fn transcript_log_is_open(
+    plane: &control_core::ControlPlane,
+    run_id: &str,
+    latest_transcript: &str,
+) -> bool {
+    if crate::run_detail::human_transcript_is_open(plane, run_id) {
+        return true;
+    }
+    let path = latest_transcript.trim();
+    if path.is_empty() {
+        return false;
+    }
+    control_core::transcript_open::open_provider_transcript(std::path::Path::new(path)).is_ok()
+}
+
 #[cfg(feature = "ssr")]
 fn load_dashboard_data() -> DashboardData {
     use chrono::Utc;
@@ -168,7 +221,7 @@ fn load_dashboard_data_from(
 ) -> DashboardData {
     use control_core::{Event, LifecycleRunSummary, RunStatus};
 
-    fn run_summary(run: RunStatus) -> DashboardRun {
+    fn run_summary(plane: &control_core::ControlPlane, run: RunStatus) -> DashboardRun {
         let settlement_tui = run
             .settlement_tui
             .map(|cell| match cell {
@@ -178,6 +231,9 @@ fn load_dashboard_data_from(
             })
             .unwrap_or("")
             .to_string();
+        let settlement_verdict = settlement_verdict_wire(&run.settlement_verdict);
+        let (plan_id, plan_href) = plan_from_report_path(&run.latest_report);
+        let transcript_open = transcript_log_is_open(plane, &run.run_id, &run.latest_transcript);
         DashboardRun {
             run_id: run.run_id,
             logical_session_id: run.logical_session_id,
@@ -191,6 +247,10 @@ fn load_dashboard_data_from(
             latest_transcript: run.latest_transcript,
             updated_at: run.updated_at,
             settlement_tui,
+            settlement_verdict,
+            plan_id,
+            plan_href,
+            transcript_open,
             last_error: run.last_error,
         }
     }
@@ -204,12 +264,17 @@ fn load_dashboard_data_from(
         }
     }
 
-    fn lifecycle_summary(run: LifecycleRunSummary) -> DashboardLifecycleRun {
+    fn lifecycle_summary(
+        plane: &control_core::ControlPlane,
+        run: LifecycleRunSummary,
+    ) -> DashboardLifecycleRun {
         let dou_label = match (run.dou_readiness.as_str(), run.dou_index) {
             ("zero", Some(0)) => "ZERO DoU".to_string(),
             ("open", Some(value)) => format!("DoU {value}"),
             _ => "DoU unknown".to_string(),
         };
+        let (plan_id, plan_href) = plan_from_report_path(&run.report_path);
+        let transcript_open = transcript_log_is_open(plane, &run.run_id, &run.transcript_path);
         DashboardLifecycleRun {
             run_id: run.run_id,
             workflow: run.workflow,
@@ -224,6 +289,11 @@ fn load_dashboard_data_from(
             operator_actions_count: run.operator_actions_count,
             next_action: run.next_action,
             updated_at: run.updated_at,
+            report_path: run.report_path,
+            transcript_path: run.transcript_path,
+            plan_id,
+            plan_href,
+            transcript_open,
         }
     }
 
@@ -448,10 +518,25 @@ fn load_dashboard_data_from(
             unclassified: settlement.unclassified,
             total_settled: settlement.total_settled,
         },
-        active_runs: state.active_runs.into_iter().map(run_summary).collect(),
-        stalled_runs: state.stalled_runs.into_iter().map(run_summary).collect(),
-        recent_runs: state.recent_runs.into_iter().map(run_summary).collect(),
-        lifecycle_runs: lifecycle_runs.into_iter().map(lifecycle_summary).collect(),
+        active_runs: state
+            .active_runs
+            .into_iter()
+            .map(|run| run_summary(plane, run))
+            .collect(),
+        stalled_runs: state
+            .stalled_runs
+            .into_iter()
+            .map(|run| run_summary(plane, run))
+            .collect(),
+        recent_runs: state
+            .recent_runs
+            .into_iter()
+            .map(|run| run_summary(plane, run))
+            .collect(),
+        lifecycle_runs: lifecycle_runs
+            .into_iter()
+            .map(|run| lifecycle_summary(plane, run))
+            .collect(),
         warnings,
         events: state.events.into_iter().map(event_summary).collect(),
         loctree_report,
@@ -818,7 +903,7 @@ fn retained_run_history(settlement: DashboardSettlement) -> impl IntoView {
                 <span>{format!("{} settled", settlement.total_settled)}</span>
             </div>
             <p class="control-plane-meta">
-                "Every run snapshot this host still keeps, from all days — not what is running now. Current agents are listed above."
+                "Every run snapshot this host still keeps, from all days — not what is running now. Open runs are in the buckets above."
             </p>
             <p class="control-plane-meta">
                 <span>{format!("{} finished", settlement.f)}</span>
@@ -1997,57 +2082,249 @@ pub fn AgentManagerPage() -> impl IntoView {
     }
 }
 
+/// Plan id already written into a recorded report path
+/// (`.../<org>/<repo>/<day>/plans/<plan_id>/...`). No id, no door.
+fn plan_from_report_path(path: &str) -> (String, String) {
+    let parts: Vec<&str> = path
+        .split(['/', '\\'])
+        .filter(|part| !part.is_empty())
+        .collect();
+    let Some(plans_at) = parts.iter().position(|part| *part == "plans") else {
+        return (String::new(), String::new());
+    };
+    let Some(plan_id) = parts.get(plans_at + 1).copied().filter(|id| !id.is_empty()) else {
+        return (String::new(), String::new());
+    };
+    let href = if plans_at >= 3 {
+        format!(
+            "/scaffold?org={}&repo={}&day={}&plan_id={}",
+            url_component(parts[plans_at - 3]),
+            url_component(parts[plans_at - 2]),
+            url_component(parts[plans_at - 1]),
+            url_component(plan_id),
+        )
+    } else {
+        format!("/scaffold?plan_id={}", url_component(plan_id))
+    };
+    (plan_id.to_string(), href)
+}
+
+fn url_component(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+/// Success / Needs Attention / Failures come only from the settlement verdict.
+/// `invalid` is not a sixth heading and is not folded into Failures. Queued is
+/// the lifecycle state of that name. Current is the non-terminal active or
+/// stalled set, so a stall does not invent another bucket. Exit codes are not read.
+fn place_run(run: &DashboardRun) -> Option<&'static str> {
+    match run.settlement_verdict.as_str() {
+        "finalized" => return Some("success"),
+        "needs_attention" => return Some("needs-attention"),
+        "failed" => return Some("failures"),
+        _ => {}
+    }
+    if run.state.eq_ignore_ascii_case("queued") {
+        return Some("queued");
+    }
+    let current = matches!(run.health.as_str(), "active" | "stalled")
+        && !is_terminal_state(&run.state)
+        && !is_quarantined_run(run);
+    current.then_some("current")
+}
+
+fn queued_lifecycle_run(run: &DashboardLifecycleRun) -> DashboardRun {
+    DashboardRun {
+        run_id: run.run_id.clone(),
+        state: "queued".to_string(),
+        health: "queued".to_string(),
+        agent: run.next_agent.clone(),
+        skill: run.workflow.clone(),
+        latest_report: run.report_path.clone(),
+        updated_at: run.updated_at.clone(),
+        plan_id: run.plan_id.clone(),
+        plan_href: run.plan_href.clone(),
+        transcript_open: run.transcript_open,
+        ..DashboardRun::default()
+    }
+}
+
+fn partition_run_buckets(dashboard: &DashboardData) -> [Vec<DashboardRun>; 5] {
+    let mut placed = std::collections::HashSet::new();
+    let mut success = Vec::new();
+    let mut attention = Vec::new();
+    let mut failures = Vec::new();
+    let mut current = Vec::new();
+    let mut queued = Vec::new();
+    for run in dashboard
+        .active_runs
+        .iter()
+        .chain(dashboard.stalled_runs.iter())
+        .chain(dashboard.recent_runs.iter())
+    {
+        if !placed.insert(run.run_id.clone()) {
+            continue;
+        }
+        match place_run(run) {
+            Some("success") => success.push(run.clone()),
+            Some("needs-attention") => attention.push(run.clone()),
+            Some("failures") => failures.push(run.clone()),
+            Some("current") => current.push(run.clone()),
+            Some("queued") => queued.push(run.clone()),
+            _ => {}
+        }
+    }
+    for run in &dashboard.lifecycle_runs {
+        if !run.status.eq_ignore_ascii_case("queued") {
+            continue;
+        }
+        if !placed.insert(run.run_id.clone()) {
+            continue;
+        }
+        queued.push(queued_lifecycle_run(run));
+    }
+    [success, attention, failures, current, queued]
+}
+
+fn run_bucket_row(run: DashboardRun) -> impl IntoView {
+    let detail_href = format!("/run/{}", run.run_id);
+    let row_href = detail_href.clone();
+    let transcript_href = detail_href.clone();
+    let transcript_url = run
+        .transcript_open
+        .then(|| format!("/api/control/runs/{}/transcript", run.run_id));
+    let plan_href = if run.plan_href.is_empty() && !run.plan_id.is_empty() {
+        format!("/scaffold?plan_id={}", url_component(&run.plan_id))
+    } else {
+        run.plan_href.clone()
+    };
+    let show_plan = !plan_href.is_empty();
+    let transcript_open = run.transcript_open;
+    let meta = format!("{} · {} · {}", run.agent, run.skill, run.updated_at);
+    let run_id = run.run_id.clone();
+    view! {
+        <tr
+            data-ppm="run"
+            data-run-id=run.run_id.clone()
+            data-href=row_href
+            data-focus-root=run.root.clone()
+            data-transcript-url=transcript_url
+            data-report=run.latest_report.clone()
+            data-error=run.last_error.clone()
+            data-meta=meta
+        >
+            <td>
+                <a class="control-run-id" href=detail_href data-copy=run_id.clone()>{run_id.clone()}</a>
+            </td>
+            <td>{run.agent}</td>
+            <td>{run.skill}</td>
+            <td class="run-doors">
+                {show_plan.then(|| view! {
+                    <a class="server-console-link" data-run-door="plan" href=plan_href>"Plan"</a>
+                })}
+                {transcript_open.then(|| view! {
+                    <a class="server-console-link" data-run-door="transcript" href=transcript_href>"Transcript"</a>
+                })}
+                <span class="run-door" data-run-door="dock">"Dock"</span>
+            </td>
+        </tr>
+    }
+}
+
+fn run_bucket(title: &'static str, id: &'static str, runs: Vec<DashboardRun>) -> impl IntoView {
+    let count = runs.len();
+    view! {
+        <section class="control-panel control-panel-wide" aria-label=title data-run-bucket=id>
+            <div class="control-panel-head">
+                <h2>{title}</h2>
+                <span>{count}</span>
+            </div>
+            <p class="control-empty" hidden={count != 0}>"None."</p>
+            <div class="run-table-wrap">
+                <table class="run-table">
+                    <tbody>{runs.into_iter().map(run_bucket_row).collect_view()}</tbody>
+                </table>
+            </div>
+        </section>
+    }
+}
+
 #[component]
 pub fn RunsPage() -> impl IntoView {
     view! {
-        <Title text="live runs - vc-server" />
-        <Meta name="description" content="Current agents and their human transcript tails." />
+        <Title text="runs - vc-server" />
+        <Meta name="description" content="Agent runs in five buckets, with plan, transcript, and dock." />
         {control_dashboard(|dashboard| runs_dashboard(dashboard).into_any())}
     }
 }
 
 fn runs_dashboard(dashboard: DashboardData) -> impl IntoView {
-    let control_plane = dashboard.control_plane;
-    let control_status = dashboard.control_status;
-    let control_error = dashboard.control_error;
-    let generated_at = dashboard.generated_at;
-    let active = operator_active_runs(dashboard.active_runs);
-    let stalled = dashboard.stalled_runs;
-    let recent = dashboard.recent_runs;
-    let settlement = dashboard.settlement;
-    let active_count = active.len();
-    let stalled_count = stalled.len();
-    let recent_count = recent.len();
+    let control_plane = dashboard.control_plane.clone();
+    let control_status = dashboard.control_status.clone();
+    let control_error = dashboard.control_error.clone();
+    let generated_at = dashboard.generated_at.clone();
+    let settlement = dashboard.settlement.clone();
+    let [success, attention, failures, current, queued] = partition_run_buckets(&dashboard);
+    let current_count = current.len();
     let not_initialized = control_status == "not_initialized";
     let unavailable = control_status == "unavailable";
-    let available = control_status == "available";
 
     view! {
-        <ServerFrame active=ServerSection::Runs status=format!("{active_count} live")>
+        <ServerFrame active=ServerSection::Runs status=format!("{current_count} current")>
             <div class="server-console-shell route-page-shell">
-                {route_header("Runtime", "Live runs", "Choose a current agent to open its bounded transcript.human.log tail and full control-plane detail.")}
-                <p class="control-plane-meta"><span>{control_plane}</span><span>{generated_at}</span><span>{control_status.clone()}</span></p>
+                {route_header(
+                    "Work",
+                    "Runs",
+                    "Finalized runs sit in Success, Needs Attention, and Failures. Current and Queued have not settled. Open the plan when one was recorded, open transcript.human.log when that log is on disk, or dock the row.",
+                )}
+                <p class="control-plane-meta"><span>{control_plane}</span><span>{generated_at}</span><span>{control_status}</span></p>
                 {not_initialized.then(|| view! {
                     <p class="control-empty">"The server is healthy, but the control plane is not initialized yet."</p>
                 })}
                 {unavailable.then(|| view! {
                     <p class="control-empty control-error">{format!("Control-plane data is unavailable: {control_error}")}</p>
                 })}
-                <section class="control-panel control-panel-wide" aria-label="Active runs" data-source-status=control_status>
-                    <div class="control-panel-head"><h2>"Current agents"</h2><span>{active_count}</span></div>
-                    {(available && active_count == 0).then(|| view! { <p class="control-empty">"No live agents right now."</p> })}
-                    <div class="control-run-list">{run_cards(active)}</div>
-                </section>
-                <section class="control-panel control-panel-wide" aria-label="Stalled runs">
-                    <div class="control-panel-head"><h2>"Stalled"</h2><span>{stalled_count}</span></div>
-                    {(available && stalled_count == 0).then(|| view! { <p class="control-empty">"No stalled runs."</p> })}
-                    <div class="control-run-list">{run_cards(stalled)}</div>
-                </section>
-                <section class="control-panel control-panel-wide" aria-label="Recent state view">
-                    <div class="control-panel-head"><h2>"Recent"</h2><span>{recent_count}</span></div>
-                    {(available && recent_count == 0).then(|| view! { <p class="control-empty">"No recent settled runs."</p> })}
-                    <div class="control-run-list">{run_cards(recent)}</div>
-                </section>
+                <div class="overview-desk-body">
+                    <div class="overview-desk-main">
+                        {run_bucket("Success", "success", success)}
+                        {run_bucket("Needs Attention", "needs-attention", attention)}
+                        {run_bucket("Failures", "failures", failures)}
+                        {run_bucket("Current", "current", current)}
+                        {run_bucket("Queued", "queued", queued)}
+                    </div>
+                    <aside class="overview-inspector doc-pane" id="overview-inspector" aria-label="Run document" hidden>
+                        <div class="doc-tabs" role="tablist" aria-label="Document">
+                            <button type="button" data-doc-tab="transcript" class="is-active">"Transcript"</button>
+                            <button type="button" data-doc-tab="report">"Report"</button>
+                            <button type="button" data-doc-tab="structure">"Structure"</button>
+                        </div>
+                        <article class="doc-sheet" data-doc-panel="transcript">
+                            <p class="doc-kicker">"Run"</p>
+                            <h2 data-inspector-id></h2>
+                            <p class="doc-meta" data-inspector-meta>"Select a row."</p>
+                            <pre class="inspector-tail" data-inspector-tail>"Select a row."</pre>
+                        </article>
+                        <article class="doc-sheet" data-doc-panel="report" hidden>
+                            <p class="doc-kicker">"Report"</p>
+                            <p data-inspector-report>"Select a row."</p>
+                            <p class="control-run-error" data-inspector-error hidden></p>
+                        </article>
+                        <article class="doc-sheet" data-doc-panel="structure" hidden>
+                            <p class="doc-kicker">"Path"</p>
+                            <p data-inspector-root>"Select a row."</p>
+                            <a class="doc-path" data-inspector-open href="/structure">"Open structure"</a>
+                        </article>
+                    </aside>
+                </div>
                 {retained_run_history(settlement)}
             </div>
         </ServerFrame>
@@ -2274,7 +2551,7 @@ pub fn NotFoundPage() -> impl IntoView {
 }
 
 #[cfg(all(test, feature = "ssr"))]
-mod tests {
+pub(crate) mod tests {
     use std::fs;
     use std::io::ErrorKind;
     use std::net::SocketAddr;
@@ -2908,9 +3185,16 @@ mod tests {
 
         assert!(workspaces.contains("Workspace catalog"));
         assert!(sessions.contains("Session attachments"));
-        assert!(runs.contains("Live runs"));
-        assert!(runs.contains("Current agents"));
+        assert!(runs.contains("run-detail-title"));
+        assert!(runs.contains(">Runs<"));
+        assert!(runs.contains(">Success<"));
+        assert!(runs.contains(">Needs Attention<"));
+        assert!(runs.contains(">Failures<"));
+        assert!(runs.contains(">Current<"));
+        assert!(runs.contains(">Queued<"));
         assert!(runs.contains("transcript.human.log"));
+        assert!(!runs.contains("Current agents"));
+        assert!(!runs.contains("<h2>Stalled</h2>"));
         assert!(lifecycle.contains("Action plan"));
         assert!(activity.contains("Runtime context"));
         assert!(activity.contains("Warnings"));
@@ -3164,6 +3448,259 @@ mod tests {
         assert!(!before_catch.contains("AICX unavailable:"));
         let catch = script.split("catch (error)").nth(1).expect("catch");
         assert!(catch.contains("AICX unavailable:"));
+    }
+
+    fn bucket_html<'a>(html: &'a str, id: &str) -> &'a str {
+        let marker = format!("data-run-bucket=\"{id}\"");
+        let start = html
+            .find(&marker)
+            .unwrap_or_else(|| panic!("missing bucket {id}"));
+        let rest = &html[start + marker.len()..];
+        let end = rest.find("data-run-bucket=").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    #[test]
+    pub(crate) fn runs_five_buckets_use_settlement() {
+        let home = temp_home();
+        let runs_dir = home.join("control_plane/runs");
+        fs::create_dir_all(&runs_dir).expect("runs dir");
+        let plan_report = "/var/artifacts/vetcoders/vibecrafted/2026_0925/plans/zen-rooms-ia/reports/w2-02.md";
+
+        let write = |run_id: &str,
+                     state: &str,
+                     health: &str,
+                     verdict: Option<&str>,
+                     tui: Option<&str>,
+                     report: &str,
+                     transcript: &str,
+                     exit_code: Option<i64>| {
+            let payload = json!({
+                "run_id": run_id,
+                "state": state,
+                "agent": "grok",
+                "skill": "implement",
+                "mode": "implement",
+                "root": "/tmp/repo",
+                "operator_session": format!("repo-{run_id}"),
+                "latest_report": report,
+                "latest_transcript": transcript,
+                "last_error": "",
+                "updated_at": "2026-07-22T12:29:30+00:00",
+                "started_at": "2026-07-22T11:59:00+00:00",
+                "health": health,
+                "source": "agent-meta",
+                "lock_present": false,
+                "exit_code": exit_code,
+                "liveness": if health == "active" || health == "stalled" { "live" } else { "terminal" },
+                "launcher_pid": Value::Null,
+                "completed_at": if health == "final" { "2026-07-22T12:00:00+00:00" } else { "" },
+                "session_id": "",
+                "current_loop": Value::Null,
+                "total_loops": Value::Null,
+                "settlement_verdict": verdict,
+                "settlement_tui": tui,
+            });
+            fs::write(
+                runs_dir.join(format!("{run_id}.json")),
+                serde_json::to_vec_pretty(&payload).expect("snapshot JSON"),
+            )
+            .expect("write snapshot");
+        };
+
+        write(
+            "settled-ok",
+            "completed",
+            "final",
+            Some("finalized"),
+            Some("f"),
+            plan_report,
+            "",
+            Some(0),
+        );
+        write(
+            "needs-a-look",
+            "completed",
+            "final",
+            Some("needs_attention"),
+            Some("n"),
+            "",
+            "/tmp/missing-transcript.log",
+            Some(0),
+        );
+        write(
+            "broke",
+            "completed",
+            "final",
+            Some("failed"),
+            Some("x"),
+            "",
+            "",
+            None,
+        );
+        write(
+            "bad-receipt",
+            "completed",
+            "final",
+            Some("invalid"),
+            Some("x"),
+            "",
+            "",
+            Some(1),
+        );
+        write(
+            "exit-zero-unsettled",
+            "completed",
+            "final",
+            None,
+            None,
+            "",
+            "",
+            Some(0),
+        );
+        write(
+            "exit-one-unsettled",
+            "completed",
+            "final",
+            None,
+            Some("x"),
+            "",
+            "",
+            Some(1),
+        );
+        write(
+            "live-now",
+            "running",
+            "active",
+            None,
+            None,
+            plan_report,
+            "",
+            None,
+        );
+        write("stuck", "running", "stalled", None, None, "", "", None);
+
+        let human = home.join("control_plane/runtime_runs/settled-ok");
+        fs::create_dir_all(&human).expect("human transcript dir");
+        fs::write(human.join("transcript.human.log"), "worker said hello\n")
+            .expect("human transcript");
+
+        let queued_id = "cut-waiting";
+        let lifecycle_dir = home.join("control_plane/lifecycle_runs").join(queued_id);
+        fs::create_dir_all(&lifecycle_dir).expect("lifecycle dir");
+        fs::write(
+            lifecycle_dir.join("state.json"),
+            serde_json::to_vec_pretty(&json!({
+                "run_id": queued_id,
+                "workflow": "vc-ship",
+                "agent": "grok",
+                "root": "/tmp/repo",
+                "status": "queued",
+                "updated_at": "2026-07-22T12:29:30+00:00",
+                "owner_pid": std::process::id() as i64,
+                "report_path": plan_report,
+                "transcript_path": "",
+            }))
+            .expect("lifecycle JSON"),
+        )
+        .expect("write lifecycle state");
+
+        let plane = ControlPlane::new(&home);
+        let now = chrono::DateTime::parse_from_rfc3339("2026-07-22T12:30:00+00:00")
+            .expect("fixed now")
+            .with_timezone(&Utc);
+        let dashboard = load_dashboard_data_from(&plane, now);
+        let owner = Owner::new();
+        let html = owner.with(|| {
+            provide_theme_context();
+            runs_dashboard(dashboard).to_html()
+        });
+
+        for heading in [
+            "Success",
+            "Needs Attention",
+            "Failures",
+            "Current",
+            "Queued",
+        ] {
+            assert!(
+                html.contains(&format!("<h2>{heading}</h2>")),
+                "missing heading {heading}"
+            );
+        }
+        for extra in [
+            "stalled",
+            "recent",
+            "invalid",
+            "unclassified",
+            "abandoned",
+            "exit",
+        ] {
+            assert!(
+                !html.contains(&format!("data-run-bucket=\"{extra}\"")),
+                "sixth bucket {extra} must not be invented"
+            );
+        }
+        assert!(!html.contains("<h2>Stalled</h2>"));
+        assert!(!html.contains("<h2>Recent</h2>"));
+        assert!(!html.contains("<h2>Invalid</h2>"));
+
+        let success = bucket_html(&html, "success");
+        let attention = bucket_html(&html, "needs-attention");
+        let failures = bucket_html(&html, "failures");
+        let current = bucket_html(&html, "current");
+        let queued = bucket_html(&html, "queued");
+
+        assert!(success.contains("settled-ok"));
+        assert!(success.contains("data-run-door=\"plan\""));
+        assert!(success.contains("plan_id=zen-rooms-ia"));
+        assert!(success.contains("org=vetcoders"));
+        assert!(success.contains("data-run-door=\"transcript\""));
+        assert!(success.contains("data-run-door=\"dock\""));
+        assert!(success.contains("data-transcript-url="));
+        assert!(!attention.contains("data-run-door=\"transcript\""));
+        assert!(!attention.contains("data-transcript-url="));
+        assert!(attention.contains("data-run-door=\"dock\""));
+        assert!(attention.contains("needs-a-look"));
+        assert!(failures.contains("broke"));
+        assert!(!failures.contains("bad-receipt"));
+        assert!(!failures.contains("exit-one-unsettled"));
+        assert!(!success.contains("exit-zero-unsettled"));
+        assert!(!success.contains("bad-receipt"));
+        assert!(current.contains("live-now"));
+        assert!(
+            current.contains("stuck"),
+            "stalled stays in Current, not a sixth heading"
+        );
+        assert!(current.contains("data-run-door=\"plan\""));
+        assert!(!current.contains("data-run-door=\"transcript\""));
+        assert!(queued.contains("cut-waiting"));
+        assert!(queued.contains("data-run-door=\"plan\""));
+        assert!(html.contains("id=\"overview-inspector\""));
+        assert!(html.contains("data-inspector-id"));
+
+        for (label, slice) in [
+            ("success", success),
+            ("attention", attention),
+            ("failures", failures),
+            ("current", current),
+            ("queued", queued),
+        ] {
+            assert!(
+                !slice.contains("exit-zero-unsettled") || label == "nowhere",
+                "exit 0 without a verdict is not Success ({label})"
+            );
+            assert!(
+                !slice.contains("exit-one-unsettled"),
+                "exit 1 / tui x without verdict failed is not Failures ({label})"
+            );
+            assert!(
+                !slice.contains("bad-receipt"),
+                "invalid is not a bucket ({label})"
+            );
+        }
+
+        fs::remove_dir_all(home).ok();
     }
 }
 

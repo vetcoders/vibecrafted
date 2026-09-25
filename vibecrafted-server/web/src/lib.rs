@@ -8,10 +8,18 @@ pub mod scaffold;
 pub mod theme;
 pub mod tools;
 
+// Delivery gates filter with `--exact` on these bare names. A test nested
+// under `app::tests` is `app::tests::…` and that filter runs nothing.
 #[cfg(all(test, feature = "ssr"))]
 #[test]
 fn overview_welcome_status_and_miniatures() {
     app::overview_welcome_status_and_miniatures();
+}
+
+#[cfg(all(test, feature = "ssr"))]
+#[test]
+fn runs_five_buckets_use_settlement() {
+    app::tests::runs_five_buckets_use_settlement();
 }
 
 #[cfg(feature = "hydrate")]

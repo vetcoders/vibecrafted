@@ -215,6 +215,14 @@ fn confined_human_transcript(
     Some((file, metadata.len()))
 }
 
+/// True when the bounded human transcript is a regular file the detail page
+/// can open. A missing path, a symlink, or a file outside the runtime tree
+/// is not a log.
+#[cfg(feature = "ssr")]
+pub(crate) fn human_transcript_is_open(plane: &control_core::ControlPlane, run_id: &str) -> bool {
+    confined_human_transcript(plane, run_id).is_some()
+}
+
 #[cfg(feature = "ssr")]
 pub(crate) fn snippet_for(body: &str, query: &str) -> String {
     const LIMIT: usize = 160;
