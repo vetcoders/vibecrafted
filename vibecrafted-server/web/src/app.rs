@@ -969,6 +969,7 @@ pub fn App() -> impl IntoView {
                 <Route path=path!("/structure") view=StructurePage />
                 <Route path=path!("/code") view=StructurePage />
                 <Route path=path!("/aicx") view=AicxPage />
+                <Route path=path!("/history") view=HistoryPage />
                 <Route path=path!("/frame") view=FramePage />
                 <Route path=path!("/guide") view=GuidePage />
                 <Route path=path!("/help") view=HelpPage />
@@ -1615,6 +1616,219 @@ pub fn AicxPage() -> impl IntoView {
             </div>
         </ServerFrame>
     }
+}
+
+/// One remembered AICX hit. Plans and Loctree reports are not rows in this room.
+struct HistoryMemory {
+    session_id: String,
+    kind: String,
+    agent: String,
+    date: String,
+    summary: String,
+    reference: String,
+    plan_id: String,
+}
+
+impl HistoryMemory {
+    #[cfg(test)]
+    fn hit(kind: &str, session_id: &str) -> Self {
+        Self {
+            session_id: session_id.to_string(),
+            kind: kind.to_string(),
+            agent: "grok".to_string(),
+            date: "2026-09-25".to_string(),
+            summary: String::new(),
+            reference: format!("/api/aicx/reference?path={session_id}"),
+            plan_id: String::new(),
+        }
+    }
+
+    /// Session or intent memory only. A plan id, a plan kind, or a report kind
+    /// never becomes a row, even when a session id is also present.
+    fn is_remembered(&self) -> bool {
+        if !self.plan_id.trim().is_empty() {
+            return false;
+        }
+        let kind = self.kind.trim().to_ascii_lowercase();
+        if kind == "plan" || kind == "report" || kind.contains("loctree") {
+            return false;
+        }
+        if self.session_id.trim().is_empty() {
+            return false;
+        }
+        kind == "session" || kind == "intent" || kind.is_empty()
+    }
+}
+
+fn history_page_script() -> &'static str {
+    r#"(() => {
+  const form = document.getElementById('history-search-form');
+  const q = document.getElementById('history-search-query');
+  const project = document.getElementById('history-search-project');
+  const status = document.getElementById('history-memory-status');
+  const empty = document.getElementById('history-memory-empty');
+  const results = document.getElementById('history-memory-list');
+  if (!form || !q || !status || !results) return;
+  const roomEmpty = 'History & context has no remembered sessions or intents yet.';
+  const remembered = (item) => {
+    if (!item || item.plan_id) return false;
+    const kind = String(item.kind || '').toLowerCase();
+    if (kind === 'plan' || kind === 'report' || kind.indexOf('loctree') !== -1) return false;
+    const session = String(item.session_id || '').trim();
+    if (!session) return false;
+    return kind === 'session' || kind === 'intent' || kind === '';
+  };
+  const paint = (items) => {
+    results.replaceChildren();
+    const rows = (items || []).filter(remembered);
+    if (empty) empty.hidden = rows.length !== 0;
+    status.textContent = rows.length ? (rows.length + ' remembered') : roomEmpty;
+    for (const item of rows) {
+      const li = document.createElement('li');
+      const kind = String(item.kind || 'session').toLowerCase() === 'intent' ? 'intent' : 'session';
+      li.className = 'history-memory-row';
+      li.setAttribute('data-memory', kind);
+      const reference = String(item.reference || '');
+      const label = String(item.session_id);
+      if (reference.indexOf('/api/aicx/reference') === 0) {
+        const a = document.createElement('a');
+        a.href = reference;
+        a.className = 'control-run-open';
+        a.textContent = label;
+        li.append(a);
+      } else {
+        const strong = document.createElement('strong');
+        strong.textContent = label;
+        li.append(strong);
+      }
+      const meta = document.createElement('span');
+      meta.textContent = [kind, item.agent, item.date].filter(Boolean).join(' · ');
+      li.append(meta);
+      const summary = document.createElement('span');
+      summary.textContent = (item.matches || []).join(' ');
+      li.append(summary);
+      results.append(li);
+    }
+  };
+  const runSearch = async () => {
+    const query = q.value.trim();
+    if (!query || query.startsWith('-') || query.length > 512) {
+      status.textContent = 'History & context needs a query of at most 512 characters.';
+      return;
+    }
+    const scope = project ? project.value.trim() : '';
+    if (scope && !/^[\w][\w.-]{0,63}\/[\w][\w.-]{0,63}$/.test(scope)) {
+      status.textContent = 'Project must be an owner/repo slug (for example vetcoders/vibecrafted).';
+      return;
+    }
+    status.textContent = 'Reading AICX…';
+    const params = new URLSearchParams({ q: query });
+    if (scope) params.set('project', scope);
+    try {
+      const response = await fetch('/api/aicx/search?' + params.toString(), {
+        credentials: 'same-origin',
+        cache: 'no-store'
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        status.textContent = payload.error || ('AICX search failed (HTTP ' + response.status + ')');
+        return;
+      }
+      paint(payload.items || []);
+    } catch (error) {
+      status.textContent = 'History & context could not read AICX: ' + error.message;
+    }
+  };
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    runSearch();
+  });
+  const initial = new URLSearchParams(location.search).get('q') || '';
+  if (initial.trim()) {
+    q.value = initial.trim();
+    runSearch();
+  }
+})();"#
+}
+
+fn history_view(hits: Vec<HistoryMemory>) -> impl IntoView {
+    let remembered: Vec<HistoryMemory> = hits
+        .into_iter()
+        .filter(HistoryMemory::is_remembered)
+        .collect();
+    let count = remembered.len();
+    let show_empty = count == 0;
+    view! {
+        <Title text="History & context - vc-server" />
+        <Meta name="description" content="Sessions and intents this host remembers, from the local AICX corpus." />
+        <ServerFrame active=ServerSection::Structure status=format!("{count} remembered")>
+            <div class="server-console-shell route-page-shell" data-history-room>
+                {route_header(
+                    "Trace",
+                    "History & context",
+                    "Sessions and intents the work remembered. This room queries the local AICX search and opens a hit only through the server reference route.",
+                )}
+                <section class="control-panel control-panel-wide" aria-label="Remembered sessions and intents">
+                    <div class="control-panel-head">
+                        <h2>"Remembered"</h2>
+                        <span>{count}</span>
+                    </div>
+                    <form id="history-search-form" class="server-console-links" action="/api/aicx/search" method="get">
+                        <input id="history-search-query" name="q" type="search" required=true maxlength="512" placeholder="Name a session or intent" />
+                        <input id="history-search-project" name="project" type="text" maxlength="129" placeholder="owner/repo (optional)" />
+                        <button class="server-console-link server-console-link-primary" type="submit">"Show memory"</button>
+                    </form>
+                    <p id="history-memory-status" class="control-plane-meta">"The list is AICX memory."</p>
+                    {show_empty.then(|| view! {
+                        <p id="history-memory-empty" class="control-empty">"History & context has no remembered sessions or intents yet."</p>
+                    })}
+                    <ul id="history-memory-list" class="control-warning-list">
+                        {remembered.into_iter().map(|hit| {
+                            let kind = if hit.kind.eq_ignore_ascii_case("intent") {
+                                "intent".to_string()
+                            } else {
+                                "session".to_string()
+                            };
+                            let session_label = hit.session_id.clone();
+                            let reference = hit.reference.clone();
+                            let linked = reference.starts_with("/api/aicx/reference");
+                            let agent = hit.agent.clone();
+                            let date = hit.date.clone();
+                            let summary = hit.summary.clone();
+                            let memory_kind = kind.clone();
+                            view! {
+                                <li class="history-memory-row" data-memory=memory_kind>
+                                    {linked.then(|| view! {
+                                        <a class="control-run-open" href=reference>{session_label.clone()}</a>
+                                    })}
+                                    {(!linked).then(|| view! {
+                                        <strong>{session_label.clone()}</strong>
+                                    })}
+                                    <span>{kind}</span>
+                                    <span>{agent}</span>
+                                    <span>{date}</span>
+                                    <span>{summary}</span>
+                                </li>
+                            }
+                        }).collect_view()}
+                    </ul>
+                    <script inner_html=history_page_script()></script>
+                </section>
+            </div>
+        </ServerFrame>
+    }
+}
+
+#[component]
+pub fn HistoryPage() -> impl IntoView {
+    history_view(Vec::new())
+}
+
+/// Crate-root test name. `cargo test -- --exact history_is_aicx_not_plans`
+/// only matches a test at the lib root, not `app::tests::…`.
+#[cfg(all(test, feature = "ssr"))]
+pub(crate) fn history_is_aicx_not_plans_proof() {
+    tests::history_room_proof();
 }
 
 #[component]
@@ -3336,11 +3550,7 @@ pub(crate) mod tests {
 
     use super::{
         ActivityPage, AicxPage, ConsolePage, DashboardData, DashboardRun, DashboardSession,
-        DashboardSessionRun, FramePage, LifecyclePage, RunsPage, SessionsPage, StructurePage,
-        TranscriptsPage, UsagePage, WorkspacesPage, aicx_page_script, console_dashboard,
-        decode_dashboard_embed, encode_dashboard_embed, git_repo_name, load_dashboard_data_from,
-        operator_active_runs, projects_frame, run_cards, runs_dashboard, session_cards,
-        snapshot_from_plans, unique_runtime_labels, workspaces_dashboard,
+        DashboardSessionRun, FramePage, HistoryMemory, HistoryPage, LifecyclePage, RunsPage, SessionsPage, StructurePage, TranscriptsPage, UsagePage, WorkspacesPage, aicx_page_script, console_dashboard, decode_dashboard_embed, encode_dashboard_embed, git_repo_name, history_view, load_dashboard_data_from, operator_active_runs, projects_frame, run_cards, runs_dashboard, session_cards, snapshot_from_plans, unique_runtime_labels, workspaces_dashboard,
     };
     use crate::control::api::{control_routes_for, state_payload};
     use crate::scaffold::api::project_shelf;
@@ -4878,6 +5088,55 @@ pub(crate) mod tests {
         assert!(super::save_named_skill_in(&[root], "not-a-skill", "nope").is_err());
 
         fs::remove_dir_all(home).ok();
+    }
+
+    pub(super) fn history_room_proof() {
+        let mut plan = HistoryMemory::hit("plan", "should-not-render");
+        plan.plan_id = "zen-rooms-ia".to_string();
+        plan.summary = "scaffold plan card".to_string();
+        let mut report = HistoryMemory::hit("report", "loctree-report-session");
+        report.summary = "loctree-report.html".to_string();
+        let session = HistoryMemory::hit("session", "remembered-session-ac121475");
+        let intent = HistoryMemory::hit("intent", "intent-cut-w4-03");
+
+        let owner = Owner::new();
+        let (remembered, empty) = owner.with(|| {
+            leptos_meta::provide_meta_context();
+            provide_theme_context();
+            (
+                history_view(vec![session, intent, plan, report]).to_html(),
+                HistoryPage().to_html(),
+            )
+        });
+
+        assert!(remembered.contains("<h1 class=\"run-detail-title\">History &amp; context</h1>"));
+        assert_eq!(
+            remembered.matches("class=\"history-memory-row\"").count(),
+            2
+        );
+        assert!(remembered.contains("data-memory=\"session\""));
+        assert!(remembered.contains("data-memory=\"intent\""));
+        assert!(remembered.contains("remembered-session-ac121475"));
+        assert!(remembered.contains("intent-cut-w4-03"));
+        assert!(remembered.contains("/api/aicx/search"));
+        assert!(remembered.contains("/api/aicx/reference?path=remembered-session-ac121475"));
+        assert!(remembered.contains("/api/aicx/reference?path=intent-cut-w4-03"));
+        assert!(!remembered.contains("zen-rooms-ia"));
+        assert!(!remembered.contains("should-not-render"));
+        assert!(!remembered.contains("loctree-report"));
+        assert!(!remembered.contains("plan-card"));
+        assert!(!remembered.contains("data-ppm=\"plan\""));
+        assert!(!remembered.contains("id=\"history-memory-empty\""));
+
+        assert!(empty.contains("<h1 class=\"run-detail-title\">History &amp; context</h1>"));
+        assert!(empty.contains("History &amp; context has no remembered sessions or intents yet."));
+        assert!(empty.contains("data-history-room"));
+        assert!(empty.contains("/api/aicx/search"));
+        assert!(empty.contains("/api/aicx/reference"));
+        assert!(!empty.contains("class=\"history-memory-row\""));
+        assert!(!empty.contains("plan-card"));
+        assert!(!empty.contains("zen-rooms-ia"));
+        assert!(!empty.contains("loctree-report"));
     }
 }
 

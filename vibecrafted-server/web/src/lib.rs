@@ -42,6 +42,12 @@ fn code_intelligence_is_not_a_plan_library() {
     app::code_intelligence_is_not_a_plan_library();
 }
 
+#[cfg(all(test, feature = "ssr"))]
+#[test]
+fn history_is_aicx_not_plans() {
+    crate::app::history_is_aicx_not_plans_proof();
+}
+
 #[cfg(feature = "hydrate")]
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn hydrate() {
