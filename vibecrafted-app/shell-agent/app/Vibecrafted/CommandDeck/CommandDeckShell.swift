@@ -14,11 +14,17 @@ extension Notification.Name {
 struct CommandDeckShell<Workspace: View>: View {
   let phase: CommandDeckPhase
   var openPath: ((String) -> Void)?
+  var frameOrigin: (() -> URL?)?
+  var presentFrame: (() -> Bool)?
+  var restoreFrame: (() -> Void)?
   @ViewBuilder var workspace: () -> Workspace
 
   @State private var selection: CommandDeckDestination? = .overview
   @State private var columnVisibility = NavigationSplitViewVisibility.all
   @State private var inspectorPresented = false
+  @State private var projectingFrame = false
+  @State private var sidebarBeforeProjection: NavigationSplitViewVisibility?
+  @State private var inspectorBeforeProjection = false
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   var body: some View {
@@ -26,16 +32,31 @@ struct CommandDeckShell<Workspace: View>: View {
       CommandDeckSidebar(selection: $selection, phase: phase)
         .navigationSplitViewColumnWidth(min: 180, ideal: 220, max: 280)
     } detail: {
-      workspace()
-        .navigationTitle(selection?.title ?? "Vibecrafted")
-        .toolbar {
-          CommandDeckColumnToggles(
-            sidebarHidden: columnVisibility == .detailOnly,
-            inspectorPresented: inspectorPresented,
-            toggleSidebar: toggleSidebar,
-            toggleInspector: toggleInspector
-          )
+      VStack(spacing: 0) {
+        if projectingFrame {
+          FrameProjectionBar(onBack: restoreDashboardFromFrame)
         }
+        ZStack(alignment: .bottomTrailing) {
+          workspace()
+          if frameOrigin != nil, !projectingFrame {
+            FrameProjectionMarkButton(
+              available: frameOrigin?() != nil,
+              present: activateFrame
+            )
+            .padding(.trailing, 16)
+            .padding(.bottom, 12)
+          }
+        }
+      }
+      .navigationTitle(projectingFrame ? "Frame" : (selection?.title ?? "Vibecrafted"))
+      .toolbar {
+        CommandDeckColumnToggles(
+          sidebarHidden: columnVisibility == .detailOnly,
+          inspectorPresented: inspectorPresented,
+          toggleSidebar: toggleSidebar,
+          toggleInspector: toggleInspector
+        )
+      }
     }
     .inspector(isPresented: $inspectorPresented) {
       CommandDeckInspector(phase: phase)
@@ -43,8 +64,9 @@ struct CommandDeckShell<Workspace: View>: View {
     }
     .animation(reduceMotion ? nil : .easeInOut(duration: CommandDeckMetrics.motionDuration), value: columnVisibility)
     .animation(reduceMotion ? nil : .easeInOut(duration: CommandDeckMetrics.motionDuration), value: inspectorPresented)
+    .animation(reduceMotion ? nil : .easeInOut(duration: CommandDeckMetrics.motionDuration), value: projectingFrame)
     .onChange(of: selection) { _, destination in
-      guard let destination else { return }
+      guard !projectingFrame, let destination else { return }
       openPath?(destination.path)
     }
     .onReceive(NotificationCenter.default.publisher(for: .commandDeckToggleSidebar)) { _ in
@@ -55,12 +77,82 @@ struct CommandDeckShell<Workspace: View>: View {
     }
   }
 
+  private func activateFrame() {
+    guard frameOrigin?() != nil else { return }
+    guard presentFrame?() == true else { return }
+    sidebarBeforeProjection = columnVisibility
+    inspectorBeforeProjection = inspectorPresented
+    projectingFrame = true
+    columnVisibility = .detailOnly
+    inspectorPresented = false
+  }
+
+  private func restoreDashboardFromFrame() {
+    restoreFrame?()
+    projectingFrame = false
+    if let sidebarBeforeProjection {
+      columnVisibility = sidebarBeforeProjection
+    }
+    self.sidebarBeforeProjection = nil
+    inspectorPresented = inspectorBeforeProjection
+  }
+
   private func toggleSidebar() {
+    guard !projectingFrame else { return }
     columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
   }
 
   private func toggleInspector() {
+    guard !projectingFrame else { return }
     inspectorPresented.toggle()
+  }
+}
+
+/// Thin bar above the projected web view. The way back stays in this window.
+private struct FrameProjectionBar: View {
+  let onBack: () -> Void
+
+  @Environment(\.commandDeckTheme) private var theme
+
+  var body: some View {
+    HStack(spacing: 8) {
+      Button("Back", systemImage: "chevron.backward", action: onBack)
+        .buttonStyle(.borderless)
+        .accessibilityLabel("Back to dashboard")
+        .help("Back. Returns to the dashboard in this window.")
+      Spacer(minLength: 0)
+      Text("Frame")
+        .font(.caption)
+        .foregroundStyle(theme.palette.muted)
+    }
+    .padding(.horizontal, 10)
+    .padding(.vertical, 4)
+    .background(theme.palette.surfaceRaised)
+    .overlay(alignment: .bottom) {
+      Rectangle().fill(theme.palette.stroke).frame(height: theme.strokeWidth)
+    }
+  }
+}
+
+struct FrameProjectionMarkButton: View {
+  let available: Bool
+  let present: () -> Void
+
+  var body: some View {
+    Button(action: present) {
+      Text(FrameProjectionMark.label)
+        .font(.caption.monospaced().weight(.medium))
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+    }
+    .buttonStyle(.plain)
+    .disabled(!available)
+    .opacity(available ? 1 : 0.4)
+    .foregroundStyle(available ? .primary : .secondary)
+    .help(available ? "Open Frame. Shows the configured frame in this window." : "Frame is not available.")
+    .accessibilityLabel(FrameProjectionMark.label)
+    .accessibilityValue(available ? "available" : "unavailable")
+    .fixedSize()
   }
 }
 

@@ -362,6 +362,53 @@ struct CommandDeckIntegrationTests {
       "Generated report must be isolated; trusted runtime and local dashboards keep their normal stores")
   }
 
+  /// The corner mark is not a sidebar destination. A configured loopback URL
+  /// still binds through FrameWebLaunch, and only the mark calls present(service:).
+  static func frameProjectionContract(_ endpoint: URL) throws {
+    try require(FrameProjectionMark.label == "vc_", "The corner mark is not vc_")
+    try require(!FrameProjectionMark.isSidebarDestination(),
+      "The vc_ mark is a CommandDeckDestination")
+    let loopback = URL(string: "http://127.0.0.1:8082/")!
+    try require(
+      FrameWebLaunch.bind(url: loopback)?.startArguments == ["web", "--ip", "127.0.0.1", "--port", "8082"],
+      "Configured loopback URL did not bind via FrameWebLaunch")
+    try require(FrameWebLaunch.bind(url: URL(string: "https://127.0.0.1:8082/")!) == nil,
+      "HTTPS Frame origins must not bind")
+    try require(FrameWebLaunch.bind(url: URL(string: "http://10.0.0.8:8082/")!) == nil,
+      "Non-loopback Frame origins must not bind")
+    try require(FrameWebLaunch.bind(url: URL(string: "http://127.0.0.1:9090/")!)?.port == 9090,
+      "A non-default Frame port must come from the named URL")
+
+    let model = AppModel()
+    let session = WebConsoleSession(
+      websiteDataStore: .nonPersistent(), initialLoadTimeout: .milliseconds(200),
+      downloadDestinationProvider: { _, _, _ in nil })
+    session.apply(endpoint: endpoint)
+    let frameURL = URL(string: "http://127.0.0.1:9/")!
+    let controller = MainWindowController(model: model, session: session, actions: Actions())
+    controller.frameWebURL = { frameURL }
+    controller.openWorkspacePath("/frame")
+    guard case .runtime = session.scope else {
+      throw Failure(message: "A sidebar path presented the frame origin")
+    }
+    try require(controller.presentConfiguredFrame(), "The mark did not present the configured origin")
+    guard case .service(let origin) = session.scope, origin == WebRuntimeOrigin(url: frameURL) else {
+      throw Failure(message: "present(service:) was not reached from the mark")
+    }
+    controller.restoreFromFrame()
+    guard case .runtime(let restored) = session.scope, restored == WebRuntimeOrigin(url: endpoint) else {
+      throw Failure(message: "Back did not restore the product console in this window")
+    }
+    controller.frameWebURL = { nil }
+    try require(!controller.presentConfiguredFrame(), "An absent frame URL still presented")
+    guard case .runtime = session.scope else {
+      throw Failure(message: "The quiet mark changed the window")
+    }
+    session.webView.stopLoading()
+    controller.close()
+    print("Witness: vc_ mark presents the configured origin; sidebar path and absent URL do not")
+  }
+
   static func hasFixtureCookie(_ store: WKHTTPCookieStore) async -> Bool {
     await withCheckedContinuation { continuation in
       store.getAllCookies { cookies in
@@ -1118,6 +1165,7 @@ struct CommandDeckIntegrationTests {
     try authenticationAndDownloadContract(endpoint)
     try tabPolicyContract(endpoint)
     try destinationContract(endpoint)
+    try frameProjectionContract(endpoint)
     try await webContract(endpoint)
     try await inlineScriptSuccessContract(endpoint)
     try await firstLoadTimeoutContract(endpoint, reconnectEndpoint: reconnectEndpoint)
