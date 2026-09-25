@@ -199,3 +199,55 @@ fn settings_one_room_six_groups() {
 
     fs::remove_dir_all(home).ok();
 }
+
+// Crate-root name: the delivery gate filters `--exact diagnostics_is_not_runs`.
+// A test inside `app::tests` would be `app::tests::diagnostics_is_not_runs` and
+// that exact filter would run nothing.
+#[cfg(all(test, feature = "ssr"))]
+#[test]
+fn diagnostics_is_not_runs() {
+    use leptos::prelude::*;
+
+    use crate::app::{DiagnosticsPage, diagnostics_room};
+    use crate::theme::provide_theme_context;
+
+    let owner = Owner::new();
+    let page = owner.with(|| {
+        leptos_meta::provide_meta_context();
+        provide_theme_context();
+        DiagnosticsPage().to_html()
+    });
+    let room_at = page
+        .find("id=\"diagnostics-room\"")
+        .expect("diagnostics room");
+    let html = &page[room_at..];
+    let room = owner.with(|| {
+        leptos_meta::provide_meta_context();
+        provide_theme_context();
+        diagnostics_room().to_html()
+    });
+    for html in [html, room.as_str()] {
+        assert!(html.contains("Diagnostics"), "{html}");
+        assert!(html.contains("Logs"), "{html}");
+        assert!(html.contains("Events"), "{html}");
+        assert!(html.contains("Server health"), "{html}");
+        assert!(html.contains("Process stats"), "{html}");
+        assert!(html.contains("health"), "{html}");
+        assert!(html.contains("logs"), "{html}");
+        assert!(html.contains("events"), "{html}");
+        assert!(html.contains("vc-monitor"), "{html}");
+        assert!(html.contains(">cleanup<"), "{html}");
+        for title in [
+            "Success",
+            "Needs Attention",
+            "Failures",
+            "Current",
+            "Queued",
+        ] {
+            assert!(
+                !html.contains(title),
+                "run bucket {title} leaked onto diagnostics: {html}"
+            );
+        }
+    }
+}

@@ -979,6 +979,7 @@ pub fn App() -> impl IntoView {
                 <Route path=path!("/skills") view=SkillsPage />
                 <Route path=path!("/skills/:name") view=SkillEditorPage />
                 <Route path=path!("/settings") view=SettingsPage />
+                <Route path=path!("/diagnostics") view=DiagnosticsPage />
                 <Route path=path!("/run/:run_id") view=RunDetailPage />
             </Routes>
         </Router>
@@ -4392,6 +4393,80 @@ pub fn SettingsPage() -> impl IntoView {
                     </p>
                 </form>
             </div>
+        </ServerFrame>
+    }
+}
+
+/// Machine room. Run buckets stay on Runs. Nav highlight stays on the
+/// existing Activity rail until the sidebar cut owns the Diagnostics door.
+pub(crate) fn diagnostics_room() -> impl IntoView {
+    view! {
+        <div id="diagnostics-room" class="server-console-shell route-page-shell">
+            {route_header(
+                "Machine",
+                "Diagnostics",
+                "When something is wrong, this is the machine. Logs, events, tools, server health, and process stats. Agent runs stay on their own door.",
+            )}
+            <section class="control-panel control-panel-wide" id="diagnostics-logs" aria-label="Logs">
+                <div class="control-panel-head"><h2>"Logs"</h2><span>"transcripts"</span></div>
+                <p class="route-page-description">
+                    "Human logs stay on the transcript surface. The mobile nav already calls that door Logs. This room does not copy them into a second list."
+                </p>
+                <p class="server-console-links">
+                    <a class="server-console-link server-console-link-primary" href="/transcripts">"Open logs"</a>
+                    <a class="server-console-link" href="/api/control/transcripts">"Transcript index"</a>
+                </p>
+            </section>
+            <section class="control-panel control-panel-wide" id="diagnostics-events" aria-label="Events">
+                <div class="control-panel-head"><h2>"Events"</h2><span>"tail"</span></div>
+                <p class="route-page-description">
+                    "Control-plane events stay on the activity tail and the cursorable events feed."
+                </p>
+                <p class="server-console-links">
+                    <a class="server-console-link server-console-link-primary" href="/activity">"Open events"</a>
+                    <a class="server-console-link" href="/api/control/events">"Event stream"</a>
+                </p>
+            </section>
+            <section class="control-panel control-panel-wide" id="diagnostics-tools" aria-label="Tools">
+                <div class="control-panel-head"><h2>"Tools"</h2><span>"existing"</span></div>
+                <ul class="operator-guide-list">
+                    <li>
+                        <strong>"cleanup"</strong>
+                        <span>"The existing worktree cleanup removes a settled worker checkout. It is not a new binary and not a daemon."</span>
+                    </li>
+                </ul>
+            </section>
+            <section class="control-panel control-panel-wide" id="diagnostics-health" aria-label="Server health">
+                <div class="control-panel-head"><h2>"Server health"</h2><span>"readiness"</span></div>
+                <p class="route-page-description">
+                    "Server health is the existing constant-time readiness check at /api/health. It does not scan retained history. The caretaker envelope remains the health verdict."
+                </p>
+                <p class="server-console-links">
+                    <a class="server-console-link server-console-link-primary" href="/api/health">"Open server health"</a>
+                    <a class="server-console-link" href="/api/control/caretaker">"Caretaker envelope"</a>
+                </p>
+            </section>
+            <section class="control-panel control-panel-wide" id="diagnostics-process-stats" aria-label="Process stats">
+                <div class="control-panel-head"><h2>"Process stats"</h2><span>"vc-monitor"</span></div>
+                <p class="route-page-description">
+                    "Process stats stay on vc-monitor. Run observation already records that witness and does not project a second process table onto this page."
+                </p>
+                <pre class="control-plane-meta" data-monitor-source="vc-monitor">"vc-monitor"</pre>
+                <p class="server-console-links">
+                    <a class="server-console-link server-console-link-primary" href="/api/control/observability">"Observability index"</a>
+                </p>
+            </section>
+        </div>
+    }
+}
+
+#[component]
+pub fn DiagnosticsPage() -> impl IntoView {
+    view! {
+        <Title text="diagnostics - vc-server" />
+        <Meta name="description" content="Logs, events, tools, server health, and process stats." />
+        <ServerFrame active=ServerSection::Activity status="diagnostics".to_string()>
+            {diagnostics_room()}
         </ServerFrame>
     }
 }
