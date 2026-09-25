@@ -49,7 +49,8 @@ def test_windows_installer_identity_matches_version_and_upgrade_code() -> None:
     build = BUILD_SCRIPT.read_text(encoding="utf-8")
 
     assert f'UpgradeCode = "{STABLE_UPGRADE_CODE}"' in identity
-    assert 'ProductName = "Vibecrafted"' in identity
+    assert 'ProductName = "Vibecrafted. Framework"' in identity
+    assert 'ProductName = "Vibecrafted"' not in identity
     assert 'ProductVersion = "0.0.0.0"' in identity
     assert "<?include Identity.wxi ?>" in product
     assert "<?include Identity.wxi ?>" in bundle
@@ -270,6 +271,12 @@ def test_windows_installer_license_comes_from_repo_license() -> None:
     assert "WixUI_Minimal" in product
     assert "WixUILicenseRtf" in product
     assert "License.rtf" in product
+    assert 'WixVariable Id="WixUIBannerBmp" Value="banner.bmp"' in product
+    assert 'WixVariable Id="WixUIDialogBmp" Value="dialog.bmp"' in product
+    assert "WixUI_Bmp_Banner" not in product
+    assert (PACKAGING / "assets" / "banner.bmp").is_file()
+    assert (PACKAGING / "assets" / "dialog.bmp").is_file()
+    assert (PACKAGING / "assets" / "burn-logo.bmp").is_file()
     assert "ARPHELPLINK" in product
     assert "SECURITY.md" in product
     assert "hello@vetcoders.io" in product
@@ -278,13 +285,18 @@ def test_windows_installer_license_comes_from_repo_license() -> None:
 
     assert "RtfLicense" in bundle
     assert 'LicenseFile="License.rtf"' in bundle
+    assert 'LogoFile="burn-logo.bmp"' in bundle
     assert "HyperlinkLicense" not in bundle
 
     assert "License.rtf" in build
     assert "WixUIExtension" in build
+    assert "WixUIBannerBmp" in build
+    assert "burn-logo.bmp" in build
     assert "Business Source License" in build
     assert "License.rtf" in readme
     assert "BUSL" in readme or "LICENSE" in readme
+    assert "Vibecrafted. Framework" in identity
+    assert "banner.bmp" in readme or "near-black" in readme or "0a0a0b" in readme
 
 
 def test_windows_license_rtf_is_regenerated_from_repo_license() -> None:
@@ -304,6 +316,8 @@ def test_windows_license_rtf_is_regenerated_from_repo_license() -> None:
 
     assert rendered.startswith("{\\rtf1")
     assert rendered.isascii()
+    assert "\\uc1" not in rendered
+    assert "\\rtf1\\ansi\\ansicpg1252" in rendered
     assert "\r" not in rendered
     assert "\x00" not in rendered
     assert on_disk == rendered
@@ -322,15 +336,20 @@ def test_windows_license_rtf_is_regenerated_from_repo_license() -> None:
     assert main(["--check"]) == 0
 
     assert 'WixVariable Id="WixUILicenseRtf" Value="License.rtf"' in product
+    assert 'WixVariable Id="WixUIBannerBmp" Value="banner.bmp"' in product
+    assert 'WixVariable Id="WixUIDialogBmp" Value="dialog.bmp"' in product
     assert "WixUI_Minimal" in product
     assert (
         'BootstrapperApplicationRef Id="WixStandardBootstrapperApplication.RtfLicense"'
         in bundle
     )
     assert 'LicenseFile="License.rtf"' in bundle
+    assert 'LogoFile="burn-logo.bmp"' in bundle
     assert "windows_license_rtf.py" in build
     assert "--write" in build
     assert "License.rtf is not RTF" in build
+    assert "banner.bmp" in build
+    assert "refusing stock WixUI red-CD" in build
 
 
 def test_windows_license_rtf_check_fails_when_file_is_plain_text(

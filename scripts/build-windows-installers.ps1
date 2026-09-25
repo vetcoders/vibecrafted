@@ -256,13 +256,29 @@ if ($productBody -notmatch "LocalAppDataFolder") {
 if ($productBody -notmatch "WixUILicenseRtf" -or $productBody -notmatch "WixUI_Minimal") {
     Die "Product.wxs must wire WixUI_Minimal + WixUILicenseRtf for the BUSL license dialog"
 }
+if ($productBody -notmatch "WixUIBannerBmp" -or $productBody -notmatch "WixUIDialogBmp") {
+    Die "Product.wxs must override WixUIBannerBmp and WixUIDialogBmp (no stock red-CD face)"
+}
 if ($productBody -notmatch "LaunchVcTerminal") {
     Die "Product.wxs must launch vc-terminal after install"
 }
 $productBody = $productBody.Replace("REPLACE_PACK_BASENAME", $packBasename)
 Write-Utf8NoBom -Path $productWork -Content $productBody
-Copy-Item $bundleTemplate (Join-Path $work "Bundle.wxs")
+$bundleWork = Join-Path $work "Bundle.wxs"
+$bundleBody = Get-Content -LiteralPath $bundleTemplate -Raw
+if ($bundleBody -notmatch "LogoFile=`"burn-logo\.bmp`"") {
+    Die "Bundle.wxs must set LogoFile=burn-logo.bmp (no stock Burn logo)"
+}
+Write-Utf8NoBom -Path $bundleWork -Content $bundleBody
 Copy-Item $licenseRtf (Join-Path $work "License.rtf")
+$assetsRoot = Join-Path $packagingRoot "assets"
+foreach ($bmpName in @("banner.bmp", "dialog.bmp", "burn-logo.bmp")) {
+    $bmpSrc = Join-Path $assetsRoot $bmpName
+    if (-not (Test-Path -LiteralPath $bmpSrc -PathType Leaf)) {
+        Die "missing installer chrome bitmap: $bmpSrc (refusing stock WixUI red-CD defaults)"
+    }
+    Copy-Item $bmpSrc (Join-Path $work $bmpName)
+}
 
 $msiOut = Join-Path $OutDir "Vibecrafted.msi"
 $exeOut = Join-Path $OutDir "Vibecrafted.exe"
