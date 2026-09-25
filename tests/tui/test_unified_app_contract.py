@@ -4139,7 +4139,8 @@ def test_terminal_policy_uses_operator_toml_and_primary_shell_chain() -> None:
     assert 'generation / "config/vc-terminal/themes/dark.toml"' in installer
     assert 'tomllib.loads(theme.read_text(encoding="utf-8"))' in installer
     assert "_materialize_runtime_generation_vc_terminal_entry" in installer
-    assert 'generation / "libexec/vc-terminal"' in installer
+    # 7034a498 spells the host path per segment so Windows can prefer .exe.
+    assert 'generation / "libexec" / "vc-terminal"' in installer
     assert 'let socketRoot = "/tmp/vc-frame-\\(getuid())"' in delegate
     assert 'environment["VC_FRAME_SOCKET_DIR"] = socketRoot' in delegate
     assert 'environment["ZELLIJ_SOCKET_DIR"] = socketRoot' in delegate
