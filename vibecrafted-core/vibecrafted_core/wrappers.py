@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from . import control_plane
+from .env_allowlist import filter_headless_worker_env
 from .events import append_event
 from .help_surface import AGENT_SELECTOR
 from .package_resources import deck_path, package_root, runtime_path
@@ -132,7 +133,7 @@ def _env_for_run(run_id: str, skill_code: str) -> dict[str, str]:
     env["PYTHONPATH"] = f"{core_path}{os.pathsep}{env.get('PYTHONPATH', '')}".rstrip(
         os.pathsep
     )
-    return env
+    return filter_headless_worker_env(env)
 
 
 def _dispatcher_command(

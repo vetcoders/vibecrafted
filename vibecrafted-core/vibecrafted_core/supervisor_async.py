@@ -26,6 +26,7 @@ from .control_plane import (
     event_resume_cursor,
     normalize_run_root,
 )
+from .env_allowlist import dispatcher_identity, filter_headless_worker_env
 from .events import append_event
 from .failure_attribution import attribute_failure
 from .lifecycle import EventKind, RunState
@@ -494,6 +495,9 @@ class AsyncSupervisor:
             transcript.parent.mkdir(parents=True, exist_ok=True)
         prompt_file = Path(prompt_file_path).expanduser() if prompt_file_path else None
 
+        # Parent identity before the caller overlay replaces VIBECRAFTED_AGENT
+        # with the worker. The child process must not see the parent bus.
+        dispatcher = dispatcher_identity(os.environ)
         merged_env = os.environ.copy()
         if env:
             merged_env.update(env)
@@ -544,6 +548,7 @@ class AsyncSupervisor:
             else None
         )
         agent_model = resolve_default_model(agent, command=command, env=merged_env)
+        launch_env = filter_headless_worker_env(merged_env)
         model_receipt = _model_override_receipt(
             agent, str(merged_env.get("VIBECRAFTED_MODEL_REQUESTED") or "")
         )
@@ -600,7 +605,7 @@ class AsyncSupervisor:
             process = await asyncio.create_subprocess_exec(
                 *command,
                 cwd=str(cwd),
-                env=merged_env,
+                env=launch_env,
                 stdin=stdin_handle,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
@@ -692,6 +697,7 @@ class AsyncSupervisor:
                     ):
                         if origin.get(field):
                             latest.setdefault(field, origin[field])
+                    latest.setdefault("dispatcher", dict(dispatcher))
                     latest.setdefault("run_id", run_id)
                     latest.setdefault("root", str(cwd))
                     latest.setdefault("agent", agent)
