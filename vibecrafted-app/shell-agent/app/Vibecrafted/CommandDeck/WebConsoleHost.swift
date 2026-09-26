@@ -169,8 +169,9 @@ final class WebConsoleSession: NSObject {
     webView.navigationDelegate = self
     webView.uiDelegate = self
     webView.allowsBackForwardNavigationGestures = true
-    // Avoids a white flash before first paint and follows the system
-    // appearance; the visual identity itself belongs to the deck's theme.
+    // The page theme follows this appearance. A light web view inside a
+    // dark window is how Cost & usage lost its dark tokens.
+    webView.appearance = NSApp.effectiveAppearance
     webView.underPageBackgroundColor = .windowBackgroundColor
     webView.setAccessibilityLabel(role == .console ? "Vibecrafted server console" : "Vibecrafted \(role.rawValue) view")
     #if DEBUG

@@ -231,7 +231,7 @@ struct CommandDeckToolbar: ToolbarContent {
 
   var body: some ToolbarContent {
     ToolbarItemGroup(placement: .primaryAction) {
-      if shows(.retryConnection) {
+      if shows(.retryConnection), presentation.phase != .online {
         Button("Try Again", systemImage: "arrow.clockwise") { actions?.handle(.retryConnection) }
           .keyboardShortcut("r", modifiers: .command)
           .help("Try Again (⌘R). Connects to the server again.")

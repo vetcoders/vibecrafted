@@ -698,6 +698,8 @@ button:hover > .icon-box {
   gap: 0;
   min-height: 100%;
   padding: 0;
+  background: var(--surface-page);
+  color: var(--text-primary);
 }
 
 .usage-toolbar {
@@ -3850,8 +3852,44 @@ a.control-run-id:focus-visible {
   box-shadow: none;
 }
 
-.overview-desk-body:has(.overview-inspector[hidden]) {
+.overview-desk-body:has(.overview-inspector[hidden]),
+.usage-split:has(.overview-inspector[hidden]) {
   grid-template-columns: minmax(0, 1fr);
+}
+
+/* Repository rows are anchors. The card rule painted the hairline and
+   left the anchor's own color and underline to the browser, so the
+   line sat through the name. */
+.project-list,
+.project-plan-list {
+  display: grid;
+}
+
+a.project-row,
+a.project-plan {
+  display: grid;
+  grid-template-columns: minmax(8rem, 0.8fr) minmax(0, 1.6fr);
+  align-items: center;
+  gap: 8px 20px;
+  min-height: 2.5rem;
+  padding: 9px 2px;
+  color: var(--text-primary);
+  line-height: 1.35;
+  text-decoration: none;
+}
+
+a.project-row .project-name,
+a.project-plan .project-plan-name {
+  color: var(--text-primary);
+  font: 650 13px/1.35 var(--font-body);
+}
+
+a.project-row .control-run-meta,
+a.project-plan .control-run-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  color: var(--text-muted);
 }
 
 /* prompt web-nav (w1-02): quiet Help and About sit with the phase line.

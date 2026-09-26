@@ -73,6 +73,11 @@ enum CommandDeckDestination: String, CaseIterable, Hashable, Identifiable {
     }
   }
 
+  /// The empty run document stays off pages that are not a run list.
+  var showsRunDocument: Bool {
+    self == .overview || self == .runs
+  }
+
   /// Footer doors have no section. They are not peers of the shelf rows.
   var section: CommandDeckDestinationSection? {
     switch self {

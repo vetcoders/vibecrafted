@@ -214,11 +214,19 @@ pub const STYLE_MAIN: &str = include_str!("../styles/main.css");
 #[cfg(feature = "ssr")]
 pub fn theme_head_script() -> &'static str {
     r#"(() => {
+  const root = document.documentElement;
+  // The native shell hides the theme toggle. A saved light choice
+  // would paint a white document inside a dark window. Follow the shell.
+  if (root.dataset.nativeShell === '1') {
+    const dark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    root.dataset.theme = dark ? 'dark' : 'light';
+    return;
+  }
   try {
     const saved = localStorage.getItem('loct-theme');
-    document.documentElement.dataset.theme = saved === 'light' ? 'light' : 'dark';
+    root.dataset.theme = saved === 'light' ? 'light' : 'dark';
   } catch (_) {
-    document.documentElement.dataset.theme = 'dark';
+    root.dataset.theme = 'dark';
   }
 })();"#
 }

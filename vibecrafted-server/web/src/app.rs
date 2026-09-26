@@ -1005,7 +1005,7 @@ pub fn UsagePage() -> impl IntoView {
                     <p id="usage-empty" class="control-empty" hidden>"No canonical runtime runs match this window and filter."</p>
                     <p class="usage-footnote"><span id="usage-schema">"vibecrafted.usage-report.v1"</span><span id="usage-generated"></span><span>"Unknowns stay visible. Currencies are never combined."</span></p>
                 </section>
-                <aside class="overview-inspector doc-pane" id="overview-inspector" aria-label="Run document">
+                <aside class="overview-inspector doc-pane" id="overview-inspector" aria-label="Run document" hidden>
                     <div class="doc-tabs" role="tablist" aria-label="Document">
                         <button type="button" data-doc-tab="transcript" class="is-active">"Transcript"</button>
                         <button type="button" data-doc-tab="report">"Report"</button>
