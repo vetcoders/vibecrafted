@@ -22,6 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 INSTALLER = REPO_ROOT / "scripts/install-runtime-pack.sh"
 PACKAGER = REPO_ROOT / "scripts/package-runtime-pack.sh"
 SELECTION_LIBRARY = REPO_ROOT / "scripts/lib/runtime-pack-selection.sh"
+XCODE_CHANNEL_LIBRARY = REPO_ROOT / "scripts/lib/xcode-channel.sh"
 SELECTION_SCHEMA = "vibecrafted.runtime-pack-selection.v1"
 # The eighteen canonical archives the Founder's dist actually held on
 # 2026-09-09, when `make runtime-pack && make install` refused as ambiguous.
@@ -277,6 +278,9 @@ def _isolated_repo_install(
     # without that library keeps the pre-handoff single-archive behaviour, which
     # is exactly what the App-embedded copy relies on.
     shutil.copy2(SELECTION_LIBRARY, scripts / "lib" / SELECTION_LIBRARY.name)
+    # The install path sources the Xcode channel gate before touching the
+    # toolchain; an isolated repo without it dies at that source line.
+    shutil.copy2(XCODE_CHANNEL_LIBRARY, scripts / "lib" / XCODE_CHANNEL_LIBRARY.name)
     # `make install` continues into the foundation step and the LaunchAgent
     # reconcile. Both have their own tests; here a real foundation run would
     # reach PyPI, and a real HOME would let the reconcile drive the developer's
