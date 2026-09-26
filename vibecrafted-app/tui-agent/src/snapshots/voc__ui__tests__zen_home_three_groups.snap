@@ -1,16 +1,17 @@
 ---
 source: tui-agent/src/ui.rs
+assertion_line: 2325
 expression: snapshot_without_terminal_padding(&wide)
 ---
 Voc ZEN  [Global]  runs: 3 | active 1 | failed 1 | unknown 1
 live 1  attention 1  failed 1  · attention working rule on
 ┌ Live · Needs attention (working rule) · Failed ──────────────────────────────┐
 │Live                                                                          │
-│  ● claude  ws-alpha   —           work-1     running             cost —      │
+│  ● claude  ws-alpha  —        work-1   running             04-19 10:00 cost —│
 │Needs attention · working rule                                                │
-│  ! kimi    ws-alpha   —           ask-1      waiting on operator cost —      │
+│  ! kimi    ws-alpha  —        ask-1    waiting on operator 04-19 10:00 cost —│
 │Failed                                                                        │
-│  × cursor  ws-alpha   —           failed-1   failed              cost —      │
+│  × cursor  ws-alpha  —        failed-1 failed              04-19 10:00 cost —│
 │                                                                              │
 │                                                                              │
 │                                                                              │

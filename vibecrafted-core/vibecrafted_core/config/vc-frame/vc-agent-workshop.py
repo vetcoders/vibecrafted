@@ -755,10 +755,9 @@ def _dim_unavailable_choices(
 ) -> None:
     """Paint unavailable tokens dim and the selected token bold.
 
-    Selection is bold letters and nothing else; ``base`` carries the row's
-    focus underline so every token on a focused row keeps it (Founder,
-    2026-09-15: no reverse-video blocks, the rail already carries the
-    selected/active semantics).
+    The selected option is bold letters. Focus is a chevron beside the row,
+    never an underline or strike through the glyphs, and never a reverse-video
+    block.
     """
     tokens = _choice_tokens(choices, selected=selected, available=available)
     # The base line clips the *whole* token sequence.  Slice that same rendered
@@ -783,9 +782,22 @@ def _choice_tokens(
     selected: int,
     available: tuple[bool, ...] | None = None,
 ) -> tuple[str, ...]:
-    """Bare labels. Selection is reverse video; unavailable is dim."""
+    """Bare option labels. The selected one is painted bold; unavailable is dim."""
     _ = (selected, available)
     return tuple(choices)
+
+
+def _paint_row_focus(window: curses.window, row: int, col: int, focused: bool) -> int:
+    """Chevron in the gutter. Option glyphs stay unmarked and unshifted."""
+    if col > 0:
+        _safe_addstr(
+            window,
+            row,
+            col - 1,
+            "›" if focused else " ",
+            curses.A_BOLD if focused else 0,
+        )
+    return col
 
 
 def _provider_available(agent: str) -> bool:
@@ -1012,10 +1024,7 @@ class Workshop:
             _safe_addstr(self.window, height - 1, left, self.error, curses.A_BOLD)
 
     def _draw_providers(self, row: int, col: int, width: int) -> None:
-        x = col
-        # Focused picker row: constant underline.  Selected provider: bold
-        # letters, nothing else.  Never a reverse-video block.
-        base = curses.A_UNDERLINE if self.row == 0 else 0
+        x = _paint_row_focus(self.window, row, col, self.row == 0)
         for index, name in enumerate(AGENTS):
             token = f" {name} "
             if x + len(token) >= col + width:
@@ -1023,11 +1032,11 @@ class Workshop:
                 x = col
             available = _provider_available(name)
             if index == self.agent and available:
-                attr = curses.A_BOLD | base
+                attr = curses.A_BOLD
             elif available:
-                attr = base
+                attr = 0
             else:
-                attr = curses.A_DIM | base
+                attr = curses.A_DIM
             _safe_addstr(self.window, row, x, token, attr)
             self.mouse_targets.append((row, x, x + len(token), index, "provider"))
             x += len(token) + 1
@@ -1048,13 +1057,13 @@ class Workshop:
         )
         self._draw_providers(top + 3, left, inner)
         path_row = top + 5
-        path_attr = curses.A_UNDERLINE if self.row == 1 else 0
+        path_col = _paint_row_focus(self.window, path_row, left, self.row == 1)
         _safe_addstr(
             self.window,
             path_row,
-            left,
+            path_col,
             _clip(f"Project  {self.path}", inner),
-            path_attr,
+            0,
         )
         toggle = "▾ Advanced options" if self.advanced else "▸ Advanced options"
         toggle_row = path_row + 2
@@ -1124,26 +1133,31 @@ class Workshop:
                     _choice_tokens(choices, selected=selected, available=available)
                 )
                 focused = self.row == offset + 2
-                base = curses.A_UNDERLINE if focused else 0
+                text_col = _paint_row_focus(self.window, cursor + offset, left, focused)
                 _safe_addstr(
-                    self.window, cursor + offset, left, _clip(line, inner), base
+                    self.window,
+                    cursor + offset,
+                    text_col,
+                    _clip(line, inner),
+                    0,
                 )
                 _dim_unavailable_choices(
                     self.window,
                     cursor + offset,
-                    left + len(label),
+                    text_col + len(label),
                     choices,
                     available,
                     selected,
-                    left + inner,
-                    base=base,
+                    text_col + inner,
+                    base=0,
                 )
+            parent_col = _paint_row_focus(self.window, cursor + 4, left, self.row == 6)
             _safe_addstr(
                 self.window,
                 cursor + 4,
-                left,
+                parent_col,
                 _clip(f"Parent    {self.continuity_parent or '(none)'}", inner),
-                curses.A_UNDERLINE if self.row == 6 else 0,
+                0,
             )
             runtime_help = RUNTIME_HELP[RUNTIME_POLICIES[self.runtime]]
             help_text = public_reason(runtime_help[0]) or runtime_help[0]

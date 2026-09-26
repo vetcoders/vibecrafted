@@ -1518,10 +1518,10 @@ def test_selected_provider_is_bold_only_not_a_dot_or_block(
     assert bullets == []
 
 
-def test_focused_picker_row_is_underlined_and_selection_stays_bold(
+def test_focused_picker_row_uses_a_chevron_and_selection_stays_bold(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Founder 2026-09-15: selected = bold letters, focused row = underline."""
+    """Selected option is bold. Focus is a chevron, not a full-row underline."""
     workshop = _load()
     styled: list[tuple[str, int]] = []
 
@@ -1544,14 +1544,14 @@ def test_focused_picker_row_is_underlined_and_selection_stays_bold(
     form.row = 0
     form.draw_launcher()
     providers = [item for item in styled if item[0].strip() in workshop.AGENTS]
-    assert providers and all(
-        attr & workshop.curses.A_UNDERLINE for _, attr in providers
-    )
+    assert providers
+    assert not any(attr & workshop.curses.A_UNDERLINE for _, attr in styled)
     assert not any(attr & workshop.curses.A_REVERSE for _, attr in styled)
     selected = [attr for text, attr in providers if text.strip() == "codex"]
     assert selected[0] & workshop.curses.A_BOLD
     others = [attr for text, attr in providers if text.strip() != "codex"]
     assert others and not any(attr & workshop.curses.A_BOLD for attr in others)
+    assert any(text == "›" for text, _attr in styled)
 
     styled.clear()
     form.row = 1
@@ -1559,7 +1559,8 @@ def test_focused_picker_row_is_underlined_and_selection_stays_bold(
     providers = [item for item in styled if item[0].strip() in workshop.AGENTS]
     assert not any(attr & workshop.curses.A_UNDERLINE for _, attr in providers)
     path_rows = [attr for text, attr in styled if text.startswith("Project  ")]
-    assert path_rows and path_rows[0] & workshop.curses.A_UNDERLINE
+    assert path_rows and not path_rows[0] & workshop.curses.A_UNDERLINE
+    assert any(text == "›" for text, _attr in styled)
     launch = [attr for text, attr in styled if text == "[ Launch ]"]
     assert launch and launch[0] == workshop.curses.A_BOLD
 

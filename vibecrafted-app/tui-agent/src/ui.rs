@@ -317,7 +317,7 @@ fn draw_home_header(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-fn home_board_lines(app: &App) -> Vec<(Option<usize>, String, Style)> {
+fn home_board_lines(app: &App, area_width: usize) -> Vec<(Option<usize>, String, Style)> {
     let rows = app.home_rows();
     let mut lines = Vec::new();
     for band in [HomeBand::Live, HomeBand::Attention, HomeBand::Failed] {
@@ -352,18 +352,23 @@ fn home_board_lines(app: &App) -> Vec<(Option<usize>, String, Style)> {
             } else {
                 Style::default().fg(Color::Red)
             };
-            lines.push((Some(index), format!("  {}", row.list_line(72)), style));
+            let line_width = area_width.saturating_sub(2);
+            lines.push((
+                Some(index),
+                format!("  {}", row.list_line(line_width)),
+                style,
+            ));
         }
     }
     lines
 }
 
 pub(crate) fn home_board_line_count(app: &App) -> usize {
-    home_board_lines(app).len()
+    home_board_lines(app, 120).len()
 }
 
 pub(crate) fn home_row_index_at(app: &App, inner_row: usize) -> Option<usize> {
-    home_board_lines(app)
+    home_board_lines(app, 120)
         .into_iter()
         .skip(inner_row)
         .find_map(|(index, _, _)| index)
@@ -371,7 +376,7 @@ pub(crate) fn home_row_index_at(app: &App, inner_row: usize) -> Option<usize> {
 
 fn draw_home_board(frame: &mut Frame, area: Rect, app: &App) {
     let skip = usize::from(app.interaction.scroll.home_list);
-    let items = home_board_lines(app)
+    let items = home_board_lines(app, usize::from(area.width))
         .into_iter()
         .skip(skip)
         .map(|(_, text, style)| ListItem::new(Line::from(Span::styled(text, style))))

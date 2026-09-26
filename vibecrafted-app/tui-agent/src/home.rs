@@ -5,6 +5,7 @@
 //! register of truth, and selecting an agent never launches a process.
 
 use crate::state::{ControlPlaneState, RenderedRun, RunKind, RunSnapshot, workspace_matches};
+use crate::usage::{UsageCost, UsageRun};
 use serde_json::Value;
 use std::path::Path;
 
@@ -80,6 +81,9 @@ pub struct HomeRow {
     pub panel: Option<String>,
     /// Honest cost cell. Missing or null data is "—", never an invented zero.
     pub cost_label: String,
+    /// Short date/time from the run's start, or its recorded stamp when start
+    /// is absent. Missing stamps stay "—".
+    pub when_label: String,
     pub state_label: String,
 }
 
@@ -89,16 +93,31 @@ impl HomeRow {
             .attention_reason
             .as_deref()
             .unwrap_or(self.state_label.as_str());
-        let line = format!(
-            "{} {:<7} {:<10} {:<11} {:<10} {:<19} cost {}",
+        let when = truncate(&self.when_label, 11);
+        let tail = format!("{when:<11} cost {}", self.cost_label);
+        let prefix = format!(
+            "{} {:<7} {:<9} {:<8} {:<8}",
             self.band.marker(),
             truncate(&self.agent, 7),
-            truncate(&self.workspace, 10),
-            truncate(&self.frame_session, 11),
-            truncate(&self.run_id, 10),
-            truncate(reason, 19),
-            self.cost_label
+            truncate(&self.workspace, 9),
+            truncate(&self.frame_session, 8),
+            truncate(&self.run_id, 8),
         );
+        let reason_width = if width == 0 {
+            19
+        } else {
+            width
+                .saturating_sub(prefix.chars().count() + tail.chars().count() + 2)
+                .min(19)
+        };
+        let line = if reason_width == 0 {
+            format!("{prefix} {tail}")
+        } else {
+            format!(
+                "{prefix} {:<reason_width$} {tail}",
+                truncate(reason, reason_width)
+            )
+        };
         if width == 0 || line.chars().count() <= width {
             return line;
         }
@@ -177,7 +196,12 @@ pub fn project_home_with_options(
         .cloned()
         .filter_map(|snapshot| {
             let kind = crate::state::classify_run(&snapshot, now);
-            project_row(snapshot, kind, attention_working_rule)
+            let usage = state
+                .usage
+                .runs
+                .iter()
+                .find(|run| run.run_id == snapshot.run_id);
+            project_row(snapshot, kind, attention_working_rule, usage)
         })
         .collect::<Vec<_>>();
     if matches!(scope, HomeScope::Local) {
@@ -199,7 +223,7 @@ pub fn project_home_with_options(
 pub fn project_rendered(runs: &[RenderedRun], scope: HomeScope, workspace: &Path) -> Vec<HomeRow> {
     let mut rows = runs
         .iter()
-        .filter_map(|run| project_row(run.snapshot.clone(), run.kind, false))
+        .filter_map(|run| project_row(run.snapshot.clone(), run.kind, false, None))
         .collect::<Vec<_>>();
     if matches!(scope, HomeScope::Local) {
         rows.retain(|row| {
@@ -229,6 +253,7 @@ fn project_row(
     snapshot: RunSnapshot,
     kind: RunKind,
     attention_working_rule: bool,
+    usage: Option<&UsageRun>,
 ) -> Option<HomeRow> {
     let candidate_reason = attention_reason(&snapshot, kind);
     let band = if kind == RunKind::Failed {
@@ -254,7 +279,8 @@ fn project_row(
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| "—".to_string());
     let panel = panel_destination(&snapshot);
-    let cost = cost_label(&snapshot);
+    let cost = resolved_cost(&snapshot, usage);
+    let when = when_label(&snapshot, usage.map(|run| run.timestamp.as_str()));
     let state_label = snapshot.display_state();
     Some(HomeRow {
         run_id: snapshot.run_id,
@@ -266,6 +292,7 @@ fn project_row(
         frame_session,
         panel,
         cost_label: cost,
+        when_label: when,
         state_label,
     })
 }
@@ -347,26 +374,111 @@ fn panel_destination(snapshot: &RunSnapshot) -> Option<String> {
 
 /// Missing cost is an honest dash. A present numeric zero is real data and
 /// may render as "0"; Home never invents that zero from an absent field.
+/// A canonical `{amount, currency|unit}` object is a real cost, not a miss.
 pub fn cost_label(snapshot: &RunSnapshot) -> String {
     for key in ["cost", "usage_cost", "session_cost"] {
         match snapshot.extra.get(key) {
             None => continue,
             Some(Value::Null) => return "—".to_string(),
-            Some(Value::String(raw)) => {
-                let trimmed = raw.trim();
-                if trimmed.is_empty()
-                    || trimmed.eq_ignore_ascii_case("unknown")
-                    || trimmed.eq_ignore_ascii_case("null")
-                {
-                    return "—".to_string();
-                }
-                return trimmed.to_string();
-            }
+            Some(Value::String(raw)) => return string_cost(raw),
             Some(Value::Number(number)) => return number.to_string(),
+            Some(Value::Object(map)) => return object_cost(map),
             Some(_) => return "—".to_string(),
         }
     }
     "—".to_string()
+}
+
+fn resolved_cost(snapshot: &RunSnapshot, usage: Option<&UsageRun>) -> String {
+    let direct = cost_label(snapshot);
+    if direct != "—" {
+        return direct;
+    }
+    usage.and_then(receipt_cost).unwrap_or(direct)
+}
+
+fn receipt_cost(run: &UsageRun) -> Option<String> {
+    match &run.cost {
+        UsageCost::Known { amount, unit } if unit.eq_ignore_ascii_case("USD") => {
+            Some(format!("${amount:.4}"))
+        }
+        UsageCost::Known { amount, unit } => Some(format!("{amount:.2} {unit}")),
+        UsageCost::Unknown => None,
+    }
+}
+
+fn string_cost(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("unknown")
+        || trimmed.eq_ignore_ascii_case("null")
+    {
+        "—".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn object_cost(map: &serde_json::Map<String, Value>) -> String {
+    let Some(amount) = map.get("amount") else {
+        return "—".to_string();
+    };
+    let unit = map
+        .get("currency")
+        .or_else(|| map.get("unit"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    match amount {
+        Value::Number(number) => numbered_cost(number, unit),
+        Value::String(raw) => {
+            let trimmed = string_cost(raw);
+            if trimmed == "—" || unit.is_empty() {
+                trimmed
+            } else if unit.eq_ignore_ascii_case("USD") {
+                format!("${trimmed}")
+            } else {
+                format!("{trimmed} {unit}")
+            }
+        }
+        _ => "—".to_string(),
+    }
+}
+
+fn numbered_cost(number: &serde_json::Number, unit: &str) -> String {
+    if unit.is_empty() {
+        return number.to_string();
+    }
+    let Some(amount) = number.as_f64() else {
+        return number.to_string();
+    };
+    if unit.eq_ignore_ascii_case("USD") {
+        format!("${amount:.4}")
+    } else {
+        format!("{amount:.2} {unit}")
+    }
+}
+
+fn when_label(snapshot: &RunSnapshot, recorded: Option<&str>) -> String {
+    let start = nonempty_stamp(snapshot.started_at.as_deref());
+    let recorded = nonempty_stamp(recorded)
+        .or_else(|| nonempty_stamp(snapshot.extra.get("recorded_at").and_then(Value::as_str)));
+    start
+        .or(recorded)
+        .map(short_when)
+        .unwrap_or_else(|| "—".to_string())
+}
+
+fn nonempty_stamp(value: Option<&str>) -> Option<&str> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("null"))
+}
+
+/// `MM-DD HH:MM` from a real RFC3339 stamp, in that stamp's own offset.
+fn short_when(raw: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .map(|stamp| stamp.format("%m-%d %H:%M").to_string())
+        .unwrap_or_else(|_| "—".to_string())
 }
 
 pub fn wrap_transcript_words(value: &str, width: usize) -> Vec<String> {
@@ -657,6 +769,112 @@ mod tests {
         );
         assert_eq!(cost_label(&priced), "0");
         assert_eq!(cost_label(&bare), "—");
+    }
+
+    #[test]
+    fn object_cost_is_read_and_unknown_amount_stays_a_dash() {
+        let priced = snapshot(
+            "priced",
+            "claude",
+            "running",
+            "/tmp/ws-alpha",
+            Some("pane-2"),
+            &[(
+                "cost",
+                serde_json::json!({"amount": 0.25, "currency": "USD"}),
+            )],
+        );
+        let unknown = snapshot(
+            "unknown",
+            "kimi",
+            "running",
+            "/tmp/ws-alpha",
+            Some("pane-1"),
+            &[(
+                "cost",
+                serde_json::json!({"amount": {"value": "unknown", "reason": "no event"}}),
+            )],
+        );
+        let credits = snapshot(
+            "credits",
+            "agy",
+            "running",
+            "/tmp/ws-alpha",
+            Some("pane-3"),
+            &[("cost", serde_json::json!({"amount": 7, "unit": "credits"}))],
+        );
+        assert_eq!(cost_label(&priced), "$0.2500");
+        assert_eq!(cost_label(&unknown), "—");
+        assert_eq!(cost_label(&credits), "7.00 credits");
+        assert_ne!(cost_label(&unknown), "0");
+    }
+
+    #[test]
+    fn list_line_uses_start_stamp_and_known_receipt_without_inventing_either() {
+        let mut priced = snapshot(
+            "priced",
+            "claude",
+            "running",
+            "/tmp/ws-alpha",
+            Some("pane-2"),
+            &[],
+        );
+        priced.started_at = Some("2026-09-26T06:28:00Z".into());
+        priced.updated_at = Some("2026-01-01T00:00:00Z".into());
+        let mut state = plane(vec![priced]);
+        state.usage.runs.push(UsageRun {
+            run_id: "priced".into(),
+            provider: "claude".into(),
+            agent: "claude".into(),
+            model: "opus".into(),
+            status: "running".into(),
+            timestamp: "2026-08-02T12:00:00Z".into(),
+            tokens_total: Some(42),
+            cost: UsageCost::Known {
+                amount: 0.25,
+                unit: "USD".into(),
+            },
+            failure: None,
+        });
+        let rows = project_home(&state, HomeScope::Global, Path::new("/tmp/ws-alpha"));
+        assert_eq!(rows[0].cost_label, "$0.2500");
+        assert_eq!(rows[0].when_label, "09-26 06:28");
+        let line = rows[0].list_line(80);
+        assert!(line.contains("09-26 06:28"), "{line}");
+        assert!(line.contains("cost $0.2500"), "{line}");
+        assert!(!line.contains("01-01"), "{line}");
+        assert!(!line.contains("08-02"), "{line}");
+
+        let mut bare = snapshot(
+            "bare",
+            "kimi",
+            "running",
+            "/tmp/ws-alpha",
+            Some("pane-1"),
+            &[],
+        );
+        bare.started_at = None;
+        bare.updated_at = Some("2026-01-01T00:00:00Z".into());
+        let mut quiet = plane(vec![bare]);
+        quiet.usage.runs.push(UsageRun {
+            run_id: "bare".into(),
+            provider: "kimi".into(),
+            agent: "kimi".into(),
+            model: "k2".into(),
+            status: "running".into(),
+            timestamp: "2026-08-02T12:00:00Z".into(),
+            tokens_total: None,
+            cost: UsageCost::Unknown,
+            failure: None,
+        });
+        let quiet_rows = project_home(&quiet, HomeScope::Global, Path::new("/tmp/ws-alpha"));
+        assert_eq!(quiet_rows[0].cost_label, "—");
+        assert_eq!(quiet_rows[0].when_label, "08-02 12:00");
+        let quiet_line = quiet_rows[0].list_line(80);
+        assert!(quiet_line.contains("08-02 12:00"), "{quiet_line}");
+        assert!(quiet_line.contains("cost —"), "{quiet_line}");
+        assert!(!quiet_line.contains("01-01"), "{quiet_line}");
+        assert!(!quiet_line.contains("cost 0"), "{quiet_line}");
     }
 
     #[test]
