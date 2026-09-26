@@ -278,7 +278,7 @@ def test_makefile_keeps_install_as_terminal_first_front_door() -> None:
     """Contract: `make install` consumes the same immutable Runtime Pack as
     the native App. The retained `install-source` spelling uses the same owner.
 
-    Every recipe that bootstraps uv (setup-dev, install-all, tui-installer)
+    Every recipe that bootstraps uv (install-all, tui-installer)
     must keep the uv bootstrap and the `uv run` invocation inside one shell
     stanza, otherwise the `export PATH=...` from the bootstrap leg dies before
     `uv run` sees it (each `@`-prefixed recipe line spawns a fresh shell).
@@ -307,14 +307,13 @@ def test_makefile_keeps_install_as_terminal_first_front_door() -> None:
     assert "\ninstall-source: install\n" in text
     assert "install-auto: install" in text
 
-    # setup-dev opens the uv meta-installer in advanced mode. Advanced is an
-    # interactive surface, so it never carries the auto-approve `--yes`.
-    setup_dev_block = text.split("setup-dev: init-hooks", 1)[1].split("\ndry-run:", 1)[
-        0
-    ]
-    assert "vetcoders-installer $(MANIFEST)" in setup_dev_block
-    assert "--advanced --quiet" in setup_dev_block
-    assert "--yes" not in setup_dev_block
+    # setup-dev is the living-tree door, not the 2.x uv meta-installer.
+    assert "\nsetup-dev: install-dev\n" in text
+    install_dev_block = text.split("\ninstall-dev:\n", 1)[1].split(
+        "\n# Replaceable app", 1
+    )[0]
+    assert "scripts/install-dev.sh" in install_dev_block
+    assert "scripts/install-dev-app.sh" in text
 
     # install-all is the auto-approved meta-installer: same runner, but --yes.
     install_all_block = text.split("install-all: init-hooks", 1)[1].split(
@@ -332,7 +331,6 @@ def test_makefile_keeps_install_as_terminal_first_front_door() -> None:
         "\n# BUNDLE_DIR", 1
     )[0]
     for name, block in (
-        ("setup-dev", setup_dev_block),
         ("install-all", install_all_block),
         ("tui-installer", tui_installer_block),
     ):

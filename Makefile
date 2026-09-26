@@ -36,7 +36,7 @@ if [ ! -d "$$stable_root/vibecrafted-core" ]; then \
 fi
 endef
 
-.PHONY: help help-dev vibecrafted app dmg dmg-signed release-local notarize release runtime-pack release-prereqs portable publish-release release-rehearsal gui-install wizard wizard-dev check skills-check layouts-check test test-core test-skills test-install test-parity test-vc-frame test-iterm2-migrate test-memex test-aicx-sync test-hammerspoon test-keychain-session dispatch-test unified-product-contract-gate exact-release-contract-gate release-version-gate payload-hygiene install install-source install-auto install-all install-python-tools install-bundle-tools install-tools install-tools-held install-vendored-binaries install-app install-app-binaries install-hammerspoon skills helpers setup-dev dry-run doctor list update uninstall restore migrate migrate-dry init-hooks seed-commit-msg-hooks bundle bundle-check foundations foundations-check semgrep version version-show version-bump bump-patch bump-minor bump-major iterm-plugin iterm-plugin-refresh iterm-plugin-show iterm-plugin-uninstall iterm-plugin-migrate demo demo-full commit-safe test-race-protection skill-new server server-build build-server-release server-check server-test install-server install-server-payload install-server-service reconcile-server-service server-smoke
+.PHONY: help help-dev vibecrafted app dmg dmg-signed release-local notarize release runtime-pack release-prereqs portable publish-release release-rehearsal gui-install wizard wizard-dev check skills-check layouts-check test test-core test-skills test-install test-parity test-vc-frame test-iterm2-migrate test-memex test-aicx-sync test-hammerspoon test-keychain-session dispatch-test unified-product-contract-gate exact-release-contract-gate release-version-gate payload-hygiene install install-source install-auto install-all install-python-tools install-bundle-tools install-tools install-tools-held install-vendored-binaries install-app install-app-dev install-dev install-app-binaries install-hammerspoon skills helpers setup-dev dry-run doctor list update uninstall restore migrate migrate-dry init-hooks seed-commit-msg-hooks bundle bundle-check foundations foundations-check semgrep version version-show version-bump bump-patch bump-minor bump-major iterm-plugin iterm-plugin-refresh iterm-plugin-show iterm-plugin-uninstall iterm-plugin-migrate demo demo-full commit-safe test-race-protection skill-new server server-build build-server-release server-check server-test install-server install-server-payload install-server-service reconcile-server-service server-smoke
 
 help:
 	@printf "\n"
@@ -60,7 +60,7 @@ help-dev:
 	@printf "  \033[1m\033[38;5;173m⚒  𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. dev targets\033[0m\n"
 	@printf "\n"
 	@printf "  \033[1minstall\033[0m   install · install-source · install-auto · install-all · install-python-tools · install-vendored-binaries · install-app-binaries · install-server · install-server-service · install-hammerspoon\n"
-	@printf "            skills · helpers · setup-dev · wizard · wizard-dev · gui-install · dry-run · restore\n"
+	@printf "            skills · helpers · setup-dev · install-dev · install-app-dev · wizard · wizard-dev · gui-install · dry-run · restore\n"
 	@printf "            migrate · migrate-dry · foundations · foundations-check · bundle · bundle-check\n"
 	@printf "  \033[1mtests\033[0m     test · test-core · test-skills · test-install · test-parity · test-vc-frame · test-iterm2-migrate\n"
 	@printf "            test-memex · test-aicx-sync · test-hammerspoon · test-keychain-session · dispatch-test · test-race-protection · check · semgrep\n"
@@ -602,13 +602,16 @@ foundations:
 foundations-check:
 	@bash scripts/install-foundations.sh --check
 
-setup-dev: init-hooks
-	@if ! command -v uv >/dev/null 2>&1; then \
-		echo "bootstrapping uv..."; \
-		curl -LsSf https://astral.sh/uv/install.sh | sh; \
-	fi; \
-	export PATH="$$HOME/.local/bin:$$PATH"; \
-	VIBECRAFTED_RUNTIME="$(RUNTIME)" UV_PROJECT_ENVIRONMENT="$(UV_PROJECT_ENVIRONMENT)" uv run --project $(INSTALLER_DIR) --quiet vetcoders-installer $(MANIFEST) --advanced --quiet
+# Living-tree door. Builds the local donors and ad-hoc signs them into the
+# installed generation. make install remains the receipted Runtime Pack.
+install-dev:
+	@bash scripts/install-dev.sh
+
+# Replaceable app. make install-app remains the Developer ID transaction.
+install-app-dev:
+	@bash scripts/install-dev-app.sh
+
+setup-dev: install-dev
 
 dry-run:
 	@uv run --project $(INSTALLER_DIR) --quiet vetcoders-installer $(MANIFEST) --dry-run

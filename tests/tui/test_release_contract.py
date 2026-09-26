@@ -1561,6 +1561,26 @@ def test_embedded_python_keeps_libpython_the_interpreter_links(tmp_path: Path) -
     assert 'if [[ -f "$runtime/python/lib/${PORTABLE_PYTHON_DYLIB}" ]]; then' in builder
 
 
+def test_usage_recovery_does_not_bake_the_checkout_into_release_binaries() -> None:
+    """control-core's source probe is debug-only.
+
+    `env!("CARGO_MANIFEST_DIR")` is opaque to --remap-path-prefix. One release
+    copy of it in source_core_dir was the snapshot path in voc, vc-admin,
+    vc-o, vc-server and vibecrafted-server-web.
+    """
+    usage = (REPO_ROOT / "vibecrafted-server/control-core/src/usage.rs").read_text(
+        encoding="utf-8"
+    )
+    start = usage.index("fn source_core_dir()")
+    body = usage[start : usage.index("fn regular_file")]
+    code = [line for line in body.splitlines() if not line.lstrip().startswith("//")]
+    joined = "\n".join(code)
+    assert "#[cfg(debug_assertions)]" in joined
+    assert joined.index("#[cfg(debug_assertions)]") < joined.index(
+        'env!("CARGO_MANIFEST_DIR")'
+    )
+
+
 def test_release_binaries_never_probe_the_machine_that_compiled_them() -> None:
     """`env!("CARGO_MANIFEST_DIR")` is opaque to --remap-path-prefix.
 

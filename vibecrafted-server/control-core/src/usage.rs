@@ -559,12 +559,24 @@ fn explicit_python(name: &str) -> Option<PathBuf> {
 }
 
 fn source_core_dir() -> Option<PathBuf> {
-    let candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vibecrafted-core");
-    if candidate.join("vibecrafted_core/telemetry.py").is_file() {
-        Some(candidate)
-    } else {
-        None
+    // Release binaries must not carry the checkout. `env!("CARGO_MANIFEST_DIR")`
+    // is a string literal rustc's `--remap-path-prefix` cannot rewrite, and one
+    // copy of it in control-core showed up as the snapshot path in voc,
+    // vc-admin, vc-o, vc-server and vibecrafted-server-web.
+    if let Ok(root) = std::env::var("VIBECRAFTED_RUNTIME_ROOT") {
+        let candidate = PathBuf::from(root.trim()).join("vibecrafted-core");
+        if candidate.join("vibecrafted_core/telemetry.py").is_file() {
+            return Some(candidate);
+        }
     }
+    #[cfg(debug_assertions)]
+    {
+        let candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vibecrafted-core");
+        if candidate.join("vibecrafted_core/telemetry.py").is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 fn regular_file(path: &Path) -> bool {
