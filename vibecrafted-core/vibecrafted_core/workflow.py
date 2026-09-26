@@ -1959,9 +1959,14 @@ def _source_prompt(spec: WorkflowLaunchSpec) -> str:
 
 
 def _runtime_prompt(
-    spec: WorkflowLaunchSpec, *, source_prompt: str | None = None
+    spec: WorkflowLaunchSpec,
+    *,
+    source_prompt: str | None = None,
+    run_id: str = "",
 ) -> str:
     """Wrap the source prompt in the runtime contract instructions given to the worker."""
+    from .monitor_lane import startup_lane_paragraph
+
     report_hint = "${VIBECRAFTED_REPORT_PATH}"
     transcript_hint = "${VIBECRAFTED_TRANSCRIPT_PATH}"
     if source_prompt is None:
@@ -1971,6 +1976,7 @@ def _runtime_prompt(
     # no unfinished work; `init_resume_block` never raises.
     resume_block = init_resume_block(spec.root)
     resume_section = f"\n{resume_block}\n" if resume_block else ""
+    lane_paragraph = startup_lane_paragraph(run_id or spec.run_id)
     return f"""You are running under Vibecrafted core runtime.
 
 Contract:
@@ -1997,6 +2003,7 @@ Contract:
   Handle each pending message in this run and then acknowledge it with
   `vibecrafted message --run-id "$VIBECRAFTED_RUN_ID" --ack MESSAGE_ID`.
   An inbox receipt does not itself mean you saw or acted on the message.
+- {lane_paragraph}
 {WORKER_SIGNAL_DISCIPLINE.rstrip()}
 
 Step 0 — orient before you touch (the vc-init pass).
@@ -3229,7 +3236,7 @@ def launch_workflow(
     prompt_body = (
         runtime_source
         if runtime_kind in {"supervised_research", "supervised_marbles"}
-        else _runtime_prompt(spec, source_prompt=runtime_source)
+        else _runtime_prompt(spec, source_prompt=runtime_source, run_id=run_id)
     )
     canonical_report_dir = _canonical_report_dir(spec.root, spec.skill)
     artifact_ts = time.strftime("%Y-%m-%d")

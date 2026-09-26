@@ -544,7 +544,42 @@ def test_headless_workflow_keeps_runtime_prompt_assembler(
     assert 'vibecrafted message --run-id "$VIBECRAFTED_RUN_ID" --receive' in prompt
     assert "Operator prompt:\nship the slice" in prompt
     assert "You are in an interactive Vibecrafted session." not in prompt
+    assert "MCP lane" in prompt
+    assert "harness monitor" in prompt
     assert inspect_native_resume_stays_on_launch_workflow()
+
+
+def test_startup_prompts_announce_both_lanes_and_run_nonce(tmp_path: Path) -> None:
+    from vibecrafted_core.monitor_lane import run_delivery_nonce, startup_lane_paragraph
+
+    run_id = "work-260926-233315-43752"
+    nonce = run_delivery_nonce(run_id)
+    paragraph = startup_lane_paragraph(run_id)
+    interactive = spawn.compose_interactive_task_prompt(
+        skill="init",
+        source="",
+        root=tmp_path,
+        resume_block="",
+        admission={"run_id": run_id, "skill": "init", "agent": "claude"},
+    )
+    assert "Your message inbox is attached to this run." in interactive
+    assert paragraph in interactive
+    assert nonce in interactive
+    spec = workflow.WorkflowLaunchSpec(
+        agent="claude",
+        mode="implement",
+        skill="implement",
+        prompt="ship the slice",
+        file="",
+        runtime="headless",
+        root=str(tmp_path),
+        run_id=run_id,
+    )
+    headless = workflow._runtime_prompt(spec, run_id=run_id)
+    assert 'vibecrafted message --run-id "$VIBECRAFTED_RUN_ID" --receive' in headless
+    assert paragraph in headless
+    assert nonce in headless
+    assert "You are running under Vibecrafted core runtime." in headless
 
 
 def inspect_native_resume_stays_on_launch_workflow() -> bool:

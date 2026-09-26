@@ -386,6 +386,9 @@ def compose_interactive_task_prompt(
         launcher,
         "interactive launcher. Follow the role named above; do not invent a mission.",
     )
+    from .monitor_lane import startup_lane_paragraph
+
+    lane_run = str((admission or {}).get("run_id") or "")
     contract = agent_context_contract(
         skill=launcher,
         root=root,
@@ -406,6 +409,7 @@ def compose_interactive_task_prompt(
         "Handle each pending message here, then use `vibecrafted message",
         '--run-id "$VIBECRAFTED_RUN_ID" --ack MESSAGE_ID`. The inbox receipt',
         "alone does not mean you saw or acted on the message.",
+        startup_lane_paragraph(lane_run),
         "",
         "This private task file is the complete orientation payload. Do not assume",
         "provider-specific slash commands execute from Markdown. Read the skill",
