@@ -33,7 +33,27 @@ _PLACEHOLDER_IDS = frozenset({"pending", "none", "null", "unknown"})
 _UNRESOLVED_OR_FAILED = frozenset(
     {"recorded", "retryable_failure", "permanent_failure"}
 )
-_INBOX_PROVIDERS = frozenset({"claude", "agy", "grok", "junie", "kimi", "cursor"})
+_INBOX_PROVIDERS = frozenset(
+    {"claude", "agy", "grok", "junie", "kimi", "cursor", "gemini"}
+)
+# Observed facts only. A value never means the recipient read or executed.
+DELIVERY_STATES: dict[str, str] = {
+    "recorded": (
+        "intent persisted before a native queue attempt; a crash leaves it unresolved"
+    ),
+    "inbox_pending": "stored for the selected run; not attached to model context",
+    "context_injected": "attached to a tool response; not proof the recipient read it",
+    "provider_accepted": (
+        "provider queue command returned success; not an agent acknowledgement"
+    ),
+    "agent_acknowledged": (
+        "recipient claimed the message; not proof the requested action ran"
+    ),
+    "retryable_failure": "queue attempt failed in a way retry may resubmit",
+    "permanent_failure": "queue attempt cannot be retried as the same operation",
+}
+_ACKABLE_STATES = frozenset({"inbox_pending", "context_injected", "agent_acknowledged"})
+_INJECTION_NONCE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+/=-]{0,255}$")
 
 
 class MessageControlError(ValueError):
@@ -105,6 +125,10 @@ def resolve_message_run(*, run_id: str = "", session: str = "") -> str:
 
     A provider session can span several resumed runs. Never guess which
     executor owns it; callers can use the exact run id in that case.
+
+    Contract: return one run id or raise ``MessageControlError``. A missing
+    native provider session does not block resolution by run id or by a
+    recorded runtime session. Placeholder session tokens are refused.
     """
     target = str(run_id or "").strip()
     token = str(session or "").strip()
@@ -155,7 +179,11 @@ def resolve_message_run(*, run_id: str = "", session: str = "") -> str:
 
 
 def pending_messages(*, run_id: str = "", session: str = "") -> list[dict[str, Any]]:
-    """Read unacknowledged inbox messages without consuming them."""
+    """Read ``inbox_pending`` receipts without consuming them.
+
+    Historical name for :func:`receive_messages`. Same selector rules and
+    the same ``inbox_pending``-only result.
+    """
     target = resolve_message_run(run_id=run_id, session=session)
     result: list[dict[str, Any]] = []
     for path in _outbox_root().glob("msg-*.json"):
@@ -170,10 +198,35 @@ def pending_messages(*, run_id: str = "", session: str = "") -> list[dict[str, A
     )
 
 
+def receive_messages(*, run_id: str = "", session: str = "") -> list[dict[str, Any]]:
+    """Return ``inbox_pending`` receipts for one run without consuming them.
+
+    Contract:
+    - Resolve exactly one run via :func:`resolve_message_run`. Inbox providers,
+      including Gemini with no native session, are addressable by run id or by
+      a recorded runtime session.
+    - Include only ``inbox_pending``. ``context_injected`` is not pending:
+      attachment to a tool response is a separate observation and is not proof
+      the recipient read the text.
+    - Do not acknowledge, delete, or change ``delivery_state``.
+    - An empty list is not proof the run is idle. This call does not wake a
+      stopped worker.
+    """
+
+    return pending_messages(run_id=run_id, session=session)
+
+
 def acknowledge_message(
     message_id: str, *, run_id: str = "", session: str = ""
 ) -> dict[str, Any]:
-    """Record explicit recipient acknowledgement, without claiming execution."""
+    """Record explicit recipient acknowledgement, without claiming execution.
+
+    Contract: ``inbox_pending`` or ``context_injected`` advances to
+    ``agent_acknowledged`` with ``agent_ack_state`` ``claimed_by_recipient``.
+    A repeated ACK returns the stored receipt. ACK is the recipient's claim,
+    not proof the text was read before the claim and not proof the requested
+    work ran.
+    """
     target = resolve_message_run(run_id=run_id, session=session)
     with run_mutation_locks(control_plane_home(), run_id=target):
         record = inspect_message(message_id)
@@ -181,7 +234,7 @@ def acknowledge_message(
             raise MessageControlError("message_not_found")
         if record.get("run_id") != target:
             raise MessageControlError("message_target_mismatch")
-        if record.get("delivery_state") not in {"inbox_pending", "agent_acknowledged"}:
+        if record.get("delivery_state") not in _ACKABLE_STATES:
             raise MessageControlError("message_not_in_inbox")
         if record.get("delivery_state") == "agent_acknowledged":
             return record
@@ -193,6 +246,52 @@ def acknowledge_message(
             "acknowledged_at": _now(),
         }
         _write_json_durable(_message_path(message_id), updated)
+        return updated
+
+
+def mark_context_injected(message_id: str, nonce: str) -> dict[str, Any]:
+    """Record that one inbox receipt was attached to a tool response.
+
+    Contract: ``context_injected`` means the text was glued onto a tool
+    result. It does not mean the recipient read it, acknowledged it, or
+    carried out the ask. Only ``inbox_pending`` advances. The same nonce
+    again is a no-op. A different nonce on an already injected receipt is a
+    conflict, not a rewrite. The bus still does not wake a worker.
+    """
+
+    token = str(nonce or "")
+    if not token.strip():
+        raise MessageControlError("context_injection_nonce_required")
+    if token != token.strip() or not _INJECTION_NONCE.fullmatch(token):
+        raise MessageControlError("invalid_context_injection_nonce")
+    current = inspect_message(message_id)
+    if current is None:
+        raise MessageControlError("message_not_found")
+    target = str(current.get("run_id") or "").strip()
+    if not target:
+        raise MessageControlError("message_run_missing")
+    with run_mutation_locks(control_plane_home(), run_id=target):
+        record = inspect_message(message_id)
+        if record is None:
+            raise MessageControlError("message_not_found")
+        state = str(record.get("delivery_state") or "")
+        if state == "context_injected":
+            stored = str(record.get("context_injected_nonce") or "")
+            if stored != token:
+                raise MessageControlError("context_injection_nonce_mismatch")
+            return record
+        if state != "inbox_pending":
+            raise MessageControlError("message_not_awaiting_injection")
+        stamped = _now()
+        updated = {
+            **record,
+            "delivery_state": "context_injected",
+            "context_injected_nonce": token,
+            "context_injected_at": stamped,
+            "updated_at": stamped,
+            "agent_ack_state": record.get("agent_ack_state") or "unobserved",
+        }
+        _write_json_durable(_message_path(str(record["message_id"])), updated)
         return updated
 
 
@@ -236,7 +335,12 @@ def _queue_attempt_failure(
 
 
 def inspect_message(message_id: str) -> dict[str, Any] | None:
-    """Return one durable message receipt without inferring semantic ACK."""
+    """Return one durable message receipt without inferring semantic ACK.
+
+    Contract: read the receipt unchanged, or return ``None`` when the id is
+    well-formed and no receipt exists. Do not change delivery state and do
+    not treat any state as proof the recipient read or executed the ask.
+    """
 
     candidate = str(message_id or "").strip()
     if not candidate:
@@ -262,6 +366,12 @@ def send_message(
     conflict, not a replay. ``retry`` resubmits only unresolved or failed
     receipts. ``provider_accepted`` is never submitted again. Timeouts are
     ambiguous: the typed reason does not claim exactly-once delivery.
+
+    Inbox providers (Claude, Agy, Grok, Junie, Kimi, Cursor, Gemini) stop at
+    ``inbox_pending``. That is storage for the selected run, not attachment
+    to model context. Codex with a native thread is the only provider queue.
+    A missing native session still uses the inbox and does not spawn or
+    resume a provider process.
     """
 
     target = resolve_message_run(run_id=run_id, session=session)
@@ -326,7 +436,11 @@ def send_message(
 
         provider = str(record.get("provider") or "")
         session = str(record.get("provider_session_id") or "")
-        if record.get("delivery_state") in {"inbox_pending", "agent_acknowledged"}:
+        if record.get("delivery_state") in {
+            "inbox_pending",
+            "context_injected",
+            "agent_acknowledged",
+        }:
             return record
         try:
             argv = _provider_argv(provider, session, body)
