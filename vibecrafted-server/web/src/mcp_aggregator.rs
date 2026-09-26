@@ -29,18 +29,22 @@ use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use chrono::DateTime;
 use control_core::{ControlPlane, coerce_int_value, is_safe_run_id};
 use http::{HeaderMap, HeaderName};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 pub const PID_HEADER: HeaderName = HeaderName::from_static("x-vibecrafted-pid");
 pub const ANCESTOR_HEADER: HeaderName = HeaderName::from_static("x-vibecrafted-ancestors");
 pub const RUN_HEADER: HeaderName = HeaderName::from_static("x-vibecrafted-run-id");
 /// Run `meta.json` field announced to the worker by its startup prompt.
 pub const INJECTION_NONCE_FIELD: &str = "context_injection_nonce";
+/// Digest domain shared with `monitor_lane._NONCE_DOMAIN` (python) — both
+/// lanes recompute the delivery nonce from the run id alone.
+const NONCE_DOMAIN: &str = "vibecrafted.message-bus.v1\n";
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(800);
 const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(30);
@@ -186,6 +190,7 @@ struct EnvelopeGate {
     store: Arc<dyn EnvelopeStore>,
     runs: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     claimed: Mutex<HashSet<String>>,
+    quiet: Mutex<HashMap<String, SystemTime>>,
 }
 
 impl EnvelopeGate {
@@ -199,16 +204,21 @@ impl EnvelopeGate {
             store,
             runs: Mutex::new(HashMap::new()),
             claimed: Mutex::new(HashSet::new()),
+            quiet: Mutex::new(HashMap::new()),
         }
     }
 
     /// Attach pending envelopes for `run_id` onto the last `tools/call`
     /// result in `response`. `None` run or nonce returns without touching
-    /// the store or the bytes.
+    /// the store or the bytes. A `freshness` stamp equal to the one recorded
+    /// at this run's last empty receive skips the store entirely — the CLI
+    /// store forks a process per receive, and an unchanged message directory
+    /// cannot have grown a new envelope.
     pub fn decorate(
         &self,
         run_id: Option<&str>,
         nonce: Option<&str>,
+        freshness: Option<SystemTime>,
         request: &Value,
         response: &mut Value,
     ) {
@@ -221,7 +231,7 @@ impl EnvelopeGate {
         let Some(carrier) = locate_carrier(request, response) else {
             return;
         };
-        let claimed = self.claim(run_id, nonce);
+        let claimed = self.claim(run_id, nonce, freshness);
         if claimed.is_empty() {
             return;
         }
@@ -229,13 +239,30 @@ impl EnvelopeGate {
         let _ = stamp_carrier(response, &carrier, &block);
     }
 
-    fn claim(&self, run_id: &str, nonce: &str) -> Vec<PendingEnvelope> {
+    fn claim(
+        &self,
+        run_id: &str,
+        nonce: &str,
+        freshness: Option<SystemTime>,
+    ) -> Vec<PendingEnvelope> {
         let gate = self.run_mutex(run_id);
         let _held = lock(&gate);
+        if let Some(stamp) = freshness
+            && lock(&self.quiet).get(run_id) == Some(&stamp)
+        {
+            return Vec::new();
+        }
         let pending = match self.store.receive_pending(run_id) {
             Ok(rows) => rows,
             Err(EnvelopeStoreError) => return Vec::new(),
         };
+        if pending.is_empty() {
+            if let Some(stamp) = freshness {
+                lock(&self.quiet).insert(run_id.to_string(), stamp);
+            }
+            return Vec::new();
+        }
+        lock(&self.quiet).remove(run_id);
         let mut chosen = Vec::new();
         let mut seen = HashSet::new();
         for envelope in pending {
@@ -649,13 +676,15 @@ impl Aggregator {
         response: &mut Value,
     ) {
         let nonce = run_id.and_then(|run_id| injection_nonce(plane, run_id));
-        self.decorate_reply(run_id, nonce.as_deref(), request, response);
+        let freshness = messages_fingerprint(plane);
+        self.envelopes
+            .decorate(run_id, nonce.as_deref(), freshness, request, response);
     }
 
     /// Same decoration as [`decorate_tools_reply`] with an explicit nonce.
     ///
-    /// A missing run or nonce does not read the store. The HTTP path loads
-    /// the nonce from run meta and then calls this.
+    /// A missing run or nonce does not read the store. Without a control
+    /// plane there is no store fingerprint, so every call asks the store.
     pub fn decorate_reply(
         &self,
         run_id: Option<&str>,
@@ -663,8 +692,16 @@ impl Aggregator {
         request: &Value,
         response: &mut Value,
     ) {
-        self.envelopes.decorate(run_id, nonce, request, response);
+        self.envelopes
+            .decorate(run_id, nonce, None, request, response);
     }
+}
+
+/// Newest change marker of the message-store directory. `None` when the
+/// directory cannot be inspected — the store is then always asked.
+fn messages_fingerprint(plane: &ControlPlane) -> Option<SystemTime> {
+    let dir = plane.control_plane_home().join("messages");
+    std::fs::metadata(dir).ok().and_then(|meta| meta.modified().ok())
 }
 
 impl ToolCacheEntry {
@@ -965,6 +1002,24 @@ fn safe_message_id(value: &str) -> bool {
         && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | ':' | '-'))
 }
 
+/// Deterministic per-run delivery nonce: `vcbus-` plus the first 24 hex
+/// characters of SHA-256(`NONCE_DOMAIN` + run id). Mirrors
+/// `monitor_lane.run_delivery_nonce`, which prints the same value in the
+/// worker's startup prompt, so the MCP lane needs no meta producer.
+#[must_use]
+pub fn derived_delivery_nonce(run_id: &str) -> Option<String> {
+    if !is_safe_run_id(run_id) {
+        return None;
+    }
+    let digest = Sha256::digest(format!("{NONCE_DOMAIN}{run_id}").as_bytes());
+    let mut hex = String::with_capacity(24);
+    for byte in digest.iter().take(12) {
+        use std::fmt::Write;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    Some(format!("vcbus-{hex}"))
+}
+
 fn injection_nonce(plane: &ControlPlane, run_id: &str) -> Option<String> {
     if !is_safe_run_id(run_id) {
         return None;
@@ -974,9 +1029,14 @@ fn injection_nonce(plane: &ControlPlane, run_id: &str) -> Option<String> {
         .join("runtime_runs")
         .join(run_id)
         .join("meta.json");
+    // The run must exist in the control plane; a bare header names nothing.
     let payload = read_meta(&path)?;
-    let raw = payload.get(INJECTION_NONCE_FIELD).and_then(Value::as_str)?;
-    valid_injection_nonce(raw).then(|| raw.to_string())
+    if let Some(raw) = payload.get(INJECTION_NONCE_FIELD).and_then(Value::as_str) {
+        // An explicit meta field is authoritative: a valid value overrides
+        // the derived nonce, anything else (including "") opts the run out.
+        return valid_injection_nonce(raw).then(|| raw.to_string());
+    }
+    derived_delivery_nonce(run_id)
 }
 
 /// Receipt JSON from `--receive` into the block fields. Rows without a safe

@@ -21,8 +21,8 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 use vibecrafted_server_web::mcp::api::mcp_routes_with_aggregator;
 use vibecrafted_server_web::mcp_aggregator::{
-    Aggregator, EnvelopeStore, EnvelopeStoreError, PendingEnvelope, pending_from_receipt,
-    stamp_last_result_frame,
+    Aggregator, EnvelopeStore, EnvelopeStoreError, PendingEnvelope, derived_delivery_nonce,
+    pending_from_receipt, stamp_last_result_frame,
 };
 
 const TOKEN: &str = "envelope-bearer";
@@ -544,18 +544,69 @@ async fn http_sse_puts_the_block_in_the_only_result_event() {
 }
 
 #[tokio::test]
-async fn http_without_assignment_or_nonce_does_not_query_the_store() {
-    let home = TempHome::new("skip");
+async fn run_without_meta_field_gets_the_derived_nonce() {
+    let home = TempHome::new("derived");
     write_run(&home.path, None);
+    let store = MemStore::new(vec![envelope("msg-derived", "maciej", "no producer needed")]);
+    let app = router(&home.path, Arc::clone(&store));
+    let (status, body) = post(&app, ping_body(), "application/json", Some(RUN)).await;
+    assert_eq!(status, StatusCode::OK);
+    // Parity vector: python monitor_lane.run_delivery_nonce("inject-run").
+    let expected = "vcbus-6e642f1674e76d09ac205ceb";
+    assert_eq!(derived_delivery_nonce(RUN).as_deref(), Some(expected));
+    assert!(body.contains(&format!("[vibecrafted-bus nonce={expected}]")));
+    assert!(body.contains("msg-derived"));
+    assert_eq!(store.marks.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn empty_meta_nonce_opts_the_run_out() {
+    let home = TempHome::new("optout");
+    write_run(&home.path, Some(""));
+    let store = MemStore::new(vec![envelope("msg-optout", "maciej", "stay")]);
+    let app = router(&home.path, Arc::clone(&store));
+    let (status, body) = post(&app, ping_body(), "application/json", Some(RUN)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!body.contains("vibecrafted-bus"));
+    assert_eq!(store.receives.load(Ordering::SeqCst), 0);
+    assert_eq!(store.pending(), 1);
+}
+
+#[tokio::test]
+async fn unchanged_message_dir_skips_the_store_after_an_empty_receive() {
+    let home = TempHome::new("quiet");
+    write_run(&home.path, None);
+    let messages = home.path.join("control_plane/messages");
+    fs::create_dir_all(&messages).expect("messages");
+    let store = MemStore::new(vec![]);
+    let app = router(&home.path, Arc::clone(&store));
+    for _ in 0..2 {
+        let (status, body) = post(&app, ping_body(), "application/json", Some(RUN)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!body.contains("vibecrafted-bus"));
+    }
+    // The CLI store forks a process per receive; an unchanged directory
+    // must not pay that price twice.
+    assert_eq!(store.receives.load(Ordering::SeqCst), 1);
+    fs::write(messages.join("m1.json"), b"{}").expect("new message");
+    let (status, _) = post(&app, ping_body(), "application/json", Some(RUN)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(store.receives.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn unknown_run_or_no_assignment_does_not_query_the_store() {
+    let home = TempHome::new("skip");
+    // No run directory at all: a bare header must not mint a nonce.
     let store = MemStore::new(vec![envelope("msg-skip", "maciej", "stay")]);
     let app = router(&home.path, Arc::clone(&store));
-    let (status, assigned_without_nonce) =
-        post(&app, ping_body(), "application/json", Some(RUN)).await;
+    let (status, unknown_run) = post(&app, ping_body(), "application/json", Some(RUN)).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(!assigned_without_nonce.contains("vibecrafted-bus"));
+    assert!(!unknown_run.contains("vibecrafted-bus"));
     let (status, unassigned) = post(&app, ping_body(), "application/json", None).await;
     assert_eq!(status, StatusCode::OK);
     assert!(!unassigned.contains("vibecrafted-bus"));
+    write_run(&home.path, None);
     let (status, listed) = post(
         &app,
         json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}),
