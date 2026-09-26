@@ -123,7 +123,13 @@ pub mod api {
         sse_keepalive: Duration,
         bridge: Option<Arc<StdioBridge>>,
     ) -> Router<leptos::config::LeptosOptions> {
-        mcp_routes_with_parts(home, bearer, sse_keepalive, Aggregator::local_only(), bridge)
+        mcp_routes_with_parts(
+            home,
+            bearer,
+            sse_keepalive,
+            Aggregator::local_only(),
+            bridge,
+        )
     }
 
     /// The full router: explicit aggregator and an optional stdio bridge.
@@ -358,7 +364,14 @@ pub mod api {
         };
         let sse_only = wants_sse_only(&parts.headers);
         let run = attach.aggregator.resolve_run(&attach.plane, &parts.headers);
-        let outcome = handle_payload(&attach, &payload).await;
+        let mut outcome = handle_payload(&attach, &payload).await;
+        // The reply is finished before JSON or the one SSE event, so the
+        // block lands on that last result frame and not in an earlier one.
+        if let Outcome::Reply(value) = &mut outcome {
+            attach
+                .aggregator
+                .decorate_tools_reply(&attach.plane, run.as_deref(), &payload, value);
+        }
         let response = match outcome {
             Outcome::Accepted => StatusCode::ACCEPTED.into_response(),
             Outcome::Reply(value) if sse_only => one_sse(&value),

@@ -238,6 +238,69 @@ pub mod api {
         })
     }
 
+    /// Pending inbox receipts for one run. Does not consume them.
+    ///
+    /// `vibecrafted message --run-id <id> --receive --json`.
+    ///
+    /// # Errors
+    ///
+    /// The id is unsafe or the CLI did not return a JSON array.
+    pub fn receive_pending(run_id: &str) -> Result<Vec<Value>, &'static str> {
+        if !safe_id(run_id) {
+            return Err("invalid_run_id");
+        }
+        let argv = vec![
+            "message".to_string(),
+            "--run-id".to_string(),
+            run_id.to_string(),
+            "--receive".to_string(),
+            "--json".to_string(),
+        ];
+        let output = run_cli(&argv).map_err(|_| "message_cli_failed")?;
+        if output.code != 0 {
+            return Err("message_receive_failed");
+        }
+        parse_pending(&output.stdout).ok_or("message_receive_failed")
+    }
+
+    /// Record that one receipt was attached to a tool result.
+    ///
+    /// A non-zero CLI status means the store did not accept the mark.
+    /// Callers must not attach the text in that case.
+    ///
+    /// # Errors
+    ///
+    /// The id or nonce is rejected, or `mark_context_injected` failed.
+    pub fn mark_context_injected(message_id: &str, nonce: &str) -> Result<(), &'static str> {
+        if !safe_id(message_id) {
+            return Err("invalid_message_id");
+        }
+        if !crate::mcp_aggregator::valid_injection_nonce(nonce) {
+            return Err("invalid_context_injection_nonce");
+        }
+        let argv = vec![
+            "message".to_string(),
+            "--mark-context-injected".to_string(),
+            message_id.to_string(),
+            "--nonce".to_string(),
+            nonce.to_string(),
+            "--json".to_string(),
+        ];
+        let output = run_cli(&argv).map_err(|_| "message_cli_failed")?;
+        if output.code != 0 {
+            return Err("message_mark_failed");
+        }
+        let text = std::str::from_utf8(&output.stdout).map_err(|_| "message_mark_failed")?;
+        let value: Value = serde_json::from_str(text.trim()).map_err(|_| "message_mark_failed")?;
+        if value.get("delivery_state").and_then(Value::as_str) != Some("context_injected") {
+            return Err("message_mark_failed");
+        }
+        if value.get("context_injected_nonce").and_then(Value::as_str) != Some(nonce) {
+            return Err("message_mark_failed");
+        }
+        Ok(())
+    }
+
     async fn post_message(Extension(attach): Extension<BusAttach>, request: Request) -> Response {
         if let Some(response) =
             crate::mcp::api::reject_bus_request(&attach.token, request.headers())
@@ -698,6 +761,12 @@ pub mod api {
             return StoreResult::Fail(Fail::store(StatusCode::BAD_REQUEST, code));
         }
         StoreResult::Fail(Fail::code(StatusCode::BAD_GATEWAY, "message_store_failed"))
+    }
+
+    fn parse_pending(stdout: &[u8]) -> Option<Vec<Value>> {
+        let text = std::str::from_utf8(stdout).ok()?.trim();
+        let value: Value = serde_json::from_str(text).ok()?;
+        value.as_array().cloned()
     }
 
     fn parse_receipt(stdout: &[u8]) -> Option<Value> {

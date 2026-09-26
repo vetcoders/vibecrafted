@@ -635,6 +635,17 @@ def _build_parser() -> argparse.ArgumentParser:
         default="",
         help="read one durable provider-message receipt",
     )
+    message.add_argument(
+        "--mark-context-injected",
+        metavar="MESSAGE_ID",
+        default="",
+        help="record that one inbox receipt was attached to a tool response",
+    )
+    message.add_argument(
+        "--nonce",
+        default="",
+        help="injection nonce stored with context_injected",
+    )
     message.add_argument("--json", action="store_true")
     for name in LAUNCHERS:
         _add_launch_parser(sub, name)
@@ -2535,6 +2546,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             MessageControlError,
             acknowledge_message,
             inspect_message,
+            mark_context_injected,
             pending_messages,
             send_message,
         )
@@ -2548,6 +2560,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             if result is None:
                 print(f"message not found: {args.inspect}", file=sys.stderr)
                 return 1
+            print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
+        if args.mark_context_injected:
+            try:
+                if args.receive or args.ack or args.file or args.inspect:
+                    raise MessageControlError(
+                        "mark_conflicts_with_other_message_action"
+                    )
+                result = mark_context_injected(args.mark_context_injected, args.nonce)
+            except MessageControlError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
             print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
             return 0
         if args.receive or args.ack:
@@ -2612,7 +2636,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else 1
             )
         print(
-            "usage: vibecrafted message (--run-id ID | --session ID) --file FILE | --receive | --ack MESSAGE_ID | --inspect MESSAGE_ID",
+            "usage: vibecrafted message (--run-id ID | --session ID) --file FILE | --receive | --ack MESSAGE_ID | --inspect MESSAGE_ID | --mark-context-injected MESSAGE_ID --nonce NONCE",
             file=sys.stderr,
         )
         return 2

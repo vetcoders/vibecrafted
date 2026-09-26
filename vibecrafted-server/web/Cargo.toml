@@ -142,6 +142,11 @@ name = "mcp_bridge"
 path = "tests/mcp_bridge.rs"
 required-features = ["ssr"]
 
+[[test]]
+name = "envelope_injection"
+path = "tests/envelope_injection.rs"
+required-features = ["ssr"]
+
 [package.metadata.leptos]
 output-name = "vibecrafted-server-web"
 site-root = "target/site"

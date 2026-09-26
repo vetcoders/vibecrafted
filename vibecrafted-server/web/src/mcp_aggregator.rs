@@ -13,10 +13,17 @@
 //! exists. Otherwise the shim PID and its ancestor chain are matched against
 //! `worker_pid`. Two runs sharing a PID are split by process start (sysinfo)
 //! versus `started_at`; a tie or a stale incarnation is left unassigned.
+//!
+//! A resolved run with `context_injection_nonce` in its `meta.json` gets
+//! pending inbox envelopes glued onto the finished `tools/call` result.
+//! `mark_context_injected` runs before the bytes change. Mark failure, a
+//! missing nonce, or an unassigned run leaves the result untouched and does
+//! not consume the inbox. The block is the last content part of the last
+//! result frame.
 
 #![cfg(feature = "ssr")]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
@@ -32,6 +39,8 @@ use serde_json::{Value, json};
 pub const PID_HEADER: HeaderName = HeaderName::from_static("x-vibecrafted-pid");
 pub const ANCESTOR_HEADER: HeaderName = HeaderName::from_static("x-vibecrafted-ancestors");
 pub const RUN_HEADER: HeaderName = HeaderName::from_static("x-vibecrafted-run-id");
+/// Run `meta.json` field announced to the worker by its startup prompt.
+pub const INJECTION_NONCE_FIELD: &str = "context_injection_nonce";
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(800);
 const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(30);
@@ -131,6 +140,153 @@ enum GroupPick {
     Rejected,
 }
 
+/// One inbox receipt selected for attachment. The store stays the source of
+/// truth; this is the text the result block needs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingEnvelope {
+    pub message_id: String,
+    pub sender: String,
+    pub text: String,
+}
+
+/// The inbox could not be read or the mark was refused.
+///
+/// Refusal leaves the receipt pending. Callers must not attach it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EnvelopeStoreError;
+
+impl std::fmt::Display for EnvelopeStoreError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("envelope store failed")
+    }
+}
+
+impl std::error::Error for EnvelopeStoreError {}
+
+/// Read and mark the message store. Production calls `vibecrafted message`.
+/// Tests pass a stub. Mark must fail closed: `Err` means the receipt is
+/// still pending and must not be attached.
+pub trait EnvelopeStore: Send + Sync {
+    /// # Errors
+    ///
+    /// Store or CLI failure. The caller skips injection.
+    fn receive_pending(&self, run_id: &str) -> Result<Vec<PendingEnvelope>, EnvelopeStoreError>;
+
+    /// # Errors
+    ///
+    /// The receipt was not moved to `context_injected`.
+    fn mark_context_injected(
+        &self,
+        message_id: &str,
+        nonce: &str,
+    ) -> Result<(), EnvelopeStoreError>;
+}
+
+struct EnvelopeGate {
+    store: Arc<dyn EnvelopeStore>,
+    runs: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    claimed: Mutex<HashSet<String>>,
+}
+
+impl EnvelopeGate {
+    fn cli() -> Self {
+        Self::from_store(Arc::new(CliEnvelopeStore))
+    }
+
+    #[must_use]
+    pub fn from_store(store: Arc<dyn EnvelopeStore>) -> Self {
+        Self {
+            store,
+            runs: Mutex::new(HashMap::new()),
+            claimed: Mutex::new(HashSet::new()),
+        }
+    }
+
+    /// Attach pending envelopes for `run_id` onto the last `tools/call`
+    /// result in `response`. `None` run or nonce returns without touching
+    /// the store or the bytes.
+    pub fn decorate(
+        &self,
+        run_id: Option<&str>,
+        nonce: Option<&str>,
+        request: &Value,
+        response: &mut Value,
+    ) {
+        let Some(run_id) = run_id.filter(|value| is_safe_run_id(value)) else {
+            return;
+        };
+        let Some(nonce) = nonce.filter(|value| valid_injection_nonce(value)) else {
+            return;
+        };
+        let Some(carrier) = locate_carrier(request, response) else {
+            return;
+        };
+        let claimed = self.claim(run_id, nonce);
+        if claimed.is_empty() {
+            return;
+        }
+        let block = render_blocks(nonce, &claimed);
+        let _ = stamp_carrier(response, &carrier, &block);
+    }
+
+    fn claim(&self, run_id: &str, nonce: &str) -> Vec<PendingEnvelope> {
+        let gate = self.run_mutex(run_id);
+        let _held = lock(&gate);
+        let pending = match self.store.receive_pending(run_id) {
+            Ok(rows) => rows,
+            Err(EnvelopeStoreError) => return Vec::new(),
+        };
+        let mut chosen = Vec::new();
+        let mut seen = HashSet::new();
+        for envelope in pending {
+            if !safe_message_id(&envelope.message_id) || !seen.insert(envelope.message_id.clone()) {
+                continue;
+            }
+            let reserved = lock(&self.claimed).insert(envelope.message_id.clone());
+            if !reserved {
+                continue;
+            }
+            if self
+                .store
+                .mark_context_injected(&envelope.message_id, nonce)
+                .is_err()
+            {
+                lock(&self.claimed).remove(&envelope.message_id);
+                continue;
+            }
+            chosen.push(envelope);
+        }
+        chosen
+    }
+
+    fn run_mutex(&self, run_id: &str) -> Arc<Mutex<()>> {
+        let mut runs = lock(&self.runs);
+        if let Some(existing) = runs.get(run_id) {
+            return Arc::clone(existing);
+        }
+        let created = Arc::new(Mutex::new(()));
+        runs.insert(run_id.to_string(), Arc::clone(&created));
+        created
+    }
+}
+
+struct CliEnvelopeStore;
+
+impl EnvelopeStore for CliEnvelopeStore {
+    fn receive_pending(&self, run_id: &str) -> Result<Vec<PendingEnvelope>, EnvelopeStoreError> {
+        let rows = crate::bus::api::receive_pending(run_id).map_err(|_| EnvelopeStoreError)?;
+        Ok(rows.into_iter().filter_map(pending_from_receipt).collect())
+    }
+
+    fn mark_context_injected(
+        &self,
+        message_id: &str,
+        nonce: &str,
+    ) -> Result<(), EnvelopeStoreError> {
+        crate::bus::api::mark_context_injected(message_id, nonce).map_err(|_| EnvelopeStoreError)
+    }
+}
+
 pub struct Aggregator {
     upstreams: Vec<UpstreamSpec>,
     cache_ttl: Duration,
@@ -141,6 +297,7 @@ pub struct Aggregator {
     sessions: Mutex<HashMap<String, String>>,
     identity: Mutex<Option<IdentitySnap>>,
     ids: AtomicU64,
+    envelopes: EnvelopeGate,
 }
 
 impl Aggregator {
@@ -162,7 +319,16 @@ impl Aggregator {
             sessions: Mutex::new(HashMap::new()),
             identity: Mutex::new(None),
             ids: AtomicU64::new(1),
+            envelopes: EnvelopeGate::cli(),
         }
+    }
+
+    /// Replace the message-store client. Tests pass a stub; production keeps
+    /// the `vibecrafted message` client built by [`Aggregator::new`].
+    #[must_use]
+    pub fn with_envelopes(mut self, store: Arc<dyn EnvelopeStore>) -> Self {
+        self.envelopes = EnvelopeGate::from_store(store);
+        self
     }
 
     #[must_use]
@@ -174,6 +340,21 @@ impl Aggregator {
             Arc::new(DeadTransport),
             Arc::new(SysinfoStarts),
         ))
+    }
+
+    /// [`local_only`] with a caller-supplied inbox. The CLI store is not used.
+    #[must_use]
+    pub fn local_with_envelopes(store: Arc<dyn EnvelopeStore>) -> Arc<Self> {
+        Arc::new(
+            Self::new(
+                Vec::new(),
+                DEFAULT_CACHE_TTL,
+                DEFAULT_NEGATIVE_TTL,
+                Arc::new(DeadTransport),
+                Arc::new(SysinfoStarts),
+            )
+            .with_envelopes(store),
+        )
     }
 
     #[must_use]
@@ -454,6 +635,36 @@ impl Aggregator {
     fn next_id(&self) -> u64 {
         self.ids.fetch_add(1, Ordering::Relaxed)
     }
+
+    /// Glue pending envelopes onto a finished JSON-RPC reply.
+    ///
+    /// Called after the tool result exists and before it is written as JSON
+    /// or as the single SSE event. Unassigned runs and replies that are not
+    /// a `tools/call` result do not touch the store.
+    pub fn decorate_tools_reply(
+        &self,
+        plane: &ControlPlane,
+        run_id: Option<&str>,
+        request: &Value,
+        response: &mut Value,
+    ) {
+        let nonce = run_id.and_then(|run_id| injection_nonce(plane, run_id));
+        self.decorate_reply(run_id, nonce.as_deref(), request, response);
+    }
+
+    /// Same decoration as [`decorate_tools_reply`] with an explicit nonce.
+    ///
+    /// A missing run or nonce does not read the store. The HTTP path loads
+    /// the nonce from run meta and then calls this.
+    pub fn decorate_reply(
+        &self,
+        run_id: Option<&str>,
+        nonce: Option<&str>,
+        request: &Value,
+        response: &mut Value,
+    ) {
+        self.envelopes.decorate(run_id, nonce, request, response);
+    }
 }
 
 impl ToolCacheEntry {
@@ -728,6 +939,225 @@ fn header_pid(headers: &HeaderMap, name: &HeaderName) -> Option<i64> {
     let raw = headers.get(name)?.to_str().ok()?.trim();
     let pid = raw.parse::<i64>().ok()?;
     (pid > 0).then_some(pid)
+}
+
+/// Nonce grammar shared with `message_control._INJECTION_NONCE`.
+#[must_use]
+pub fn valid_injection_nonce(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    first.is_ascii_alphanumeric()
+        && value.len() <= 256
+        && chars.all(|ch| {
+            ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | ':' | '+' | '/' | '=' | '-')
+        })
+}
+
+fn safe_message_id(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    first.is_ascii_alphanumeric()
+        && value.len() <= 128
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | ':' | '-'))
+}
+
+fn injection_nonce(plane: &ControlPlane, run_id: &str) -> Option<String> {
+    if !is_safe_run_id(run_id) {
+        return None;
+    }
+    let path = plane
+        .control_plane_home()
+        .join("runtime_runs")
+        .join(run_id)
+        .join("meta.json");
+    let payload = read_meta(&path)?;
+    let raw = payload.get(INJECTION_NONCE_FIELD).and_then(Value::as_str)?;
+    valid_injection_nonce(raw).then(|| raw.to_string())
+}
+
+/// Receipt JSON from `--receive` into the block fields. Rows without a safe
+/// `message_id` are skipped so they are not marked.
+#[must_use]
+pub fn pending_from_receipt(value: Value) -> Option<PendingEnvelope> {
+    let message_id = value.get("message_id")?.as_str()?.to_string();
+    if !safe_message_id(&message_id) {
+        return None;
+    }
+    let sender = sender_of(&value);
+    let text = value
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    Some(PendingEnvelope {
+        message_id,
+        sender,
+        text,
+    })
+}
+
+fn sender_of(value: &Value) -> String {
+    if let Some(direct) = first_text(value, &["from", "sender", "source", "role"]) {
+        return one_line(direct);
+    }
+    if let Some(text) = value.get("text").and_then(Value::as_str)
+        && let Ok(parsed) = serde_json::from_str::<Value>(text)
+        && let Some(nested) = first_text(&parsed, &["source", "from", "sender", "role"])
+    {
+        return one_line(nested);
+    }
+    if let Some(provider) = value.get("provider").and_then(Value::as_str) {
+        let provider = one_line(provider);
+        if provider != "unknown" {
+            return provider;
+        }
+    }
+    "unknown".to_string()
+}
+
+fn first_text<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(Value::as_str))
+        .filter(|text| !text.trim().is_empty())
+}
+
+fn one_line(value: &str) -> String {
+    let mut out = String::new();
+    for ch in value.chars().take(128) {
+        if ch.is_control() {
+            out.push(' ');
+        } else {
+            out.push(ch);
+        }
+    }
+    let trimmed = out.trim();
+    if trimmed.is_empty() {
+        "unknown".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn neutralize(text: &str) -> String {
+    text.replace("[/vibecrafted-bus]", "[/vibecrafted-bus.]")
+        .replace("[vibecrafted-bus", "[vibecrafted-bus.")
+}
+
+fn render_blocks(nonce: &str, envelopes: &[PendingEnvelope]) -> String {
+    let mut out = String::new();
+    for (index, envelope) in envelopes.iter().enumerate() {
+        if index > 0 {
+            out.push('\n');
+        }
+        out.push_str("[vibecrafted-bus nonce=");
+        out.push_str(nonce);
+        out.push_str("]\nmessage_id=");
+        out.push_str(&envelope.message_id);
+        out.push_str("\nfrom=");
+        out.push_str(&one_line(&envelope.sender));
+        out.push('\n');
+        out.push_str(&neutralize(&envelope.text));
+        out.push_str("\n[/vibecrafted-bus]");
+    }
+    out
+}
+
+enum Carrier {
+    Single,
+    Batch(usize),
+}
+
+fn locate_carrier(request: &Value, response: &Value) -> Option<Carrier> {
+    if request.get("method").is_some() {
+        if request.get("method").and_then(Value::as_str) != Some("tools/call") {
+            return None;
+        }
+        return can_carry(response.get("result")?).then_some(Carrier::Single);
+    }
+    let requests = request.as_array()?;
+    let replies = response.as_array()?;
+    let mut found = None;
+    for item in requests {
+        if item.get("method").and_then(Value::as_str) != Some("tools/call") {
+            continue;
+        }
+        let id = item.get("id")?;
+        if id.is_null() {
+            continue;
+        }
+        let Some(index) = replies
+            .iter()
+            .rposition(|reply| reply.get("id") == Some(id))
+        else {
+            continue;
+        };
+        let Some(result) = replies[index].get("result") else {
+            continue;
+        };
+        if can_carry(result) {
+            found = Some(Carrier::Batch(index));
+        }
+    }
+    found
+}
+
+fn can_carry(result: &Value) -> bool {
+    let Some(object) = result.as_object() else {
+        return false;
+    };
+    match object.get("content") {
+        None | Some(Value::Array(_)) => true,
+        Some(_) => false,
+    }
+}
+
+fn stamp_carrier(response: &mut Value, carrier: &Carrier, block: &str) -> bool {
+    let result = match carrier {
+        Carrier::Single => response.get_mut("result"),
+        Carrier::Batch(index) => response
+            .as_array_mut()
+            .and_then(|items| items.get_mut(*index))
+            .and_then(|reply| reply.get_mut("result")),
+    };
+    result.is_some_and(|result| append_bus_text(result, block))
+}
+
+fn append_bus_text(result: &mut Value, block: &str) -> bool {
+    let Some(object) = result.as_object_mut() else {
+        return false;
+    };
+    let part = json!({"type": "text", "text": block});
+    match object.get_mut("content") {
+        Some(Value::Array(items)) => {
+            items.push(part);
+            true
+        }
+        None => {
+            object.insert("content".to_string(), json!([part]));
+            true
+        }
+        Some(_) => false,
+    }
+}
+
+/// Put `block` on the last frame that already has a tool `result`.
+/// Earlier frames stay byte-for-byte as they were.
+#[must_use]
+pub fn stamp_last_result_frame(frames: &mut [Value], block: &str) -> bool {
+    let Some(index) = frames
+        .iter()
+        .rposition(|frame| frame.get("result").is_some_and(can_carry))
+    else {
+        return false;
+    };
+    let Some(result) = frames[index].get_mut("result") else {
+        return false;
+    };
+    append_bus_text(result, block)
 }
 
 fn prefix_tool(prefix: &str, mut tool: Value) -> Option<Value> {
