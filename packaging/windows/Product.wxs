@@ -14,7 +14,7 @@
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <?include Identity.wxi ?>
   <Product
-      Id="*"
+      Id="$(var.ProductCode)"
       Name="$(var.ProductName)"
       Language="1033"
       Version="$(var.ProductVersion)"
@@ -41,9 +41,12 @@
     <Property Id="ARPCONTACT" Value="hello@vetcoders.io" />
     <Property Id="ARPURLUPDATEINFO" Value="https://github.com/vetcoders/vibecrafted/blob/main/LICENSE" />
 
-    <!-- WixUI_Minimal shows the BUSL-1.1 license RTF before install (per-user). -->
+    <!-- WixUI_Minimal shows the BUSL-1.1 license RTF before install (per-user).
+         Replace stock red-CD WixUI bitmaps with near-black (#0a0a0b) chrome. -->
     <UIRef Id="WixUI_Minimal" />
     <WixVariable Id="WixUILicenseRtf" Value="License.rtf" />
+    <WixVariable Id="WixUIBannerBmp" Value="banner.bmp" />
+    <WixVariable Id="WixUIDialogBmp" Value="dialog.bmp" />
 
     <Feature Id="RuntimePackAdapter" Title="$(var.ProductName) Runtime Pack" Level="1">
       <ComponentGroupRef Id="InstallerPayload" />
