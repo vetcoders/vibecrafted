@@ -7,13 +7,14 @@
 //!
 //! The bearer is one server token (`VC_SERVER_MCP_BEARER`, else `[mcp].bearer`
 //! in the operator config). It is not a `[server]` key: Python
-//! `load_server_config` rejects unknown keys in that table. Per-run binding
-//! is W2-01.
+//! `load_server_config` rejects unknown keys in that table. Upstream tools
+//! and PID→run binding live in `mcp_aggregator` (W2-01).
 
 #[cfg(feature = "ssr")]
 pub mod api {
     use std::convert::Infallible;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
     use std::time::Duration;
 
     use axum::Router;
@@ -28,6 +29,8 @@ pub mod api {
     use futures_util::StreamExt;
     use futures_util::stream;
     use serde_json::{Map, Value, json};
+
+    use crate::mcp_aggregator::{self, Aggregator, RemoteCall};
 
     const DEFAULT_PROTOCOL: &str = "2025-03-26";
     const SUPPORTED_PROTOCOLS: [&str; 2] = ["2025-03-26", "2025-06-18"];
@@ -45,6 +48,7 @@ pub mod api {
         token: String,
         plane: ControlPlane,
         keepalive: Duration,
+        aggregator: Arc<Aggregator>,
     }
 
     enum Outcome {
@@ -59,11 +63,14 @@ pub mod api {
     /// call is 401) until a token is configured.
     pub fn mcp_routes() -> Router<leptos::config::LeptosOptions> {
         let env_token = std::env::var(MCP_BEARER_ENV).ok();
-        let token = load_mcp_bearer(env_token.as_deref(), operator_config_path().as_deref());
-        mcp_routes_with(
+        let config_path = operator_config_path();
+        let token = load_mcp_bearer(env_token.as_deref(), config_path.as_deref());
+        let aggregator = Aggregator::from_config(&upstream_config(config_path.as_deref()));
+        mcp_routes_with_aggregator(
             control_core::vibecrafted_home(),
             token,
             DEFAULT_SSE_KEEPALIVE,
+            aggregator,
         )
     }
 
@@ -76,6 +83,20 @@ pub mod api {
         bearer: impl Into<String>,
         sse_keepalive: Duration,
     ) -> Router<leptos::config::LeptosOptions> {
+        mcp_routes_with_aggregator(home, bearer, sse_keepalive, Aggregator::local_only())
+    }
+
+    /// Same router as [`mcp_routes_with`], with an explicit aggregator.
+    ///
+    /// Production loads upstreams from `[mcp.upstream.*]`. Tests pass a
+    /// scripted transport or [`Aggregator::local_only`] so they never dial
+    /// the operator's loctree/aicx ports.
+    pub fn mcp_routes_with_aggregator(
+        home: impl Into<PathBuf>,
+        bearer: impl Into<String>,
+        sse_keepalive: Duration,
+        aggregator: Arc<Aggregator>,
+    ) -> Router<leptos::config::LeptosOptions> {
         let keepalive = if sse_keepalive.is_zero() {
             DEFAULT_SSE_KEEPALIVE
         } else {
@@ -85,10 +106,22 @@ pub mod api {
             token: bearer.into(),
             plane: ControlPlane::new(home),
             keepalive,
+            aggregator,
         };
         Router::<leptos::config::LeptosOptions>::new()
             .route("/mcp", get(mcp_get).post(mcp_post))
             .layer(Extension(attach))
+    }
+
+    fn upstream_config(config_file: Option<&Path>) -> mcp_aggregator::McpUpstreamConfig {
+        config_file
+            .and_then(read_config_text)
+            .map(|text| mcp_aggregator::parse_mcp_upstreams(&text))
+            .unwrap_or(mcp_aggregator::McpUpstreamConfig {
+                seen_upstream_table: false,
+                upstreams: Vec::new(),
+                cache_ttl: None,
+            })
     }
 
     /// Resolve the server bearer. A non-empty env value wins, including when
@@ -249,7 +282,11 @@ pub mod api {
                 &json!({"error": "accept text/event-stream"}),
             );
         }
-        open_sse(&stream_open_notification(), attach.keepalive)
+        let run = attach.aggregator.resolve_run(&attach.plane, &headers);
+        stamp_run(
+            open_sse(&stream_open_notification(), attach.keepalive),
+            run.as_deref(),
+        )
     }
 
     async fn mcp_post(Extension(attach): Extension<McpAttach>, request: Request) -> Response {
@@ -282,11 +319,14 @@ pub mod api {
             }
         };
         let sse_only = wants_sse_only(&parts.headers);
-        match handle_payload(&attach.plane, &payload) {
+        let run = attach.aggregator.resolve_run(&attach.plane, &parts.headers);
+        let outcome = handle_payload(&attach, &payload).await;
+        let response = match outcome {
             Outcome::Accepted => StatusCode::ACCEPTED.into_response(),
             Outcome::Reply(value) if sse_only => one_sse(&value),
             Outcome::Reply(value) => json_response(StatusCode::OK, &value),
-        }
+        };
+        stamp_run(response, run.as_deref())
     }
 
     fn reject(attach: &McpAttach, headers: &HeaderMap) -> Option<Response> {
@@ -426,16 +466,16 @@ pub mod api {
             .eq_ignore_ascii_case("application/json")
     }
 
-    fn handle_payload(plane: &ControlPlane, payload: &Value) -> Outcome {
+    async fn handle_payload(attach: &McpAttach, payload: &Value) -> Outcome {
         let Some(batch) = payload.as_array() else {
-            return handle_message(plane, payload);
+            return handle_message(attach, payload).await;
         };
         if batch.is_empty() || batch.len() > MAX_BATCH {
             return Outcome::Reply(rpc_err(Value::Null, -32600, "invalid request"));
         }
         let mut replies = Vec::new();
         for message in batch {
-            if let Outcome::Reply(value) = handle_message(plane, message) {
+            if let Outcome::Reply(value) = handle_message(attach, message).await {
                 replies.push(value);
             }
         }
@@ -446,7 +486,7 @@ pub mod api {
         }
     }
 
-    fn handle_message(plane: &ControlPlane, message: &Value) -> Outcome {
+    async fn handle_message(attach: &McpAttach, message: &Value) -> Outcome {
         let Some(object) = message.as_object() else {
             return Outcome::Reply(rpc_err(Value::Null, -32600, "invalid request"));
         };
@@ -478,10 +518,14 @@ pub mod api {
         match method {
             "initialize" => Outcome::Reply(rpc_ok(id, initialize_result(&params))),
             "ping" => Outcome::Reply(rpc_ok(id, json!({}))),
-            "tools/list" => Outcome::Reply(rpc_ok(id, tools_list())),
-            "tools/call" => match tools_call(plane, &params) {
+            "tools/list" => {
+                let mut tools = vec![ping_tool(), run_status_tool()];
+                tools.extend(attach.aggregator.list_remote().await);
+                Outcome::Reply(rpc_ok(id, json!({"tools": tools})))
+            }
+            "tools/call" => match tools_call(attach, &params).await {
                 Ok(result) => Outcome::Reply(rpc_ok(id, result)),
-                Err(message) => Outcome::Reply(rpc_err(id, -32602, message)),
+                Err(failure) => Outcome::Reply(failure.into_rpc(id)),
             },
             _ => Outcome::Reply(rpc_err(id, -32601, "method not found")),
         }
@@ -512,12 +556,6 @@ pub mod api {
                 "version": env!("VC_SERVER_VERSION"),
             },
             "instructions": "Pilot tools: vc_ping, vc_run_status.",
-        })
-    }
-
-    fn tools_list() -> Value {
-        json!({
-            "tools": [ping_tool(), run_status_tool()],
         })
     }
 
@@ -553,26 +591,40 @@ pub mod api {
         })
     }
 
-    fn tools_call(plane: &ControlPlane, params: &Value) -> Result<Value, &'static str> {
+    async fn tools_call(attach: &McpAttach, params: &Value) -> Result<Value, CallFailure> {
         let Some(object) = params.as_object() else {
-            return Err("invalid params");
+            return Err(CallFailure::params("invalid params"));
         };
         let Some(name) = object.get("name").and_then(Value::as_str) else {
-            return Err("invalid params");
+            return Err(CallFailure::params("invalid params"));
         };
         let arguments = object.get("arguments").cloned().unwrap_or(Value::Null);
-        match name {
-            TOOL_PING => ping_call(&arguments),
-            TOOL_RUN_STATUS => run_status_call(plane, &arguments),
-            _ => Err("unknown tool"),
+        if name == TOOL_PING {
+            return ping_call(&arguments);
+        }
+        if name == TOOL_RUN_STATUS {
+            return run_status_call(&attach.plane, &arguments);
+        }
+        match attach.aggregator.call(name, arguments).await {
+            RemoteCall::Local => Err(CallFailure::params("unknown tool")),
+            RemoteCall::Ready(result) => Ok(result),
+            RemoteCall::Failed {
+                upstream,
+                tool,
+                fault,
+            } => Err(CallFailure::Upstream {
+                upstream,
+                tool,
+                reason: fault.reason(),
+            }),
         }
     }
 
-    fn ping_call(arguments: &Value) -> Result<Value, &'static str> {
+    fn ping_call(arguments: &Value) -> Result<Value, CallFailure> {
         match arguments {
             Value::Null => {}
             Value::Object(map) if map.is_empty() => {}
-            _ => return Err("invalid params"),
+            _ => return Err(CallFailure::params("invalid params")),
         }
         let version = env!("VC_SERVER_VERSION");
         let time = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
@@ -582,15 +634,15 @@ pub mod api {
         ))
     }
 
-    fn run_status_call(plane: &ControlPlane, arguments: &Value) -> Result<Value, &'static str> {
+    fn run_status_call(plane: &ControlPlane, arguments: &Value) -> Result<Value, CallFailure> {
         let Some(map) = arguments.as_object() else {
-            return Err("invalid params");
+            return Err(CallFailure::params("invalid params"));
         };
         if map.len() != 1 {
-            return Err("invalid params");
+            return Err(CallFailure::params("invalid params"));
         }
         let Some(run_id) = map.get("run_id").and_then(Value::as_str) else {
-            return Err("invalid params");
+            return Err(CallFailure::params("invalid params"));
         };
         let Some(run) = plane.lookup_run(run_id) else {
             return Ok(tool_err(format!("run not found: {run_id}")));
@@ -650,12 +702,61 @@ pub mod api {
         json!({"jsonrpc": "2.0", "id": id, "result": result})
     }
 
+    enum CallFailure {
+        Params(&'static str),
+        Upstream {
+            upstream: String,
+            tool: String,
+            reason: &'static str,
+        },
+    }
+
+    impl CallFailure {
+        fn params(message: &'static str) -> Self {
+            Self::Params(message)
+        }
+
+        fn into_rpc(self, id: Value) -> Value {
+            match self {
+                Self::Params(message) => rpc_err(id, -32602, message),
+                Self::Upstream {
+                    upstream,
+                    tool,
+                    reason,
+                } => json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": {
+                        "code": -32002,
+                        "message": "upstream unavailable",
+                        "data": {
+                            "upstream": upstream,
+                            "tool": tool,
+                            "reason": reason,
+                        }
+                    }
+                }),
+            }
+        }
+    }
+
     fn rpc_err(id: Value, code: i32, message: &str) -> Value {
         json!({
             "jsonrpc": "2.0",
             "id": id,
             "error": {"code": code, "message": message},
         })
+    }
+
+    fn stamp_run(mut response: Response, run: Option<&str>) -> Response {
+        if let Some(run) = run
+            && let Ok(value) = header::HeaderValue::from_str(run)
+        {
+            response
+                .headers_mut()
+                .insert(mcp_aggregator::RUN_HEADER, value);
+        }
+        response
     }
 
     fn json_response(status: StatusCode, value: &Value) -> Response {
