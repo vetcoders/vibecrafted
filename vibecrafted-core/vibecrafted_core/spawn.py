@@ -34,6 +34,7 @@ from .control_plane import (
     normalize_run_root,
     sync_state,
 )
+from .env_allowlist import dispatcher_identity, filter_headless_worker_env
 from .events import append_event
 from .execution_controls import PERMISSION_POLICIES, ExecutionControls
 from .failure_attribution import attribute_failure
@@ -4683,6 +4684,7 @@ def write_meta(
         "loop_nr": loop_nr_value,
         "skill_code": skill_code,
         "framework_version": framework_version,
+        "dispatcher": dispatcher_identity(),
         "exit_code": None,
         "launcher_pid": None,
         "liveness": "pid_pending",
@@ -5412,6 +5414,9 @@ class Supervisor:
         session_id = ensure_session_id(child_env.get("VIBECRAFTED_SESSION_ID"))
         child_env.setdefault("VIBECRAFTED_RUN_ID", effective_run_id)
         child_env["VIBECRAFTED_SESSION_ID"] = session_id
+        # This supervisor launches workers, not interactive workspaces.
+        # Interactive sessions use _fresh_child_environment and stay unfiltered.
+        child_env = filter_headless_worker_env(child_env)
 
         if sandbox:
             if not sandbox_supported(agent):

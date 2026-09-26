@@ -44,6 +44,7 @@ from .control_plane import (
 )
 from .cron import parse_frontmatter
 from .delivery.store import atomic_write_json
+from .env_allowlist import dispatcher_identity, filter_headless_worker_env
 from .events import append_event
 from .execution_controls import (
     SUPERVISED_RUNTIME_KINDS,
@@ -3310,6 +3311,9 @@ def launch_workflow(
         initial_meta["model_effective"] = spec.model
     if claim_digest:
         initial_meta["claim_digest"] = claim_digest
+    # Who launched this run, captured before the child env overlay replaces
+    # VIBECRAFTED_AGENT with the worker. Message recipients read this block.
+    initial_meta["dispatcher"] = dispatcher_identity()
     if len(initial_meta) > 1:
         atomic_write_json(
             artifacts["meta"],
@@ -3473,6 +3477,14 @@ def launch_workflow(
     else:
         merged_env.pop("VIBECRAFTED_OPERATOR_SESSION", None)
 
+    # Headless Popen replaces the child environment. Interactive and visible
+    # launches keep the dispatcher environment; vc-frame does not use this map.
+    launch_env = (
+        filter_headless_worker_env(merged_env)
+        if spec.runtime == "headless"
+        else merged_env
+    )
+
     append_event(
         kind="launch",
         run_id=run_id,
@@ -3618,7 +3630,7 @@ def launch_workflow(
                 proc = subprocess.Popen(
                     command,
                     cwd=Path(source_dir).resolve(),
-                    env=merged_env,
+                    env=launch_env,
                     stdout=handle,
                     stderr=subprocess.STDOUT,
                     start_new_session=True,
