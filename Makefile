@@ -114,6 +114,8 @@ RELEASE_MIN_FREE_KIB ?= 6291456
 
 release-prereqs:
 	@set -eu; \
+	. "$(CURDIR)/scripts/lib/xcode-channel.sh"; \
+	vibecrafted_xcode_require_stable; \
 	. "$(RELEASE_TOOLCHAIN_CONTRACT)"; \
 	if [ "$$(uname -s)" != Darwin ]; then \
 		printf '==> %s host: this is the macOS release toolchain contract; the Linux assembler provisions its own\n' "$$(uname -s)"; \

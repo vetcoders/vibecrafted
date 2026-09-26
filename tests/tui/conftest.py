@@ -95,6 +95,8 @@ def _disable_live_perception_side_effects(
     monkeypatch.setenv("VC_FRAME_SOCKET_DIR", str(home / "frame-sockets"))
     monkeypatch.setenv("VIBECRAFTED_PERCEPTION_WATCH", "0")
     monkeypatch.setenv("VIBECRAFTED_TEST_MODE", "1")
+    # Host xcode-select may be a beta. Installer tests are not choosing a toolchain.
+    monkeypatch.setenv("VIBECRAFTED_ALLOW_BETA_XCODE", "1")
     for name in _AMBIENT_FRAME_ENV + _AMBIENT_ROOT_ENV:
         monkeypatch.delenv(name, raising=False)
 

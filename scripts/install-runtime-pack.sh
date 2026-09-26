@@ -539,6 +539,12 @@ if [[ "$operation" == "install" && "$dry_run" == "1" ]]; then
   die "--dry-run is only valid with --uninstall"
 fi
 
+if [[ "$operation" == "install" && "$verify_only" != "1" ]]; then
+  # shellcheck source=lib/xcode-channel.sh
+  . "$SCRIPT_DIR/lib/xcode-channel.sh"
+  vibecrafted_xcode_require_stable || exit 1
+fi
+
 if [[ -z "$expected_platform" ]]; then
   case "$(uname -s)" in
     Darwin) expected_platform="darwin-$(uname -m | sed 's/^aarch64$/arm64/; s/^x86_64$/x64/')" ;;

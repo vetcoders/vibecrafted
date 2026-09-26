@@ -245,18 +245,9 @@ CODESIGN_KEYCHAIN_ARGS=()
 # the same tree under /Applications/Xcode.app (26.6) builds clean. A beta
 # Xcode is therefore refused unless the operator opts in explicitly.
 #
-XCODE_DEVELOPER_DIR="${DEVELOPER_DIR:-$(xcode-select -p 2>/dev/null || true)}"
-if [[ -z "$XCODE_DEVELOPER_DIR" || ! -d "$XCODE_DEVELOPER_DIR" ]]; then
-  echo "FATAL: no usable Xcode developer dir (xcode-select -p / DEVELOPER_DIR)" >&2
-  exit 1
-fi
-if [[ "$XCODE_DEVELOPER_DIR" == *[Bb]eta* && -z "${VIBECRAFTED_ALLOW_BETA_XCODE:-}" ]]; then
-  echo "FATAL: release refuses a beta Xcode toolchain: $XCODE_DEVELOPER_DIR" >&2
-  echo "       repair: DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer make release" >&2
-  echo "       (or sudo xcode-select -s /Applications/Xcode.app; VIBECRAFTED_ALLOW_BETA_XCODE=1 overrides)" >&2
-  exit 1
-fi
-export DEVELOPER_DIR="$XCODE_DEVELOPER_DIR"
+# shellcheck source=lib/xcode-channel.sh
+. "$REPO_ROOT/scripts/lib/xcode-channel.sh"
+vibecrafted_xcode_require_stable || exit 1
 echo "==> Xcode developer dir: $DEVELOPER_DIR ($(xcrun --find strip 2>/dev/null || echo 'strip: unresolved'))"
 export MACOSX_DEPLOYMENT_TARGET=14.0
 # Apple ld64 1230.1 and 27037.1 both assert in makeSymbolStringInPlace while
