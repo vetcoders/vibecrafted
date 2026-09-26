@@ -464,6 +464,97 @@ fn global_catalog_lists_scaffold_truth_and_ignores_unrelated_manifests() {
     fs::remove_dir_all(home).ok();
 }
 
+/// Live shape: `vetcoders/vibecrafted` is the real repo directory, and
+/// `vetcoders/vibecrafted-suite` plus `local/vibecrafted-suite` are symlinks
+/// onto it. Titles are not the key — the manifest plan_id is.
+#[cfg(unix)]
+#[test]
+fn catalog_collapses_symlink_aliases() {
+    use std::os::unix::fs::symlink;
+
+    let home = temp_home("catalog-aliases");
+    let plan_id = "shelf-plan";
+    let root = write_plan(&home, plan_id, declarations());
+    populate(&root, plan_id);
+
+    let real_repo = home.join("artifacts/vetcoders/vibecrafted");
+    let same_org_alias = home.join("artifacts/vetcoders/vibecrafted-suite");
+    let other_org = home.join("artifacts/local");
+    fs::create_dir_all(&other_org).expect("alias org");
+    let other_alias = other_org.join("vibecrafted-suite");
+    symlink("vibecrafted", &same_org_alias).expect("same-org alias");
+    symlink("../vetcoders/vibecrafted", &other_alias).expect("other-org alias");
+
+    let broken = plan_root(&home, "broken-manifest");
+    fs::create_dir_all(&broken).expect("broken plan root");
+    fs::write(
+        broken.join("manifest.json"),
+        br#"{"plan_id":"broken-manifest"}"#,
+    )
+    .expect("broken manifest");
+
+    let catalog = ScaffoldArtifactStore::new(&home).catalog_detailed();
+    assert_eq!(
+        catalog
+            .plans
+            .iter()
+            .map(|plan| plan.plan_id.as_str())
+            .collect::<Vec<_>>(),
+        [plan_id]
+    );
+    let plan = &catalog.plans[0];
+    assert_eq!(plan.plan_id, plan_id);
+    assert_eq!(plan.org, "vetcoders");
+    assert_eq!(plan.repo, "vibecrafted");
+    assert!(
+        plan.plan_root
+            .contains("artifacts/vetcoders/vibecrafted/2026_0720/plans/shelf-plan"),
+        "row must keep the real plan root, got {}",
+        plan.plan_root
+    );
+    assert!(
+        !plan.plan_root.contains("vibecrafted-suite"),
+        "alias path leaked into plan_root: {}",
+        plan.plan_root
+    );
+
+    assert_eq!(
+        catalog.skipped.len(),
+        1,
+        "a broken manifest is one skip, not a silent drop and not an alias triple: {:?}",
+        catalog
+            .skipped
+            .iter()
+            .map(|skip| skip.plan_root.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        catalog.skipped[0].plan_root.contains("broken-manifest"),
+        "skip root: {}",
+        catalog.skipped[0].plan_root
+    );
+    assert_eq!(
+        catalog.skipped[0].guessed_plan_id.as_deref(),
+        Some("broken-manifest")
+    );
+
+    assert!(
+        fs::symlink_metadata(&same_org_alias)
+            .expect("same-org alias metadata")
+            .file_type()
+            .is_symlink()
+    );
+    assert!(
+        fs::symlink_metadata(&other_alias)
+            .expect("other-org alias metadata")
+            .file_type()
+            .is_symlink()
+    );
+    assert!(real_repo.is_dir());
+
+    fs::remove_dir_all(home).ok();
+}
+
 #[test]
 fn canonical_write_requires_hash_rejects_unlisted_and_scopes_history() {
     let home = temp_home("writes");

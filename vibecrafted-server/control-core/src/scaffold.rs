@@ -2556,24 +2556,31 @@ fn validate_path_segment(value: &str, label: &str) -> ScaffoldResult<()> {
     Ok(())
 }
 
+/// Real directory, not a symlink. `Path::is_dir` follows links, so alias repos
+/// (`vetcoders/vibecrafted-suite`, `local/vibecrafted-suite`) would list every
+/// plan again. `FileType::is_dir` does not follow, matching `plans()`.
+fn dir_entry_is_real_directory(entry: &fs::DirEntry) -> bool {
+    entry.file_type().is_ok_and(|kind| kind.is_dir())
+}
+
 fn collect_scaffold_manifest_paths(artifacts_root: &Path, output: &mut Vec<PathBuf>) {
     let Ok(orgs) = fs::read_dir(artifacts_root) else {
         return;
     };
-    for org in orgs.flatten().filter(|entry| entry.path().is_dir()) {
+    for org in orgs.flatten().filter(dir_entry_is_real_directory) {
         let Ok(repos) = fs::read_dir(org.path()) else {
             continue;
         };
-        for repo in repos.flatten().filter(|entry| entry.path().is_dir()) {
+        for repo in repos.flatten().filter(dir_entry_is_real_directory) {
             let Ok(days) = fs::read_dir(repo.path()) else {
                 continue;
             };
-            for day in days.flatten().filter(|entry| entry.path().is_dir()) {
+            for day in days.flatten().filter(dir_entry_is_real_directory) {
                 let plans_root = day.path().join("plans");
                 let Ok(plans) = fs::read_dir(plans_root) else {
                     continue;
                 };
-                for plan in plans.flatten().filter(|entry| entry.path().is_dir()) {
+                for plan in plans.flatten().filter(dir_entry_is_real_directory) {
                     let manifest = plan.path().join("manifest.json");
                     if manifest.is_file() {
                         output.push(manifest);

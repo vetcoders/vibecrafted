@@ -698,6 +698,8 @@ button:hover > .icon-box {
   gap: 0;
   min-height: 100%;
   padding: 0;
+  background: var(--surface-page);
+  color: var(--text-primary);
 }
 
 .usage-toolbar {
@@ -3850,6 +3852,117 @@ a.control-run-id:focus-visible {
   box-shadow: none;
 }
 
-.overview-desk-body:has(.overview-inspector[hidden]) {
+.overview-desk-body:has(.overview-inspector[hidden]),
+.usage-split:has(.overview-inspector[hidden]) {
   grid-template-columns: minmax(0, 1fr);
+}
+
+/* Repository rows are anchors. The card rule painted the hairline and
+   left the anchor's own color and underline to the browser, so the
+   line sat through the name. */
+.project-list,
+.project-plan-list {
+  display: grid;
+}
+
+a.project-row,
+a.project-plan {
+  display: grid;
+  grid-template-columns: minmax(8rem, 0.8fr) minmax(0, 1.6fr);
+  align-items: center;
+  gap: 8px 20px;
+  min-height: 2.5rem;
+  padding: 9px 2px;
+  color: var(--text-primary);
+  line-height: 1.35;
+  text-decoration: none;
+}
+
+a.project-row .project-name,
+a.project-plan .project-plan-name {
+  color: var(--text-primary);
+  font: 650 13px/1.35 var(--font-body);
+}
+
+a.project-row .control-run-meta,
+a.project-plan .control-run-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  color: var(--text-muted);
+}
+
+/* prompt web-nav (w1-02): quiet Help and About sit with the phase line.
+   Group labels after the first door shelf need air. The phase note keeps
+   its row; the footer above it takes the bottom push. */
+.server-sidebar-nav .server-nav-label:not(:first-child) {
+  margin-top: 14px;
+}
+
+.server-sidebar-footer {
+  display: grid;
+  gap: 0;
+  margin-top: auto;
+  padding: 4px 8px 0;
+}
+
+.server-sidebar-footer .server-nav-link {
+  min-height: 24px;
+  color: var(--text-muted);
+}
+
+.server-sidebar-footer .server-nav-link strong {
+  font-size: 11px;
+  font-weight: 450;
+}
+
+.server-sidebar-note {
+  margin-top: 0;
+}
+
+/* w2-01 overview welcome: one status line and four Work miniatures.
+   The costs door is a link to /usage, not a second usage-chart-heat. */
+.overview-status {
+  margin: 0;
+  color: var(--text-muted);
+  font: 13px/1.4 var(--font-body);
+}
+
+.overview-doors {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 8px 16px 16px;
+}
+
+.overview-door {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 12px;
+  border: var(--stroke-width) solid var(--border-subtle);
+  border-radius: var(--radius-surface);
+  color: inherit;
+  text-decoration: none;
+}
+
+.overview-door strong {
+  font: 600 14px/1.2 var(--font-body);
+}
+
+.overview-door small {
+  color: var(--text-muted);
+  font: 11px/1.3 var(--font-mono);
+}
+
+.overview-door[aria-current="page"] {
+  border-color: var(--text-muted);
+}
+
+@media (max-width: 720px) {
+  .overview-doors {
+    grid-template-columns: 1fr 1fr;
+  }
 }

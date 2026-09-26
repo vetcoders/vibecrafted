@@ -6,7 +6,7 @@ use leptos_router::components::{Route, Router, Routes};
 use leptos_router::path;
 use serde::{Deserialize, Serialize};
 
-use crate::chrome::{ServerFrame, ServerSection};
+use crate::chrome::{ServerFrame, ServerSection, overview_welcome_line};
 use crate::run_detail::RunDetailPage;
 
 // The SSR page embeds the dashboard JSON and the hydrated client reads it
@@ -109,6 +109,20 @@ struct DashboardRun {
     updated_at: String,
     /// Settlement tui cell when Python wrote one (`f`/`x`/`n`), else empty.
     settlement_tui: String,
+    /// Python settlement verdict (`finalized` / `failed` / `needs_attention` /
+    /// `invalid`). Empty when the snapshot omitted one. Never derived from
+    /// an exit code or from the tui cell.
+    #[serde(default)]
+    settlement_verdict: String,
+    /// Plan id already present on the recorded report path. Empty hides the plan door.
+    #[serde(default)]
+    plan_id: String,
+    /// Scaffold href for [`Self::plan_id`], with org/repo/day when the path has them.
+    #[serde(default)]
+    plan_href: String,
+    /// True only when a transcript file can actually be opened.
+    #[serde(default)]
+    transcript_open: bool,
     last_error: String,
 }
 
@@ -127,6 +141,16 @@ struct DashboardLifecycleRun {
     operator_actions_count: usize,
     next_action: String,
     updated_at: String,
+    #[serde(default)]
+    report_path: String,
+    #[serde(default)]
+    transcript_path: String,
+    #[serde(default)]
+    plan_id: String,
+    #[serde(default)]
+    plan_href: String,
+    #[serde(default)]
+    transcript_open: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -153,6 +177,35 @@ where
         .join(", ")
 }
 
+/// Serde is the naming authority for the Python verdict. The tui cell is not
+/// a substitute: `x` covers both `failed` and `invalid`.
+#[cfg(feature = "ssr")]
+fn settlement_verdict_wire(value: &Option<control_core::SettlementVerdict>) -> String {
+    value
+        .as_ref()
+        .and_then(|inner| serde_json::to_value(inner).ok())
+        .and_then(|json| json.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
+/// A transcript door exists only when a log file can be opened. A recorded
+/// path that is missing, or a symlink `transcript_open` refuses, stays hidden.
+#[cfg(feature = "ssr")]
+fn transcript_log_is_open(
+    plane: &control_core::ControlPlane,
+    run_id: &str,
+    latest_transcript: &str,
+) -> bool {
+    if crate::run_detail::human_transcript_is_open(plane, run_id) {
+        return true;
+    }
+    let path = latest_transcript.trim();
+    if path.is_empty() {
+        return false;
+    }
+    control_core::transcript_open::open_provider_transcript(std::path::Path::new(path)).is_ok()
+}
+
 #[cfg(feature = "ssr")]
 fn load_dashboard_data() -> DashboardData {
     use chrono::Utc;
@@ -168,7 +221,7 @@ fn load_dashboard_data_from(
 ) -> DashboardData {
     use control_core::{Event, LifecycleRunSummary, RunStatus};
 
-    fn run_summary(run: RunStatus) -> DashboardRun {
+    fn run_summary(plane: &control_core::ControlPlane, run: RunStatus) -> DashboardRun {
         let settlement_tui = run
             .settlement_tui
             .map(|cell| match cell {
@@ -178,6 +231,9 @@ fn load_dashboard_data_from(
             })
             .unwrap_or("")
             .to_string();
+        let settlement_verdict = settlement_verdict_wire(&run.settlement_verdict);
+        let (plan_id, plan_href) = plan_from_report_path(&run.latest_report);
+        let transcript_open = transcript_log_is_open(plane, &run.run_id, &run.latest_transcript);
         DashboardRun {
             run_id: run.run_id,
             logical_session_id: run.logical_session_id,
@@ -191,6 +247,10 @@ fn load_dashboard_data_from(
             latest_transcript: run.latest_transcript,
             updated_at: run.updated_at,
             settlement_tui,
+            settlement_verdict,
+            plan_id,
+            plan_href,
+            transcript_open,
             last_error: run.last_error,
         }
     }
@@ -204,12 +264,17 @@ fn load_dashboard_data_from(
         }
     }
 
-    fn lifecycle_summary(run: LifecycleRunSummary) -> DashboardLifecycleRun {
+    fn lifecycle_summary(
+        plane: &control_core::ControlPlane,
+        run: LifecycleRunSummary,
+    ) -> DashboardLifecycleRun {
         let dou_label = match (run.dou_readiness.as_str(), run.dou_index) {
             ("zero", Some(0)) => "ZERO DoU".to_string(),
             ("open", Some(value)) => format!("DoU {value}"),
             _ => "DoU unknown".to_string(),
         };
+        let (plan_id, plan_href) = plan_from_report_path(&run.report_path);
+        let transcript_open = transcript_log_is_open(plane, &run.run_id, &run.transcript_path);
         DashboardLifecycleRun {
             run_id: run.run_id,
             workflow: run.workflow,
@@ -224,6 +289,11 @@ fn load_dashboard_data_from(
             operator_actions_count: run.operator_actions_count,
             next_action: run.next_action,
             updated_at: run.updated_at,
+            report_path: run.report_path,
+            transcript_path: run.transcript_path,
+            plan_id,
+            plan_href,
+            transcript_open,
         }
     }
 
@@ -448,10 +518,25 @@ fn load_dashboard_data_from(
             unclassified: settlement.unclassified,
             total_settled: settlement.total_settled,
         },
-        active_runs: state.active_runs.into_iter().map(run_summary).collect(),
-        stalled_runs: state.stalled_runs.into_iter().map(run_summary).collect(),
-        recent_runs: state.recent_runs.into_iter().map(run_summary).collect(),
-        lifecycle_runs: lifecycle_runs.into_iter().map(lifecycle_summary).collect(),
+        active_runs: state
+            .active_runs
+            .into_iter()
+            .map(|run| run_summary(plane, run))
+            .collect(),
+        stalled_runs: state
+            .stalled_runs
+            .into_iter()
+            .map(|run| run_summary(plane, run))
+            .collect(),
+        recent_runs: state
+            .recent_runs
+            .into_iter()
+            .map(|run| run_summary(plane, run))
+            .collect(),
+        lifecycle_runs: lifecycle_runs
+            .into_iter()
+            .map(|run| lifecycle_summary(plane, run))
+            .collect(),
         warnings,
         events: state.events.into_iter().map(event_summary).collect(),
         loctree_report,
@@ -626,135 +711,6 @@ fn control_dashboard(
     dashboard_loading().into_any()
 }
 
-fn settlement_badge(tui: &str) -> String {
-    if tui.is_empty() {
-        "settle:—".to_string()
-    } else {
-        format!("settle:{tui}")
-    }
-}
-
-fn run_cards(runs: Vec<DashboardRun>) -> impl IntoView {
-    runs.into_iter()
-        .map(|run| {
-            let report_label = if run.latest_report.is_empty() {
-                "no report".to_string()
-            } else {
-                run.latest_report.clone()
-            };
-            // Civilized console link: every run id opens its observability page.
-            let detail_href = format!("/run/{}", run.run_id);
-            let transcript_url = format!("/api/control/runs/{}/transcript", run.run_id);
-            let run_id = run.run_id.clone();
-            let root = run.root.clone();
-            let run_id_attr = run_id.clone();
-            let run_id_copy = run_id.clone();
-            let root_attr = root.clone();
-            let href_attr = detail_href.clone();
-            let href_link = detail_href.clone();
-            let href_copy = detail_href.clone();
-            view! {
-                <article
-                    class="control-run-row"
-                    data-ppm="run"
-                    data-run-id=run_id_attr
-                    data-href=href_attr
-                    data-focus-root=root_attr
-                    data-transcript-url=transcript_url
-                >
-                    <div class="control-run-primary">
-                        <a class="control-run-id" href=href_link data-copy=run_id_copy>{run_id}</a>
-                        <span class="control-run-root">{root}</span>
-                    </div>
-                    <div class="control-run-tags">
-                        <span class="control-badge">{run.state}</span>
-                        <span class="control-badge">{run.health}</span>
-                        <span class="control-badge">{settlement_badge(&run.settlement_tui)}</span>
-                        <span class="control-badge">{run.agent}</span>
-                        <span class="control-badge">{run.skill}</span>
-                        <span class="control-badge">{run.mode}</span>
-                    </div>
-                    <div class="control-run-meta">
-                        <span>{run.updated_at}</span>
-                        <span>{report_label}</span>
-                        <span class="control-run-error">{run.last_error}</span>
-                        <button type="button" class="control-copy" data-copy=href_copy>"Copy"</button>
-                    </div>
-                </article>
-            }
-        })
-        .collect_view()
-}
-
-fn run_table(
-    title: &'static str,
-    aria: &'static str,
-    band: &'static str,
-    runs: Vec<DashboardRun>,
-) -> impl IntoView {
-    let count = runs.len();
-    let empty = count == 0;
-    view! {
-        <section class="overview-band run-table-band" aria-label=aria data-rail-band=band hidden=empty>
-            <header class="run-table-head">
-                <h2>{title}</h2>
-                <span>{count}</span>
-            </header>
-            <div class="run-table-wrap">
-                <table class="run-table">
-                    <thead>
-                        <tr>
-                            <th>"Run"</th>
-                            <th>"Agent"</th>
-                            <th>"Skill"</th>
-                            <th>"Age"</th>
-                            <th>"Heartbeat"</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <tr class="run-table-empty" hidden={!empty}>
-                            <td colspan="5">"None."</td>
-                        </tr>
-                        {runs.into_iter().map(|run| {
-                            let detail_href = format!("/run/{}", run.run_id);
-                            let transcript_url = format!("/api/control/runs/{}/transcript", run.run_id);
-                            let live = run.health == "active";
-                            let beat = if live { "live" } else { "none" };
-                            let beat_class = if live { "run-beat is-live" } else { "run-beat" };
-                            let meta = format!("{} · {} · {}", run.agent, run.skill, run.updated_at);
-                            view! {
-                                <tr
-                                    data-ppm="run"
-                                    data-run-id=run.run_id.clone()
-                                    data-href=detail_href.clone()
-                                    data-focus-root=run.root.clone()
-                                    data-transcript-url=transcript_url
-                                    data-report=run.latest_report.clone()
-                                    data-error=run.last_error.clone()
-                                    data-meta=meta
-                                >
-                                    <td>
-                                        <a class="control-run-id" href=detail_href.clone() data-copy=run.run_id.clone()>{run.run_id.clone()}</a>
-                                    </td>
-                                    <td>{run.agent}</td>
-                                    <td>{run.skill}</td>
-                                    <td>{run.updated_at}</td>
-                                    <td>
-                                        <span class=beat_class>
-                                            <i aria-hidden="true"></i>
-                                            {beat}
-                                        </span>
-                                    </td>
-                                </tr>
-                            }
-                        }).collect_view()}
-                    </tbody>
-                </table>
-            </div>
-        </section>
-    }
-}
-
 fn is_terminal_state(state: &str) -> bool {
     matches!(
         state.to_ascii_lowercase().as_str(),
@@ -886,7 +842,7 @@ fn retained_run_history(settlement: DashboardSettlement) -> impl IntoView {
                 <span>{format!("{} settled", settlement.total_settled)}</span>
             </div>
             <p class="control-plane-meta">
-                "Every run snapshot this host still keeps, from all days — not what is running now. Current agents are listed above."
+                "Every run snapshot this host still keeps, from all days — not what is running now. Open runs are in the buckets above."
             </p>
             <p class="control-plane-meta">
                 <span>{format!("{} finished", settlement.f)}</span>
@@ -922,6 +878,7 @@ pub fn shell(_options: leptos::config::LeptosOptions) -> impl IntoView {
                 <style>{STYLE_MAIN}</style>
             </head>
             <body>
+                <script id=CODE_REPORTS_EMBED_ID type="application/json" inner_html=code_reports_embed_json()></script>
                 <App/>
                 <script inner_html=theme_control_script()></script>
                 <script inner_html=operator_desk_script()></script>
@@ -949,9 +906,19 @@ pub fn App() -> impl IntoView {
                 <Route path=path!("/lifecycle") view=LifecyclePage />
                 <Route path=path!("/activity") view=ActivityPage />
                 <Route path=path!("/structure") view=StructurePage />
+                <Route path=path!("/code") view=StructurePage />
                 <Route path=path!("/aicx") view=AicxPage />
+                <Route path=path!("/history") view=HistoryPage />
                 <Route path=path!("/frame") view=FramePage />
                 <Route path=path!("/guide") view=GuidePage />
+                <Route path=path!("/help") view=HelpPage />
+                <Route path=path!("/about") view=AboutPage />
+                <Route path=path!("/projects") view=ProjectsPage />
+                <Route path=path!("/projects/:org/:repo") view=ProjectPlansPage />
+                <Route path=path!("/skills") view=SkillsPage />
+                <Route path=path!("/skills/:name") view=SkillEditorPage />
+                <Route path=path!("/settings") view=SettingsPage />
+                <Route path=path!("/diagnostics") view=DiagnosticsPage />
                 <Route path=path!("/run/:run_id") view=RunDetailPage />
             </Routes>
         </Router>
@@ -1037,7 +1004,7 @@ pub fn UsagePage() -> impl IntoView {
                     <p id="usage-empty" class="control-empty" hidden>"No canonical runtime runs match this window and filter."</p>
                     <p class="usage-footnote"><span id="usage-schema">"vibecrafted.usage-report.v1"</span><span id="usage-generated"></span><span>"Unknowns stay visible. Currencies are never combined. This projection is not a bill."</span></p>
                 </section>
-                <aside class="overview-inspector doc-pane" id="overview-inspector" aria-label="Run document">
+                <aside class="overview-inspector doc-pane" id="overview-inspector" aria-label="Run document" hidden>
                     <div class="doc-tabs" role="tablist" aria-label="Document">
                         <button type="button" data-doc-tab="transcript" class="is-active">"Transcript"</button>
                         <button type="button" data-doc-tab="report">"Report"</button>
@@ -1614,6 +1581,219 @@ pub fn AicxPage() -> impl IntoView {
     }
 }
 
+/// One remembered AICX hit. Plans and Loctree reports are not rows in this room.
+struct HistoryMemory {
+    session_id: String,
+    kind: String,
+    agent: String,
+    date: String,
+    summary: String,
+    reference: String,
+    plan_id: String,
+}
+
+impl HistoryMemory {
+    #[cfg(test)]
+    fn hit(kind: &str, session_id: &str) -> Self {
+        Self {
+            session_id: session_id.to_string(),
+            kind: kind.to_string(),
+            agent: "grok".to_string(),
+            date: "2026-09-25".to_string(),
+            summary: String::new(),
+            reference: format!("/api/aicx/reference?path={session_id}"),
+            plan_id: String::new(),
+        }
+    }
+
+    /// Session or intent memory only. A plan id, a plan kind, or a report kind
+    /// never becomes a row, even when a session id is also present.
+    fn is_remembered(&self) -> bool {
+        if !self.plan_id.trim().is_empty() {
+            return false;
+        }
+        let kind = self.kind.trim().to_ascii_lowercase();
+        if kind == "plan" || kind == "report" || kind.contains("loctree") {
+            return false;
+        }
+        if self.session_id.trim().is_empty() {
+            return false;
+        }
+        kind == "session" || kind == "intent" || kind.is_empty()
+    }
+}
+
+fn history_page_script() -> &'static str {
+    r#"(() => {
+  const form = document.getElementById('history-search-form');
+  const q = document.getElementById('history-search-query');
+  const project = document.getElementById('history-search-project');
+  const status = document.getElementById('history-memory-status');
+  const empty = document.getElementById('history-memory-empty');
+  const results = document.getElementById('history-memory-list');
+  if (!form || !q || !status || !results) return;
+  const roomEmpty = 'History & context has no remembered sessions or intents yet.';
+  const remembered = (item) => {
+    if (!item || item.plan_id) return false;
+    const kind = String(item.kind || '').toLowerCase();
+    if (kind === 'plan' || kind === 'report' || kind.indexOf('loctree') !== -1) return false;
+    const session = String(item.session_id || '').trim();
+    if (!session) return false;
+    return kind === 'session' || kind === 'intent' || kind === '';
+  };
+  const paint = (items) => {
+    results.replaceChildren();
+    const rows = (items || []).filter(remembered);
+    if (empty) empty.hidden = rows.length !== 0;
+    status.textContent = rows.length ? (rows.length + ' remembered') : roomEmpty;
+    for (const item of rows) {
+      const li = document.createElement('li');
+      const kind = String(item.kind || 'session').toLowerCase() === 'intent' ? 'intent' : 'session';
+      li.className = 'history-memory-row';
+      li.setAttribute('data-memory', kind);
+      const reference = String(item.reference || '');
+      const label = String(item.session_id);
+      if (reference.indexOf('/api/aicx/reference') === 0) {
+        const a = document.createElement('a');
+        a.href = reference;
+        a.className = 'control-run-open';
+        a.textContent = label;
+        li.append(a);
+      } else {
+        const strong = document.createElement('strong');
+        strong.textContent = label;
+        li.append(strong);
+      }
+      const meta = document.createElement('span');
+      meta.textContent = [kind, item.agent, item.date].filter(Boolean).join(' · ');
+      li.append(meta);
+      const summary = document.createElement('span');
+      summary.textContent = (item.matches || []).join(' ');
+      li.append(summary);
+      results.append(li);
+    }
+  };
+  const runSearch = async () => {
+    const query = q.value.trim();
+    if (!query || query.startsWith('-') || query.length > 512) {
+      status.textContent = 'History & context needs a query of at most 512 characters.';
+      return;
+    }
+    const scope = project ? project.value.trim() : '';
+    if (scope && !/^[\w][\w.-]{0,63}\/[\w][\w.-]{0,63}$/.test(scope)) {
+      status.textContent = 'Project must be an owner/repo slug (for example vetcoders/vibecrafted).';
+      return;
+    }
+    status.textContent = 'Reading AICX…';
+    const params = new URLSearchParams({ q: query });
+    if (scope) params.set('project', scope);
+    try {
+      const response = await fetch('/api/aicx/search?' + params.toString(), {
+        credentials: 'same-origin',
+        cache: 'no-store'
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        status.textContent = payload.error || ('AICX search failed (HTTP ' + response.status + ')');
+        return;
+      }
+      paint(payload.items || []);
+    } catch (error) {
+      status.textContent = 'History & context could not read AICX: ' + error.message;
+    }
+  };
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    runSearch();
+  });
+  const initial = new URLSearchParams(location.search).get('q') || '';
+  if (initial.trim()) {
+    q.value = initial.trim();
+    runSearch();
+  }
+})();"#
+}
+
+fn history_view(hits: Vec<HistoryMemory>) -> impl IntoView {
+    let remembered: Vec<HistoryMemory> = hits
+        .into_iter()
+        .filter(HistoryMemory::is_remembered)
+        .collect();
+    let count = remembered.len();
+    let show_empty = count == 0;
+    view! {
+        <Title text="History & context - vc-server" />
+        <Meta name="description" content="Sessions and intents this host remembers, from the local AICX corpus." />
+        <ServerFrame active=ServerSection::Structure status=format!("{count} remembered")>
+            <div class="server-console-shell route-page-shell" data-history-room>
+                {route_header(
+                    "Trace",
+                    "History & context",
+                    "Sessions and intents the work remembered. This room queries the local AICX search and opens a hit only through the server reference route.",
+                )}
+                <section class="control-panel control-panel-wide" aria-label="Remembered sessions and intents">
+                    <div class="control-panel-head">
+                        <h2>"Remembered"</h2>
+                        <span>{count}</span>
+                    </div>
+                    <form id="history-search-form" class="server-console-links" action="/api/aicx/search" method="get">
+                        <input id="history-search-query" name="q" type="search" required=true maxlength="512" placeholder="Name a session or intent" />
+                        <input id="history-search-project" name="project" type="text" maxlength="129" placeholder="owner/repo (optional)" />
+                        <button class="server-console-link server-console-link-primary" type="submit">"Show memory"</button>
+                    </form>
+                    <p id="history-memory-status" class="control-plane-meta">"The list is AICX memory."</p>
+                    {show_empty.then(|| view! {
+                        <p id="history-memory-empty" class="control-empty">"History & context has no remembered sessions or intents yet."</p>
+                    })}
+                    <ul id="history-memory-list" class="control-warning-list">
+                        {remembered.into_iter().map(|hit| {
+                            let kind = if hit.kind.eq_ignore_ascii_case("intent") {
+                                "intent".to_string()
+                            } else {
+                                "session".to_string()
+                            };
+                            let session_label = hit.session_id.clone();
+                            let reference = hit.reference.clone();
+                            let linked = reference.starts_with("/api/aicx/reference");
+                            let agent = hit.agent.clone();
+                            let date = hit.date.clone();
+                            let summary = hit.summary.clone();
+                            let memory_kind = kind.clone();
+                            view! {
+                                <li class="history-memory-row" data-memory=memory_kind>
+                                    {linked.then(|| view! {
+                                        <a class="control-run-open" href=reference>{session_label.clone()}</a>
+                                    })}
+                                    {(!linked).then(|| view! {
+                                        <strong>{session_label.clone()}</strong>
+                                    })}
+                                    <span>{kind}</span>
+                                    <span>{agent}</span>
+                                    <span>{date}</span>
+                                    <span>{summary}</span>
+                                </li>
+                            }
+                        }).collect_view()}
+                    </ul>
+                    <script inner_html=history_page_script()></script>
+                </section>
+            </div>
+        </ServerFrame>
+    }
+}
+
+#[component]
+pub fn HistoryPage() -> impl IntoView {
+    history_view(Vec::new())
+}
+
+/// Crate-root test name. `cargo test -- --exact history_is_aicx_not_plans`
+/// only matches a test at the lib root, not `app::tests::…`.
+#[cfg(all(test, feature = "ssr"))]
+pub(crate) fn history_is_aicx_not_plans_proof() {
+    tests::history_room_proof();
+}
+
 #[component]
 pub fn ConsolePage() -> impl IntoView {
     view! {
@@ -1627,96 +1807,50 @@ pub fn ConsolePage() -> impl IntoView {
 }
 
 fn console_dashboard(dashboard: DashboardData) -> impl IntoView {
-    let active_runs = operator_active_runs(dashboard.active_runs);
-    let stalled_runs = dashboard.stalled_runs;
-    let recent_runs = dashboard.recent_runs;
-    let generated_at = dashboard.generated_at.clone();
-    let loctree_report = dashboard.loctree_report;
-
-    let active_count = active_runs.len();
-    let stalled_count = stalled_runs.len();
-    let recent_count = recent_runs.len();
-    let warning_count = dashboard.warnings.len();
-    let action_count = operator_action_runs(dashboard.lifecycle_runs).len();
-    // Workspaces with a running vc-frame session, not the durable catalog:
-    // the catalog keeps every identity ever registered (worker worktrees and
-    // test roots included) and lives on /workspaces as history.
+    let runs_live = operator_active_runs(dashboard.active_runs).len();
+    // Running vc-frame sessions, not the durable catalog. The attribute stays
+    // so home still counts frames; the catalog itself is not this page.
     let live_workspace_count = dashboard.live_frame_sessions.len();
-    let workspace_status = dashboard.workspace_status;
-    let server_status = dashboard.server_status;
+    let welcome = overview_welcome_line(&dashboard.server_status).to_string();
     let selected_root = dashboard
         .workspaces
         .iter()
         .find(|workspace| workspace.selected)
         .map(|workspace| workspace.root.clone())
         .unwrap_or_default();
-    let has_loctree_report = !loctree_report.is_empty();
-    let loctree_note = if has_loctree_report {
-        "Loctree report available"
-    } else {
-        "Loctree empty"
-    };
     view! {
         <ServerFrame
             active=ServerSection::Overview
-            status=format!("{server_status} · {active_count} live")
+            status=welcome.clone()
         >
-            <div class="server-console-shell overview-desk">
+            <div
+                class="server-console-shell overview-desk"
+                data-live-workspaces=live_workspace_count
+            >
                 <div
                     id="vc-focus-context"
                     data-selected-workspace-root=selected_root
                     hidden
                 ></div>
                 <header class="overview-head">
-                    <p class="overview-context">{format!("{server_status} · {workspace_status}")}</p>
-                    <dl class="overview-head-stats">
-                        <div><dt>"live"</dt><dd>{active_count}</dd></div>
-                        <div><dt>"failures"</dt><dd>{stalled_count}</dd></div>
-                        <div><dt>"next"</dt><dd>{action_count}</dd></div>
-                        <div><dt>"warnings"</dt><dd>{warning_count}</dd></div>
-                        <div><dt>"recent"</dt><dd>{recent_count}</dd></div>
-                        <div data-live-workspaces=live_workspace_count><dt>"workspaces"</dt><dd>{live_workspace_count}</dd></div>
-                    </dl>
-                    <p class="overview-generated">{format!("Generated {generated_at}")}</p>
+                    <h1 class="run-detail-title">"Overview"</h1>
+                    <p id="overview-status" class="overview-status" role="status">{welcome}</p>
                 </header>
-
-                <div class="overview-desk-body">
-                    <div class="overview-desk-main">
-                        {run_table("Active dispatches", "Active dispatches", "active", active_runs)}
-                        {run_table("Failures", "Failures", "failures", stalled_runs)}
-                        {run_table("Recent", "Recent", "recent", recent_runs)}
-                        <p class="overview-structure-line" aria-label="Structure">
-                            <a href="/structure">"Structure"</a>
-                            " · "
-                            {loctree_note}
-                            " · "
-                            <a href="/scaffold">"Plans"</a>
-                        </p>
-                    </div>
-                    <aside class="overview-inspector doc-pane" id="overview-inspector" aria-label="Run document" hidden>
-                        <div class="doc-tabs" role="tablist" aria-label="Document">
-                            <button type="button" data-doc-tab="transcript" class="is-active">"Transcript"</button>
-                            <button type="button" data-doc-tab="report">"Report"</button>
-                            <button type="button" data-doc-tab="structure">"Structure"</button>
-                        </div>
-                        <article class="doc-sheet" data-doc-panel="transcript">
-                            <p class="doc-kicker">"Run"</p>
-                            <h2 data-inspector-id></h2>
-                            <p class="doc-meta" data-inspector-meta>"Select a row."</p>
-                            <pre class="inspector-tail" data-inspector-tail>"Select a row."</pre>
-                        </article>
-                        <article class="doc-sheet" data-doc-panel="report" hidden>
-                            <p class="doc-kicker">"Report"</p>
-                            <p data-inspector-report>"Select a row."</p>
-                            <p class="control-run-error" data-inspector-error hidden></p>
-                        </article>
-                        <article class="doc-sheet" data-doc-panel="structure" hidden>
-                            <p class="doc-kicker">"Path"</p>
-                            <p data-inspector-root>"Select a row."</p>
-                            <a class="doc-path" data-inspector-open href="/structure">"Open structure"</a>
-                        </article>
-                    </aside>
-                </div>
+                <nav class="overview-doors" aria-label="Work">
+                    <a class="overview-door" href="/" aria-current="page">
+                        <strong>"Overview"</strong>
+                    </a>
+                    <a class="overview-door" href="/runs">
+                        <strong>"Runs"</strong>
+                        <small>{runs_live}</small>
+                    </a>
+                    <a class="overview-door" href="/projects">
+                        <strong>"Projects"</strong>
+                    </a>
+                    <a class="overview-door" href="/usage">
+                        <strong>"Costs & usage"</strong>
+                    </a>
+                </nav>
             </div>
         </ServerFrame>
     }
@@ -2131,57 +2265,249 @@ pub fn AgentManagerPage() -> impl IntoView {
     }
 }
 
+/// Plan id already written into a recorded report path
+/// (`.../<org>/<repo>/<day>/plans/<plan_id>/...`). No id, no door.
+fn plan_from_report_path(path: &str) -> (String, String) {
+    let parts: Vec<&str> = path
+        .split(['/', '\\'])
+        .filter(|part| !part.is_empty())
+        .collect();
+    let Some(plans_at) = parts.iter().position(|part| *part == "plans") else {
+        return (String::new(), String::new());
+    };
+    let Some(plan_id) = parts.get(plans_at + 1).copied().filter(|id| !id.is_empty()) else {
+        return (String::new(), String::new());
+    };
+    let href = if plans_at >= 3 {
+        format!(
+            "/scaffold?org={}&repo={}&day={}&plan_id={}",
+            url_component(parts[plans_at - 3]),
+            url_component(parts[plans_at - 2]),
+            url_component(parts[plans_at - 1]),
+            url_component(plan_id),
+        )
+    } else {
+        format!("/scaffold?plan_id={}", url_component(plan_id))
+    };
+    (plan_id.to_string(), href)
+}
+
+fn url_component(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+/// Success / Needs Attention / Failures come only from the settlement verdict.
+/// `invalid` is not a sixth heading and is not folded into Failures. Queued is
+/// the lifecycle state of that name. Current is the non-terminal active or
+/// stalled set, so a stall does not invent another bucket. Exit codes are not read.
+fn place_run(run: &DashboardRun) -> Option<&'static str> {
+    match run.settlement_verdict.as_str() {
+        "finalized" => return Some("success"),
+        "needs_attention" => return Some("needs-attention"),
+        "failed" => return Some("failures"),
+        _ => {}
+    }
+    if run.state.eq_ignore_ascii_case("queued") {
+        return Some("queued");
+    }
+    let current = matches!(run.health.as_str(), "active" | "stalled")
+        && !is_terminal_state(&run.state)
+        && !is_quarantined_run(run);
+    current.then_some("current")
+}
+
+fn queued_lifecycle_run(run: &DashboardLifecycleRun) -> DashboardRun {
+    DashboardRun {
+        run_id: run.run_id.clone(),
+        state: "queued".to_string(),
+        health: "queued".to_string(),
+        agent: run.next_agent.clone(),
+        skill: run.workflow.clone(),
+        latest_report: run.report_path.clone(),
+        updated_at: run.updated_at.clone(),
+        plan_id: run.plan_id.clone(),
+        plan_href: run.plan_href.clone(),
+        transcript_open: run.transcript_open,
+        ..DashboardRun::default()
+    }
+}
+
+fn partition_run_buckets(dashboard: &DashboardData) -> [Vec<DashboardRun>; 5] {
+    let mut placed = std::collections::HashSet::new();
+    let mut success = Vec::new();
+    let mut attention = Vec::new();
+    let mut failures = Vec::new();
+    let mut current = Vec::new();
+    let mut queued = Vec::new();
+    for run in dashboard
+        .active_runs
+        .iter()
+        .chain(dashboard.stalled_runs.iter())
+        .chain(dashboard.recent_runs.iter())
+    {
+        if !placed.insert(run.run_id.clone()) {
+            continue;
+        }
+        match place_run(run) {
+            Some("success") => success.push(run.clone()),
+            Some("needs-attention") => attention.push(run.clone()),
+            Some("failures") => failures.push(run.clone()),
+            Some("current") => current.push(run.clone()),
+            Some("queued") => queued.push(run.clone()),
+            _ => {}
+        }
+    }
+    for run in &dashboard.lifecycle_runs {
+        if !run.status.eq_ignore_ascii_case("queued") {
+            continue;
+        }
+        if !placed.insert(run.run_id.clone()) {
+            continue;
+        }
+        queued.push(queued_lifecycle_run(run));
+    }
+    [success, attention, failures, current, queued]
+}
+
+fn run_bucket_row(run: DashboardRun) -> impl IntoView {
+    let detail_href = format!("/run/{}", run.run_id);
+    let row_href = detail_href.clone();
+    let transcript_href = detail_href.clone();
+    let transcript_url = run
+        .transcript_open
+        .then(|| format!("/api/control/runs/{}/transcript", run.run_id));
+    let plan_href = if run.plan_href.is_empty() && !run.plan_id.is_empty() {
+        format!("/scaffold?plan_id={}", url_component(&run.plan_id))
+    } else {
+        run.plan_href.clone()
+    };
+    let show_plan = !plan_href.is_empty();
+    let transcript_open = run.transcript_open;
+    let meta = format!("{} · {} · {}", run.agent, run.skill, run.updated_at);
+    let run_id = run.run_id.clone();
+    view! {
+        <tr
+            data-ppm="run"
+            data-run-id=run.run_id.clone()
+            data-href=row_href
+            data-focus-root=run.root.clone()
+            data-transcript-url=transcript_url
+            data-report=run.latest_report.clone()
+            data-error=run.last_error.clone()
+            data-meta=meta
+        >
+            <td>
+                <a class="control-run-id" href=detail_href data-copy=run_id.clone()>{run_id.clone()}</a>
+            </td>
+            <td>{run.agent}</td>
+            <td>{run.skill}</td>
+            <td class="run-doors">
+                {show_plan.then(|| view! {
+                    <a class="server-console-link" data-run-door="plan" href=plan_href>"Plan"</a>
+                })}
+                {transcript_open.then(|| view! {
+                    <a class="server-console-link" data-run-door="transcript" href=transcript_href>"Transcript"</a>
+                })}
+                <span class="run-door" data-run-door="dock">"Dock"</span>
+            </td>
+        </tr>
+    }
+}
+
+fn run_bucket(title: &'static str, id: &'static str, runs: Vec<DashboardRun>) -> impl IntoView {
+    let count = runs.len();
+    view! {
+        <section class="control-panel control-panel-wide" aria-label=title data-run-bucket=id>
+            <div class="control-panel-head">
+                <h2>{title}</h2>
+                <span>{count}</span>
+            </div>
+            <p class="control-empty" hidden={count != 0}>"None."</p>
+            <div class="run-table-wrap">
+                <table class="run-table">
+                    <tbody>{runs.into_iter().map(run_bucket_row).collect_view()}</tbody>
+                </table>
+            </div>
+        </section>
+    }
+}
+
 #[component]
 pub fn RunsPage() -> impl IntoView {
     view! {
-        <Title text="live runs - vc-server" />
-        <Meta name="description" content="Current agents and their human transcript tails." />
+        <Title text="runs - vc-server" />
+        <Meta name="description" content="Agent runs in five buckets, with plan, transcript, and dock." />
         {control_dashboard(|dashboard| runs_dashboard(dashboard).into_any())}
     }
 }
 
 fn runs_dashboard(dashboard: DashboardData) -> impl IntoView {
-    let control_plane = dashboard.control_plane;
-    let control_status = dashboard.control_status;
-    let control_error = dashboard.control_error;
-    let generated_at = dashboard.generated_at;
-    let active = operator_active_runs(dashboard.active_runs);
-    let stalled = dashboard.stalled_runs;
-    let recent = dashboard.recent_runs;
-    let settlement = dashboard.settlement;
-    let active_count = active.len();
-    let stalled_count = stalled.len();
-    let recent_count = recent.len();
+    let control_plane = dashboard.control_plane.clone();
+    let control_status = dashboard.control_status.clone();
+    let control_error = dashboard.control_error.clone();
+    let generated_at = dashboard.generated_at.clone();
+    let settlement = dashboard.settlement.clone();
+    let [success, attention, failures, current, queued] = partition_run_buckets(&dashboard);
+    let current_count = current.len();
     let not_initialized = control_status == "not_initialized";
     let unavailable = control_status == "unavailable";
-    let available = control_status == "available";
 
     view! {
-        <ServerFrame active=ServerSection::Runs status=format!("{active_count} live")>
+        <ServerFrame active=ServerSection::Runs status=format!("{current_count} current")>
             <div class="server-console-shell route-page-shell">
-                {route_header("Runtime", "Live runs", "Choose a current agent to open its bounded transcript.human.log tail and full control-plane detail.")}
-                <p class="control-plane-meta"><span>{control_plane}</span><span>{generated_at}</span><span>{control_status.clone()}</span></p>
+                {route_header(
+                    "Work",
+                    "Runs",
+                    "Finalized runs sit in Success, Needs Attention, and Failures. Current and Queued have not settled. Open the plan when one was recorded, open transcript.human.log when that log is on disk, or dock the row.",
+                )}
+                <p class="control-plane-meta"><span>{control_plane}</span><span>{generated_at}</span><span>{control_status}</span></p>
                 {not_initialized.then(|| view! {
                     <p class="control-empty">"The server is healthy, but the control plane is not initialized yet."</p>
                 })}
                 {unavailable.then(|| view! {
                     <p class="control-empty control-error">{format!("Control-plane data is unavailable: {control_error}")}</p>
                 })}
-                <section class="control-panel control-panel-wide" aria-label="Active runs" data-source-status=control_status>
-                    <div class="control-panel-head"><h2>"Current agents"</h2><span>{active_count}</span></div>
-                    {(available && active_count == 0).then(|| view! { <p class="control-empty">"No live agents right now."</p> })}
-                    <div class="control-run-list">{run_cards(active)}</div>
-                </section>
-                <section class="control-panel control-panel-wide" aria-label="Stalled runs">
-                    <div class="control-panel-head"><h2>"Stalled"</h2><span>{stalled_count}</span></div>
-                    {(available && stalled_count == 0).then(|| view! { <p class="control-empty">"No stalled runs."</p> })}
-                    <div class="control-run-list">{run_cards(stalled)}</div>
-                </section>
-                <section class="control-panel control-panel-wide" aria-label="Recent state view">
-                    <div class="control-panel-head"><h2>"Recent"</h2><span>{recent_count}</span></div>
-                    {(available && recent_count == 0).then(|| view! { <p class="control-empty">"No recent settled runs."</p> })}
-                    <div class="control-run-list">{run_cards(recent)}</div>
-                </section>
+                <div class="overview-desk-body">
+                    <div class="overview-desk-main">
+                        {run_bucket("Success", "success", success)}
+                        {run_bucket("Needs Attention", "needs-attention", attention)}
+                        {run_bucket("Failures", "failures", failures)}
+                        {run_bucket("Current", "current", current)}
+                        {run_bucket("Queued", "queued", queued)}
+                    </div>
+                    <aside class="overview-inspector doc-pane" id="overview-inspector" aria-label="Run document" hidden>
+                        <div class="doc-tabs" role="tablist" aria-label="Document">
+                            <button type="button" data-doc-tab="transcript" class="is-active">"Transcript"</button>
+                            <button type="button" data-doc-tab="report">"Report"</button>
+                            <button type="button" data-doc-tab="structure">"Structure"</button>
+                        </div>
+                        <article class="doc-sheet" data-doc-panel="transcript">
+                            <p class="doc-kicker">"Run"</p>
+                            <h2 data-inspector-id></h2>
+                            <p class="doc-meta" data-inspector-meta>"Select a row."</p>
+                            <pre class="inspector-tail" data-inspector-tail>"Select a row."</pre>
+                        </article>
+                        <article class="doc-sheet" data-doc-panel="report" hidden>
+                            <p class="doc-kicker">"Report"</p>
+                            <p data-inspector-report>"Select a row."</p>
+                            <p class="control-run-error" data-inspector-error hidden></p>
+                        </article>
+                        <article class="doc-sheet" data-doc-panel="structure" hidden>
+                            <p class="doc-kicker">"Path"</p>
+                            <p data-inspector-root>"Select a row."</p>
+                            <a class="doc-path" data-inspector-open href="/structure">"Open structure"</a>
+                        </article>
+                    </aside>
+                </div>
                 {retained_run_history(settlement)}
             </div>
         </ServerFrame>
@@ -2247,86 +2573,210 @@ fn activity_dashboard(dashboard: DashboardData) -> impl IntoView {
     }
 }
 
-#[component]
-pub fn StructurePage() -> impl IntoView {
-    view! {
-        <Title text="structure - vc-server" />
-        <Meta name="description" content="Current structural evidence and scaffold entry points." />
-        {control_dashboard(|dashboard| structure_dashboard(dashboard).into_any())}
+#[cfg(any(feature = "ssr", feature = "hydrate"))]
+const CODE_REPORTS_EMBED_ID: &str = "vc-code-reports";
+
+/// Report documents are a different noun from scaffold plans.
+/// `VIBECRAFTED_LOCTREE_REPORTS`, then `loctree_reports` in the operator
+/// config, then `$VIBECRAFTED_HOME/loctree/reports`. Never a build-host path:
+/// the release payload gate refuses binaries that name the operator's checkout.
+#[cfg(feature = "ssr")]
+fn configured_loctree_reports_dir() -> std::path::PathBuf {
+    #[cfg(all(test, feature = "ssr"))]
+    if let Some(path) = code_reports_override() {
+        return path;
     }
+    if let Some(value) = std::env::var_os("VIBECRAFTED_LOCTREE_REPORTS") {
+        let path = std::path::PathBuf::from(value);
+        if !path.as_os_str().is_empty() {
+            return path;
+        }
+    }
+    if let Some(path) = loctree_reports_from_operator_config() {
+        return path;
+    }
+    control_core::vibecrafted_home().join("loctree/reports")
 }
 
-fn structure_dashboard(dashboard: DashboardData) -> impl IntoView {
-    let report = dashboard.loctree_report;
-    let has_report = !report.is_empty();
-    let selected_root = dashboard
-        .workspaces
-        .iter()
-        .find(|workspace| workspace.selected)
-        .map(|workspace| workspace.root.clone())
-        .unwrap_or_default();
+#[cfg(all(test, feature = "ssr"))]
+std::thread_local! {
+    static CODE_REPORTS_OVERRIDE: std::cell::RefCell<Option<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(all(test, feature = "ssr"))]
+fn code_reports_override() -> Option<std::path::PathBuf> {
+    CODE_REPORTS_OVERRIDE.with(|slot| slot.borrow().clone())
+}
+
+#[cfg(all(test, feature = "ssr"))]
+fn set_code_reports_override(path: Option<std::path::PathBuf>) {
+    CODE_REPORTS_OVERRIDE.with(|slot| *slot.borrow_mut() = path);
+}
+
+#[cfg(feature = "ssr")]
+fn loctree_reports_from_operator_config() -> Option<std::path::PathBuf> {
+    let config_home = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".config"))
+        })?;
+    let text = std::fs::read_to_string(config_home.join("vibecrafted/config.toml")).ok()?;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with('[') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "loctree_reports" {
+            continue;
+        }
+        let value = value.trim().trim_matches('"').trim_matches('\'').trim();
+        if value.is_empty() {
+            return None;
+        }
+        return Some(std::path::PathBuf::from(value));
+    }
+    None
+}
+
+#[cfg(feature = "ssr")]
+fn is_loctree_report_document(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".md")
+        || lower.ends_with(".markdown")
+        || lower.ends_with(".html")
+        || lower.ends_with(".htm")
+}
+
+/// Top-level report documents only. Directories, symlinks, and non-documents
+/// stay out so a checkout's source tree cannot masquerade as the list.
+#[cfg(feature = "ssr")]
+fn list_loctree_report_documents(dir: &std::path::Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !meta.is_file() || meta.file_type().is_symlink() {
+            continue;
+        }
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if name.starts_with('.') || !is_loctree_report_document(&name) {
+            continue;
+        }
+        names.push(name);
+    }
+    names.sort_by(|left, right| {
+        left.to_ascii_lowercase()
+            .cmp(&right.to_ascii_lowercase())
+            .then_with(|| left.cmp(right))
+    });
+    names
+}
+
+#[cfg(feature = "ssr")]
+fn code_reports_embed_json() -> String {
+    let names = list_loctree_report_documents(&configured_loctree_reports_dir());
+    serde_json::to_string(&names)
+        .unwrap_or_else(|_| "[]".to_string())
+        .replace('<', "\\u003c")
+}
+
+#[cfg(feature = "ssr")]
+fn code_intelligence_report_names() -> Vec<String> {
+    list_loctree_report_documents(&configured_loctree_reports_dir())
+}
+
+#[cfg(all(feature = "hydrate", not(feature = "ssr")))]
+fn code_intelligence_report_names() -> Vec<String> {
+    let Some(window) = web_sys::window() else {
+        return Vec::new();
+    };
+    let Some(document) = window.document() else {
+        return Vec::new();
+    };
+    let Some(element) = document.get_element_by_id(CODE_REPORTS_EMBED_ID) else {
+        return Vec::new();
+    };
+    let Some(json) = element.text_content() else {
+        return Vec::new();
+    };
+    serde_json::from_str(&json).unwrap_or_default()
+}
+
+#[cfg(not(any(feature = "ssr", feature = "hydrate")))]
+fn code_intelligence_report_names() -> Vec<String> {
+    Vec::new()
+}
+
+#[cfg(all(test, feature = "ssr"))]
+pub fn code_intelligence_is_not_a_plan_library() {
+    tests::code_intelligence_is_not_a_plan_library();
+}
+
+fn code_report_rows(names: Vec<String>) -> impl IntoView {
+    names
+        .into_iter()
+        .map(|name| {
+            let label = name.clone();
+            view! { <li data-code-report=name>{label}</li> }
+        })
+        .collect_view()
+}
+
+#[component]
+pub fn StructurePage() -> impl IntoView {
+    let names = code_intelligence_report_names();
+    let count = names.len();
+    let status = if count == 0 {
+        "no reports".to_string()
+    } else {
+        format!("{count} reports")
+    };
+    let body = if names.is_empty() {
+        view! {
+            <p class="control-empty" data-code-empty>
+                "Code intelligence has no report documents in the configured directory."
+            </p>
+        }
+        .into_any()
+    } else {
+        view! {
+            <ul class="control-warning-list" data-code-reports aria-label="Loctree reports">
+                {code_report_rows(names)}
+            </ul>
+        }
+        .into_any()
+    };
     view! {
-        <ServerFrame active=ServerSection::Structure status="structural evidence".to_string()>
+        <Title text="Code intelligence - vc-server" />
+        <Meta name="description" content="Loctree report documents. Not a plan shelf." />
+        <ServerFrame active=ServerSection::Structure status=status>
             <div class="server-console-shell route-page-shell">
-                <div
-                    id="vc-focus-context"
-                    data-selected-workspace-root=selected_root
-                    hidden
-                ></div>
-                {route_header("Repository", "Structure", "Loctree report for the selected workspace. Generate it here; tabs never start this process. Local filesystem paths are never emitted as broken browser links.")}
-                <section class="control-panel control-panel-wide" aria-label="Structural evidence">
-                    <div class="control-panel-head"><h2>"Latest Loctree report"</h2><span>{if has_report { "available" } else { "not found" }}</span></div>
-                    <p class="run-detail-artifact-path" hidden={!has_report}>{report}</p>
-                    <p class="server-console-links" hidden={!has_report}>
-                        <a class="server-console-link server-console-link-primary" href="/structure/report" target="_blank" rel="noopener noreferrer">"Open Loctree report ↗"</a>
-                    </p>
-                    <p class="control-empty" hidden=has_report>"No Loctree report is known for the roots in the canonical state view."</p>
-                    <p class="server-console-links">
-                        <button id="loctree-generate" class="server-console-link server-console-link-primary" type="button">"Generate Loctree report"</button>
-                    </p>
-                    <p id="loctree-generate-status" class="control-empty"></p>
-                    <p class="control-plane-meta" hidden={!has_report}>"The report opens sandboxed: its scripts run, but it holds no control-plane authority."</p>
-                    {aicx_search_panel()}
-                    <script inner_html=loctree_generate_script()></script>
+                {route_header(
+                    "Loctree",
+                    "Code intelligence",
+                    "Report documents from the configured Loctree reports directory. File names only — this room is not a plan shelf.",
+                )}
+                <section class="control-panel control-panel-wide" aria-label="Code intelligence">
+                    <div class="control-panel-head">
+                        <h2>"Loctree reports"</h2>
+                        <span>{count}</span>
+                    </div>
+                    {body}
                 </section>
             </div>
         </ServerFrame>
     }
-}
-
-fn loctree_generate_script() -> &'static str {
-    r#"(() => {
-  const btn = document.getElementById('loctree-generate');
-  const status = document.getElementById('loctree-generate-status');
-  if (!btn || !status) return;
-  btn.addEventListener('click', async () => {
-    let root = '';
-    try { root = localStorage.getItem('vc-focus-root') || ''; } catch (_) {}
-    const ctx = document.getElementById('vc-focus-context');
-    const live = ctx && ctx.getAttribute('data-selected-workspace-root');
-    if (live) root = live;
-    status.textContent = 'Generating…';
-    btn.disabled = true;
-    try {
-      const response = await fetch('/api/structure/report', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(root ? { root } : {}),
-      });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || ('HTTP ' + response.status));
-      if (payload.href) {
-        location.href = payload.href;
-        return;
-      }
-      location.reload();
-    } catch (error) {
-      status.textContent = 'Generate failed: ' + error.message;
-      btn.disabled = false;
-    }
-  });
-})();"#
 }
 
 #[component]
@@ -2357,6 +2807,1639 @@ pub fn GuidePage() -> impl IntoView {
     }
 }
 
+const PROJECTS_EMBED_ID: &str = "vc-projects-canvas";
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+struct ProjectsSnapshot {
+    kind: String,
+    org: String,
+    repo: String,
+    projects: Vec<ProjectShelfView>,
+    plans: Vec<ProjectPlanView>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct ProjectShelfView {
+    org: String,
+    repo: String,
+    last_activity: String,
+    needs_attention: bool,
+    plan_count: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct ProjectPlanView {
+    plan_id: String,
+    title: String,
+    day: String,
+    href: String,
+    needs_attention: bool,
+}
+
+#[cfg(any(feature = "ssr", feature = "hydrate"))]
+fn encode_projects_embed(snapshot: &ProjectsSnapshot) -> String {
+    serde_json::to_string(snapshot)
+        .unwrap_or_else(|_| "{}".to_string())
+        .replace('<', "\\u003c")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
+}
+
+#[cfg(all(feature = "hydrate", not(feature = "ssr")))]
+fn decode_projects_embed(json: &str) -> Option<ProjectsSnapshot> {
+    serde_json::from_str(json).ok()
+}
+
+#[cfg(all(feature = "hydrate", not(feature = "ssr")))]
+fn read_embedded_projects() -> Option<ProjectsSnapshot> {
+    let document = web_sys::window()?.document()?;
+    let json = document
+        .get_element_by_id(PROJECTS_EMBED_ID)?
+        .text_content()
+        .filter(|text| !text.trim().is_empty())?;
+    decode_projects_embed(&json)
+}
+
+#[cfg(feature = "ssr")]
+fn load_projects_snapshot(org: Option<&str>, repo: Option<&str>) -> ProjectsSnapshot {
+    use control_core::ScaffoldArtifactStore;
+
+    let store = ScaffoldArtifactStore::new(control_core::vibecrafted_home());
+    let detailed = store.catalog_detailed();
+    snapshot_from_plans(&detailed.plans, org, repo, |plan| {
+        !store.is_plan_reviewable(&plan.org, &plan.repo, &plan.day, &plan.plan_id)
+    })
+}
+
+#[cfg(feature = "ssr")]
+fn snapshot_from_plans(
+    plans: &[control_core::ScaffoldPlanSummary],
+    org: Option<&str>,
+    repo: Option<&str>,
+    needs_attention: impl Fn(&control_core::ScaffoldPlanSummary) -> bool,
+) -> ProjectsSnapshot {
+    use crate::scaffold::api::{plan_display_title, project_shelf, scaffold_document_href};
+
+    let shelf = project_shelf(plans);
+    if let (Some(org), Some(repo)) = (org, repo) {
+        let plans = shelf
+            .into_iter()
+            .find(|group| group.org == org && group.repo == repo)
+            .map(|group| {
+                group
+                    .plans
+                    .iter()
+                    .map(|plan| ProjectPlanView {
+                        plan_id: plan.plan_id.clone(),
+                        title: plan_display_title(&plan.plan_id),
+                        day: plan.day.clone(),
+                        href: scaffold_document_href(plan),
+                        needs_attention: needs_attention(plan),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        return ProjectsSnapshot {
+            kind: "project".into(),
+            org: org.to_string(),
+            repo: repo.to_string(),
+            projects: Vec::new(),
+            plans,
+        };
+    }
+    let projects = shelf
+        .iter()
+        .map(|group| ProjectShelfView {
+            org: group.org.clone(),
+            repo: group.repo.clone(),
+            last_activity: group.last_activity.clone(),
+            needs_attention: group.plans.iter().any(&needs_attention),
+            plan_count: group.plans.len(),
+        })
+        .collect();
+    ProjectsSnapshot {
+        kind: "index".into(),
+        org: String::new(),
+        repo: String::new(),
+        projects,
+        plans: Vec::new(),
+    }
+}
+
+#[cfg(feature = "ssr")]
+fn projects_snapshot(org: Option<String>, repo: Option<String>) -> ProjectsSnapshot {
+    load_projects_snapshot(org.as_deref(), repo.as_deref())
+}
+
+#[cfg(all(feature = "hydrate", not(feature = "ssr")))]
+fn projects_snapshot(org: Option<String>, repo: Option<String>) -> ProjectsSnapshot {
+    let _ = (org, repo);
+    read_embedded_projects().unwrap_or_default()
+}
+
+#[cfg(not(any(feature = "ssr", feature = "hydrate")))]
+fn projects_snapshot(org: Option<String>, repo: Option<String>) -> ProjectsSnapshot {
+    let _ = (org, repo);
+    ProjectsSnapshot::default()
+}
+
+fn activity_label(day: &str) -> String {
+    let mut parts = day.split('_');
+    let year = parts.next();
+    let month_day = parts.next();
+    if let (Some(year), Some(month_day), None) = (year, month_day, parts.next())
+        && year.len() == 4
+        && month_day.len() == 4
+        && year.chars().all(|character| character.is_ascii_digit())
+        && month_day
+            .chars()
+            .all(|character| character.is_ascii_digit())
+    {
+        return format!("{year}-{}-{}", &month_day[..2], &month_day[2..]);
+    }
+    if day.is_empty() {
+        "No activity".to_string()
+    } else {
+        day.replace('_', " · ")
+    }
+}
+
+fn path_segment(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+fn owned_route_header(eyebrow: String, title: String, description: String) -> impl IntoView {
+    view! {
+        <section class="run-detail-header route-page-header">
+            <div>
+                <p class="section-eyebrow">{eyebrow}</p>
+                <h1 class="run-detail-title">{title}</h1>
+                <p class="route-page-description">{description}</p>
+            </div>
+        </section>
+    }
+}
+
+fn project_rows(projects: Vec<ProjectShelfView>) -> impl IntoView {
+    projects
+        .into_iter()
+        .map(|project| {
+            let href = format!(
+                "/projects/{}/{}",
+                path_segment(&project.org),
+                path_segment(&project.repo)
+            );
+            let name = project.repo.clone();
+            let org = project.org.clone();
+            let project_key = format!("{org}/{name}");
+            let activity = activity_label(&project.last_activity);
+            let attention = if project.needs_attention {
+                "Needs attention"
+            } else {
+                "Clear"
+            };
+            let plan_count = project.plan_count;
+            view! {
+                <a class="workspace-card project-row" href=href data-project=project_key>
+                    <div class="control-run-primary">
+                        <strong class="project-name">{name}</strong>
+                    </div>
+                    <div class="control-run-meta">
+                        <span class="project-org">{org}</span>
+                        <span class="project-activity">{activity}</span>
+                        <span class="project-attention">{attention}</span>
+                        <span>{format!("{plan_count} plans")}</span>
+                    </div>
+                </a>
+            }
+        })
+        .collect_view()
+}
+
+fn plan_rows(plans: Vec<ProjectPlanView>) -> impl IntoView {
+    plans
+        .into_iter()
+        .map(|plan| {
+            let activity = activity_label(&plan.day);
+            let attention = if plan.needs_attention {
+                "Needs attention"
+            } else {
+                "Clear"
+            };
+            let plan_id = plan.plan_id.clone();
+            view! {
+                <a class="workspace-card project-plan" href=plan.href data-plan-id=plan_id>
+                    <div class="control-run-primary">
+                        <strong class="project-plan-name">{plan.title}</strong>
+                    </div>
+                    <div class="control-run-meta">
+                        <span class="project-activity">{activity}</span>
+                        <span class="project-attention">{attention}</span>
+                    </div>
+                </a>
+            }
+        })
+        .collect_view()
+}
+
+fn projects_frame(snapshot: ProjectsSnapshot) -> impl IntoView {
+    let project_page = snapshot.kind == "project";
+    let plan_count = snapshot.plans.len();
+    let project_count = snapshot.projects.len();
+    let status = if project_page {
+        format!("{plan_count} plans")
+    } else {
+        format!("{project_count} repositories")
+    };
+    let header = if project_page {
+        let title = if snapshot.repo.is_empty() {
+            "Project".to_string()
+        } else {
+            snapshot.repo.clone()
+        };
+        owned_route_header(
+            snapshot.org.clone(),
+            title,
+            "Plans in this repository. Opening one uses the studio document. Checkpoint and status stay in the inspector.".to_string(),
+        )
+        .into_any()
+    } else {
+        route_header(
+            "Work",
+            "Projects",
+            "A project is one repository. Open it to see that repository's plans, not a filesystem path.",
+        )
+        .into_any()
+    };
+    let body = if project_page {
+        let empty = snapshot.plans.is_empty();
+        view! {
+            <section class="control-panel control-panel-wide" aria-label="Plans">
+                <div class="control-panel-head">
+                    <h2>"Plans"</h2>
+                    <span>{plan_count}</span>
+                </div>
+                <p class="server-console-links">
+                    <a class="server-console-link" href="/projects">"All projects"</a>
+                </p>
+                {empty.then(|| view! {
+                    <p class="control-empty">"This project has no plans."</p>
+                })}
+                <div class="project-plan-list">{plan_rows(snapshot.plans)}</div>
+            </section>
+        }
+        .into_any()
+    } else {
+        let empty = snapshot.projects.is_empty();
+        view! {
+            <section class="control-panel control-panel-wide" aria-label="Projects">
+                <div class="control-panel-head">
+                    <h2>"Repositories"</h2>
+                    <span>{project_count}</span>
+                </div>
+                {empty.then(|| view! {
+                    <p class="control-empty">"No projects yet. A project is one repository."</p>
+                })}
+                <div class="project-list">{project_rows(snapshot.projects)}</div>
+            </section>
+        }
+        .into_any()
+    };
+    view! {
+        <ServerFrame active=ServerSection::Overview status=status>
+            <div class="server-console-shell route-page-shell">
+                {header}
+                {body}
+            </div>
+        </ServerFrame>
+    }
+}
+
+#[cfg(any(feature = "ssr", feature = "hydrate"))]
+fn projects_room(snapshot: ProjectsSnapshot) -> impl IntoView {
+    let embed = encode_projects_embed(&snapshot);
+    view! {
+        <script id=PROJECTS_EMBED_ID type="application/json" inner_html=embed></script>
+        {projects_frame(snapshot)}
+    }
+}
+
+#[cfg(not(any(feature = "ssr", feature = "hydrate")))]
+fn projects_room(snapshot: ProjectsSnapshot) -> impl IntoView {
+    projects_frame(snapshot)
+}
+
+#[component]
+pub fn ProjectsPage() -> impl IntoView {
+    let snapshot = projects_snapshot(None, None);
+    view! {
+        <Title text="Projects - vc-server" />
+        <Meta name="description" content="Repositories, then the plans that belong to each one." />
+        {projects_room(snapshot)}
+    }
+}
+
+#[component]
+pub fn ProjectPlansPage() -> impl IntoView {
+    let params = leptos_router::hooks::use_params_map();
+    let org = params.read_untracked().get("org").unwrap_or_default();
+    let repo = params.read_untracked().get("repo").unwrap_or_default();
+    let snapshot = projects_snapshot(Some(org), Some(repo));
+    let title = if snapshot.repo.is_empty() {
+        "Projects - vc-server".to_string()
+    } else {
+        format!("{} - Projects - vc-server", snapshot.repo)
+    };
+    view! {
+        <Title text=title />
+        <Meta name="description" content="Plans for one repository, filtered from the artifact shelf." />
+        {projects_room(snapshot)}
+    }
+}
+
+#[component]
+pub fn HelpPage() -> impl IntoView {
+    view! {
+        <Title text="Help & docs - vc-server" />
+        <Meta name="description" content="Help for someone already stuck." />
+        <ServerFrame active=ServerSection::Help status="help".to_string()>
+            <div class="server-console-shell route-page-shell">
+                {route_header(
+                    "Help",
+                    "Help & docs",
+                    "For someone already stuck. The operator guide stays its own page.",
+                )}
+                <p class="server-console-links">
+                    <a class="server-console-link" href="/guide">"Operator guide"</a>
+                </p>
+            </div>
+        </ServerFrame>
+    }
+}
+
+#[component]
+pub fn AboutPage() -> impl IntoView {
+    view! {
+        <Title text="About - vc-server" />
+        <Meta name="description" content="What this server window is." />
+        <ServerFrame active=ServerSection::About status="about".to_string()>
+            <div class="server-console-shell route-page-shell">
+                {route_header(
+                    "About",
+                    "About",
+                    "This window is the Vibecrafted server console for one workspace.",
+                )}
+            </div>
+        </ServerFrame>
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct SkillsSnapshot {
+    names: Vec<String>,
+    #[serde(default)]
+    open: Option<String>,
+    #[serde(default)]
+    text: String,
+}
+
+impl SkillsSnapshot {
+    #[cfg(any(test, feature = "hydrate", not(feature = "ssr")))]
+    fn empty() -> Self {
+        Self {
+            names: Vec::new(),
+            open: None,
+            text: String::new(),
+        }
+    }
+}
+
+fn encode_skills_embed(snapshot: &SkillsSnapshot) -> String {
+    serde_json::to_string(snapshot)
+        .unwrap_or_else(|_| "{}".to_string())
+        .replace('<', "\\u003c")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
+}
+
+/// Directory names `discover_skills` already accepts. Anything else is not a skill.
+fn skill_dir_name_ok(name: &str) -> bool {
+    (name.starts_with("vc-") || name.starts_with("vetcoders-"))
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SkillFile {
+    name: String,
+    path: std::path::PathBuf,
+}
+
+#[cfg(feature = "ssr")]
+fn product_skill_roots() -> Vec<std::path::PathBuf> {
+    use std::path::PathBuf;
+
+    // Installer search, not a new catalog: canonical `~/.agents/skills`,
+    // each runtime view, then `$VIBECRAFTED_HOME/skills`. No `env!("CARGO_MANIFEST_DIR")`
+    // root: it bakes the build checkout into the signed binary.
+    let mut roots = Vec::new();
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        roots.push(home.join(".agents/skills"));
+        for runtime in ["claude", "codex", "agy", "junie", "grok", "cursor"] {
+            roots.push(home.join(format!(".{runtime}/skills")));
+        }
+    }
+    roots.push(control_core::vibecrafted_home().join("skills"));
+    let mut unique = Vec::new();
+    for root in roots {
+        if !unique.iter().any(|seen: &PathBuf| seen == &root) {
+            unique.push(root);
+        }
+    }
+    unique
+}
+
+#[cfg(feature = "ssr")]
+fn discover_skill_files(roots: &[std::path::PathBuf]) -> Vec<SkillFile> {
+    use std::collections::BTreeSet;
+
+    let mut seen_paths = BTreeSet::new();
+    let mut seen_names = BTreeSet::new();
+    let mut found = Vec::new();
+    for root in roots {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !skill_dir_name_ok(&name) {
+                continue;
+            }
+            let file = entry.path().join("SKILL.md");
+            if !file.is_file() {
+                continue;
+            }
+            let canonical = std::fs::canonicalize(&file).unwrap_or_else(|_| file.clone());
+            if !seen_paths.insert(canonical) || !seen_names.insert(name.clone()) {
+                continue;
+            }
+            found.push(SkillFile { name, path: file });
+        }
+    }
+    found.sort_by(|left, right| left.name.cmp(&right.name));
+    found
+}
+
+#[cfg(feature = "ssr")]
+fn save_named_skill_in(roots: &[std::path::PathBuf], name: &str, text: &str) -> Result<(), ()> {
+    if !skill_dir_name_ok(name) {
+        return Err(());
+    }
+    let Some(file) = discover_skill_files(roots)
+        .into_iter()
+        .find(|file| file.name == name)
+    else {
+        return Err(());
+    };
+    let canonical = std::fs::canonicalize(&file.path).map_err(|_| ())?;
+    let allowed = roots.iter().any(|root| {
+        std::fs::canonicalize(root)
+            .ok()
+            .is_some_and(|root| canonical.starts_with(&root))
+    });
+    if !allowed || canonical.file_name().and_then(|part| part.to_str()) != Some("SKILL.md") {
+        return Err(());
+    }
+    std::fs::write(&canonical, text).map_err(|_| ())
+}
+
+#[cfg(feature = "ssr")]
+fn save_named_skill(name: &str, text: &str) -> Result<(), ()> {
+    save_named_skill_in(&product_skill_roots(), name, text)
+}
+
+#[cfg(feature = "ssr")]
+fn build_skills_snapshot(open: Option<&str>) -> SkillsSnapshot {
+    let files = discover_skill_files(&product_skill_roots());
+    let names: Vec<String> = files.iter().map(|file| file.name.clone()).collect();
+    let open = open.and_then(|name| {
+        names
+            .iter()
+            .any(|known| known == name)
+            .then(|| name.to_string())
+    });
+    let text = open
+        .as_ref()
+        .and_then(|name| files.iter().find(|file| file.name == *name))
+        .and_then(|file| std::fs::read_to_string(&file.path).ok())
+        .unwrap_or_default();
+    SkillsSnapshot { names, open, text }
+}
+
+#[cfg(feature = "hydrate")]
+fn read_embedded_skills_snapshot() -> SkillsSnapshot {
+    let Some(window) = web_sys::window() else {
+        return SkillsSnapshot::empty();
+    };
+    let Some(document) = window.document() else {
+        return SkillsSnapshot::empty();
+    };
+    let Some(element) = document.get_element_by_id("vc-skills-data") else {
+        return SkillsSnapshot::empty();
+    };
+    serde_json::from_str(&element.text_content().unwrap_or_default())
+        .unwrap_or_else(|_| SkillsSnapshot::empty())
+}
+
+#[cfg(feature = "hydrate")]
+fn skills_snapshot(open: Option<String>) -> SkillsSnapshot {
+    let _ = open;
+    read_embedded_skills_snapshot()
+}
+
+#[cfg(all(feature = "ssr", not(feature = "hydrate")))]
+fn skills_snapshot(open: Option<String>) -> SkillsSnapshot {
+    build_skills_snapshot(open.as_deref())
+}
+
+#[cfg(not(any(feature = "ssr", feature = "hydrate")))]
+fn skills_snapshot(open: Option<String>) -> SkillsSnapshot {
+    let _ = open;
+    SkillsSnapshot::empty()
+}
+
+fn skills_room(snapshot: SkillsSnapshot) -> impl IntoView {
+    if let Some(name) = snapshot.open.clone() {
+        let text = snapshot.text;
+        view! {
+            <main class="skills-room" data-skills-room>
+                <h1>"Skills"</h1>
+                <aside class="doc-pane" data-skills-body="editor" aria-label="Skills">
+                    <article class="doc-sheet">
+                        <form class="skills-editor" method="post" action="/api/skills/file">
+                            <input type="hidden" name="name" value=name.clone() />
+                            <textarea class="skills-document" name="text">{text}</textarea>
+                            <button type="submit">"Save"</button>
+                        </form>
+                    </article>
+                </aside>
+                <a class="skills-back" href="/skills" rel="external">"Skills"</a>
+            </main>
+        }
+        .into_any()
+    } else if snapshot.names.is_empty() {
+        view! {
+            <main class="skills-room" data-skills-room>
+                <h1>"Skills"</h1>
+                <p class="skills-empty" data-skills-state="empty">"Skills"</p>
+            </main>
+        }
+        .into_any()
+    } else {
+        let names = snapshot.names;
+        view! {
+            <main class="skills-room" data-skills-room>
+                <h1>"Skills"</h1>
+                <ul class="skills-list" data-skills-body="list">
+                    {names
+                        .into_iter()
+                        .map(|name| {
+                            let href = format!("/skills/{name}");
+                            view! {
+                                <li><a href=href rel="external">{name}</a></li>
+                            }
+                        })
+                        .collect_view()}
+                </ul>
+            </main>
+        }
+        .into_any()
+    }
+}
+
+fn skills_page(snapshot: SkillsSnapshot) -> impl IntoView {
+    let embed = encode_skills_embed(&snapshot);
+    let room = skills_room(snapshot);
+    view! {
+        <Title text="Skills" />
+        <Meta name="description" content="Skills" />
+        <ServerFrame active=ServerSection::Overview status="skills".to_string()>
+            {room}
+            <script id="vc-skills-data" type="application/json" inner_html=embed></script>
+        </ServerFrame>
+    }
+}
+
+#[component]
+pub fn SkillsPage() -> impl IntoView {
+    skills_page(skills_snapshot(None))
+}
+
+#[component]
+pub fn SkillEditorPage() -> impl IntoView {
+    let params = leptos_router::hooks::use_params_map();
+    let name = params.with(|params| params.get("name"));
+    skills_page(skills_snapshot(name))
+}
+
+#[cfg(feature = "ssr")]
+#[derive(Debug, Deserialize)]
+struct SaveSkillForm {
+    name: String,
+    #[serde(default)]
+    text: String,
+}
+
+#[cfg(feature = "ssr")]
+async fn save_skill_form(
+    axum::extract::Form(form): axum::extract::Form<SaveSkillForm>,
+) -> impl axum::response::IntoResponse {
+    use axum::response::IntoResponse;
+
+    if save_named_skill(&form.name, &form.text).is_ok() && skill_dir_name_ok(&form.name) {
+        axum::response::Redirect::to(&format!("/skills/{}", form.name)).into_response()
+    } else {
+        (axum::http::StatusCode::BAD_REQUEST, "Skills").into_response()
+    }
+}
+
+#[cfg(feature = "ssr")]
+pub fn skills_routes() -> axum::Router<leptos::config::LeptosOptions> {
+    axum::Router::new().route("/api/skills/file", axum::routing::post(save_skill_form))
+}
+
+/// `/settings` reads and writes the one product file, `config.toml`.
+mod settings_config {
+    use std::path::{Path, PathBuf};
+
+    #[derive(Clone, Debug)]
+    pub(super) struct SettingsView {
+        pub config_path: String,
+        pub state_home: String,
+        pub runtime_home: String,
+        pub frame_url: String,
+        pub slack_url: String,
+        pub agents: String,
+        pub permissions: String,
+        pub default_runtime: String,
+        pub isolation: String,
+        pub artifacts_root: String,
+        pub git_repos: Vec<(String, String)>,
+        pub read_error: String,
+    }
+
+    #[cfg(feature = "ssr")]
+    #[derive(Debug, Clone, serde::Deserialize)]
+    pub(crate) struct SettingsWrite {
+        pub vc_frame_url: String,
+        pub slack_console_url: String,
+        pub agents: String,
+        pub permissions: String,
+        pub runtime: String,
+        pub isolation: String,
+        pub git_identity: String,
+        pub git_remote: String,
+    }
+
+    pub(crate) fn canonical_artifacts_root() -> String {
+        display_path(&state_home().join("artifacts"))
+    }
+
+    pub(super) fn load() -> SettingsView {
+        #[cfg(feature = "ssr")]
+        {
+            load_from_disk()
+        }
+        #[cfg(not(feature = "ssr"))]
+        {
+            shell()
+        }
+    }
+
+    fn shell() -> SettingsView {
+        SettingsView {
+            config_path: display_path(&product_config_path()),
+            state_home: display_path(&state_home()),
+            runtime_home: display_path(&runtime_home()),
+            frame_url: String::new(),
+            slack_url: String::new(),
+            agents: String::new(),
+            permissions: String::new(),
+            default_runtime: String::new(),
+            isolation: String::new(),
+            artifacts_root: canonical_artifacts_root(),
+            git_repos: Vec::new(),
+            read_error: String::new(),
+        }
+    }
+
+    #[cfg(feature = "ssr")]
+    fn load_from_disk() -> SettingsView {
+        let mut view = shell();
+        let path = product_config_path();
+        match read_config_text(&path) {
+            Ok(text) => {
+                view.frame_url = table_value(&text, "tools.vc-frame", "url").unwrap_or_default();
+                view.slack_url =
+                    table_value(&text, "tools.slack-console", "url").unwrap_or_default();
+                view.agents = table_value(&text, "runtime.picking.research", "default_agents")
+                    .unwrap_or_default();
+                view.permissions =
+                    table_value(&text, "runtime.picking", "permissions").unwrap_or_default();
+                view.default_runtime =
+                    table_value(&text, "runtime.picking", "runtime").unwrap_or_default();
+                view.isolation =
+                    table_value(&text, "runtime.picking", "isolation").unwrap_or_default();
+                view.git_repos = repository_remotes(&text);
+            }
+            Err(error) => view.read_error = error,
+        }
+        view
+    }
+
+    #[cfg(feature = "ssr")]
+    pub(crate) fn save_settings_file(path: &Path, write: &SettingsWrite) -> Result<(), String> {
+        let frame = write.vc_frame_url.trim();
+        let slack = write.slack_console_url.trim();
+        let agents = parse_agents(&write.agents)?;
+        let permissions = optional_token("Default permissions", &write.permissions)?;
+        let runtime = optional_token("Default runtime", &write.runtime)?;
+        let isolation = normalize_isolation(&write.isolation)?;
+        let git_identity = write.git_identity.trim();
+        let git_remote = write.git_remote.trim();
+        if git_identity.is_empty() != git_remote.is_empty() {
+            return Err("connect git needs both org/name and a remote".into());
+        }
+        if !git_identity.is_empty() {
+            if let Some(error) = identity_rejected(git_identity) {
+                return Err(error.into());
+            }
+            if let Some(error) = remote_rejected(git_remote) {
+                return Err(error.into());
+            }
+        }
+        if let Some(error) = tool_url_rejected(frame) {
+            return Err(error.into());
+        }
+        if let Some(error) = tool_url_rejected(slack) {
+            return Err(error.into());
+        }
+
+        let mut text = read_config_text(path)?;
+        text = upsert_tool(&text, "tools.vc-frame", frame);
+        text = upsert_tool(&text, "tools.slack-console", slack);
+        text = upsert(
+            &text,
+            "runtime.picking.research",
+            "default_agents",
+            &toml_string_array(&agents),
+        );
+        text = upsert(
+            &text,
+            "runtime.picking",
+            "permissions",
+            &toml_basic_string(&permissions),
+        );
+        text = upsert(
+            &text,
+            "runtime.picking",
+            "runtime",
+            &toml_basic_string(&runtime),
+        );
+        text = upsert(
+            &text,
+            "runtime.picking",
+            "isolation",
+            &toml_basic_string(&isolation),
+        );
+        if !git_identity.is_empty() {
+            let table = format!("repositories.{}", toml_basic_string(git_identity));
+            text = upsert(&text, &table, "remote", &toml_basic_string(git_remote));
+        }
+        atomic_write(path, &text)
+    }
+
+    #[cfg(feature = "ssr")]
+    pub fn settings_routes() -> axum::Router<leptos::config::LeptosOptions> {
+        use axum::Router;
+        use axum::extract::Form;
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+
+        async fn save_settings(Form(form): Form<SettingsWrite>) -> impl IntoResponse {
+            match save_settings_file(&product_config_path(), &form) {
+                Ok(()) => axum::response::Redirect::to("/settings").into_response(),
+                Err(error) => (axum::http::StatusCode::BAD_REQUEST, error).into_response(),
+            }
+        }
+
+        Router::new().route("/api/settings", post(save_settings))
+    }
+
+    fn env_nonempty(name: &str) -> Option<std::ffi::OsString> {
+        std::env::var_os(name).filter(|value| !value.is_empty())
+    }
+
+    fn home_dir() -> PathBuf {
+        #[cfg(windows)]
+        if let Some(profile) = env_nonempty("USERPROFILE") {
+            return PathBuf::from(profile);
+        }
+        env_nonempty("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    fn product_config_path() -> PathBuf {
+        let base = env_nonempty("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home_dir().join(".config"));
+        base.join("vibecrafted").join("config.toml")
+    }
+
+    fn state_home() -> PathBuf {
+        if let Some(home) = env_nonempty("VIBECRAFTED_HOME") {
+            return PathBuf::from(home);
+        }
+        #[cfg(windows)]
+        {
+            return windows_local_app_data().join("Vibecrafted").join("home");
+        }
+        #[cfg(not(windows))]
+        {
+            home_dir().join(".vibecrafted")
+        }
+    }
+
+    fn runtime_home() -> PathBuf {
+        if let Some(home) = env_nonempty("VIBECRAFTED_RUNTIME_HOME") {
+            return PathBuf::from(home);
+        }
+        if let Some(data) = env_nonempty("XDG_DATA_HOME") {
+            return PathBuf::from(data).join("vibecrafted");
+        }
+        #[cfg(windows)]
+        {
+            return windows_local_app_data().join("Vibecrafted");
+        }
+        #[cfg(not(windows))]
+        {
+            home_dir().join(".local").join("share").join("vibecrafted")
+        }
+    }
+
+    #[cfg(windows)]
+    fn windows_local_app_data() -> PathBuf {
+        env_nonempty("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home_dir().join("AppData").join("Local"))
+    }
+
+    fn display_path(path: &Path) -> String {
+        path.to_string_lossy().into_owned()
+    }
+
+    #[cfg(feature = "ssr")]
+    fn read_config_text(path: &Path) -> Result<String, String> {
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    return Err("config.toml is a symlink; refusing to follow it".into());
+                }
+                if !meta.is_file() {
+                    return Err("config.toml is not a regular file".into());
+                }
+                std::fs::read_to_string(path)
+                    .map_err(|err| format!("cannot read config.toml: {err}"))
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+            Err(err) => Err(format!("cannot inspect config.toml: {err}")),
+        }
+    }
+
+    #[cfg(feature = "ssr")]
+    fn atomic_write(path: &Path, contents: &str) -> Result<(), String> {
+        use std::io::Write;
+
+        let parent = path
+            .parent()
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .ok_or_else(|| "config path has no directory".to_string())?;
+        std::fs::create_dir_all(parent)
+            .map_err(|err| format!("cannot create config directory: {err}"))?;
+
+        let mut mode = 0o600;
+        if std::fs::symlink_metadata(path).is_ok() {
+            let meta = std::fs::symlink_metadata(path)
+                .map_err(|err| format!("cannot inspect config.toml: {err}"))?;
+            if meta.file_type().is_symlink() {
+                return Err("config.toml is a symlink; refusing to replace it".into());
+            }
+            if !meta.is_file() {
+                return Err("config.toml is not a regular file".into());
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                mode = meta.permissions().mode() & 0o777;
+            }
+        }
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let tmp = parent.join(format!(".config.toml.{}.{}", std::process::id(), nanos));
+        let write_tmp = || -> Result<(), String> {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)
+                .map_err(|err| format!("cannot create config tempfile: {err}"))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                file.set_permissions(std::fs::Permissions::from_mode(mode))
+                    .map_err(|err| format!("cannot set config mode: {err}"))?;
+            }
+            file.write_all(contents.as_bytes())
+                .map_err(|err| format!("cannot write config.toml: {err}"))?;
+            file.sync_all()
+                .map_err(|err| format!("cannot sync config.toml: {err}"))?;
+            Ok(())
+        };
+        if let Err(error) = write_tmp() {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(error);
+        }
+        if let Err(err) = std::fs::rename(&tmp, path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!("cannot replace config.toml: {err}"));
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "ssr")]
+    fn split_lines(source: &str) -> Vec<String> {
+        if source.is_empty() {
+            return Vec::new();
+        }
+        let mut lines: Vec<String> = source
+            .split('\n')
+            .map(|line| line.trim_end_matches('\r').to_string())
+            .collect();
+        if lines.last().is_some_and(String::is_empty) {
+            lines.pop();
+        }
+        lines
+    }
+
+    #[cfg(feature = "ssr")]
+    fn join_lines(lines: &[String]) -> String {
+        if lines.is_empty() {
+            return String::new();
+        }
+        let mut text = lines.join("\n");
+        text.push('\n');
+        text
+    }
+
+    #[cfg(feature = "ssr")]
+    fn strip_unquoted_comment(input: &str) -> &str {
+        let mut quote: Option<char> = None;
+        let mut escaped = false;
+        for (index, ch) in input.char_indices() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if quote == Some('"') && ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == '"' || ch == '\'' {
+                quote = match quote {
+                    Some(current) if current == ch => None,
+                    Some(_) => quote,
+                    None => Some(ch),
+                };
+                continue;
+            }
+            if ch == '#' && quote.is_none() {
+                return &input[..index];
+            }
+        }
+        input
+    }
+
+    #[cfg(feature = "ssr")]
+    fn header_of(line: &str) -> Option<String> {
+        let trimmed = strip_unquoted_comment(line).trim();
+        let inner = trimmed.strip_prefix('[')?.strip_suffix(']')?.trim();
+        if inner.is_empty() || inner.contains('[') || inner.contains(']') {
+            return None;
+        }
+        Some(inner.to_string())
+    }
+
+    #[cfg(feature = "ssr")]
+    fn assignment_key(line: &str) -> Option<String> {
+        let trimmed = strip_unquoted_comment(line).trim();
+        if trimmed.is_empty() || trimmed.starts_with('[') {
+            return None;
+        }
+        let (key, _) = trimmed.split_once('=')?;
+        let key = key.trim();
+        if key.is_empty()
+            || !key
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+        {
+            return None;
+        }
+        Some(key.to_string())
+    }
+
+    #[cfg(feature = "ssr")]
+    fn table_end(lines: &[String], header_at: usize) -> usize {
+        lines
+            .iter()
+            .enumerate()
+            .skip(header_at + 1)
+            .find_map(|(index, line)| header_of(line).map(|_| index))
+            .unwrap_or(lines.len())
+    }
+
+    #[cfg(feature = "ssr")]
+    fn table_value(source: &str, table: &str, key: &str) -> Option<String> {
+        let lines = split_lines(source);
+        let header_at = lines
+            .iter()
+            .position(|line| header_of(line).as_deref() == Some(table))?;
+        let end = table_end(&lines, header_at);
+        for line in &lines[header_at + 1..end] {
+            if assignment_key(line).as_deref() == Some(key) {
+                let raw = line.split_once('=')?.1;
+                return Some(decode_toml_value(raw));
+            }
+        }
+        None
+    }
+
+    #[cfg(feature = "ssr")]
+    fn decode_toml_value(raw: &str) -> String {
+        let value = strip_unquoted_comment(raw).trim();
+        if let Some(inner) = value
+            .strip_prefix('"')
+            .and_then(|rest| rest.strip_suffix('"'))
+        {
+            return unescape_basic(inner);
+        }
+        if let Some(inner) = value
+            .strip_prefix('\'')
+            .and_then(|rest| rest.strip_suffix('\''))
+        {
+            return inner.to_string();
+        }
+        if let Some(inner) = value
+            .strip_prefix('[')
+            .and_then(|rest| rest.strip_suffix(']'))
+        {
+            return decode_string_array(inner).join(", ");
+        }
+        value.to_string()
+    }
+
+    #[cfg(feature = "ssr")]
+    fn unescape_basic(input: &str) -> String {
+        let mut out = String::with_capacity(input.len());
+        let mut chars = input.chars();
+        while let Some(ch) = chars.next() {
+            if ch != '\\' {
+                out.push(ch);
+                continue;
+            }
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('r') => out.push('\r'),
+                Some('t') => out.push('\t'),
+                Some('\\') => out.push('\\'),
+                Some('"') => out.push('"'),
+                Some('u') => {
+                    let hex: String = chars.by_ref().take(4).collect();
+                    match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                        Some(decoded) => out.push(decoded),
+                        None => {
+                            out.push('u');
+                            out.push_str(&hex);
+                        }
+                    }
+                }
+                Some(other) => out.push(other),
+                None => out.push('\\'),
+            }
+        }
+        out
+    }
+
+    #[cfg(feature = "ssr")]
+    fn decode_string_array(inner: &str) -> Vec<String> {
+        let mut items = Vec::new();
+        let mut chars = inner.chars().peekable();
+        while chars.peek().is_some() {
+            match chars.next() {
+                Some('"') => items.push(take_basic_string(&mut chars)),
+                Some('\'') => {
+                    let mut literal = String::new();
+                    for ch in chars.by_ref() {
+                        if ch == '\'' {
+                            break;
+                        }
+                        literal.push(ch);
+                    }
+                    items.push(literal);
+                }
+                _ => {}
+            }
+        }
+        items
+    }
+
+    #[cfg(feature = "ssr")]
+    fn take_basic_string(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> String {
+        let mut out = String::new();
+        let mut escaped = false;
+        for ch in chars.by_ref() {
+            if escaped {
+                match ch {
+                    'n' => out.push('\n'),
+                    'r' => out.push('\r'),
+                    't' => out.push('\t'),
+                    '\\' => out.push('\\'),
+                    '"' => out.push('"'),
+                    other => out.push(other),
+                }
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == '"' {
+                break;
+            }
+            out.push(ch);
+        }
+        out
+    }
+
+    #[cfg(feature = "ssr")]
+    fn repository_identity(header: &str) -> Option<String> {
+        let rest = header.strip_prefix("repositories.")?;
+        if let Some(inner) = rest
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+        {
+            return Some(unescape_basic(inner));
+        }
+        rest.strip_prefix('\'')
+            .and_then(|value| value.strip_suffix('\''))
+            .map(ToOwned::to_owned)
+    }
+
+    #[cfg(feature = "ssr")]
+    fn repository_remotes(source: &str) -> Vec<(String, String)> {
+        let lines = split_lines(source);
+        let mut repos = Vec::new();
+        let mut index = 0;
+        while index < lines.len() {
+            let Some(header) = header_of(&lines[index]) else {
+                index += 1;
+                continue;
+            };
+            let end = table_end(&lines, index);
+            if let Some(identity) = repository_identity(&header) {
+                let mut remote = None;
+                for line in &lines[index + 1..end] {
+                    if assignment_key(line).as_deref() == Some("remote") {
+                        remote = line.split_once('=').map(|(_, raw)| decode_toml_value(raw));
+                    }
+                }
+                if let Some(remote) = remote.filter(|value| !value.is_empty()) {
+                    repos.push((identity, redact_remote(&remote)));
+                }
+            }
+            index = end;
+        }
+        repos.truncate(64);
+        repos
+    }
+
+    #[cfg(feature = "ssr")]
+    fn redact_remote(remote: &str) -> String {
+        if remote_has_userinfo(remote) {
+            "[redacted]".into()
+        } else {
+            remote.to_string()
+        }
+    }
+
+    #[cfg(feature = "ssr")]
+    fn remote_has_userinfo(remote: &str) -> bool {
+        let Some((_, rest)) = remote.split_once("://") else {
+            return false;
+        };
+        rest.split(['/', '?', '#'])
+            .next()
+            .unwrap_or("")
+            .contains('@')
+    }
+
+    #[cfg(feature = "ssr")]
+    fn table_exists(source: &str, table: &str) -> bool {
+        split_lines(source)
+            .iter()
+            .any(|line| header_of(line).as_deref() == Some(table))
+    }
+
+    #[cfg(feature = "ssr")]
+    fn upsert(source: &str, table: &str, key: &str, value_toml: &str) -> String {
+        let mut lines = split_lines(source);
+        let assignment = format!("{key} = {value_toml}");
+        if let Some(header_at) = lines
+            .iter()
+            .position(|line| header_of(line).as_deref() == Some(table))
+        {
+            let end = table_end(&lines, header_at);
+            let mut found = false;
+            for line in &mut lines[header_at + 1..end] {
+                if assignment_key(line).as_deref() == Some(key) {
+                    *line = assignment.clone();
+                    found = true;
+                }
+            }
+            if !found {
+                lines.insert(header_at + 1, assignment);
+            }
+        } else {
+            if !lines.is_empty() {
+                lines.push(String::new());
+            }
+            lines.push(format!("[{table}]"));
+            lines.push(assignment);
+        }
+        join_lines(&lines)
+    }
+
+    #[cfg(feature = "ssr")]
+    fn upsert_tool(source: &str, table: &str, url: &str) -> String {
+        if url.is_empty() && !table_exists(source, table) {
+            return source.to_string();
+        }
+        upsert(source, table, "url", &toml_basic_string(url))
+    }
+
+    #[cfg(feature = "ssr")]
+    fn toml_basic_string(value: &str) -> String {
+        let mut out = String::from("\"");
+        for ch in value.chars() {
+            match ch {
+                '\\' => out.push_str("\\\\"),
+                '"' => out.push_str("\\\""),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                other if other.is_control() => {
+                    out.push_str(&format!("\\u{:04x}", other as u32));
+                }
+                other => out.push(other),
+            }
+        }
+        out.push('"');
+        out
+    }
+
+    #[cfg(feature = "ssr")]
+    fn toml_string_array(tokens: &[String]) -> String {
+        let parts: Vec<String> = tokens
+            .iter()
+            .map(|token| toml_basic_string(token))
+            .collect();
+        format!("[{}]", parts.join(", "))
+    }
+
+    #[cfg(feature = "ssr")]
+    fn parse_agents(raw: &str) -> Result<Vec<String>, String> {
+        let mut agents = Vec::new();
+        for token in raw.split(|ch: char| ch == ',' || ch.is_whitespace()) {
+            if token.is_empty() {
+                continue;
+            }
+            if !token
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '-'))
+            {
+                return Err(format!("agent name is not a token: {token}"));
+            }
+            let agent = token.to_ascii_lowercase();
+            if !agents.contains(&agent) {
+                agents.push(agent);
+            }
+        }
+        Ok(agents)
+    }
+
+    #[cfg(feature = "ssr")]
+    fn optional_token(label: &str, raw: &str) -> Result<String, String> {
+        let value = raw.trim();
+        if value.is_empty() {
+            return Ok(String::new());
+        }
+        if value.len() > 64
+            || !value
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '-'))
+        {
+            return Err(format!("{label} must be a short token"));
+        }
+        Ok(value.to_string())
+    }
+
+    #[cfg(feature = "ssr")]
+    fn normalize_isolation(raw: &str) -> Result<String, String> {
+        match raw.trim() {
+            "Worktrees" => Ok("Worktrees".into()),
+            "vm" => Ok("vm".into()),
+            "cloud" => Ok("cloud".into()),
+            _ => Err("isolation must be Worktrees, vm, or cloud".into()),
+        }
+    }
+
+    #[cfg(feature = "ssr")]
+    fn identity_rejected(identity: &str) -> Option<&'static str> {
+        let Some((org, name)) = identity.split_once('/') else {
+            return Some("repository identity must be org/name");
+        };
+        if identity.matches('/').count() != 1 || !identity_token(org) || !identity_token(name) {
+            return Some("repository identity must be org/name");
+        }
+        None
+    }
+
+    #[cfg(feature = "ssr")]
+    fn identity_token(value: &str) -> bool {
+        let mut chars = value.chars();
+        match chars.next() {
+            Some(first) if first.is_ascii_alphanumeric() => {}
+            _ => return false,
+        }
+        chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '-'))
+    }
+
+    #[cfg(feature = "ssr")]
+    fn remote_rejected(remote: &str) -> Option<&'static str> {
+        if remote.is_empty() {
+            return Some("git remote is empty");
+        }
+        if remote.starts_with('-')
+            || remote
+                .chars()
+                .any(|ch| ch.is_control() || ch.is_whitespace())
+        {
+            return Some("git remote contains whitespace, control characters, or starts with -");
+        }
+        if remote.contains('?') || remote.contains('#') {
+            return Some("git remote must not contain a query or fragment");
+        }
+        if let Some((scheme, rest)) = remote.split_once("://") {
+            if !matches!(scheme, "https" | "http" | "ssh" | "file") {
+                return Some("unsupported Git remote transport");
+            }
+            let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+            if let Some((userinfo, _)) = authority.rsplit_once('@') {
+                if userinfo.contains(':')
+                    || (matches!(scheme, "https" | "http") && !userinfo.is_empty())
+                {
+                    return Some("git remote must not contain credentials");
+                }
+            }
+        }
+        None
+    }
+
+    #[cfg(feature = "ssr")]
+    fn tool_url_rejected(url: &str) -> Option<&'static str> {
+        if url.is_empty() {
+            return None;
+        }
+        if url.chars().any(|ch| ch.is_control() || ch.is_whitespace()) {
+            return Some("tool url contains whitespace or control characters");
+        }
+        let Some((scheme, rest)) = url.split_once("://") else {
+            return Some("tool url must be http or https");
+        };
+        if !matches!(scheme, "http" | "https") {
+            return Some("tool url must be http or https");
+        }
+        if rest.contains('?') || rest.contains('#') || rest.contains('@') {
+            return Some("tool url must not contain credentials, a query, or a fragment");
+        }
+        if rest.is_empty() || rest.starts_with('/') {
+            return Some("tool url must include a host");
+        }
+        None
+    }
+}
+
+#[cfg(feature = "ssr")]
+pub use settings_config::settings_routes;
+
+#[cfg(all(test, feature = "ssr"))]
+pub(crate) use settings_config::{SettingsWrite, canonical_artifacts_root, save_settings_file};
+
+fn settings_git_list(repos: Vec<(String, String)>) -> impl IntoView {
+    repos
+        .into_iter()
+        .map(|(identity, remote)| {
+            view! {
+                <li><code>{identity}</code><span>" "{remote}</span></li>
+            }
+        })
+        .collect_view()
+}
+
+#[component]
+pub fn SettingsPage() -> impl IntoView {
+    let view_model = settings_config::load();
+    let isolation_worktrees = view_model.isolation == "Worktrees";
+    let isolation_vm = view_model.isolation == "vm";
+    let isolation_cloud = view_model.isolation == "cloud";
+    let settings_config::SettingsView {
+        config_path,
+        state_home,
+        runtime_home,
+        frame_url,
+        slack_url,
+        agents,
+        permissions,
+        default_runtime,
+        artifacts_root,
+        git_repos,
+        read_error,
+        ..
+    } = view_model;
+
+    view! {
+        <Title text="Settings & config - vc-server" />
+        <Meta name="description" content="Paths, MCP, agents, defaults, artifacts, and git in the existing Vibecrafted config file." />
+        <ServerFrame active=ServerSection::Overview status="settings".to_string()>
+            <div
+                class="server-console-shell route-page-shell"
+                data-settings-room="/settings"
+                data-settings-path="/settings"
+            >
+                {route_header(
+                    "Machine",
+                    "Settings & config",
+                    "One room for the config file this product already reads and writes.",
+                )}
+                <p id="settings-read-error" class="control-plane-meta">{read_error}</p>
+                <form method="post" action="/api/settings">
+                    <section class="control-panel control-panel-wide" aria-label="Paths">
+                        <div class="control-panel-head"><h2 id="settings-paths">"Paths"</h2></div>
+                        <p><span>"Config file"</span>" "<code>{config_path}</code></p>
+                        <p><span>"State home"</span>" "<code>{state_home}</code></p>
+                        <p><span>"Runtime home"</span>" "<code>{runtime_home}</code></p>
+                    </section>
+                    <section class="control-panel control-panel-wide" aria-label="MCP">
+                        <div class="control-panel-head"><h2 id="settings-mcp">"MCP"</h2></div>
+                        <p class="control-plane-meta">"Served tool origins already stored in the [tools] table."</p>
+                        <label><span>"vc-frame"</span><input name="vc_frame_url" value=frame_url maxlength="2048" /></label>
+                        <label><span>"slack-console"</span><input name="slack_console_url" value=slack_url maxlength="2048" /></label>
+                    </section>
+                    <section class="control-panel control-panel-wide" aria-label="Agents">
+                        <div class="control-panel-head"><h2 id="settings-agents">"Agents"</h2></div>
+                        <p class="control-plane-meta">"Default research agents. Stored as runtime.picking.research.default_agents."</p>
+                        <label><span>"Default agents"</span><input name="agents" value=agents maxlength="400" /></label>
+                    </section>
+                    <section class="control-panel control-panel-wide" aria-label="Defaults">
+                        <div class="control-panel-head"><h2 id="settings-defaults">"Defaults"</h2></div>
+                        <label><span>"Default permissions"</span><input name="permissions" value=permissions maxlength="64" /></label>
+                        <label><span>"Default runtime"</span><input name="runtime" value=default_runtime maxlength="64" /></label>
+                        <label>
+                            <span>"Isolation"</span>
+                            <select name="isolation">
+                                <option value="Worktrees" selected=isolation_worktrees>"Worktrees"</option>
+                                <option value="vm" selected=isolation_vm>"vm"</option>
+                                <option value="cloud" selected=isolation_cloud>"cloud"</option>
+                            </select>
+                        </label>
+                    </section>
+                    <section class="control-panel control-panel-wide" aria-label="Artifacts location">
+                        <div class="control-panel-head"><h2 id="settings-artifacts">"Artifacts location"</h2></div>
+                        <p class="control-plane-meta">"Canonical artifacts root."</p>
+                        <p><code id="artifacts-location">{artifacts_root}</code></p>
+                    </section>
+                    <section class="control-panel control-panel-wide" aria-label="Git">
+                        <div class="control-panel-head"><h2 id="settings-git">"Git"</h2></div>
+                        <p class="control-plane-meta">"Repository remotes already stored as repositories.\"org/name\".remote."</p>
+                        <ul>{settings_git_list(git_repos)}</ul>
+                        <label><span>"org/name"</span><input name="git_identity" value="" maxlength="200" /></label>
+                        <label><span>"remote"</span><input name="git_remote" value="" maxlength="2048" /></label>
+                    </section>
+                    <p class="server-console-links">
+                        <button type="submit" class="server-console-link server-console-link-primary">"Save"</button>
+                    </p>
+                </form>
+            </div>
+        </ServerFrame>
+    }
+}
+
+/// Machine room. Run buckets stay on Runs. Nav highlight stays on the
+/// existing Activity rail until the sidebar cut owns the Diagnostics door.
+pub(crate) fn diagnostics_room() -> impl IntoView {
+    view! {
+        <div id="diagnostics-room" class="server-console-shell route-page-shell">
+            {route_header(
+                "Machine",
+                "Diagnostics",
+                "When something is wrong, this is the machine. Logs, events, tools, server health, and process stats. Agent runs stay on their own door.",
+            )}
+            <section class="control-panel control-panel-wide" id="diagnostics-logs" aria-label="Logs">
+                <div class="control-panel-head"><h2>"Logs"</h2><span>"transcripts"</span></div>
+                <p class="route-page-description">
+                    "Human logs stay on the transcript surface. The mobile nav already calls that door Logs. This room does not copy them into a second list."
+                </p>
+                <p class="server-console-links">
+                    <a class="server-console-link server-console-link-primary" href="/transcripts">"Open logs"</a>
+                    <a class="server-console-link" href="/api/control/transcripts">"Transcript index"</a>
+                </p>
+            </section>
+            <section class="control-panel control-panel-wide" id="diagnostics-events" aria-label="Events">
+                <div class="control-panel-head"><h2>"Events"</h2><span>"tail"</span></div>
+                <p class="route-page-description">
+                    "Control-plane events stay on the activity tail and the cursorable events feed."
+                </p>
+                <p class="server-console-links">
+                    <a class="server-console-link server-console-link-primary" href="/activity">"Open events"</a>
+                    <a class="server-console-link" href="/api/control/events">"Event stream"</a>
+                </p>
+            </section>
+            <section class="control-panel control-panel-wide" id="diagnostics-tools" aria-label="Tools">
+                <div class="control-panel-head"><h2>"Tools"</h2><span>"existing"</span></div>
+                <ul class="operator-guide-list">
+                    <li>
+                        <strong>"cleanup"</strong>
+                        <span>"The existing worktree cleanup removes a settled worker checkout. It is not a new binary and not a daemon."</span>
+                    </li>
+                </ul>
+            </section>
+            <section class="control-panel control-panel-wide" id="diagnostics-health" aria-label="Server health">
+                <div class="control-panel-head"><h2>"Server health"</h2><span>"readiness"</span></div>
+                <p class="route-page-description">
+                    "Server health is the existing constant-time readiness check at /api/health. It does not scan retained history. The caretaker envelope remains the health verdict."
+                </p>
+                <p class="server-console-links">
+                    <a class="server-console-link server-console-link-primary" href="/api/health">"Open server health"</a>
+                    <a class="server-console-link" href="/api/control/caretaker">"Caretaker envelope"</a>
+                </p>
+            </section>
+            <section class="control-panel control-panel-wide" id="diagnostics-process-stats" aria-label="Process stats">
+                <div class="control-panel-head"><h2>"Process stats"</h2><span>"vc-monitor"</span></div>
+                <p class="route-page-description">
+                    "Process stats stay on vc-monitor. Run observation records that witness as unavailable in this server generation, and this page does not draw a second process table."
+                </p>
+                <pre class="control-plane-meta" data-monitor-source="vc-monitor">"vc-monitor"</pre>
+                <p class="server-console-links">
+                    <a class="server-console-link server-console-link-primary" href="/api/control/observability">"Observability index"</a>
+                </p>
+            </section>
+        </div>
+    }
+}
+
+#[component]
+pub fn DiagnosticsPage() -> impl IntoView {
+    view! {
+        <Title text="diagnostics - vc-server" />
+        <Meta name="description" content="Logs, events, tools, server health, and process stats." />
+        <ServerFrame active=ServerSection::Activity status="diagnostics".to_string()>
+            {diagnostics_room()}
+        </ServerFrame>
+    }
+}
+
 #[component]
 pub fn NotFoundPage() -> impl IntoView {
     view! {
@@ -2371,7 +4454,7 @@ pub fn NotFoundPage() -> impl IntoView {
 }
 
 #[cfg(all(test, feature = "ssr"))]
-mod tests {
+pub(crate) mod tests {
     use std::fs;
     use std::io::ErrorKind;
     use std::net::SocketAddr;
@@ -2389,13 +4472,15 @@ mod tests {
 
     use super::{
         ActivityPage, AicxPage, ConsolePage, DashboardData, DashboardRun, DashboardSession,
-        DashboardSessionRun, FramePage, LifecyclePage, RunsPage, SessionsPage, StructurePage,
-        TranscriptsPage, UsagePage, WorkspacesPage, aicx_page_script, console_dashboard,
-        decode_dashboard_embed, encode_dashboard_embed, git_repo_name, load_dashboard_data_from,
-        operator_active_runs, run_cards, runs_dashboard, session_cards, unique_runtime_labels,
+        DashboardSessionRun, FramePage, HistoryMemory, HistoryPage, LifecyclePage, RunsPage,
+        SessionsPage, StructurePage, TranscriptsPage, UsagePage, WorkspacesPage, aicx_page_script,
+        console_dashboard, decode_dashboard_embed, encode_dashboard_embed, git_repo_name,
+        history_view, load_dashboard_data_from, operator_active_runs, projects_frame,
+        runs_dashboard, session_cards, snapshot_from_plans, unique_runtime_labels,
         workspaces_dashboard,
     };
     use crate::control::api::{control_routes_for, state_payload};
+    use crate::scaffold::api::project_shelf;
     use crate::theme::provide_theme_context;
 
     fn temp_home() -> PathBuf {
@@ -2851,20 +4936,24 @@ mod tests {
         assert!(!html.contains("data-total-settled"));
         assert!(html.contains("aria-label=\"Switch to light theme\""));
         assert!(html.contains("href=\"/structure\""));
-        assert!(html.contains("id=\"overview-inspector\""));
-        assert!(html.contains("class=\"run-table\""));
+        assert!(html.contains("id=\"overview-status\""));
+        assert!(!html.contains("id=\"overview-inspector\""));
+        assert!(!html.contains("class=\"run-table\""));
+        assert!(!html.contains("id=\"usage-chart-heat\""));
         assert!(!html.contains("http://127.0.0.1:8033/"));
         assert!(!html.contains("AICX desk"));
         assert!(!html.contains("Choose the truth"));
         assert!(!html.contains("Open scaffold"));
         assert!(html.contains("Vibecrafted server navigation"));
         assert!(html.contains("server-sidebar"));
+        // zen-rooms nav (w1-02): Work / Trace / Machine doors replace the old rail.
         assert!(html.contains("href=\"/runs\""));
-        assert!(html.contains("href=\"/lifecycle\""));
-        assert!(html.contains("href=\"/activity\""));
-        assert!(html.contains("href=\"/scaffold\""));
+        assert!(html.contains("href=\"/projects\""));
+        assert!(html.contains("href=\"/artifacts\""));
+        assert!(html.contains("href=\"/diagnostics\""));
         assert!(!html.contains("href=\"#fleet\""));
-        assert!(html.contains("aria-label=\"Structure\""));
+        assert!(html.contains("aria-label=\"Work\""));
+        assert!(!html.contains("aria-label=\"Structure\""));
         assert!(!html.contains("aria-label=\"Active runs\""));
         assert!(!html.contains("aria-label=\"Warnings\""));
         assert!(!html.contains("aria-label=\"Action plan\""));
@@ -2981,13 +5070,13 @@ mod tests {
         let (workspaces, sessions, runs, lifecycle, activity, structure, card) = owner.with(|| {
             leptos_meta::provide_meta_context();
             provide_theme_context();
-            let card = run_cards(vec![DashboardRun {
+            let card = super::run_bucket_row(DashboardRun {
                 run_id: "impl-live-agent".into(),
                 agent: "codex".into(),
                 health: "active".into(),
                 state: "running".into(),
                 ..DashboardRun::default()
-            }])
+            })
             .to_html();
             (
                 WorkspacesPage().to_html(),
@@ -3002,22 +5091,146 @@ mod tests {
 
         assert!(workspaces.contains("Workspace catalog"));
         assert!(sessions.contains("Session attachments"));
-        assert!(runs.contains("Live runs"));
-        assert!(runs.contains("Current agents"));
+        assert!(runs.contains("run-detail-title"));
+        assert!(runs.contains(">Runs<"));
+        assert!(runs.contains(">Success<"));
+        assert!(runs.contains(">Needs Attention<"));
+        assert!(runs.contains(">Failures<"));
+        assert!(runs.contains(">Current<"));
+        assert!(runs.contains(">Queued<"));
         assert!(runs.contains("transcript.human.log"));
+        assert!(!runs.contains("Current agents"));
+        assert!(!runs.contains("<h2>Stalled</h2>"));
         assert!(lifecycle.contains("Action plan"));
         assert!(activity.contains("Runtime context"));
         assert!(activity.contains("Warnings"));
-        assert!(structure.contains("Latest Loctree report"));
-        assert!(structure.contains("id=\"loctree-generate\""));
-        assert!(structure.contains("/api/structure/report"));
-        assert!(structure.contains("id=\"aicx-search-form\""));
-        assert!(structure.contains("/api/aicx/search"));
+        assert!(structure.contains("Code intelligence"));
+        assert!(structure.contains("Loctree reports") || structure.contains("data-code-empty"));
+        assert!(!structure.contains("id=\"loctree-generate\""));
+        assert!(!structure.contains("id=\"aicx-search-form\""));
         assert!(!structure.contains("href=\"/Volumes/"));
         assert!(card.contains("href=\"/run/impl-live-agent\""));
         assert!(!card.contains("Open transcript"));
         assert!(card.contains("data-ppm=\"run\""));
-        assert!(card.contains("control-copy"));
+        assert!(card.contains("data-copy=\"impl-live-agent\""));
+    }
+
+    pub(super) fn code_intelligence_is_not_a_plan_library() {
+        let home = temp_home();
+        let plan_id = "shelf-plan-not-a-row";
+        let plan_root = home
+            .join("artifacts/vetcoders/vibecrafted/2026_0925/plans")
+            .join(plan_id);
+        fs::create_dir_all(&plan_root).expect("plan root");
+        fs::write(
+            plan_root.join("manifest.json"),
+            r#"{
+                "schema_version": "1",
+                "plan_id": "shelf-plan-not-a-row",
+                "org": "vetcoders",
+                "repo": "vibecrafted",
+                "day": "2026_0925",
+                "artifacts": []
+            }"#,
+        )
+        .expect("manifest");
+        let shelf = control_core::ScaffoldArtifactStore::new(&home).catalog_detailed();
+        assert!(
+            shelf.plans.iter().any(|plan| plan.plan_id == plan_id),
+            "catalog_detailed must see the planted plan so a leaked row can fail this test"
+        );
+
+        let reports = home.join("reports");
+        fs::create_dir_all(reports.join("nested")).expect("nested");
+        fs::write(reports.join("beta-notes.html"), "<p>report</p>").expect("html");
+        fs::write(reports.join("alpha-project.md"), "# report\n").expect("md");
+        fs::write(reports.join("notes.txt"), "not a report document").expect("txt");
+        fs::write(reports.join("Cargo.toml"), "[package]\n").expect("toml");
+        fs::create_dir_all(reports.join(plan_id)).expect("plan-named dir");
+        std::os::unix::fs::symlink("alpha-project.md", reports.join("linked.md")).expect("symlink");
+
+        super::set_code_reports_override(Some(reports.clone()));
+        let _override = CodeReportsOverrideGuard;
+        let html = render_structure_page();
+        super::set_code_reports_override(None);
+
+        let rows = code_report_rows_from(&html);
+        assert_eq!(
+            rows,
+            vec![
+                "alpha-project.md".to_string(),
+                "beta-notes.html".to_string()
+            ]
+        );
+        assert!(html.contains("Code intelligence"));
+        assert!(
+            html.contains("<h1 class=\"run-detail-title\">Code intelligence</h1>")
+                || html.contains(">Code intelligence<")
+        );
+        for plan in &shelf.plans {
+            assert!(
+                !rows.iter().any(|row| row == &plan.plan_id),
+                "plan_id {} rendered as a row on Code intelligence",
+                plan.plan_id
+            );
+        }
+        assert!(!html.contains(plan_id));
+        assert!(!html.contains("catalog_detailed"));
+        assert!(!html.contains("id=\"aicx-search-form\""));
+
+        let empty = home.join("empty-reports");
+        fs::create_dir_all(&empty).expect("empty reports");
+        super::set_code_reports_override(Some(empty));
+        let empty_html = render_structure_page();
+        super::set_code_reports_override(None);
+        assert!(empty_html.contains("Code intelligence"));
+        assert!(empty_html.contains("data-code-empty"));
+        assert!(
+            code_report_rows_from(&empty_html).is_empty(),
+            "an empty reports directory must not invent rows"
+        );
+
+        let missing = home.join("missing-reports");
+        super::set_code_reports_override(Some(missing));
+        let missing_html = render_structure_page();
+        super::set_code_reports_override(None);
+        assert!(missing_html.contains("Code intelligence"));
+        assert!(missing_html.contains("data-code-empty"));
+        assert!(code_report_rows_from(&missing_html).is_empty());
+
+        fs::remove_dir_all(home).ok();
+    }
+
+    struct CodeReportsOverrideGuard;
+
+    impl Drop for CodeReportsOverrideGuard {
+        fn drop(&mut self) {
+            super::set_code_reports_override(None);
+        }
+    }
+
+    fn render_structure_page() -> String {
+        let owner = Owner::new();
+        owner.with(|| {
+            leptos_meta::provide_meta_context();
+            provide_theme_context();
+            StructurePage().to_html()
+        })
+    }
+
+    fn code_report_rows_from(html: &str) -> Vec<String> {
+        let needle = "data-code-report=\"";
+        let mut rows = Vec::new();
+        let mut rest = html;
+        while let Some(start) = rest.find(needle) {
+            let after = &rest[start + needle.len()..];
+            let Some(end) = after.find('"') else {
+                break;
+            };
+            rows.push(after[..end].to_string());
+            rest = &after[end + 1..];
+        }
+        rows
     }
 
     #[test]
@@ -3206,8 +5419,9 @@ mod tests {
         assert!(html.contains("type=\"application/json\""));
         assert!(!html.contains("Loading control plane"));
         assert!(html.contains("Overview"));
-        assert!(html.contains("href=\"/transcripts\""));
-        assert!(html.contains("href=\"/frame\""));
+        // zen-rooms: History & context is a door; Frame is a projection, not a nav row.
+        assert!(html.contains("href=\"/history\""));
+        assert!(!html.contains("href=\"/frame\""));
         assert!(!html.contains("Control plane"));
     }
 
@@ -3270,4 +5484,678 @@ mod tests {
         let catch = script.split("catch (error)").nth(1).expect("catch");
         assert!(catch.contains("AICX unavailable:"));
     }
+
+    fn bucket_html<'a>(html: &'a str, id: &str) -> &'a str {
+        let marker = format!("data-run-bucket=\"{id}\"");
+        let start = html
+            .find(&marker)
+            .unwrap_or_else(|| panic!("missing bucket {id}"));
+        let rest = &html[start + marker.len()..];
+        let end = rest.find("data-run-bucket=").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    #[test]
+    pub(crate) fn runs_five_buckets_use_settlement() {
+        let home = temp_home();
+        let runs_dir = home.join("control_plane/runs");
+        fs::create_dir_all(&runs_dir).expect("runs dir");
+        let plan_report =
+            "/var/artifacts/vetcoders/vibecrafted/2026_0925/plans/zen-rooms-ia/reports/w2-02.md";
+
+        let write = |run_id: &str,
+                     state: &str,
+                     health: &str,
+                     verdict: Option<&str>,
+                     tui: Option<&str>,
+                     report: &str,
+                     transcript: &str,
+                     exit_code: Option<i64>| {
+            let payload = json!({
+                "run_id": run_id,
+                "state": state,
+                "agent": "grok",
+                "skill": "implement",
+                "mode": "implement",
+                "root": "/tmp/repo",
+                "operator_session": format!("repo-{run_id}"),
+                "latest_report": report,
+                "latest_transcript": transcript,
+                "last_error": "",
+                "updated_at": "2026-07-22T12:29:30+00:00",
+                "started_at": "2026-07-22T11:59:00+00:00",
+                "health": health,
+                "source": "agent-meta",
+                "lock_present": false,
+                "exit_code": exit_code,
+                "liveness": if health == "active" || health == "stalled" { "live" } else { "terminal" },
+                "launcher_pid": Value::Null,
+                "completed_at": if health == "final" { "2026-07-22T12:00:00+00:00" } else { "" },
+                "session_id": "",
+                "current_loop": Value::Null,
+                "total_loops": Value::Null,
+                "settlement_verdict": verdict,
+                "settlement_tui": tui,
+            });
+            fs::write(
+                runs_dir.join(format!("{run_id}.json")),
+                serde_json::to_vec_pretty(&payload).expect("snapshot JSON"),
+            )
+            .expect("write snapshot");
+        };
+
+        write(
+            "settled-ok",
+            "completed",
+            "final",
+            Some("finalized"),
+            Some("f"),
+            plan_report,
+            "",
+            Some(0),
+        );
+        write(
+            "needs-a-look",
+            "completed",
+            "final",
+            Some("needs_attention"),
+            Some("n"),
+            "",
+            "/tmp/missing-transcript.log",
+            Some(0),
+        );
+        write(
+            "broke",
+            "completed",
+            "final",
+            Some("failed"),
+            Some("x"),
+            "",
+            "",
+            None,
+        );
+        write(
+            "bad-receipt",
+            "completed",
+            "final",
+            Some("invalid"),
+            Some("x"),
+            "",
+            "",
+            Some(1),
+        );
+        write(
+            "exit-zero-unsettled",
+            "completed",
+            "final",
+            None,
+            None,
+            "",
+            "",
+            Some(0),
+        );
+        write(
+            "exit-one-unsettled",
+            "completed",
+            "final",
+            None,
+            Some("x"),
+            "",
+            "",
+            Some(1),
+        );
+        write(
+            "live-now",
+            "running",
+            "active",
+            None,
+            None,
+            plan_report,
+            "",
+            None,
+        );
+        write("stuck", "running", "stalled", None, None, "", "", None);
+
+        let human = home.join("control_plane/runtime_runs/settled-ok");
+        fs::create_dir_all(&human).expect("human transcript dir");
+        fs::write(human.join("transcript.human.log"), "worker said hello\n")
+            .expect("human transcript");
+
+        let queued_id = "cut-waiting";
+        let lifecycle_dir = home.join("control_plane/lifecycle_runs").join(queued_id);
+        fs::create_dir_all(&lifecycle_dir).expect("lifecycle dir");
+        fs::write(
+            lifecycle_dir.join("state.json"),
+            serde_json::to_vec_pretty(&json!({
+                "run_id": queued_id,
+                "workflow": "vc-ship",
+                "agent": "grok",
+                "root": "/tmp/repo",
+                "status": "queued",
+                "updated_at": "2026-07-22T12:29:30+00:00",
+                "owner_pid": std::process::id() as i64,
+                "report_path": plan_report,
+                "transcript_path": "",
+            }))
+            .expect("lifecycle JSON"),
+        )
+        .expect("write lifecycle state");
+
+        let plane = ControlPlane::new(&home);
+        let now = chrono::DateTime::parse_from_rfc3339("2026-07-22T12:30:00+00:00")
+            .expect("fixed now")
+            .with_timezone(&Utc);
+        let dashboard = load_dashboard_data_from(&plane, now);
+        let owner = Owner::new();
+        let html = owner.with(|| {
+            provide_theme_context();
+            runs_dashboard(dashboard).to_html()
+        });
+
+        for heading in [
+            "Success",
+            "Needs Attention",
+            "Failures",
+            "Current",
+            "Queued",
+        ] {
+            assert!(
+                html.contains(&format!("<h2>{heading}</h2>")),
+                "missing heading {heading}"
+            );
+        }
+        for extra in [
+            "stalled",
+            "recent",
+            "invalid",
+            "unclassified",
+            "abandoned",
+            "exit",
+        ] {
+            assert!(
+                !html.contains(&format!("data-run-bucket=\"{extra}\"")),
+                "sixth bucket {extra} must not be invented"
+            );
+        }
+        assert!(!html.contains("<h2>Stalled</h2>"));
+        assert!(!html.contains("<h2>Recent</h2>"));
+        assert!(!html.contains("<h2>Invalid</h2>"));
+
+        let success = bucket_html(&html, "success");
+        let attention = bucket_html(&html, "needs-attention");
+        let failures = bucket_html(&html, "failures");
+        let current = bucket_html(&html, "current");
+        let queued = bucket_html(&html, "queued");
+
+        assert!(success.contains("settled-ok"));
+        assert!(success.contains("data-run-door=\"plan\""));
+        assert!(success.contains("plan_id=zen-rooms-ia"));
+        assert!(success.contains("org=vetcoders"));
+        assert!(success.contains("data-run-door=\"transcript\""));
+        assert!(success.contains("data-run-door=\"dock\""));
+        assert!(success.contains("data-transcript-url="));
+        assert!(!attention.contains("data-run-door=\"transcript\""));
+        assert!(!attention.contains("data-transcript-url="));
+        assert!(attention.contains("data-run-door=\"dock\""));
+        assert!(attention.contains("needs-a-look"));
+        assert!(failures.contains("broke"));
+        assert!(!failures.contains("bad-receipt"));
+        assert!(!failures.contains("exit-one-unsettled"));
+        assert!(!success.contains("exit-zero-unsettled"));
+        assert!(!success.contains("bad-receipt"));
+        assert!(current.contains("live-now"));
+        assert!(
+            current.contains("stuck"),
+            "stalled stays in Current, not a sixth heading"
+        );
+        assert!(current.contains("data-run-door=\"plan\""));
+        assert!(!current.contains("data-run-door=\"transcript\""));
+        assert!(queued.contains("cut-waiting"));
+        assert!(queued.contains("data-run-door=\"plan\""));
+        assert!(html.contains("id=\"overview-inspector\""));
+        assert!(html.contains("data-inspector-id"));
+
+        for (label, slice) in [
+            ("success", success),
+            ("attention", attention),
+            ("failures", failures),
+            ("current", current),
+            ("queued", queued),
+        ] {
+            assert!(
+                !slice.contains("exit-zero-unsettled") || label == "nowhere",
+                "exit 0 without a verdict is not Success ({label})"
+            );
+            assert!(
+                !slice.contains("exit-one-unsettled"),
+                "exit 1 / tui x without verdict failed is not Failures ({label})"
+            );
+            assert!(
+                !slice.contains("bad-receipt"),
+                "invalid is not a bucket ({label})"
+            );
+        }
+
+        fs::remove_dir_all(home).ok();
+    }
+
+    fn write_catalog_plan(home: &Path, repo: &str, day: &str, plan_id: &str) -> PathBuf {
+        let root = home
+            .join("artifacts/vetcoders")
+            .join(repo)
+            .join(day)
+            .join("plans")
+            .join(plan_id);
+        fs::create_dir_all(&root).expect("plan root");
+        let manifest = json!({
+            "schema_version": "1",
+            "plan_id": plan_id,
+            "org": "vetcoders",
+            "repo": repo,
+            "day": day,
+            "artifacts": [{
+                "id": "driver",
+                "role": "driver",
+                "path": "DRIVER.md",
+                "editable": true,
+                "required": true
+            }]
+        });
+        fs::write(
+            root.join("manifest.json"),
+            serde_json::to_vec_pretty(&manifest).expect("manifest json"),
+        )
+        .expect("manifest");
+        root
+    }
+
+    /// Two symlink aliases of one plan_id stay one row under the repository.
+    /// The list is `catalog_detailed` after the repo predicate, not a second walk.
+    pub(crate) fn projects_filter_deduped_shelf() {
+        let home = temp_home();
+        let real = write_catalog_plan(&home, "vibecrafted", "2026_0925", "one-plan");
+        write_catalog_plan(&home, "vibecrafted", "2026_0925", "two-plan");
+        write_catalog_plan(&home, "loctree", "2026_0901", "other-plan");
+        let repo_dir = real
+            .parent()
+            .and_then(|plans| plans.parent())
+            .and_then(|day| day.parent())
+            .expect("repo dir");
+        let suite_alias = repo_dir.with_file_name("vibecrafted-suite");
+        let local_org = home.join("artifacts/local");
+        fs::create_dir_all(&local_org).expect("local org");
+        let local_alias = local_org.join("vibecrafted-suite");
+        std::os::unix::fs::symlink(repo_dir, &suite_alias).expect("suite alias");
+        std::os::unix::fs::symlink(repo_dir, &local_alias).expect("local alias");
+        assert!(
+            suite_alias
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            local_alias
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+
+        let store = control_core::ScaffoldArtifactStore::new(&home);
+        let detailed = store.catalog_detailed();
+        let raw_one = detailed
+            .plans
+            .iter()
+            .filter(|plan| plan.plan_id == "one-plan")
+            .count();
+        // w3-01 collapses symlink aliases in the catalog itself; Projects filters that
+        // collapsed catalog (Decision 3), it does not dedupe a tripled one.
+        assert_eq!(
+            raw_one, 1,
+            "alias fixture produced {raw_one} catalog rows for one-plan"
+        );
+        let shelf = project_shelf(&detailed.plans);
+        let vibecrafted = shelf
+            .iter()
+            .find(|group| group.org == "vetcoders" && group.repo == "vibecrafted")
+            .expect("vibecrafted project");
+        assert_eq!(
+            vibecrafted
+                .plans
+                .iter()
+                .filter(|plan| plan.plan_id == "one-plan")
+                .count(),
+            1,
+            "alias-tripled plan_id must appear once"
+        );
+        assert_eq!(vibecrafted.plans.len(), 2);
+        let loctree = shelf
+            .iter()
+            .find(|group| group.repo == "loctree")
+            .expect("loctree project");
+        assert_eq!(loctree.plans.len(), 1);
+
+        let attention = |plan: &control_core::ScaffoldPlanSummary| {
+            !store.is_plan_reviewable(&plan.org, &plan.repo, &plan.day, &plan.plan_id)
+        };
+        let index = snapshot_from_plans(&detailed.plans, None, None, attention);
+        let detail = snapshot_from_plans(
+            &detailed.plans,
+            Some("vetcoders"),
+            Some("vibecrafted"),
+            attention,
+        );
+        assert_eq!(detail.plans.len(), vibecrafted.plans.len());
+        assert_eq!(
+            detail
+                .plans
+                .iter()
+                .filter(|plan| plan.plan_id == "one-plan")
+                .count(),
+            1
+        );
+        assert!(
+            detail
+                .plans
+                .iter()
+                .all(|plan| plan.href.starts_with("/scaffold?"))
+        );
+        assert!(
+            detail
+                .plans
+                .iter()
+                .all(|plan| !plan.href.contains(&real.display().to_string()))
+        );
+
+        let owner = Owner::new();
+        let (index_html, detail_html) = owner.with(|| {
+            provide_theme_context();
+            (
+                projects_frame(index).to_html(),
+                projects_frame(detail).to_html(),
+            )
+        });
+
+        assert_eq!(
+            index_html
+                .matches("aria-label=\"Vibecrafted server navigation\"")
+                .count(),
+            1
+        );
+        assert_eq!(
+            detail_html
+                .matches("aria-label=\"Vibecrafted server navigation\"")
+                .count(),
+            1
+        );
+        assert!(!index_html.contains("review-sidebar"));
+        assert!(!detail_html.contains("review-sidebar"));
+        assert!(!detail_html.contains("aria-label=\"Scaffold artifacts\""));
+        assert!(
+            index_html.contains("<h1 class=\"run-detail-title\">Projects</h1>")
+                || index_html.contains(">Projects<")
+        );
+        assert!(index_html.contains("class=\"project-name\">vibecrafted<"));
+        assert!(index_html.contains("class=\"project-name\">loctree<"));
+        assert!(!index_html.contains("vibecrafted-suite"));
+        assert!(!index_html.contains("artifacts/vetcoders"));
+        assert!(!detail_html.contains("vibecrafted-suite"));
+        assert!(!detail_html.contains("artifacts/vetcoders"));
+        assert!(!detail_html.contains(&real.display().to_string()));
+        assert_eq!(detail_html.matches("data-plan-id=\"one-plan\"").count(), 1);
+        assert_eq!(detail_html.matches("data-plan-id=\"two-plan\"").count(), 1);
+        assert!(!detail_html.contains("data-plan-id=\"other-plan\""));
+        assert!(detail_html.contains("/scaffold?"));
+        assert!(detail_html.contains("plan_id=one-plan"));
+        assert!(detail_html.contains("Needs attention"));
+        assert!(
+            detail_html.contains("<h1 class=\"run-detail-title\">vibecrafted</h1>")
+                || detail_html.contains(">vibecrafted<")
+        );
+        assert!(!detail_html.contains("id=\"plan-search\""));
+        assert!(index_html.contains("href=\"/projects/vetcoders/vibecrafted\""));
+
+        fs::remove_dir_all(home).ok();
+    }
+
+    fn skills_room_html(html: &str) -> &str {
+        let marker_at = html.find("data-skills-room").expect("skills room");
+        let start = html[..marker_at].rfind("<main").expect("skills main");
+        let end = html[start..].find("</main>").expect("skills room end") + start + "</main>".len();
+        &html[start..end]
+    }
+
+    fn render_skills(snapshot: super::SkillsSnapshot) -> String {
+        let owner = Owner::new();
+        owner.with(|| {
+            leptos_meta::provide_meta_context();
+            provide_theme_context();
+            super::skills_page(snapshot).to_html()
+        })
+    }
+
+    pub(crate) fn skills_one_list_then_one_editor() {
+        let home = temp_home();
+        let root = home.join("skills");
+        let other = home.join("view");
+        fs::create_dir_all(root.join("vc-alpha")).expect("alpha dir");
+        fs::create_dir_all(root.join("vc-beta")).expect("beta dir");
+        fs::create_dir_all(root.join("not-a-skill")).expect("decoy dir");
+        fs::create_dir_all(root.join("plans")).expect("plans dir");
+        fs::create_dir_all(root.join("vc-gamma")).expect("gamma dir");
+        fs::create_dir_all(&other).expect("second root");
+        fs::write(root.join("vc-alpha/SKILL.md"), "alpha body").expect("alpha skill");
+        fs::write(root.join("vc-alpha/NOTES.md"), "leave this file").expect("notes");
+        fs::write(root.join("vc-beta/SKILL.md"), "beta body").expect("beta skill");
+        fs::write(root.join("not-a-skill/SKILL.md"), "not listed").expect("decoy skill");
+        fs::write(root.join("plans/plan.md"), "plan card").expect("plan file");
+        fs::write(root.join("vc-gamma/README.md"), "no skill file").expect("gamma readme");
+        std::os::unix::fs::symlink(root.join("vc-alpha"), other.join("vc-alpha")).expect("symlink");
+
+        let files = super::discover_skill_files(&[root.clone(), other.clone()]);
+        let names: Vec<&str> = files.iter().map(|file| file.name.as_str()).collect();
+        assert_eq!(names, ["vc-alpha", "vc-beta"]);
+
+        let list = render_skills(super::SkillsSnapshot {
+            names: files.iter().map(|file| file.name.clone()).collect(),
+            open: None,
+            text: String::new(),
+        });
+        let list_room = skills_room_html(&list);
+        assert_eq!(list.matches("<h1").count(), 1);
+        assert_eq!(list_room.matches("<h1").count(), 1);
+        assert!(list_room.contains(">Skills<"));
+        assert_eq!(list_room.matches("<ul").count(), 1);
+        assert!(list_room.contains("class=\"skills-list\""));
+        assert!(list_room.contains("href=\"/skills/vc-alpha\""));
+        assert!(list_room.contains("href=\"/skills/vc-beta\""));
+        assert!(!list_room.contains("<textarea"));
+        assert!(!list.contains("plan-card"));
+        assert!(!list.contains("data-ppm=\"plan\""));
+        assert!(!list_room.contains("not-a-skill"));
+        assert!(!list_room.contains("vc-gamma"));
+
+        let editor = render_skills(super::SkillsSnapshot {
+            names: vec!["vc-alpha".into(), "vc-beta".into()],
+            open: Some("vc-alpha".into()),
+            text: "alpha body".into(),
+        });
+        let editor_room = skills_room_html(&editor);
+        assert_eq!(editor.matches("<h1").count(), 1);
+        assert!(editor_room.contains(">Skills<"));
+        assert_eq!(editor_room.matches("<ul").count(), 0);
+        assert!(!editor_room.contains("skills-list"));
+        assert_eq!(editor_room.matches("<textarea").count(), 1);
+        assert!(editor_room.contains("alpha body"));
+        assert!(editor_room.contains("class=\"doc-pane\""));
+        assert!(editor_room.contains("action=\"/api/skills/file\""));
+        assert!(editor_room.contains("name=\"name\""));
+        assert!(editor_room.contains("value=\"vc-alpha\""));
+        assert!(editor_room.contains("name=\"text\""));
+        assert!(!editor.contains("plan-card"));
+        assert!(!editor_room.contains("vc-beta"));
+
+        let empty_root = home.join("empty-skills");
+        fs::create_dir_all(&empty_root).expect("empty skills dir");
+        assert!(super::discover_skill_files(&[empty_root]).is_empty());
+        let empty = render_skills(super::SkillsSnapshot::empty());
+        let empty_room = skills_room_html(&empty);
+        assert_eq!(empty.matches("<h1").count(), 1);
+        assert!(empty_room.contains(">Skills<"));
+        assert!(empty_room.contains("data-skills-state=\"empty\""));
+        assert_eq!(empty_room.matches("<ul").count(), 0);
+        assert!(!empty_room.contains("<textarea"));
+        assert!(!empty.contains("plan-card"));
+
+        super::save_named_skill_in(&[root.clone(), other], "vc-alpha", "rewritten skill")
+            .expect("save the open skill");
+        assert_eq!(
+            fs::read_to_string(root.join("vc-alpha/SKILL.md")).expect("reread alpha"),
+            "rewritten skill"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("vc-alpha/NOTES.md")).expect("notes stay"),
+            "leave this file"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("vc-beta/SKILL.md")).expect("beta stays"),
+            "beta body"
+        );
+        assert!(
+            super::save_named_skill_in(std::slice::from_ref(&root), "../vc-alpha", "nope").is_err()
+        );
+        assert!(
+            super::save_named_skill_in(std::slice::from_ref(&root), "vc-missing", "nope").is_err()
+        );
+        assert!(super::save_named_skill_in(&[root], "not-a-skill", "nope").is_err());
+
+        fs::remove_dir_all(home).ok();
+    }
+
+    pub(super) fn history_room_proof() {
+        let mut plan = HistoryMemory::hit("plan", "should-not-render");
+        plan.plan_id = "zen-rooms-ia".to_string();
+        plan.summary = "scaffold plan card".to_string();
+        let mut report = HistoryMemory::hit("report", "loctree-report-session");
+        report.summary = "loctree-report.html".to_string();
+        let session = HistoryMemory::hit("session", "remembered-session-ac121475");
+        let intent = HistoryMemory::hit("intent", "intent-cut-w4-03");
+
+        let owner = Owner::new();
+        let (remembered, empty) = owner.with(|| {
+            leptos_meta::provide_meta_context();
+            provide_theme_context();
+            (
+                history_view(vec![session, intent, plan, report]).to_html(),
+                HistoryPage().to_html(),
+            )
+        });
+
+        assert!(remembered.contains("<h1 class=\"run-detail-title\">History &amp; context</h1>"));
+        assert_eq!(
+            remembered.matches("class=\"history-memory-row\"").count(),
+            2
+        );
+        assert!(remembered.contains("data-memory=\"session\""));
+        assert!(remembered.contains("data-memory=\"intent\""));
+        assert!(remembered.contains("remembered-session-ac121475"));
+        assert!(remembered.contains("intent-cut-w4-03"));
+        assert!(remembered.contains("/api/aicx/search"));
+        assert!(remembered.contains("/api/aicx/reference?path=remembered-session-ac121475"));
+        assert!(remembered.contains("/api/aicx/reference?path=intent-cut-w4-03"));
+        assert!(!remembered.contains("zen-rooms-ia"));
+        assert!(!remembered.contains("should-not-render"));
+        assert!(!remembered.contains("loctree-report"));
+        assert!(!remembered.contains("plan-card"));
+        assert!(!remembered.contains("data-ppm=\"plan\""));
+        assert!(!remembered.contains("id=\"history-memory-empty\""));
+
+        assert!(empty.contains("<h1 class=\"run-detail-title\">History &amp; context</h1>"));
+        assert!(empty.contains("History &amp; context has no remembered sessions or intents yet."));
+        assert!(empty.contains("data-history-room"));
+        assert!(empty.contains("/api/aicx/search"));
+        assert!(empty.contains("/api/aicx/reference"));
+        assert!(!empty.contains("class=\"history-memory-row\""));
+        assert!(!empty.contains("plan-card"));
+        assert!(!empty.contains("zen-rooms-ia"));
+        assert!(!empty.contains("loctree-report"));
+    }
 }
+
+#[cfg(all(test, feature = "ssr"))]
+pub(crate) fn overview_welcome_status_and_miniatures() {
+    use leptos::prelude::*;
+
+    use crate::theme::provide_theme_context;
+
+    fn work_door(html: &str, href: &str, label: &str) -> bool {
+        html.split("<a ").any(|chunk| {
+            let anchor = chunk.split("</a>").next().unwrap_or("");
+            anchor.contains("overview-door")
+                && anchor.contains(&format!("href=\"{href}\""))
+                && anchor.contains(label)
+        })
+    }
+
+    assert_eq!(overview_welcome_line(""), "still starting");
+    assert_eq!(overview_welcome_line("loading"), "still starting");
+    assert_eq!(overview_welcome_line("starting"), "still starting");
+    assert_eq!(overview_welcome_line("healthy"), "server up");
+    assert_eq!(overview_welcome_line("healthy · 2 live"), "server up");
+
+    let owner = Owner::new();
+    let (welcome, starting, usage) = owner.with(|| {
+        leptos_meta::provide_meta_context();
+        provide_theme_context();
+        let up = DashboardData {
+            server_status: "healthy".into(),
+            active_runs: vec![DashboardRun {
+                run_id: "impl-live".into(),
+                state: "running".into(),
+                health: "active".into(),
+                ..DashboardRun::default()
+            }],
+            ..DashboardData::default()
+        };
+        let welcome = console_dashboard(up).to_html();
+        let starting = console_dashboard(DashboardData {
+            server_status: "loading".into(),
+            ..DashboardData::default()
+        })
+        .to_html();
+        (welcome, starting, UsagePage().to_html())
+    });
+
+    assert_eq!(welcome.matches("id=\"overview-status\"").count(), 1);
+    assert!(welcome.contains("server up"));
+    assert!(!welcome.contains("still starting"));
+    assert_eq!(welcome.matches("class=\"overview-door\"").count(), 4);
+    assert!(work_door(&welcome, "/", "Overview"));
+    assert!(work_door(&welcome, "/runs", "Runs"));
+    assert!(work_door(&welcome, "/projects", "Projects"));
+    assert!(work_door(&welcome, "/usage", "Costs &amp; usage"));
+    assert!(!welcome.contains("id=\"usage-chart-heat\""));
+    assert!(!welcome.contains("usage-chart-heat"));
+    assert!(!welcome.contains("class=\"run-table\""));
+    assert!(
+        welcome.contains(">1<"),
+        "runs miniature keeps a short count"
+    );
+
+    assert_eq!(starting.matches("id=\"overview-status\"").count(), 1);
+    assert!(starting.contains("still starting"));
+    assert!(!starting.contains("usage-chart-heat"));
+
+    assert!(usage.contains("id=\"usage-chart-heat\""));
+    assert!(usage.contains("Known tokens"));
+    assert!(usage.contains("id=\"usage-total-tokens\""));
+}
+
+// The delivery gate filters `--exact projects_filter_deduped_shelf`.
+// Nested module paths never match that literal, so the crate root re-exports the proof.
+#[cfg(all(test, feature = "ssr"))]
+pub(crate) use tests::projects_filter_deduped_shelf;
+
+#[cfg(all(test, feature = "ssr"))]
+pub(crate) use tests::skills_one_list_then_one_editor;

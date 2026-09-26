@@ -362,6 +362,53 @@ struct CommandDeckIntegrationTests {
       "Generated report must be isolated; trusted runtime and local dashboards keep their normal stores")
   }
 
+  /// The corner mark is not a sidebar destination. A configured loopback URL
+  /// still binds through FrameWebLaunch, and only the mark calls present(service:).
+  static func frameProjectionContract(_ endpoint: URL) throws {
+    try require(FrameProjectionMark.label == "vc_", "The corner mark is not vc_")
+    try require(!FrameProjectionMark.isSidebarDestination(),
+      "The vc_ mark is a CommandDeckDestination")
+    let loopback = URL(string: "http://127.0.0.1:8082/")!
+    try require(
+      FrameWebLaunch.bind(url: loopback)?.startArguments == ["web", "--ip", "127.0.0.1", "--port", "8082"],
+      "Configured loopback URL did not bind via FrameWebLaunch")
+    try require(FrameWebLaunch.bind(url: URL(string: "https://127.0.0.1:8082/")!) == nil,
+      "HTTPS Frame origins must not bind")
+    try require(FrameWebLaunch.bind(url: URL(string: "http://10.0.0.8:8082/")!) == nil,
+      "Non-loopback Frame origins must not bind")
+    try require(FrameWebLaunch.bind(url: URL(string: "http://127.0.0.1:9090/")!)?.port == 9090,
+      "A non-default Frame port must come from the named URL")
+
+    let model = AppModel()
+    let session = WebConsoleSession(
+      websiteDataStore: .nonPersistent(), initialLoadTimeout: .milliseconds(200),
+      downloadDestinationProvider: { _, _, _ in nil })
+    session.apply(endpoint: endpoint)
+    let frameURL = URL(string: "http://127.0.0.1:9/")!
+    let controller = MainWindowController(model: model, session: session, actions: Actions())
+    controller.frameWebURL = { frameURL }
+    controller.openWorkspacePath("/frame")
+    guard case .runtime = session.scope else {
+      throw Failure(message: "A sidebar path presented the frame origin")
+    }
+    try require(controller.presentConfiguredFrame(), "The mark did not present the configured origin")
+    guard case .service(let origin) = session.scope, origin == WebRuntimeOrigin(url: frameURL) else {
+      throw Failure(message: "present(service:) was not reached from the mark")
+    }
+    controller.restoreFromFrame()
+    guard case .runtime(let restored) = session.scope, restored == WebRuntimeOrigin(url: endpoint) else {
+      throw Failure(message: "Back did not restore the product console in this window")
+    }
+    controller.frameWebURL = { nil }
+    try require(!controller.presentConfiguredFrame(), "An absent frame URL still presented")
+    guard case .runtime = session.scope else {
+      throw Failure(message: "The quiet mark changed the window")
+    }
+    session.webView.stopLoading()
+    controller.close()
+    print("Witness: vc_ mark presents the configured origin; sidebar path and absent URL do not")
+  }
+
   static func hasFixtureCookie(_ store: WKHTTPCookieStore) async -> Bool {
     await withCheckedContinuation { continuation in
       store.getAllCookies { cookies in
@@ -1064,6 +1111,45 @@ struct CommandDeckIntegrationTests {
     controller.close()
   }
 
+  /// Three shelves and a quiet footer. Retired peer titles are not destinations.
+  static func sidebarGroupsContract() throws {
+    try require(CommandDeckDestinationSection.allCases.map(\.title) == ["Work", "Trace", "Machine"],
+      "CommandDeckDestinationSection titles are not Work, Trace, Machine")
+    let peers = CommandDeckDestinationSection.allCases.flatMap { CommandDeckDestination.inSection($0) }
+    try require(peers.map(\.title) == [
+      "Overview", "Runs", "Projects", "Costs & usage",
+      "Skills", "Artifacts", "Code intelligence", "History & context",
+      "Settings & config", "Diagnostics",
+    ], "Section rows are not the ten shelf doors")
+    try require(peers.map(\.path) == [
+      "/", "/runs", "/projects", "/usage",
+      "/skills", "/artifacts", "/structure", "/history",
+      "/settings", "/diagnostics",
+    ], "Shelf paths drifted")
+    try require(CommandDeckDestination.footerCases.map(\.title) == ["Help & docs", "About"],
+      "Help & docs and About are not the footer")
+    try require(CommandDeckDestination.footerCases.map(\.path) == ["/help", "/about"],
+      "Footer paths drifted")
+    try require(Set(peers).isDisjoint(with: CommandDeckDestination.footerCases),
+      "Footer rows are section peers")
+    let banned = [
+      "Frame", "Active", "Sessions", "Agents", "Live", "Activity", "Plans", "Guide",
+      "Transcripts", "Structure", "Workspaces", "Failures", "Health", "Lifecycle",
+    ]
+    for title in CommandDeckDestination.allCases.map(\.title) {
+      try require(!banned.contains(title), "Retired sidebar title remained: \(title)")
+    }
+    try require(CommandDeckDestination.usage.title == "Costs & usage"
+      && CommandDeckDestination.usage.path == "/usage",
+      "Costs & usage is not /usage")
+    try require(CommandDeckDestination.structure.title == "Code intelligence"
+      && CommandDeckDestination.structure.path == "/structure",
+      "Code intelligence is not /structure")
+    try require(CommandDeckDestination.help.title == "Help & docs"
+      && CommandDeckDestination.about.title == "About",
+      "Footer titles drifted from the sidebar labels")
+  }
+
   static func main() async throws {
     _ = NSApplication.shared
     let endpoint = URL(string: CommandLine.arguments[1])!
@@ -1072,12 +1158,14 @@ struct CommandDeckIntegrationTests {
       "Only a loopback fixture endpoint is permitted")
     try require(reconnectEndpoint.scheme == "http" && reconnectEndpoint.host == "127.0.0.1" && reconnectEndpoint.port != nil,
       "Only a loopback reconnect endpoint is permitted")
+    try sidebarGroupsContract()
     try stateContract(endpoint)
     try trayMenuContract()
     try policyContract(endpoint)
     try authenticationAndDownloadContract(endpoint)
     try tabPolicyContract(endpoint)
     try destinationContract(endpoint)
+    try frameProjectionContract(endpoint)
     try await webContract(endpoint)
     try await inlineScriptSuccessContract(endpoint)
     try await firstLoadTimeoutContract(endpoint, reconnectEndpoint: reconnectEndpoint)

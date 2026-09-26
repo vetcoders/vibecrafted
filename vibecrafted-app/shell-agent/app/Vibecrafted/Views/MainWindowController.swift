@@ -54,9 +54,11 @@ final class MainWindowController: NSWindowController, CommandDeckNavigationHandl
   let session: WebConsoleSession
   private let openExternally: @MainActor (URL) -> Void
   /// Configured `vc-frame web` origin, when `[tools.vc-frame]` names one.
-  /// Sidebar Frame loads it in this window's web view. Absent, Frame stays
-  /// the product `/frame` page. Never a second window.
+  /// The corner mark projects it across this window. Absent, the mark stays
+  /// quiet. Never a second window, and never a guessed port.
   var frameWebURL: (() -> URL?)?
+  /// Product route to restore when the projection bar goes back.
+  private var dashboardPath = "/"
 
   init(
     model: AppModel, session: WebConsoleSession, actions: any CommandDeckActionHandling,
@@ -68,20 +70,54 @@ final class MainWindowController: NSWindowController, CommandDeckNavigationHandl
       title: "Vibecrafted", frameAutosaveName: "VibecraftedCommandDeck")
     super.init(window: window)
     CommandDeckWindowFactory.mount(
-      CommandDeckRootView(model: model, session: session, actions: actions, navigationHandler: self,
-        openPath: { [weak self] path in self?.openWorkspacePath(path) }),
+      CommandDeckRootView(
+        model: model, session: session, actions: actions, navigationHandler: self,
+        openPath: { [weak self] path in self?.openWorkspacePath(path) },
+        frameOrigin: { [weak self] in self?.configuredFrameOrigin() },
+        presentFrame: { [weak self] in self?.presentConfiguredFrame() ?? false },
+        restoreFrame: { [weak self] in self?.restoreFromFrame() }),
       in: window)
   }
 
-  /// Sidebar selection. Frame, when configured, is the Zellij web client in
-  /// this web view. Every other destination returns to the product console.
+  /// Sidebar selection returns to the product console in this window.
+  /// The frame origin is not a destination; the corner mark presents it.
   func openWorkspacePath(_ path: String) {
-    if path == CommandDeckDestination.frame.path, let url = frameWebURL?() {
-      session.present(service: url)
-      return
-    }
+    dashboardPath = path
     if session.restoreProduct(route: path) { return }
     session.navigate(path: path)
+  }
+
+  /// Corner mark. `present(service:)` is the only way the configured origin
+  /// occupies this window. Returns false when there is nothing to project.
+  @discardableResult
+  func presentConfiguredFrame() -> Bool {
+    guard case .runtime = session.scope, let url = frameWebURL?(), WebRuntimeOrigin(url: url) != nil
+    else { return false }
+    if let current = session.navigation.currentURL, session.runtimeOrigin?.covers(current) == true {
+      dashboardPath = Self.dashboardRoute(from: current)
+    }
+    session.present(service: url)
+    return true
+  }
+
+  /// Projection bar. Puts the product console back on the route that was open.
+  func restoreFromFrame() {
+    let path = dashboardPath
+    if session.restoreProduct(route: path) { return }
+    session.navigate(path: path)
+  }
+
+  private func configuredFrameOrigin() -> URL? {
+    guard case .runtime = session.scope else { return nil }
+    return frameWebURL?()
+  }
+
+  private static func dashboardRoute(from url: URL) -> String {
+    let path = url.path.isEmpty ? "/" : url.path
+    guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+      let query = components.percentEncodedQuery, !query.isEmpty
+    else { return path }
+    return "\(path)?\(query)"
   }
 
   @available(*, unavailable)
@@ -107,12 +143,16 @@ private struct CommandDeckRootView: View {
   let actions: any CommandDeckActionHandling
   let navigationHandler: any CommandDeckNavigationHandling
   var openPath: (String) -> Void
+  var frameOrigin: () -> URL?
+  var presentFrame: () -> Bool
+  var restoreFrame: () -> Void
 
   var body: some View {
     CommandDeckView(
       presentation: model.presentation, actions: actions,
       navigation: session.navigation, navigationHandler: navigationHandler,
-      openPath: openPath
+      openPath: openPath, frameOrigin: frameOrigin, presentFrame: presentFrame,
+      restoreFrame: restoreFrame
     ) {
       WebConsoleHost(session: session)
     }

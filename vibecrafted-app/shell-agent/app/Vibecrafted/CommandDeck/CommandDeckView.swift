@@ -64,6 +64,19 @@ protocol CommandDeckNavigationHandling: AnyObject {
   func navigate(_ action: CommandDeckNavigationAction)
 }
 
+/// Corner token for the frame projection. Not a sidebar row and not a route.
+enum FrameProjectionMark {
+  static let label = "vc_"
+
+  static func isSidebarDestination(
+    _ destinations: [CommandDeckDestination] = CommandDeckDestination.allCases
+  ) -> Bool {
+    destinations.contains { destination in
+      destination.rawValue == label || destination.title == label || destination.path == label
+    }
+  }
+}
+
 struct CommandDeckPresentation: Equatable, Sendable {
   var phase: CommandDeckPhase
   var problem: CommandDeckProblem?
@@ -104,6 +117,9 @@ struct CommandDeckView<Canvas: View>: View {
   var navigation: WebTabNavigation?
   var navigationHandler: (any CommandDeckNavigationHandling)?
   var openPath: ((String) -> Void)?
+  var frameOrigin: (() -> URL?)?
+  var presentFrame: (() -> Bool)?
+  var restoreFrame: (() -> Void)?
 
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -113,6 +129,9 @@ struct CommandDeckView<Canvas: View>: View {
     navigation: WebTabNavigation? = nil,
     navigationHandler: (any CommandDeckNavigationHandling)? = nil,
     openPath: ((String) -> Void)? = nil,
+    frameOrigin: (() -> URL?)? = nil,
+    presentFrame: (() -> Bool)? = nil,
+    restoreFrame: (() -> Void)? = nil,
     @ViewBuilder canvas: () -> Canvas
   ) {
     self.presentation = presentation
@@ -120,11 +139,17 @@ struct CommandDeckView<Canvas: View>: View {
     self.navigation = navigation
     self.navigationHandler = navigationHandler
     self.openPath = openPath
+    self.frameOrigin = frameOrigin
+    self.presentFrame = presentFrame
+    self.restoreFrame = restoreFrame
     self.canvas = canvas()
   }
 
   var body: some View {
-    CommandDeckShell(phase: presentation.phase, openPath: openPath) {
+    CommandDeckShell(
+      phase: presentation.phase, openPath: openPath, frameOrigin: frameOrigin,
+      presentFrame: presentFrame, restoreFrame: restoreFrame
+    ) {
       CommandDeckCanvasStage(
       phase: presentation.phase,
       problem: presentation.problem,
@@ -148,6 +173,7 @@ struct CommandDeckView<Canvas: View>: View {
     .accessibilityElement(children: .contain)
     .accessibilityLabel("Command Deck")
     }
+    .commandDeckThemed()
   }
 }
 
@@ -205,7 +231,7 @@ struct CommandDeckToolbar: ToolbarContent {
 
   var body: some ToolbarContent {
     ToolbarItemGroup(placement: .primaryAction) {
-      if shows(.retryConnection) {
+      if shows(.retryConnection), presentation.phase != .online {
         Button("Try Again", systemImage: "arrow.clockwise") { actions?.handle(.retryConnection) }
           .keyboardShortcut("r", modifiers: .command)
           .help("Try Again (⌘R). Connects to the server again.")
