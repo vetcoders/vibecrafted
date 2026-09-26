@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "control-core",
     "web",
+    "mcp-shim",
 ]
 
 [profile.release]

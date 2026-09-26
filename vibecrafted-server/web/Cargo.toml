@@ -34,6 +34,8 @@ http-body-util = { version = "0.1", optional = true }
 futures-util = { version = "0.3", default-features = false, features = ["std"], optional = true }
 bytes = { version = "1", optional = true }
 http = { version = "1", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+sysinfo = { version = "0.33", optional = true }
 
 console_error_panic_hook = { version = "0.1", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
@@ -65,6 +67,8 @@ ssr = [
     "dep:futures-util",
     "dep:bytes",
     "dep:http",
+    "dep:reqwest",
+    "dep:sysinfo",
     "dep:control-core",
     "dep:serde_urlencoded",
     "dep:chrono",
@@ -126,6 +130,11 @@ required-features = ["ssr"]
 [[test]]
 name = "mcp_http"
 path = "tests/mcp_http.rs"
+required-features = ["ssr"]
+
+[[test]]
+name = "mcp_aggregator"
+path = "tests/mcp_aggregator.rs"
 required-features = ["ssr"]
 
 [package.metadata.leptos]
