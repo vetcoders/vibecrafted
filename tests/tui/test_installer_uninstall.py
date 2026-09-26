@@ -46,6 +46,35 @@ def _write_executable(path: Path, body: str | None = None) -> None:
     path.chmod(0o755)
 
 
+# Runtime Packs up to 2026-09-25 carried these channel tools; the current
+# contract refuses them. Legacy-shim migration starts from such a generation.
+LEGACY_CHANNEL_TOOLS = (
+    "loct",
+    "loctree-mcp",
+    "aicx",
+    "aicx-mcp",
+    "prview",
+    "screenscribe",
+)
+
+
+def _legacy_runtime_install_args(
+    tmp_path: Path, terminal_host: Path, frame_helper: Path
+) -> Namespace:
+    """An older generation (9.9.8) that still carried the channel tools."""
+    legacy = seed_runtime_pack(
+        tmp_path / "legacy-runtime-pack", version="9.9.8+g12345678"
+    )
+    for name in LEGACY_CHANNEL_TOOLS:
+        _write_executable(legacy / "bin" / name, "#!/bin/sh\nexit 0\n")
+    return Namespace(
+        payload_root=str(legacy),
+        app_root=str(terminal_host.parents[2]),
+        terminal_host=str(terminal_host),
+        frame_helper=str(frame_helper),
+    )
+
+
 def _write_native_stub(path: Path, payload: bytes = b"pack-terminal") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(_MACHO_MAGIC + payload)
@@ -628,7 +657,7 @@ def test_runtime_pack_uninstall_prunes_only_created_empty_xdg_parents(
     assert not (home / ".codex").exists()
 
 
-def test_runtime_pack_refuses_missing_required_agent_foundation(
+def test_runtime_pack_refuses_missing_required_runtime_executable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     home = tmp_path / "home"
@@ -638,9 +667,11 @@ def test_runtime_pack_refuses_missing_required_agent_foundation(
     monkeypatch.setenv("VIBECRAFTED_HOME", str(home / "state"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "config"))
     payload, terminal_host, frame_helper = _runtime_pack_fixture(tmp_path)
-    (payload / "bin/prview").unlink()
+    (payload / "bin/vc-server").unlink()
 
-    with pytest.raises(RuntimeError, match=r"Runtime Pack is incomplete: .*bin/prview"):
+    with pytest.raises(
+        RuntimeError, match=r"Runtime Pack is incomplete: .*bin/vc-server"
+    ):
         installer.cmd_runtime_install(
             Namespace(
                 payload_root=str(payload),
@@ -972,9 +1003,10 @@ def test_runtime_pack_restores_public_owner_when_retiring_old_bare_shim(
 
     # Reproduce an older installer that published every bundled executable
     # under its bare public name.
+    legacy_args = _legacy_runtime_install_args(tmp_path, terminal_host, frame_helper)
     with monkeypatch.context() as legacy:
         legacy.setattr(installer, "_runtime_launcher_public_name", lambda name: name)
-        assert installer.cmd_runtime_install(args) == 0
+        assert installer.cmd_runtime_install(legacy_args) == 0
     capsys.readouterr()
     assert "VIBECRAFTED_RUNTIME_ROOT=" in public_prview.read_text(encoding="utf-8")
 
@@ -984,9 +1016,9 @@ def test_runtime_pack_restores_public_owner_when_retiring_old_bare_shim(
     capsys.readouterr()
     assert public_prview.read_text(encoding="utf-8") == original_body
     generation = runtime_home / "releases/9.9.9+g12345678"
-    assert (generation / "bin/prview").is_file()
-    # The vendored copy stays generation-private: no `vibecrafted-*` wrapper
-    # is published onto the user's PATH.
+    # prview now comes from its GitHub release; the current generation carries
+    # no copy and publishes no `vibecrafted-*` wrapper onto the user's PATH.
+    assert not (generation / "bin/prview").exists()
     private_alias = launcher_home / "vibecrafted-prview"
     assert not private_alias.exists()
     receipt = json.loads(
@@ -1018,9 +1050,10 @@ def test_runtime_pack_forgets_already_removed_old_bare_shim(
         frame_helper=str(frame_helper),
     )
 
+    legacy_args = _legacy_runtime_install_args(tmp_path, terminal_host, frame_helper)
     with monkeypatch.context() as legacy:
         legacy.setattr(installer, "_runtime_launcher_public_name", lambda name: name)
-        assert installer.cmd_runtime_install(args) == 0
+        assert installer.cmd_runtime_install(legacy_args) == 0
     capsys.readouterr()
     public_prview = launcher_home / "prview"
     public_prview.unlink()
@@ -1059,11 +1092,12 @@ def test_runtime_pack_retires_legacy_vibecrafted_shim_aliases(
         frame_helper=str(frame_helper),
     )
 
+    legacy_args = _legacy_runtime_install_args(tmp_path, terminal_host, frame_helper)
     with monkeypatch.context() as legacy:
         legacy.setattr(
             installer, "_runtime_launcher_public_name", _legacy_shim_public_name
         )
-        assert installer.cmd_runtime_install(args) == 0
+        assert installer.cmd_runtime_install(legacy_args) == 0
     capsys.readouterr()
     alias = launcher_home / "vibecrafted-prview"
     assert alias.is_file()
@@ -1121,11 +1155,12 @@ def test_runtime_install_repoints_foundation_launchagent_off_retired_shim(
         frame_helper=str(frame_helper),
     )
 
+    legacy_args = _legacy_runtime_install_args(tmp_path, terminal_host, frame_helper)
     with monkeypatch.context() as legacy:
         legacy.setattr(
             installer, "_runtime_launcher_public_name", _legacy_shim_public_name
         )
-        assert installer.cmd_runtime_install(args) == 0
+        assert installer.cmd_runtime_install(legacy_args) == 0
     capsys.readouterr()
     shim = launcher_home / "vibecrafted-loctree-mcp"
     assert shim.is_file()

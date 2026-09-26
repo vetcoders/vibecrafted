@@ -3,12 +3,13 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # install-foundations.sh — portable installer for 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. foundation layer
 #
-# Handles:
-#   loctree / loctree-mcp  — required Loctree product binaries via Loctree installer
-#   aicx / aicx-mcp       — required AICX product binaries via Loctree installer
+# Handles (each foundation comes from its own public channel; the Runtime
+# Pack never carries them, and an existing working install is left alone):
+#   loctree / loctree-mcp  — npm: @loctree/loctree
+#   aicx / aicx-mcp       — npm: @loctree/aicx
 #   vc-frame               — required donor BINARY installed by this owner from sibling source
-#   prview                 — bundled binary from a pinned GitHub release
-#   screenscribe           — pinned PyPI wheel installed through pipx
+#   prview                 — GitHub releases: vetcoders/prview-rs (SHA256SUMS-verified)
+#   screenscribe           — PyPI: screenscribe, installed through pipx
 #
 # Usage:
 #   bash scripts/install-foundations.sh                   # install/validate foundations
@@ -30,10 +31,13 @@ set -euo pipefail
 # without a rideable operator surface.
 # ---------------------------------------------------------------------------
 
+LOCTREE_NPM_PACKAGE="@loctree/loctree"
+AICX_NPM_PACKAGE="@loctree/aicx"
 PRVIEW_REPO="vetcoders/prview-rs"
-SCREENSCRIBE_VERSION="0.1.19"
-
-LOCTREE_INSTALL_URL="${LOCTREE_INSTALL_URL:-https://loct.io/install.sh}"
+PRVIEW_RELEASE_BASE="${PRVIEW_RELEASE_BASE:-https://github.com/$PRVIEW_REPO/releases/latest/download}"
+# Every published prview Darwin binary carries this Developer ID team.
+PRVIEW_MACOS_TEAM_ID="MW223P3NPX"
+SCREENSCRIBE_PACKAGE="screenscribe"
 
 # Agent CLIs — npm packages when the vendor publishes an official package.
 AGENT_PACKAGES=(
@@ -66,12 +70,11 @@ LAUNCHER_PREFIX="${VIBECRAFTED_LAUNCHER_BIN:-$HOME/.local/bin}"
 CHECK_ONLY=0
 INSTALL_ALL=0
 AGENTS_REQUIRED=0
-# Product foundations (loctree/aicx/vc-frame) are externally managed: this
-# script deliberately refuses to guess crates/npm/checkout paths and points at
-# the canonical installer instead. Their absence is therefore an ADVISORY, not
-# an install failure — consistent with `make install-vendored-binaries`, which
-# already keeps the "external fallback" path non-fatal when vendored binaries
-# are absent. Set REQUIRE_FOUNDATIONS=1 (e.g. release validation) to make a
+# Product foundations install from their own channels (npm, GitHub releases,
+# PyPI). A channel can be unreachable (no npm, no network), so a foundation
+# that stays missing is an ADVISORY, not an install failure — consistent with
+# `make install-vendored-binaries`, which keeps its "external fallback" path
+# non-fatal. Set REQUIRE_FOUNDATIONS=1 (e.g. release validation) to make a
 # missing product foundation fail the run instead.
 REQUIRE_FOUNDATIONS="${REQUIRE_FOUNDATIONS:-0}"
 TARGETS=()
@@ -421,14 +424,17 @@ install_loctree() {
   fi
 
   if (( CHECK_ONLY )); then
-    info "Would install Loctree foundations from canonical installer:"
-    info "  curl -fsSL $LOCTREE_INSTALL_URL | sh"
+    info "Would install Loctree from npm: npm install -g $LOCTREE_NPM_PACKAGE"
     return 0
   fi
 
-  warn "Loctree foundations are required, but Vibecrafted will not guess crates, npm packages, or local checkout paths."
-  warn "Use the canonical installer, then rerun this check:"
-  warn "  curl -fsSL $LOCTREE_INSTALL_URL | sh"
+  install_from_npm "$LOCTREE_NPM_PACKAGE" loct || true
+  if loctree_suite_ready; then
+    ok "Loctree from npm: loct=$(command -v loct), loctree-mcp=$(command -v loctree-mcp)"
+    return 0
+  fi
+  warn "Install Loctree from its channel, then rerun this check:"
+  warn "  npm install -g $LOCTREE_NPM_PACKAGE"
   return 1
 }
 
@@ -463,16 +469,16 @@ install_screenscribe() {
   fi
 
   if (( CHECK_ONLY )); then
-    info "Would install screenscribe==${SCREENSCRIBE_VERSION} from PyPI via pipx"
+    info "Would install $SCREENSCRIBE_PACKAGE from PyPI via pipx"
     return 0
   fi
 
   ensure_pipx || return 1
-  info "Installing screenscribe==${SCREENSCRIBE_VERSION} from PyPI via pipx..."
-  pipx install --force "screenscribe==${SCREENSCRIBE_VERSION}" || {
-    warn "pipx failed to install screenscribe==${SCREENSCRIBE_VERSION}."
+  info "Installing $SCREENSCRIBE_PACKAGE from PyPI via pipx..."
+  pipx install --force "$SCREENSCRIBE_PACKAGE" || {
+    warn "pipx failed to install $SCREENSCRIBE_PACKAGE."
     warn "ScreenScribe needs Python >= 3.11; pipx uses its default interpreter unless told otherwise:"
-    warn "  pipx install --python python3.12 screenscribe==${SCREENSCRIBE_VERSION}"
+    warn "  pipx install --python python3.12 $SCREENSCRIBE_PACKAGE"
     return 1
   }
   binary_runs screenscribe
@@ -483,20 +489,25 @@ install_screenscribe() {
 # ---------------------------------------------------------------------------
 
 install_aicx() {
-  if has_cmd aicx-mcp; then
-    ok "aicx-mcp already installed: $(command -v aicx-mcp)"
+  aicx_ready() { binary_runs aicx && binary_runs aicx-mcp; }
+
+  if aicx_ready; then
+    ok "aicx already installed: aicx=$(command -v aicx), aicx-mcp=$(command -v aicx-mcp)"
     return 0
   fi
 
   if (( CHECK_ONLY )); then
-    info "Would install AICX foundations from canonical Loctree installer:"
-    info "  curl -fsSL $LOCTREE_INSTALL_URL | sh"
+    info "Would install AICX from npm: npm install -g $AICX_NPM_PACKAGE"
     return 0
   fi
 
-  warn "AICX foundations are required, but Vibecrafted will not guess crates, npm packages, or local checkout paths."
-  warn "Use the canonical installer, then rerun this check:"
-  warn "  curl -fsSL $LOCTREE_INSTALL_URL | sh"
+  install_from_npm "$AICX_NPM_PACKAGE" aicx || true
+  if aicx_ready; then
+    ok "AICX from npm: aicx=$(command -v aicx), aicx-mcp=$(command -v aicx-mcp)"
+    return 0
+  fi
+  warn "Install AICX from its channel, then rerun this check:"
+  warn "  npm install -g $AICX_NPM_PACKAGE"
   return 1
 }
 
@@ -579,8 +590,27 @@ install_agents() {
 # prview installer
 # ---------------------------------------------------------------------------
 
+prview_release_target() {
+  case "$(detect_os)-$(detect_arch)" in
+    macos-aarch64) printf 'aarch64-apple-darwin\n' ;;
+    linux-x86_64)  printf 'x86_64-unknown-linux-gnu\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+sha256_of() {
+  if has_cmd shasum; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    sha256sum "$1" | awk '{print $1}'
+  fi
+}
+
+# The latest GitHub release asset for this host, checked against the release's
+# own SHA256SUMS and, on macOS, against the Developer ID team that signs every
+# published prview. Lands in the launcher bin, which agents already search.
 install_prview() {
-  if has_cmd prview; then
+  if binary_runs prview; then
     ok "prview already installed: $(command -v prview)"
     return 0
   fi
@@ -588,9 +618,60 @@ install_prview() {
   # --- Attempt 0: bundled tarball (notarized drop-in) ---
   install_from_bundled "prview" && return 0
 
-  warn "prview is absent from the Runtime Pack."
-  warn "Rebuild the pack from the pinned GitHub release in scripts/stage-runtime-foundations.sh ($PRVIEW_REPO)."
-  return 1
+  local target asset
+  if ! target="$(prview_release_target)"; then
+    warn "prview publishes no GitHub release asset for $(detect_os)/$(detect_arch) ($PRVIEW_REPO)."
+    return 1
+  fi
+  asset="prview-${target}.tar.gz"
+
+  if (( CHECK_ONLY )); then
+    info "Would install prview from GitHub releases: $PRVIEW_RELEASE_BASE/$asset -> $LAUNCHER_PREFIX/prview"
+    return 0
+  fi
+
+  if [[ -e "$LAUNCHER_PREFIX/prview" || -L "$LAUNCHER_PREFIX/prview" ]]; then
+    warn "$LAUNCHER_PREFIX/prview exists but does not run; not overwriting another install."
+    return 1
+  fi
+  has_cmd curl || { warn "curl is required to download prview."; return 1; }
+  local work expected observed version
+  work="$(mktemp -d "${TMPDIR:-/tmp}/vibecrafted-prview.XXXXXX")" || return 1
+  if ! curl -fsSL --retry 3 "$PRVIEW_RELEASE_BASE/$asset" -o "$work/$asset" \
+    || ! curl -fsSL --retry 3 "$PRVIEW_RELEASE_BASE/SHA256SUMS" -o "$work/SHA256SUMS"; then
+    warn "Could not download $asset from $PRVIEW_RELEASE_BASE."
+    rm -rf "$work"
+    return 1
+  fi
+  expected="$(awk -v asset="$asset" '$2 == asset || $2 == "*" asset {print $1}' "$work/SHA256SUMS")"
+  observed="$(sha256_of "$work/$asset")"
+  if [[ -z "$expected" || "$expected" != "$observed" ]]; then
+    warn "prview $asset does not match the release SHA256SUMS; refusing to install it."
+    rm -rf "$work"
+    return 1
+  fi
+  if ! tar -xzf "$work/$asset" -C "$work" || [[ ! -f "$work/prview" ]]; then
+    warn "prview $asset carries no prview binary."
+    rm -rf "$work"
+    return 1
+  fi
+  if [[ "$(detect_os)" == "macos" ]]; then
+    local signature
+    signature="$(codesign -dv "$work/prview" 2>&1 || true)"
+    if ! grep -qx "TeamIdentifier=$PRVIEW_MACOS_TEAM_ID" <<<"$signature"; then
+      warn "prview $asset is not signed by Developer ID team $PRVIEW_MACOS_TEAM_ID; refusing to install it."
+      rm -rf "$work"
+      return 1
+    fi
+  fi
+  mkdir -p "$LAUNCHER_PREFIX"
+  install -m 0755 "$work/prview" "$LAUNCHER_PREFIX/prview"
+  rm -rf "$work"
+  if ! version="$("$LAUNCHER_PREFIX/prview" --version 2>/dev/null)"; then
+    warn "prview installed at $LAUNCHER_PREFIX/prview does not run."
+    return 1
+  fi
+  ok "Installed $version from GitHub releases: $LAUNCHER_PREFIX/prview"
 }
 
 # ---------------------------------------------------------------------------
@@ -735,14 +816,14 @@ usage() {
 Usage: install-foundations.sh [options] [targets...]
 
 Targets:
-  loctree         Validate loctree + loctree-mcp product binaries
-  aicx            Validate aicx / aicx-mcp product binaries
+  loctree         Install loctree + loctree-mcp from npm when missing
+  aicx            Install aicx / aicx-mcp from npm when missing
   vc-frame        Validate vc-frame product binary
-  prview          Validate bundled prview from the pinned GitHub release
-  screenscribe    Install the pinned PyPI wheel through pipx
+  prview          Install prview from its GitHub release when missing
+  screenscribe    Install screenscribe from PyPI through pipx when missing
   sandbox         Optional microsandbox/libkrun runtime
   iterm2-plugin   vibecrafted iTerm2 / locterm AutoLaunch plugin (macOS, opt-in)
-  (no target)     Validate required foundations; install only framework-owned tools
+  (no target)     Install missing required foundations from their channels
 
 Options:
   --all        Install all foundations (including optional)
@@ -799,7 +880,7 @@ foundation_optional_fail() {
   if [[ "$REQUIRE_FOUNDATIONS" == "1" ]]; then
     exit_code=1
   else
-    warn "$name unavailable — deferring to external/canonical install (non-fatal). Set REQUIRE_FOUNDATIONS=1 to enforce."
+    warn "$name unavailable — install it from its channel later (non-fatal). Set REQUIRE_FOUNDATIONS=1 to enforce."
   fi
 }
 
@@ -822,7 +903,7 @@ for target in "${TARGETS[@]}"; do
         fi
       fi
       ;;
-    prview)  install_prview  || exit_code=1 ;;
+    prview)  install_prview  || foundation_optional_fail prview ;;
     screenscribe) install_screenscribe || foundation_optional_fail screenscribe ;;
     sandbox) install_sandbox || exit_code=1 ;;
     iterm2-plugin) install_iterm2_integration || exit_code=1 ;;

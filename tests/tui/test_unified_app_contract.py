@@ -1653,9 +1653,12 @@ def test_host_path_scan_allows_libpython_documentation_paths_in_portable_python_
     )
 
 
-def test_host_path_scan_allows_vendored_openssl_openssl_dir_strings(
+def test_host_path_scan_has_no_vendored_openssl_exception_any_more(
     tmp_path: Path,
 ) -> None:
+    # The pack carried Homebrew OpenSSL dylibs only for the bundled prview.
+    # prview now ships through its GitHub release, so its compiled-in
+    # OPENSSLDIR strings are an ordinary build-host binding again.
     payload = tmp_path / "libcrypto.3.dylib"
     relative = "Contents/Resources/runtime/lib/libcrypto.3.dylib"
     payload.write_bytes(
@@ -1663,7 +1666,14 @@ def test_host_path_scan_allows_vendored_openssl_openssl_dir_strings(
         b"/opt/homebrew/Cellar/openssl@3/3.6.3/lib/engines-3 "
         b"/opt/homebrew/opt/openssl@3/lib/libcrypto.3.dylib"
     )
-    contract._reject_host_bound_paths(payload, relative=relative, kind="dylib")
+    _assert_error(
+        contract.E_PATH,
+        lambda: contract._reject_host_bound_paths(
+            payload,
+            relative=relative,
+            kind="dylib",
+        ),
+    )
 
     payload.write_bytes(b"panic at /Users/tester/src/main.rs")
     _assert_error(

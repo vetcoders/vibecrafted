@@ -2,8 +2,9 @@
 set -euo pipefail
 
 runtime_root="${VIBECRAFTED_RUNTIME_ROOT:-/opt/vibecrafted-runtime}"
-for binary in vibecrafted vc-server loct loctree loctree-mcp loctree-lsp \
-  aicx aicx-mcp prview screenscribe vc-frame vc-terminal voc; do
+# Loctree, AICX, PRView and ScreenScribe come from their own channels, not
+# from the Runtime Pack (no linux-arm64 npm/GitHub artifacts are published yet).
+for binary in vibecrafted vc-server vc-frame vc-terminal voc; do
   [[ -x "$runtime_root/bin/$binary" ]] || {
     printf 'Runtime Pack inventory failure: %s is missing or not executable\n' "$binary" >&2
     exit 70

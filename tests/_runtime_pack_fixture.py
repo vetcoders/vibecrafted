@@ -128,12 +128,6 @@ def seed_runtime_pack(
     for name in (
         "vibecrafted",
         "vibecrafted-mcp",
-        "loct",
-        "loctree-mcp",
-        "aicx",
-        "aicx-mcp",
-        "prview",
-        "screenscribe",
         "vc-server",
         "vc-server-supervisor",
         "vc-start",

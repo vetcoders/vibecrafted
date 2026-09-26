@@ -84,17 +84,8 @@ if ($hostPython) {
     Copy-Item $hostPython (Join-Path $shim "python3.exe")
 }
 $env:PATH = "$shim;$env:PATH"
-# Do not run stage-runtime-foundations.sh here. Git Bash compiles aicx/llama
-# against POSIX paths and needs libclang; this Windows builder copies host
-# cargo bins and inventories missing optional tools honestly.
-$cargoBin = Join-Path $env:USERPROFILE ".cargo\bin"
-foreach ($name in @("loct", "loctree", "loctree-mcp", "loctree-lsp", "aicx", "aicx-mcp", "prview")) {
-    $dest = Join-Path $payload "bin\$name.exe"
-    if (-not (Test-Path -LiteralPath $dest)) {
-        $src = Join-Path $cargoBin "$name.exe"
-        if (Test-Path -LiteralPath $src) { Copy-Item $src $dest }
-    }
-}
+# Loctree, AICX, PRView and ScreenScribe ship through their own channels
+# (npm / GitHub releases / PyPI); this pack never carries them.
 
 function Install-CargoBin([string]$PackagePath, [string]$BinName, [string]$DestName) {
     if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { return $false }
@@ -362,7 +353,7 @@ $env:TMP = $pipTmp
 $siteInstalled = $false
 for ($attempt = 1; $attempt -le 6; $attempt++) {
     & python -m pip install --disable-pip-version-check --upgrade --target $site `
-        "jsonschema>=4.23,<5" "PyYAML>=6.0,<7" "screenscribe==0.1.19"
+        "jsonschema>=4.23,<5" "PyYAML>=6.0,<7"
     if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath (Join-Path $site "jsonschema"))) {
         $siteInstalled = $true
         break
@@ -379,18 +370,6 @@ if (-not $siteInstalled) {
 if ($LASTEXITCODE -ne 0) {
     Die "pack python cannot import jsonschema from python-site"
 }
-$screenscribeCmd = @"
-@echo off
-setlocal EnableExtensions
-set "BIN_DIR=%~dp0"
-for %%I in ("%BIN_DIR%..") do set "VIBECRAFTED_RUNTIME_ROOT=%%~fI"
-set "PYTHONPATH=%VIBECRAFTED_RUNTIME_ROOT%\python-site;%VIBECRAFTED_RUNTIME_ROOT%\vibecrafted-core"
-set "PYTHONNOUSERSITE=1"
-set "PYTHONDONTWRITEBYTECODE=1"
-"%BIN_DIR%python.exe" -c "from screenscribe.bootstrap import main; main()" %*
-"@
-Set-Content -LiteralPath (Join-Path $binDir "screenscribe.cmd") -Value $screenscribeCmd -Encoding ascii
-
 $launcher = @"
 @echo off
 setlocal EnableExtensions
@@ -407,24 +386,6 @@ Set-Content -LiteralPath (Join-Path $payload "bin\vibecrafted.cmd") -Value $laun
     --pyproject (Join-Path $repoRoot "vibecrafted-core\pyproject.toml") `
     --bin-dir (Join-Path $payload "bin") --windows
 
-$screenscribeSite = Join-Path $payload "python-site\screenscribe"
-if (Test-Path -LiteralPath $screenscribeSite) {
-    $screenscribeCmd = @'
-@echo off
-setlocal EnableExtensions
-set "BIN_DIR=%~dp0"
-for %%I in ("%BIN_DIR%..") do set "VIBECRAFTED_RUNTIME_ROOT=%%~fI"
-set "PYTHONPATH=%VIBECRAFTED_RUNTIME_ROOT%\python-site;%VIBECRAFTED_RUNTIME_ROOT%\vibecrafted-core"
-set "PYTHONNOUSERSITE=1"
-set "PYTHONDONTWRITEBYTECODE=1"
-"%BIN_DIR%python.exe" -c "from screenscribe.bootstrap import main; main()" %*
-'@
-    Set-Content -LiteralPath (Join-Path $binDir "screenscribe.cmd") -Value $screenscribeCmd -Encoding ascii
-    if (-not (Test-Path -LiteralPath (Join-Path $binDir "screenscribe.cmd"))) {
-        Die "screenscribe wheel is present but bin/screenscribe.cmd was not written"
-    }
-}
-
 $inventoryScript = Join-Path $work "write_inventory.py"
 @'
 import hashlib, json, os, subprocess, sys
@@ -435,10 +396,8 @@ source_revision = os.environ["SOURCE_REVISION"]
 terminal_revision = os.environ["TERMINAL_REVISION"]
 frame_revision = os.environ["FRAME_REVISION"]
 source_manifest_sha = hashlib.sha256((root / "source-provenance.json").read_bytes()).hexdigest()
-mandatory = ["python", "loct", "loctree", "loctree-mcp", "loctree-lsp", "aicx", "aicx-mcp", "vc-server", "vc-terminal", "vc-frame"]
+mandatory = ["python", "vc-server", "vc-terminal", "vc-frame"]
 optional = {
-    "prview": "release-blocker",
-    "screenscribe": "release-blocker",
     "voc": "limited-platform-scope",
     "vc-start": "limited-platform-scope",
     "vc-server-supervisor": "limited-platform-scope",
@@ -446,7 +405,7 @@ optional = {
 def exe_path(name):
     if name == "python":
         return root / "bin" / "python.exe"
-    if name in {"screenscribe", "vc-terminal", "vc-frame"}:
+    if name in {"vc-terminal", "vc-frame"}:
         cmd = root / "bin" / f"{name}.cmd"
         if cmd.is_file():
             return cmd
@@ -489,8 +448,6 @@ for name in mandatory:
 reasons = {
     "voc": "voc is not built for Windows in this pack",
     "vc-start": "vc-start is not built for Windows in this pack",
-    "prview": "prview has no Windows artifact in this pack",
-    "screenscribe": "screenscribe has no Windows artifact in this pack",
     "vc-server-supervisor": "launchd supervisor is macOS-only; Windows uses vibecrafted server",
 }
 for name, classification in optional.items():

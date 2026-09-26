@@ -107,12 +107,13 @@ _MACHO_MAGICS = frozenset(
 def sha256_file_without_signature(path: Path) -> str:
     """Digest of a Mach-O with its code signature removed, or "" when N/A.
 
-    The release pipeline re-signs pinned upstream foundations with the
-    operator's identity and a fresh timestamp, so shipped bytes never hash to
-    the published digest and a raw-bytes pin can never match a DMG. Stripping
+    A release pipeline that re-signs a pinned upstream artifact with the
+    operator's identity and a fresh timestamp ships bytes that never hash to
+    the published digest, so a raw-bytes pin can never match a DMG. Stripping
     the signature is deterministic — the published artifact and every
-    re-signed copy of it converge to one digest, which is what the
-    `sha256_unsigned` pins in published-foundation-digests.json name.
+    re-signed copy of it converge to one digest, which an unsigned
+    `--accept-digest` pin names. (No Vibecrafted builder passes one since the
+    Runtime Pack stopped carrying channel foundations, 2026-09-25.)
     """
     if CODESIGN is None:
         return ""

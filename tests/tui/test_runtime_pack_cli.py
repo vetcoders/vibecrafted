@@ -61,7 +61,7 @@ def _foundation_manifest(root: Path) -> None:
         files[name] = hashlib.sha256(executable.read_bytes()).hexdigest()
     payload = {
         "schema": "io.vetcoders.vibecrafted.runtime-foundations.v1",
-        "versions": {"aicx": "fixture", "loctree": "fixture", "prview": "fixture"},
+        "versions": {},
         "source_revisions": {},
         "source_archives": {},
         "licenses": {},
@@ -1173,11 +1173,11 @@ def test_runtime_pack_contract_rejects_post_manifest_foundation_mutation(
     capture = tmp_path / "argv"
     _fake_runtime_payload(payload, capture)
     _source_provenance(payload)
-    (payload / "bin/loctree").write_bytes(b"post-manifest signing mutation")
+    (payload / "bin/vc-server").write_bytes(b"post-manifest signing mutation")
 
     with pytest.raises(
         RuntimePackContractError,
-        match="foundation digest does not match final bytes: bin/loctree",
+        match="foundation digest does not match final bytes: bin/vc-server",
     ):
         write_provenance(
             payload,

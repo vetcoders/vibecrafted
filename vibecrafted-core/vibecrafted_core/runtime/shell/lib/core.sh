@@ -318,17 +318,14 @@ _vetcoders_internal_python() {
 }
 
 _vetcoders_aicx_bin() {
-  local xdg_data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
-  local runtime_bin="${VIBECRAFTED_RUNTIME_ROOT:+$VIBECRAFTED_RUNTIME_ROOT/bin}"
-  runtime_bin="${runtime_bin:-${VIBECRAFTED_RUNTIME_BIN:-${VIBECRAFTED_RUNTIME_HOME:-$xdg_data_home/vibecrafted}/bin}}"
   local candidate=""
 
   # Foundation discovery is deterministic and independent of interactive
-  # shell startup. Explicit/operator and Vibecrafted-owned paths win; the
-  # Cargo location is retained for source installs during the transition.
+  # shell startup. AICX comes from its own channel (npm @loctree/aicx), never
+  # from the Runtime Pack: an explicit operator path wins, then the common
+  # user bin dirs; the Cargo location is retained for source installs.
   for candidate in \
     "${VIBECRAFTED_AICX_BIN:-}" \
-    "$runtime_bin/aicx" \
     "$HOME/.local/bin/aicx" \
     "$HOME/.cargo/bin/aicx"
   do

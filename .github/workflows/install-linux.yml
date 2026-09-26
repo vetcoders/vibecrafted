@@ -198,9 +198,9 @@ jobs:
           set -euo pipefail
           # PATH adjustments mirror what the install.sh interactive path does
           # — make sure the staged CLI is visible to this step. Foundations
-          # (loct/aicx/…) install into the runtime bin
-          # (~/.local/share/vibecrafted/bin, wired by vc-start for real
-          # users); without it here doctor reports INSTALLED_NOT_ON_PATH.
+          # come from their own channels: loct/aicx from npm (its global bin),
+          # prview from its GitHub release and screenscribe through pipx
+          # (both ~/.local/bin); a channel CI cannot reach stays a warning.
           export PATH="$HOME/.vibecrafted/bin:$HOME/.cargo/bin:$HOME/.local/bin:$HOME/.local/share/vibecrafted/bin:$PATH"
           if command -v vibecrafted >/dev/null 2>&1; then
             # Neutral cwd: the deck resolves core via `python -m`, and a

@@ -16,33 +16,30 @@ def _executable(path: Path, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
-def test_foundation_stager_rejects_linux_arm64_without_published_packages(
-    tmp_path: Path,
-) -> None:
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    _executable(
-        fake_bin / "uname",
-        '#!/bin/sh\n[ "${1:-}" = -s ] && echo Linux || echo aarch64\n',
+def test_linux_arm64_is_no_longer_blocked_by_channel_foundations() -> None:
+    # Until 2026-09-25 the stager refused Linux/aarch64 because npm publishes
+    # no linux-arm64 Loctree/AICX package. The pack no longer carries them, so
+    # its inventory names first-party executables only, on every architecture.
+    assembler = (REPO_ROOT / "scripts/build-linux-arm64-runtime-pack.sh").read_text(
+        encoding="utf-8"
     )
-    result = subprocess.run(
-        [
-            "bash",
-            str(REPO_ROOT / "scripts/stage-runtime-foundations.sh"),
-            str(tmp_path / "out"),
-        ],
-        cwd=REPO_ROOT,
-        env={
-            **os.environ,
-            "PATH": f"{fake_bin}:{os.environ['PATH']}",
-            "VIBECRAFTED_FOUNDATIONS_TARGET_PROBE": "1",
-        },
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert result.returncode != 0
-    assert "no published Runtime Foundations payload for Linux/aarch64" in result.stderr
+
+    assert "stage-runtime-foundations" not in assembler
+    assert "runtime_pack_contract write-foundations" in assembler
+    for name in LINUX_EXECUTABLES:
+        assert f'"{name}": ["--version"]' in assembler, name
+    for name in (
+        "loct",
+        "loctree",
+        "loctree-mcp",
+        "loctree-lsp",
+        "aicx",
+        "aicx-mcp",
+        "prview",
+        "screenscribe",
+    ):
+        assert f'"{name}": ["--version"]' not in assembler, name
+        assert name not in LINUX_EXECUTABLES
 
 
 def test_local_vm_image_consumes_only_the_exact_runtime_pack_carrier() -> None:
@@ -155,22 +152,6 @@ def test_linux_builder_uses_pinned_public_inputs_for_arm64_and_x64() -> None:
     assert "uv python install 3.12.3" not in assembler
     assert "PORTABLE_PYTHON_BIN" in assembler
     assert "python3.12" not in assembler
-
-    foundations = (REPO_ROOT / "scripts/stage-runtime-foundations.sh").read_text(
-        encoding="utf-8"
-    )
-    assert 'rm -rf "$WORK/loctree"' in foundations
-    assert 'rm -rf "$WORK/aicx"' in foundations
-    assert "@loctree/aicx-linux-x64-gnu" in foundations
-    assert "@loctree/loctree-linux-x64-gnu" in foundations
-    # The candidate stager is the newer npm-integrity iteration: published
-    # tarballs verified by sha512 integrity, no cargo at all. It clears the
-    # donor work trees first so a stale checkout cannot survive into the pack.
-    assert "stage_npm_binaries" in foundations
-    assert 'rm -rf "$WORK/loctree"' in foundations
-    assert 'rm -rf "$WORK/aicx"' in foundations
-    assert "cargo build --manifest-path" not in foundations
-    assert "cargo install" not in foundations
 
 
 def test_linux_carrier_provisions_wasi_targets_for_the_assembler_toolchain(

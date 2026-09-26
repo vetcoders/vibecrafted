@@ -128,8 +128,8 @@ fi
 # Any file that appears after this line still fails the closed inventory.
 find "$root" -type f -name '.DS_Store' -delete
 
-# stage-runtime-foundations records source-built bytes before the release
-# builder signs Mach-O files. This pack staging tree is the final byte owner,
+# The release builder records the executable manifest (write-foundations)
+# before it signs Mach-O files. This pack staging tree is the final byte owner,
 # so rebind the manifest only after the last signing mutation and fail closed
 # if anything changes again before provenance captures the payload.
 PYTHONPATH="$root/vibecrafted-core" "$root/bin/python3" \
