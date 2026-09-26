@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import time
+from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -70,6 +72,139 @@ def stamp() -> str:
 def tool_tag(name: str) -> str:
     """Render a cyan ``[HH:MM:SS name]`` tag used to mark tool-call lines in the pane."""
     return f"\x1b[36m[{stamp()} {name}]\x1b[0m "
+
+
+# One tool call stays a single clipped line. Two or more consecutive calls
+# collapse to one summary so a Bash/MCP burst cannot fill the pane with
+# empty timestamps.
+_TOOL_LINE_LIMIT = 60
+_TWO_WORD_HEADS = frozenset({"aicx"})
+_PARTIAL_TOOL_FIELD = re.compile(
+    r'"(?:command|cmd|query|pattern|file_path|path|url)"\s*:\s*"((?:\\.|[^"\\])*)'
+)
+
+
+class _ToolNote:
+    """One tool/MCP/command call held until the burst ends."""
+
+    __slots__ = ("detail", "name", "stamp")
+
+    def __init__(self, stamp: str, name: str, detail: str) -> None:
+        self.stamp = stamp
+        self.name = name
+        self.detail = detail
+
+
+def _clip_visible(text: str, limit: int = _TOOL_LINE_LIMIT) -> str:
+    """Clip ``text`` to ``limit`` visible characters, ignoring ANSI and newlines."""
+    visible = ANSI_PATTERN.sub("", text).replace("\n", " ").strip()
+    if len(visible) <= limit:
+        return visible
+    return visible[: limit - 3].rstrip() + "..."
+
+
+def _unescape_partial(value: str) -> str:
+    try:
+        return json.loads(f'"{value}"')
+    except json.JSONDecodeError:
+        return value.replace("\\n", "\n").replace('\\"', '"')
+
+
+def _command_text(value: Any) -> str:
+    """Pull the operator-visible command or argument out of a tool input."""
+    if isinstance(value, dict):
+        for key in ("command", "cmd", "query", "pattern", "file_path", "path", "url"):
+            text = _stringish(value.get(key))
+            if text:
+                return text
+        arguments = value.get("arguments")
+        if isinstance(arguments, str) and arguments.strip().startswith("{"):
+            try:
+                return _command_text(json.loads(arguments))
+            except json.JSONDecodeError:
+                return arguments
+        nested = value.get("input")
+        if nested is not None and nested is not value:
+            return _command_text(nested)
+        return ""
+    if isinstance(value, str) and value.strip().startswith("{"):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return value
+        if isinstance(parsed, dict):
+            return _command_text(parsed)
+    return _stringish(value)
+
+
+def _detail_from_partial(blob: str) -> str:
+    """Read a command field out of a still-streaming tool-input JSON fragment."""
+    match = _PARTIAL_TOOL_FIELD.search(blob)
+    if match is None:
+        return ""
+    return _unescape_partial(match.group(1)).strip()
+
+
+def _command_head(detail: str) -> str:
+    """First meaningful argv token, keeping ``aicx <sub>`` as one head."""
+    text = detail.strip()
+    if text.startswith("$ "):
+        text = text[2:].strip()
+    if not text:
+        return ""
+    try:
+        tokens = shlex.split(text)
+    except ValueError:
+        tokens = text.split()
+    cleaned: list[str] = []
+    for token in tokens:
+        if not cleaned and "=" in token and not token.startswith("-"):
+            continue
+        cleaned.append(token)
+    if not cleaned:
+        return ""
+    if cleaned[0] in _TWO_WORD_HEADS and len(cleaned) > 1:
+        return f"{cleaned[0]} {cleaned[1]}"
+    return cleaned[0]
+
+
+def render_tool_burst(notes: Sequence[_ToolNote]) -> str:
+    """Render one tool call clipped to 60 visible characters, or one burst summary.
+
+    A burst is ``from [HH:MM:SS] to [HH:MM:SS] 12x Bash: grep 8, loct 2``.
+    The calls stay in the summary; they are not dropped and not printed as
+    a column of bare timestamps.
+    """
+    if not notes:
+        return ""
+    if len(notes) == 1:
+        note = notes[0]
+        body = f"[{note.stamp} {note.name}]"
+        if note.detail:
+            body = f"{body} {note.detail}"
+        return f"\n\x1b[36m{_clip_visible(body)}\x1b[0m\n"
+    by_name: OrderedDict[str, list[_ToolNote]] = OrderedDict()
+    for note in notes:
+        by_name.setdefault(note.name, []).append(note)
+    parts: list[str] = []
+    for name, group in by_name.items():
+        order: list[str] = []
+        counts: dict[str, int] = {}
+        for note in group:
+            head = _command_head(note.detail)
+            if not head:
+                continue
+            if head not in counts:
+                order.append(head)
+                counts[head] = 0
+            counts[head] += 1
+        if order:
+            breakdown = ", ".join(f"{head} {counts[head]}" for head in order)
+            parts.append(f"{len(group)}x {name}: {breakdown}")
+        else:
+            parts.append(f"{len(group)}x {name}")
+    summary = f"from [{notes[0].stamp}] to [{notes[-1].stamp}] " + "; ".join(parts)
+    return f"\n\x1b[36m{summary}\x1b[0m\n"
 
 
 def _stringish(value: Any) -> str:
@@ -235,6 +370,37 @@ class AgentStreamParser:
         # Final assistant answer of a stream that reports one (agy
         # `result.response`; kimi's last assistant `content`).
         self.final_response: str = ""
+        self._tool_burst: list[_ToolNote] = []
+        self._tool_partial = ""
+
+    def _note_tool(self, name: str, detail: str = "") -> None:
+        """Hold one tool, MCP, or command call until the burst ends."""
+        self._tool_burst.append(
+            _ToolNote(stamp(), (name or "?").strip() or "?", detail.strip())
+        )
+        self._tool_partial = ""
+
+    def _absorb_tool_input(self, fragment: str) -> None:
+        """Attach a streaming tool-input fragment to the open call."""
+        if not fragment or not self._tool_burst:
+            return
+        self._tool_partial += fragment
+        detail = _detail_from_partial(self._tool_partial)
+        if detail:
+            self._tool_burst[-1].detail = detail
+
+    def flush_tool_burst(self) -> str:
+        """Render and clear the held tool burst. Empty when nothing is held."""
+        notes = self._tool_burst
+        self._tool_burst = []
+        self._tool_partial = ""
+        return render_tool_burst(notes)
+
+    def _emit(self, text: str) -> str:
+        """Flush a held tool burst, then the agent's reasoning or result text."""
+        if not text:
+            return ""
+        return self.flush_tool_burst() + text
 
     def feed_line(self, chunk: bytes) -> str:
         """Decode one line of agent output and render it to human-readable text.
@@ -438,7 +604,7 @@ class AgentStreamParser:
             return ""
         self._rendered_session_ids.add(session_id)
         model_suffix = f" model: {self.model_id}" if self.model_id else ""
-        return (
+        return self._emit(
             f"\x1b[33m[{stamp()}] session: {session_id}{model_suffix}\x1b[0m{suffix}\n"
         )
 
@@ -452,7 +618,7 @@ class AgentStreamParser:
             if self.agent == "cursor":
                 thinking = self._format_cursor_thinking(event)
                 if thinking is not None:
-                    return thinking
+                    return self._emit(thinking) if thinking else ""
             return self._format_claude_event(event)
         if self.agent == "codex":
             return self._format_codex_event(event)
@@ -499,11 +665,18 @@ class AgentStreamParser:
                     if not isinstance(item, dict):
                         continue
                     if item.get("type") == "text":
-                        out.append("\n" + str(item.get("text") or "") + "\n")
+                        text = str(item.get("text") or "")
+                        if text:
+                            out.append(self._emit("\n" + text + "\n"))
                     elif item.get("type") == "thinking":
-                        out.append(f"\n\x1b[2m{item.get('thinking') or ''}\x1b[0m\n")
+                        thinking = str(item.get("thinking") or "").strip()
+                        if thinking:
+                            out.append(self._emit(f"\n\x1b[2m{thinking}\x1b[0m\n"))
                     elif item.get("type") == "tool_use":
-                        out.append(tool_tag(str(item.get("name") or "?")))
+                        self._note_tool(
+                            str(item.get("name") or "?"),
+                            _command_text(item.get("input")),
+                        )
             return "".join(out)
 
         if event_type == "stream_event":
@@ -515,13 +688,21 @@ class AgentStreamParser:
                 if not isinstance(delta, dict):
                     return ""
                 if delta.get("type") == "text_delta":
-                    return str(delta.get("text") or "")
+                    return self._emit(str(delta.get("text") or ""))
                 if delta.get("type") == "thinking_delta":
-                    return f"\x1b[2m{delta.get('thinking') or ''}\x1b[0m"
+                    thinking = str(delta.get("thinking") or "")
+                    return self._emit(f"\x1b[2m{thinking}\x1b[0m") if thinking else ""
+                if delta.get("type") == "input_json_delta":
+                    self._absorb_tool_input(str(delta.get("partial_json") or ""))
+                    return ""
             if stream.get("type") == "content_block_start":
                 block = stream.get("content_block") or {}
                 if isinstance(block, dict) and block.get("type") == "tool_use":
-                    return "\n" + tool_tag(str(block.get("name") or "?"))
+                    self._note_tool(
+                        str(block.get("name") or "?"),
+                        _command_text(block.get("input")),
+                    )
+                    return ""
             return ""
 
         if event_type == "result":
@@ -529,7 +710,9 @@ class AgentStreamParser:
             if isinstance(usage, dict):
                 self._record_usage(usage)
             self._record_cost(event)
-            return f"\n\x1b[32m[{stamp()}] {event.get('result') or 'done'}\x1b[0m\n"
+            return self._emit(
+                f"\n\x1b[32m[{stamp()}] {event.get('result') or 'done'}\x1b[0m\n"
+            )
 
         return ""
 
@@ -547,15 +730,19 @@ class AgentStreamParser:
                 return ""
             item_type = item.get("type")
             if item_type == "command_execution":
-                return "\n" + tool_tag(f"$ {item.get('command', 'cmd')}") + "\n"
+                self._note_tool("Bash", str(item.get("command") or ""))
+                return ""
             if item_type == "mcp_tool_call":
-                return tool_tag(
-                    f"{item.get('server', '')}:{item.get('tool') or item.get('name') or '?'}"
+                self._note_tool(
+                    f"{item.get('server', '')}:{item.get('tool') or item.get('name') or '?'}",
+                    _command_text(item.get("arguments") or item.get("input")),
                 )
+                return ""
             if item_type == "web_search":
-                return tool_tag("search")
+                self._note_tool("search", _command_text(item.get("query")))
+                return ""
             if item_type == "plan_update":
-                return f"\x1b[35m[{stamp()} plan]\x1b[0m "
+                return self._emit(f"\x1b[35m[{stamp()} plan]\x1b[0m ")
             return ""
 
         if event_type == "item.completed":
@@ -564,20 +751,24 @@ class AgentStreamParser:
                 return ""
             item_type = item.get("type")
             if item_type == "agent_message":
-                return "\n" + str(item.get("text") or "") + "\n"
+                text = str(item.get("text") or "")
+                return self._emit("\n" + text + "\n") if text else ""
             if item_type == "reasoning":
-                return f"\x1b[2m{item.get('text', '')}\x1b[0m\n"
+                text = str(item.get("text") or "")
+                return self._emit(f"\x1b[2m{text}\x1b[0m\n") if text else ""
             if item_type == "command_execution":
                 output = str(item.get("output") or "")
-                return _truncate_block(output) if output else ""
+                return self._emit(_truncate_block(output)) if output else ""
             if item_type == "mcp_tool_call":
                 result = item.get("result") or {}
                 content = result.get("content") if isinstance(result, dict) else None
                 first = content[0] if isinstance(content, list) and content else {}
                 output = str(first.get("text") or "") if isinstance(first, dict) else ""
-                return _truncate_block(output) if output else ""
+                return self._emit(_truncate_block(output)) if output else ""
             if item_type == "file_changes":
-                return f"\x1b[32m[{stamp()} write: {item.get('path', '?')}]\x1b[0m\n"
+                return self._emit(
+                    f"\x1b[32m[{stamp()} write: {item.get('path', '?')}]\x1b[0m\n"
+                )
             return ""
 
         if event_type in {"turn.completed", "turn_completed"}:
@@ -586,16 +777,20 @@ class AgentStreamParser:
                 self._record_usage(usage)
                 cached = usage.get("cached_input_tokens")
                 cached_fragment = f" ({cached} cached)" if cached is not None else ""
-                return (
+                return self._emit(
                     f"\n\x1b[2m[{stamp()}] tokens: {usage.get('input_tokens', 0)} in"
                     f"{cached_fragment} / {usage.get('output_tokens', 0)} out\x1b[0m\n"
                 )
             return ""
 
         if event_type in {"turn.failed", "turn_failed"}:
-            return f"\n\x1b[31m[{stamp()} error] {_stringish(event.get('error') or event.get('message') or 'turn failed')}\x1b[0m\n"
+            return self._emit(
+                f"\n\x1b[31m[{stamp()} error] {_stringish(event.get('error') or event.get('message') or 'turn failed')}\x1b[0m\n"
+            )
         if event_type in {"turn.aborted", "turn_aborted"}:
-            return f"\n\x1b[31m[{stamp()} abort] {_stringish(event.get('message') or event.get('reason') or event.get('error') or 'turn aborted')}\x1b[0m\n"
+            return self._emit(
+                f"\n\x1b[31m[{stamp()} abort] {_stringish(event.get('message') or event.get('reason') or event.get('error') or 'turn aborted')}\x1b[0m\n"
+            )
         return ""
 
     def _format_gemini_event(self, event: dict[str, Any]) -> str:
@@ -610,33 +805,46 @@ class AgentStreamParser:
             for thought in event.get("thoughts") or []:
                 if isinstance(thought, dict):
                     out.append(
-                        f"\x1b[2m[{stamp()} thinking] {thought.get('subject') or '?'}: {thought.get('description') or ''}\x1b[0m\n"
+                        self._emit(
+                            f"\x1b[2m[{stamp()} thinking] {thought.get('subject') or '?'}: {thought.get('description') or ''}\x1b[0m\n"
+                        )
                     )
             content = str(event.get("content") or "")
             if content:
-                out.append(content)
+                out.append(self._emit(content))
             for call in event.get("toolCalls") or []:
                 if isinstance(call, dict):
-                    out.append("\n" + tool_tag(str(call.get("name") or "?")))
+                    self._note_tool(
+                        str(call.get("name") or "?"),
+                        _command_text(
+                            call.get("args")
+                            or call.get("arguments")
+                            or call.get("input")
+                        ),
+                    )
             return "".join(out)
         if event_type == "message" and event.get("role") == "assistant":
-            return str(event.get("content") or "")
+            return self._emit(str(event.get("content") or ""))
         if event_type == "tool_use":
-            return "\n" + tool_tag(
-                str(event.get("tool_name") or event.get("name") or "?")
+            self._note_tool(
+                str(event.get("tool_name") or event.get("name") or "?"),
+                _command_text(event.get("input") or event.get("arguments")),
             )
+            return ""
         if event_type == "tool_result":
             output = str(event.get("output") or "")
-            return _truncate_block(output) if output else ""
+            return self._emit(_truncate_block(output)) if output else ""
         if event_type == "error":
-            return f"\x1b[31m[{stamp()} error] {event.get('message') or event.get('error') or 'unknown'}\x1b[0m\n"
+            return self._emit(
+                f"\x1b[31m[{stamp()} error] {event.get('message') or event.get('error') or 'unknown'}\x1b[0m\n"
+            )
         if event_type == "result":
             stats = event.get("stats") or {}
             status_line = (
                 f"\n\x1b[32m[{stamp()}] {event.get('status') or 'done'}\x1b[0m\n"
             )
             if not isinstance(stats, dict):
-                return status_line
+                return self._emit(status_line)
             self._record_usage(stats)
             input_tokens = _as_int(stats.get("input_tokens"))
             output_tokens = _as_int(stats.get("output_tokens"))
@@ -652,8 +860,8 @@ class AgentStreamParser:
                     f"\x1b[2m[{stamp()}] tokens: {input_tokens} in"
                     f"{cached_fragment} / {output_tokens} out\x1b[0m\n"
                 )
-                return tokens_line + status_line
-            return status_line
+                return self._emit(tokens_line + status_line)
+            return self._emit(status_line)
         return ""
 
     def _format_junie_event(self, event: dict[str, Any]) -> str:
@@ -678,8 +886,8 @@ class AgentStreamParser:
             return ""
         name = _stringish(event.get("name"))
         if name and event.get("type") == "step":
-            return f"{name}: {text}\n"
-        return text + "\n"
+            return self._emit(f"{name}: {text}\n")
+        return self._emit(text + "\n")
 
     def _format_agy_event(self, event: dict[str, Any]) -> str:
         """Render one agy (Antigravity) stream-json event.
@@ -707,16 +915,16 @@ class AgentStreamParser:
             if step_type in {"user_input", ""}:
                 return ""
             if step_type == "agent_response":
-                return text
+                return self._emit(text) if text else ""
             if step_type in {"thinking", "thought", "planning"}:
-                return f"\x1b[2m{text}\x1b[0m" if text else ""
-            out = ""
+                return self._emit(f"\x1b[2m{text}\x1b[0m") if text else ""
             if str(step.get("state") or "") == "ACTIVE" and not text:
                 name = step.get("tool_name") or step.get("name") or step_type
-                out = "\n" + tool_tag(_stringish(name) or step_type)
+                self._note_tool(_stringish(name) or step_type, _command_text(step))
+                return ""
             if text:
-                out += _truncate_block(text)
-            return out
+                return self._emit(_truncate_block(text))
+            return ""
         if kind == "result":
             result = event.get("result") or {}
             if not isinstance(result, dict):
@@ -742,7 +950,7 @@ class AgentStreamParser:
             if error and error != "None":
                 out += f"\x1b[31m[{stamp()} error] {error}\x1b[0m\n"
             color = "32" if status.upper() == "SUCCESS" else "31"
-            return out + f"\x1b[{color}m[{stamp()}] {status}\x1b[0m\n"
+            return self._emit(out + f"\x1b[{color}m[{stamp()}] {status}\x1b[0m\n")
         if kind == "error":
             message = event.get("error") or event.get("message")
             return f"\n\x1b[31m[{stamp()} error] {_stringish(message) or 'unknown'}\x1b[0m\n"
@@ -776,15 +984,23 @@ class AgentStreamParser:
                         if isinstance(function, dict)
                         else call.get("name")
                     )
-                    out.append("\n" + tool_tag(_stringish(name) or "?"))
+                    arguments = (
+                        function.get("arguments")
+                        if isinstance(function, dict)
+                        else call.get("arguments")
+                    )
+                    self._note_tool(
+                        _stringish(name) or "?",
+                        _command_text(arguments),
+                    )
             content = str(event.get("content") or "")
             if content:
-                out.append("\n" + content + "\n")
+                out.append(self._emit("\n" + content + "\n"))
                 self.final_response = content
             return "".join(out)
         if role == "tool":
             output = _stringish(event.get("content"))
-            return _truncate_block(output) if output else ""
+            return self._emit(_truncate_block(output)) if output else ""
         if role == "meta":
             meta_type = str(event.get("type") or "")
             if meta_type == "system.version":
@@ -829,19 +1045,28 @@ class AgentStreamParser:
             return ""
         if event_type == "thought":
             text = _stringish(event.get("data"))
-            return f"\x1b[2m{text}\x1b[0m" if text else ""
+            return self._emit(f"\x1b[2m{text}\x1b[0m") if text else ""
         if event_type == "text":
-            return _stringish(event.get("data"))
+            return self._emit(_stringish(event.get("data")))
         if event_type in {"tool", "tool_use", "tool_call"}:
             name = event.get("name") or event.get("tool") or event.get("toolName")
-            return "\n" + tool_tag(_stringish(name) or "?")
+            self._note_tool(
+                _stringish(name) or "?",
+                _command_text(
+                    event.get("input") or event.get("arguments") or event.get("data")
+                ),
+            )
+            return ""
         if event_type == "diff":
             path = _stringish(event.get("path"))
-            return "\n" + tool_tag("diff") + (f" {path}\n" if path else "\n")
+            self._note_tool("diff", path)
+            return ""
         if event_type == "error":
             message = event.get("message") or event.get("error") or event.get("data")
             text = _stringish(message)
-            return f"\n\x1b[31m[{stamp()} error] {text or 'unknown'}\x1b[0m\n"
+            return self._emit(
+                f"\n\x1b[31m[{stamp()} error] {text or 'unknown'}\x1b[0m\n"
+            )
 
         message = (
             event.get("message")
@@ -852,7 +1077,7 @@ class AgentStreamParser:
         text = _stringish(message)
         if not text or text == "None":
             return ""
-        return text + "\n"
+        return self._emit(text + "\n")
 
 
 def filter_stream(
@@ -897,6 +1122,10 @@ def filter_stream(
             if display:
                 out_stream.write(display.encode("utf-8"))
                 out_stream.flush()
+        tail = parser.flush_tool_burst()
+        if tail:
+            out_stream.write(tail.encode("utf-8"))
+            out_stream.flush()
     finally:
         if raw_handle is not None:
             raw_handle.close()

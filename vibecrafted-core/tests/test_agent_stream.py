@@ -318,10 +318,10 @@ def test_agent_stream_parser_renders_agy_stream_json_events(tmp_path) -> None:
     tool = parser.feed_line(
         b'{"event":"step_update","step_update":{"conversation_id":"conv-1","step_index":2,"state":"ACTIVE","step_type":"run_command"}}\n'
     )
-    assert "run_command" in tool
     result = parser.feed_line(
         b'{"event":"result","result":{"conversation_id":"conv-1","status":"SUCCESS","response":"OK\\n","duration_seconds":1.5,"num_turns":1,"usage":{"input_tokens":31345,"output_tokens":20,"thinking_tokens":19,"cache_read_tokens":128,"total_tokens":31365}}}\n'
     )
+    assert "run_command" in tool + result
     assert "tokens: 31345 in (128 cached) / 20 out" in result
     assert "SUCCESS" in result
     assert parser.tokens_input == 31345
@@ -443,3 +443,101 @@ def test_filter_stream_writes_kimi_last_message(tmp_path) -> None:
         last_message_file=missing,
     )
     assert not missing.exists()
+
+
+def test_tool_burst_collapses_instead_of_empty_timestamps(monkeypatch) -> None:
+    """A Bash burst is one summary, never a column of empty timestamps."""
+    import json
+    import re
+    from io import BytesIO
+
+    from vibecrafted_core.agent_stream import ANSI_PATTERN, filter_stream
+
+    ticks = iter(f"05:33:{index:02d}" for index in range(1, 80))
+    monkeypatch.setattr("vibecrafted_core.agent_stream.stamp", lambda: next(ticks))
+
+    def render(payloads: list[str]) -> str:
+        out = BytesIO()
+        assert (
+            filter_stream(
+                "claude", stdin=BytesIO("".join(payloads).encode()), stdout=out
+            )
+            == 0
+        )
+        return ANSI_PATTERN.sub("", out.getvalue().decode())
+
+    empty = [
+        '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{}}]}}\n'
+        for _ in range(12)
+    ]
+    empty.append(
+        '{"type":"assistant","message":{"content":[{"type":"text","text":"reasoning"}]}}\n'
+    )
+    blank = render(empty)
+    bare = [
+        line
+        for line in blank.splitlines()
+        if re.fullmatch(r"\[\d\d:\d\d:\d\d Bash\]\s*", line)
+    ]
+    assert bare == []
+    assert sum(1 for line in blank.splitlines() if line.strip()) < 12
+    assert "12x Bash" in blank
+    assert "reasoning" in blank
+
+    commands = ["grep -n foo"] * 8 + ["loct find render"] * 2 + ["aicx sed -n 1p"] * 2
+    counted = [
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Bash",
+                            "input": {"command": command},
+                        }
+                    ]
+                },
+            }
+        )
+        + "\n"
+        for command in commands
+    ]
+    counted.append(
+        '{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}\n'
+    )
+    summary_text = render(counted)
+    summaries = [
+        line for line in summary_text.splitlines() if line.startswith("from [")
+    ]
+    assert len(summaries) == 1
+    summary = summaries[0]
+    assert "12x Bash: grep 8, loct 2, aicx sed 2" in summary
+    assert summary_text.count("Bash") == 1
+
+    long_command = ("grep " + ("needle " * 40)).strip()
+    single = render(
+        [
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "name": "Bash",
+                                "input": {"command": long_command},
+                            }
+                        ]
+                    },
+                }
+            )
+            + "\n",
+            '{"type":"assistant","message":{"content":[{"type":"text","text":"after"}]}}\n',
+        ]
+    )
+    tool_lines = [line for line in single.splitlines() if "Bash" in line]
+    assert len(tool_lines) == 1
+    assert len(tool_lines[0]) <= 60
+    assert tool_lines[0].startswith("[")
+    assert "grep" in tool_lines[0]

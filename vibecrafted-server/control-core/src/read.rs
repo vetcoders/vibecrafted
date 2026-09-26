@@ -896,6 +896,17 @@ impl ControlPlane {
         quarantine_test_runs(&mut runs);
         let settlement_counts = SettlementBoard::from_snapshots(&runs);
         self.append_discoverable_lifecycle_runs(&mut runs);
+        // Same read-follows-write gap compute_view closes: a just-launched
+        // runtime dir is live before Python writes runs/<id>.json. Fresh only;
+        // the directory itself is not liveness evidence.
+        let now = chrono::Utc::now();
+        for run in self.iter_runtime_run_status() {
+            if !runs.iter().any(|existing| existing.run_id == run.run_id)
+                && self.runtime_run_is_fresh(&run.run_id, now)
+            {
+                runs.push(run);
+            }
+        }
         sort_recent_first(&mut runs);
         self.project_view(runs, settlement_counts)
     }

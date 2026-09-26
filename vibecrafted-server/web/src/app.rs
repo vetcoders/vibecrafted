@@ -781,7 +781,6 @@ fn operator_active_runs(runs: Vec<DashboardRun>) -> Vec<DashboardRun> {
         .filter(|run| {
             run.health == "active" && !is_terminal_state(&run.state) && !is_quarantined_run(run)
         })
-        .take(8)
         .collect()
 }
 
@@ -3133,6 +3132,13 @@ mod tests {
 
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].run_id, "real-worker");
+
+        let fleet = operator_active_runs(
+            (0..9)
+                .map(|index| run(&format!("live-{index}"), "launching", "active", "implement"))
+                .collect(),
+        );
+        assert_eq!(fleet.len(), 9);
     }
 
     #[test]

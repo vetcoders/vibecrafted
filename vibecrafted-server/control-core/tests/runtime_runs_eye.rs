@@ -116,6 +116,26 @@ fn compute_view_surfaces_a_launching_run_not_yet_synced() {
 }
 
 #[test]
+fn read_state_view_surfaces_a_fresh_launching_runtime_run() {
+    let home = temp_home("runtime-runs-snapshot-view");
+    let run_id = "marb-view-launching-snapshot";
+    let run_dir = home.join("control_plane").join("runtime_runs").join(run_id);
+    fs::create_dir_all(&run_dir).expect("run dir");
+    fs::write(run_dir.join("transcript.log"), "fresh\n").expect("transcript");
+
+    let plane = ControlPlane::new(&home);
+    let view = plane.read_state_view();
+
+    assert!(
+        view.active_runs.iter().any(|run| run.run_id == run_id
+            && run.state == "launching"
+            && run.health == "active"),
+        "snapshot view keeps a fresh launching runtime run in Current: {:?}",
+        view.active_runs.iter().map(|run| &run.run_id).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn compute_view_reads_settlement_board_only_from_retained_snapshots() {
     let home = temp_home("settlement-board");
     let control_plane = home.join("control_plane");

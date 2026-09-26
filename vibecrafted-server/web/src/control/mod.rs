@@ -13,12 +13,13 @@
 //!   control plane.
 //! * `GET /api/control/state` — cached [`StateView`](control_core::StateView)
 //!   (canonical settlement board, active/recent runs, warnings, event tail)
-//!   read from the Python-owned snapshots. The raw self-sufficient merge stays
-//!   available to TUI/diagnostic consumers, but is too expensive for an HTTP
-//!   request over a long-lived control plane. Two contracts hold together on
-//!   this route: (1) the projection reads only the Python-owned snapshots
-//!   (`read_state_view`), so raw locks/meta are never rescanned into
-//!   `recent_runs`; (2) the snapshot read carries the same lifecycle liveness
+//!   read from the Python-owned snapshots plus fresh `runtime_runs/` that
+//!   have not been synced yet. The raw lock/meta merge stays available to
+//!   TUI/diagnostic consumers, but is too expensive for an HTTP request over
+//!   a long-lived control plane. Two contracts hold together on this route:
+//!   (1) the projection reads Python-owned snapshots and the fresh
+//!   runtime-run fallback (`read_state_view`), so raw locks/meta are never
+//!   rescanned into `recent_runs`; (2) the snapshot read carries the same lifecycle liveness
 //!   overlay as `compute_view` — one shared policy,
 //!   `ControlPlane::project_lifecycle_read`, not a second copy — so a
 //!   lifecycle container with no live owner and no movement past
