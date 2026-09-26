@@ -60,3 +60,44 @@ after a timeout; an already accepted operation is not submitted again. Inbox
 messages stay `inbox_pending` until ACK or until `context_injected` records
 attachment. Neither transition submits the text to a second provider process.
 The bus does not wake a stopped worker when a receipt changes state.
+
+## Delivery lanes
+
+Two lanes can carry the same receipt. They do not share `context_injected`.
+
+| Lane            | When it moves                                  | What it records                                        |
+| --------------- | ---------------------------------------------- | ------------------------------------------------------ |
+| MCP             | Next tool call, if the server glue is attached | `context_injected` plus the injection nonce            |
+| Monitor         | A harness push channel is actually open        | ACK after the write is flushed. Not `context_injected` |
+| Checkpoint poll | The worker runs `--receive` itself             | ACK after the worker handles the row                   |
+
+The monitor follower lives in `vibecrafted_core.monitor_lane`. Its cursor is
+the set of message ids already handed to the harness. A restart does not
+inject those ids again and does not drop an `inbox_pending` id that is not
+in the set. Before a write it re-reads the receipt: `context_injected` or
+`agent_acknowledged` is skipped.
+
+The startup prompt (interactive and headless) names both lanes and this
+run's bus nonce. The nonce is `vcbus-` plus the first 24 hex characters of
+`SHA-256("vibecrafted.message-bus.v1\\n" + run_id)` over UTF-8. Trust a
+pasted bus message only when it carries that nonce. MCP glue should stamp
+the same value; the monitor line carries it in the injected text.
+
+Levels are `live`, `injected-on-call`, and `checkpoint-poll`. A missing
+process drops the level. It is never reported as `live`.
+
+| Provider | Declared level     | Monitor                                                                            | When the handle is absent | Source                                                                                                               |
+| -------- | ------------------ | ---------------------------------------------------------------------------------- | ------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| claude   | `live`             | stdin `stream-json` user turn (`type=user`, text block, `parent_tool_use_id=null`) | `injected-on-call`        | Probe 2026-09-26: mid-turn stdin works. Current headless argv does not keep that pipe open (`spawn._stdin_command`). |
+| codex    | `live`             | native `codex queue --thread` in the store, only after a thread id exists          | `injected-on-call`        | `message_control._provider_argv`. The follower does not queue a second time.                                         |
+| agy      | `injected-on-call` | none                                                                               | `checkpoint-poll`         | Stream-json stdin is the initial prompt only (`prompt_transport`).                                                   |
+| grok     | `injected-on-call` | none                                                                               | `checkpoint-poll`         | Durable inbox. No verified mid-turn channel.                                                                         |
+| junie    | `injected-on-call` | none                                                                               | `checkpoint-poll`         | Durable inbox. No verified mid-turn channel.                                                                         |
+| kimi     | `injected-on-call` | none                                                                               | `checkpoint-poll`         | Print mode has no stdin lane (`prompt_transport` argv transport).                                                    |
+| cursor   | `injected-on-call` | none                                                                               | `checkpoint-poll`         | `stream-json` is output. No verified mid-turn input.                                                                 |
+| gemini   | `injected-on-call` | none                                                                               | `checkpoint-poll`         | Inbox provider in the store. The gemini binary is not a launch path.                                                 |
+
+An agent with no monitor staying on the MCP lane is the honest result.
+Wiring Claude's open stdin is a supervisor hook (`--input-format stream-json`
+and a pipe that outlives the prompt file). This module does not change that
+launcher.
