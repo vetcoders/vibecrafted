@@ -15,6 +15,7 @@ async fn main() {
     use leptos::logging::log;
     use leptos_axum::{LeptosRoutes, generate_route_list};
     use vibecrafted_server_web::app::{App, settings_routes, shell, skills_routes};
+    use vibecrafted_server_web::bus::api::bus_routes;
     use vibecrafted_server_web::control::api::control_routes;
     use vibecrafted_server_web::mcp::api::mcp_routes;
     use vibecrafted_server_web::scaffold::api::scaffold_routes;
@@ -228,6 +229,7 @@ Examples:
         .merge(settings_routes())
         // Streamable HTTP MCP. Protocol and bearer live in `mcp`; this is the only mount.
         .merge(mcp_routes())
+        .merge(bus_routes())
         .fallback(leptos_axum::file_and_error_handler(shell))
         .with_state(leptos_options);
 

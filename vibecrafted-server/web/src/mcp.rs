@@ -58,13 +58,20 @@ pub mod api {
     /// operator config file. An empty result fail-closes the endpoint (every
     /// call is 401) until a token is configured.
     pub fn mcp_routes() -> Router<leptos::config::LeptosOptions> {
-        let env_token = std::env::var(MCP_BEARER_ENV).ok();
-        let token = load_mcp_bearer(env_token.as_deref(), operator_config_path().as_deref());
         mcp_routes_with(
             control_core::vibecrafted_home(),
-            token,
+            configured_bearer(),
             DEFAULT_SSE_KEEPALIVE,
         )
+    }
+
+    /// Bearer captured by [`mcp_routes`] and by `POST /api/bus/messages`.
+    ///
+    /// `VC_SERVER_MCP_BEARER` wins over `[mcp].bearer`. Empty means fail closed.
+    #[must_use]
+    pub fn configured_bearer() -> String {
+        let env_token = std::env::var(MCP_BEARER_ENV).ok();
+        load_mcp_bearer(env_token.as_deref(), operator_config_path().as_deref())
     }
 
     /// Same router as [`mcp_routes`], with an explicit home, bearer, and SSE keepalive.
@@ -312,6 +319,25 @@ pub mod api {
         }
     }
 
+    /// Bearer and localhost `Origin` gate for bus HTTP. No MCP protocol header.
+    #[must_use]
+    pub fn reject_bus_request(expected: &str, headers: &HeaderMap) -> Option<Response> {
+        if !origin_allowed(headers) {
+            return Some(json_response(
+                StatusCode::FORBIDDEN,
+                &json!({"error": "origin rejected"}),
+            ));
+        }
+        let presented = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(presented_bearer);
+        match presented {
+            Some(token) if bearer_matches(expected, token) => None,
+            _ => Some(unauthorized()),
+        }
+    }
+
     fn presented_bearer(value: &str) -> Option<&str> {
         let (scheme, rest) = value.trim().split_once(' ')?;
         if !scheme.eq_ignore_ascii_case("bearer") {
@@ -511,13 +537,19 @@ pub mod api {
                 "name": "vc-server",
                 "version": env!("VC_SERVER_VERSION"),
             },
-            "instructions": "Pilot tools: vc_ping, vc_run_status.",
+            "instructions": "Tools: vc_ping, vc_run_status, vc_message_send, vc_message_reply, vc_message_status.",
         })
     }
 
     fn tools_list() -> Value {
         json!({
-            "tools": [ping_tool(), run_status_tool()],
+            "tools": [
+                ping_tool(),
+                run_status_tool(),
+                crate::bus::api::message_send_tool(),
+                crate::bus::api::message_reply_tool(),
+                crate::bus::api::message_status_tool(),
+            ],
         })
     }
 
@@ -564,6 +596,11 @@ pub mod api {
         match name {
             TOOL_PING => ping_call(&arguments),
             TOOL_RUN_STATUS => run_status_call(plane, &arguments),
+            crate::bus::api::TOOL_MESSAGE_SEND
+            | crate::bus::api::TOOL_MESSAGE_REPLY
+            | crate::bus::api::TOOL_MESSAGE_STATUS => {
+                crate::bus::api::call_message_tool(name, &arguments)
+            }
             _ => Err("unknown tool"),
         }
     }

@@ -8,6 +8,7 @@ pub mod chrome;
 fn skills_one_list_then_one_editor() {
     app::skills_one_list_then_one_editor();
 }
+pub mod bus;
 pub mod control;
 pub mod mcp;
 pub mod run_detail;
