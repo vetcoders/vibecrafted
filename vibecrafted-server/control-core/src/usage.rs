@@ -7,7 +7,9 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -120,9 +122,12 @@ pub struct UsageDimension {
 impl ControlPlane {
     /// Aggregate structured telemetry recorded by the runtime, newest first.
     ///
-    /// Legacy runs without a structured `usage` or `cost` block remain
-    /// explicitly unknown. Transcript parsing stays with the Python telemetry
-    /// owner instead of being duplicated here with subtly different rules.
+    /// A run whose `meta.json` has no structured `usage` block stays unknown
+    /// until the same Python transcript recovery the CLI uses
+    /// (`run_telemetry_from_meta`) can read `transcript.log`. This projection
+    /// does not invent a second parser and does not turn a missing total into
+    /// zero. A recovered number is a measurement; a still-missing one stays
+    /// unknown.
     pub fn usage_report(&self, now: DateTime<Utc>, filter: UsageFilter) -> UsageReport {
         let runtime_runs = self.control_plane_home().join("runtime_runs");
         let cutoff = filter.since.map(|duration| now - duration);
@@ -145,6 +150,7 @@ impl ControlPlane {
                 .cmp(&left.recorded_at)
                 .then_with(|| left.run_id.cmp(&right.run_id))
         });
+        recover_lazy_transcripts(&runtime_runs, &mut runs);
 
         let totals = totals(&runs);
         let dimensions = UsageDimensions {
@@ -403,4 +409,164 @@ fn unknown(reason: &str) -> Value {
 
 fn round_six(value: f64) -> f64 {
     (value * 1_000_000.0).round() / 1_000_000.0
+}
+
+const LAZY_TELEMETRY_SCRIPT: &str = r#"
+import json, sys
+from pathlib import Path
+from vibecrafted_core.telemetry import run_telemetry_from_meta
+
+items = json.load(sys.stdin)
+out = []
+for item in items:
+    run_id = str(item.get("run_id") or "")
+    try:
+        meta = json.loads(Path(item["meta"]).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        continue
+    if not isinstance(meta, dict):
+        continue
+    transcript = Path(item["transcript"])
+    row = run_telemetry_from_meta(
+        meta, transcript=transcript if transcript.is_file() else None
+    )
+    out.append({"run_id": run_id, "telemetry": row})
+json.dump(out, sys.stdout)
+"#;
+
+/// Fill legacy rows from `transcript.log` using the CLI's Python recovery.
+///
+/// Rows that already carry a structured `usage` block are left alone. If the
+/// interpreter or the import is unavailable, the rows stay unknown.
+fn recover_lazy_transcripts(runtime_runs: &Path, runs: &mut [UsageRun]) {
+    let mut jobs = Vec::new();
+    for run in runs.iter() {
+        if run.telemetry_source != "meta(legacy-uninstrumented)" {
+            continue;
+        }
+        if run.tokens.tokens_total.as_u64().is_some() {
+            continue;
+        }
+        let meta = runtime_runs.join(&run.run_id).join("meta.json");
+        let transcript = runtime_runs.join(&run.run_id).join("transcript.log");
+        if !regular_file(&meta) || !regular_file(&transcript) {
+            continue;
+        }
+        jobs.push(json!({
+            "run_id": run.run_id,
+            "meta": meta,
+            "transcript": transcript,
+        }));
+    }
+    if jobs.is_empty() {
+        return;
+    }
+    let Some(recovered) = lazy_telemetry(&jobs) else {
+        return;
+    };
+    for run in runs.iter_mut() {
+        let Some(telemetry) = recovered.get(&run.run_id).and_then(Value::as_object) else {
+            continue;
+        };
+        apply_lazy_telemetry(run, telemetry);
+    }
+}
+
+fn apply_lazy_telemetry(run: &mut UsageRun, telemetry: &Map<String, Value>) {
+    if let Some(usage) = telemetry.get("usage").and_then(Value::as_object) {
+        run.tokens = usage_from(Some(usage));
+    }
+    if let Some(cost) = telemetry.get("cost").and_then(Value::as_object) {
+        run.cost = cost_from(Some(cost));
+    }
+    if let Some(source) = telemetry
+        .get("telemetry_source")
+        .and_then(Value::as_str)
+        .filter(|source| !source.is_empty())
+    {
+        run.telemetry_source = source.to_string();
+    }
+    if let Some(model) = telemetry.get("model") {
+        let usable = model
+            .as_str()
+            .is_some_and(|text| !text.is_empty())
+            || model.get("value").is_some();
+        if usable {
+            run.model = model.clone();
+        }
+    }
+}
+
+fn lazy_telemetry(jobs: &[Value]) -> Option<BTreeMap<String, Value>> {
+    let payload = serde_json::to_vec(jobs).ok()?;
+    let mut command = telemetry_python()?;
+    command
+        .arg("-c")
+        .arg(LAZY_TELEMETRY_SCRIPT)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = command.spawn().ok()?;
+    {
+        let mut stdin = child.stdin.take()?;
+        stdin.write_all(&payload).ok()?;
+    }
+    let output = child.wait_with_output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let rows = serde_json::from_slice::<Vec<Value>>(&output.stdout).ok()?;
+    let mut by_id = BTreeMap::new();
+    for row in rows {
+        let Some(run_id) = row.get("run_id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(telemetry) = row.get("telemetry").cloned() else {
+            continue;
+        };
+        by_id.insert(run_id.to_string(), telemetry);
+    }
+    Some(by_id)
+}
+
+fn telemetry_python() -> Option<Command> {
+    let executable = explicit_python("VIBECRAFTED_PYTHON")
+        .or_else(runtime_python)
+        .unwrap_or_else(|| PathBuf::from("python3"));
+    let mut command = Command::new(executable);
+    if let Some(core) = source_core_dir() {
+        // A source build must call the checkout's recovery, not an older
+        // installed package that happens to sit on PYTHONPATH.
+        command.env("PYTHONPATH", core);
+    }
+    Some(command)
+}
+
+fn runtime_python() -> Option<PathBuf> {
+    let root = std::env::var("VIBECRAFTED_RUNTIME_ROOT").ok()?;
+    let path = PathBuf::from(root.trim()).join("bin/python3");
+    path.is_file().then_some(path)
+}
+
+fn explicit_python(name: &str) -> Option<PathBuf> {
+    let value = std::env::var(name).ok()?;
+    let path = PathBuf::from(value.trim());
+    if path.is_absolute() && path.is_file() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+fn source_core_dir() -> Option<PathBuf> {
+    let candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vibecrafted-core");
+    if candidate.join("vibecrafted_core/telemetry.py").is_file() {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+fn regular_file(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file() && !meta.file_type().is_symlink())
 }

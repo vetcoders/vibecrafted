@@ -1036,7 +1036,7 @@ pub fn UsagePage() -> impl IntoView {
                         </table>
                     </div>
                     <p id="usage-empty" class="control-empty" hidden>"No canonical runtime runs match this window and filter."</p>
-                    <p class="usage-footnote"><span id="usage-schema">"vibecrafted.usage-report.v1"</span><span id="usage-generated"></span><span>"Unknowns stay visible. Currencies are never combined."</span></p>
+                    <p class="usage-footnote"><span id="usage-schema">"vibecrafted.usage-report.v1"</span><span id="usage-generated"></span><span>"Unknowns stay visible. Currencies are never combined. This projection is not a bill."</span></p>
                 </section>
                 <aside class="overview-inspector doc-pane" id="overview-inspector" aria-label="Run document">
                     <div class="doc-tabs" role="tablist" aria-label="Document">
@@ -1175,6 +1175,13 @@ fn usage_dashboard_script() -> &'static str {
     const entries = Object.entries(values || {});
     return entries.length ? entries.map(([unit, amount]) => label(amount) + ' ' + unit).join(' · ') : 'none known';
   };
+  const tokensKnownText = (totals) => {
+    const runs = Number(totals && totals.runs) || 0;
+    const unknown = Number(totals && totals.runs_tokens_unknown) || 0;
+    if (!runs) return '—';
+    if (unknown === runs) return 'missing';
+    return number.format(totals.tokens_total_known);
+  };
   const set = (id, value) => { const node = byId(id); if (node) node.textContent = value; };
   const renderDimensions = (id, values) => {
     const target = byId(id);
@@ -1191,7 +1198,7 @@ fn usage_dashboard_script() -> &'static str {
       const name = document.createElement('strong'); name.textContent = item.name;
       const runs = document.createElement('span'); runs.textContent = number.format(item.runs || 0);
       const fail = document.createElement('span'); fail.textContent = number.format(failed); if (failed) fail.className = 'is-signal';
-      const tokens = document.createElement('span'); tokens.textContent = number.format(item.tokens_total_known || 0);
+      const tokens = document.createElement('span'); tokens.textContent = tokensKnownText(item);
       const unk = document.createElement('span'); unk.textContent = number.format(tokenUnknown + costUnknown); if (tokenUnknown || costUnknown) unk.className = 'is-signal';
       const cost = document.createElement('span'); cost.textContent = costsText(item.cost_by_unit);
       row.append(name, runs, fail, tokens, unk, cost); target.append(row);
@@ -1217,7 +1224,7 @@ fn usage_dashboard_script() -> &'static str {
     const totals = report.totals || {};
     set('usage-total-runs', number.format(totals.runs || 0));
     set('usage-total-failed', number.format(totals.runs_failed || 0));
-    set('usage-total-tokens', number.format(totals.tokens_total_known || 0));
+    set('usage-total-tokens', tokensKnownText(totals));
     set('usage-total-token-unknown', number.format(totals.runs_tokens_unknown || 0));
     set('usage-total-cost', costsText(totals.cost_by_unit));
     set('usage-total-cost-unknown', number.format(totals.runs_cost_unknown || 0));
@@ -1297,11 +1304,14 @@ fn usage_dashboard_script() -> &'static str {
     }
     const width = stepMs(grain);
     const buckets = [];
-    for (let at = min; at <= max; at += width) buckets.push({ t: at, value: 0 });
+    for (let at = min; at <= max; at += width) buckets.push({ t: at, value: 0, measured: false });
     const index = new Map(buckets.map((bucket, i) => [bucket.t, i]));
     for (const point of points) {
       const slot = index.get(bucketStart(point.ms, grain));
-      if (slot != null) buckets[slot].value += point.value;
+      if (slot != null) {
+        buckets[slot].value += point.value;
+        buckets[slot].measured = true;
+      }
     }
     return { grain, buckets };
   };
@@ -1311,9 +1321,8 @@ fn usage_dashboard_script() -> &'static str {
     if (title) title.textContent = caption;
     if (!host) return;
     host.replaceChildren();
-    const values = built ? built.buckets.map((bucket) => bucket.value) : [];
-    const sum = values.reduce((total, value) => total + value, 0);
-    if (!built || !values.length || sum === 0) {
+    const measured = built ? built.buckets.filter((bucket) => bucket.measured) : [];
+    if (!built || !measured.length) {
       const note = document.createElement('p');
       note.className = 'usage-chart-empty';
       note.textContent = 'No measured points in this window.';
@@ -1323,16 +1332,25 @@ fn usage_dashboard_script() -> &'static str {
     const w = 640;
     const h = 148;
     const pad = 10;
-    const max = Math.max(...values);
-    const n = values.length;
+    const peak = Math.max(...measured.map((bucket) => bucket.value));
+    const scale = peak > 0 ? peak : 1;
+    const n = built.buckets.length;
     const xAt = (i) => n === 1 ? w / 2 : pad + (i / (n - 1)) * (w - pad * 2);
-    const yAt = (value) => h - pad - (value / max) * (h - pad * 2);
-    const coords = values.map((value, i) => xAt(i).toFixed(1) + ',' + yAt(value).toFixed(1));
+    const yAt = (value) => h - pad - (value / scale) * (h - pad * 2);
+    const coords = [];
+    let firstMeasured = 0;
+    let lastMeasured = 0;
+    built.buckets.forEach((bucket, i) => {
+      if (!bucket.measured) return;
+      if (!coords.length) firstMeasured = i;
+      lastMeasured = i;
+      coords.push(xAt(i).toFixed(1) + ',' + yAt(bucket.value).toFixed(1));
+    });
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
     svg.setAttribute('role', 'img');
     const area = document.createElementNS(svg.namespaceURI, 'polygon');
-    area.setAttribute('points', xAt(0).toFixed(1) + ',' + (h - pad) + ' ' + coords.join(' ') + ' ' + xAt(n - 1).toFixed(1) + ',' + (h - pad));
+    area.setAttribute('points', xAt(firstMeasured).toFixed(1) + ',' + (h - pad) + ' ' + coords.join(' ') + ' ' + xAt(lastMeasured).toFixed(1) + ',' + (h - pad));
     area.setAttribute('fill', color);
     area.setAttribute('fill-opacity', '0.16');
     const line = document.createElementNS(svg.namespaceURI, 'polyline');
@@ -1445,9 +1463,13 @@ fn usage_dashboard_script() -> &'static str {
     const totals = report.totals || {};
     const since = (report.filter && report.filter.since) || '';
     const windowName = since || 'window';
-    set('usage-hero-tokens', number.format(totals.tokens_total_known || 0));
-    const unknownRuns = (totals.runs_tokens_unknown || 0) + (totals.runs_cost_unknown || 0);
-    set('usage-hero-caption', windowName + ' · ' + number.format(unknownRuns) + ' unknown');
+    set('usage-hero-tokens', tokensKnownText(totals));
+    const runs = Number(totals.runs) || 0;
+    const tokenUnknown = Number(totals.runs_tokens_unknown) || 0;
+    let caption = windowName + ' · ' + number.format(tokenUnknown) + ' token totals missing';
+    if (!runs) caption = windowName + ' · no runs';
+    else if (tokenUnknown === runs) caption = number.format(tokenUnknown) + ' runs · token totals not recorded';
+    set('usage-hero-caption', caption);
     paintHeat(rows, since, report.generated_at || '');
     const byUnit = new Map();
     for (const run of rows) {
@@ -3037,6 +3059,10 @@ mod tests {
         assert!(usage.contains("api-equiv"));
         assert!(usage.contains("vibecrafted.usage-report.v1"));
         assert!(usage.contains("No canonical runtime runs match this window and filter."));
+        assert!(usage.contains("token totals not recorded"));
+        assert!(usage.contains("return 'missing'"));
+        assert!(!usage.contains("tokens_total_known || 0"));
+        assert!(usage.contains("This projection is not a bill."));
         assert!(usage.contains("id=\"usage-chart-cost\""));
         assert!(usage.contains("recorded_at"));
         assert!(!usage.contains("innerHTML"));

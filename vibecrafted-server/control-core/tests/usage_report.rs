@@ -189,3 +189,76 @@ fn analytical_adapter_inventory_covers_every_supported_provider() {
         &["agy", "claude", "codex", "cursor", "grok", "junie", "kimi"]
     );
 }
+
+#[test]
+fn usage_report_recovers_transcript_totals_without_treating_missing_as_zero() {
+    let home = fixture_home("transcript-recovery");
+    let now = Utc.with_ymd_and_hms(2026, 9, 21, 12, 0, 0).unwrap();
+    write_meta(
+        &home,
+        "measured-from-transcript",
+        json!({
+            "run_id": "measured-from-transcript",
+            "agent": "codex",
+            "agent_model": "gpt-5.6-terra",
+            "status": "completed",
+            "exit_code": 0,
+            "completed_at": "2026-09-21T11:00:00Z"
+        }),
+    );
+    fs::write(
+        home.join("control_plane/runtime_runs/measured-from-transcript/transcript.log"),
+        "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":40,\"cached_input_tokens\":0,\"output_tokens\":11},\"model\":\"gpt-5.6-terra\"}\n",
+    )
+    .expect("transcript");
+    write_meta(
+        &home,
+        "still-unknown",
+        json!({
+            "run_id": "still-unknown",
+            "agent": "kimi",
+            "status": "completed",
+            "exit_code": 0,
+            "completed_at": "2026-09-21T10:00:00Z",
+            "tokens_total": 0,
+            "cost_usd": 0
+        }),
+    );
+
+    let report = ControlPlane::new(&home).usage_report(
+        now,
+        UsageFilter {
+            since: Some(Duration::days(7)),
+            since_label: "7d".into(),
+            ..UsageFilter::default()
+        },
+    );
+
+    assert_eq!(report.totals.runs, 2);
+    assert_eq!(report.totals.runs_tokens_unknown, 1);
+    assert_eq!(report.totals.tokens_total_known, 51);
+    let measured = report
+        .runs
+        .iter()
+        .find(|run| run.run_id == "measured-from-transcript")
+        .expect("recovered run");
+    assert_eq!(measured.telemetry_source, "transcript(lazy)");
+    assert_eq!(measured.tokens.tokens_total, 51);
+    let usd = measured
+        .cost
+        .amount
+        .as_f64()
+        .expect("transcript-derived cost");
+    assert!(
+        (usd - 0.000265).abs() < 1e-9,
+        "expected the CLI price-table cost, got {usd}"
+    );
+    let unknown = report
+        .runs
+        .iter()
+        .find(|run| run.run_id == "still-unknown")
+        .expect("unmeasured run");
+    assert_eq!(unknown.tokens.tokens_total["value"], "unknown");
+    assert_ne!(unknown.tokens.tokens_total, 0);
+    fs::remove_dir_all(home).ok();
+}
