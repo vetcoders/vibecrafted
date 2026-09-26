@@ -128,6 +128,11 @@ name = "mcp_http"
 path = "tests/mcp_http.rs"
 required-features = ["ssr"]
 
+[[test]]
+name = "mcp_bridge"
+path = "tests/mcp_bridge.rs"
+required-features = ["ssr"]
+
 [package.metadata.leptos]
 output-name = "vibecrafted-server-web"
 site-root = "target/site"

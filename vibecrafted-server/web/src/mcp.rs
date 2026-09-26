@@ -14,8 +14,10 @@
 pub mod api {
     use std::convert::Infallible;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
     use std::time::Duration;
 
+    use crate::mcp_bridge::{BridgeError, StdioBridge, merge_vc_tools};
     use axum::Router;
     use axum::body::{Body, to_bytes};
     use axum::extract::{Extension, Request};
@@ -45,6 +47,8 @@ pub mod api {
         token: String,
         plane: ControlPlane,
         keepalive: Duration,
+        /// `None` keeps the pilot registry only. Production passes the bridge.
+        bridge: Option<Arc<StdioBridge>>,
     }
 
     enum Outcome {
@@ -60,10 +64,11 @@ pub mod api {
     pub fn mcp_routes() -> Router<leptos::config::LeptosOptions> {
         let env_token = std::env::var(MCP_BEARER_ENV).ok();
         let token = load_mcp_bearer(env_token.as_deref(), operator_config_path().as_deref());
-        mcp_routes_with(
+        mcp_routes_with_bridge(
             control_core::vibecrafted_home(),
             token,
             DEFAULT_SSE_KEEPALIVE,
+            Some(StdioBridge::production()),
         )
     }
 
@@ -71,10 +76,25 @@ pub mod api {
     ///
     /// Tests pass these in. They do not publish `VC_SERVER_MCP_BEARER` into
     /// the process, and they do not read the operator's real config file.
+    /// This constructor does not attach the stdio bridge, so the pilot list
+    /// stays exactly `vc_ping` and `vc_run_status`.
     pub fn mcp_routes_with(
         home: impl Into<PathBuf>,
         bearer: impl Into<String>,
         sse_keepalive: Duration,
+    ) -> Router<leptos::config::LeptosOptions> {
+        mcp_routes_with_bridge(home, bearer, sse_keepalive, None)
+    }
+
+    /// [`mcp_routes_with`] plus an optional stdio bridge.
+    ///
+    /// Pilot tools always win. The bridge is consulted for `tools/list` and
+    /// for `vc_*` calls that are not pilots. `None` is the pilot-only router.
+    pub fn mcp_routes_with_bridge(
+        home: impl Into<PathBuf>,
+        bearer: impl Into<String>,
+        sse_keepalive: Duration,
+        bridge: Option<Arc<StdioBridge>>,
     ) -> Router<leptos::config::LeptosOptions> {
         let keepalive = if sse_keepalive.is_zero() {
             DEFAULT_SSE_KEEPALIVE
@@ -85,6 +105,7 @@ pub mod api {
             token: bearer.into(),
             plane: ControlPlane::new(home),
             keepalive,
+            bridge,
         };
         Router::<leptos::config::LeptosOptions>::new()
             .route("/mcp", get(mcp_get).post(mcp_post))
@@ -282,7 +303,7 @@ pub mod api {
             }
         };
         let sse_only = wants_sse_only(&parts.headers);
-        match handle_payload(&attach.plane, &payload) {
+        match handle_payload(&attach, &payload).await {
             Outcome::Accepted => StatusCode::ACCEPTED.into_response(),
             Outcome::Reply(value) if sse_only => one_sse(&value),
             Outcome::Reply(value) => json_response(StatusCode::OK, &value),
@@ -426,16 +447,16 @@ pub mod api {
             .eq_ignore_ascii_case("application/json")
     }
 
-    fn handle_payload(plane: &ControlPlane, payload: &Value) -> Outcome {
+    async fn handle_payload(attach: &McpAttach, payload: &Value) -> Outcome {
         let Some(batch) = payload.as_array() else {
-            return handle_message(plane, payload);
+            return handle_message(attach, payload).await;
         };
         if batch.is_empty() || batch.len() > MAX_BATCH {
             return Outcome::Reply(rpc_err(Value::Null, -32600, "invalid request"));
         }
         let mut replies = Vec::new();
         for message in batch {
-            if let Outcome::Reply(value) = handle_message(plane, message) {
+            if let Outcome::Reply(value) = handle_message(attach, message).await {
                 replies.push(value);
             }
         }
@@ -446,7 +467,7 @@ pub mod api {
         }
     }
 
-    fn handle_message(plane: &ControlPlane, message: &Value) -> Outcome {
+    async fn handle_message(attach: &McpAttach, message: &Value) -> Outcome {
         let Some(object) = message.as_object() else {
             return Outcome::Reply(rpc_err(Value::Null, -32600, "invalid request"));
         };
@@ -476,13 +497,27 @@ pub mod api {
             return Outcome::Reply(rpc_err(id, -32602, "invalid params"));
         }
         match method {
-            "initialize" => Outcome::Reply(rpc_ok(id, initialize_result(&params))),
+            "initialize" => Outcome::Reply(rpc_ok(
+                id,
+                initialize_result(&params, attach.bridge.is_some()),
+            )),
             "ping" => Outcome::Reply(rpc_ok(id, json!({}))),
-            "tools/list" => Outcome::Reply(rpc_ok(id, tools_list())),
-            "tools/call" => match tools_call(plane, &params) {
+            "tools/list" => match tools_list(attach.bridge.as_deref()).await {
                 Ok(result) => Outcome::Reply(rpc_ok(id, result)),
-                Err(message) => Outcome::Reply(rpc_err(id, -32602, message)),
+                Err(error) => {
+                    let message = error.rpc_message();
+                    Outcome::Reply(rpc_err(id, error.rpc_code(), &message))
+                }
             },
+            "tools/call" => {
+                match tools_call(&attach.plane, attach.bridge.as_deref(), &params).await {
+                    Ok(result) => Outcome::Reply(rpc_ok(id, result)),
+                    Err(error) => {
+                        let message = error.message();
+                        Outcome::Reply(rpc_err(id, error.code(), &message))
+                    }
+                }
+            }
             _ => Outcome::Reply(rpc_err(id, -32601, "method not found")),
         }
     }
@@ -494,7 +529,7 @@ pub mod api {
         }
     }
 
-    fn initialize_result(params: &Value) -> Value {
+    fn initialize_result(params: &Value, bridged: bool) -> Value {
         let requested = params
             .get("protocolVersion")
             .and_then(Value::as_str)
@@ -504,6 +539,11 @@ pub mod api {
         } else {
             DEFAULT_PROTOCOL
         };
+        let instructions = if bridged {
+            "Pilot tools vc_ping and vc_run_status are served here. Other vc_* tools are proxied to vibecrafted-mcp."
+        } else {
+            "Pilot tools: vc_ping, vc_run_status."
+        };
         json!({
             "protocolVersion": protocol,
             "capabilities": {"tools": {"listChanged": false}},
@@ -511,14 +551,17 @@ pub mod api {
                 "name": "vc-server",
                 "version": env!("VC_SERVER_VERSION"),
             },
-            "instructions": "Pilot tools: vc_ping, vc_run_status.",
+            "instructions": instructions,
         })
     }
 
-    fn tools_list() -> Value {
-        json!({
-            "tools": [ping_tool(), run_status_tool()],
-        })
+    async fn tools_list(bridge: Option<&StdioBridge>) -> Result<Value, BridgeError> {
+        let pilots = vec![ping_tool(), run_status_tool()];
+        let Some(bridge) = bridge else {
+            return Ok(json!({"tools": pilots}));
+        };
+        let remote = bridge.list_tools().await?;
+        Ok(json!({"tools": merge_vc_tools(pilots, remote)}))
     }
 
     fn ping_tool() -> Value {
@@ -553,18 +596,52 @@ pub mod api {
         })
     }
 
-    fn tools_call(plane: &ControlPlane, params: &Value) -> Result<Value, &'static str> {
+    async fn tools_call(
+        plane: &ControlPlane,
+        bridge: Option<&StdioBridge>,
+        params: &Value,
+    ) -> Result<Value, CallFail> {
         let Some(object) = params.as_object() else {
-            return Err("invalid params");
+            return Err(CallFail::Params("invalid params"));
         };
         let Some(name) = object.get("name").and_then(Value::as_str) else {
-            return Err("invalid params");
+            return Err(CallFail::Params("invalid params"));
         };
         let arguments = object.get("arguments").cloned().unwrap_or(Value::Null);
         match name {
-            TOOL_PING => ping_call(&arguments),
-            TOOL_RUN_STATUS => run_status_call(plane, &arguments),
-            _ => Err("unknown tool"),
+            TOOL_PING => ping_call(&arguments).map_err(CallFail::Params),
+            TOOL_RUN_STATUS => run_status_call(plane, &arguments).map_err(CallFail::Params),
+            other if other.starts_with("vc_") => {
+                let Some(bridge) = bridge else {
+                    return Err(CallFail::Params("unknown tool"));
+                };
+                bridge
+                    .call_tool(other, arguments)
+                    .await
+                    .map_err(CallFail::Bridge)
+            }
+            _ => Err(CallFail::Params("unknown tool")),
+        }
+    }
+
+    enum CallFail {
+        Params(&'static str),
+        Bridge(BridgeError),
+    }
+
+    impl CallFail {
+        fn code(&self) -> i32 {
+            match self {
+                Self::Params(_) => -32602,
+                Self::Bridge(error) => error.rpc_code(),
+            }
+        }
+
+        fn message(&self) -> String {
+            match self {
+                Self::Params(message) => (*message).to_string(),
+                Self::Bridge(error) => error.rpc_message(),
+            }
         }
     }
 

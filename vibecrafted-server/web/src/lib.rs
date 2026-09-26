@@ -10,6 +10,8 @@ fn skills_one_list_then_one_editor() {
 }
 pub mod control;
 pub mod mcp;
+#[cfg(feature = "ssr")]
+pub mod mcp_bridge;
 pub mod run_detail;
 pub mod scaffold;
 pub mod theme;
