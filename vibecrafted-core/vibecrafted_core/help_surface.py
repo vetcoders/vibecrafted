@@ -509,6 +509,7 @@ Usage:
   vibecrafted message --run-id <id> --receive
   vibecrafted message --run-id <id> --ack <message-id>
   vibecrafted message --inspect <message-id>
+  vibecrafted message --mark-context-injected <message-id> --nonce <nonce>
 
 Options:
   --run-id <id>            Exact tracked run
@@ -519,13 +520,18 @@ Options:
   --idempotency-key <key>  Replay key; same body+run is a receipt replay
   --retry                  Resubmit only unresolved or failed receipts
   --inspect <message-id>   Read one durable receipt (JSON)
+  --mark-context-injected <message-id>
+                           Record that the text was attached to a tool response
+  --nonce <nonce>          Nonce stored with that attachment
   --json                   Machine-readable send receipt
 
 Contract:
   Codex `queue --thread` is used once its thread is known; earlier messages
   and Claude/other-provider messages use the durable inbox.
   Inbox messages require explicit polling; inbox_pending is not delivery into
-  model context. This command never starts or resumes another worker.
+  model context. context_injected records attachment to a tool response and
+  is not proof the recipient read it; --receive does not list those receipts.
+  This command never starts or resumes another worker.
   provider_accepted is not an agent ACK; --ack is a recipient claim only.
 
 Example:

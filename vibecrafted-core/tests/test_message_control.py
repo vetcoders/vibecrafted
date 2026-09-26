@@ -233,6 +233,52 @@ def test_cli_session_send_receive_ack_round_trip(
     assert json.loads(capsys.readouterr().out) == []
 
 
+def test_cli_mark_context_injected_leaves_receive(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    from vibecrafted_core import cli
+
+    home = tmp_path / "home"
+    _run(home, "run-1", agent="claude", session="claude-native")
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    body = tmp_path / "body.txt"
+    body.write_text("during the turn", encoding="utf-8")
+    assert (
+        cli.main(["message", "--run-id", "run-1", "--file", str(body), "--json"]) == 0
+    )
+    item = json.loads(capsys.readouterr().out)
+    assert (
+        cli.main(
+            [
+                "message",
+                "--mark-context-injected",
+                item["message_id"],
+                "--nonce",
+                "nonce-1",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    marked = json.loads(capsys.readouterr().out)
+    assert marked["delivery_state"] == "context_injected"
+    assert marked["context_injected_nonce"] == "nonce-1"
+    assert cli.main(["message", "--run-id", "run-1", "--receive"]) == 0
+    assert json.loads(capsys.readouterr().out) == []
+    assert (
+        cli.main(
+            [
+                "message",
+                "--mark-context-injected",
+                item["message_id"],
+                "--nonce",
+                "other-nonce",
+            ]
+        )
+        == 2
+    )
+
+
 def test_same_key_body_different_run_fails_before_runner_including_retry(
     monkeypatch, tmp_path: Path
 ) -> None:
