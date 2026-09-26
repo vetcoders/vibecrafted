@@ -123,6 +123,11 @@ name = "usage_heatmap_lock"
 path = "tests/usage_heatmap_lock.rs"
 required-features = ["ssr"]
 
+[[test]]
+name = "mcp_http"
+path = "tests/mcp_http.rs"
+required-features = ["ssr"]
+
 [package.metadata.leptos]
 output-name = "vibecrafted-server-web"
 site-root = "target/site"

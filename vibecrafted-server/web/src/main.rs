@@ -16,6 +16,7 @@ async fn main() {
     use leptos_axum::{LeptosRoutes, generate_route_list};
     use vibecrafted_server_web::app::{App, settings_routes, shell, skills_routes};
     use vibecrafted_server_web::control::api::control_routes;
+    use vibecrafted_server_web::mcp::api::mcp_routes;
     use vibecrafted_server_web::scaffold::api::scaffold_routes;
     use vibecrafted_server_web::tools::api::{
         aicx_reference, aicx_search, loctree_generate, loctree_report, loctree_report_asset,
@@ -225,6 +226,8 @@ Examples:
         .merge(skills_routes())
         .merge(control_routes())
         .merge(settings_routes())
+        // Streamable HTTP MCP. Protocol and bearer live in `mcp`; this is the only mount.
+        .merge(mcp_routes())
         .fallback(leptos_axum::file_and_error_handler(shell))
         .with_state(leptos_options);
 
