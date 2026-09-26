@@ -137,6 +137,11 @@ name = "mcp_aggregator"
 path = "tests/mcp_aggregator.rs"
 required-features = ["ssr"]
 
+[[test]]
+name = "mcp_bridge"
+path = "tests/mcp_bridge.rs"
+required-features = ["ssr"]
+
 [package.metadata.leptos]
 output-name = "vibecrafted-server-web"
 site-root = "target/site"

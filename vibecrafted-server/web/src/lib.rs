@@ -12,6 +12,7 @@ pub mod control;
 pub mod mcp;
 #[cfg(feature = "ssr")]
 pub mod mcp_aggregator;
+pub mod mcp_bridge;
 pub mod run_detail;
 pub mod scaffold;
 pub mod theme;

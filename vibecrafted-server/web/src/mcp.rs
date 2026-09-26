@@ -17,6 +17,7 @@ pub mod api {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use crate::mcp_bridge::{BridgeError, StdioBridge, merge_vc_tools};
     use axum::Router;
     use axum::body::{Body, to_bytes};
     use axum::extract::{Extension, Request};
@@ -49,6 +50,8 @@ pub mod api {
         plane: ControlPlane,
         keepalive: Duration,
         aggregator: Arc<Aggregator>,
+        /// `None` keeps the pilot registry only. Production passes the bridge.
+        bridge: Option<Arc<StdioBridge>>,
     }
 
     enum Outcome {
@@ -66,11 +69,12 @@ pub mod api {
         let config_path = operator_config_path();
         let token = load_mcp_bearer(env_token.as_deref(), config_path.as_deref());
         let aggregator = Aggregator::from_config(&upstream_config(config_path.as_deref()));
-        mcp_routes_with_aggregator(
+        mcp_routes_with_parts(
             control_core::vibecrafted_home(),
             token,
             DEFAULT_SSE_KEEPALIVE,
             aggregator,
+            Some(StdioBridge::production()),
         )
     }
 
@@ -78,12 +82,14 @@ pub mod api {
     ///
     /// Tests pass these in. They do not publish `VC_SERVER_MCP_BEARER` into
     /// the process, and they do not read the operator's real config file.
+    /// This constructor does not attach the stdio bridge, so the pilot list
+    /// stays exactly `vc_ping` and `vc_run_status`.
     pub fn mcp_routes_with(
         home: impl Into<PathBuf>,
         bearer: impl Into<String>,
         sse_keepalive: Duration,
     ) -> Router<leptos::config::LeptosOptions> {
-        mcp_routes_with_aggregator(home, bearer, sse_keepalive, Aggregator::local_only())
+        mcp_routes_with_parts(home, bearer, sse_keepalive, Aggregator::local_only(), None)
     }
 
     /// Same router as [`mcp_routes_with`], with an explicit aggregator.
@@ -97,6 +103,30 @@ pub mod api {
         sse_keepalive: Duration,
         aggregator: Arc<Aggregator>,
     ) -> Router<leptos::config::LeptosOptions> {
+        mcp_routes_with_parts(home, bearer, sse_keepalive, aggregator, None)
+    }
+
+    /// [`mcp_routes_with`] plus an optional stdio bridge.
+    ///
+    /// Pilot tools always win. The bridge is consulted for `tools/list` and
+    /// for `vc_*` calls that are not pilots. `None` is the pilot-only router.
+    pub fn mcp_routes_with_bridge(
+        home: impl Into<PathBuf>,
+        bearer: impl Into<String>,
+        sse_keepalive: Duration,
+        bridge: Option<Arc<StdioBridge>>,
+    ) -> Router<leptos::config::LeptosOptions> {
+        mcp_routes_with_parts(home, bearer, sse_keepalive, Aggregator::local_only(), bridge)
+    }
+
+    /// The full router: explicit aggregator and an optional stdio bridge.
+    pub fn mcp_routes_with_parts(
+        home: impl Into<PathBuf>,
+        bearer: impl Into<String>,
+        sse_keepalive: Duration,
+        aggregator: Arc<Aggregator>,
+        bridge: Option<Arc<StdioBridge>>,
+    ) -> Router<leptos::config::LeptosOptions> {
         let keepalive = if sse_keepalive.is_zero() {
             DEFAULT_SSE_KEEPALIVE
         } else {
@@ -107,6 +137,7 @@ pub mod api {
             plane: ControlPlane::new(home),
             keepalive,
             aggregator,
+            bridge,
         };
         Router::<leptos::config::LeptosOptions>::new()
             .route("/mcp", get(mcp_get).post(mcp_post))
@@ -516,13 +547,15 @@ pub mod api {
             return Outcome::Reply(rpc_err(id, -32602, "invalid params"));
         }
         match method {
-            "initialize" => Outcome::Reply(rpc_ok(id, initialize_result(&params))),
+            "initialize" => Outcome::Reply(rpc_ok(
+                id,
+                initialize_result(&params, attach.bridge.is_some()),
+            )),
             "ping" => Outcome::Reply(rpc_ok(id, json!({}))),
-            "tools/list" => {
-                let mut tools = vec![ping_tool(), run_status_tool()];
-                tools.extend(attach.aggregator.list_remote().await);
-                Outcome::Reply(rpc_ok(id, json!({"tools": tools})))
-            }
+            "tools/list" => match tools_list(attach).await {
+                Ok(result) => Outcome::Reply(rpc_ok(id, result)),
+                Err(failure) => Outcome::Reply(failure.into_rpc(id)),
+            },
             "tools/call" => match tools_call(attach, &params).await {
                 Ok(result) => Outcome::Reply(rpc_ok(id, result)),
                 Err(failure) => Outcome::Reply(failure.into_rpc(id)),
@@ -538,7 +571,7 @@ pub mod api {
         }
     }
 
-    fn initialize_result(params: &Value) -> Value {
+    fn initialize_result(params: &Value, bridged: bool) -> Value {
         let requested = params
             .get("protocolVersion")
             .and_then(Value::as_str)
@@ -548,6 +581,11 @@ pub mod api {
         } else {
             DEFAULT_PROTOCOL
         };
+        let instructions = if bridged {
+            "Pilot tools vc_ping and vc_run_status are served here. Other vc_* tools are proxied to vibecrafted-mcp."
+        } else {
+            "Pilot tools: vc_ping, vc_run_status."
+        };
         json!({
             "protocolVersion": protocol,
             "capabilities": {"tools": {"listChanged": false}},
@@ -555,8 +593,22 @@ pub mod api {
                 "name": "vc-server",
                 "version": env!("VC_SERVER_VERSION"),
             },
-            "instructions": "Pilot tools: vc_ping, vc_run_status.",
+            "instructions": instructions,
         })
+    }
+
+    /// Pilots, then bridged `vc_*` tools (pilots win), then aggregator remotes.
+    async fn tools_list(attach: &McpAttach) -> Result<Value, CallFailure> {
+        let pilots = vec![ping_tool(), run_status_tool()];
+        let mut tools = match attach.bridge.as_deref() {
+            None => pilots,
+            Some(bridge) => {
+                let remote = bridge.list_tools().await.map_err(CallFailure::Bridge)?;
+                merge_vc_tools(pilots, remote)
+            }
+        };
+        tools.extend(attach.aggregator.list_remote().await);
+        Ok(json!({"tools": tools}))
     }
 
     fn ping_tool() -> Value {
@@ -604,6 +656,15 @@ pub mod api {
         }
         if name == TOOL_RUN_STATUS {
             return run_status_call(&attach.plane, &arguments);
+        }
+        if name.starts_with("vc_") {
+            let Some(bridge) = attach.bridge.as_deref() else {
+                return Err(CallFailure::params("unknown tool"));
+            };
+            return bridge
+                .call_tool(name, arguments)
+                .await
+                .map_err(CallFailure::Bridge);
         }
         match attach.aggregator.call(name, arguments).await {
             RemoteCall::Local => Err(CallFailure::params("unknown tool")),
@@ -709,6 +770,7 @@ pub mod api {
             tool: String,
             reason: &'static str,
         },
+        Bridge(BridgeError),
     }
 
     impl CallFailure {
@@ -719,6 +781,10 @@ pub mod api {
         fn into_rpc(self, id: Value) -> Value {
             match self {
                 Self::Params(message) => rpc_err(id, -32602, message),
+                Self::Bridge(error) => {
+                    let message = error.rpc_message();
+                    rpc_err(id, error.rpc_code(), &message)
+                }
                 Self::Upstream {
                     upstream,
                     tool,
