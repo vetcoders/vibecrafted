@@ -65,17 +65,24 @@ pub mod api {
     /// operator config file. An empty result fail-closes the endpoint (every
     /// call is 401) until a token is configured.
     pub fn mcp_routes() -> Router<leptos::config::LeptosOptions> {
-        let env_token = std::env::var(MCP_BEARER_ENV).ok();
         let config_path = operator_config_path();
-        let token = load_mcp_bearer(env_token.as_deref(), config_path.as_deref());
         let aggregator = Aggregator::from_config(&upstream_config(config_path.as_deref()));
         mcp_routes_with_parts(
             control_core::vibecrafted_home(),
-            token,
+            configured_bearer(),
             DEFAULT_SSE_KEEPALIVE,
             aggregator,
             Some(StdioBridge::production()),
         )
+    }
+
+    /// Bearer captured by [`mcp_routes`] and by `POST /api/bus/messages`.
+    ///
+    /// `VC_SERVER_MCP_BEARER` wins over `[mcp].bearer`. Empty means fail closed.
+    #[must_use]
+    pub fn configured_bearer() -> String {
+        let env_token = std::env::var(MCP_BEARER_ENV).ok();
+        load_mcp_bearer(env_token.as_deref(), operator_config_path().as_deref())
     }
 
     /// Same router as [`mcp_routes`], with an explicit home, bearer, and SSE keepalive.
@@ -383,6 +390,25 @@ pub mod api {
         }
     }
 
+    /// Bearer and localhost `Origin` gate for bus HTTP. No MCP protocol header.
+    #[must_use]
+    pub fn reject_bus_request(expected: &str, headers: &HeaderMap) -> Option<Response> {
+        if !origin_allowed(headers) {
+            return Some(json_response(
+                StatusCode::FORBIDDEN,
+                &json!({"error": "origin rejected"}),
+            ));
+        }
+        let presented = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(presented_bearer);
+        match presented {
+            Some(token) if bearer_matches(expected, token) => None,
+            _ => Some(unauthorized()),
+        }
+    }
+
     fn presented_bearer(value: &str) -> Option<&str> {
         let (scheme, rest) = value.trim().split_once(' ')?;
         if !scheme.eq_ignore_ascii_case("bearer") {
@@ -582,9 +608,9 @@ pub mod api {
             DEFAULT_PROTOCOL
         };
         let instructions = if bridged {
-            "Pilot tools vc_ping and vc_run_status are served here. Other vc_* tools are proxied to vibecrafted-mcp."
+            "Pilot tools vc_ping, vc_run_status, vc_message_send, vc_message_reply and vc_message_status are served here. Other vc_* tools are proxied to vibecrafted-mcp."
         } else {
-            "Pilot tools: vc_ping, vc_run_status."
+            "Tools: vc_ping, vc_run_status, vc_message_send, vc_message_reply, vc_message_status."
         };
         json!({
             "protocolVersion": protocol,
@@ -597,9 +623,16 @@ pub mod api {
         })
     }
 
-    /// Pilots, then bridged `vc_*` tools (pilots win), then aggregator remotes.
+    /// Pilots (including the bus tools), then bridged `vc_*` tools
+    /// (pilots win), then aggregator remotes.
     async fn tools_list(attach: &McpAttach) -> Result<Value, CallFailure> {
-        let pilots = vec![ping_tool(), run_status_tool()];
+        let pilots = vec![
+            ping_tool(),
+            run_status_tool(),
+            crate::bus::api::message_send_tool(),
+            crate::bus::api::message_reply_tool(),
+            crate::bus::api::message_status_tool(),
+        ];
         let mut tools = match attach.bridge.as_deref() {
             None => pilots,
             Some(bridge) => {
@@ -656,6 +689,15 @@ pub mod api {
         }
         if name == TOOL_RUN_STATUS {
             return run_status_call(&attach.plane, &arguments);
+        }
+        if matches!(
+            name,
+            crate::bus::api::TOOL_MESSAGE_SEND
+                | crate::bus::api::TOOL_MESSAGE_REPLY
+                | crate::bus::api::TOOL_MESSAGE_STATUS
+        ) {
+            return crate::bus::api::call_message_tool(name, &arguments)
+                .map_err(CallFailure::params);
         }
         if name.starts_with("vc_") {
             let Some(bridge) = attach.bridge.as_deref() else {

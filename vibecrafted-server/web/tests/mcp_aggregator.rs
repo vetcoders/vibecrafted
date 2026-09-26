@@ -271,6 +271,9 @@ async fn tools_list_prefixes_both_mock_upstreams() {
         vec![
             "vc_ping".to_string(),
             "vc_run_status".to_string(),
+            "vc_message_send".to_string(),
+            "vc_message_reply".to_string(),
+            "vc_message_status".to_string(),
             "loctree_context".to_string(),
             "aicx_search".to_string(),
         ]

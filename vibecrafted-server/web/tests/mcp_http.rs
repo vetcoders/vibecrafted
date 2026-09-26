@@ -221,7 +221,10 @@ async fn tools_list_returns_pilot_tool_schemas() {
     assert_eq!(status, StatusCode::OK);
     let payload = json_body(&body);
     let tools = payload["result"]["tools"].as_array().expect("tools");
-    assert_eq!(tools.len(), 2);
+    assert_eq!(tools.len(), 5);
+    assert!(tools.iter().any(|tool| tool["name"] == "vc_message_send"));
+    assert!(tools.iter().any(|tool| tool["name"] == "vc_message_reply"));
+    assert!(tools.iter().any(|tool| tool["name"] == "vc_message_status"));
 
     let ping = tool_named(&payload, "vc_ping");
     assert_eq!(
