@@ -1131,14 +1131,14 @@ cmd_fork_help() {
   printf '%b⚒%b  %bfork%b\n' "$_copper" "$_reset" "$_bold" "$_reset"
   printf '%b─────────────────────────────────────────%b\n' "$_steel" "$_reset"
   printf '  Branch a provider session into a NEW session; the source session stays untouched.\n'
-  printf '  Native forks: codex (codex fork), claude and grok (--resume <id> --fork-session).\n'
+  printf '  Native forks: codex (codex fork), claude and grok (--resume <id> --fork-session), kimi (kimi fork <id> -y).\n'
   printf '  cursor, agy and junie have no verified native fork adapter: vibecrafted resume <agent> --session <id>\n'
   printf '  continues the ORIGINAL session there (a resume, never presented as a fork).\n'
   printf '\n%bUsage:%b\n' "$_bold" "$_reset"
-  printf '  vibecrafted fork <claude|codex|grok> --session <provider-session-id> [flags]\n'
-  printf '  vc-fork <claude|codex|grok> --session <provider-session-id> [flags]\n'
-  printf '  vibecrafted fork <claude|codex|grok> --run-id <work-...> [flags]\n'
-  printf '  vc-fork <claude|codex|grok> --run-id <work-...> [flags]\n'
+  printf '  vibecrafted fork <claude|codex|grok|kimi> --session <provider-session-id> [flags]\n'
+  printf '  vc-fork <claude|codex|grok|kimi> --session <provider-session-id> [flags]\n'
+  printf '  vibecrafted fork <claude|codex|grok|kimi> --run-id <work-...> [flags]\n'
+  printf '  vc-fork <claude|codex|grok|kimi> --run-id <work-...> [flags]\n'
   printf '  vibecrafted fork codex --session current|last [flags]   # explicit context or scoped run records\n'
   printf '  vc-fork codex --session current|last [flags]\n'
   printf '\n%bOptions:%b\n' "$_bold" "$_reset"

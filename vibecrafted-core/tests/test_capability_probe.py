@@ -16,7 +16,7 @@ from vibecrafted_core.runtime_paths import (
     selected_runtime_environment,
 )
 
-ALL_AGENTS = ("claude", "codex", "gemini", "agy", "junie", "grok", "cursor")
+ALL_AGENTS = ("claude", "codex", "gemini", "agy", "junie", "grok", "cursor", "kimi")
 VERDICTS = {
     continuity.SUPPORTED,
     continuity.UNSUPPORTED,
@@ -85,6 +85,26 @@ def test_unverified_never_upgraded_optimistically() -> None:
         continuity.capability_for("cursor").noninteractive_resume
         == continuity.UNVERIFIED
     )
+
+
+def test_kimi_continuity_record_is_honest_about_the_missing_stdin_lane() -> None:
+    # kimi 2.1.1 host probe 2026-09-27: `-S/--session [id]` resumes
+    # interactively, `kimi fork <id> -y` forks headless and exits, and
+    # `-S <id> -p <prompt> --output-format stream-json` resumes headless with
+    # context preserved. The supervised lane still cannot host that resume:
+    # print mode takes the prompt as the `-p` argv value (no stdin), while
+    # native_resume_argv builds stdin-transport argv — so the table keeps
+    # noninteractive resume UNVERIFIED instead of claiming the runtime lane.
+    cap = continuity.capability_for("kimi")
+    assert cap.execution == continuity.EXECUTABLE
+    assert cap.interactive_resume == continuity.SUPPORTED
+    assert cap.noninteractive_resume == continuity.UNVERIFIED
+    assert cap.native_fork == continuity.SUPPORTED
+    assert cap.prompt_transport == "flag_value"
+    assert cap.probe_recipe is not None
+    assert cap.probe_recipe.cli == "kimi"
+    assert "--session" in cap.probe_recipe.required_markers
+    assert "fork" in cap.probe_recipe.required_markers
 
 
 def test_capability_registry_is_serializable_and_versioned() -> None:

@@ -295,6 +295,52 @@ CAPABILITIES: Mapping[str, ProviderCapability] = {
             "shared Living Tree — both forbidden for recovery"
         ),
     ),
+    "kimi": ProviderCapability(
+        agent="kimi",
+        execution=EXECUTABLE,
+        session_id_shape="session_<UUID> (kimi 2.x ids carry the session_ prefix)",
+        session_id_sources=(
+            "stream_json_resume_hint_event",
+            "session_list_command",
+            "run_meta",
+        ),
+        interactive_resume=SUPPORTED,
+        noninteractive_resume=UNVERIFIED,
+        native_fork=SUPPORTED,
+        fork_runtime_restrictions=(
+            "`kimi fork [sessionId] -y` forks headless and exits with the new "
+            "session id (probed 2026-09-27); driving the fork headless still "
+            "needs the `-p` argv prompt lane — kimi print mode has no stdin"
+        ),
+        prompt_transport="flag_value",
+        session_identity_event=(
+            "stream-json `session.resume_hint` meta event carrying "
+            "`session_id` (with the `session_` prefix)"
+        ),
+        cwd_safety=(
+            "runs in invocation cwd; `--add-dir` is additive only; no "
+            "checkout-mutating flags"
+        ),
+        resume_preserves_cache=None,
+        forbidden_flags=(),
+        probe_recipe=ProbeRecipe(
+            cli="kimi",
+            required_markers=("--session", "--continue", "--prompt", "fork"),
+        ),
+        notes=(
+            "kimi 2.1.1 probed 2026-09-27 on this host: `-S/--session [id]` "
+            "(alias `-r`, emitted by the CLI's own resume_hint) resumes "
+            "interactively; `-S <id> -p <prompt> --output-format stream-json` "
+            "resumes headless with context preserved (PROBE1 recall, identical "
+            "session_id echoed). `kimi fork <id> -y` forks non-interactively "
+            "and exits 0 with the new id. The supervised runtime lane still "
+            "cannot host kimi resume: print mode has no stdin prompt lane "
+            "(`-p` takes the prompt as its argv value, ps-visible and "
+            "ARG_MAX-bound — see spawn.py's kimi builder), while "
+            "native_resume_argv builds stdin-transport argv. Stays UNVERIFIED "
+            "until an argv-prompt resume transport lands."
+        ),
+    ),
     "cursor": ProviderCapability(
         agent="cursor",
         execution=EXECUTABLE,

@@ -308,6 +308,7 @@ Provider coverage (verified on the installed CLIs):
 | codex    | `codex fork <id> [prompt]`                                                  | supported                                                                                         |
 | claude   | `claude --resume <id> --fork-session`                                       | supported                                                                                         |
 | grok     | `grok --resume <id> --fork-session` (never `--restore-code` / `--worktree`) | supported                                                                                         |
+| kimi     | `kimi fork <id> [-y]`                                                       | supported                                                                                         |
 | cursor   | none (`--resume [chatId]` only)                                             | refused: `vibecrafted resume cursor --session <id>` continues the original (a resume, not a fork) |
 | agy      | none (`--conversation <id>` only)                                           | refused, same hint                                                                                |
 | junie    | none (`--session-id … --resume` only)                                       | refused, same hint                                                                                |
