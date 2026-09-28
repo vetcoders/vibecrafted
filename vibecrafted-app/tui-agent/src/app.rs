@@ -1,7 +1,7 @@
 use crate::catalog::CatalogState;
 use crate::config::{AppConfig, path_display, resolve_destination_repo_from_env};
 use crate::home::{
-    HomeCounts, HomeNavigation, HomeRow, HomeScope, HomeSurface, project_home_with_options,
+    HomeCounts, HomeNavigation, HomeRow, HomeScope, HomeSurface, project_home_view,
     wrap_transcript_words,
 };
 use crate::launch::{
@@ -440,6 +440,7 @@ pub struct HomeRowsKey {
     scope: HomeScope,
     query: String,
     attention_working_rule: bool,
+    history: bool,
     repo: PathBuf,
     runs: (usize, usize),
     retained: (usize, usize),
@@ -919,6 +920,7 @@ impl App {
         let key = HomeRowsKey {
             scope: self.observe.home.scope,
             query: query.to_string(),
+            history: self.observe.home.history,
             attention_working_rule: self.config.view.attention_working_rule(),
             repo: self.config.repo.clone(),
             runs: (self.state.runs.as_ptr() as usize, self.state.runs.len()),
@@ -928,12 +930,13 @@ impl App {
             ),
         };
         self.home_rows_memo.rows(key, || {
-            project_home_with_options(
+            project_home_view(
                 &self.state,
                 self.observe.home.scope,
                 &self.config.repo,
                 self.config.view.attention_working_rule(),
                 query,
+                self.observe.home.history,
             )
         })
     }
@@ -959,6 +962,27 @@ impl App {
             index += count;
         }
         self.observe.home.selected = (index % count) as usize;
+    }
+
+    pub fn toggle_home_history(&mut self) {
+        self.observe.home.history = !self.observe.home.history;
+        self.observe.home.selected = 0;
+        self.interaction.scroll.home_list = 0;
+        self.append_status(if self.observe.home.history {
+            "History · Enter observes transcript · x archives the reviewed run"
+        } else {
+            "Live · failures from the last 24h · h opens History"
+        });
+    }
+
+    pub fn archive_home_target(&mut self, target: &str) -> anyhow::Result<()> {
+        match self.select_home_target(target) {
+            Ok(row) => self.archive_run(&row.run_id),
+            Err(reason) => {
+                self.append_status(reason);
+                Ok(())
+            }
+        }
     }
 
     pub fn toggle_home_scope(&mut self) {
@@ -1116,6 +1140,10 @@ impl App {
                         .map(|panel| format!("panel:{panel}"))
                         .unwrap_or_else(|| "no panel".to_string())
                 ),
+                width,
+            ));
+            lines.extend(wrap_transcript_words(
+                &format!("{} · {}", row.state_label, row.full_date),
                 width,
             ));
             if let Some(body) = self.home_conversation_transcript() {
@@ -1282,15 +1310,30 @@ impl App {
             self.append_status("No run selected to archive.");
             return Ok(());
         };
+        self.archive_run(&run_id)
+    }
+
+    fn archive_run(&mut self, run_id: &str) -> anyhow::Result<()> {
+        let Some(snapshot) = self.state.runs.iter().find(|run| run.run_id == run_id) else {
+            self.append_status("Run is no longer available; refresh and select it again.");
+            return Ok(());
+        };
+        if snapshot.is_runtime_inflight() {
+            self.append_status("This run is still in flight. Only finished runs can be archived.");
+            return Ok(());
+        }
         let archive_dir = self.config.state_root.join("runs/.archived");
         fs::create_dir_all(&archive_dir)?;
-        let marker_path = archive_dir.join(format!("{}.json", safe_marker_name(&run_id)));
+        let marker_path = archive_dir.join(format!("{}.json", safe_marker_name(run_id)));
         let marker = serde_json::json!({
             "run_id": run_id,
             "archived_by": "vc-tui",
             "archived_at": chrono::Utc::now().to_rfc3339(),
         });
         fs::write(&marker_path, serde_json::to_vec_pretty(&marker)?)?;
+        self.state.runs.retain(|run| run.run_id != run_id);
+        self.state.archived_run_ids.insert(run_id.to_string());
+        self.home_rows_memo.clear();
         self.request_full_refresh();
         self.append_status(format!(
             "archived run from operator view: {}",
@@ -1646,7 +1689,11 @@ impl App {
         let mut lines = vec![self.error_title.clone(), String::new()];
         lines.extend(self.error_lines.clone());
         lines.push(String::new());
-        lines.push("R retry launch · Esc back to dispatch".to_string());
+        lines.push(if self.error_title.starts_with("goto-work ") {
+            "Esc returns to the list · Enter observes transcript · h History · x archive finished run".to_string()
+        } else {
+            "R retry launch · Esc back to dispatch".to_string()
+        });
         lines
     }
 
@@ -2726,6 +2773,7 @@ mod home_rows_memo_tests {
         HomeRowsKey {
             scope: HomeScope::default(),
             query: String::new(),
+            history: false,
             attention_working_rule: false,
             repo: PathBuf::from("/tmp/repo"),
             runs,

@@ -644,6 +644,16 @@ fn submit_home_input(app: &mut App) -> anyhow::Result<InputOutcome> {
                 Ok(InputOutcome::Handled)
             }
         },
+        "history" => {
+            app.observe.home.input.clear();
+            app.toggle_home_history();
+            Ok(InputOutcome::Handled)
+        }
+        "archive" => {
+            app.observe.home.input.clear();
+            app.archive_home_target(target)?;
+            Ok(InputOutcome::Handled)
+        }
         "resume" => {
             app.observe.home.input.clear();
             resume_home_target(app, target)
@@ -687,6 +697,14 @@ fn handle_home_landing_key(app: &mut App, key: KeyEvent) -> anyhow::Result<Optio
         }
         KeyCode::Char('f') if input_is_empty => {
             app.toggle_home_scope();
+            InputOutcome::Handled
+        }
+        KeyCode::Char('h') if input_is_empty => {
+            app.toggle_home_history();
+            InputOutcome::Handled
+        }
+        KeyCode::Char('x') if input_is_empty => {
+            app.archive_home_target("")?;
             InputOutcome::Handled
         }
         KeyCode::Char('g') if input_is_empty => goto_home_target(app, ""),
@@ -841,6 +859,18 @@ fn handle_key(
             _ => {}
         },
         LaunchFocus::Error => match key.code {
+            KeyCode::Enter if app.error_title.starts_with("goto-work ") => {
+                app.focus = LaunchFocus::Browse;
+                app.open_selected_home_row();
+            }
+            KeyCode::Char('x') if app.error_title.starts_with("goto-work ") => {
+                app.focus = LaunchFocus::Browse;
+                app.archive_home_target("")?;
+            }
+            KeyCode::Char('h') if app.error_title.starts_with("goto-work ") => {
+                app.focus = LaunchFocus::Browse;
+                app.toggle_home_history();
+            }
             KeyCode::Char('r') | KeyCode::Char('R')
                 if app.error_title.starts_with("goto-work ") =>
             {
@@ -1993,6 +2023,57 @@ mod tests {
     }
 
     #[test]
+    fn home_archive_hides_only_the_selected_finished_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = sample_app();
+        app.config.state_root = dir.path().to_path_buf();
+        app.config.view = crate::observe::ConsoleView::Home;
+        let mut live = app
+            .state
+            .runs
+            .first()
+            .cloned()
+            .unwrap_or_else(|| app.runs[0].snapshot.clone());
+        live.run_id = "live-archive-test".into();
+        live.state = Some("active".into());
+        live.last_error = None;
+        live.extra.clear();
+        let mut finished = live.clone();
+        finished.run_id = "finished-archive-test".into();
+        finished.state = Some("failed".into());
+        finished
+            .extra
+            .insert("exit_code".into(), serde_json::json!(1));
+        app.state.runs = vec![live, finished];
+        app.home_rows_memo = Default::default();
+        app.archive_home_target("live-archive-test").unwrap();
+        assert!(
+            !dir.path()
+                .join("runs/.archived/live-archive-test.json")
+                .exists()
+        );
+        app.toggle_home_history();
+        app.archive_home_target("finished-archive-test").unwrap();
+        assert!(
+            dir.path()
+                .join("runs/.archived/finished-archive-test.json")
+                .exists()
+        );
+        assert!(
+            !app.state
+                .runs
+                .iter()
+                .any(|run| run.run_id == "finished-archive-test")
+        );
+        assert!(
+            app.state
+                .runs
+                .iter()
+                .any(|run| run.run_id == "live-archive-test")
+        );
+    }
+
+    #[test]
     fn goto_work_uncertainty_never_turns_r_into_a_blind_retry() {
         let mut app = sample_app();
         app.config.view = crate::observe::ConsoleView::HomeAttention;
@@ -2000,6 +2081,8 @@ mod tests {
             "goto-work unconfirmed",
             vec!["the tab may exist, do not retry blindly".to_string()],
         );
+        assert!(!app.error_lines().join(" ").contains("retry launch"));
+        assert!(app.error_lines().join(" ").contains("observes transcript"));
         let (tx, rx) = std::sync::mpsc::channel::<BackgroundMessage>();
 
         handle_key(&mut app, key(KeyCode::Char('r')), &tx).expect("r handled");
@@ -2101,7 +2184,7 @@ mod tests {
                 let mut run = sample_run("ask-beta", "grok", "").snapshot;
                 run.root = Some("/tmp/ws-beta".into());
                 run.operator_session = None;
-                run.state = Some("unknown".into());
+                run.state = Some("waiting".into());
                 run
             },
         ];

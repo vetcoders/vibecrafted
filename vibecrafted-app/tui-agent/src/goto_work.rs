@@ -142,7 +142,7 @@ fn resolve_target(control_plane_root: &Path, run_id: &str) -> Result<Target, Got
     let plane = ControlPlane::from_control_plane_home(control_plane_root);
     let route = plane.load_run_routing().remove(run_id).ok_or_else(|| {
         refuse(format!(
-            "run {run_id} has no canonical runtime routing receipt"
+            "Cannot open run {run_id}: its saved workspace/session address is missing. Older runs may predate the current runtime. Observe the transcript or archive the finished run from History."
         ))
     })?;
     let agent = required(&route.agent, "agent", run_id)?;

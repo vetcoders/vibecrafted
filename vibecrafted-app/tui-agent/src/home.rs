@@ -49,6 +49,7 @@ pub enum HomeBand {
     Live,
     Attention,
     Failed,
+    History,
 }
 
 impl HomeBand {
@@ -56,7 +57,8 @@ impl HomeBand {
         match self {
             Self::Live => "Live",
             Self::Attention => "Needs attention · working rule",
-            Self::Failed => "Failed",
+            Self::Failed => "Failed · last 24h",
+            Self::History => "History · h returns to Live",
         }
     }
 
@@ -65,6 +67,7 @@ impl HomeBand {
             Self::Live => "●",
             Self::Attention => "!",
             Self::Failed => "×",
+            Self::History => "·",
         }
     }
 }
@@ -85,6 +88,8 @@ pub struct HomeRow {
     /// is absent. Missing stamps stay "—".
     pub when_label: String,
     pub state_label: String,
+    pub timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    pub full_date: String,
 }
 
 impl HomeRow {
@@ -94,9 +99,9 @@ impl HomeRow {
             .as_deref()
             .unwrap_or(self.state_label.as_str());
         let when = truncate(&self.when_label, 11);
-        let tail = format!("{when:<11} cost {}", self.cost_label);
+        let tail = format!("cost {}", self.cost_label);
         let prefix = format!(
-            "{} {:<7} {:<9} {:<8} {:<8}",
+            "{} {when:<11} {:<7} {:<9} {:<8} {:<8}",
             self.band.marker(),
             truncate(&self.agent, 7),
             truncate(&self.workspace, 9),
@@ -149,6 +154,8 @@ pub struct HomeState {
     pub surface: HomeSurface,
     pub scope: HomeScope,
     pub selected: usize,
+    pub history: bool,
+    pub viewport_offset: std::cell::Cell<usize>,
     pub navigations: Vec<HomeNavigation>,
     pub conversation_run_id: Option<String>,
     /// The always-focused ZEN line. `/text` filters; `!command` executes.
@@ -160,6 +167,7 @@ pub struct HomeCounts {
     pub live: usize,
     pub attention: usize,
     pub failed: usize,
+    pub history: usize,
 }
 
 impl HomeCounts {
@@ -173,6 +181,10 @@ impl HomeCounts {
             failed: rows
                 .iter()
                 .filter(|row| row.band == HomeBand::Failed)
+                .count(),
+            history: rows
+                .iter()
+                .filter(|row| row.band == HomeBand::History)
                 .count(),
         }
     }
@@ -189,6 +201,24 @@ pub fn project_home_with_options(
     attention_working_rule: bool,
     query: &str,
 ) -> Vec<HomeRow> {
+    project_home_view(
+        state,
+        scope,
+        workspace,
+        attention_working_rule,
+        query,
+        false,
+    )
+}
+
+pub fn project_home_view(
+    state: &ControlPlaneState,
+    scope: HomeScope,
+    workspace: &Path,
+    attention_working_rule: bool,
+    query: &str,
+    history: bool,
+) -> Vec<HomeRow> {
     let now = chrono::Utc::now();
     let mut rows = state
         .runs
@@ -201,7 +231,37 @@ pub fn project_home_with_options(
                 .runs
                 .iter()
                 .find(|run| run.run_id == snapshot.run_id);
-            project_row(snapshot, kind, attention_working_rule, usage)
+            let historical_unknown = snapshot.display_state() == "unknown"
+                && snapshot
+                    .extra
+                    .get("needs_attention")
+                    .and_then(Value::as_bool)
+                    != Some(true)
+                && snapshot
+                    .extra
+                    .get("attention_reason")
+                    .and_then(Value::as_str)
+                    .is_none();
+            let terminal = matches!(kind, RunKind::Failed | RunKind::Completed | RunKind::Recent)
+                || historical_unknown;
+            if history {
+                if !terminal {
+                    return None;
+                }
+                let mut row = project_row(snapshot, kind, attention_working_rule, usage)?;
+                row.band = HomeBand::History;
+                Some(row)
+            } else {
+                if historical_unknown || matches!(kind, RunKind::Completed | RunKind::Recent) {
+                    return None;
+                }
+                if terminal
+                    && run_timestamp(&snapshot).is_none_or(|stamp| (now - stamp).num_hours() >= 24)
+                {
+                    return None;
+                }
+                project_row(snapshot, kind, attention_working_rule, usage)
+            }
         })
         .collect::<Vec<_>>();
     if matches!(scope, HomeScope::Local) {
@@ -214,7 +274,7 @@ pub fn project_home_with_options(
     rows.sort_by(|left, right| {
         left.band
             .cmp(&right.band)
-            .then_with(|| left.agent.cmp(&right.agent))
+            .then_with(|| right.timestamp.cmp(&left.timestamp))
             .then_with(|| left.run_id.cmp(&right.run_id))
     });
     rows
@@ -223,6 +283,7 @@ pub fn project_home_with_options(
 pub fn project_rendered(runs: &[RenderedRun], scope: HomeScope, workspace: &Path) -> Vec<HomeRow> {
     let mut rows = runs
         .iter()
+        .filter(|run| !matches!(run.kind, RunKind::Recent | RunKind::Completed))
         .filter_map(|run| project_row(run.snapshot.clone(), run.kind, false, None))
         .collect::<Vec<_>>();
     if matches!(scope, HomeScope::Local) {
@@ -235,7 +296,7 @@ pub fn project_rendered(runs: &[RenderedRun], scope: HomeScope, workspace: &Path
     rows.sort_by(|left, right| {
         left.band
             .cmp(&right.band)
-            .then_with(|| left.agent.cmp(&right.agent))
+            .then_with(|| right.timestamp.cmp(&left.timestamp))
             .then_with(|| left.run_id.cmp(&right.run_id))
     });
     rows
@@ -256,7 +317,9 @@ fn project_row(
     usage: Option<&UsageRun>,
 ) -> Option<HomeRow> {
     let candidate_reason = attention_reason(&snapshot, kind);
-    let band = if kind == RunKind::Failed {
+    let band = if matches!(kind, RunKind::Completed | RunKind::Recent) {
+        HomeBand::History
+    } else if kind == RunKind::Failed {
         HomeBand::Failed
     } else if attention_working_rule && candidate_reason.is_some() {
         HomeBand::Attention
@@ -282,6 +345,21 @@ fn project_row(
     let cost = resolved_cost(&snapshot, usage);
     let when = when_label(&snapshot, usage.map(|run| run.timestamp.as_str()));
     let state_label = snapshot.display_state();
+    let timestamp = run_timestamp(&snapshot);
+    let full_date = timestamp
+        .map(|stamp| stamp.to_rfc3339())
+        .unwrap_or_else(|| "date unknown".into());
+    let orphaned = snapshot.extra.get("process_truth").and_then(Value::as_str) == Some("orphaned")
+        || snapshot
+            .extra
+            .get("terminal_reason")
+            .and_then(Value::as_str)
+            == Some("orphaned_no_live_process");
+    let full_date = if orphaned {
+        format!("Stale since {full_date}; actual exit time unknown")
+    } else {
+        full_date
+    };
     Some(HomeRow {
         run_id: snapshot.run_id,
         title: format!("{skill} · {agent}"),
@@ -294,6 +372,8 @@ fn project_row(
         cost_label: cost,
         when_label: when,
         state_label,
+        timestamp,
+        full_date,
     })
 }
 
@@ -458,27 +538,43 @@ fn numbered_cost(number: &serde_json::Number, unit: &str) -> String {
     }
 }
 
+fn run_timestamp(snapshot: &RunSnapshot) -> Option<chrono::DateTime<chrono::Utc>> {
+    [
+        snapshot.extra.get("completed_at").and_then(Value::as_str),
+        snapshot.started_at.as_deref(),
+        snapshot.updated_at.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
+    .map(|stamp| stamp.with_timezone(&chrono::Utc))
+}
+
 fn when_label(snapshot: &RunSnapshot, recorded: Option<&str>) -> String {
-    let start = nonempty_stamp(snapshot.started_at.as_deref());
-    let recorded = nonempty_stamp(recorded)
-        .or_else(|| nonempty_stamp(snapshot.extra.get("recorded_at").and_then(Value::as_str)));
-    start
-        .or(recorded)
-        .map(short_when)
-        .unwrap_or_else(|| "—".to_string())
+    let stamp = run_timestamp(snapshot).or_else(|| {
+        nonempty_stamp(recorded)
+            .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
+            .map(|stamp| stamp.with_timezone(&chrono::Utc))
+    });
+    let Some(stamp) = stamp else {
+        return "—".into();
+    };
+    let seconds = (chrono::Utc::now() - stamp).num_seconds().max(0);
+    if seconds < 60 {
+        "now".into()
+    } else if seconds < 3600 {
+        format!("{}m ago", seconds / 60)
+    } else if seconds < 86400 {
+        format!("{}h ago", seconds / 3600)
+    } else {
+        format!("{}d ago", seconds / 86400)
+    }
 }
 
 fn nonempty_stamp(value: Option<&str>) -> Option<&str> {
     value
         .map(str::trim)
         .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("null"))
-}
-
-/// `MM-DD HH:MM` from a real RFC3339 stamp, in that stamp's own offset.
-fn short_when(raw: &str) -> String {
-    chrono::DateTime::parse_from_rfc3339(raw)
-        .map(|stamp| stamp.format("%m-%d %H:%M").to_string())
-        .unwrap_or_else(|_| "—".to_string())
 }
 
 pub fn wrap_transcript_words(value: &str, width: usize) -> Vec<String> {
@@ -750,6 +846,37 @@ mod tests {
     }
 
     #[test]
+    fn history_separates_old_failures_and_rows_sort_by_date() {
+        let mut old = snapshot("old-failed", "codex", "failed", "/repo", None, &[]);
+        old.extra.insert(
+            "completed_at".into(),
+            Value::String((chrono::Utc::now() - chrono::Duration::days(180)).to_rfc3339()),
+        );
+        let mut older = snapshot("aaa-older", "alpha", "running", "/repo", None, &[]);
+        older.started_at = Some((chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339());
+        let newest = snapshot("zzz-newest", "zeta", "running", "/repo", None, &[]);
+        let state = plane(vec![old, older, newest]);
+        let live = project_home(&state, HomeScope::Global, Path::new("/repo"));
+        assert_eq!(
+            live.iter().map(|r| r.run_id.as_str()).collect::<Vec<_>>(),
+            vec!["zzz-newest", "aaa-older"]
+        );
+        let history = project_home_view(
+            &state,
+            HomeScope::Global,
+            Path::new("/repo"),
+            false,
+            "",
+            true,
+        );
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].run_id, "old-failed");
+        assert!(history[0].list_line(40).contains("180d ago"));
+        assert_eq!(HomeCounts::from_rows(&live).live, 2);
+        assert_eq!(HomeCounts::from_rows(&history).history, 1);
+    }
+
+    #[test]
     fn present_cost_zero_is_kept_but_absent_cost_stays_a_dash() {
         let priced = snapshot(
             "priced",
@@ -838,9 +965,9 @@ mod tests {
         });
         let rows = project_home(&state, HomeScope::Global, Path::new("/tmp/ws-alpha"));
         assert_eq!(rows[0].cost_label, "$0.2500");
-        assert_eq!(rows[0].when_label, "09-26 06:28");
+        assert_eq!(rows[0].full_date, "2026-09-26T06:28:00+00:00");
         let line = rows[0].list_line(80);
-        assert!(line.contains("09-26 06:28"), "{line}");
+        assert!(line.contains(&rows[0].when_label), "{line}");
         assert!(line.contains("cost $0.2500"), "{line}");
         assert!(!line.contains("01-01"), "{line}");
         assert!(!line.contains("08-02"), "{line}");
@@ -869,9 +996,12 @@ mod tests {
         });
         let quiet_rows = project_home(&quiet, HomeScope::Global, Path::new("/tmp/ws-alpha"));
         assert_eq!(quiet_rows[0].cost_label, "—");
-        assert_eq!(quiet_rows[0].when_label, "08-02 12:00");
+        assert_eq!(quiet_rows[0].full_date, "2026-01-01T00:00:00+00:00");
         let quiet_line = quiet_rows[0].list_line(80);
-        assert!(quiet_line.contains("08-02 12:00"), "{quiet_line}");
+        assert!(
+            quiet_line.contains(&quiet_rows[0].when_label),
+            "{quiet_line}"
+        );
         assert!(quiet_line.contains("cost —"), "{quiet_line}");
         assert!(!quiet_line.contains("01-01"), "{quiet_line}");
         assert!(!quiet_line.contains("cost 0"), "{quiet_line}");

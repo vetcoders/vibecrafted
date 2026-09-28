@@ -299,7 +299,14 @@ fn draw_home_header(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(Color::Cyan),
         ),
         Span::raw("  "),
-        Span::styled(app.status_summary(), Style::default().fg(Color::Gray)),
+        Span::styled(
+            if app.observe.home.history {
+                format!("History · {} runs", counts.history)
+            } else {
+                format!("Live · {} runs", counts.live)
+            },
+            Style::default().fg(Color::Gray),
+        ),
     ]);
     frame.render_widget(Paragraph::new(title), rows[0]);
     let rule = if app.config.view.attention_working_rule() {
@@ -308,10 +315,17 @@ fn draw_home_header(frame: &mut Frame, area: Rect, app: &App) {
         "off; flag --attention-working-rule"
     };
     frame.render_widget(
-        Paragraph::new(format!(
-            "live {}  attention {}  failed {}  · attention working rule {rule}",
-            counts.live, counts.attention, counts.failed,
-        ))
+        Paragraph::new(if app.observe.home.history {
+            format!(
+                "{} historical records · Enter observe · x archive reviewed",
+                counts.history
+            )
+        } else {
+            format!(
+                "live {}  attention {}  failed {}  · attention working rule {rule}",
+                counts.live, counts.attention, counts.failed
+            )
+        })
         .style(Style::default().fg(Color::DarkGray)),
         rows[1],
     );
@@ -320,7 +334,12 @@ fn draw_home_header(frame: &mut Frame, area: Rect, app: &App) {
 fn home_board_lines(app: &App, area_width: usize) -> Vec<(Option<usize>, String, Style)> {
     let rows = app.home_rows();
     let mut lines = Vec::new();
-    for band in [HomeBand::Live, HomeBand::Attention, HomeBand::Failed] {
+    let bands = if app.observe.home.history {
+        vec![HomeBand::History]
+    } else {
+        vec![HomeBand::Live, HomeBand::Attention, HomeBand::Failed]
+    };
+    for band in bands {
         lines.push((
             None,
             band.title().to_string(),
@@ -370,20 +389,42 @@ pub(crate) fn home_board_line_count(app: &App) -> usize {
 pub(crate) fn home_row_index_at(app: &App, inner_row: usize) -> Option<usize> {
     home_board_lines(app, 120)
         .into_iter()
-        .skip(inner_row)
-        .find_map(|(index, _, _)| index)
+        .nth(inner_row + app.observe.home.viewport_offset.get())
+        .and_then(|(index, _, _)| index)
 }
 
 fn draw_home_board(frame: &mut Frame, area: Rect, app: &App) {
-    let skip = usize::from(app.interaction.scroll.home_list);
-    let items = home_board_lines(app, usize::from(area.width))
+    let lines = home_board_lines(app, usize::from(area.width.saturating_sub(2)));
+    let height = usize::from(area.height.saturating_sub(2));
+    let selected_line = lines
+        .iter()
+        .position(|(index, _, _)| *index == Some(app.observe.home.selected))
+        .unwrap_or(0);
+    let mut skip = app
+        .observe
+        .home
+        .viewport_offset
+        .get()
+        .min(lines.len().saturating_sub(height));
+    if selected_line < skip {
+        skip = selected_line;
+    }
+    if selected_line >= skip + height {
+        skip = selected_line.saturating_sub(height.saturating_sub(1));
+    }
+    app.observe.home.viewport_offset.set(skip);
+    let items = lines
         .into_iter()
         .skip(skip)
         .map(|(_, text, style)| ListItem::new(Line::from(Span::styled(text, style))))
         .collect::<Vec<_>>();
     frame.render_widget(
         List::new(items).block(Block::default().borders(Borders::ALL).title(Span::styled(
-            " Live · Needs attention (working rule) · Failed ",
+            if app.observe.home.history {
+                " History · date ↓ · x archive reviewed "
+            } else {
+                " Live · date ↓ · h History "
+            },
             Style::default().add_modifier(Modifier::BOLD),
         ))),
         area,
@@ -430,7 +471,7 @@ fn draw_home_footer(frame: &mut Frame, area: Rect, app: &App) {
             "Conversation: Esc/H returns Home  no launch  transcript wraps at the pane width"
         }
         (HomeSurface::Landing, _) => {
-            "↑/↓ select · Enter observe · g goto · r resume · f scope · Tab panels · q quit"
+            "↑/↓ select · Enter observe · g goto · h history · x archive · f scope · Tab panels"
         }
         (HomeSurface::Panels, _) => "H/Esc returns to ZEN Home",
     };
@@ -2291,11 +2332,17 @@ mod tests {
         let mut work = sample_run("work-1", "claude", "pane-2");
         work.snapshot.root = Some("/tmp/ws-alpha".into());
         work.snapshot.updated_at = Some(now.clone());
-        work.snapshot.last_heartbeat = Some(now);
+        work.snapshot.last_heartbeat = Some(now.clone());
+        work.snapshot.started_at = Some(now.clone());
+        ask.snapshot.started_at = Some(now.clone());
         let mut failed = sample_run("failed-1", "cursor", "pane-old");
         failed.snapshot.root = Some("/tmp/ws-alpha".into());
         failed.snapshot.state = Some("failed".into());
         failed.kind = RunKind::Failed;
+        failed
+            .snapshot
+            .extra
+            .insert("completed_at".into(), serde_json::Value::String(now));
         failed
             .snapshot
             .extra
@@ -2316,6 +2363,38 @@ mod tests {
             .map(str::trim_end)
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn home_header_uses_board_counts_and_list_uses_full_height() {
+        let mut app = home_fixture_app();
+        let template = app
+            .state
+            .runs
+            .iter()
+            .find(|r| r.run_id == "work-1")
+            .unwrap()
+            .clone();
+        app.state.runs = (0..50)
+            .map(|i| {
+                let mut run = template.clone();
+                run.run_id = format!("row-{i:03}");
+                run
+            })
+            .collect();
+        app.runs.clear(); // Monitor's independent queue must not define ZEN's header.
+        let rendered = render_home_size(&app, 100, 40);
+        assert!(!rendered.contains("no live runs loaded"), "{rendered}");
+        assert!(rendered.contains("live 50"), "{rendered}");
+        assert!(
+            rendered.lines().nth(34).unwrap().contains("row-"),
+            "{rendered}"
+        );
+        app.observe.home.selected = 49;
+        let scrolled = render_home_size(&app, 100, 40);
+        assert!(scrolled.contains("row-049"), "{scrolled}");
+        assert!(app.observe.home.viewport_offset.get() > 0);
+        assert_eq!(home_row_index_at(&app, 32), Some(49));
     }
 
     #[test]
