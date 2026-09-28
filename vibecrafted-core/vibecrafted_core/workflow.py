@@ -213,68 +213,13 @@ def _run_id(skill: str) -> str:
 
 
 def _artifact_org_repo(root: str | Path) -> tuple[str, str] | None:
-    """Derive (org, repo) from the git origin remote, falling back to dir name."""
-    root_path = Path(root).expanduser()
-    remote = _origin_remote_url(root_path)
-    match = re.search(r"[:/]([^/]+)/([^/.]+)(?:\.git)?$", remote)
-    if match:
-        return match.group(1), match.group(2)
-    fallback = root_path.name.strip()
-    return ("local", fallback) if fallback else None
+    """``(org, repo)`` from origin. Unknown identity is None, never the dirname."""
+    from .runtime_receipt import ArtifactIdentityError, artifact_org_repo
 
-
-def _git_config_path(root: Path) -> Path | None:
-    """Resolve the git config file for ``root``, following worktree gitdir/commondir."""
-    git_entry = root / ".git"
-    if git_entry.is_dir():
-        return git_entry / "config"
-    if not git_entry.is_file():
-        return None
     try:
-        raw = git_entry.read_text(encoding="utf-8").strip()
-    except OSError:
+        return artifact_org_repo(root)
+    except ArtifactIdentityError:
         return None
-    if not raw.startswith("gitdir:"):
-        return None
-    git_dir = Path(raw.removeprefix("gitdir:").strip()).expanduser()
-    if not git_dir.is_absolute():
-        git_dir = (root / git_dir).resolve()
-    config = git_dir / "config"
-    if config.is_file():
-        return config
-    common_dir_file = git_dir / "commondir"
-    if common_dir_file.is_file():
-        try:
-            common = Path(common_dir_file.read_text(encoding="utf-8").strip())
-        except OSError:
-            return None
-        if not common.is_absolute():
-            common = (git_dir / common).resolve()
-        return common / "config"
-    return None
-
-
-def _origin_remote_url(root: Path) -> str:
-    """Read the ``[remote "origin"] url`` value from the resolved git config."""
-    config_path = _git_config_path(root)
-    if config_path is None or not config_path.is_file():
-        return ""
-    try:
-        lines = config_path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
-        return ""
-    in_origin = False
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
-            in_origin = stripped == '[remote "origin"]'
-            continue
-        if not in_origin or "=" not in stripped:
-            continue
-        key, value = stripped.split("=", 1)
-        if key.strip() == "url":
-            return value.strip()
-    return ""
 
 
 def _run_artifact_paths(run_id: str) -> dict[str, Path]:

@@ -58,6 +58,7 @@ def test_fail_g3_real_worktree_records_descendant_head_not_silent_drift(
     (repo / "README.md").write_text("seed\n", encoding="utf-8")
     _git(repo, "add", "README.md")
     _git(repo, "commit", "-q", "-m", "seed")
+    _git(repo, "remote", "add", "origin", "https://github.com/vetcoders/fixture.git")
     frozen = _git(repo, "rev-parse", "HEAD")
 
     (repo / "fix.txt").write_text("between-cut fix\n", encoding="utf-8")

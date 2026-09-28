@@ -67,6 +67,7 @@ def _repo(path: Path, *, rust: bool = False) -> str:
         )
     _git(path, "add", "-A")
     _git(path, "commit", "-q", "-m", "seed")
+    _git(path, "remote", "add", "origin", "https://github.com/vetcoders/fixture.git")
     return _git(path, "rev-parse", "HEAD")
 
 

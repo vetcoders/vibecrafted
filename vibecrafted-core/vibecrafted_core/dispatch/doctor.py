@@ -15,6 +15,7 @@ from vibecrafted_core.repository_claims import (
     RepositoryClaimRegistry,
 )
 from vibecrafted_core.runtime_paths import vibecrafted_home
+from vibecrafted_core.runtime_receipt import ArtifactIdentityError
 
 from .model import Dispatch
 from .schema import doctor_dispatch
@@ -102,11 +103,21 @@ def diagnose_runtime(
 ) -> tuple[DoctorError, ...]:
     """Falsify resolved worktree/report/control-plane receipts for a plan."""
     errors: list[DoctorError] = []
-    expected_artifacts = canonical_artifact_root(dispatch.meta.repo).resolve()
-    org, repo = repo_identity(dispatch.meta.repo)
+    expected_artifacts: Path | None
+    try:
+        expected_artifacts = canonical_artifact_root(dispatch.meta.repo).resolve()
+        org, repo = repo_identity(dispatch.meta.repo)
+    except ArtifactIdentityError as exc:
+        errors.append(DoctorError(str(dispatch.meta.repo), str(exc)))
+        expected_artifacts = None
+        org, repo = "", ""
     expected_worktrees = (
-        vibecrafted_home() / "worktrees" / org / repo / expected_artifacts.name
-    ).resolve()
+        (
+            vibecrafted_home() / "worktrees" / org / repo / expected_artifacts.name
+        ).resolve()
+        if expected_artifacts is not None
+        else None
+    )
     dispatches = control_plane_home() / "dispatches"
     receipt_paths = (
         sorted(dispatches.glob("*/receipts.json")) if dispatches.is_dir() else []
@@ -166,7 +177,12 @@ def diagnose_runtime(
             artifacts = Path(str(raw.get("artifact_path") or "")).expanduser()
             report_path = str(raw.get("report_path") or "")
             integrator = bool(raw.get("integrator_exclusivity"))
-            if worktree and str(worktree) != "." and not integrator:
+            if (
+                expected_worktrees is not None
+                and worktree
+                and str(worktree) != "."
+                and not integrator
+            ):
                 if not _is_within(worktree, expected_worktrees):
                     errors.append(
                         DoctorError(
@@ -189,7 +205,8 @@ def diagnose_runtime(
                         )
                     )
             if (
-                artifacts
+                expected_artifacts is not None
+                and artifacts
                 and str(artifacts) != "."
                 and artifacts.resolve() != expected_artifacts
             ):
@@ -203,7 +220,9 @@ def diagnose_runtime(
                 report_owners.setdefault(
                     str(Path(report_path).expanduser().resolve()), []
                 ).append(owner)
-                if not _is_within(Path(report_path), expected_artifacts):
+                if expected_artifacts is not None and not _is_within(
+                    Path(report_path), expected_artifacts
+                ):
                     errors.append(
                         DoctorError(
                             f"cuts.{cut_id}.report_path",

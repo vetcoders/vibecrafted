@@ -201,7 +201,8 @@ prompt = "canonical dispatch report prompt"
     assert run.report_path == env["VIBECRAFTED_REPORT_PATH"]
     assert run.meta_path == env["VIBECRAFTED_META_PATH"]
     assert command[command.index("--report") + 1] == run.report_path
-    assert "/artifacts/local/repo/" in run.report_path
+    assert "/artifacts/local/" not in run.report_path
+    assert "/.vibecrafted/reports/implement/" in run.report_path
     assert "/reports/implement/" in run.report_path
     assert "canonical-dispatch-report" not in Path(run.report_path).name
     assert "_codex_implement_" in Path(run.report_path).name

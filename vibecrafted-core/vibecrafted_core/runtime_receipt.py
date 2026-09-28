@@ -207,6 +207,91 @@ def checkout_branch(start: Path) -> str | None:
     return "HEAD"  # detached
 
 
+class ArtifactIdentityError(ValueError):
+    """Origin does not name an org/repo and no explicit org/repo was given."""
+
+
+_ORG_REPO_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
+def artifact_org_repo(
+    repo: str | Path, *, explicit: str | None = None
+) -> tuple[str, str]:
+    """Return ``(org, repo)`` for ``artifacts/<org>/<repo>``.
+
+    Identity is the forge origin (``git remote get-url origin``), or
+    ``explicit`` (``org/repo``). A resolved symlink path and the checkout
+    directory name are never an org.
+    """
+    if explicit is not None and str(explicit).strip():
+        parsed = _explicit_org_repo(str(explicit))
+        if parsed is None:
+            raise ArtifactIdentityError(
+                f"explicit artifact identity must be org/repo, got {explicit!r}"
+            )
+        return parsed
+    start = Path(repo).expanduser()
+    owner_repo = _artifact_owner_repo(start)
+    if owner_repo is None:
+        raise ArtifactIdentityError(
+            f"cannot derive artifacts org/repo from origin of {start}; "
+            "set a forge origin (https://host/org/repo) or pass org/repo explicitly"
+        )
+    org, _, name = owner_repo.partition("/")
+    return org, name
+
+
+def _explicit_org_repo(value: str) -> tuple[str, str] | None:
+    org, sep, name = value.strip().strip("/").partition("/")
+    if not sep or "/" in name:
+        return None
+    if not _ORG_REPO_SEGMENT.fullmatch(org) or not _ORG_REPO_SEGMENT.fullmatch(name):
+        return None
+    return org, name
+
+
+def _artifact_owner_repo(start: Path) -> str | None:
+    """Origin org/repo, including linked worktrees. Empty origin is unknown."""
+    url = _git_origin_url(start)
+    if url:
+        return _parse_owner_repo(url)
+    direct = owner_repo_from_git(start)
+    if direct:
+        return direct
+    git_dir = find_git_dir(start)
+    if git_dir is None:
+        return None
+    common_file = git_dir / "commondir"
+    try:
+        raw = common_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    common = Path(raw)
+    if not common.is_absolute():
+        common = (git_dir / common).resolve()
+    if common == git_dir:
+        return None
+    return owner_repo_from_git(common.parent)
+
+
+def _git_origin_url(start: Path) -> str:
+    """``git -C <start> remote get-url origin``. Does not resolve ``start``."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(start), "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except (FileNotFoundError, OSError):
+        return ""
+    if proc.returncode != 0:
+        return ""
+    return proc.stdout.strip()
+
+
 def owner_repo_from_git(start: Path) -> str | None:
     """Best-effort owner/repo from ``.git/config`` origin url. No cwd invent."""
     git_dir = find_git_dir(start)
@@ -232,19 +317,35 @@ def owner_repo_from_git(start: Path) -> str | None:
 
 
 def _parse_owner_repo(url: str) -> str | None:
-    """Extract ``owner/repo`` from an https or ssh-style git remote URL."""
-    url = url.rstrip("/")
-    url = url.removesuffix(".git")
-    # git@host:owner/repo  or  https://host/owner/repo
-    if ":" in url and not url.startswith("http"):
-        # ssh style host:path
-        path = url.split(":", 1)[-1]
+    """Extract ``owner/repo`` from a forge remote. Checkout paths are not an org."""
+    raw = url.strip().rstrip("/")
+    if not raw or raw.startswith(("/", "~", "file:")):
+        return None
+    if re.match(r"^[A-Za-z]:[\\/]", raw):
+        return None
+    text = raw.removesuffix(".git")
+    if "://" in text:
+        after = text.split("://", 1)[1]
+        host = after.split("/", 1)[0]
+        if "@" in host:
+            after = after.split("@", 1)[1]
+        slash = after.find("/")
+        if slash < 0:
+            return None
+        path = after[slash + 1 :]
+    elif ":" in text.split("/", 1)[0]:
+        path = text.split(":", 1)[1]
+        if path.startswith(("/", "~")):
+            return None
     else:
-        path = url
-    parts = [p for p in path.replace("\\", "/").split("/") if p]
-    if len(parts) >= 2:
-        return f"{parts[-2]}/{parts[-1]}"
-    return None
+        return None
+    parts = [part for part in path.replace("\\", "/").split("/") if part]
+    if len(parts) != 2:
+        return None
+    org, repo = parts
+    if not _ORG_REPO_SEGMENT.fullmatch(org) or not _ORG_REPO_SEGMENT.fullmatch(repo):
+        return None
+    return f"{org}/{repo}"
 
 
 # ---------------------------------------------------------------------------

@@ -542,20 +542,45 @@ def cut(
     return s
 
 
+def _plan_artifact_day(repo: Path, artifacts: str | None) -> Path:
+    """Day bucket for a plan. Origin or ``--artifacts``, never the checkout path."""
+    if artifacts:
+        return Path(artifacts).expanduser()
+    try:
+        from vibecrafted_core.runtime_receipt import (
+            ArtifactIdentityError,
+            artifact_org_repo,
+        )
+    except ImportError:
+        source_root = HERE.parents[4] if len(HERE.parents) > 4 else None
+        receipt = (
+            source_root / "vibecrafted_core" / "runtime_receipt.py"
+            if source_root is not None
+            else None
+        )
+        if receipt is None or not receipt.is_file():
+            die(
+                "artifact org/repo resolver is unavailable; pass --artifacts "
+                "(identity comes from git origin, never from the checkout path)"
+            )
+        sys.path.insert(0, str(source_root))
+        from vibecrafted_core.runtime_receipt import (
+            ArtifactIdentityError,
+            artifact_org_repo,
+        )
+    try:
+        org, name = artifact_org_repo(repo)
+    except ArtifactIdentityError as exc:
+        die(f"{exc}; pass --artifacts")
+    home = Path(os.environ.get("VIBECRAFTED_HOME", "~/.vibecrafted")).expanduser()
+    day = datetime.now(timezone.utc).strftime("%Y_%m%d")
+    return home / "artifacts" / org / name / day
+
+
 def cmd_plan(a: argparse.Namespace) -> None:
     work: Path = a.workdir
-    repo = Path(a.repo).resolve()
-    art = (
-        Path(a.artifacts).expanduser().resolve()
-        if a.artifacts
-        else (
-            Path(os.environ.get("VIBECRAFTED_HOME", "~/.vibecrafted")).expanduser()
-            / "artifacts"
-            / repo.parent.name
-            / repo.name
-            / datetime.now(timezone.utc).strftime("%Y_%m%d")
-        )
-    )
+    repo = Path(a.repo).expanduser()
+    art = _plan_artifact_day(repo, a.artifacts)
     plans = art / "plans"
     reports = art / "reports"
     plans.mkdir(parents=True, exist_ok=True)
