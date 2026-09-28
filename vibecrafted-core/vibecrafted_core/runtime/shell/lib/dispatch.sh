@@ -776,9 +776,7 @@ repo-full() {
     }
     {
       size=$1;
-      $1="";
-      sub(/^\t/, "", $0);
-      printf "%10s  %s\n", human(size), $0;
+      printf "%10s  %s\n", human(size), $2;
     }
   '
 
@@ -870,11 +868,11 @@ repo-full() {
 
   echo "==================== TOP 10 LARGEST TRACKED FILES ===================="
   if git ls-files -z | grep -q . 2>/dev/null; then
-    { git ls-files -z | xargs -0 stat -f "%z\t%N" 2>/dev/null ||
+    { git ls-files -z | xargs -0 stat -f "%z%t%N" 2>/dev/null ||
       git ls-files -z | xargs -0 stat -c "%s\t%n" 2>/dev/null; } \
       | sort -nr \
       | head -n 10 \
-      | awk "$_repo_full_human_awk"
+      | awk -F '\t' "$_repo_full_human_awk"
   else
     echo "No tracked files."
   fi

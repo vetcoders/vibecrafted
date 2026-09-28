@@ -842,10 +842,10 @@ fn doctor_r12_refuses_forged_founder_signature() {
     populate(&root, "plan-forged");
     let driver = fs::read_to_string(root.join("DRIVER.md")).expect("driver");
     let forged = driver.replace(
-        "Zatwierdzono przez: Worker [ ] Operator [ ] Founder [ ]",
-        "Zatwierdzono przez: Worker [x] Operator [x] Founder [x]",
+        "| W1-01 | — | — | [ ] | [ ] | [ ] |",
+        "| W1-01 | — | — | [x] | [x] | [x] |",
     );
-    assert_ne!(driver, forged, "fixture must carry the signature line");
+    assert_ne!(driver, forged, "fixture must carry the reception row");
     fs::write(root.join("DRIVER.md"), forged).expect("driver rewrite");
 
     let store = ScaffoldArtifactStore::new(&home);
@@ -872,5 +872,37 @@ fn doctor_r12_refuses_forged_founder_signature() {
         .doctor("vetcoders", "vibecrafted", "2026_0720", "plan-forged")
         .expect("doctor");
     assert!(report.valid, "{:?}", report.errors);
+    fs::remove_dir_all(home).ok();
+}
+
+#[test]
+fn doctor_r12_ignores_checked_founder_explanation_outside_table() {
+    let home = temp_home("r12-explanatory-prose");
+    let root = write_plan(&home, "plan-explanation", declarations());
+    populate(&root, "plan-explanation");
+    let driver = fs::read_to_string(root.join("DRIVER.md")).expect("driver");
+    fs::write(
+        root.join("DRIVER.md"),
+        format!("{driver}\nFounder [x] requires acceptance evidence.\n"),
+    )
+    .expect("driver rewrite");
+
+    let report = ScaffoldArtifactStore::new(&home)
+        .doctor(
+            "vetcoders",
+            "vibecrafted",
+            "2026_0720",
+            "plan-explanation",
+        )
+        .expect("doctor");
+
+    assert!(
+        !report.errors.iter().any(|error| {
+            error.code == "reception_matrix"
+                && error.message.contains("acceptance/founder.json")
+        }),
+        "errors={:?}",
+        report.errors
+    );
     fs::remove_dir_all(home).ok();
 }

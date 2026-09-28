@@ -5432,9 +5432,22 @@ _scaffold_doctor_source_roots() {
   unset -f _scaffold_doctor_emit_root
 }
 
-# Prefer release → debug under each root. Returns 0 and prints path when found.
+# Prefer the selected Runtime Pack, then release → debug under each source root.
+# Returns 0 and prints the executable path when found.
 _scaffold_doctor_find_bin() {
   local root candidate
+  candidate="${VIBECRAFTED_RUNTIME_BIN:+$VIBECRAFTED_RUNTIME_BIN/scaffold-doctor}"
+  if [[ -n "$candidate" && -x "$candidate" ]]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  if [[ -n "${VIBECRAFTED_ROOT:-}" && -f "$VIBECRAFTED_ROOT/runtime-manifest.json" ]]; then
+    candidate="$VIBECRAFTED_ROOT/bin/scaffold-doctor"
+    if [[ -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  fi
   while IFS= read -r root; do
     [[ -n "$root" ]] || continue
     for candidate in \

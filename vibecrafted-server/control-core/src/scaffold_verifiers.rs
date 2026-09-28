@@ -76,13 +76,23 @@ pub fn execute_brief_verifiers(
     manifest: &ScaffoldManifest,
     errors: &mut Vec<ScaffoldDoctorError>,
 ) {
+    execute_brief_verifiers_in_repo(plan_root, manifest, None, errors);
+}
+
+/// Execute brief verifiers with an explicit checkout for repo-sensitive probes.
+pub fn execute_brief_verifiers_in_repo(
+    plan_root: &Path,
+    manifest: &ScaffoldManifest,
+    repo_root: Option<&Path>,
+    errors: &mut Vec<ScaffoldDoctorError>,
+) {
     let mut saw_brief = false;
     for artifact in &manifest.artifacts {
         if artifact.role != ScaffoldArtifactRole::Brief {
             continue;
         }
         saw_brief = true;
-        inspect_brief(plan_root, artifact, errors);
+        inspect_brief(plan_root, repo_root, artifact, errors);
     }
     if !saw_brief {
         errors.push(doctor_error(
@@ -109,6 +119,7 @@ pub fn extract_brief_verifier_commands(content: &str) -> Vec<String> {
 
 fn inspect_brief(
     plan_root: &Path,
+    repo_root: Option<&Path>,
     artifact: &ScaffoldArtifactDeclaration,
     errors: &mut Vec<ScaffoldDoctorError>,
 ) {
@@ -138,7 +149,7 @@ fn inspect_brief(
             continue;
         }
         let bound = bound_command(&command);
-        match run_probe(&bound, cwd_for(&bound, plan_root)) {
+        match run_probe(&bound, cwd_for(&bound, plan_root, repo_root)) {
             ProbeOutcome::Ok => {}
             ProbeOutcome::NoToday { exit_code } => {
                 errors.push(doctor_error(
@@ -337,7 +348,7 @@ fn unsafe_reason(command: &str) -> Option<&'static str> {
     None
 }
 
-fn cwd_for(command: &str, plan_root: &Path) -> PathBuf {
+fn cwd_for(command: &str, plan_root: &Path, repo_root: Option<&Path>) -> PathBuf {
     if let Ok(root) = std::env::var("SCAFFOLD_VERIFIER_CWD") {
         let path = PathBuf::from(root);
         if path.is_dir() {
@@ -345,6 +356,11 @@ fn cwd_for(command: &str, plan_root: &Path) -> PathBuf {
         }
     }
     if needs_repo(command) {
+        if let Some(path) = repo_root
+            && path.is_dir()
+        {
+            return path.to_path_buf();
+        }
         if let Ok(root) = std::env::var("VIBECRAFTED_REPO_ROOT") {
             let path = PathBuf::from(root);
             if path.is_dir() {
@@ -371,6 +387,9 @@ fn needs_repo(command: &str) -> bool {
         || lower.contains("uv ")
         || lower.contains("semgrep")
         || lower.contains("mypy")
+        || lower.starts_with("test ")
+        || lower.starts_with("ls ")
+        || lower.starts_with("cat ")
 }
 
 fn nearest_git(start: Option<&Path>) -> Option<PathBuf> {

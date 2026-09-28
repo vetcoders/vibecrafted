@@ -44,8 +44,6 @@ FORBIDDEN_COMMAND_NEEDLES = (
     "git reset --hard",
     "git clean -fd",
     "git clean -xdf",
-    "make release",
-    "release",
     "rm -rf /",
     "vc-release",
     "vibecrafted release",
@@ -916,6 +914,9 @@ def _validate_command(run: str, prefix: str, errors: list[str]) -> None:
     for needle in FORBIDDEN_COMMAND_NEEDLES:
         if needle in lowered:
             errors.append(f"{prefix}.run: forbidden hard-stop command {needle!r}")
+    tokens = shlex.split(run) if _can_shlex(run) else re.split(r"[\s;&|()]+", lowered)
+    if any(token.lower() == "release" for token in tokens):
+        errors.append(f"{prefix}.run: forbidden hard-stop command 'release'")
 
 
 def _can_shlex(value: str) -> bool:
