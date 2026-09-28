@@ -2,14 +2,14 @@
 source: tui-agent/src/ui.rs
 expression: snapshot_without_terminal_padding(&rendered)
 ---
-Voc ZEN  [Global]  no live runs loaded
+Voc ZEN  [Global]  Live · 0 runs
 live 0  attention 0  failed 0  · attention working rule on
-┌ Live · Needs attention (working rule) · Failed ──────────────────────────────┐
+┌ Live · date ↓ · h History ───────────────────────────────────────────────────┐
 │Live                                                                          │
 │  —                                                                           │
 │Needs attention · working rule                                                │
 │  —                                                                           │
-│Failed                                                                        │
+│Failed · last 24h                                                             │
 │  —                                                                           │
 │                                                                              │
 │                                                                              │
@@ -23,6 +23,6 @@ live 0  attention 0  failed 0  · attention working rule on
 │                                                                              │
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
-↑/↓ select · Enter observe · g goto · r resume · f scope · Tab panels · q quit
+↑/↓ select · Enter observe · g goto · h history · x archive · f scope · Tab pane
 state root: /tmp/state
 › /query  !observe <run>  !goto <run>  !resume <run>  █

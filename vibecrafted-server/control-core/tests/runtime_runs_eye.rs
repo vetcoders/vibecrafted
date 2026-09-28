@@ -462,6 +462,10 @@ fn overlay_does_not_stamp_final_from_contradictory_running_meta() {
     let runs_dir = home.join("control_plane").join("runs");
     fs::create_dir_all(&runs_dir).expect("runs dir");
     write_snapshot(&runs_dir, "work-live", "running", None);
+    let path = runs_dir.join("work-live.json");
+    let mut snapshot: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    snapshot["updated_at"] = json!(Utc::now().to_rfc3339());
+    fs::write(path, snapshot.to_string()).unwrap();
 
     let run_dir = home
         .join("control_plane")

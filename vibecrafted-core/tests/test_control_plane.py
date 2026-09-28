@@ -477,7 +477,7 @@ def test_sync_state_publishes_lifecycle_control_availability(
             "agent": "codex",
             "mode": "workflow",
             "root": str(tmp_path),
-            "updated_at": "2026-05-19T00:00:00+00:00",
+            "updated_at": control_plane._now().isoformat(),
             "skill_code": "wflw",
             "worker_pgid": 23456,
             "prompt": "continue",
@@ -530,8 +530,9 @@ def test_sync_state_publishes_lifecycle_control_availability(
         "resume": True,
         "recovery_required": False,
     }
+    assert runs["rvew-010104-42"]["state"] == "failed"
     assert runs["rvew-010104-42"]["lifecycle"] == {
-        "await": True,
+        "await": False,
         "inspect": True,
         "stop": False,
         "cancel": False,
@@ -1117,9 +1118,13 @@ def test_sync_state_active_truth_quarantines_pytest_events_and_separates_stalls(
         snapshot = control_plane.sync_state()
 
         assert [run["run_id"] for run in snapshot["active_runs"]] == ["live-worker"]
-        assert [run["run_id"] for run in snapshot["stalled_runs"]] == [
-            "definitely-missing"
-        ]
+        assert snapshot["stalled_runs"] == []
+        missing = next(
+            run
+            for run in snapshot["recent_runs"]
+            if run["run_id"] == "definitely-missing"
+        )
+        assert missing["terminal_reason"] == "orphaned_no_live_process"
         projected_ids = {
             run["run_id"]
             for bucket in ("active_runs", "stalled_runs", "recent_runs")
@@ -1131,17 +1136,15 @@ def test_sync_state_active_truth_quarantines_pytest_events_and_separates_stalls(
         )
         assert snapshot["settlement_counts"] == {
             "f": 0,
-            "x": 0,
+            "x": 1,
             "n": 0,
-            "total_settled": 0,
+            "total_settled": 1,
             "orphans": 0,
         }
 
         replayed = control_plane.sync_state()
         assert [run["run_id"] for run in replayed["active_runs"]] == ["live-worker"]
-        assert [run["run_id"] for run in replayed["stalled_runs"]] == [
-            "definitely-missing"
-        ]
+        assert replayed["stalled_runs"] == []
 
 
 def test_sync_state_never_resurrects_guardian_settlement_as_stalled(
@@ -1652,17 +1655,16 @@ def test_sync_state_reaps_stale_lock_present_run_without_launcher_pid(
     run = snapshot["recent_runs"][0]
 
     assert lock.exists()
-    assert run["state"] == "stalled"
-    assert run["health"] == "stalled"
+    assert run["state"] == "failed"
+    assert run["health"] == "final"
     assert run["liveness"] == "pid_gone"
     assert run["launcher_pid"] is None
     assert run["heartbeat_at"] == "2026-06-11T06:31:41Z"
     assert run["lock_present"] is True
-    assert run["recovery_required"] is True
+    assert run["recovery_required"] is False
     assert run["lifecycle"]["recovery_required"] is True
-    assert "launcher_pid is missing" in run["last_error"]
-    assert "no live launcher proof" in run["last_error"]
-    assert "lock file remains present" in run["last_error"]
+    assert run["terminal_reason"] == "orphaned_no_live_process"
+    assert "No live process remains" in run["last_error"]
 
 
 def test_sync_state_leaves_fresh_lock_present_run_running(
@@ -1791,6 +1793,7 @@ def test_sync_state_archives_old_terminal_snapshots_only(
         json.dumps(
             {
                 "run_id": "old-active",
+                "launcher_pid": os.getpid(),
                 "state": "running",
                 "health": "active",
                 "updated_at": "2026-05-19T00:00:00+00:00",
@@ -2422,7 +2425,7 @@ def test_block_run_lever_pins_terminal_blocked_state(
     events.write_text(
         json.dumps(
             {
-                "ts": "2026-05-19T00:02:00+00:00",
+                "ts": control_plane._now().isoformat(),
                 "run_id": "wflw-333333-3333",
                 "kind": "lifecycle:active",
                 "message": "process active",
@@ -3259,3 +3262,110 @@ def test_a_growing_transcript_alone_is_not_a_refreshed_transition(monkeypatch) -
 
     control_plane._record_transition(previous, {**current, "state": "completed"})
     assert [event["message"] for event in emitted] == ["work-talking entered completed"]
+
+
+@pytest.mark.parametrize("state", ["launching", "active", "prepared"])
+def test_ownerless_old_run_reconciles_without_rewriting_meta(
+    monkeypatch, tmp_path, state
+):
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        control_plane, "_worker_process_truth", lambda run: (False, "missing")
+    )
+    old = "2026-03-01T00:00:00+00:00"
+    meta = _write_meta(
+        tmp_path,
+        {
+            "run_id": "old-ownerless",
+            "status": state,
+            "agent": "codex",
+            "started_at": old,
+            "updated_at": old,
+            "liveness": "pid_alive",
+        },
+    )
+    before = meta.read_bytes()
+    first = control_plane.lookup_run("old-ownerless")
+    second = control_plane.lookup_run("old-ownerless")
+    assert first["state"] == "failed"
+    assert first["terminal_reason"] == "orphaned_no_live_process"
+    assert first["completed_at"] == second["completed_at"]
+    assert meta.read_bytes() == before
+
+
+def test_orphan_reconcile_preserves_launch_grace_and_cancelled(monkeypatch):
+    monkeypatch.setattr(
+        control_plane, "_worker_process_truth", lambda run: (False, "missing")
+    )
+    fresh = {
+        "state": "launching",
+        "updated_at": control_plane._now().isoformat(),
+        "liveness": "pid_alive",
+    }
+    assert control_plane._reconcile_dead_launcher(fresh) == fresh
+    cancelled = {"state": "cancelled", "liveness": "terminal", "owner_pid": 99999999}
+    assert control_plane._reconcile_dead_launcher(cancelled) == cancelled
+
+
+def test_orphan_reconcile_runtime_meta_is_immutable_and_scoped(monkeypatch, tmp_path):
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path))
+    run_dir = tmp_path / "control_plane/runtime_runs/old-runtime"
+    run_dir.mkdir(parents=True)
+    meta = run_dir / "meta.json"
+    meta.write_text(
+        json.dumps(
+            {
+                "run_id": "old-runtime",
+                "status": "launching",
+                "agent": "codex",
+                "updated_at": "2026-03-01T00:00:00Z",
+                "worker_pid": 99999999,
+            }
+        )
+    )
+    runs_dir = tmp_path / "control_plane/runs"
+    runs_dir.mkdir()
+    sibling = runs_dir / "unrelated.json"
+    sibling.write_text(
+        json.dumps(
+            {
+                "run_id": "unrelated",
+                "state": "active",
+                "updated_at": "2026-03-01T00:00:00Z",
+            }
+        )
+    )
+    # The writer discovers the legacy artifact/event source; runtime meta is
+    # the immutable canonical receipt alongside that source.
+    _write_meta(tmp_path, json.loads(meta.read_text()))
+    before, sibling_before = meta.read_bytes(), sibling.read_bytes()
+    first = control_plane.lookup_run("old-runtime")
+    assert first["state"] == "failed"
+    second = control_plane.lookup_run("old-runtime")
+    assert second["completed_at"] == first["completed_at"]
+    assert meta.read_bytes() == before
+    assert sibling.read_bytes() == sibling_before
+    events = [
+        event
+        for event in control_plane.read_event_tail()
+        if event.get("payload", {}).get("terminal_reason") == "orphaned_no_live_process"
+    ]
+    assert len(events) == 1
+    assert events[0]["payload"]["reconciled_at"]
+
+
+@pytest.mark.parametrize("state", ["launching", "active", "prepared"])
+def test_recycled_launcher_does_not_keep_old_run_live(monkeypatch, state):
+    monkeypatch.setattr(
+        control_plane, "_worker_process_truth", lambda run: (False, "no_worker")
+    )
+    run = {
+        "run_id": "old-launcher",
+        "state": state,
+        "launcher_pid": os.getpid(),
+        "updated_at": "2026-03-01T00:00:00Z",
+        "liveness": "pid_alive",
+    }
+    result = control_plane._reconcile_dead_launcher(run)
+    assert result["state"] == "failed"
+    assert result["terminal_reason"] == "orphaned_no_live_process"

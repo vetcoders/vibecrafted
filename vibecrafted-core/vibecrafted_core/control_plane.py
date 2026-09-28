@@ -525,7 +525,11 @@ def _write_run_snapshot(
 
         settlement = settlement_from_payload(payload)
         runtime_meta = _runtime_run_dir(run_id) / "meta.json"
-        if settlement is not None and runtime_meta.is_file():
+        if (
+            settlement is not None
+            and runtime_meta.is_file()
+            and payload.get("terminal_reason") != "orphaned_no_live_process"
+        ):
             if revision is None or revision <= 0:
                 return dict(current or {})
             if not persist_settlement_to_meta(
@@ -1192,8 +1196,58 @@ def _reconcile_dead_launcher(run: dict[str, Any]) -> dict[str, Any]:
 
     if _run_is_terminal(result):
         return result
-    if state not in ACTIVE_STATES - {"paused"}:
+    if state not in (ACTIVE_STATES - {"paused"}) | {"prepared"}:
         return result
+    # Legacy launches can have no launcher identity at all. A stale pid_alive
+    # string cannot keep these in Live forever. This is a projection verdict,
+    # not a rewrite of the historical launcher receipt.
+    age = _activity_age_seconds(result, _now())
+    if (
+        (launcher_pid is None or state in {"launching", "active", "prepared"})
+        and age is not None
+        and age > RUN_STALL_SECONDS
+    ):
+        recorded_alive = any(
+            _pid_is_alive(pid)
+            for pid in (
+                _coerce_int(result.get("worker_pid")),
+                _coerce_int(result.get("worker_pgid")),
+            )
+            if pid is not None
+        )
+        pgid = _coerce_int(result.get("worker_pgid"))
+        if pgid is not None and pgid > 1 and hasattr(os, "killpg"):
+            try:
+                os.killpg(pgid, 0)
+                recorded_alive = True
+            except ProcessLookupError:
+                pass
+            except OSError:
+                # Permission/unknown probe failures are not proof of death.
+                recorded_alive = True
+        has_worker_target = any(
+            _coerce_int(result.get(key)) is not None
+            for key in ("worker_pid", "worker_pgid")
+        )
+        if not recorded_alive and (liveness != "pid_alive" or not has_worker_target):
+            # The cutoff is stable history; reconciled_at records observation.
+            # It is not proof of the exact process-exit time.
+            stamp = (_now() - dt.timedelta(seconds=age - RUN_STALL_SECONDS)).isoformat()
+            result.update(
+                state="failed",
+                health="final",
+                liveness="pid_gone",
+                worker_alive=False,
+                completed_at=stamp,
+                updated_at=stamp,
+                terminal_reason="orphaned_no_live_process",
+                reconciled_at=_now().isoformat(),
+                process_truth="orphaned",
+                process_truth_reason=process_reason,
+                recovery_required=False,
+                last_error="No live process remains for this old run. Observe its transcript or archive it.",
+            )
+            return result
     if liveness == "pid_alive":
         has_worker_target = any(
             _coerce_int(result.get(key)) is not None
@@ -3005,6 +3059,9 @@ def _record_transition(
                 "session_id": current.get("session_id"),
                 "liveness": current.get("liveness"),
                 "launcher_pid": current.get("launcher_pid"),
+                "terminal_reason": current.get("terminal_reason"),
+                "reconciled_at": current.get("reconciled_at"),
+                "completed_at": current.get("completed_at"),
                 "heartbeat_at": current.get("heartbeat_at"),
                 "recovery_required": current.get("recovery_required"),
                 "last_error": current.get("last_error"),
@@ -3633,6 +3690,15 @@ def _project_run_payload(
         and _coerce_int(incoming.get("exit_code")) is None
     ):
         return dict(previous)
+    if (
+        previous is not None
+        and previous.get("terminal_reason") == "orphaned_no_live_process"
+        and incoming.get("state") in ACTIVE_STATES | {"prepared"}
+        and not _has_success_evidence(incoming)
+        and not _worker_is_alive(incoming)
+        and (_activity_age_seconds(incoming, _now()) or 0) > RUN_STALL_SECONDS
+    ):
+        return dict(previous)
     payload = _artifact_projection(incoming, previous)
     payload = _reconcile_dead_launcher(payload)
     run_dir = _runtime_run_dir(run_id)
@@ -3851,7 +3917,12 @@ def sync_state(only_run_id: str | None = None) -> dict[str, Any]:
             seen_ids = {str(run.get("run_id") or "") for run in payload_runs}
             for run_id, prev in previous_snapshots.items():
                 if run_id not in seen_ids:
-                    payload_runs.append(prev)
+                    reconciled = _reconcile_dead_launcher(prev)
+                    payload_runs.append(
+                        _write_run_snapshot(_snapshot_path(run_id), prev, reconciled)
+                        if reconciled != prev
+                        else prev
+                    )
             _archive_expired_snapshots()
             _rotate_event_stream()
 

@@ -1055,19 +1055,20 @@ impl ControlPlane {
             let terminal = run.is_terminal();
             if terminal {
                 run.health = "final".to_string();
-            } else if live_worker_runs.contains(&run.run_id) {
+            } else if live_worker_runs.contains(&run.run_id) || run_has_live_process(run) {
                 run.worker_alive = Some(true);
                 run.health = "active".to_string();
             } else {
-                if run.worker_pid.is_some() || run.worker_pgid.is_some() {
-                    run.worker_alive = Some(false);
-                }
+                // A cached boolean is not a liveness probe.
+                run.worker_alive = Some(false);
                 if run.owner_pid.is_some() && run.worker_alive == Some(false) {
                     run.health = "stalled".to_string();
                     run.liveness = "pid_gone".to_string();
                     run.recovery_required = true;
                 }
             }
+            reconcile_orphaned(run, now);
+            let terminal = run.is_terminal();
             let await_run = !terminal
                 && run
                     .controls
@@ -1896,6 +1897,63 @@ fn enrich_run_status(run: &mut RunStatus, payload: &serde_json::Value, probe_wor
     run.set_controls(await_run, stop, retry);
 }
 
+/// Read-only liveness verdict; settlement and canonical meta remain writer-owned.
+fn reconcile_orphaned(run: &mut RunStatus, now: DateTime<Utc>) {
+    if run.is_terminal()
+        || !(crate::model::is_active_state(&run.state) || run.state == "prepared")
+        || run.state == "paused"
+        || run.worker_alive == Some(true)
+        || run_has_live_process(run)
+    {
+        return;
+    }
+    let activity = parse_iso(&run.updated_at).or_else(|| parse_iso(&run.started_at));
+    let transcript = modified_at(Path::new(&run.latest_transcript)).map(DateTime::<Utc>::from);
+    let Some(stamp) = activity.into_iter().chain(transcript).max() else {
+        return;
+    };
+    if (now - stamp).num_seconds() <= RUN_STALL_SECONDS {
+        return;
+    }
+    run.state = "failed".into();
+    run.health = "final".into();
+    run.worker_alive = Some(false);
+    run.liveness = "pid_gone".into();
+    run.process_truth = "orphaned".into();
+    run.process_truth_reason = "orphaned_no_live_process".into();
+    // Deterministic stale cutoff, not a fabricated exact process-exit time.
+    // Consumers identify this inference through process_truth=orphaned.
+    run.completed_at = (stamp + chrono::Duration::seconds(RUN_STALL_SECONDS)).to_rfc3339();
+    run.last_error =
+        "No live process remains for this old run. Observe its transcript or archive it.".into();
+    run.set_controls(false, false, false);
+}
+
+fn run_has_live_process(run: &RunStatus) -> bool {
+    [run.worker_pid, run.owner_pid]
+        .into_iter()
+        .flatten()
+        .any(pid_is_alive)
+        || run.worker_pgid.is_some_and(pgid_is_alive)
+}
+
+#[cfg(unix)]
+fn pgid_is_alive(pgid: i64) -> bool {
+    let Ok(pgid) = libc::pid_t::try_from(pgid) else {
+        return false;
+    };
+    if pgid <= 1 {
+        return false;
+    }
+    // SAFETY: signal zero only observes whether the recorded group exists.
+    unsafe { libc::kill(-pgid, 0) == 0 }
+}
+
+#[cfg(not(unix))]
+fn pgid_is_alive(pgid: i64) -> bool {
+    pid_is_alive(pgid)
+}
+
 fn refresh_worker_liveness(run: &mut RunStatus) {
     if run.is_terminal() {
         run.worker_alive = Some(false);
@@ -2355,6 +2413,46 @@ mod tests {
             }
         }
         panic!("could not allocate an isolated fixture home")
+    }
+
+    #[test]
+    fn old_ownerless_runs_leave_live_without_mutating_history() {
+        let home = temp_home("orphan-projection");
+        let runs = home.join("control_plane/runs");
+        fs::create_dir_all(&runs).unwrap();
+        let now = Utc::now();
+        let old = (now - Duration::days(180)).to_rfc3339();
+        for (id, state, stamp, pid) in [
+            ("old-launch", "launching", old.clone(), None),
+            ("old-active", "active", old.clone(), Some(99999999)),
+            (
+                "live",
+                "active",
+                old.clone(),
+                Some(i64::from(std::process::id())),
+            ),
+            ("new-launch", "launching", now.to_rfc3339(), None),
+        ] {
+            let payload = json!({"run_id":id,"state":state,"agent":"codex","skill":"workflow",
+                "mode":"headless","root":"/repo","operator_session":"","latest_report":"",
+                "latest_transcript":"","last_error":"","started_at":stamp,"updated_at":stamp,
+                "health":"active","source":"meta","lock_present":false,"worker_pid":pid,
+                "launcher_pid": std::process::id(), "worker_alive": true});
+            fs::write(runs.join(format!("{id}.json")), payload.to_string()).unwrap();
+        }
+        let before = fs::read(runs.join("old-launch.json")).unwrap();
+        let plane = ControlPlane::new(&home);
+        let view = plane.compute_view(now);
+        let active: Vec<_> = view.active_runs.iter().map(|r| r.run_id.as_str()).collect();
+        assert!(active.contains(&"live"));
+        assert!(active.contains(&"new-launch"));
+        assert!(!active.contains(&"old-launch"));
+        assert!(view.stalled_runs.is_empty());
+        let orphan = plane.derived_run("old-launch", now).unwrap();
+        assert_eq!(orphan.state, "failed");
+        assert!(!orphan.completed_at.is_empty());
+        assert_eq!(fs::read(runs.join("old-launch.json")).unwrap(), before);
+        fs::remove_dir_all(home).unwrap();
     }
 
     #[test]

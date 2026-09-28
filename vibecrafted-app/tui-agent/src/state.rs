@@ -35,35 +35,37 @@ impl ControlPlaneState {
         let archived_run_ids = root.load_archived_run_ids()?;
         let mut retained_runs = root.load_runs()?;
         let usage = UsageDashboard::load(root.as_path())?;
-        let canonical =
-            ControlPlane::from_control_plane_home(root.as_path()).compute_view(Utc::now());
-        let run_routing = canonical.run_routing.clone();
+        let plane = ControlPlane::from_control_plane_home(root.as_path());
+        let derived = plane.derived_runs(Utc::now());
+        let run_routing = plane.load_run_routing();
         for snapshot in &mut retained_runs {
             replace_run_routing(snapshot, run_routing.get(&snapshot.run_id));
         }
-        let canonical_runtime_authority = root.as_path().join("events.jsonl").is_file()
-            || !canonical.active_runs.is_empty()
-            || !canonical.stalled_runs.is_empty();
         let mut runs = retained_runs
             .iter()
             .filter(|snapshot| !archived_run_ids.contains(&snapshot.run_id))
-            .filter(|snapshot| !canonical_runtime_authority || !snapshot.is_runtime_inflight())
             .cloned()
             .map(|snapshot| (snapshot.run_id.clone(), snapshot))
             .collect::<HashMap<_, _>>();
-        for run in canonical
-            .active_runs
-            .into_iter()
-            .chain(canonical.stalled_runs)
-        {
-            if !archived_run_ids.contains(&run.run_id) {
-                let routing = run_routing.get(&run.run_id);
-                runs.insert(run.run_id.clone(), canonical_run_snapshot(run, routing));
+        // Consume every derived verdict, including old orphans outside the
+        // capped recent window. Dropping these would resurrect raw snapshots.
+        for run in derived {
+            if archived_run_ids.contains(&run.run_id) {
+                continue;
             }
+            let routing = run_routing.get(&run.run_id);
+            let mut snapshot = canonical_run_snapshot(run, routing);
+            if let Some(retained) = runs.remove(&snapshot.run_id) {
+                let mut extra = retained.extra;
+                extra.extend(snapshot.extra);
+                snapshot.extra = extra;
+                replace_run_routing(&mut snapshot, routing);
+            }
+            runs.insert(snapshot.run_id.clone(), snapshot);
         }
         let runs = runs.into_values().collect();
-        let events = canonical
-            .events
+        let events = plane
+            .read_event_tail(control_core::EVENT_TAIL_LIMIT)
             .into_iter()
             .map(canonical_run_event)
             .collect();
@@ -197,9 +199,10 @@ impl RunSnapshot {
         .filter(|value| !value.is_empty())
     }
 
-    fn is_runtime_inflight(&self) -> bool {
+    pub fn is_runtime_inflight(&self) -> bool {
         let state = self.display_state().to_lowercase();
         let terminal = is_final_state(&state)
+            || matches!(state.as_str(), "cancelled" | "killed_by_operator")
             || self
                 .extra
                 .get("liveness")
@@ -378,8 +381,21 @@ pub fn classify_run(snapshot: &RunSnapshot, now: DateTime<Utc>) -> RunKind {
             RunKind::Completed
         };
     }
-    if snapshot.last_error.is_some() || state.contains("fail") || state.contains("error") {
+    if snapshot
+        .last_error
+        .as_deref()
+        .is_some_and(|error| !error.trim().is_empty())
+        || state.contains("fail")
+        || state.contains("error")
+        || matches!(
+            state.as_str(),
+            "report_missing" | "report_invalid" | "ghost"
+        )
+    {
         return RunKind::Failed;
+    }
+    if matches!(state.as_str(), "cancelled" | "killed_by_operator") {
+        return RunKind::Completed;
     }
     if canonical_health == Some("stalled") || state.contains("stalled") {
         return RunKind::Stalled;
@@ -635,6 +651,14 @@ fn canonical_run_snapshot(run: CanonicalRunStatus, routing: Option<&RunRouting>)
     let mut extra = HashMap::new();
     extra.insert("health".to_string(), Value::String(run.health.clone()));
     extra.insert("source".to_string(), Value::String(run.source.clone()));
+    extra.insert(
+        "process_truth".to_string(),
+        Value::String(run.process_truth.clone()),
+    );
+    extra.insert(
+        "process_truth_reason".to_string(),
+        Value::String(run.process_truth_reason.clone()),
+    );
     if !run.completed_at.trim().is_empty() {
         extra.insert(
             "completed_at".to_string(),
