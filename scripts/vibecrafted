@@ -534,8 +534,11 @@ _vibecrafted_owned_python() {
       printf '%s\n' "$runtime_root/bin/python3"
       return 0
     fi
+    # Warn, but keep resolving: a source checkout still owns its .venv even
+    # when the selected runtime home has no interpreter (isolated test homes,
+    # partial runtimes). Hard-returning here used to strand source checkouts
+    # on a host python3 that can be older than vibecrafted_core requires.
     printf 'vibecrafted: selected runtime Python missing: %s/bin/python3\n' "$runtime_root" >&2
-    return 1
   fi
   if [[ -n "${VIBECRAFTED_PYTHON:-}" && -x "$VIBECRAFTED_PYTHON" ]] \
     && _vibecrafted_python_owned_by_current "$VIBECRAFTED_PYTHON"; then
@@ -543,10 +546,17 @@ _vibecrafted_owned_python() {
     return 0
   fi
   if _is_framework_source_root "$(_script_owner_root)"; then
-    py="$(_script_owner_root)/vibecrafted-core/.venv/bin/python"
-    [[ -x "$py" ]] || return 1
-    printf '%s\n' "$py"
-    return 0
+    # The development venv moved from vibecrafted-core/.venv to the checkout
+    # root; own whichever layout this checkout actually carries.
+    for py in \
+      "$(_script_owner_root)/vibecrafted-core/.venv/bin/python" \
+      "$(_script_owner_root)/.venv/bin/python"; do
+      if [[ -x "$py" ]]; then
+        printf '%s\n' "$py"
+        return 0
+      fi
+    done
+    return 1
   fi
   for resolved in \
     "$(command -v vc-server-supervisor 2>/dev/null || true)" \
@@ -581,7 +591,14 @@ _vibecrafted_python() {
   _vibecrafted_owned_python && return 0
   # A partial physical runtime must never borrow the host interpreter.
   _is_installed_generation_root "$(_script_owner_root)" && return 1
-  command -v python3 2>/dev/null || command -v python 2>/dev/null || printf 'python3\n'
+  # vibecrafted_core.cli requires >=3.11 (tomllib); a bare `python3` on a
+  # login PATH can be a stub too old to import the core. Prefer versioned
+  # interpreters, mirroring _telemetry_python's order.
+  local candidate
+  for candidate in python3.13 python3.12 python3.11 python3 python; do
+    command -v "$candidate" 2>/dev/null && return 0
+  done
+  printf 'python3\n'
 }
 
 _run_core_help() {

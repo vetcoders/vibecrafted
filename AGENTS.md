@@ -910,7 +910,7 @@ write here.
 
 ### Known Slow Or Flaky Checks
 
-- `tests/tui/test_research_launcher.py` ×3 (settle timeouts) and `test_dashboard_subcommand_launches_repo_owned_vc_frame_layout` are pre-existing red on some hosts — confirm against a clean HEAD before attributing.
+- `tests/tui/test_research_launcher.py` and `test_dashboard_subcommand_launches_repo_owned_vc_frame_layout` were host-red until 2026-09-28 — root cause was the deck interpreter resolver falling back to a tomllib-less host `python3` under login shells and probing only the retired `vibecrafted-core/.venv` path (fixed in `_vibecrafted_python`; rerun this file standalone when touching the resolver). Remaining timing-sensitive failures still need a clean-HEAD comparison before attributing.
 - `tests/tui/*` and `vibecrafted-core/tests/*` must run as separate pytest invocations (conftest collision).
 - pytest can leak a real workspace into `~/.vibecrafted/control_plane` and export `VIBECRAFTED_WORKSPACE_ID` (HAK-31) — run with an isolated `VIBECRAFTED_HOME` until the fixture is default.
 
