@@ -212,6 +212,9 @@ def _run_telemetry(handle: AsyncRunHandle) -> RunTelemetry:
             extra={"runtime_session_id": handle.session_id, **handle.parent_sessions}
         ),
         failure=failure,
+        agent=handle.agent,
+        started_at=handle.started_at.isoformat(),
+        completed_at=handle.completed_at.isoformat() if handle.completed_at else None,
     )
     return handle.telemetry
 
@@ -1282,6 +1285,7 @@ class AsyncSupervisor:
             **telemetry.meta_fields(),
             "resume_command": handle.resume_command,
             "exit_code": handle.exit_code,
+            "started_at": handle.started_at.isoformat(),
             "completed_at": handle.completed_at.isoformat()
             if handle.completed_at
             else "",

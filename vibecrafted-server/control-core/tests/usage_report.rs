@@ -262,3 +262,41 @@ fn usage_report_recovers_transcript_totals_without_treating_missing_as_zero() {
     assert_ne!(unknown.tokens.tokens_total, 0);
     fs::remove_dir_all(home).ok();
 }
+
+#[test]
+fn harness_settlement_reaches_existing_dashboard_with_semantics() {
+    let home = fixture_home("harness-settle");
+    let now = Utc.with_ymd_and_hms(2026, 9, 28, 12, 0, 0).unwrap();
+    write_meta(
+        &home,
+        "harness",
+        json!({
+            "run_id": "harness", "agent": "codex", "model": "unpriced-model",
+            "status": "completed", "completed_at": "2026-09-28T11:00:00Z",
+            "unpricedModels": ["unpriced-model"],
+            "usage": {
+                "schema": "vibecrafted.usage.v1", "counting_version": 2,
+                "source": "harness_log", "events": 1, "unit": "tokens",
+                "input_semantics": "includes_cache", "tokens_input": 100,
+                "tokens_cached_input": 80, "tokens_cache_write": 0,
+                "tokens_output": 10, "tokens_total": 110, "tokens_reasoning": 4,
+                "model_usage": {"unpriced-model": {"fresh_input": 20, "cache_read": 80, "cache_creation": 0, "output": 10, "reasoning": 4}}
+            }
+        }),
+    );
+    let before = fs::read(home.join("control_plane/runtime_runs/harness/meta.json")).unwrap();
+    let report = ControlPlane::new(&home).usage_report(now, UsageFilter::default());
+    assert_eq!(report.totals.runs_tokens_unknown, 0);
+    assert_eq!(report.totals.tokens_total_known, 110);
+    assert_eq!(report.totals.runs_cost_unknown, 1);
+    let json = serde_json::to_value(report).unwrap();
+    assert_eq!(json["unpricedModels"], json!(["unpriced-model"]));
+    assert_eq!(json["runs"][0]["tokens"]["counting_version"], 2);
+    assert_eq!(json["runs"][0]["tokens"]["tokens_reasoning"], 4);
+    assert_eq!(json["runs"][0]["tokens"]["source"], "harness_log");
+    assert_eq!(
+        before,
+        fs::read(home.join("control_plane/runtime_runs/harness/meta.json")).unwrap()
+    );
+    fs::remove_dir_all(home).ok();
+}

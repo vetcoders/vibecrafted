@@ -94,6 +94,7 @@ def usage_report_row(meta: dict[str, Any], transcript: Path | None) -> dict[str,
         "failure": failure.get("summary") if isinstance(failure, dict) else None,
         "provider_session_id": telemetry["provider_session_id"],
         "telemetry_source": telemetry["telemetry_source"],
+        "unpricedModels": telemetry["unpricedModels"],
     }
 
 
@@ -233,6 +234,9 @@ def build_usage_report(
         "filter": {"run_ids": selected} if selected else {"since": effective_since},
         "runs": rows,
         "totals": usage_report_totals(rows),
+        "unpricedModels": sorted(
+            {model for row in rows for model in row["unpricedModels"]}
+        ),
     }
 
 

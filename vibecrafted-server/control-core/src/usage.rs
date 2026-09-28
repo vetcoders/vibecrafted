@@ -42,6 +42,8 @@ pub struct UsageReport {
     pub runs: Vec<UsageRun>,
     pub totals: UsageTotals,
     pub dimensions: UsageDimensions,
+    #[serde(default, rename = "unpricedModels")]
+    pub unpriced_models: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -70,6 +72,8 @@ pub struct UsageRun {
     pub failure: Option<String>,
     pub provider_session_id: Value,
     pub telemetry_source: String,
+    #[serde(default, rename = "unpricedModels")]
+    pub unpriced_models: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -83,6 +87,8 @@ pub struct UsageTokens {
     pub tokens_cache_write: Value,
     pub tokens_output: Value,
     pub tokens_total: Value,
+    #[serde(flatten)]
+    pub semantics: BTreeMap<String, Value>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -167,6 +173,12 @@ impl ControlPlane {
                 agent: filter.agent,
                 model: filter.model,
             },
+            unpriced_models: runs
+                .iter()
+                .flat_map(|run| run.unpriced_models.iter().cloned())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect(),
             runs,
             totals,
             dimensions,
@@ -218,6 +230,17 @@ fn read_usage_run(run_dir: &Path) -> Option<UsageRun> {
     );
 
     Some(UsageRun {
+        unpriced_models: object
+            .get("unpricedModels")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
         run_id,
         provider,
         agent,
@@ -248,6 +271,19 @@ fn read_usage_run(run_dir: &Path) -> Option<UsageRun> {
 fn usage_from(block: Option<&Map<String, Value>>) -> UsageTokens {
     let missing = unknown("provider emitted no usage events");
     UsageTokens {
+        semantics: [
+            "counting_version",
+            "model_usage",
+            "input_semantics",
+            "tokens_reasoning",
+        ]
+        .into_iter()
+        .filter_map(|key| {
+            block
+                .and_then(|value| value.get(key))
+                .map(|value| (key.to_string(), value.clone()))
+        })
+        .collect(),
         schema: block
             .and_then(|value| text(value, "schema"))
             .unwrap_or("vibecrafted.usage.v1")
@@ -436,20 +472,17 @@ json.dump(out, sys.stdout)
 
 /// Fill legacy rows from `transcript.log` using the CLI's Python recovery.
 ///
-/// Rows that already carry a structured `usage` block are left alone. If the
-/// interpreter or the import is unavailable, the rows stay unknown.
+/// Missing measurements, including recorded unknowns, use the same Python
+/// harness fallback as settle. If recovery is unavailable they stay unknown.
 fn recover_lazy_transcripts(runtime_runs: &Path, runs: &mut [UsageRun]) {
     let mut jobs = Vec::new();
     for run in runs.iter() {
-        if run.telemetry_source != "meta(legacy-uninstrumented)" {
-            continue;
-        }
-        if run.tokens.tokens_total.as_u64().is_some() {
+        if run.tokens.tokens_total.as_u64().is_some() && run.cost.amount.as_f64().is_some() {
             continue;
         }
         let meta = runtime_runs.join(&run.run_id).join("meta.json");
         let transcript = runtime_runs.join(&run.run_id).join("transcript.log");
-        if !regular_file(&meta) || !regular_file(&transcript) {
+        if !regular_file(&meta) {
             continue;
         }
         jobs.push(json!({
@@ -468,11 +501,26 @@ fn recover_lazy_transcripts(runtime_runs: &Path, runs: &mut [UsageRun]) {
         let Some(telemetry) = recovered.get(&run.run_id).and_then(Value::as_object) else {
             continue;
         };
+        if telemetry
+            .get("usage")
+            .and_then(|usage| usage.get("tokens_total"))
+            .and_then(Value::as_u64)
+            .is_none()
+        {
+            continue;
+        }
         apply_lazy_telemetry(run, telemetry);
     }
 }
 
 fn apply_lazy_telemetry(run: &mut UsageRun, telemetry: &Map<String, Value>) {
+    if let Some(models) = telemetry.get("unpricedModels").and_then(Value::as_array) {
+        run.unpriced_models = models
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect();
+    }
     if let Some(usage) = telemetry.get("usage").and_then(Value::as_object) {
         run.tokens = usage_from(Some(usage));
     }
@@ -487,10 +535,8 @@ fn apply_lazy_telemetry(run: &mut UsageRun, telemetry: &Map<String, Value>) {
         run.telemetry_source = source.to_string();
     }
     if let Some(model) = telemetry.get("model") {
-        let usable = model
-            .as_str()
-            .is_some_and(|text| !text.is_empty())
-            || model.get("value").is_some();
+        let usable =
+            model.as_str().is_some_and(|text| !text.is_empty()) || model.get("value").is_some();
         if usable {
             run.model = model.clone();
         }

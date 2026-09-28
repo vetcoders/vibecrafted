@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -27,11 +27,68 @@ class ModelPrice:
     cached_input_per_million: float
     output_per_million: float
     source: str
+    cache_creation_per_million: float | None = None
 
 
 # API-equivalent rates. Provider-reported CLI cost always wins; these rates are
 # only a transparent fallback when a stream exposes tokens but no monetary cost.
 _PRICES: tuple[tuple[tuple[str, ...], ModelPrice], ...] = (
+    # Verified 2026-09-28: https://platform.openai.com/pricing
+    (("gpt-6-astra",), ModelPrice(10.0, 1.0, 50.0, "openai-api-2026-09-28")),
+    # https://platform.claude.com/docs/en/about-claude/pricing
+    # Cache creation estimate uses the standard 5-minute write rate.
+    (
+        (
+            "claude-fable-5-1",
+            "claude-fable-5.1",
+            "claude-mythos-5-1",
+            "claude-mythos-5.1",
+        ),
+        ModelPrice(10, 0.25, 50, "anthropic-api-2026-09-28", 12.5),
+    ),
+    (
+        ("claude-fable-5", "claude-mythos-5"),
+        ModelPrice(10, 1, 50, "anthropic-api-2026-09-28", 12.5),
+    ),
+    (
+        ("claude-opus-5-5", "claude-opus-5.5"),
+        ModelPrice(4, 0.2, 20, "anthropic-api-2026-09-28", 5),
+    ),
+    (
+        (
+            "claude-opus-5",
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+            "claude-opus-4-6",
+            "claude-opus-4-5",
+            "claude-opus-4.8",
+            "claude-opus-4.7",
+            "claude-opus-4.6",
+            "claude-opus-4.5",
+        ),
+        ModelPrice(5, 0.5, 25, "anthropic-api-2026-09-28", 6.25),
+    ),
+    (("claude-sonnet-5",), ModelPrice(2, 0.2, 10, "anthropic-api-2026-09-28", 2.5)),
+    (
+        (
+            "claude-sonnet-4",
+            "claude-sonnet-4-5",
+            "claude-sonnet-4-6",
+            "claude-sonnet-4.5",
+            "claude-sonnet-4.6",
+        ),
+        ModelPrice(3, 0.3, 15, "anthropic-api-2026-09-28", 3.75),
+    ),
+    (
+        ("claude-haiku-4-5", "claude-haiku-4.5"),
+        ModelPrice(1, 0.1, 5, "anthropic-api-2026-09-28", 1.25),
+    ),
+    # https://docs.x.ai/developers/models/grok-4.6
+    (("grok-4.6", "grok-4.7"), ModelPrice(2, 0.5, 6, "xai-api-2026-09-28")),
+    # https://docs.x.ai/developers/pricing (standard context rates)
+    (("grok-4.5",), ModelPrice(2, 0.3, 6, "xai-api-2026-09-28")),
+    # https://forum.moonshot.ai/t/kimi-k3-is-here-our-most-capable-model/480
+    (("kimi-k3", "k3"), ModelPrice(3, 0.3, 15, "moonshot-api-2026-09-28", 3)),
     (("grok-build", "grok-code-fast"), ModelPrice(1.0, 0.2, 2.0, "xai-api-2026-07")),
     (("gpt-5.6-sol",), ModelPrice(5.0, 0.5, 30.0, "openai-api-2026-07")),
     (("gpt-5.6-terra",), ModelPrice(2.5, 0.25, 15.0, "openai-api-2026-07")),
@@ -43,10 +100,25 @@ _PRICES: tuple[tuple[tuple[str, ...], ModelPrice], ...] = (
 
 
 def model_price(model: str) -> ModelPrice | None:
-    """Look up the ModelPrice whose alias substring-matches *model*, else None."""
-    normalized = (model or "").strip().lower()
+    """Exact model/version aliases only; unknown variants never inherit a rate."""
+    normalized = (
+        (model or "")
+        .strip()
+        .lower()
+        .replace(" ", "-")
+        .removeprefix("kimi-code/")
+        .removeprefix("cursor-")
+    )
     for aliases, price in _PRICES:
-        if any(alias in normalized for alias in aliases):
+        if any(
+            normalized == alias
+            or re.fullmatch(
+                re.escape(alias)
+                + r"(?:-\d{8}|-build(?:-fast)?|-(?:low|medium|high|xhigh|max)(?:-fast)?|:cloud)",
+                normalized,
+            )
+            for alias in aliases
+        ):
             return price
     return None
 
@@ -180,6 +252,9 @@ class UsageRecord:
     source: str
     events: int
     unit: str = "tokens"
+    counting_version: int = 1
+    model_usage: dict[str, dict[str, int]] | None = None
+    tokens_reasoning: int | None = None
 
     @property
     def known(self) -> bool:
@@ -190,6 +265,16 @@ class UsageRecord:
         """Structured ``usage`` block for meta.json."""
         return {
             "schema": USAGE_SCHEMA,
+            "counting_version": self.counting_version,
+            **(
+                {
+                    "model_usage": self.model_usage,
+                    "input_semantics": "includes_cache",
+                    "tokens_reasoning": self.tokens_reasoning,
+                }
+                if self.model_usage is not None
+                else {}
+            ),
             "unit": self.unit,
             "source": self.source,
             "events": self.events,
@@ -307,6 +392,32 @@ def resolve_cost(
         return CostRecord(amount=amount, source="provider_reported")
     if not usage.known:
         return CostRecord(amount=Unknown(reason=NO_COST_REASON), source="unknown")
+    if usage.model_usage is not None:
+        amount = 0.0
+        sources: set[str] = set()
+        for name, buckets in usage.model_usage.items():
+            price = model_price(name)
+            if price is None:
+                return CostRecord(
+                    amount=Unknown(reason=f"no price table entry for model {name!r}"),
+                    source="unknown",
+                )
+            write_rate = price.cache_creation_per_million
+            if buckets["cache_creation"] and write_rate is None:
+                return CostRecord(
+                    amount=Unknown(reason=f"no cache creation rate for model {name!r}"),
+                    source="unknown",
+                )
+            amount += (
+                buckets["fresh_input"] * price.input_per_million
+                + buckets["cache_read"] * price.cached_input_per_million
+                + buckets["cache_creation"] * (write_rate or 0)
+                + buckets["output"] * price.output_per_million
+            ) / 1_000_000
+            sources.add(price.source)
+        return CostRecord(
+            amount=round(amount, 6), source="estimated:" + "+".join(sorted(sources))
+        )
     clean_model = str(model or "").strip()
     if not clean_model:
         return CostRecord(amount=Unknown(reason=NO_MODEL_REASON), source="unknown")
@@ -495,6 +606,7 @@ class RunTelemetry:
     failure: FailureAttribution | None
     provider_session_id: str | Unknown
     provider_session_source: str
+    model: str = ""
 
     def meta_fields(self) -> dict[str, object]:
         """Keys merged into meta.json (structured blocks plus flat legacy mirrors)."""
@@ -505,6 +617,11 @@ class RunTelemetry:
             "cost": self.cost.as_dict(),
             "provider_session_id": _project(self.provider_session_id),
             "provider_session_source": self.provider_session_source,
+            "unpricedModels": sorted(
+                name or "unknown"
+                for name in (self.usage.model_usage or {self.model: {}})
+                if model_price(name) is None
+            ),
         }
         if self.failure is not None:
             fields["failure"] = self.failure.as_dict()
@@ -541,22 +658,95 @@ def build_run_telemetry(
     session_source: str,
     parents: Mapping[str, str],
     failure: FailureAttribution | None,
+    agent: str = "",
+    started_at: object = None,
+    completed_at: object = None,
 ) -> RunTelemetry:
     """Assemble a RunTelemetry from what a close path observed."""
     provider_session_id, provider_session_source = resolve_provider_session_id(
         session_candidate, source=session_source, parents=parents
     )
+    if not usage.known and isinstance(provider_session_id, str):
+        usage = (
+            harness_usage_record(
+                agent, provider_session_id, started_at, completed_at, model
+            )
+            or usage
+        )
     return RunTelemetry(
         usage=usage,
         cost=resolve_cost(
             model,
-            usage,
-            reported_amount=reported_cost,
+            _stream_pricing_usage(usage, agent, model),
+            reported_amount=None
+            if str(reported_cost_source).startswith("estimated:")
+            else reported_cost,
             reported_source=reported_cost_source,
         ),
         failure=failure,
         provider_session_id=provider_session_id,
         provider_session_source=provider_session_source,
+        model=model,
+    )
+
+
+def _stream_pricing_usage(usage: UsageRecord, agent: str, model: str) -> UsageRecord:
+    """Use provider semantics for pricing; never guess from cache magnitudes."""
+    if (
+        not usage.known
+        or usage.model_usage is not None
+        or agent not in {"codex", "grok", "cursor", "claude", "junie"}
+    ):
+        return usage
+    inp, cached, out = (
+        int(usage.tokens_input),
+        int(usage.tokens_cached_input),
+        int(usage.tokens_output),
+    )
+    created = (
+        usage.tokens_cache_write if isinstance(usage.tokens_cache_write, int) else 0
+    )
+    fresh = inp - cached - created if agent in {"codex", "grok", "cursor"} else inp
+    if fresh < 0:
+        return replace(usage, events=0)
+    return replace(
+        usage,
+        model_usage={
+            model: {
+                "fresh_input": fresh,
+                "cache_read": cached,
+                "cache_creation": created,
+                "output": out,
+                "reasoning": 0,
+            }
+        },
+    )
+
+
+def harness_usage_record(
+    agent: str, session: str, start: object, end: object, model: str
+) -> UsageRecord | None:
+    """Adapt local evidence into the one existing usage contract."""
+    from .harness_usage import resolve_harness_usage
+
+    evidence = resolve_harness_usage(
+        agent=agent, session_id=session, started_at=start, completed_at=end, model=model
+    )
+    if evidence is None:
+        return None
+    totals = evidence.totals()
+    inp = totals["fresh_input"] + totals["cache_read"] + totals["cache_creation"]
+    return UsageRecord(
+        tokens_input=inp,
+        tokens_cached_input=totals["cache_read"],
+        tokens_cache_write=totals["cache_creation"],
+        tokens_output=totals["output"],
+        tokens_total=inp + totals["output"],
+        tokens_reasoning=totals["reasoning"],
+        source="harness_log",
+        events=evidence.events,
+        counting_version=2,
+        model_usage=evidence.models,
     )
 
 
@@ -627,7 +817,9 @@ def run_telemetry_from_meta(
                 amount=Unknown(reason="cost not recorded"), source="unknown"
             ).as_dict()
         )
-        provider_session = meta.get("provider_session_id")
+        provider_session = meta.get("provider_session_id") or meta.get(
+            "agent_session_id"
+        )
         if provider_session in (None, ""):
             provider_session = Unknown(reason=NO_SESSION_REASON).as_dict()
         session_source = str(meta.get("provider_session_source") or "meta")
@@ -658,6 +850,69 @@ def run_telemetry_from_meta(
         provider_session = _project(resolved)
         telemetry_source = LAZY_SOURCE
 
+    started_at = meta.get("started_at") or meta.get("created_at")
+    if not started_at and isinstance(provider_session, str) and meta.get("run_id"):
+        # Historical supervisor meta omitted start time; reuse its canonical
+        # snapshot, but only when both durable records identify the same session.
+        from .control_plane import lookup_run_snapshot
+
+        snapshot = lookup_run_snapshot(str(meta["run_id"])) or {}
+        if snapshot.get("agent_session_id") == provider_session:
+            started_at = snapshot.get("started_at")
+
+    if (
+        not usage_block.get("events")
+        and isinstance(provider_session, str)
+        and not is_unknown(provider_session)
+    ):
+        resolved, _ = resolve_provider_session_id(
+            provider_session, source=session_source, parents=_meta_parent_ids(meta)
+        )
+        recovered = (
+            harness_usage_record(
+                agent,
+                resolved,
+                started_at,
+                meta.get("completed_at"),
+                model_value,
+            )
+            if isinstance(resolved, str)
+            else None
+        )
+        if recovered is not None:
+            usage_block = recovered.as_dict()
+            telemetry_source = "harness_log"
+            if cost_block.get("source") != "provider_reported":
+                cost_block = resolve_cost(
+                    model_value, recovered, reported_amount=None, reported_source=None
+                ).as_dict()
+
+    if is_unknown(model) and len(usage_block.get("model_usage") or {}) == 1:
+        model = next(iter(usage_block["model_usage"]))
+    if cost_block.get("source") == "unknown" and usage_block.get("events"):
+        keys = ("tokens_input", "tokens_cached_input", "tokens_output", "tokens_total")
+        if all(
+            type(usage_block.get(key)) is int and usage_block[key] >= 0 for key in keys
+        ):
+            measured = UsageRecord(
+                tokens_input=usage_block["tokens_input"],
+                tokens_cached_input=usage_block["tokens_cached_input"],
+                tokens_cache_write=usage_block.get(
+                    "tokens_cache_write", Unknown(reason=NO_CACHE_WRITE_REASON)
+                ),
+                tokens_output=usage_block["tokens_output"],
+                tokens_total=usage_block["tokens_total"],
+                source=str(usage_block.get("source") or "meta"),
+                events=usage_block["events"],
+                model_usage=usage_block.get("model_usage"),
+            )
+            cost_block = resolve_cost(
+                str(model) if isinstance(model, str) else "",
+                _stream_pricing_usage(measured, agent, model_value),
+                reported_amount=None,
+                reported_source=None,
+            ).as_dict()
+
     failure_block = (
         meta.get("failure") if isinstance(meta.get("failure"), Mapping) else None
     )
@@ -683,4 +938,9 @@ def run_telemetry_from_meta(
         "provider_session_id": provider_session,
         "provider_session_source": session_source,
         "telemetry_source": telemetry_source,
+        "unpricedModels": sorted(
+            name or "unknown"
+            for name in (usage_block.get("model_usage") or {model_value: {}})
+            if model_price(name) is None
+        ),
     }
