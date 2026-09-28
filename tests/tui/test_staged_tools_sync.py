@@ -5662,6 +5662,44 @@ def test_tools_install_lease_serializes_processes_and_times_out_clearly(
         events.join_thread()
 
 
+def test_tools_install_lease_recovers_dead_owner_on_same_inode(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    current = tmp_path / "tools" / "vibecrafted-current"
+    context = multiprocessing.get_context("fork")
+    events = context.Queue()
+    ready = context.Event()
+    holder = context.Process(
+        target=_tools_lease_worker,
+        args=(str(current), "interrupted", 60.0, 0.0, ready, events),
+    )
+    holder.start()
+    try:
+        assert ready.wait(10)
+        lock = installer._tools_install_lease_path(current)
+        identity = lock.stat().st_ino
+        previous = json.loads(lock.read_text())
+        assert previous["pid"] == holder.pid
+        assert previous["started_at"]
+        holder.kill()
+        holder.join(timeout=5)
+        assert not holder.is_alive()
+        with installer._tools_install_lease(current, timeout_seconds=0):
+            assert json.loads(lock.read_text())["pid"] == os.getpid()
+            assert lock.stat().st_ino == identity
+        assert lock.read_text() == ""
+        diagnostic = capsys.readouterr().err
+        assert "Recovering stale installer lease" in diagnostic
+        assert str(holder.pid) in diagnostic
+        assert str(lock) in diagnostic
+    finally:
+        if holder.is_alive():
+            holder.kill()
+        holder.join(timeout=5)
+        events.close()
+        events.join_thread()
+
+
 def test_generation_gc_preserves_live_recovery_and_interrupted_receipt_targets(
     tmp_path: Path, monkeypatch
 ) -> None:

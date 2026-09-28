@@ -17,6 +17,7 @@ import json
 import os
 import plistlib
 import re
+import shlex
 import signal
 import stat
 import subprocess
@@ -1173,13 +1174,39 @@ class _ToolsInstallMutationLease:
             _validate_tools_install_descriptor(descriptor, lock_path)
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
+            try:
+                if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                    owner = _read_lock_payload(descriptor) or {}
+                    pid = owner.get("pid", "unknown")
+                    alive = (
+                        _process_alive(pid)
+                        if type(pid) is int and 1 < pid <= 2**31 - 1
+                        else "unknown"
+                    )
+                    raise SupervisorError(
+                        "runtime install is active; refusing concurrent service mutation: "
+                        f"{lock_path} (pid={pid}, alive={alive}, "
+                        f"operation={owner.get('operation', owner.get('role', 'unknown'))}, "
+                        f"started_at={owner.get('started_at', owner.get('acquired_at', 'unknown'))}). "
+                        f"Inspect holders with lsof {shlex.quote(str(lock_path))} "
+                        "and ps -p <pid> -o pid,ppid,etime,command. "
+                        "A child may retain the lease after its recorded owner exits; "
+                        "do not remove the lock file.",
+                        EX_TEMPFAIL,
+                    ) from exc
+                raise
+            finally:
+                os.close(descriptor)
+        except BaseException:
             os.close(descriptor)
-            if exc.errno in {errno.EACCES, errno.EAGAIN}:
-                raise SupervisorError(
-                    "runtime install is active; refusing concurrent service mutation",
-                    EX_TEMPFAIL,
-                ) from exc
             raise
+        try:
+            _write_lock_payload(
+                descriptor,
+                role="service-mutation",
+                service_managed=False,
+                identity=None,
+            )
         except BaseException:
             os.close(descriptor)
             raise
@@ -1192,9 +1219,15 @@ class _ToolsInstallMutationLease:
 
         if self.descriptor < 0 or self.inherited:
             return
-        fcntl.flock(self.descriptor, fcntl.LOCK_UN)
-        os.close(self.descriptor)
-        self.descriptor = -1
+        try:
+            os.ftruncate(self.descriptor, 0)
+            os.fsync(self.descriptor)
+        finally:
+            try:
+                fcntl.flock(self.descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(self.descriptor)
+                self.descriptor = -1
 
 
 def _receipt(

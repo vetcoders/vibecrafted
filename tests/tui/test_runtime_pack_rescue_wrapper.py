@@ -375,6 +375,119 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+def test_public_wrapper_xcode_abort_creates_no_install_lease(
+    tmp_path: Path, roots, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    uname = fake_bin / "uname"
+    uname.write_text("#!/bin/sh\necho Darwin\n")
+    uname.chmod(0o755)
+    beta = tmp_path / "Xcode-beta.app" / "Contents" / "Developer"
+    beta.mkdir(parents=True)
+    monkeypatch.delenv("VIBECRAFTED_ALLOW_BETA_XCODE", raising=False)
+    result = _run_wrapper(
+        "--pack",
+        str(tmp_path / "unused.tar.gz"),
+        env={
+            **os.environ,
+            "DEVELOPER_DIR": str(beta),
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        },
+    )
+    assert result.returncode != 0
+    assert "FATAL: refusing beta Xcode" in result.stderr
+    lock = installer._tools_install_lease_path(
+        roots["runtime_home"] / "tools" / "vibecrafted-current"
+    )
+    assert not lock.exists()
+    with installer._tools_install_lease(
+        lock.parent / "vibecrafted-current", timeout_seconds=0
+    ):
+        pass
+
+
+@pytest.mark.parametrize("stop_signal", [signal.SIGINT, signal.SIGTERM])
+def test_public_wrapper_signal_releases_install_lease(
+    tmp_path: Path, roots, stop_signal: int
+) -> None:
+    payload = seed_runtime_pack(
+        tmp_path / "pack-signal",
+        version="9.9.9+signal",
+        before_source_seal=_instrument_pack_installer_publication_hold,
+    )
+    _seal_runtime_pack_for_admission(payload)
+    archive, public_key = _sign_payload_archive(tmp_path / "signed-signal", payload)
+    request, ready = _publication_hold_paths()
+    request.parent.mkdir(parents=True, exist_ok=True)
+    request.write_text("hold\n")
+    wrapper, stdout, stderr = _start_public_wrapper(
+        "--pack",
+        str(archive),
+        *_wrapper_flags("9.9.9+signal"),
+        env=_wrapper_env(public_key),
+        logs=tmp_path / "signal-logs",
+    )
+    child_pid = None
+    try:
+        _wait_exists(ready, timeout=60)
+        child_pid, parent_pid = _read_hold_identity(ready)
+        assert parent_pid == wrapper.pid
+        current = roots["runtime_home"] / "tools" / "vibecrafted-current"
+        lock = installer._tools_install_lease_path(current)
+        assert json.loads(lock.read_text())["pid"] == child_pid
+        inode = lock.stat().st_ino
+        wrapper.send_signal(stop_signal)
+        assert wrapper.wait(timeout=10) != 0, (stdout.read_text(), stderr.read_text())
+        assert not _pid_alive(child_pid)
+        with installer._tools_install_lease(current, timeout_seconds=0):
+            assert lock.stat().st_ino == inode
+        assert lock.read_text() == ""
+    finally:
+        request.unlink(missing_ok=True)
+        _reap_owned_pids(child_pid, wrapper.pid)
+        wrapper.wait(timeout=5)
+        _close_wrapper_logs(wrapper)
+
+
+def test_public_wrapper_installs_over_dead_owner_metadata(
+    tmp_path: Path, roots
+) -> None:
+    payload = seed_runtime_pack(tmp_path / "pack-stale", version="9.9.9+stale")
+    _seal_runtime_pack_for_admission(payload)
+    archive, public_key = _sign_payload_archive(tmp_path / "signed-stale", payload)
+    previous = subprocess.Popen(["/usr/bin/true"])
+    assert previous.wait(timeout=5) == 0
+    lock = installer._tools_install_lease_path(
+        roots["runtime_home"] / "tools" / "vibecrafted-current"
+    )
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text(
+        json.dumps(
+            {
+                "pid": previous.pid,
+                "operation": "interrupted",
+                "started_at": "2026-09-28T00:00:00Z",
+            }
+        )
+    )
+    inode = lock.stat().st_ino
+    result = _run_wrapper(
+        "--pack",
+        str(archive),
+        *_wrapper_flags("9.9.9+stale"),
+        env=_wrapper_env(public_key),
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert "Recovering stale installer lease" in result.stderr
+    assert f"pid={previous.pid}" in result.stderr
+    assert lock.stat().st_ino == inode
+    assert lock.read_text() == ""
+    receipt = _load_receipt(roots)
+    assert not receipt.get("install_pending")
+    assert not receipt.get("config_transaction")
+
+
 def _reap_owned_pids(*pids: int | None) -> None:
     seen: set[int] = set()
     for pid in pids:

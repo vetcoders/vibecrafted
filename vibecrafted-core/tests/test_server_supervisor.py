@@ -2343,9 +2343,11 @@ def test_service_stop_rejects_launchd_reactivation_during_cleanup(
     assert not supervisor.probe_supervisor(config.paths).live
 
 
+@pytest.mark.parametrize("recorded_pid", [os.getpid(), 2**31 - 1, 2**100, None])
 def test_service_mutation_lease_refuses_concurrent_runtime_install(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    recorded_pid: int | None,
 ) -> None:
     launcher = _executable(tmp_path / "bin" / "vibecrafted")
     config = _config(tmp_path, launcher)
@@ -2358,6 +2360,16 @@ def test_service_mutation_lease_refuses_concurrent_runtime_install(
     monkeypatch.delenv(supervisor._TOOLS_INSTALL_LEASE_ENV, raising=False)
 
     try:
+        os.write(
+            descriptor,
+            json.dumps(
+                {
+                    "pid": recorded_pid,
+                    "operation": "runtime-install",
+                    "started_at": "2026-09-28T00:00:00Z",
+                }
+            ).encode(),
+        )
         with (
             pytest.raises(
                 supervisor.SupervisorError,
@@ -2367,9 +2379,35 @@ def test_service_mutation_lease_refuses_concurrent_runtime_install(
         ):
             pass
         assert failure.value.exit_code == supervisor.EX_TEMPFAIL
+        assert str(lock_path) in str(failure.value)
+        assert f"pid={recorded_pid}" in str(failure.value)
+        assert "lsof" in str(failure.value)
+        assert "ps -p" in str(failure.value)
     finally:
         fcntl.flock(descriptor, fcntl.LOCK_UN)
         os.close(descriptor)
+
+
+def test_service_mutation_records_owner_and_clears_it_on_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path, _executable(tmp_path / "bin" / "vibecrafted"))
+    monkeypatch.setenv("VIBECRAFTED_TOOLS_HOME", str(tmp_path / "tools"))
+    monkeypatch.delenv(supervisor._TOOLS_INSTALL_LEASE_ENV, raising=False)
+    lock = supervisor._tools_install_lock_path(config.paths)
+    with (
+        pytest.raises(RuntimeError, match="abort"),
+        supervisor._ToolsInstallMutationLease(config.paths),
+    ):
+        owner = json.loads(lock.read_text())
+        assert owner["pid"] == os.getpid()
+        assert owner["acquired_at"]
+        assert owner["role"] == "service-mutation"
+        inode = lock.stat().st_ino
+        raise RuntimeError("abort")
+    assert lock.read_text() == ""
+    with supervisor._ToolsInstallMutationLease(config.paths):
+        assert lock.stat().st_ino == inode
 
 
 def test_service_mutation_lease_accepts_verified_inherited_descriptor(

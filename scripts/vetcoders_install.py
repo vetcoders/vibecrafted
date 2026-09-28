@@ -3999,8 +3999,8 @@ def _tools_lease_owner(descriptor: int) -> str:
     if not isinstance(payload, dict):
         return "owner metadata unavailable"
     pid = payload.get("pid", "unknown")
-    operation = payload.get("operation", "unknown")
-    started_at = payload.get("started_at", "unknown")
+    operation = payload.get("operation", payload.get("role", "unknown"))
+    started_at = payload.get("started_at", payload.get("acquired_at", "unknown"))
     return f"pid={pid}, operation={operation}, started_at={started_at}"
 
 
@@ -4082,19 +4082,33 @@ def _tools_install_lease(
                     owner = _tools_lease_owner(descriptor)
                     raise TimeoutError(
                         "another Vibecrafted installer still owns "
-                        f"{lock_path} ({owner}); waited {timeout:.2f}s"
+                        f"{lock_path} ({owner}); waited {timeout:.2f}s. "
+                        f"Inspect holders with lsof {shlex.quote(str(lock_path))} "
+                        "and ps -p <pid> -o pid,ppid,etime,command. "
+                        "Do not remove the lock file while a descriptor holds it."
                     )
                 time.sleep(min(0.1, remaining))
+        # Only flock proves the previous lease ended. PID metadata may outlive
+        # its owner (SIGKILL), or its descriptor may survive in a child. Never
+        # unlink this inode or steal a held lease based on kill(pid, 0).
+        if os.fstat(descriptor).st_size:
+            print(
+                f"Recovering stale installer lease at {lock_path} "
+                f"({_tools_lease_owner(descriptor)}); kernel lock is free.",
+                file=sys.stderr,
+            )
         _write_tools_lease_owner(descriptor, operation)
         yield descriptor
     finally:
-        if acquired:
-            try:
-                os.ftruncate(descriptor, 0)
-                os.fsync(descriptor)
-            finally:
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
-        os.close(descriptor)
+        try:
+            if acquired:
+                try:
+                    os.ftruncate(descriptor, 0)
+                    os.fsync(descriptor)
+                finally:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
 
 
 def _require_inherited_tools_install_lease(shared_home: Path) -> int:
