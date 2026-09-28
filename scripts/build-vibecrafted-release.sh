@@ -844,12 +844,9 @@ embed_runtime_pack() {
   log "Embedding the exact standalone Runtime Pack bytes in Vibecrafted.app"
   rm -rf "$RUNTIME_PACK_RESOURCE_DIR"
   mkdir -p "$RUNTIME_PACK_RESOURCE_DIR"
-  install -m 0755 "$SOURCE_ROOT/scripts/install-runtime-pack.sh" \
-    "$RUNTIME_PACK_RESOURCE_DIR/install-runtime-pack.sh"
+  bash "$SOURCE_ROOT/scripts/package-installer-kit.sh" \
+    --directory "$RUNTIME_PACK_RESOURCE_DIR"
   printf '%s\n' "$RUNTIME_VERSION" > "$RUNTIME_PACK_RESOURCE_DIR/VERSION"
-  install -m 0644 \
-    "$SOURCE_ROOT/vibecrafted-core/vibecrafted_core/trust/vibecrafted-signing-v1.pub" \
-    "$RUNTIME_PACK_RESOURCE_DIR/vibecrafted-signing-v1.pub"
   install -m 0644 "$RUNTIME_PACK" "$EMBEDDED_RUNTIME_PACK"
   install -m 0644 "$RUNTIME_PACK_CHECKSUM" "$EMBEDDED_RUNTIME_PACK_CHECKSUM"
   install -m 0644 "$RUNTIME_PACK_SIGNATURE" "$EMBEDDED_RUNTIME_PACK_SIGNATURE"

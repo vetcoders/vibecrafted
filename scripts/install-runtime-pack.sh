@@ -628,13 +628,12 @@ if [[ -z "$pack" ]]; then
   # reaches this branch: deliberately installing another signed generation is a
   # supported act. Only the implicit case asks the producer what it built.
   #
-  # The record's owner is scripts/lib/runtime-pack-selection.sh. It is absent
-  # from the copy of this script that ships inside Vibecrafted.app, which always
-  # passes --pack; no owner means no record, and the legacy path below stands.
+  # The record's owner is scripts/lib/runtime-pack-selection.sh. Bundled callers
+  # pass --pack explicitly; only source installs consult the build record.
   selection_library="$SCRIPT_DIR/lib/runtime-pack-selection.sh"
   if [[ -f "$selection_library" ]]; then
-    # shellcheck source=/dev/null
-    . "$selection_library"
+    # shellcheck source=lib/runtime-pack-selection.sh
+    . "$SCRIPT_DIR/lib/runtime-pack-selection.sh"
     selection_status=0
     runtime_pack_selection_read "$REPO_ROOT" \
       "$expected_platform" "$expected_architecture" || selection_status=$?
@@ -706,7 +705,10 @@ if [[ -f "$pack" && "$pack" == *.tar.gz ]]; then
     || die "tar is required to extract a Runtime Pack archive"
   checksum="$pack.sha256"
   signature="$pack.sig"
-  public_key="${VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY:-$REPO_ROOT/vibecrafted-core/vibecrafted_core/trust/vibecrafted-signing-v1.pub}"
+  public_key="$SCRIPT_DIR/vibecrafted-signing-v1.pub"
+  if [[ ! -f "$public_key" ]]; then
+    public_key="${VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY:-$REPO_ROOT/vibecrafted-core/vibecrafted_core/trust/vibecrafted-signing-v1.pub}"
+  fi
   [[ -f "$checksum" ]] || die "Runtime Pack checksum is missing: $checksum"
   [[ -f "$signature" ]] || die "Runtime Pack signature is missing: $signature"
   [[ -f "$public_key" ]] || die "trusted Runtime Pack public key is missing: $public_key"
