@@ -17166,6 +17166,128 @@ _TOML_MISSING = object()
 # and representation must not change setting identity.
 _TOML_ATOMIC_RECORD_PATHS = frozenset({"terminal.shell"})
 
+
+def _terminal_shell_problem(value: Any, *, persistent: bool = True) -> str | None:
+    """Validate Alacritty's atomic Program without executing shell input."""
+    if isinstance(value, str):
+        program, arguments = value, []
+    elif isinstance(value, dict):
+        program, arguments = value.get("program"), value.get("args", [])
+    else:
+        return "terminal.shell must be a program or a program/args record"
+    if not isinstance(program, str) or not program.strip():
+        return "terminal.shell.program is missing or invalid"
+    if not isinstance(arguments, list) or any(
+        not isinstance(a, str) for a in arguments
+    ):
+        return "terminal.shell.args must be an array of strings"
+    if "$" in program or "~" in program:
+        return "terminal.shell.program contains an unexpanded home variable"
+    tokens = [program, *arguments]
+    script_targets: list[str] = []
+    if Path(program).name in {"sh", "bash", "zsh", "dash", "fish"}:
+        if arguments and not arguments[0].startswith("-"):
+            script_targets.append(arguments[0])
+        for index, argument in enumerate(arguments[:-1]):
+            if argument.startswith("-") and "c" in argument:
+                try:
+                    command = shlex.split(arguments[index + 1])
+                except ValueError:
+                    return "terminal.shell command has invalid quoting"
+                tokens.extend(command)
+                target = (
+                    command[1:2]
+                    if command[:1] in (["exec"], ["source"], ["."])
+                    else command[:1]
+                )
+                script_targets.extend(
+                    t
+                    for t in target
+                    if t.startswith(("/", "$HOME/", "${HOME}/", "./", "../"))
+                )
+                break
+    for token in tokens:
+        # A diagnostic invocation may use a temporary script. Persisted config
+        # must never retain it after the invocation ends.
+        if persistent and re.search(r"(?:^|[\s=;])(?:/private)?/tmp/", token):
+            return "terminal.shell retains a temporary probe; use invocation argv"
+    executable = shutil.which(program)
+    if executable is None:
+        return "terminal.shell.program does not name an executable"
+    for token in [*script_targets, *tokens[1:]]:
+        expanded = token.replace("${HOME}", str(Path.home())).replace(
+            "$HOME", str(Path.home())
+        )
+        if (
+            token in script_targets
+            or (
+                expanded.startswith("/") and expanded.endswith((".sh", ".zsh", ".bash"))
+            )
+        ) and not Path(expanded).is_file():
+            return "terminal.shell script is missing"
+    return None
+
+
+def _terminal_config_shell(path: Path, ancestors: tuple[Path, ...] = ()) -> Any:
+    """Read the installed import chain; later imports and the root win."""
+    import tomllib
+
+    path = path.expanduser().resolve()
+    if path in ancestors or len(ancestors) >= 16:
+        raise ValueError("terminal config import cycle or depth limit")
+    document = tomllib.loads(path.read_text(encoding="utf-8"))
+    general = document.get("general", {})
+    if not isinstance(general, dict):
+        raise TypeError("terminal config general table is invalid")
+    imports = general.get("import", document.get("import", []))
+    if not isinstance(imports, list) or any(not isinstance(p, str) for p in imports):
+        raise ValueError("terminal config imports must be an array of paths")
+    shell = None
+    for imported in imports:
+        imported_path = Path(imported).expanduser()
+        if not imported_path.is_absolute():
+            imported_path = path.parent / imported_path
+        inherited = _terminal_config_shell(imported_path, (*ancestors, path))
+        if inherited is not None:
+            shell = inherited
+    terminal = document.get("terminal", {})
+    if not isinstance(terminal, dict):
+        raise TypeError("terminal config terminal table is invalid")
+    if "shell" in terminal:
+        shell = terminal["shell"]
+    return shell
+
+
+def cmd_terminal_shell_check(args: argparse.Namespace) -> int:
+    """Read-only startup preflight shared with the installer's shell repair."""
+    import tomllib
+
+    try:
+        shell = _terminal_config_shell(Path(args.config_file))
+        problem = _terminal_shell_problem(shell)
+        if problem:
+            raise ValueError(problem)
+        for option in args.option:
+            document = tomllib.loads(option)
+            terminal = document.get("terminal", {})
+            if isinstance(terminal, dict) and "shell" in terminal:
+                # An override is atomic too: args without program is not Program.
+                problem = _terminal_shell_problem(terminal["shell"], persistent=False)
+                if problem:
+                    raise ValueError(problem)
+    except (OSError, UnicodeError, ValueError, TypeError) as exc:
+        # Never echo user-provided shell commands (which may contain secrets).
+        reason = (
+            str(exc)
+            if isinstance(exc, ValueError)
+            and not isinstance(exc, tomllib.TOMLDecodeError)
+            else "terminal config is unreadable or malformed"
+        )
+        print(f"vc-terminal: {reason}", file=sys.stderr)
+        return 2
+    return 0
+
+
 # These are deliberately narrower than all terminal-policy settings.  A
 # Founder-owned choice of chrome or font must survive a shipped default that
 # temporarily has the same value: otherwise the next upgrade cannot tell a
@@ -18369,6 +18491,21 @@ def _reconcile_runtime_preference(
                     "preference choice requires bound current and incoming hashes"
                 )
         current = current_raw.decode("utf-8") if current_raw is not None else None
+        if destination.name == "terminal-policy.toml" and current is not None:
+            import tomllib
+
+            current_shell = _toml_flatten(tomllib.loads(current)).get("terminal.shell")
+            incoming_shell = _toml_flatten(tomllib.loads(incoming)).get(
+                "terminal.shell"
+            )
+            if _terminal_shell_problem(
+                current_shell
+            ) and _preference_shell_launcher_name(incoming_shell):
+                # Use the existing transaction/backup owner. Repair the atomic
+                # shell only, preserving all unrelated user preference bytes.
+                current = _toml_replace_or_insert(
+                    current, "terminal.shell", _toml_literal(incoming_shell)
+                )
 
         def merge(selected: str | None) -> str:
             return (
@@ -22873,6 +23010,30 @@ def _runtime_managed_config_plan(
     apply would actually do.
     """
     entries: list[dict[str, str]] = []
+    terminal_entry = product_config / "vc-terminal/vc-terminal.toml"
+    if terminal_entry.is_file() and not terminal_entry.is_symlink():
+        import tomllib
+
+        try:
+            entry_values = _toml_flatten(tomllib.loads(terminal_entry.read_text()))
+            problem = (
+                _terminal_shell_problem(entry_values["terminal.shell"])
+                if "terminal.shell" in entry_values
+                else None
+            )
+        except (ValueError, UnicodeError):
+            problem = "generated terminal entry is malformed"
+        if problem:
+            # Publication recreates this installer-owned import entry and
+            # keeps the preimage in its existing transaction backup.
+            entries.append(
+                {
+                    "path": str(terminal_entry),
+                    "action": "repair",
+                    "reason": problem,
+                    "backup": "",
+                }
+            )
     for relative, source in (
         (
             "vc-frame",
@@ -24567,6 +24728,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     p_runtime_repair.add_argument("--json", action="store_true")
 
+    p_terminal_check = sub.add_parser(
+        "terminal-shell-check",
+        help="Validate the terminal shell without changing config",
+    )
+    p_terminal_check.add_argument("--config-file", required=True)
+    p_terminal_check.add_argument("--option", action="append", default=[])
+
     p_runtime_uninstall = sub.add_parser(
         "runtime-uninstall", help="Undo the receipted Runtime Pack install"
     )
@@ -24601,6 +24769,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return cmd_runtime_resolve(args)
     elif args.command == "runtime-repair":
         return cmd_runtime_repair(args)
+    elif args.command == "terminal-shell-check":
+        return cmd_terminal_shell_check(args)
     elif args.command == "runtime-uninstall":
         return cmd_runtime_uninstall(args)
 

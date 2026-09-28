@@ -72,13 +72,26 @@ run_product_entry() {
   local product_entry_status=0
   shift
   export VIBECRAFTED_PRIMARY_SHELL_ATTACHED=1
-  /bin/zsh -lic '"$0" "$@"' "$product_entry" "$@"
+  # An interactive intermediate zsh takes the terminal foreground group. When
+  # it exits, the final shell below can no longer read the orphaned PTY (EIO).
+  # The command keeps its controlling terminal without an interactive parent.
+  /bin/zsh -lc '"$0" "$@"' "$product_entry" "$@"
   product_entry_status=$?
   # vc-frame owns its own alternate-buffer lifecycle; clean sticky smcup.
   leave_alt_screen
   if (( product_entry_status != 0 )); then
-    printf '\nVibecrafted could not start the requested workspace (exit %s).\nYour terminal is still available; correct the command and try again.\n\n' "$product_entry_status" >&2
+    report_start_failure "workspace entry failed (exit $product_entry_status)"
   fi
+}
+
+report_start_failure() {
+  local reason="$1" log_dir="${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/logs" log=""
+  log="$log_dir/terminal-startup.log"
+  if ! (umask 077; mkdir -p "$log_dir" && printf '%s\n' "$reason" >>"$log"); then
+    log="unavailable (cannot write $log)"
+  fi
+  printf '\nVibecrafted: %s. Your terminal is still available.\nRecovery: vc-frame attach %q\nList sessions: vc-frame list-sessions\nLog: %s\n\n' \
+    "$reason" "${VIBECRAFTED_FRAME_HOST_SESSION:-vc-host}" "$log" >&2
 }
 
 # Explicit product argv (vc-terminal -e … vc-start …) keeps its command.
@@ -86,6 +99,13 @@ run_product_entry() {
 # `vc-start resume` (create if missing, return if live). Failure leaves a
 # usable shell. Nested/quiet shells skip the auto-attach.
 product_entry=""
+recovery_shell=false
+if [[ -n "${VIBECRAFTED_TERMINAL_STARTUP_ERROR:-}" ]]; then
+  report_start_failure "$VIBECRAFTED_TERMINAL_STARTUP_ERROR; repair: vc-terminal --doctor"
+  unset VIBECRAFTED_TERMINAL_STARTUP_ERROR
+  # Keep the diagnosis visible; do not immediately cover it with a Frame attach.
+  recovery_shell=true
+fi
 case "${1##*/}" in
   vc-*|vibecrafted|vibecrafted-*) product_entry="$1" ;;
 esac
@@ -93,8 +113,12 @@ esac
 if [[ -n "$product_entry" ]]; then
   shift
   run_product_entry "$product_entry" "$@"
-elif ! skip_auto_workspace && product_entry="$(resolve_vc_start)"; then
-  run_product_entry "$product_entry" resume
+elif ! $recovery_shell && ! skip_auto_workspace; then
+  if product_entry="$(resolve_vc_start)"; then
+    run_product_entry "$product_entry" resume
+  else
+    report_start_failure "vc-start is unavailable; repair: open Vibecrafted.app and select Repair Runtime"
+  fi
 fi
 
 exec /bin/zsh -l

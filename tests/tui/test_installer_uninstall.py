@@ -118,6 +118,8 @@ def test_vc_terminal_product_entry_pins_config_file_and_refuses_private_alacritt
     generation = tmp_path / "releases/4.3.0+gfixture"
     (generation / "bin").mkdir(parents=True)
     (generation / "libexec").mkdir()
+    (generation / "bin/python3").symlink_to(sys.executable)
+    (generation / "scripts").symlink_to(REPO_ROOT / "scripts")
     host = generation / "libexec/vc-terminal"
     user_bin = tmp_path / "user-bin"
     user_bin.mkdir()
@@ -140,7 +142,10 @@ def test_vc_terminal_product_entry_pins_config_file_and_refuses_private_alacritt
     config_home = tmp_path / "home/.config"
     entry = config_home / "vibecrafted/vc-terminal/vc-terminal.toml"
     entry.parent.mkdir(parents=True)
-    entry.write_text("[general]\nlive_config_reload = true\n", encoding="utf-8")
+    entry.write_text(
+        '[general]\nlive_config_reload = true\n[terminal]\nshell = { program = "/bin/zsh", args = ["-l"] }\n',
+        encoding="utf-8",
+    )
     env = {
         **os.environ,
         "HOME": str(tmp_path / "home"),
@@ -148,6 +153,7 @@ def test_vc_terminal_product_entry_pins_config_file_and_refuses_private_alacritt
         "PATH": f"{user_bin}:/usr/bin:/bin",
     }
     env.pop("VIBECRAFTED_RUNTIME_ROOT", None)
+    env.pop("VIBECRAFTED_TERMINAL_HOST", None)
     first = subprocess.run(
         [str(wrapper)],
         check=True,

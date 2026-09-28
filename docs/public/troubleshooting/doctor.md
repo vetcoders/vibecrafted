@@ -125,6 +125,32 @@ vibecrafted doctor --fix-server-service     # reconcile the LaunchAgent with the
 
 Each fix flag re-verifies after repairing, so a clean exit means the repair actually held.
 
+## Terminal startup recovery
+
+The `vc-terminal` launcher validates the installed shell specification before
+opening its default workspace. A malformed record, missing shell or script,
+or persisted `/tmp` probe selects the product recovery shell for that invocation.
+The terminal prints the reason, recovery commands, and the startup log path
+(`$VIBECRAFTED_HOME/logs/terminal-startup.log`, defaulting to
+`~/.vibecrafted/logs/terminal-startup.log`).
+
+```bash
+vc-terminal --doctor       # apply the installer's configuration repair transaction
+vc-frame attach vc-host    # return to the named session
+vc-frame list-sessions     # list available sessions
+```
+
+The repair preserves a backup and unrelated preferences. Temporary diagnostic
+shell overrides belong in invocation arguments; never save them in
+`terminal-policy.toml` or `vc-terminal/vc-terminal.toml`.
+
+When the reserved `vc-host` name has a guest layout, `vc-start` preserves it
+and creates `vc-host-recovered` as the host. The diagnostic names the old session
+and gives its exact attach and cleanup commands. Save its work before choosing
+`kill-session` and `delete-session`; startup never runs those commands for you.
+`vc-frame ka` is an alias for `kill-all-sessions`: it stops every session, so use
+it only for an intentional global reset after saving work in all sessions.
+
 ## Receipt — provenance on top of health
 
 Doctor proves the install is internally consistent. `vibecrafted receipt` proves where it **came from**:

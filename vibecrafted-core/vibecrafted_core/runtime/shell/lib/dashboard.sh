@@ -2015,6 +2015,17 @@ _vetcoders_start_ensure_host() {
       ;;
   esac
   role="$(_vetcoders_start_session_projection_role "$host" "$vc_frame_bin")" || role_rc=$?
+  if ((role_rc == 0)) && [[ "$role" == guest && "$host" != *-recovered ]]; then
+    # A prior generation may have used the reserved name for a workspace.
+    # Never delete/promote that live session or relabel it based on its name.
+    # A deterministic sibling lets concurrent/repeated starts converge.
+    printf 'vc-start: %s has guest layout; preserving it and recovering host %s. Access the old session: vc-frame attach %s. After saving its work, remove it with: vc-frame kill-session %s && vc-frame delete-session %s\n' \
+      "$(_vetcoders_shell_quote "$host")" "$(_vetcoders_shell_quote "$host-recovered")" \
+      "$(_vetcoders_shell_quote "$host")" "$(_vetcoders_shell_quote "$host")" "$(_vetcoders_shell_quote "$host")" >&2
+    local VIBECRAFTED_FRAME_HOST_SESSION="$host-recovered"
+    _vetcoders_start_ensure_host "$vc_frame_bin" "$session_name"
+    return $?
+  fi
   if ((role_rc != 0)) || [[ "$role" != host ]]; then
     printf 'vc-start: session %s exists but is not a Frame host (role: %s); refusing before creating %s.\n' \
       "$(_vetcoders_shell_quote "$host")" "$(_vetcoders_shell_quote "${role:-unknown}")" \
