@@ -182,6 +182,9 @@ if [[ $# -eq 1 ]]; then
     --version | -V | --help | -h)
       exec "$host" "$1"
       ;;
+    --doctor)
+      exec "$root/bin/python3" -B "$root/scripts/vetcoders_install.py" runtime-repair --json
+      ;;
   esac
 fi
 if [[ ! -f "$config" || -L "$config" || -L "$HOME/.config" \
@@ -194,30 +197,61 @@ fi
 # Alacritty's -e/--command consumes all remaining argv, including hyphens.
 # Consume values of terminal options so a title such as "-e" is not a boundary.
 value_pending=false
+option_pending=false
+explicit_command=false
+shell_options=(--config-file "$config")
 for argument in "$@"; do
   if $value_pending; then
+    if $option_pending; then
+      shell_options+=(--option "$argument")
+    fi
     value_pending=false
+    option_pending=false
     continue
   fi
   # clap accepts short flag clusters: -veCOMMAND has the same boundary as -e.
   if [[ "$argument" =~ ^-[qv]*e ]]; then
+    explicit_command=true
     break
   fi
   if [[ "$argument" =~ ^-[qv]*[tTo]$ ]]; then
     value_pending=true
+    [[ "$argument" == *o ]] && option_pending=true
     continue
   fi
   case "$argument" in
     -e* | --command | --command=* | --)
+      explicit_command=true
       break
       ;;
     --config-file | --config-file=*)
       printf 'vc-terminal: --config-file is product-owned: %s\n' "$config" >&2
       exit 2
       ;;
-    --embed | --socket | --working-directory | --title | -T | -t | --class | -o | --option | -s)
+    --option)
+      value_pending=true
+      option_pending=true
+      ;;
+    --option=*) shell_options+=(--option "${argument#*=}") ;;
+    -o?*) shell_options+=(--option "${argument#-o}") ;;
+    --embed | --socket | --working-directory | --title | -T | -t | --class | -s)
       value_pending=true
       ;;
   esac
 done
+if ! $explicit_command; then
+  if ! startup_error="$("$root/bin/python3" -B "$root/scripts/vetcoders_install.py" terminal-shell-check \
+    "${shell_options[@]}" 2>&1)"; then
+    export VIBECRAFTED_TERMINAL_STARTUP_ERROR="${startup_error:-terminal shell preflight failed}"
+    primary="$HOME/.config/vibecrafted/vc-terminal/launch-primary-shell.zsh"
+    [[ -f "$primary" ]] || primary="$root/config/alacritty/launch-primary-shell.zsh"
+    if [[ -f "$primary" ]]; then
+      # Override for this invocation only. Never persist diagnostic argv.
+      exec "$host" --config-file "$config" "$@" -e /bin/bash "$primary"
+    fi
+    # Even a damaged generation must leave a readable terminal with a shell.
+    exec "$host" --config-file "$config" "$@" -e /bin/zsh -fc \
+      'print -u2 -- "Vibecrafted: product shell missing. Open Vibecrafted.app → Repair Runtime; run vc-terminal --doctor. Startup log unavailable: product shell missing."; exec /bin/zsh -dfi'
+  fi
+fi
 exec "$host" --config-file "$config" "$@"

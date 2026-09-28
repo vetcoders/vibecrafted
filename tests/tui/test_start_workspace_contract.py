@@ -2289,6 +2289,37 @@ def test_the_host_name_is_not_a_workspace_name(tmp_path: Path) -> None:
     assert scene.terminal_launches(wait=0.5) == []
 
 
+def test_resume_preserves_guest_under_host_name_and_creates_sibling_host(
+    tmp_path: Path,
+) -> None:
+    scene = Scene(
+        tmp_path,
+        project="mlx-batch-runner",
+        live=(HOST_SESSION,),
+        guests=(HOST_SESSION,),
+    )
+    result = _run(
+        scene,
+        "vc-start resume",
+        tty=True,
+        developer_root=True,
+        extra_env={
+            "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
+            "VIBECRAFTED_VC_FRAME_BIN": str(scene.generation / "bin/vc-frame"),
+        },
+    )
+    assert "RC=[0]" in result.stdout, result.stdout + result.stderr
+    assert HOST_SESSION in scene.live()
+    recovered = HOST_SESSION + "-recovered"
+    assert [a["attached"] for a in _attaches(scene.calls())] == [recovered]
+    _wait_for_projection(scene, recovered, "catalog-mlx-batch-runner-a1b2c3")
+    assert "vc-frame attach vc-host" in result.stdout + result.stderr
+    assert (
+        "vc-frame kill-session vc-host && vc-frame delete-session vc-host"
+        in result.stdout + result.stderr
+    )
+
+
 @pytest.mark.parametrize("tty", [False, True])
 def test_detached_host_is_entered_and_the_new_guest_opens_in_it(
     tmp_path: Path, tty: bool

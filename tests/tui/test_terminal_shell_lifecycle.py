@@ -1,16 +1,20 @@
 """A product command failure must not destroy the terminal's login shell."""
 
 import contextlib
+import fcntl
 import json
 import os
 import pty
+import re
 import select
 import shlex
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
+import termios
 import time
 from pathlib import Path
 
@@ -20,6 +24,98 @@ import tomllib
 ENTRY = (
     Path(__file__).resolve().parents[2] / "config/alacritty/launch-primary-shell.zsh"
 )
+
+
+def test_invalid_spec_diagnosis_stays_visible_in_recovery_shell(tmp_path: Path) -> None:
+    command = tmp_path / "vc-start"
+    command.write_text("#!/bin/sh\necho ATTACH_MUST_NOT_RUN\n")
+    command.chmod(0o700)
+    result = subprocess.run(
+        ["/bin/bash", str(ENTRY)],
+        input="printf 'RECOVERY_%s\\n' READY; exit\n",
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+        env={
+            "HOME": str(tmp_path),
+            "PATH": "/usr/bin:/bin",
+            "TERM": "dumb",
+            "VIBECRAFTED_RUNTIME_BIN": str(tmp_path),
+            "VIBECRAFTED_TERMINAL_STARTUP_ERROR": "terminal.shell.program is missing",
+        },
+    )
+    assert result.returncode == 0
+    assert "RECOVERY_READY" in result.stdout
+    assert "ATTACH_MUST_NOT_RUN" not in result.stdout
+    assert "terminal.shell.program is missing" in result.stderr
+    assert "vc-terminal --doctor" in result.stderr
+    assert (
+        "terminal.shell.program is missing"
+        in (tmp_path / ".vibecrafted/logs/terminal-startup.log").read_text()
+    )
+
+
+@pytest.mark.parametrize("entry_status", [0, 2])
+def test_product_entry_returns_controlling_pty_to_live_shell(
+    tmp_path: Path, entry_status: int
+) -> None:
+    """Both attach completion and refusal must leave a shell that reads its PTY."""
+    product = tmp_path / ".config/vibecrafted/vc-terminal"
+    product.mkdir(parents=True)
+    (product / ".zshrc").write_text("print -r -- FALLBACK_READY\n")
+    command = tmp_path / "vc-start"
+    command.write_text(
+        "#!/bin/zsh\n"
+        "[[ -t 0 && -t 1 ]] || exit 90\n"
+        "read -r reply\n"
+        "[[ $reply == ATTACH_INPUT ]] || exit 91\n"
+        f"print -r -- ATTACH_EXIT_{entry_status}\nexit {entry_status}\n"
+    )
+    command.chmod(0o700)
+    pid, descriptor = pty.fork()
+    if pid == 0:
+        os.chdir(tmp_path)
+        os.execve(
+            "/bin/bash",
+            ["/bin/bash", str(ENTRY), str(command), "resume"],
+            {"HOME": str(tmp_path), "PATH": "/usr/bin:/bin", "TERM": "xterm"},
+        )
+    output = bytearray()
+
+    def read_until(marker: bytes) -> None:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if marker in output:
+                return
+            if select.select([descriptor], [], [], 0.1)[0]:
+                try:
+                    chunk = os.read(descriptor, 65536)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                output.extend(chunk)
+        pytest.fail(f"Missing {marker!r}: {output.decode(errors='replace')}")
+
+    try:
+        os.write(descriptor, b"ATTACH_INPUT\n")
+        read_until(f"ATTACH_EXIT_{entry_status}".encode())
+        read_until(b"FALLBACK_READY")
+        # Split the marker so terminal echo cannot pass for shell execution.
+        os.write(descriptor, b"printf 'SHELL_%s\\n' ALIVE\n")
+        read_until(b"SHELL_ALIVE")
+        if entry_status:
+            assert b"vc-frame attach vc-host" in output
+            assert b"vc-frame ka" in output
+            log = tmp_path / ".vibecrafted/logs/terminal-startup.log"
+            assert str(log).encode() in output
+            assert "exit 2" in log.read_text()
+    finally:
+        os.close(descriptor)
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
 
 
 @pytest.mark.parametrize("failed_entry", [False, True])
@@ -51,7 +147,13 @@ def test_terminal_remains_a_shell_without_frame(
     if failed_entry:
         assert "workspace rejected" in result.stderr
         assert "exit 2" in result.stderr
-    assert not (tmp_path / "state").exists()
+    log = tmp_path / "state/logs/terminal-startup.log"
+    assert log.is_file()
+    assert (
+        "exit 2" in log.read_text()
+        if failed_entry
+        else "vc-start is unavailable" in log.read_text()
+    )
 
 
 def test_terminal_policy_isolates_startup_before_user_login_files(
@@ -1282,6 +1384,93 @@ def _installed_frame() -> Path | None:
 
 
 _REAL_FRAME = _installed_frame()
+
+
+@pytest.mark.skipif(_REAL_FRAME is None, reason="no installed vc-frame engine")
+def test_primary_entry_real_frame_attach_detach_returns_a_readable_pty() -> None:
+    """The -lc intermediate must admit a real Frame client, then hand back."""
+    sandbox = _OwnedFrameSandbox(_REAL_FRAME, "vcentry")
+    descriptor = None
+    pid = None
+    try:
+        product = sandbox.home / ".config/vibecrafted/vc-terminal"
+        product.mkdir(parents=True, exist_ok=True)
+        (product / ".zshrc").write_text("print -r -- ENTRY_SHELL_READY\n")
+        frame_config = sandbox.config_dir / "config.kdl"
+        frame_config.write_text(
+            frame_config.read_text().replace(
+                "keybinds clear-defaults=true {}",
+                'keybinds clear-defaults=true {\n normal {\n  bind "Ctrl q" { Detach; }\n }\n}',
+            )
+        )
+        environment = sandbox.env(ZDOTDIR=str(product))
+        session = sandbox.session_name("attach")
+        sandbox.create_session(environment, session, cwd=sandbox.home)
+        command = sandbox.home / "vc-start"
+        command.write_text(
+            "#!/bin/sh\n"
+            f"{shlex.quote(str(sandbox.binary))} attach {shlex.quote(session)}\n"
+            'result=$?; printf \'ENTRY_ATTACH_DONE=%s\\n\' "$result"; exit "$result"\n'
+        )
+        command.chmod(0o700)
+        pid, descriptor = pty.fork()
+        if pid == 0:
+            os.chdir(sandbox.home)
+            fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
+            os.execve("/bin/bash", ["/bin/bash", str(ENTRY), str(command)], environment)
+        output = bytearray()
+        deadline = time.monotonic() + 20
+        attached = False
+        while time.monotonic() < deadline:
+            if select.select([descriptor], [], [], 0.1)[0]:
+                output.extend(os.read(descriptor, 65536))
+            clients = sandbox.run(
+                environment, "--session", session, "action", "list-clients"
+            )
+            if re.search(r"^\s*\d+\s", clients.stdout, re.MULTILINE):
+                attached = True
+                break
+        assert attached, (
+            clients.stdout,
+            clients.stderr,
+            output[-1200:].decode(errors="replace"),
+        )
+        # Detach from the real interactive client. A separate action client
+        # can acknowledge Detach without targeting this attached client.
+        last_detach = 0.0
+        sent = False
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if select.select([descriptor], [], [], 0.1)[0]:
+                output.extend(os.read(descriptor, 65536))
+            if (
+                b"ENTRY_ATTACH_DONE=" not in output
+                and time.monotonic() - last_detach > 0.5
+            ):
+                # Initial terminal-query collection may consume early input;
+                # retry until the interactive client acknowledges its exit.
+                os.write(descriptor, b"\x11")
+                last_detach = time.monotonic()
+            if (
+                b"ENTRY_ATTACH_DONE=0" in output
+                and b"ENTRY_SHELL_READY" in output
+                and not sent
+            ):
+                os.write(descriptor, b"printf 'REAL_%s\\n' HAND_BACK\n")
+                sent = True
+            if b"REAL_HAND_BACK" in output:
+                break
+        assert b"REAL_HAND_BACK" in output, output[-1600:].decode(errors="replace")
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if pid:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+        sandbox.close()
+    assert not sandbox.teardown_errors, sandbox.teardown_errors
+
 
 # Ambient identity that must never reach an owned engine. `os.environ.copy()`
 # minus a deny-list is the wrong shape here: `VC_FRAME_SERVER_IDLE_EXIT_SECS`
