@@ -4877,6 +4877,27 @@ def test_polarize_uses_supervised_marbles_runtime_with_polarize_prompt(
     assert command[command.index("--depth") + 1] == "4"
 
 
+def test_polarize_provider_can_differ_from_source_report_author(tmp_path: Path) -> None:
+    report = tmp_path / "codex-report.md"
+    report.write_text(
+        "---\nagent: codex\nstatus: completed\n---\n\n# Findings\n",
+        encoding="utf-8",
+    )
+
+    spec = workflow.normalize_launch_spec(
+        {
+            "skill": "polarize",
+            "agent": "grok",
+            "file": str(report),
+            "root": str(tmp_path),
+        },
+        tmp_path,
+    )
+
+    assert spec.agent == "grok"
+    assert spec.file == str(report)
+
+
 def test_runtime_prompt_carries_worker_signal_discipline(tmp_path: Path) -> None:
     spec = workflow.WorkflowLaunchSpec(
         agent="codex",

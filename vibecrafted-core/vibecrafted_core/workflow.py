@@ -1549,11 +1549,16 @@ def read_prompt_stream(stream: Any) -> str:
 
 
 def select_plan_model(
-    agent: str, text: str, *, model: str = "", previous: str = ""
+    agent: str,
+    text: str,
+    *,
+    model: str = "",
+    previous: str = "",
+    enforce_agent: bool = True,
 ) -> tuple[str, str]:
     """Select an exact provider identifier without altering the source document."""
     fields = parse_frontmatter(text=text, strict=True)
-    if fields.get("agent") and fields["agent"] != agent:
+    if enforce_agent and fields.get("agent") and fields["agent"] != agent:
         raise ValueError("frontmatter agent conflicts with selected provider")
     if model:
         if (
@@ -1653,6 +1658,7 @@ def normalize_launch_spec(
         model_agent,
         plan_text,
         model=payload.get("model") or payload.get("model_requested") or "",
+        enforce_agent=skill != "polarize",
     )
     if model and definition.runtime_kind == "supervised_research" and not model_agent:
         raise ValueError("research --model requires an explicit provider role")
