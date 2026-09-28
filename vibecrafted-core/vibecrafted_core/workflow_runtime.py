@@ -623,6 +623,8 @@ async def _run_child(
         tee_output=_tee_enabled(),
     )
     validation = handle.artifact_validation
+    settled = getattr(handle, "telemetry", None)
+    counts = settled.usage.flat() if settled is not None else {}
     return ChildResult(
         label=label,
         agent=agent,
@@ -638,11 +640,20 @@ async def _run_child(
         exit_code=handle.exit_code,
         artifact_ok=bool(validation.ok if validation is not None else False),
         artifact_errors=tuple(validation.errors if validation is not None else ()),
-        tokens_input=handle.tokens_input,
-        tokens_cached_input=handle.tokens_cached_input,
-        tokens_cache_write=handle.tokens_cache_write,
-        tokens_output=handle.tokens_output,
-        cost_usd=handle.cost_usd,
+        tokens_input=_optional_int(counts.get("tokens_input", handle.tokens_input))
+        or 0,
+        tokens_cached_input=_optional_int(
+            counts.get("tokens_cached_input", handle.tokens_cached_input)
+        )
+        or 0,
+        tokens_cache_write=_optional_int(
+            counts.get("tokens_cache_write", handle.tokens_cache_write)
+        ),
+        tokens_output=_optional_int(counts.get("tokens_output", handle.tokens_output))
+        or 0,
+        cost_usd=_optional_float(settled.cost.flat()["cost_usd"])
+        if settled is not None
+        else handle.cost_usd,
         resume_command=handle.resume_command,
         completed_at=handle.completed_at.isoformat() if handle.completed_at else "",
     )

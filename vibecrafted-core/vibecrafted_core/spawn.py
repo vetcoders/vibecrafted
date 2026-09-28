@@ -5145,7 +5145,11 @@ def finalize_artifacts(
             }
         ),
         failure=None,
+        agent=str(payload.get("agent") or ""),
+        started_at=payload.get("started_at") or payload.get("created_at"),
+        completed_at=completed_at,
     )
+    flat_tokens = telemetry.usage.flat()
     payload["duration_s"] = _resolve_duration(payload, str(completed_at))
     if "tokens_cache_write" not in flat_tokens:
         payload.pop("tokens_cache_write", None)
