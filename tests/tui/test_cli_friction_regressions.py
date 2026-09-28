@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -51,3 +53,42 @@ def test_repo_full_largest_tracked_files_include_size_and_name(tmp_path: Path) -
 
     assert "2.0 KB" in largest
     assert tracked.name in largest
+
+
+def test_scaffold_doctor_prefers_runtime_pack_binary_outside_monorepo(
+    tmp_path: Path,
+) -> None:
+    pack = tmp_path / "runtime-pack"
+    pack_bin = pack / "bin"
+    pack_bin.mkdir(parents=True)
+    (pack / "runtime-manifest.json").write_text("{}\n", encoding="utf-8")
+    deck = pack_bin / "vibecrafted"
+    shutil.copy2(REPO_ROOT / "scripts/vibecrafted", deck)
+    helper_source = REPO_ROOT / "vibecrafted-core/vibecrafted_core/runtime"
+    helper_target = pack / "vibecrafted-core/vibecrafted_core/runtime"
+    shutil.copytree(helper_source, helper_target)
+    scaffold_doctor = pack_bin / "scaffold-doctor"
+    scaffold_doctor.write_text(
+        "#!/bin/sh\nprintf 'runtime-pack-scaffold-doctor\\n'\n",
+        encoding="utf-8",
+    )
+    scaffold_doctor.chmod(0o755)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    plan = tmp_path / "plan"
+    plan.mkdir()
+    env = os.environ.copy()
+    env.pop("VIBECRAFTED_PREFER_REPO_SPAWN", None)
+    env["VIBECRAFTED_ROOT"] = str(pack)
+
+    result = subprocess.run(
+        [str(deck), "scaffold-doctor", "--plan", str(plan)],
+        cwd=outside,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "runtime-pack-scaffold-doctor" in result.stdout
