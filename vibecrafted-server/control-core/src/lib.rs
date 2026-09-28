@@ -81,7 +81,9 @@ pub use scaffold::{
     ScaffoldWorkspace, apply_plan_geometry, collect_delivery_verifiers, doctor_plan_root,
     doctor_plan_root_in_repo,
 };
-pub use scaffold_verifiers::{execute_brief_verifiers, extract_brief_verifier_commands};
+pub use scaffold_verifiers::{
+    execute_brief_verifiers, execute_brief_verifiers_in_repo, extract_brief_verifier_commands,
+};
 pub use usage::{
     USAGE_PROVIDER_ADAPTERS, USAGE_REPORT_SCHEMA, UsageCost, UsageDimension, UsageDimensions,
     UsageFilter, UsageReport, UsageReportFilter, UsageRun, UsageTokens, UsageTotals,

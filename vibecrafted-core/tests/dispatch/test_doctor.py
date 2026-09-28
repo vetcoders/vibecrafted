@@ -61,6 +61,29 @@ def test_dispatch_doctor_allows_observational_read_with_mutation_policy() -> Non
     assert report.errors == ()
 
 
+def test_dispatch_doctor_allows_release_in_branch_name_probe(tmp_path: Path) -> None:
+    dispatch = tmp_path / "release-branch-probe.dispatch.toml"
+    dispatch.write_text(
+        """schema = "vibecrafted.dispatch.v1"
+[meta]
+repo = "/tmp/vibecrafted-dispatch-fixture"
+[[cuts]]
+id = "branch-probe"
+agent = "codex"
+workflow = "implement"
+prompt = "check branch"
+  [[cuts.verify]]
+  run = "git branch --show-current | grep release-"
+  expect = { exit_code = 0 }
+""",
+        encoding="utf-8",
+    )
+
+    report = diagnose_file(dispatch)
+
+    assert report.ok is True, report.errors
+
+
 def test_dispatch_doctor_warns_model_pin_is_not_provider_validated() -> None:
     report = diagnose_file(FIXTURES / "model-pin.dispatch.toml")
 

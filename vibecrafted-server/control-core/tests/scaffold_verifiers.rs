@@ -2,10 +2,12 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Mutex;
 
 use control_core::{
-    SCAFFOLD_MANIFEST_SCHEMA_JSON, doctor_plan_root, extract_brief_verifier_commands,
+    SCAFFOLD_MANIFEST_SCHEMA_JSON, doctor_plan_root, doctor_plan_root_in_repo,
+    extract_brief_verifier_commands,
 };
 use serde_json::json;
 
@@ -93,6 +95,33 @@ fn write_plan(home: &Path, plan_id: &str, gates: &str) -> PathBuf {
 fn doctor_locked(root: &Path) -> control_core::ScaffoldDoctorReport {
     let _guard = ENV_LOCK.lock().expect("env lock");
     doctor_plan_root(root).expect("doctor_plan_root")
+}
+
+#[test]
+fn explicit_repo_is_verifier_cwd_for_simple_file_probes() {
+    let home = temp_home("explicit-repo-cwd");
+    let repo = home.join("checkout");
+    fs::create_dir_all(&repo).expect("repo");
+    Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .status()
+        .expect("git init");
+    fs::write(repo.join("repo-marker"), "today: present\n").expect("marker");
+    let root = write_plan(
+        &home,
+        "explicit-repo-cwd",
+        "```bash\ntest -f repo-marker && cat repo-marker\n```",
+    );
+
+    let report = doctor_plan_root_in_repo(&root, Some(&repo)).expect("doctor");
+
+    assert!(
+        !codes(&report).iter().any(|code| code.starts_with("verifier_")),
+        "errors={:?}",
+        report.errors
+    );
+    fs::remove_dir_all(home).ok();
 }
 
 fn codes(report: &control_core::ScaffoldDoctorReport) -> Vec<&str> {

@@ -137,7 +137,7 @@ every cut `[~]→[x]`.
 Every requirement in this plan starts as `[ ]`. An untouched `[ ]` at the end of a run is a
 non-delivery indicator, not a formatting nit. The worker flips its own boxes as part of delivery;
 no flip is believed — the supervisor re-runs the verifiers regardless. The Founder box is never
-filled by an agent: `Founder [x]` is valid only next to `acceptance/founder.json` in the plan root.
+filled by an agent; only the acceptance evidence file in the plan root makes a checked box valid.
 
 | cut | agent | commit | dowód (Operator) | zintegrowane | Worker | Operator | Founder |
 |---|---|---|---|---|---|---|---|

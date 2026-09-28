@@ -137,7 +137,7 @@ każdego cięcia `[~]→[x]`.
 Każde wymaganie w tym planie startuje jako `[ ]`. Nietknięte `[ ]` na końcu przebiegu to wskaźnik
 niedowiezienia, nie usterka formatowania. Worker przerzuca własne pola w ramach dostawy; żadnemu
 przerzuceniu się nie wierzy — supervisor i tak ponownie uruchamia verifiery. Pola Foundera nigdy
-nie wypełnia agent: `Founder [x]` jest ważne wyłącznie obok `acceptance/founder.json` w root planu.
+nie wypełnia agent; zaznaczone pole uznaje się wyłącznie przy pliku dowodu akceptacji w root planu.
 
 | cut | agent | commit | dowód (Operator) | zintegrowane | Worker | Operator | Founder |
 |---|---|---|---|---|---|---|---|

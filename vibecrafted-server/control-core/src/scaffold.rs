@@ -1058,7 +1058,12 @@ pub fn doctor_plan_root_in_repo(
         &manifest,
         repo_root.as_ref().map(AsRef::as_ref),
     );
-    crate::scaffold_verifiers::execute_brief_verifiers(root, &manifest, &mut report.errors);
+    crate::scaffold_verifiers::execute_brief_verifiers_in_repo(
+        root,
+        &manifest,
+        repo_root.as_ref().map(AsRef::as_ref),
+        &mut report.errors,
+    );
     report.valid = report.errors.is_empty();
     Ok(report)
 }
@@ -2187,7 +2192,26 @@ fn validate_reception_matrix(
             ),
         );
     }
-    if lower.contains("founder [x]") && !plan_root.join("acceptance/founder.json").is_file() {
+    let mut founder_column = None;
+    let mut founder_checked = false;
+    for line in lower.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with('|') || !trimmed.ends_with('|') {
+            continue;
+        }
+        let cells = trimmed
+            .trim_matches('|')
+            .split('|')
+            .map(str::trim)
+            .collect::<Vec<_>>();
+        if let Some(index) = cells.iter().position(|cell| *cell == "founder") {
+            founder_column = Some(index);
+        } else if founder_column.is_some_and(|index| cells.get(index) == Some(&"[x]")) {
+            founder_checked = true;
+            break;
+        }
+    }
+    if founder_checked && !plan_root.join("acceptance/founder.json").is_file() {
         doctor_error(
             errors,
             "reception_matrix",
