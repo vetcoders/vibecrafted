@@ -9,8 +9,19 @@ import pytest
 from vibecrafted_core import workflow_runtime
 
 
-def _fake_agent(bin_dir: Path, name: str) -> None:
+def _fake_agent(bin_dir: Path, name: str, *, status: str = "completed") -> None:
     path = bin_dir / name
+    if status == "missing-frontmatter":
+        report_writer = (
+            'printf "report without frontmatter\\n" > "$VIBECRAFTED_REPORT_PATH"\n'
+        )
+    else:
+        report_writer = (
+            'printf "%s\\n" "---" "run_id: ${VIBECRAFTED_RUN_ID:-unknown}" '
+            f'"agent: {name}" "skill: test" "status: {status}" '
+            f'"claim_status: {status}" "---" "report for $0" '
+            '> "$VIBECRAFTED_REPORT_PATH"\n'
+        )
     path.write_text(
         "#!/usr/bin/env bash\n"
         "printf '%s\\n' \"$@\"\n"
@@ -19,11 +30,7 @@ def _fake_agent(bin_dir: Path, name: str) -> None:
         f"printf '[12:00:00] session: {name}-session\\n'\n"
         "printf '[12:00:01] tokens: 10 in (3 cached) / 5 out\\n'\n"
         "printf 'cost_usd: $0.015\\n'\n"
-        "printf 'fake worker ok\\n'\n"
-        'printf "%s\\n" "---" "run_id: ${VIBECRAFTED_RUN_ID:-unknown}" '
-        f'"agent: {name}" "skill: test" "status: completed" '
-        '"claim_status: completed" "---" "report for $0" '
-        '> "$VIBECRAFTED_REPORT_PATH"\n',
+        "printf 'fake worker ok\\n'\n" + report_writer,
         encoding="utf-8",
     )
     path.chmod(0o755)
@@ -1035,6 +1042,86 @@ def test_polarize_runtime_reuses_loop_with_polarize_identity(
     assert "intentionally blind to prior marbles runs" not in transcript
     assert "Previous loop report" not in transcript
     assert "marbles-L1.md" not in transcript
+
+
+@pytest.mark.parametrize(
+    ("child_status", "expected_children", "expected_rc", "expected_parent_status"),
+    [
+        ("blocked", 1, 1, "blocked"),
+        ("failed", 1, 1, "failed"),
+        ("completed", 3, 0, "completed"),
+    ],
+)
+def test_marbles_loop_stops_on_child_report_status(
+    monkeypatch,
+    tmp_path: Path,
+    child_status: str,
+    expected_children: int,
+    expected_rc: int,
+    expected_parent_status: str,
+) -> None:
+    """Exit-0 + artifact_ok is not enough: blocked/failed report status stops L1.
+
+    A completed child still walks the full count (regression of the pre-fix loop).
+    """
+    home = _runtime_env(monkeypatch, tmp_path, f"marb-status-{child_status}")
+    _fake_agent(tmp_path / "bin", "codex", status=child_status)
+
+    rc = workflow_runtime.main(
+        [
+            "marbles",
+            "--agent",
+            "codex",
+            "--root",
+            str(tmp_path),
+            "--prompt",
+            "converge",
+            "--count",
+            "3",
+            "--depth",
+            "3",
+        ]
+    )
+
+    assert rc == expected_rc
+    meta = json.loads((home / "parent.meta.json").read_text(encoding="utf-8"))
+    assert len(meta["children"]) == expected_children
+    assert meta["status"] == expected_parent_status
+    report = (home / "parent.md").read_text(encoding="utf-8")
+    assert report.splitlines()[1] == f"status: {expected_parent_status}"
+    child_dir = home / f"marb-status-{child_status}-children"
+    assert (child_dir / "marbles-L1.md").is_file()
+    assert (child_dir / "marbles-L2.md").is_file() is (expected_children > 1)
+    assert (child_dir / "marbles-L3.md").is_file() is (expected_children > 2)
+
+
+def test_marbles_loop_missing_frontmatter_is_not_a_stop(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Unreadable/absent frontmatter must not invent a blocked stop."""
+    home = _runtime_env(monkeypatch, tmp_path, "marb-status-missing")
+    _fake_agent(tmp_path / "bin", "codex", status="missing-frontmatter")
+
+    rc = workflow_runtime.main(
+        [
+            "marbles",
+            "--agent",
+            "codex",
+            "--root",
+            str(tmp_path),
+            "--prompt",
+            "converge",
+            "--count",
+            "3",
+            "--depth",
+            "3",
+        ]
+    )
+
+    assert rc == 0
+    meta = json.loads((home / "parent.meta.json").read_text(encoding="utf-8"))
+    assert len(meta["children"]) == 3
+    assert meta["status"] == "completed"
 
 
 def test_child_prompt_carries_worker_signal_discipline() -> None:

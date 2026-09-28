@@ -17,6 +17,7 @@ from pathlib import Path
 
 from .model_overrides import _with_model_override
 from .package_resources import package_root
+from .report_contract import parse_report_path
 from .research_config import (
     SUPPORTED_RESEARCH_AGENTS,
     ResearchAgentSelection,
@@ -26,6 +27,8 @@ from .runtime_paths import agent_tool_search_path, selected_runtime_environment
 from .spawn import _resolve_agent_command, _stdin_command
 from .supervisor_async import AsyncRunHandle, AsyncSupervisor
 from .telemetry import tokens_total as _tokens_total
+
+_LOOP_STOP_REPORT_STATUSES = frozenset({"blocked", "failed"})
 
 
 @dataclass(frozen=True)
@@ -835,6 +838,17 @@ def _research_survivors(results: Sequence[ChildResult]) -> list[ChildResult]:
     return [r for r in results if r.exit_code == 0 and r.artifact_ok]
 
 
+def _child_report_status(result: ChildResult) -> str:
+    """Return the child's report frontmatter ``status``, or empty if unreadable.
+
+    Missing report / unreadable frontmatter is empty, not a stop signal.
+    """
+    parsed = parse_report_path(result.report)
+    if not parsed.has_frontmatter:
+        return ""
+    return (parsed.fields.get("status") or "").strip().lower()
+
+
 def _research_run_status(
     results: Sequence[ChildResult],
     synthesis: ChildResult | None,
@@ -846,7 +860,9 @@ def _research_run_status(
     Research degrades gracefully: a majority of surviving lanes plus a valid
     synthesis is ``partial_success`` (a green run, not a failure) instead of
     collapsing the whole swarm to ``failed`` on a single dead lane. Non-research
-    kinds (marbles/polarize) keep the strict all-or-nothing contract.
+    kinds (marbles/polarize) keep the strict all-or-nothing contract, and also
+    surface a child report ``blocked``/``failed`` instead of calling an early
+    loop stop ``completed``.
     """
 
     total = len(results)
@@ -855,7 +871,14 @@ def _research_run_status(
     survivors = _research_survivors(results)
     all_ok = len(survivors) == total
     if kind != "research":
-        return "completed" if all_ok else "failed"
+        if not all_ok:
+            return "failed"
+        statuses = [_child_report_status(result) for result in results]
+        if "failed" in statuses:
+            return "failed"
+        if "blocked" in statuses:
+            return "blocked"
+        return "completed"
     synthesis_ok = (
         synthesis is not None and synthesis.exit_code == 0 and synthesis.artifact_ok
     )
@@ -1410,7 +1433,8 @@ async def run_marbles(
     model_requested: str = "",
 ) -> int:
     """Run up to `count` sequential marbles/polarize loop iterations, stopping
-    early on the first failed/invalid child; writes the parent report.
+    early on the first failed/invalid child or a child report whose ``status``
+    is ``blocked`` or ``failed``; writes the parent report.
     Returns 0 only if all `count` iterations completed cleanly.
     """
     model_requested = _remember_runtime_model_request(model_requested)
@@ -1429,11 +1453,18 @@ async def run_marbles(
         results.append(result)
         if result.exit_code != 0 or not result.artifact_ok:
             break
+        if _child_report_status(result) in _LOOP_STOP_REPORT_STATUSES:
+            break
     _write_parent_report(kind, root, prompt, results)
     return (
         0
         if len(results) == count
-        and all(result.exit_code == 0 and result.artifact_ok for result in results)
+        and all(
+            result.exit_code == 0
+            and result.artifact_ok
+            and _child_report_status(result) not in _LOOP_STOP_REPORT_STATUSES
+            for result in results
+        )
         else 1
     )
 
