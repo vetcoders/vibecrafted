@@ -268,6 +268,26 @@ def validate_runtime_transcript(
     return canonical
 
 
+_PUBLIC_SLASH_COMMAND = re.compile(r"\A/[a-z0-9-]+\Z")
+
+MIN_PRIVATE_LAUNCH_SECRET_BYTES = 16
+
+
+def is_private_launch_secret(secret: str) -> bool:
+    """Decide whether a launch prompt deserves transcript redaction.
+
+    A bare public slash-command (``/vc-init``) or a token below the minimum
+    length is not a secret: redacting it erases every later mention of the
+    same bytes in the conversation while protecting nothing.
+    """
+    token = secret.strip()
+    if not token:
+        return False
+    if _PUBLIC_SLASH_COMMAND.match(token):
+        return False
+    return len(token.encode("utf-8")) >= MIN_PRIVATE_LAUNCH_SECRET_BYTES
+
+
 class PrivatePromptFilter:
     """Streaming exact-byte redaction, including matches across read boundaries."""
 
@@ -330,6 +350,8 @@ class InteractiveTranscriptCapture:
         self.path = path
         self.display_fd = display_fd
         self.error = ""
+        if not is_private_launch_secret(secret):
+            secret = ""
         self.filter = PrivatePromptFilter(secret.encode("utf-8"))
         self.normalized_filter = PrivatePromptFilter(
             secret.replace("\r\n", "\n").replace("\n", "\r\n").encode("utf-8")
