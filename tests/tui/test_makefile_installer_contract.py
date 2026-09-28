@@ -1790,6 +1790,12 @@ def _mock_pack_repo(tmp_path: Path, *, body: str) -> Path:
         REPO_ROOT / "scripts/lib/runtime-pack-selection.sh",
         repo / "scripts/lib/runtime-pack-selection.sh",
     )
+    # release-prereqs sources the Xcode channel gate before the toolchain
+    # contract; an isolated repo without it dies at that source line.
+    shutil.copy2(
+        REPO_ROOT / "scripts/lib/xcode-channel.sh",
+        repo / "scripts/lib/xcode-channel.sh",
+    )
     # The release toolchain contract is pinned to absolute CLT paths; hosts
     # whose CLT dropped ld-classic (27.x) cannot satisfy it. The mock builder
     # proves Make-target wiring, not the operator's toolchain, so the contract
