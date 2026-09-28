@@ -90,7 +90,7 @@ report_start_failure() {
   if ! (umask 077; mkdir -p "$log_dir" && printf '%s\n' "$reason" >>"$log"); then
     log="unavailable (cannot write $log)"
   fi
-  printf '\nVibecrafted: %s. Your terminal is still available.\nRecovery: vc-frame attach %q\nSession chooser: vc-frame ka\nLog: %s\n\n' \
+  printf '\nVibecrafted: %s. Your terminal is still available.\nRecovery: vc-frame attach %q\nList sessions: vc-frame list-sessions\nLog: %s\n\n' \
     "$reason" "${VIBECRAFTED_FRAME_HOST_SESSION:-vc-host}" "$log" >&2
 }
 

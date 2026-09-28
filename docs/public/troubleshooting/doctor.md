@@ -137,7 +137,7 @@ The terminal prints the reason, recovery commands, and the startup log path
 ```bash
 vc-terminal --doctor       # apply the installer's configuration repair transaction
 vc-frame attach vc-host    # return to the named session
-vc-frame ka                # open the session chooser
+vc-frame list-sessions     # list available sessions
 ```
 
 The repair preserves a backup and unrelated preferences. Temporary diagnostic
@@ -148,6 +148,8 @@ When the reserved `vc-host` name has a guest layout, `vc-start` preserves it
 and creates `vc-host-recovered` as the host. The diagnostic names the old session
 and gives its exact attach and cleanup commands. Save its work before choosing
 `kill-session` and `delete-session`; startup never runs those commands for you.
+`vc-frame ka` is an alias for `kill-all-sessions`: it stops every session, so use
+it only for an intentional global reset after saving work in all sessions.
 
 ## Receipt — provenance on top of health
 

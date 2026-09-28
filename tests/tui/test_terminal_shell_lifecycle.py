@@ -107,7 +107,8 @@ def test_product_entry_returns_controlling_pty_to_live_shell(
         read_until(b"SHELL_ALIVE")
         if entry_status:
             assert b"vc-frame attach vc-host" in output
-            assert b"vc-frame ka" in output
+            assert b"vc-frame list-sessions" in output
+            assert b"vc-frame ka" not in output
             log = tmp_path / ".vibecrafted/logs/terminal-startup.log"
             assert str(log).encode() in output
             assert "exit 2" in log.read_text()
