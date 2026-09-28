@@ -304,6 +304,12 @@ def _seed_repo(path: Path) -> str:
     subprocess.run(
         ["git", "commit", "-q", "-m", "seed"], cwd=path, check=True, capture_output=True
     )
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/vetcoders/fixture.git"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+    )
     return subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=path,

@@ -195,13 +195,33 @@ PY
 spawn_org_repo() {
   local root="${1:-$(spawn_repo_root)}"
   local fallback_to_basename="${2:-1}"
-  local org_repo=""
-  if ! org_repo="$(cd "$root" && git remote get-url origin 2>/dev/null | sed -E 's|.*[:/]([^/]+)/([^/.]+)(\.git)?$|\1/\2|')"; then
-    org_repo=""
+  local org_repo="" py lib_dir source_root
+  # util.sh -> lib -> scripts -> runtime -> vibecrafted_core -> vibecrafted-core
+  lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  source_root="$(cd "$lib_dir/../../../.." && pwd)"
+  if py="$(spawn_python_bin 2>/dev/null)"; then
+    if ! org_repo="$("$py" - "$root" "$source_root" <<'PY'
+import sys
+
+root, source_root = sys.argv[1], sys.argv[2]
+sys.path.insert(0, source_root)
+try:
+    from vibecrafted_core.runtime_receipt import artifact_org_repo
+    org, repo = artifact_org_repo(root)
+except Exception:
+    sys.exit(1)
+if not org or not repo or "/" in org or "/" in repo:
+    sys.exit(1)
+print(f"{org}/{repo}")
+PY
+)"; then
+      org_repo=""
+    fi
   fi
   if [[ -n "$org_repo" ]]; then
     printf '%s\n' "$org_repo"
   elif [[ "$fallback_to_basename" == "1" ]]; then
+    # Lock paths only. Artifact stores call this with fallback 0.
     printf '%s\n' "$(basename "$root")"
   else
     printf '\n'

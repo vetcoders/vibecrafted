@@ -255,7 +255,8 @@ def test_launch_workflow_returns_pid_and_logs_spawn(
     assert payload["accepted"] is True
     assert isinstance(payload["pid"], int)
     assert payload["prompt_file"]
-    assert ".vibecrafted/artifacts/local/src/" in payload["report"]
+    assert "/artifacts/local/" not in payload["report"]
+    assert "/.vibecrafted/reports/workflow/" in payload["report"]
     assert "/reports/workflow/" in payload["report"]
     report_name = Path(payload["report"]).name
     assert "_go_" not in report_name
@@ -2281,7 +2282,8 @@ def test_research_terminal_runtime_uses_vc_frame_research_layout(
         tmp_path / ".vibecrafted" / "control_plane" / "runtime_runs" / payload["run_id"]
     )
     assert Path(payload["report"]).parent.name == "research"
-    assert "/artifacts/local/" in payload["report"]
+    assert "/artifacts/local/" not in payload["report"]
+    assert "/.vibecrafted/reports/research/" in payload["report"]
     assert "/reports/research/" in payload["report"]
     assert Path(payload["transcript"]).parent == runtime_bucket
     assert Path(payload["meta"]).parent == runtime_bucket

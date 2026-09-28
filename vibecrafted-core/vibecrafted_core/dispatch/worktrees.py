@@ -73,23 +73,21 @@ def _same_filesystem_location(left: str | Path, right: str | Path) -> bool:
         return Path(left).resolve() == Path(right).resolve()
 
 
-def repo_identity(repo: str | Path) -> tuple[str, str]:
-    """Resolve a stable ``(org, repo)`` from origin, with local fallbacks."""
-    root = Path(repo).expanduser().resolve()
-    from ..repository_claims import ClaimContractError, canonical_repo_identity
+def repo_identity(repo: str | Path, *, explicit: str | None = None) -> tuple[str, str]:
+    """``(org, repo)`` from the forge origin, or from ``explicit``.
 
-    try:
-        identity = canonical_repo_identity(root)["repo_identity"]
-    except ClaimContractError:
-        # Artifact paths may be requested before a repository is initialized.
-        identity = f"local/{root.name}"
-    org, name = identity.rsplit("/", 1)
-    return _safe_component(org, "local"), _safe_component(name, "repo")
+    Never from the resolved symlink path or the checkout directory name.
+    """
+    from ..runtime_receipt import artifact_org_repo
+
+    return artifact_org_repo(repo, explicit=explicit)
 
 
-def canonical_artifact_root(repo: str | Path, *, day: str | None = None) -> Path:
+def canonical_artifact_root(
+    repo: str | Path, *, day: str | None = None, explicit: str | None = None
+) -> Path:
     """Return the durable, agent-agnostic artifact root for this repository."""
-    org, name = repo_identity(repo)
+    org, name = repo_identity(repo, explicit=explicit)
     stamp = day or datetime.now(UTC).strftime("%Y_%m%d")
     return vibecrafted_home() / "artifacts" / org / name / stamp
 

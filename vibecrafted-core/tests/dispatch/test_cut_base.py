@@ -40,6 +40,7 @@ def _repo(path: Path) -> str:
     (path / "README.md").write_text("seed\n", encoding="utf-8")
     _git(path, "add", "-A")
     _git(path, "commit", "-q", "-m", "seed")
+    _git(path, "remote", "add", "origin", "https://github.com/vetcoders/fixture.git")
     return _git(path, "rev-parse", "HEAD")
 
 
