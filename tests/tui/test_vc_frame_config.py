@@ -431,3 +431,17 @@ def test_first_session_is_the_frame_host() -> None:
     operator = (LAYOUTS_DIR / "operator.kdl").read_text(encoding="utf-8")
     assert _layout_declares_frame_host(operator)
     assert "rail true" in operator or 'rail "true"' in operator
+
+
+def test_host_lands_on_running_global_dashboard_without_losing_guest_anchor() -> None:
+    payload = (LAYOUTS_DIR / "host.kdl").read_text(encoding="utf-8")
+    home = _kdl_block(payload, 'tab name="Home" focus=true')
+    assert 'command="vc-o"' in home
+    assert 'args "--view" "host"' in home
+    assert "start_suspended=false" in home
+    assert "cwd=" not in home
+    assert "/releases/" not in home
+    workspace = _kdl_block(payload, 'tab name="Workspace"')
+    assert "workspace_surface true" in workspace
+    assert "frame_host true" in workspace
+    assert payload.count("focus=true") == 1

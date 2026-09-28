@@ -5,6 +5,36 @@ This crate is the Rust TUI operator console for Vibecrafted.
 It is intentionally separate from the Python installer surfaces and only reads
 the shared control-plane state under `VIBECRAFTED_HOME`.
 
+## Host Dashboard
+
+`vc-o --view host` opens the global host canvas, independent of the current
+directory. Keys `1`–`6` (or the navigation tabs) select Dashboard, Active runs,
+Config, Doctor, Projects and Voc. `o` opens a repository path prompt; Projects
+also supports selection with arrows and Enter. Run views use `g` for the
+existing goto-work action. `PgUp`/`PgDn` scroll and `q` closes the canvas.
+
+Host navigation reads the existing `control-core` run/workspace projections.
+The Active runs tab, summary and canvas LIVE counter use the same snapshot.
+Projects retain canonical IDs and roots, including duplicate display names;
+catalog entries alone never count as running sessions. The workspace census
+uses the existing registered Frame socket inventory, whose stale-socket
+limitation is shown in Doctor. An unreadable catalog is labelled unknown and
+the last successfully read project list is retained.
+
+The reader refreshes off the input thread every three seconds. Server readiness
+uses the existing `/api/health` endpoint with a one-second timeout. Navigation
+does not initialize the launcher, register a workspace, archive a run or write
+control-plane state. Explicit Open actions call `vibecrafted start resume
+--repo`; goto uses the existing receipt-checked goto-work path.
+
+The product host layout starts this canvas through `vc-o` on PATH with
+`start_suspended=false`. Its existing Workspace tab and projection anchor remain
+available for guests. This is not the complete Frame simulator contract:
+native rail routing, host chrome on Home, resurrection normalization, guest
+organ/draft preservation and an installed A–F walkaround still require Frame
+integration. The tests in `host_dashboard_contract.rs` certify the host
+projection only, not those external surfaces.
+
 ## Interface model
 
 The operator surface is split into three tabs so the console reads like a

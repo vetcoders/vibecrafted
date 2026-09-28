@@ -16,6 +16,8 @@ pub const DEFAULT_SERVER: &str = "http://127.0.0.1:3024";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConsoleView {
+    /// Read-only host canvas; project scope and launch forms belong to guests.
+    Host(crate::host::HostRoute),
     /// Shared Home / Dashboard. This is the product landing surface.
     Home,
     /// Home with the deliberately provisional needs-attention classifier.
@@ -172,10 +174,18 @@ impl TranscriptFilter {
 impl ConsoleView {
     pub fn parse(raw: &str) -> anyhow::Result<Self> {
         match raw {
+            "host" | "host-dashboard" => Ok(Self::Host(crate::host::HostRoute::Dashboard)),
+            "host-runs" => Ok(Self::Host(crate::host::HostRoute::ActiveRuns)),
+            "host-config" => Ok(Self::Host(crate::host::HostRoute::Config)),
+            "host-doctor" => Ok(Self::Host(crate::host::HostRoute::Doctor)),
+            "host-projects" => Ok(Self::Host(crate::host::HostRoute::Projects)),
+            "host-voc" => Ok(Self::Host(crate::host::HostRoute::Voc)),
             "home" | "dashboard" => Ok(Self::Home),
             "observe" | "live" => Ok(Self::Observe),
             "full" | "classic" => Ok(Self::Full),
-            other => anyhow::bail!("unknown --view {other} (home|observe|full)"),
+            other => anyhow::bail!(
+                "unknown --view {other} (home|observe|full|host|host-runs|host-config|host-doctor|host-projects|host-voc)"
+            ),
         }
     }
 
@@ -190,7 +200,7 @@ impl ConsoleView {
     pub fn with_attention_working_rule(self) -> anyhow::Result<Self> {
         match self {
             Self::Home | Self::HomeAttention => Ok(Self::HomeAttention),
-            Self::Observe | Self::Full => {
+            Self::Observe | Self::Full | Self::Host(_) => {
                 anyhow::bail!("--attention-working-rule requires --view home")
             }
         }

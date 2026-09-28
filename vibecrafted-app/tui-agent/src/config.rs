@@ -410,10 +410,12 @@ fn print_help() {
     println!();
     println!("Usage:");
     println!(
-        "  voc [--view home|observe|full] [--server <url>] [--state-root <dir>] [--repo <path>]"
+        "  voc [--view home|observe|full|host] [--server <url>] [--state-root <dir>] [--repo <path>]"
     );
     println!();
     println!("Options:");
+    println!("  --view host         Global, read-only host Dashboard (independent of cwd)");
+    println!("  --view host-runs|host-config|host-doctor|host-projects|host-voc");
     println!(
         "  --view home|observe|full  Default home: live / needs-attention / failed, then observation"
     );
