@@ -50,6 +50,7 @@ help:
 	@printf "  make check        \033[2mLint shell scripts\033[0m\n"
 	@printf "  make release      \033[2mBuild, sign, notarize the canonical versioned DMG\033[0m\n"
 	@printf "  make portable     \033[2mBuild the provenance-bound tarball for Linux/WSL2\033[0m\n"
+	@printf "  make installer-kit \033[2mPackage the standalone Runtime Pack installer\033[0m\n"
 	@printf "  make publish-release \033[2mCold-verify and publish both channels\033[0m\n"
 	@printf "\n"
 	@printf "  \033[2mdev targets: make help-dev\033[0m\n"
@@ -82,6 +83,12 @@ PORTABLE_SCRIPT := scripts/build-portable-release.sh
 LINUX_RUNTIME_PACK_SCRIPT := scripts/build-linux-runtime-pack.sh
 RUNTIME_PACK_INSTALLER := scripts/install-runtime-pack.sh
 RUNTIME_PACK_PACKAGER := scripts/package-runtime-pack.sh
+INSTALLER_KIT_OUTPUT ?= $(CURDIR)/dist/Vibecrafted_InstallerKit.tar.gz
+
+.PHONY: installer-kit
+installer-kit:
+	@bash scripts/package-installer-kit.sh --output "$(INSTALLER_KIT_OUTPUT)"
+
 # Owner of the build -> install handoff record. The builder writes which pack it
 # actually completed; this Makefile and the installer read it instead of each
 # re-deriving a filename from the current HEAD, date and a hard-coded dist.
@@ -235,6 +242,7 @@ unified-product-contract-gate:
 	uv run --project vibecrafted-core --with pytest python -m pytest \
 		tests/tui/test_unified_app_contract.py \
 		tests/tui/test_makefile_installer_contract.py \
+		tests/tui/test_installer_kit.py \
 		tests/tui/test_distribution_manifest.py \
 		tests/tui/test_install_bootstrap.py \
 		tests/tui/test_installer_doctor.py \

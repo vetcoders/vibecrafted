@@ -1448,8 +1448,8 @@ TOOLCHAIN_CONTRACT = REPO_ROOT / "scripts/lib/release-toolchain-contract.sh"
 def _preflight_builder_repo(tmp_path: Path) -> tuple[Path, str, Path]:
     """A repo where the real release builder runs as far as its preflight.
 
-    Only the builder, its pinned toolchain contract (sourced before the first
-    argument is parsed) and the record's owner are copied. That is not a shortcut:
+    The builder and its preflight libraries, including the Xcode channel guard,
+    are copied. That is not a shortcut:
     every failure exercised here happens before the remaining libraries are even
     sourced, which is precisely the property under test -- the attempt must be
     claimed before them.
@@ -1461,6 +1461,9 @@ def _preflight_builder_repo(tmp_path: Path) -> tuple[Path, str, Path]:
     shutil.copy2(RELEASE_BUILDER, repo / "scripts" / RELEASE_BUILDER.name)
     shutil.copy2(SELECTION_LIBRARY, repo / "scripts/lib" / SELECTION_LIBRARY.name)
     shutil.copy2(TOOLCHAIN_CONTRACT, repo / "scripts/lib" / TOOLCHAIN_CONTRACT.name)
+    shutil.copy2(
+        XCODE_CHANNEL_LIBRARY, repo / "scripts/lib" / XCODE_CHANNEL_LIBRARY.name
+    )
     shutil.copy2(
         REPO_ROOT / "scripts/lib/release-single-flight.sh",
         repo / "scripts/lib/release-single-flight.sh",
