@@ -3,6 +3,7 @@ pub mod catalog;
 pub mod config;
 pub mod goto_work;
 pub mod home;
+pub mod host;
 pub mod launch;
 pub mod layout;
 pub mod memory;
@@ -218,6 +219,9 @@ fn spawn_catalog_load(app: &App, tx: &Sender<BackgroundMessage>) {
 pub fn run_cli() -> anyhow::Result<()> {
     let options = parse_args()?;
     let config = build_config(options);
+    if let ConsoleView::Host(route) = config.view {
+        return host::run(config, route);
+    }
     let rt = tokio::runtime::Runtime::new()?;
     let _guard = rt.enter();
     run_app(config)

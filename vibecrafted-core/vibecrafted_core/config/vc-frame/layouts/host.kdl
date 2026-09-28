@@ -33,9 +33,18 @@ layout {
         pane { children; }
     }
 
+    // Host landing carries intent, not a generation path or the creator's cwd.
+    // Keep the guest projection anchor below: Frame requires a plugin surface
+    // beside its exclusive frame_host owner to project an existing guest.
+    tab name="Home" focus=true {
+        pane name="Dashboard" command="vc-o" start_suspended=false {
+            args "--view" "host"
+        }
+    }
+
     // session_layer is mounted into every tab. Keep the exclusive frame host
     // beside its single workspace surface so Screen sees exactly one owner.
-    tab name="Workspace" focus=true {
+    tab name="Workspace" {
         pane split_direction="vertical" {
             pane size=24 borderless=true {
                 plugin location="frame-host" {

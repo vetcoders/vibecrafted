@@ -58,6 +58,16 @@ def _guard_host_guest(layouts_dir: Path, config_path: Path) -> None:
         raise ValueError("host.kdl Workspace tab must own frame_host")
     if host_workspace.count("workspace_surface true") != 1:
         raise ValueError("host.kdl must expose exactly one guest workspace surface")
+    host_home = _block(host, 'tab name="Home" focus=true')
+    if not all(
+        token in host_home
+        for token in ('command="vc-o"', 'args "--view" "host"', "start_suspended=false")
+    ):
+        raise ValueError("host.kdl must start the global Dashboard through PATH")
+    if "cwd=" in host_home or "/releases/" in host_home:
+        raise ValueError("host Dashboard must not retain creator cwd or generation")
+    if host.count("focus=true") != 1:
+        raise ValueError("host.kdl must focus only the Home landing tab")
 
     operator_layer = _block(operator, "session_layer")
     operator_content = operator.replace(operator_layer, "", 1)
