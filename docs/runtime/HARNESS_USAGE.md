@@ -9,7 +9,8 @@ run metadata, or a second ledger. The runtime owns persistence.
 The existing Costs & usage projection invokes the same Python resolver for
 historical unknowns. It may also estimate previously unpriced known usage after
 a price-table update. This read-only recovery does not backfill historical files.
-Provider-reported cost always wins. Updated estimates correct cache accounting
+Provider-reported cost always wins. Legacy Grok stream input is fresh input;
+its native `inference_done` prompt count includes cache. Updated estimates correct cache accounting
 using the provider's input semantics, rather than comparing count magnitudes.
 
 ## Evidence contract

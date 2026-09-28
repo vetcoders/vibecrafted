@@ -672,3 +672,27 @@ def test_malformed_copilot_data_is_not_a_settlement_failure(tmp_path):
         [{"type": "session.shutdown", "timestamp": STAMP, "data": "broken"}],
     )
     assert resolve(tmp_path, "copilot") is None
+
+
+def test_legacy_grok_stream_input_is_fresh_not_the_native_prompt_total():
+    usage = t.usage_record(
+        1,
+        tokens_input=123064,
+        tokens_cached_input=4200256,
+        tokens_cache_write=None,
+        tokens_output=21463,
+        source="provider_stream",
+    )
+    result = t.build_run_telemetry(
+        usage=usage,
+        model="grok-build",
+        reported_cost=1.006041,
+        reported_cost_source="estimated:xai-api-2026-07",
+        session_candidate=SESSION,
+        session_source="provider_stream",
+        parents={},
+        failure=None,
+        agent="grok",
+    )
+    assert result.cost.amount == 1.006041
+    assert result.usage is usage

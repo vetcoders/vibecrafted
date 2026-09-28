@@ -706,7 +706,9 @@ def _stream_pricing_usage(usage: UsageRecord, agent: str, model: str) -> UsageRe
     created = (
         usage.tokens_cache_write if isinstance(usage.tokens_cache_write, int) else 0
     )
-    fresh = inp - cached - created if agent in {"codex", "grok", "cursor"} else inp
+    # Legacy Grok stream modelUsage reports fresh input; native inference_done
+    # prompt_tokens are inclusive and normalized separately in harness_usage.
+    fresh = inp - cached - created if agent in {"codex", "cursor"} else inp
     if fresh < 0:
         return replace(usage, events=0)
     return replace(
