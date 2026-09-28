@@ -4688,3 +4688,34 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
         shutil.rmtree(sandbox, ignore_errors=True)
         for name in owned:
             assert name not in leftover, leftover
+
+
+@pytest.mark.parametrize("invocation", ["vc-start", "vc-start resume"])
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+def test_colliding_guest_host_name_creates_host_beside_it(
+    tmp_path: Path, shell: str, invocation: str
+) -> None:
+    scene = Scene(tmp_path, live=(HOST_SESSION,), guests=(HOST_SESSION,))
+    original = (scene.table / "live" / HOST_SESSION).read_bytes()
+    result = _run(
+        scene,
+        invocation,
+        shell=shell,
+        tty=True,
+        developer_root=True,
+        extra_env={
+            "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
+            "VIBECRAFTED_VC_FRAME_BIN": str(scene.generation / "bin" / "vc-frame"),
+        },
+    )
+    assert "RC=[0]" in result.stdout, result.stdout + result.stderr
+    assert (scene.table / "live" / HOST_SESSION).read_bytes() == original
+    assert "preserving session" in result.stdout + result.stderr
+    assert "vc-frame attach vc-host" in result.stdout + result.stderr
+    assert [a["attached"] for a in _attaches(scene.calls())] == ["vc-host-2"]
+    guest = (
+        scene.root.name
+        if invocation == "vc-start"
+        else f"catalog-{scene.root.name}-a1b2c3"
+    )
+    _wait_for_projection(scene, "vc-host-2", guest)

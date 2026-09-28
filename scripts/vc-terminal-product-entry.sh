@@ -141,6 +141,17 @@ _vc_terminal_select_host() {
 }
 
 _vc_terminal_sanitize_inherited_path
+# Explicit diagnostic/repair uses the selected generation's existing owner.
+# It opens no window and never persists invocation-only -o/-e probes.
+if [[ $# -eq 1 && "$1" == --doctor ]]; then
+  if [[ ! -x "$root/bin/python3" || ! -f "$root/scripts/vetcoders_install.py" ]]; then
+    printf 'vc-terminal: config repair owner is missing from %s\n' "$root" >&2
+    exit 2
+  fi
+  unset PYTHONPATH PYTHONHOME
+  exec "$root/bin/python3" -E -s -B "$root/scripts/vetcoders_install.py" \
+    runtime-repair --runtime-home "$(_vc_terminal_runtime_home)" --json
+fi
 if [[ "$native_host" != /* || ! -x "$native_host" || -L "$native_host" || -L "$root/libexec" ]]; then
   printf 'vc-terminal: native host missing: %s\n' "$native_host" >&2
   exit 127

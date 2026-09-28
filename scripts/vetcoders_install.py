@@ -17050,6 +17050,47 @@ def _preference_shell_blob(value: Any) -> str:
     return str(value)
 
 
+def _preference_shell_invalid_reason(value: Any) -> str | None:
+    """Reject broken persisted launch vehicles without executing shell text.
+
+    Temporary probes belong on invocation argv, never in a durable preference.
+    Reasons are deliberately value-free: repair receipts are user-visible.
+    """
+    if isinstance(value, str):
+        program, args = value, []
+    elif isinstance(value, Mapping):
+        program, args = value.get("program"), value.get("args", [])
+    else:
+        return "terminal.shell has an invalid shape"
+    if not isinstance(program, str) or not program.strip():
+        return "terminal.shell requires a non-empty program"
+    if not isinstance(args, list) or any(not isinstance(arg, str) for arg in args):
+        return "terminal.shell args must be a list of strings"
+    if any("\0" in part for part in [program, *args]):
+        return "terminal.shell contains an invalid argument"
+    if any(
+        re.search(r"(?:^|[\s\"'=])/(?:private/)?tmp/", part)
+        for part in [program, *args]
+    ):
+        return "terminal.shell contains a temporary probe"
+    if "$" in program or program.startswith("~"):
+        return "terminal.shell program contains an unexpanded home variable"
+    if not shutil.which(program):
+        return "terminal.shell program is missing or not executable"
+    # Direct interpreter script arguments are paths, not arbitrary shell code.
+    # Do not evaluate -c expressions or expand them through a login shell.
+    if Path(program).name in {"sh", "bash", "zsh", "fish"}:
+        for arg in args:
+            if arg.startswith("-"):
+                if "c" in arg[1:]:
+                    break
+                continue
+            if "/" in arg and not Path(arg).is_file():
+                return "terminal.shell script is missing"
+            break
+    return None
+
+
 def _preference_shell_has_operator_payload(value: Any) -> bool:
     """True when a shipped or user shell still launches `vc-start operator`."""
     blob = _preference_shell_blob(value)
@@ -18369,6 +18410,28 @@ def _reconcile_runtime_preference(
                     "preference choice requires bound current and incoming hashes"
                 )
         current = current_raw.decode("utf-8") if current_raw is not None else None
+        # Repair only the known-invalid atomic shell record. The surrounding
+        # user policy still takes the normal three-way/conflict path, including
+        # transaction backups, digest-bound retries and chrome preservation.
+        if destination.name == "terminal-policy.toml" and current is not None:
+            import tomllib
+
+            shell = _toml_flatten(tomllib.loads(current)).get("terminal.shell")
+            invalid_reason = (
+                _preference_shell_invalid_reason(shell) if shell is not None else None
+            )
+            if invalid_reason:
+                outcome["repair_reason"] = invalid_reason
+                replacement = _toml_flatten(tomllib.loads(incoming)).get(
+                    "terminal.shell"
+                )
+                if replacement is None or _preference_shell_invalid_reason(replacement):
+                    raise ValueError(
+                        "shipped terminal.shell is not a valid repair vehicle"
+                    )
+                current = _toml_replace_or_insert(
+                    current, "terminal.shell", _toml_literal(replacement)
+                )
 
         def merge(selected: str | None) -> str:
             return (
@@ -23005,7 +23068,8 @@ def _runtime_config_repair_plan(
             {
                 "path": str(destination),
                 "action": "repair",
-                "reason": (
+                "reason": outcome.get("repair_reason")
+                or (
                     "shipped defaults for the selected generation were never "
                     "merged into this preference"
                     if stale

@@ -1982,12 +1982,35 @@ _vetcoders_start_host_session_name() {
 # can never carry that name.
 _vetcoders_start_ensure_host() {
   local vc_frame_bin="${1:-}" session_name="${2:-}" host="" state="" role="" role_rc=0 rc=0
+  local base_host="" suffix=1
   host="$(_vetcoders_start_host_session_name)"
   if [[ "$host" == "$session_name" ]]; then
     printf 'vc-start: %s is the Frame host name; pass a different workspace name.\n' \
       "$(_vetcoders_shell_quote "$host")" >&2
     return 2
   fi
+  base_host="$host"
+  # A name is not a role. Preserve a colliding guest (including old-generation
+  # sessions) and reserve another name for the chrome. Never kill/promote it.
+  while :; do
+    _vetcoders_start_read_inventory_state "$host"
+    state="$_vetcoders_start_inventory_state"
+    role=""
+    if [[ "$state" == live ]]; then
+      role="$(_vetcoders_start_session_projection_role "$host" "$vc_frame_bin")" || {
+        _vetcoders_start_refuse_inventory "$host"
+        return $?
+      }
+    fi
+    if [[ "$host" != "$session_name" ]] && \
+      { [[ "$state" != live ]] || [[ "$role" != guest ]]; }; then
+      break
+    fi
+    printf 'vc-start: preserving session %s (role: %s); creating the Frame host beside it. Recover it with: vc-frame attach %s\n' \
+      "$(_vetcoders_shell_quote "$host")" "${role:-exited}" "$(_vetcoders_shell_quote "$host")" >&2
+    suffix=$((suffix + 1))
+    host="${base_host}-${suffix}"
+  done
   _vetcoders_start_read_inventory_state "$host"
   state="$_vetcoders_start_inventory_state"
   case "$state" in
@@ -2019,6 +2042,8 @@ _vetcoders_start_ensure_host() {
     printf 'vc-start: session %s exists but is not a Frame host (role: %s); refusing before creating %s.\n' \
       "$(_vetcoders_shell_quote "$host")" "$(_vetcoders_shell_quote "${role:-unknown}")" \
       "$(_vetcoders_shell_quote "$session_name")" >&2
+    printf 'Recover: vc-frame attach %s\nList sessions: vc-frame ka\n' \
+      "$(_vetcoders_shell_quote "$host")" >&2
     return 4
   fi
 }

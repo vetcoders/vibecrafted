@@ -4204,6 +4204,90 @@ def test_primary_shell_retains_error_and_usable_shell_after_vc_start_failure(
     assert "NEXT_COMMAND_WORKS" in result.stdout
 
 
+@pytest.mark.parametrize("entry_status", [0, 7])
+def test_primary_shell_preserves_foreground_pty(
+    tmp_path: Path, entry_status: int
+) -> None:
+    """A real controlling tty detects the -lic/exec EIO missed by pipes."""
+    if not Path("/bin/zsh").exists():
+        pytest.skip("product login shell requires zsh")
+    entry = tmp_path / "vc-start"
+    entry.write_text(
+        f"#!{sys.executable}\nimport os, sys\n"
+        "assert os.isatty(0)\nassert os.tcgetpgrp(0) == os.getpgrp()\n"
+        f"sys.exit({entry_status})\n"
+    )
+    entry.chmod(0o755)
+    zdotdir = tmp_path / ".config/vibecrafted/vc-terminal"
+    zdotdir.mkdir(parents=True)
+    (zdotdir / ".zshrc").write_text("printf 'FALLBACK_READY\\n'\n")
+    driver = r"""
+import os, pty, select, signal, sys, time
+pid, fd = pty.fork()
+if pid == 0:
+    os.execv('/bin/bash', ['/bin/bash', sys.argv[1], sys.argv[2]])
+output = b''
+sent = False
+reaped = False
+try:
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if select.select([fd], [], [], .1)[0]:
+            try:
+                block = os.read(fd, 65536)
+            except OSError:
+                break
+            if not block:
+                break
+            output += block
+        if b'FALLBACK_READY' in output and not sent:
+            os.write(fd, b"printf 'NEXT_%s\\n' COMMAND_WORKS; exit 0\n")
+            sent = True
+        done, status = os.waitpid(pid, os.WNOHANG)
+        if done:
+            reaped = True
+            break
+    sys.stdout.buffer.write(output)
+    assert b'NEXT_COMMAND_WORKS' in output, output
+    assert b'error on TTY read' not in output, output
+    assert b"can't set tty pgrp" not in output, output
+finally:
+    if not reaped:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        os.waitpid(pid, 0)
+    os.close(fd)
+"""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            driver,
+            str(REPO_ROOT / "config/alacritty/launch-primary-shell.zsh"),
+            str(entry),
+        ],
+        env={
+            **os.environ,
+            "HOME": str(tmp_path),
+            "VIBECRAFTED_HOME": str(tmp_path / "state"),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    if entry_status:
+        assert "vc-frame ka" in result.stdout
+        log = tmp_path / "state/logs/terminal-startup.log"
+        assert str(log) in result.stdout
+        assert "exit=7" in log.read_text()
+    else:
+        assert "could not start" not in result.stdout
+
+
 def test_manifest_producer_emits_an_app_accepted_by_the_runtime_verifier(
     tmp_path: Path, macho_executable: Path
 ) -> None:

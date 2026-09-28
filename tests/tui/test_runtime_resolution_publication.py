@@ -1484,7 +1484,7 @@ _REPO_TERMINAL_POLICY = (
 _INCOMING_SHELL = 'shell = { program = "/bin/sh", args = ["-c", "exec \\"$HOME/.config/vibecrafted/vc-terminal/launch-primary-shell.zsh\\""] }'
 _PREVIOUS_SHELL = 'shell = { program = "/bin/zsh", args = ["-lc", "exec \\"${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-terminal/launch-primary-shell.zsh\\" \\"$VIBECRAFTED_RUNTIME_ROOT/bin/vc-start\\" operator"] }'
 _USER_STRIPPED_SHELL = 'shell = { program = "/bin/zsh", args = ["-lc", "exec \\"${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-terminal/launch-primary-shell.zsh\\""] }'
-_EXPLICIT_FISH_SHELL = 'shell = { program = "/usr/bin/fish", args = ["-l"] }'
+_EXPLICIT_CUSTOM_SHELL = 'shell = { program = "/bin/sh", args = ["-l"] }'
 
 
 def _previous_terminal_policy() -> str:
@@ -1738,7 +1738,7 @@ def test_explicit_shell_preference_stays_a_bound_choice(tmp_path, roots, capsys)
         capsys,
     )
     policy = roots["product_config"] / "terminal-policy.toml"
-    user = _user_terminal_policy(shell=_EXPLICIT_FISH_SHELL)
+    user = _user_terminal_policy(shell=_EXPLICIT_CUSTOM_SHELL)
     policy.write_text(user, encoding="utf-8")
     current_sha = installer._sha256_path(policy)
     incoming_source = tmp_path / "pack-b/config/vc-terminal/vibecrafted.toml"
@@ -1752,7 +1752,7 @@ def test_explicit_shell_preference_stays_a_bound_choice(tmp_path, roots, capsys)
     assert conflict.envelope["schema"] == installer.PREFERENCE_CONFLICT_SCHEMA
     assert conflict.envelope["previous_runtime_available"] is True
     assert "terminal.shell" in json.dumps(conflict.envelope)
-    assert "/usr/bin/fish" not in json.dumps(conflict.envelope)
+    assert "/bin/sh" not in json.dumps(conflict.envelope)
     assert "Traceback" not in json.dumps(conflict.envelope)
     assert "^^^^" not in json.dumps(conflict.envelope)
     receipt = json.loads(
@@ -1789,7 +1789,7 @@ def test_explicit_shell_preference_stays_a_bound_choice(tmp_path, roots, capsys)
             preference_incoming_sha256=incoming_sha,
             preference_path=str(policy),
         )
-        assert _EXPLICIT_FISH_SHELL in policy.read_text(encoding="utf-8")
+        assert _EXPLICIT_CUSTOM_SHELL in policy.read_text(encoding="utf-8")
         assert "padding = { x = 0, y = 0 }" in policy.read_text(encoding="utf-8")
         _resolve(roots, capsys, status="ready")
 
@@ -1806,7 +1806,7 @@ def test_use_incoming_shell_choice_is_bound_and_preserves_chrome(
         capsys,
     )
     policy = roots["product_config"] / "terminal-policy.toml"
-    user = _user_terminal_policy(shell=_EXPLICIT_FISH_SHELL)
+    user = _user_terminal_policy(shell=_EXPLICIT_CUSTOM_SHELL)
     policy.write_text(user, encoding="utf-8")
     current_sha = installer._sha256_path(policy)
     incoming_source = tmp_path / "pack-b/config/vc-terminal/vibecrafted.toml"
@@ -1826,7 +1826,7 @@ def test_use_incoming_shell_choice_is_bound_and_preserves_chrome(
     )
     text = policy.read_text(encoding="utf-8")
     assert _INCOMING_SHELL in text
-    assert _EXPLICIT_FISH_SHELL not in text
+    assert _EXPLICIT_CUSTOM_SHELL not in text
     assert 'family = "User Mono"' in text
     assert 'background = "#111111"' in text
     assert 'mods = "Control"' in text
@@ -1848,7 +1848,7 @@ def test_failed_upgrade_without_prior_runtime_is_not_ready(roots, tmp_path, caps
     policy = roots["product_config"] / "terminal-policy.toml"
     policy.parent.mkdir(parents=True)
     policy.write_text(
-        _user_terminal_policy(shell=_EXPLICIT_FISH_SHELL), encoding="utf-8"
+        _user_terminal_policy(shell=_EXPLICIT_CUSTOM_SHELL), encoding="utf-8"
     )
     conflict = _install_conflict(
         seed_runtime_pack(
@@ -1876,7 +1876,7 @@ def test_cli_preference_conflict_is_json_without_traceback(tmp_path, roots, caps
     )
     policy = roots["product_config"] / "terminal-policy.toml"
     policy.write_text(
-        _user_terminal_policy(shell=_EXPLICIT_FISH_SHELL), encoding="utf-8"
+        _user_terminal_policy(shell=_EXPLICIT_CUSTOM_SHELL), encoding="utf-8"
     )
     payload = seed_runtime_pack(
         tmp_path / "pack-b", version="9.9.10+b", terminal_policy=incoming
@@ -1887,8 +1887,8 @@ def test_cli_preference_conflict_is_json_without_traceback(tmp_path, roots, caps
     envelope = json.loads(captured.out.splitlines()[-1])
     assert envelope["schema"] == installer.PREFERENCE_CONFLICT_SCHEMA
     assert "terminal.shell" in json.dumps(envelope)
-    assert "/usr/bin/fish" not in captured.out
-    assert "/usr/bin/fish" not in captured.err
+    assert "/bin/sh" not in captured.out
+    assert "/bin/sh" not in captured.err
     assert "Traceback" not in captured.err
     assert "^^^^" not in captured.err
     _resolve(roots, capsys, status="ready")
@@ -2637,3 +2637,65 @@ def test_keep_current_starship_preserves_exact_multiline_bytes_after_success(
     assert kept != incoming_starship
     selected = (roots["runtime_home"] / "tools/vibecrafted-current").resolve()
     assert selected.name == "9.9.10+b"
+
+
+@pytest.mark.parametrize(
+    "shell",
+    [
+        {"args": ["/private/tmp/claude-501/scratchpad/probe-i.sh"]},
+        {"program": "/bin/zsh", "args": ["/private/tmp/probe-i.sh"]},
+        {"program": "/bin/sh", "args": ["-c", "exec /tmp/probe.sh"]},
+        {"program": "${HOME}/missing-shell", "args": []},
+        {"program": "/missing/shell", "args": []},
+        {"program": "/bin/zsh", "args": ["/missing/script.zsh"]},
+        {"program": "/bin/zsh", "args": "-l"},
+    ],
+)
+def test_config_repair_quarantines_invalid_shell_only(installed, capsys, shell):
+    paths, _, _ = installed
+    policy = paths["product_config"] / "terminal-policy.toml"
+    original = policy.read_text()
+    bad = installer._toml_replace_or_insert(
+        original, "terminal.shell", installer._toml_literal(shell)
+    )
+    bad = installer._toml_replace_or_insert(bad, "window.opacity", "0.71")
+    policy.write_text(bad)
+    before = _snapshot(Path.home())
+    plan = _repair(paths, capsys, plan=True, status="repairable")
+    finding = next(item for item in plan["files"] if item["path"] == str(policy))
+    assert "terminal.shell" in finding["reason"]
+    assert _snapshot(Path.home()) == before
+    _repair(paths, capsys, plan=False, status="repaired")
+    parsed = tomllib.loads(policy.read_text())
+    assert parsed["window"]["opacity"] == 0.71
+    assert parsed["terminal"]["shell"] == tomllib.loads(original)["terminal"]["shell"]
+    assert any(item[3] == bad.encode() for item in _backups(paths).values())
+    _repair(paths, capsys, plan=False, status="healthy")
+
+
+def test_terminal_doctor_uses_generation_config_repair(installed, capsys):
+    paths, _, result = installed
+    generation = Path(result["root"])
+    policy = paths["product_config"] / "terminal-policy.toml"
+    original = policy.read_text()
+    policy.write_text(
+        installer._toml_replace_or_insert(
+            original, "terminal.shell", '{args = ["/tmp/probe.sh"]}'
+        )
+    )
+    completed = subprocess.run(
+        [str(generation / "bin/vc-terminal"), "--doctor"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    envelope = json.loads(completed.stdout)
+    assert envelope["schema"] == installer.CONFIG_REPAIR_SCHEMA
+    assert envelope["status"] == "repaired"
+    assert (
+        tomllib.loads(policy.read_text())["terminal"]["shell"]
+        == tomllib.loads(original)["terminal"]["shell"]
+    )
+    _repair(paths, capsys, plan=True, status="healthy")

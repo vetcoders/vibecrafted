@@ -70,14 +70,22 @@ resolve_vc_start() {
 run_product_entry() {
   local product_entry="$1"
   local product_entry_status=0
+  local log_dir="${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/logs" log_file=""
   shift
   export VIBECRAFTED_PRIMARY_SHELL_ATTACHED=1
-  /bin/zsh -lic '"$0" "$@"' "$product_entry" "$@"
+  # An interactive child takes the tty foreground process group. On return
+  # the final login shell would inherit a dead pgrp and fail with EIO.
+  /bin/zsh -lc '"$0" "$@"' "$product_entry" "$@"
   product_entry_status=$?
   # vc-frame owns its own alternate-buffer lifecycle; clean sticky smcup.
   leave_alt_screen
   if (( product_entry_status != 0 )); then
-    printf '\nVibecrafted could not start the requested workspace (exit %s).\nYour terminal is still available; correct the command and try again.\n\n' "$product_entry_status" >&2
+    if mkdir -p "$log_dir" 2>/dev/null; then
+      log_file="$log_dir/terminal-startup.log"
+      (umask 077; printf 'product entry failed: exit=%s\n' "$product_entry_status" >>"$log_file") || log_file=""
+    fi
+    printf '\nVibecrafted could not start the requested workspace (exit %s).\nYour terminal is still available. List and attach sessions: vc-frame ka\nRepair configuration: vc-terminal --doctor\nRetry: vc-start resume\nLog: %s\n\n' \
+      "$product_entry_status" "${log_file:-unavailable (cannot write startup log)}" >&2
   fi
 }
 
@@ -93,7 +101,8 @@ esac
 if [[ -n "$product_entry" ]]; then
   shift
   run_product_entry "$product_entry" "$@"
-elif ! skip_auto_workspace && product_entry="$(resolve_vc_start)"; then
+elif ! skip_auto_workspace; then
+  product_entry="$(resolve_vc_start)" || product_entry="vc-start"
   run_product_entry "$product_entry" resume
 fi
 
