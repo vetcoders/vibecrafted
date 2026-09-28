@@ -510,6 +510,33 @@ write_terminal_receipt() {
   write_journal "receipt_written" "$detail"
 }
 
+# The terminal receipt is written before open(1). After a successful open,
+# fold that fact back into the same receipt. A failed mark leaves relaunched
+# false and does not record the journal phase — the claim stays fail-closed.
+mark_receipt_relaunched() {
+  local sidecar="${RECEIPT}.relaunch.json"
+  without_update_lock_fd python3 - "$RECEIPT" "$sidecar" <<'PY'
+import json
+import os
+import sys
+
+receipt, sidecar = sys.argv[1], sys.argv[2]
+with open(receipt, encoding="utf-8") as handle:
+    payload = json.load(handle)
+if not isinstance(payload, dict):
+    raise SystemExit(1)
+payload["relaunched"] = True
+payload["relaunch_receipt"] = sidecar
+temporary = receipt + ".relaunched.tmp"
+with open(temporary, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
+    handle.write("\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+os.replace(temporary, receipt)
+PY
+}
+
 relaunch_destination() {
   if [[ "$RELAUNCH" -ne 1 ]]; then
     return 0
@@ -523,6 +550,8 @@ relaunch_destination() {
   fi
   atomic_write "${RECEIPT}.relaunch.json" "$(printf '{"schema":"io.vetcoders.vibecrafted.app-replacement-relaunch.v1","destination":"%s","relaunched":true,"transaction":"%s"}' \
     "$(escape_json "$DESTINATION")" "$(escape_json "$TRANSACTION")")"
+  # `relaunch_destination || true` suppresses set -e, so the mark must be checked.
+  mark_receipt_relaunched || return 1
   write_journal "relaunched" "opened after receipt"
   return 0
 }

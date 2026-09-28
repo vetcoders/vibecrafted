@@ -2745,3 +2745,131 @@ def test_product_update_policy_swift_behavior(tmp_path: Path) -> None:
         [str(binary)], capture_output=True, text=True, timeout=90, check=True
     )
     assert "ProductUpdatePolicyTests passed" in result.stdout
+
+
+def _helper_function(text: str, name: str, until: str) -> str:
+    start = text.index(f"{name}() {{")
+    end = text.index(f"\n{until}() {{", start)
+    return text[start:end]
+
+
+def _run_relaunch_harness(
+    tmp_path: Path, *, open_status: int
+) -> tuple[int, dict, dict, dict | None]:
+    text = HELPER.read_text(encoding="utf-8")
+    opener = tmp_path / "open"
+    opener.write_text(f"#!/bin/sh\nexit {open_status}\n", encoding="utf-8")
+    opener.chmod(0o755)
+    receipt = tmp_path / "install-app-receipt.json"
+    destination = "/Applications/Vibecrafted.app"
+    transaction = "tx-failsweep-17"
+    receipt.write_text(
+        json.dumps(
+            {
+                "schema": "io.vetcoders.vibecrafted.app-replacement.v1",
+                "destination": destination,
+                "relaunched": False,
+                "transaction": transaction,
+            },
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    journal = tmp_path / "journal.json"
+    assignments = "\n".join(
+        [
+            'CAPTURE=""',
+            f"DESTINATION={json.dumps(destination)}",
+            'SOURCE_IDENTITY=""',
+            'DISPLACED=""',
+            'EXPECTED_IDENTIFIER="io.vetcoders.vibecrafted"',
+            'INSTALLER_STATUS=""',
+            'MODE="replace"',
+            'parent=""',
+            'WAIT_PID=""',
+            'WAIT_START=""',
+            'PREPARED=""',
+            'PRIOR_GENERATION=""',
+            'PRIOR_IDENTITY=""',
+            'PRIOR_PACK=""',
+            'SOURCE=""',
+            'EXPECTED_TEAM="MW223P3NPX"',
+            f"TRANSACTION={json.dumps(transaction)}",
+            f"RECEIPT={json.dumps(str(receipt))}",
+            f"JOURNAL={json.dumps(str(journal))}",
+            f"OPEN_BIN={json.dumps(str(opener))}",
+            "RELAUNCH=1",
+            "UPDATE_LOCK_FD=",
+        ]
+    )
+    script = "\n".join(
+        [
+            "set -euo pipefail",
+            _helper_function(text, "escape_json", "atomic_write"),
+            _helper_function(text, "atomic_write", "process_lstart"),
+            _helper_function(text, "without_update_lock_fd", "open_update_held_fd"),
+            _helper_function(text, "write_journal", "write_admission"),
+            _helper_function(text, "mark_receipt_relaunched", "relaunch_destination"),
+            _helper_function(text, "relaunch_destination", "owned_failed_new"),
+            assignments,
+            "set +e",
+            "relaunch_destination",
+            "status=$?",
+            "set -e",
+            'printf "STATUS:%s\\n" "$status"',
+        ]
+    )
+    completed = subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    status_line = next(
+        line for line in completed.stdout.splitlines() if line.startswith("STATUS:")
+    )
+    status = int(status_line.split(":", 1)[1])
+    receipt_payload = json.loads(receipt.read_text(encoding="utf-8"))
+    journal_payload = json.loads(journal.read_text(encoding="utf-8"))
+    sidecar_path = Path(str(receipt) + ".relaunch.json")
+    sidecar = (
+        json.loads(sidecar_path.read_text(encoding="utf-8"))
+        if sidecar_path.is_file()
+        else None
+    )
+    return status, receipt_payload, journal_payload, sidecar
+
+
+def test_relaunch_receipt_agrees_with_journal(tmp_path: Path) -> None:
+    text = HELPER.read_text(encoding="utf-8")
+    assert text.index("write_terminal_receipt") < text.index('"$OPEN_BIN" -n')
+    body = text[
+        text.index("relaunch_destination() {") : text.index("\nowned_failed_new() {")
+    ]
+    assert body.index('relaunched":false') < body.index("mark_receipt_relaunched")
+    assert body.index('relaunched":true') < body.index("mark_receipt_relaunched")
+    assert body.index("mark_receipt_relaunched || return 1") < body.index(
+        'write_journal "relaunched"'
+    )
+
+    status, receipt, journal, sidecar = _run_relaunch_harness(tmp_path, open_status=0)
+    assert status == 0
+    assert receipt["relaunched"] is True
+    assert receipt["destination"] == "/Applications/Vibecrafted.app"
+    assert receipt["transaction"] == "tx-failsweep-17"
+    assert str(receipt["relaunch_receipt"]).endswith(".relaunch.json")
+    assert journal["phase"] == "relaunched"
+    assert sidecar is not None
+    assert sidecar["relaunched"] is True
+
+
+def test_failed_relaunch_does_not_claim_relaunched(tmp_path: Path) -> None:
+    status, receipt, journal, sidecar = _run_relaunch_harness(tmp_path, open_status=1)
+    assert status == 1
+    assert receipt["relaunched"] is False
+    assert "relaunch_receipt" not in receipt
+    assert journal["phase"] == "relaunching"
+    assert sidecar is not None
+    assert sidecar["relaunched"] is False
