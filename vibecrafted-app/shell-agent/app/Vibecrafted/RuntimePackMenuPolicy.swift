@@ -67,7 +67,7 @@ func deriveRuntimePackMenuState(
   if runtimePackMatchesCarrier(generation: generation, signedSourceRevision: signed) {
     return RuntimePackMenuState(
       header: "Runtime Pack: \(generation)",
-      detail: "Matches this App's signed carrier",
+      detail: "Runtime already current — matches this App's signed carrier",
       health: .healthy,
       actionsEnabled: true)
   }
@@ -99,4 +99,20 @@ func runtimeIdentityBlob(
   lines.append("runtime-home: \(runtimeHome)")
   lines.append("config-home: \(productConfigHome)")
   return lines.joined(separator: "\n")
+}
+
+/// Only a strictly newer release can trigger an upgrade offer. Different hashes
+/// of the same version have no ordering proof here; explicit republish remains
+/// available and the installer retains the authoritative downgrade tripwire.
+func shouldOfferRuntimeUpgrade(installed: String, carrier: String) -> Bool {
+  func release(_ generation: String) -> [Int]? {
+    guard let version = generation.split(separator: "+", maxSplits: 1, omittingEmptySubsequences: false).first else { return nil }
+    let parts = version.split(separator: ".", omittingEmptySubsequences: false)
+    guard parts.count == 3 else { return nil }
+    let values = parts.compactMap { Int($0) }
+    return values.count == 3 && values.allSatisfy { $0 >= 0 } ? values : nil
+  }
+  guard !installed.isEmpty, !carrier.isEmpty,
+    let current = release(installed), let candidate = release(carrier) else { return false }
+  return current.lexicographicallyPrecedes(candidate)
 }

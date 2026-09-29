@@ -1807,53 +1807,137 @@ pub fn ConsolePage() -> impl IntoView {
 }
 
 fn console_dashboard(dashboard: DashboardData) -> impl IntoView {
-    let runs_live = operator_active_runs(dashboard.active_runs).len();
-    // Running vc-frame sessions, not the durable catalog. The attribute stays
-    // so home still counts frames; the catalog itself is not this page.
+    let live = operator_active_runs(dashboard.active_runs);
+    let runs_live = live.len();
     let live_workspace_count = dashboard.live_frame_sessions.len();
     let welcome = overview_welcome_line(&dashboard.server_status).to_string();
     let selected_root = dashboard
         .workspaces
         .iter()
-        .find(|workspace| workspace.selected)
-        .map(|workspace| workspace.root.clone())
+        .find(|w| w.selected)
+        .map(|w| w.root.clone())
         .unwrap_or_default();
+    let mut projects = dashboard.workspaces;
+    projects.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    projects.truncate(5);
+    let projects_empty = projects.is_empty();
+    let runs_unavailable = dashboard.control_status == "unavailable";
+    let projects_unavailable = dashboard.workspace_status == "unavailable";
     view! {
-        <ServerFrame
-            active=ServerSection::Overview
-            status=welcome.clone()
-        >
-            <div
-                class="server-console-shell overview-desk"
-                data-live-workspaces=live_workspace_count
-            >
-                <div
-                    id="vc-focus-context"
-                    data-selected-workspace-root=selected_root
-                    hidden
-                ></div>
+        <ServerFrame active=ServerSection::Overview status=welcome.clone()>
+            <div class="server-console-shell overview-desk" data-live-workspaces=live_workspace_count>
+                <div id="vc-focus-context" data-selected-workspace-root=selected_root hidden></div>
                 <header class="overview-head">
                     <h1 class="run-detail-title">"Overview"</h1>
                     <p id="overview-status" class="overview-status" role="status">{welcome}</p>
+                    <a class="server-console-link server-console-link-primary overview-open-project" href="/projects">"Open project"</a>
                 </header>
-                <nav class="overview-doors" aria-label="Work">
-                    <a class="overview-door" href="/" aria-current="page">
-                        <strong>"Overview"</strong>
-                    </a>
-                    <a class="overview-door" href="/runs">
-                        <strong>"Runs"</strong>
-                        <small>{runs_live}</small>
-                    </a>
-                    <a class="overview-door" href="/projects">
-                        <strong>"Projects"</strong>
-                    </a>
-                    <a class="overview-door" href="/usage">
-                        <strong>"Costs & usage"</strong>
-                    </a>
-                </nav>
+                <div class="overview-dashboard">
+                    <section class="control-panel overview-live" aria-label="Live runs">
+                        <div class="control-panel-head"><h2>"Live runs"</h2><span>{runs_live}</span></div>
+                        {if runs_unavailable {
+                            view! { <p class="control-empty control-error">{format!("Runs unavailable: {}", dashboard.control_error)}</p> }.into_any()
+                        } else if runs_live == 0 {
+                            view! { <p class="control-empty">"No active runs. Open a project to begin work."</p> }.into_any()
+                        } else {
+                            live.into_iter().take(6).map(|run| {
+                                let href = format!("/run/{}", url_component(&run.run_id));
+                                view! {
+                                    <a class="overview-data-row" href=href>
+                                        <strong>{run.run_id}</strong>
+                                        <span>{format!("{} · {} · {}", run.agent, run.skill, run.state)}</span>
+                                        <time datetime=run.updated_at.clone() data-age="">{run.updated_at.clone()}</time>
+                                    </a>
+                                }
+                            }).collect_view().into_any()
+                        }}
+                        <a class="server-console-link" href="/runs">"View runs"</a>
+                    </section>
+                    <section class="control-panel overview-projects" aria-label="Recent projects">
+                        <div class="control-panel-head"><h2>"Recent projects"</h2></div>
+                        {projects_unavailable.then(|| view! { <p class="control-empty control-error">{format!("Projects unavailable: {}", dashboard.workspace_error)}</p> })}
+                        {(projects_empty && !projects_unavailable).then(|| view! { <p class="control-empty">"No recent projects. Choose a project folder with Open project."</p> })}
+                        {projects.into_iter().map(|project| {
+                            let href = format!("/workspaces#{}", url_component(&project.workspace_id));
+                            view! {
+                                <a class="overview-data-row" href=href>
+                                    <strong>{project.title}</strong>
+                                    <span>{project.root}</span>
+                                    <time datetime=project.updated_at.clone() data-age="">{project.updated_at.clone()}</time>
+                                </a>
+                            }
+                        }).collect_view()}
+                    </section>
+                    <section class="control-panel overview-health" aria-label="Health">
+                        <div class="control-panel-head"><h2>"Health"</h2><a class="server-console-link" href="/diagnostics">"Diagnostics"</a></div>
+                        <dl class="overview-health-readings">
+                            <div><dt>"Server"</dt><dd id="overview-server-health">"Reading readiness…"</dd></div>
+                            <div><dt>"Runtime health"</dt><dd id="overview-runtime-health">"Not published"</dd></div>
+                            <div><dt>"Runtime generation"</dt><dd id="overview-generation">"Not published"</dd></div>
+                            <div><dt>"Doctor"</dt><dd>"Not published — open Diagnostics for available checks."</dd></div>
+                        </dl>
+                    </section>
+                </div>
+                <script inner_html=overview_health_script()></script>
             </div>
         </ServerFrame>
     }
+}
+
+/// Only reads existing projections. No diagnostic command runs on render.
+fn overview_health_script() -> &'static str {
+    r#"(() => {
+  const host = document.querySelector('.overview-dashboard');
+  if (!host) return;
+  const put = (id, value) => { const node = document.getElementById(id); if (node) node.textContent = value; };
+  const read = async (url) => {
+    const response = await fetch(url, {cache: 'no-store', signal: AbortSignal.timeout(5000)});
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    return response.json();
+  };
+  let firstReading = true;
+  const refresh = async () => {
+    if (!host.isConnected) return;
+    // The canonical state endpoint refreshes the server's read-only cache.
+    // SSR alone deliberately returns the latest cached projection.
+    await read('/api/control/state').catch(() => {});
+    if (!firstReading) {
+      try {
+        const response = await fetch('/', {cache: 'no-store', signal: AbortSignal.timeout(5000)});
+        if (!response.ok) throw new Error('Overview unavailable');
+        const page = new DOMParser().parseFromString(await response.text(), 'text/html');
+        for (const selector of ['.overview-live', '.overview-projects']) {
+          const fresh = page.querySelector(selector);
+          const current = host.querySelector(selector);
+          if (fresh && current) current.replaceWith(fresh);
+        }
+        put('overview-status', 'View refreshed');
+      } catch (_) { put('overview-status', 'Refresh unavailable — showing the last reading'); }
+    }
+    firstReading = false;
+    await Promise.all([
+      read('/api/health').then(h => put('overview-server-health', `${h.status} · ${h.version}`))
+        .catch(() => put('overview-server-health', 'Unavailable — readiness could not be read')),
+      read('/api/control/caretaker').then(view => {
+        if (!view.published || !view.snapshot) {
+          put('overview-runtime-health', 'Not published');
+          put('overview-generation', 'Not published');
+          return;
+        }
+        const snapshot = view.snapshot;
+        const age = Number.isFinite(view.age_seconds) ? `${Math.floor(view.age_seconds)}s old` : 'age unknown';
+        put('overview-runtime-health', `${view.stale ? 'Stale · ' : ''}${snapshot.verdict?.header || 'Verdict unavailable'} · ${age}`);
+        const root = snapshot.server?.generation;
+        put('overview-generation', root ? `${root}${view.stale ? ' (stale reading)' : ''}` : 'Not published');
+      }).catch(() => {
+        put('overview-runtime-health', 'Unavailable — projection could not be read');
+        put('overview-generation', 'Unavailable');
+      })
+    ]);
+    if (host.isConnected) setTimeout(refresh, 15000);
+  };
+  refresh();
+})();"#
 }
 
 fn route_header(
@@ -1892,6 +1976,7 @@ fn workspace_cards(workspaces: Vec<DashboardWorkspace>) -> impl IntoView {
             view! {
                 <article
                     class="workspace-card"
+                    id=workspace_id_attr.clone()
                     data-workspace-id=workspace_id_attr
                     data-focus-root=root.clone()
                     data-focus-repo=repo
@@ -1928,8 +2013,9 @@ fn live_workspace_cards(frames: Vec<DashboardFrameSession>) -> impl IntoView {
                 frame.workspace_title.clone()
             };
             let frame_attr = frame.name.clone();
+            let workspace_attr = frame.workspace_id.clone();
             view! {
-                <article class="workspace-card" data-frame-session=frame_attr>
+                <article class="workspace-card" data-frame-session=frame_attr data-workspace-id=workspace_attr>
                     <div class="control-run-primary">
                         <strong class="workspace-title">{title}</strong>
                         <code class="control-run-root">{frame.workspace_root}</code>
@@ -2410,6 +2496,7 @@ fn run_bucket_row(run: DashboardRun) -> impl IntoView {
             </td>
             <td>{run.agent}</td>
             <td>{run.skill}</td>
+            <td class="run-update"><span>{run.health}</span><time datetime=run.updated_at.clone() data-age="">{run.updated_at.clone()}</time></td>
             <td class="run-doors">
                 {show_plan.then(|| view! {
                     <a class="server-console-link" data-run-door="plan" href=plan_href>"Plan"</a>
@@ -2424,7 +2511,11 @@ fn run_bucket_row(run: DashboardRun) -> impl IntoView {
 }
 
 fn run_bucket(title: &'static str, id: &'static str, runs: Vec<DashboardRun>) -> impl IntoView {
+    let (stalled, runs): (Vec<_>, Vec<_>) = runs
+        .into_iter()
+        .partition(|run| id == "current" && run.health == "stalled");
     let count = runs.len();
+    let stalled_count = stalled.len();
     view! {
         <section class="control-panel control-panel-wide" aria-label=title data-run-bucket=id>
             <div class="control-panel-head">
@@ -2437,6 +2528,12 @@ fn run_bucket(title: &'static str, id: &'static str, runs: Vec<DashboardRun>) ->
                     <tbody>{runs.into_iter().map(run_bucket_row).collect_view()}</tbody>
                 </table>
             </div>
+            {(stalled_count > 0).then(|| view! {
+                <details class="workspace-history" data-stalled-history="">
+                    <summary>{format!("Stalled history · {stalled_count} · last update shown for each run")}</summary>
+                    <div class="run-table-wrap"><table class="run-table"><tbody>{stalled.into_iter().map(run_bucket_row).collect_view()}</tbody></table></div>
+                </details>
+            })}
         </section>
     }
 }
@@ -2457,7 +2554,7 @@ fn runs_dashboard(dashboard: DashboardData) -> impl IntoView {
     let generated_at = dashboard.generated_at.clone();
     let settlement = dashboard.settlement.clone();
     let [success, attention, failures, current, queued] = partition_run_buckets(&dashboard);
-    let current_count = current.len();
+    let current_count = current.iter().filter(|run| run.health == "active").count();
     let not_initialized = control_status == "not_initialized";
     let unavailable = control_status == "unavailable";
 
@@ -4544,6 +4641,62 @@ pub(crate) mod tests {
         .expect("write snapshot");
     }
 
+    #[test]
+    fn overview_excludes_stalls_and_names_failed_projections() {
+        let owner = Owner::new();
+        owner.with(|| {
+            provide_theme_context();
+            let html = console_dashboard(DashboardData {
+                server_status: "healthy".into(),
+                control_status: "unavailable".into(),
+                control_error: "fixture unreadable".into(),
+                workspace_status: "unavailable".into(),
+                workspace_error: "fixture corrupt catalog".into(),
+                stalled_runs: vec![DashboardRun {
+                    run_id: "three-week-old-run".into(),
+                    health: "stalled".into(),
+                    state: "running".into(),
+                    updated_at: "2026-09-01T10:00:00Z".into(),
+                    ..DashboardRun::default()
+                }],
+                ..DashboardData::default()
+            })
+            .to_html();
+            assert!(html.contains("Runs unavailable: fixture unreadable"));
+            assert!(html.contains("Projects unavailable: fixture corrupt catalog"));
+            assert!(!html.contains("No active runs"));
+            assert!(!html.contains("No recent projects"));
+            assert!(!html.contains("three-week-old-run"));
+        });
+    }
+
+    #[test]
+    fn current_stalls_remain_readable_but_folded_with_update_time() {
+        let html = super::run_bucket(
+            "Current",
+            "current",
+            vec![DashboardRun {
+                run_id: "three-week-old-run".into(),
+                state: "running".into(),
+                health: "stalled".into(),
+                updated_at: "2026-09-01T10:00:00Z".into(),
+                ..DashboardRun::default()
+            }],
+        )
+        .to_html();
+        assert!(html.contains("Stalled history · 1"));
+        assert!(html.contains("datetime=\"2026-09-01T10:00:00Z\""));
+        let details = html
+            .split("<details")
+            .nth(1)
+            .expect("fold")
+            .split('>')
+            .next()
+            .expect("tag");
+        assert!(!details.contains("open"), "history must start folded");
+        assert!(html.contains("three-week-old-run"));
+    }
+
     fn write_workspace_catalog(home: &Path, schema: &str) {
         let root = home.join("control_plane/workspaces");
         fs::create_dir_all(root.join("sessions")).expect("workspace dirs");
@@ -4952,7 +5105,7 @@ pub(crate) mod tests {
         assert!(html.contains("href=\"/artifacts\""));
         assert!(html.contains("href=\"/diagnostics\""));
         assert!(!html.contains("href=\"#fleet\""));
-        assert!(html.contains("aria-label=\"Work\""));
+        assert!(html.contains("aria-label=\"Live runs\""));
         assert!(!html.contains("aria-label=\"Structure\""));
         assert!(!html.contains("aria-label=\"Active runs\""));
         assert!(!html.contains("aria-label=\"Warnings\""));
@@ -6089,15 +6242,6 @@ pub(crate) fn overview_welcome_status_and_miniatures() {
 
     use crate::theme::provide_theme_context;
 
-    fn work_door(html: &str, href: &str, label: &str) -> bool {
-        html.split("<a ").any(|chunk| {
-            let anchor = chunk.split("</a>").next().unwrap_or("");
-            anchor.contains("overview-door")
-                && anchor.contains(&format!("href=\"{href}\""))
-                && anchor.contains(label)
-        })
-    }
-
     assert_eq!(overview_welcome_line(""), "still starting");
     assert_eq!(overview_welcome_line("loading"), "still starting");
     assert_eq!(overview_welcome_line("starting"), "still starting");
@@ -6130,18 +6274,19 @@ pub(crate) fn overview_welcome_status_and_miniatures() {
     assert_eq!(welcome.matches("id=\"overview-status\"").count(), 1);
     assert!(welcome.contains("server up"));
     assert!(!welcome.contains("still starting"));
-    assert_eq!(welcome.matches("class=\"overview-door\"").count(), 4);
-    assert!(work_door(&welcome, "/", "Overview"));
-    assert!(work_door(&welcome, "/runs", "Runs"));
-    assert!(work_door(&welcome, "/projects", "Projects"));
-    assert!(work_door(&welcome, "/usage", "Costs &amp; usage"));
-    assert!(!welcome.contains("id=\"usage-chart-heat\""));
+    for section in ["Live runs", "Recent projects", "Health"] {
+        assert!(
+            welcome.contains(&format!("aria-label=\"{section}\"")),
+            "missing {section}"
+        );
+    }
+    assert!(!welcome.contains("class=\"overview-door\""));
+    assert!(welcome.contains("impl-live"));
+    assert!(welcome.contains("Open project"));
+    assert!(starting.contains("No active runs"));
+    assert!(starting.contains("No recent projects"));
+    assert!(starting.contains("Not published"));
     assert!(!welcome.contains("usage-chart-heat"));
-    assert!(!welcome.contains("class=\"run-table\""));
-    assert!(
-        welcome.contains(">1<"),
-        "runs miniature keeps a short count"
-    );
 
     assert_eq!(starting.matches("id=\"overview-status\"").count(), 1);
     assert!(starting.contains("still starting"));

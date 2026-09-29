@@ -615,6 +615,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     do {
       switch action {
       case .openTerminal: openTerminalFromStatusItem()
+      case .openProject: openProject()
       case .retryConnection: try nativeBridge.perform(.retryConnection)
       case .requestStopRuntime: try nativeBridge.perform(.requestRuntimeStop)
       case .repairRuntime: repairRuntime()
@@ -768,6 +769,49 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       observeTerminalRegistration()
     } catch {
       reportWorkspaceLaunchFailure("Cannot open the generation-owned terminal: \(error.localizedDescription)")
+    }
+  }
+
+  /// A native gesture selects the folder. Render and web scripts cannot launch work.
+  private func openProject() {
+    guard !terminalLaunchInFlight else { return }
+    let panel = NSOpenPanel()
+    panel.title = "Open project"
+    panel.prompt = "Open project"
+    panel.canChooseDirectories = true
+    panel.canChooseFiles = false
+    panel.allowsMultipleSelection = false
+    guard panel.runModal() == .OK, let root = panel.url else { return }
+    terminalLaunchInFlight = true
+    updateDeckPresentation()
+    resolveInstalledRuntime { [weak self] resolution in
+      guard let self else { return }
+      guard let install = self.applyResolution(resolution),
+        let environment = self.canonicalRuntimeEnvironment else {
+        self.terminalLaunchInFlight = false
+        self.updateDeckPresentation()
+        return
+      }
+      let process = Process()
+      process.executableURL = install.launcher
+      process.arguments = ["start", "resume", "--repo", root.path]
+      process.currentDirectoryURL = root
+      process.environment = environment
+      do {
+        try self.runBounded(process, timeout: 60, label: "open-project") { [weak self] result in
+          guard let self else { return }
+          self.terminalLaunchInFlight = false
+          self.updateDeckPresentation()
+          if !result.clean || result.terminationStatus != 0 {
+            self.showNativeMessage("Project could not be opened",
+              String(decoding: result.stderr, as: UTF8.self))
+          }
+        }
+      } catch {
+        self.terminalLaunchInFlight = false
+        self.updateDeckPresentation()
+        self.showNativeMessage("Project could not be opened", error.localizedDescription)
+      }
     }
   }
 
@@ -1612,7 +1656,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     if runtimeActionPreflight == nil && serverActionInFlight == nil && !repairInFlight {
       actions.insert(.retryConnection)
     }
-    if canonicalInstall != nil && !terminalLaunchInFlight { actions.insert(.openTerminal) }
+    if canonicalInstall != nil && !terminalLaunchInFlight {
+      actions.insert(.openTerminal)
+      actions.insert(.openProject)
+    }
     if state.canStop && runtimeActionPreflight == nil { actions.insert(.requestStopRuntime) }
     model.availableActions = actions
     let presentation = model.presentation
@@ -1756,18 +1803,24 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   }
 
   private func presentHealthyRepairResult(note: String) {
-    let alert = NSAlert()
-    alert.alertStyle = .informational
-    alert.messageText = "Vibecrafted LaunchAgent"
-    alert.informativeText =
-      note
-      + "\n\nThe LaunchAgent now matches the current launcher. Restart uses that identity. "
-      + "Reinstalling the Runtime Pack is a separate, named action."
-    alert.addButton(withTitle: "OK")
-    alert.addButton(withTitle: "Reinstall Runtime…")
-    if alert.runModal() == .alertSecondButtonReturn {
-      offerRuntimePackReinstall(configuration: note)
-    }
+    let identity = currentProductUpdateIdentity()
+    runtimeAdvisory = (identity.packGeneration == identity.appGeneration
+      ? "Runtime already current. " : "Configuration is current. ") + note
+    applyRuntimePackMenuState()
+  }
+
+  @objc private func republishRuntimeAnyway() {
+    offerRuntimePackReinstall(configuration: "Explicit republish requested from the App menu.", explicitRepublish: true)
+  }
+
+  @objc private func showRuntimeAbout() {
+    let identity = currentProductUpdateIdentity()
+    let current = identity.packGeneration == identity.appGeneration
+    NSApp.orderFrontStandardAboutPanel(options: [
+      .credits: NSAttributedString(string:
+        (current ? "Runtime already current" : "Installed runtime: " + (identity.packGeneration ?? "unavailable"))
+          + "\nCarrier: " + identity.appGeneration)
+    ])
   }
 
   /// Put the small remedy first and the large one beside it, both named.
@@ -1911,12 +1964,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   /// Normal opening never reaches here — it resolves whatever is installed —
   /// so replacing a runtime stays something the Founder asks for, with the
   /// generation that would be written named before the fact.
-  private func offerRuntimePackReinstall(configuration: String) {
+  private func offerRuntimePackReinstall(configuration: String, explicitRepublish: Bool = false) {
     guard !repairInFlight, runtimeActionPreflight == nil, serverActionInFlight == nil
     else { return }
+    let identity = currentProductUpdateIdentity()
+    if !explicitRepublish, let installed = identity.packGeneration,
+      !shouldOfferRuntimeUpgrade(installed: installed, carrier: identity.appGeneration) {
+      runtimeAdvisory = installed == identity.appGeneration
+        ? "Runtime already current. " + configuration
+        : "The carrier is not proven newer than the installed runtime. " + configuration
+      applyRuntimePackMenuState()
+      return
+    }
     let confirmation = NSAlert()
     confirmation.alertStyle = .warning
-    confirmation.messageText = "Reinstall the Vibecrafted runtime from this App?"
+    confirmation.messageText = explicitRepublish
+      ? "Republish the Vibecrafted runtime from this App?"
+      : "Upgrade the Vibecrafted runtime from this App?"
     let installed = canonicalInstall.map { "Installed generation: \($0.root.lastPathComponent).\n" }
       ?? "No usable runtime is currently installed.\n"
     confirmation.informativeText =
@@ -1926,7 +1990,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       + (signedCarrierRevisions.map { " (source \(String($0.source.prefix(8))))" } ?? "")
       + ". The installer refuses to replace a newer runtime with an older carrier."
     confirmation.addButton(withTitle: "Cancel")
-    confirmation.addButton(withTitle: "Reinstall")
+    confirmation.addButton(withTitle: explicitRepublish ? "Republish anyway" : "Upgrade")
     guard confirmation.runModal() == .alertSecondButtonReturn else { return }
     repairInFlight = true
     updateDeckPresentation()
@@ -3013,7 +3077,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     let appMenu = NSMenu()
     appMenu.addItem(
       withTitle: "About Vibecrafted",
-      action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+      action: #selector(showRuntimeAbout), keyEquivalent: "")
+    let republish = appMenu.addItem(withTitle: "Republish anyway…", action: #selector(republishRuntimeAnyway), keyEquivalent: "")
+    republish.target = self
     let checkUpdates = appMenu.addItem(
       withTitle: "Check for Updates…", action: #selector(checkForUpdatesFromMenu), keyEquivalent: "")
     checkUpdates.target = self

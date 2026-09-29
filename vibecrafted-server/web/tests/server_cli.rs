@@ -303,3 +303,98 @@ fn twenty_real_http_await_clients_share_one_server_observation() {
     stop_child(&mut server);
     let _ = fs::remove_dir_all(root);
 }
+
+/// Opening Overview and its health projections must never normalize or rewrite
+/// the Python-owned records, including old stalled metadata.
+#[test]
+fn overview_reads_preserve_control_plane_for_sixty_seconds() {
+    use std::collections::BTreeMap;
+
+    fn snapshot(root: &Path) -> BTreeMap<PathBuf, (Vec<u8>, SystemTime)> {
+        let mut files = BTreeMap::new();
+        if root.is_dir() {
+            for entry in fs::read_dir(root).expect("read fixture").flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    files.extend(snapshot(&path));
+                } else {
+                    files.insert(
+                        path.clone(),
+                        (
+                            fs::read(&path).expect("bytes"),
+                            fs::metadata(path)
+                                .expect("metadata")
+                                .modified()
+                                .expect("mtime"),
+                        ),
+                    );
+                }
+            }
+        }
+        files
+    }
+
+    let root = fixture_root();
+    let home = root.join("home");
+    let config = root.join("config");
+    fs::create_dir_all(&config).expect("isolated config");
+    write_runtime_meta(&home, "running", None);
+    let before = snapshot(&home.join("control_plane"));
+    let port = free_port();
+    let mut server = ChildGuard(
+        server_command()
+            .args(["--addr", &format!("127.0.0.1:{port}")])
+            .env("VIBECRAFTED_HOME", &home)
+            .env("VIBECRAFTED_RUNTIME_HOME", root.join("runtime"))
+            .env("VC_FRAME_SOCKET_DIR", root.join("sockets"))
+            .env("XDG_CONFIG_HOME", &config)
+            .env("VC_SERVER_SITE_ROOT", root.join("site"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("isolated server"),
+    );
+    wait_for_server(port);
+    let start = Instant::now();
+    loop {
+        for path in [
+            "/",
+            "/api/health",
+            "/api/control/caretaker",
+            "/api/control/state",
+            "/api/control/dashboard",
+        ] {
+            let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .expect("timeout");
+            write!(
+                stream,
+                "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+            )
+            .expect("request");
+            let mut response = String::new();
+            stream.read_to_string(&mut response).expect("response");
+            assert!(response.starts_with("HTTP/1.1 200"), "{path}");
+            if path == "/" {
+                for section in ["Live runs", "Recent projects", "Health"] {
+                    assert!(
+                        response.contains(&format!("aria-label=\"{section}\"")),
+                        "{section}"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            before,
+            snapshot(&home.join("control_plane")),
+            "Overview changed control-plane bytes or modification times"
+        );
+        if start.elapsed() >= Duration::from_secs(60) {
+            break;
+        }
+        thread::sleep(Duration::from_secs(5));
+    }
+    stop_child(&mut server);
+    fs::remove_dir_all(root).expect("fixture cleanup");
+}

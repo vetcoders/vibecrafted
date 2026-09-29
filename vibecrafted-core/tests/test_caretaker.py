@@ -804,3 +804,15 @@ def test_logs_projection_is_named_and_honest(tmp_path: Path) -> None:
     )
     assert snapshot["server"]["logs"]["available"] is True
     assert snapshot["actions"]["open_logs"]["enabled"] is True
+
+
+def test_server_projects_recorded_generation_without_inferring_from_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _reachable(monkeypatch, reachable=True)
+    home = _receipt(tmp_path, supervisor_executable={"version": "4.3.1+gabcdef12"})
+    section = caretaker.build_server_section(home=home, probe=False)
+    assert section["generation"] == "4.3.1+gabcdef12"
+    home = _receipt(tmp_path, supervisor_executable=None)
+    section = caretaker.build_server_section(home=home, probe=False)
+    assert section["generation"] == ""

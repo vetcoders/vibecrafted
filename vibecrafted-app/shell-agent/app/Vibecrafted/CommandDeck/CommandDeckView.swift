@@ -41,6 +41,7 @@ enum CommandDeckChromeAction: String, Hashable, Sendable {
   case retryConnection
   case repairRuntime
   case openTerminal
+  case openProject
   case requestStopRuntime
   case showDiagnostics
 }
@@ -231,12 +232,17 @@ struct CommandDeckToolbar: ToolbarContent {
 
   var body: some ToolbarContent {
     ToolbarItemGroup(placement: .primaryAction) {
+      if shows(.openProject), navigation?.currentURL?.path == "/" {
+        Button("Open project", systemImage: "folder") { actions?.handle(.openProject) }
+          .labelStyle(.titleAndIcon)
+          .help("Choose a project folder and open or rejoin its workspace.")
+      }
       if shows(.retryConnection), presentation.phase != .online {
         Button("Try Again", systemImage: "arrow.clockwise") { actions?.handle(.retryConnection) }
           .keyboardShortcut("r", modifiers: .command)
           .help("Try Again (⌘R). Connects to the server again.")
       }
-      if shows(.repairRuntime) {
+      if shows(.repairRuntime), presentation.phase != .online {
         Button("Reinitialize", systemImage: "wrench.and.screwdriver") { actions?.handle(.repairRuntime) }
           .keyboardShortcut("r", modifiers: [.command, .shift])
           .help("Reinitialize (⇧⌘R). Sets the server up again from the installed copy.")
@@ -245,10 +251,6 @@ struct CommandDeckToolbar: ToolbarContent {
         Button("Open Terminal", systemImage: "terminal") { actions?.handle(.openTerminal) }
           .keyboardShortcut("t", modifiers: [.command, .option])
           .help("Open Terminal (⌥⌘T). Opens the generation-owned terminal; closing it does not stop the runtime.")
-      }
-      if shows(.showDiagnostics) {
-        Button("Diagnostics", systemImage: "stethoscope") { actions?.handle(.showDiagnostics) }
-          .help("Diagnostics. Shows runtime diagnostics for the shared server.")
       }
       if let navigationHandler, navigation?.currentURL.map({ $0.scheme == "http" || $0.scheme == "https" }) == true {
         Button("Open in Browser", systemImage: "safari") { navigationHandler.navigate(.openInBrowser) }

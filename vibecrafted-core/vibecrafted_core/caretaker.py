@@ -353,6 +353,7 @@ def build_server_section(
         "reason": "",
         "endpoint": None,
         "state": "",
+        "generation": "",
         "supervisor_pid": None,
         "managed_pair": None,
         "last_error": None,
@@ -400,6 +401,9 @@ def build_server_section(
         section["receipt"]["stale"] = age is None or age > RECEIPT_STALE_SECONDS
         section["receipt"]["schema"] = str(receipt.get("schema") or "")
         section["state"] = str(receipt.get("state") or "")
+        executable = receipt.get("supervisor_executable")
+        if isinstance(executable, Mapping):
+            section["generation"] = str(executable.get("version") or "")
         section["supervisor_pid"] = receipt.get("supervisor_pid")
         section["service_managed"] = receipt.get("service_managed")
         section["last_error"] = receipt.get("last_error")

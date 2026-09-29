@@ -217,9 +217,12 @@ pub fn theme_head_script() -> &'static str {
   const root = document.documentElement;
   // The native shell hides the theme toggle. A saved light choice
   // would paint a white document inside a dark window. Follow the shell.
-  if (root.dataset.nativeShell === '1') {
-    const dark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-    root.dataset.theme = dark ? 'dark' : 'light';
+  if (window.__vcNativeShell || root.dataset.nativeShell === '1') {
+    root.dataset.nativeShell = '1';
+    const appearance = window.matchMedia('(prefers-color-scheme: dark)');
+    const followWindow = () => { root.dataset.theme = appearance.matches ? 'dark' : 'light'; };
+    followWindow();
+    appearance.addEventListener('change', followWindow);
     return;
   }
   try {
@@ -236,7 +239,7 @@ pub fn theme_head_script() -> &'static str {
 pub fn theme_control_script() -> &'static str {
     r#"(() => {
   const button = document.querySelector('.server-theme-toggle');
-  if (!button) return;
+  if (!button || document.documentElement.dataset.nativeShell === '1') return;
   const apply = (theme) => {
     const next = theme === 'light' ? 'light' : 'dark';
     document.documentElement.dataset.theme = next;
@@ -271,6 +274,31 @@ pub fn operator_head_script() -> &'static str {
 #[cfg(feature = "ssr")]
 pub fn operator_desk_script() -> &'static str {
     r#"(() => {
+  const revealWorkspace = () => {
+    let id;
+    try { id = decodeURIComponent(location.hash.slice(1)); } catch (_) { return; }
+    if (!id || location.pathname !== '/workspaces') return;
+    const card = Array.from(document.querySelectorAll('.workspace-card[data-workspace-id]'))
+      .find(node => node.dataset.workspaceId === id);
+    if (!card) return;
+    const fold = card.closest('details');
+    if (fold) fold.open = true;
+    card.scrollIntoView({block: 'center'});
+  };
+  revealWorkspace();
+  window.addEventListener('hashchange', revealWorkspace);
+  const updateAges = () => {
+    for (const node of document.querySelectorAll('time[data-age]')) {
+      const raw = node.getAttribute('datetime');
+      const stamp = Date.parse(raw);
+      node.title = raw || 'Update time unavailable';
+      if (!Number.isFinite(stamp) || stamp > Date.now()) { node.textContent = 'Update time unknown'; continue; }
+      const minutes = Math.floor((Date.now() - stamp) / 60000);
+      node.textContent = minutes < 1 ? 'Updated just now' : minutes < 60 ? `Updated ${minutes}m ago` : minutes < 1440 ? `Updated ${Math.floor(minutes / 60)}h ago` : `Updated ${Math.floor(minutes / 1440)}d ago`;
+    }
+  };
+  updateAges();
+  setInterval(updateAges, 30000);
   const FOCUS_KEY = 'vc-focus-mode';
   const ROOT_KEY = 'vc-focus-root';
   const html = document.documentElement;

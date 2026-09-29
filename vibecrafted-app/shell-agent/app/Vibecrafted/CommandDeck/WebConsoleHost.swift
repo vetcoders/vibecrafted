@@ -171,7 +171,7 @@ final class WebConsoleSession: NSObject {
     webView.allowsBackForwardNavigationGestures = true
     // The page theme follows this appearance. A light web view inside a
     // dark window is how Cost & usage lost its dark tokens.
-    webView.appearance = NSApp.effectiveAppearance
+    webView.appearance = nil
     webView.underPageBackgroundColor = .windowBackgroundColor
     webView.setAccessibilityLabel(role == .console ? "Vibecrafted server console" : "Vibecrafted \(role.rawValue) view")
     #if DEBUG
@@ -204,7 +204,7 @@ final class WebConsoleSession: NSObject {
     // Marks the document so the page can hide its own sidebar and titlebar.
     // Not a script-message handler: the page cannot call back into the App.
     let nativeShell = WKUserScript(
-      source: "document.documentElement.dataset.nativeShell='1';",
+      source: "window.__vcNativeShell = true; if (document.documentElement) document.documentElement.dataset.nativeShell='1';",
       injectionTime: .atDocumentStart,
       forMainFrameOnly: true)
     configuration.userContentController.addUserScript(nativeShell)
