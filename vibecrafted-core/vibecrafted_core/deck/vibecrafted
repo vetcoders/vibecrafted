@@ -917,6 +917,7 @@ cmd_start_help() {
   printf '  vibecrafted start --root <project-path>          (legacy spelling of --repo)\n'
   printf '  vibecrafted start resume\n'
   printf '  vc-start [<workspace>] [--repo <project-path>]    (same contract, same owner)\n'
+  printf '  vc-start --new-host [--repo <project-path>]      # empty host beside existing sessions\n'
   printf '  vc-start resume\n'
   printf '\n'
   printf '%bContract:%b\n' "$_bold" "$_reset"
@@ -936,6 +937,10 @@ cmd_start_help() {
   printf '          same host canvas (one chrome). Older Frame without project-workspace refuses\n'
   printf '          before mutation (exit 4). Outside Frame, the VC Terminal opens on the\n'
   printf '          repository to enter it.\n'
+  printf '  Host:   --new-host always creates another empty host on the active generation.\n'
+  printf '          Names: vc-host@<shortgen>, then -2, -3; existing sessions stay intact.\n'
+  printf '          On a detected generation split, start offers this choice before joining.\n'
+  printf '          In scripts, pass --new-host explicitly; resume deliberately keeps its owner.\n'
   printf '  Exit:   0 entered · 2 usage/name/root · 3 workspace exists · 4 inventory/engine\n'
   printf '\n'
   printf '%bExamples:%b\n' "$_bold" "$_reset"
