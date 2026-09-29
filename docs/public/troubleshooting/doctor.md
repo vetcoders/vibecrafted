@@ -151,6 +151,29 @@ and gives its exact attach and cleanup commands. Save its work before choosing
 `vc-frame ka` is an alias for `kill-all-sessions`: it stops every session, so use
 it only for an intentional global reset after saving work in all sessions.
 
+### Open the active generation beside an existing host
+
+Sessions survive runtime upgrades. A `vc-frame:generation-split` warning means
+some live servers still use an older generation. Keep them running and open
+another host with:
+
+```bash
+vc-start --new-host
+vibecrafted start --new-host --repo ~/Projects/example
+```
+
+This opens an empty host on the active generation, even when the repository's
+workspace already exists. Names are `vc-host@<shortgen>`, then `-2`, `-3`, and
+so on; an unstamped development entry uses `vc-host-2`. Occupied names, including
+EXITED records, are preserved. The launcher reports each existing host's
+generation when its socket owner can be identified, otherwise `unknown`.
+
+Ordinary `start` proposes a new host when it detects a generation split.
+Declining cancels the start; a non-interactive caller must pass `--new-host`
+explicitly. `resume` remains deliberate re-entry. The new host has its own
+terminal when started from inside another host. Open projects from that host;
+workspaces remain guests and roles still come from layout identity markers.
+
 ## Receipt — provenance on top of health
 
 Doctor proves the install is internally consistent. `vibecrafted receipt` proves where it **came from**:

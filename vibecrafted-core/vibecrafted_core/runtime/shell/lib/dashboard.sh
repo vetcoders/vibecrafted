@@ -159,13 +159,13 @@ _vetcoders_control_plane_eye_prepare() {
 # The installer owns receipts, publication transactions and generation validation.
 # This consumer only decodes its envelope and rejects a changed selected owner.
 _vetcoders_product_runtime_admit() {
-  local owner_root="$1"
+  local owner_root="$1" resolution_mode="${2:-admit}"
   if [[ ! -f "$owner_root/scripts/vetcoders_install.py" || -L "$owner_root/scripts/vetcoders_install.py" ]]; then
     printf 'vc-start: selected runtime resolver missing; explicit upgrade/repair required\n' >&2
     return 2
   fi
   env -u PYTHONPATH -u PYTHONHOME PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 \
-    "$owner_root/bin/python3" -I -B - "$owner_root" <<'PY_RUNTIME_ADMIT'
+    "$owner_root/bin/python3" -I -B - "$owner_root" "$resolution_mode" <<'PY_RUNTIME_ADMIT'
 import json
 import os
 from pathlib import Path
@@ -208,7 +208,9 @@ try:
     selected = runtime.get("root")
     if not isinstance(selected, str) or not os.path.isabs(selected):
         raise ValueError("invalid selected runtime root")
-    if os.path.realpath(selected) != str(owner):
+    if sys.argv[2] == "active-root":
+        print(os.path.realpath(selected))
+    elif os.path.realpath(selected) != str(owner):
         raise ValueError("selected generation changed; reopen through the current product entry")
 except (OSError, ValueError, subprocess.TimeoutExpired) as error:
     # Do not replay raw subprocess stderr/JSON (CLI errors can include argv).
@@ -296,8 +298,15 @@ _vetcoders_start_prepare_arguments() {
   _vetcoders_start_frame_argv=()
   _vetcoders_start_workspace_name=""
   _vetcoders_start_mode="start"
+  _vetcoders_start_new_host_requested=0
   while (($#)); do
     arg="$1"
+    if [[ "$arg" == --new-host ]]; then
+      _vetcoders_start_new_host_requested=1
+      _vetcoders_start_frame_argv+=("$arg")
+      shift
+      continue
+    fi
     if [[ "$_vetcoders_start_mode" == resume ]]; then
       case "$arg" in
         --repo | --repo=* | --root | --root=*) ;;
@@ -397,6 +406,12 @@ _vetcoders_start_prepare_arguments() {
     esac
     shift
   done
+
+  if [[ "$_vetcoders_start_new_host_requested" == 1 ]] &&
+    [[ "$_vetcoders_start_mode" == resume || -n "$_vetcoders_start_workspace_name" ]]; then
+    printf 'vc-start: --new-host opens an empty host; use it without a workspace name or resume.\n' >&2
+    return 2
+  fi
 
   unset VIBECRAFTED_START_ROOT
   # Same selector as every other public verb: `--repo` standard, `--root`
@@ -1195,7 +1210,7 @@ print("host" if host else "guest")
 #   3  more than one role-valid host and no unique-client owner
 _vetcoders_start_resolve_inventory_host() {
   local exclude="${1:-}" sessions="" valid_hosts="" line="" role=""
-  local count=0 chosen="" unique="" uniq_count=0 vc_frame_bin="" listing_rc=0 role_rc=0
+  local count=0 chosen="" unique="" attached="" uniq_count=0 vc_frame_bin="" listing_rc=0 role_rc=0
   _vetcoders_start_resolved_host=""
   _vetcoders_start_live_inventory_hosts || listing_rc=$?
   if ((listing_rc != 0)); then
@@ -1226,6 +1241,9 @@ _vetcoders_start_resolve_inventory_host() {
         ;;
     esac
     valid_hosts+="${line}"$'\n'
+    if _vetcoders_in_vc_frame && [[ "$line" == "${VC_FRAME_SESSION_NAME:-}" ]]; then
+      attached="$line"
+    fi
     count=$((count + 1))
     if [[ -z "$chosen" ]]; then
       chosen="$line"
@@ -1233,6 +1251,13 @@ _vetcoders_start_resolve_inventory_host() {
   done <<<"$sessions"
   if ((count == 0)); then
     return 1
+  fi
+  # Explicitly opened parallel hosts retain their own guest canvas. In-host
+  # resume belongs to the attached, role-verified owner even if another host
+  # also has a client. Outside callers still must resolve an unambiguous owner.
+  if [[ -n "$attached" ]]; then
+    _vetcoders_start_resolved_host="$attached"
+    return 0
   fi
   if ((count == 1)); then
     _vetcoders_start_resolved_host="$chosen"
@@ -1993,8 +2018,8 @@ _vetcoders_start_maybe_join_outside_live_host() {
   return 1
 }
 
-# One host per machine (Founder P0, 2026-09-23): the host owns the chrome and
-# every workspace is a guest. The host name is a product identity, never a
+# Default host (Founder P0, 2026-09-23): workspaces remain guests; extra hosts
+# require --new-host (2026-09-29). The default name is product identity, never a
 # repository basename, so repos named `vibecrafted` or `operator` stay guests.
 _vetcoders_start_host_session_name() {
   printf '%s\n' "${VIBECRAFTED_FRAME_HOST_SESSION:-vc-host}"
@@ -2222,10 +2247,186 @@ _vetcoders_start_launch_workspace() {
   _vetcoders_start_enter_via_host "$vc_frame_bin" "$session_name"
 }
 
+# Intentional additional hosts (Founder, 2026-09-29). Ordinary workspaces
+# remain guests. Only this explicit path allocates a second chrome session.
+_vetcoders_start_active_host_root() {
+  local owner=""
+  owner="$(_vetcoders_vc_frame_owner_root)" || return 4
+  if [[ "$(basename "$(dirname "$owner")")" == releases ]]; then
+    _vetcoders_product_runtime_admit "$owner" active-root
+  else
+    # Source/developer entry keeps its selected engine. Installed entries
+    # use the installer's verified resolution, never ambient roots.
+    printf '%s\n' "$owner"
+  fi
+}
+
+_vetcoders_start_generation_label() {
+  local owner="${1:-}" version=""
+  if [[ -f "$owner/VERSION" ]]; then
+    IFS= read -r version <"$owner/VERSION" || true
+  fi
+  printf '%s\n' "${version:-unknown}"
+}
+
+# Attribute a host to the process owning its exact socket, not pane commands,
+# session name, or this client's environment. Unknown stays unknown.
+_vetcoders_start_host_generation() {
+  local host="${1:-}" socket_dir="" python_bin=""
+  socket_dir="$(_vetcoders_vc_frame_socket_dir)"
+  python_bin="$(_vetcoders_internal_python)" || return 1
+  "$python_bin" - "$socket_dir" "$host" <<'PY_HOST_GENERATION'
+from pathlib import Path
+import subprocess
+import sys
+
+root, name = Path(sys.argv[1]), sys.argv[2]
+labels = set()
+try:
+    sockets = [root / name, *(p / name for p in root.glob("contract_version_*"))]
+    for path in sockets:
+        if not path.is_socket():
+            continue
+        holders = subprocess.run(["lsof", "-t", str(path)], capture_output=True,
+                                 text=True, timeout=3, check=False)
+        for pid in set(holders.stdout.split()):
+            if not pid.isdecimal():
+                continue
+            proc = subprocess.run(["ps", "-p", pid, "-o", "comm="],
+                                  capture_output=True, text=True, timeout=3, check=False)
+            exe = Path(proc.stdout.strip())
+            if not exe.is_absolute() or exe.name != "vc-frame":
+                continue
+            for parent in exe.parents:
+                if parent.parent.name == "releases":
+                    labels.add(parent.name)
+                    break
+    print(next(iter(labels)) if len(labels) == 1 else "unknown")
+except (OSError, subprocess.TimeoutExpired):
+    print("unknown")
+PY_HOST_GENERATION
+}
+
+# No kill, resurrect, guest projection, or workspace binding on this path.
+# The existing exclusive create rechecks under its per-name lock. A racing
+# creator causes us to try the next numbered name, never adopt its session.
+_vetcoders_start_new_host() (
+  local root="${1:-}" active="" owner="" generation="" short="" base="vc-host" host="" rc=0 index=1
+  local vc_frame_bin="" role="" front_door="" existing="" sessions=""
+  owner="$(_vetcoders_vc_frame_owner_root)" || return 4
+  active="$(_vetcoders_start_active_host_root)" || return 4
+  if [[ "$active" != "$owner" ]]; then
+    if [[ -n "${VIBECRAFTED_START_CREATED_HOST:-}" ]] && _vetcoders_start_is_owned_terminal_child; then
+      printf 'vc-start: active generation changed while opening host %s; it remains intact. Retry --new-host explicitly.\n' "$VIBECRAFTED_START_CREATED_HOST" >&2
+      return 4
+    fi
+    printf 'vc-start: opening the active generation %s (selected shell: %s).\n' \
+      "$(basename "$active")" "$(basename "$owner")" >&2
+    "$active/bin/vc-start" --new-host --repo "$root"
+    return $?
+  fi
+  generation="$(_vetcoders_start_generation_label "$active")"
+  _vetcoders_require_vc_frame || return 4
+  _vetcoders_pin_vc_frame_config_dir || return 4
+  vc_frame_bin="$(_vetcoders_vc_frame_bin)" || return 4
+  # Only an owned terminal child may consume the exact created host.
+  if [[ -n "${VIBECRAFTED_START_CREATED_HOST:-}" ]] && _vetcoders_start_is_owned_terminal_child; then
+    host="$VIBECRAFTED_START_CREATED_HOST"
+    unset VIBECRAFTED_START_CREATED_HOST
+    _vetcoders_start_validate_workspace_name "$host" "host name" || return 2
+    _vetcoders_start_read_inventory_state "$host"
+    [[ "$_vetcoders_start_inventory_state" == live ]] || return 4
+    if [[ ! -t 0 || ! -t 1 ]]; then
+      printf 'vc-start: terminal supplied no TTY; host %s remains detached.\n' "$host" >&2
+      return 4
+    fi
+  else
+    unset VIBECRAFTED_START_CREATED_HOST
+    _vetcoders_start_live_inventory_hosts || return 4
+    sessions="${_vetcoders_start_cached_live_hosts:-}"
+    while IFS= read -r existing; do
+      [[ -n "$existing" ]] || continue
+      role="$(_vetcoders_start_session_projection_role "$existing" "$vc_frame_bin")" || role="unknown"
+      [[ "$role" == host ]] || continue
+      printf 'vc-start: existing host %s runs on %s.\n' "$existing" \
+        "$(_vetcoders_start_host_generation "$existing")"
+    done <<<"$sessions"
+    short="${generation##*+g}"
+    if [[ "$generation" == *+g* && -n "$short" && "$short" != *[![:xdigit:]]* ]]; then
+      base="vc-host@${short:0:8}"
+    else
+      index=2
+    fi
+    while ((index <= 9999)); do
+      host="$base"
+      ((index == 1)) || host="$base-$index"
+      _vetcoders_start_create_workspace_session "$vc_frame_bin" "$host" \
+        "$(_vetcoders_host_layout_file 2>/dev/null || true)" chrome && rc=0 || rc=$?
+      ((rc == 3)) || break
+      index=$((index + 1))
+    done
+    ((rc == 0)) || return "$rc"
+    printf 'vc-start: created host %s on generation %s; existing sessions remain untouched.\n' "$host" "$generation"
+  fi
+  role="$(_vetcoders_start_session_projection_role "$host" "$vc_frame_bin")" || return 4
+  [[ "$role" == host ]] || return 4
+  if _vetcoders_in_vc_frame || [[ ! -t 0 || ! -t 1 ]]; then
+    # Inside-host requests need another terminal even with a TTY. Reuse the
+    # canonical PTY supplier, which clears inherited Frame markers.
+    front_door="$(_vetcoders_product_front_door vc-start)" || return 4
+    export VIBECRAFTED_START_CREATED_HOST="$host"
+    _vetcoders_open_entry_in_vc_terminal "$front_door" "$root" --new-host --repo "$root" || {
+      printf 'vc-start: host %s remains detached; enter it with: vc-frame attach %s\n' "$host" "$host" >&2
+      return 4
+    }
+  else
+    _vetcoders_start_frame_env "$vc_frame_bin" attach "$host"
+  fi
+)
+
+# A detected split is a choice, never implicit re-entry into the old host.
+# 1 means no split; 0 means new host opened; 4 means declined/unavailable.
+_vetcoders_start_offer_generation_host() {
+  local root="${1:-}" active="" generation="" sessions="" host="" version="" role="" frame="" answer="" split=0
+  active="$(_vetcoders_start_active_host_root)" || return 4
+  generation="$(_vetcoders_start_generation_label "$active")"
+  [[ "$generation" == *+g* ]] || return 1
+  _vetcoders_start_live_inventory_hosts || return 4
+  sessions="${_vetcoders_start_cached_live_hosts:-}"
+  [[ -n "$sessions" ]] || return 1
+  frame="$(_vetcoders_vc_frame_bin)" || return 4
+  while IFS= read -r host; do
+    [[ -n "$host" ]] || continue
+    if _vetcoders_in_vc_frame && [[ "$host" != "${VC_FRAME_SESSION_NAME:-}" ]]; then
+      continue
+    fi
+    role="$(_vetcoders_start_session_projection_role "$host" "$frame")" || return 4
+    [[ "$role" == host ]] || continue
+    version="$(_vetcoders_start_host_generation "$host")"
+    if [[ -n "$version" && "$version" != unknown && "$version" != "$generation" ]]; then
+      printf 'vc-start: host %s runs on %s; active generation is %s.\n' "$host" "$version" "$generation" >&2
+      split=1
+    fi
+  done <<<"$sessions"
+  ((split == 1)) || return 1
+  printf 'Open a new host alongside it? [y/N] (vc-start --new-host --repo %s) ' "$(_vetcoders_shell_quote "$root")" >&2
+  if [[ -t 0 && -t 1 ]]; then
+    IFS= read -r answer || answer=""
+  else
+    printf '\n' >&2
+  fi
+  case "$answer" in
+    y | Y | yes | YES) _vetcoders_start_new_host "$root"; return $? ;;
+    *) printf 'vc-start: existing hosts left untouched; start cancelled.\n' >&2; return 4 ;;
+  esac
+}
+
 # Shared entry for shell `vc-start` and deck `cmd_start`, after
 # _vetcoders_start_prepare_arguments. $@ = _vetcoders_start_frame_argv.
 _vetcoders_start_entry() {
   local root="" session_name="" state="" rc=0 join_rc=0
+  # Long-lived shells must refresh inventory before each generation decision.
+  _vetcoders_start_inventory_cache_valid=0
   root="$(_vetcoders_start_resolve_root)" || {
     printf 'vc-start: could not resolve the project root.\n' >&2
     return 1
@@ -2256,9 +2457,19 @@ _vetcoders_start_entry() {
     return $?
   fi
 
+  if [[ "${_vetcoders_start_new_host_requested:-0}" == 1 ]]; then
+    _vetcoders_start_new_host "$root"
+    return $?
+  fi
   session_name="${_vetcoders_start_workspace_name:-}"
   if [[ -z "$session_name" ]]; then
     session_name="$(_vetcoders_start_default_workspace_name "$root")" || return $?
+  fi
+
+  if [[ "${VIBECRAFTED_PRODUCT_ENTRY_PROBE:-0}" != 1 && -z "${VIBECRAFTED_START_CREATED_SESSION:-}" ]]; then
+    _vetcoders_start_offer_generation_host "$root" && rc=0 || rc=$?
+    ((rc == 1)) || return "$rc"
+    rc=0
   fi
 
   # Tests/doctor: preparation effects only; no inventory, no create, no attach.

@@ -1060,8 +1060,9 @@ def _vc_frame_generation_split_findings(
                 f"SPLIT: active generation is {active.name} but "
                 f"{len(stale)} of {len(servers)} live vc-frame server(s) run "
                 f"stale generations: {rows}. Sessions outlive generations "
-                "silently — fixes ship and never reach the screen. Restart "
-                f"the stale servers; doctor only reports.{hint}",
+                "and retain their original runtime. Open the active generation "
+                "beside them with vc-start --new-host; existing sessions stay "
+                f"intact. Doctor only reports.{hint}",
             )
         ]
     return [
