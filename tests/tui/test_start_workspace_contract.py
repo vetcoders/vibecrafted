@@ -692,9 +692,15 @@ class Scene:
         (self.table / "dead").mkdir(parents=True)
         for name in live:
             if name in legacy:
+                # Serialized pre-host/guest operator: four actual tabs plus
+                # eight swap templates, all carrying the same host identity.
+                tab = 'tab { pane { plugin location="frame-host" { frame_host "true"; } } }\n'
                 body = (
-                    "layout { frame_host true; frame_host true; "
-                    "workspace_surface true; }\n"
+                    "layout {\n"
+                    + tab * 4
+                    + "swap_tiled_layout {\n"
+                    + tab * 8
+                    + "}\n}\n"
                 )
             elif name in guests:
                 body = "layout { pane; }\n"
@@ -1788,6 +1794,69 @@ def test_unreadable_host_role_names_the_session_in_the_refusal(
     assert scene.terminal_launches(wait=0.5) == []
 
 
+@pytest.mark.parametrize(
+    ("layout", "role"),
+    [
+        ('layout { plugin location="frame-host" { frame_host "true"; } }', "host"),
+        (
+            'layout { plugin location="https://example.invalid/host" { frame_host true; } }',
+            "host",
+        ),
+        ('layout { pane name="; frame_host true;"; }', "guest"),
+        ('layout { pane { args "frame_host true"; } }', "guest"),
+        ("layout { /* frame_host true; */ pane; // frame_host true\n}", "guest"),
+        ("layout { frame_host false; pane; }", "guest"),
+        ("layout { my_frame_host true; pane; }", "guest"),
+        ("layout { frame_host trueish; pane; }", "guest"),
+    ],
+)
+def test_session_role_uses_declared_identity_not_display_strings(
+    tmp_path: Path, layout: str, role: str
+) -> None:
+    scene = Scene(tmp_path, live=("Dashboard",))
+    (scene.table / "live" / "Dashboard").write_text(layout, encoding="utf-8")
+    result = _eval_start_fn(
+        f'_vetcoders_start_session_projection_role Dashboard "{scene.generation}/bin/vc-frame"',
+        extra_env=scene.env(),
+    )
+    assert result.stdout.splitlines() == [role, "RC=[0]"], result
+    _assert_nothing_mutated(scene.calls())
+
+
+@pytest.mark.parametrize(
+    "layout", ["engine error", "layout { pane;", "layout } { pane; }"]
+)
+def test_unparsable_live_role_warns_and_blocks_duplicate_host(
+    tmp_path: Path, layout: str
+) -> None:
+    scene = Scene(tmp_path, live=("old-operator",))
+    (scene.table / "live" / "old-operator").write_text(layout, encoding="utf-8")
+    result = _run(scene, "vc-start")
+    assert _rc(result) == EXIT_INVENTORY, result
+    assert "WARN:" in result.stderr and "old-operator" in result.stderr
+    _assert_nothing_mutated(scene.calls())
+
+
+def test_legacy_role_from_mixed_shell_generation_is_not_silently_skipped(
+    tmp_path: Path,
+) -> None:
+    scene = Scene(tmp_path, live=("old-operator",))
+    result = _eval_start_fn(
+        '_vetcoders_start_session_projection_role() { printf "legacy\\n"; }\n'
+        "_vetcoders_start_resolve_inventory_host new-project",
+        extra_env=scene.env(
+            {
+                "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
+                "VIBECRAFTED_VC_FRAME_BIN": str(scene.generation / "bin" / "vc-frame"),
+            }
+        ),
+    )
+    assert "RC=[2]" in result.stdout, result
+    assert "WARN:" in result.stderr and "old-operator" in result.stderr
+    assert "legacy" in result.stderr
+    _assert_nothing_mutated(scene.calls())
+
+
 def test_missing_host_layout_names_the_host_layout(tmp_path: Path) -> None:
     """With no host the start creates the host first from layouts/host.kdl.
     When that file is missing the refusal names it; "operator layout missing"
@@ -2195,7 +2264,7 @@ def test_outside_caller_with_live_host_gets_no_standalone_chrome(
     assert not _switches(scene.calls()), scene.calls()
 
 
-def test_outside_caller_ignores_legacy_multi_owner_session_and_uses_valid_host(
+def test_outside_caller_refuses_two_hosts_including_legacy_operator(
     tmp_path: Path,
 ) -> None:
     scene = Scene(
@@ -2215,17 +2284,17 @@ def test_outside_caller_ignores_legacy_multi_owner_session_and_uses_valid_host(
             "VIBECRAFTED_VC_FRAME_BIN": str(scene.generation / "bin" / "vc-frame"),
         },
     )
-    assert "RC=[0]" in result.stdout, result.stdout + result.stderr
-    _assert_projected_into_host(
-        scene, host="product-host", guest="mlx-batch-runner", result=result
-    )
-    assert not any(
-        call.get("projected", [None])[0] == "legacy-operator" for call in scene.calls()
-    ), scene.calls()
+    assert _rc(result) == EXIT_INVENTORY, result.stdout + result.stderr
+    assert "live Frame host already exists" in result.stdout + result.stderr
+    _assert_nothing_mutated(scene.calls())
 
 
-def test_only_legacy_session_does_not_block_fresh_singleton_host(
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+@pytest.mark.parametrize("tty", [False, True])
+def test_only_legacy_operator_is_adopted_without_second_host(
     tmp_path: Path,
+    shell: str,
+    tty: bool,
 ) -> None:
     scene = Scene(
         tmp_path,
@@ -2237,7 +2306,8 @@ def test_only_legacy_session_does_not_block_fresh_singleton_host(
     result = _run(
         scene,
         "vc-start",
-        tty=True,
+        tty=tty,
+        shell=shell,
         developer_root=True,
         extra_env={
             "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
@@ -2245,11 +2315,13 @@ def test_only_legacy_session_does_not_block_fresh_singleton_host(
         },
     )
     assert "RC=[0]" in result.stdout, result.stdout + result.stderr
-    _assert_host_first(scene, "mlx-batch-runner")
-    assert len(_creates(scene.calls())) == 2, scene.calls()
-    assert scene.live() == ["legacy-operator", "mlx-batch-runner", HOST_SESSION]
-    projected = _wait_for_projection(scene, HOST_SESSION, "mlx-batch-runner")
-    assert projected["projected"][0] != "legacy-operator", projected
+    _assert_projected_into_host(
+        scene, host="legacy-operator", guest="mlx-batch-runner", result=result
+    )
+    assert len(_creates(scene.calls())) == 1, scene.calls()
+    assert not _standalone_chrome_creates(scene.calls()), scene.calls()
+    assert scene.live() == ["legacy-operator", "mlx-batch-runner"]
+    assert not _attaches(scene.calls()), scene.calls()
 
 
 @pytest.mark.parametrize(
@@ -2422,14 +2494,17 @@ def test_layout_alias_without_a_host_creates_the_host_first(
     _wait_for_projection(scene, HOST_SESSION, created[1]["created"])
 
 
+@pytest.mark.parametrize("legacy", [False, True])
 def test_tty_inside_an_attached_frame_projects_guest_no_nested_multiplexer(
     tmp_path: Path,
+    legacy: bool,
 ) -> None:
     scene = Scene(
         tmp_path,
         project="mlx-batch-runner",
         live=("other-place",),
         clients=("other-place",),
+        legacy=("other-place",) if legacy else (),
     )
     result = _run(
         scene,
@@ -2446,17 +2521,15 @@ def test_tty_inside_an_attached_frame_projects_guest_no_nested_multiplexer(
     assert "TARGET=[mlx-batch-runner]" in result.stdout
 
 
-@pytest.mark.parametrize("role", ["legacy", "guest"])
 def test_inside_non_host_session_refuses_before_guest_create(
-    tmp_path: Path, role: str
+    tmp_path: Path,
 ) -> None:
     scene = Scene(
         tmp_path,
         project="mlx-batch-runner",
         live=("other-place",),
         clients=("other-place",),
-        legacy=("other-place",) if role == "legacy" else (),
-        guests=("other-place",) if role == "guest" else (),
+        guests=("other-place",),
     )
     result = _run(
         scene,
@@ -2467,7 +2540,7 @@ def test_inside_non_host_session_refuses_before_guest_create(
     )
     combined = result.stdout + result.stderr
     assert _rc(result) == EXIT_INVENTORY, combined
-    assert f"role: {role}" in combined, combined
+    assert "role: guest" in combined, combined
     assert scene.live() == ["other-place"]
     assert not _creates(scene.calls()), scene.calls()
     assert not _projects(scene.calls()), scene.calls()

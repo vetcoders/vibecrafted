@@ -1141,8 +1141,10 @@ _vetcoders_start_live_inventory_hosts() {
 
 # Classify one live session from the engine's materialized layout, rather than
 # inferring its role from existence or client attachment. Output is one of:
-# host (exactly one projection owner), guest (no owner), or legacy (multiple
-# owners). The workspace_surface plugin is only the empty-host placeholder and
+# host (declared frame_host identity) or guest (no host marker). A serialized
+# operator layout repeats that identity in tabs and swap templates; repetitions
+# are not separate sessions/owners and must never make a live host disappear.
+# The workspace_surface plugin is only the empty-host placeholder and
 # disappears after a guest projection, so it is deliberately not identity.
 # Query/parser failure is exit 2 and produces no role: callers fail closed.
 _vetcoders_start_session_projection_role() {
@@ -1158,15 +1160,28 @@ import re
 import sys
 
 text = sys.stdin.read()
-text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
-text = re.sub(r"//[^\n]*", "", text)
-owners = len(re.findall(r"\bframe_host\s+(?:\"true\"|true)(?=\s|;|})", text))
-if owners == 1:
-    print("host")
-elif owners == 0:
-    print("guest")
-else:
-    print("legacy")
+# dump-layout is engine-normalized KDL. Keep strings atomic: labels, command
+# arguments, and URLs containing marker/comment text are not declarations.
+tokens = re.findall(r"\"(?:\\.|[^\"\\])*\"|//[^\n]*|/\*.*?\*/|[{};\n]|[^\s{};\"]+", text, re.S)
+tokens = [token for token in tokens if not token.startswith(("//", "/*"))]
+meaningful = [token for token in tokens if token not in ("\n", ";")]
+if meaningful[:2] != ["layout", "{"] or meaningful[-1:] != ["}"]:
+    sys.exit(2)
+depth = 0
+for token in tokens:
+    depth += (token == "{") - (token == "}")
+    if depth < 0:
+        sys.exit(2)
+if depth:
+    sys.exit(2)
+host = any(
+    token == "frame_host"
+    and index > 0 and tokens[index - 1] in ("{", ";", "\n")
+    and tokens[index + 1:index + 2] in (["true"], ["\"true\""])
+    and tokens[index + 2:index + 3] in ([";"], ["\n"], ["}"])
+    for index, token in enumerate(tokens)
+)
+print("host" if host else "guest")
 ' <<<"$layout"
 }
 
@@ -1198,9 +1213,18 @@ _vetcoders_start_resolve_inventory_host() {
     role="$(_vetcoders_start_session_projection_role "$line" "$vc_frame_bin")" || role_rc=$?
     if ((role_rc != 0)); then
       _vetcoders_start_inventory_error="the runtime role of live session ${line} is unreadable: vc-frame --session ${line} action dump-layout returned no parsable layout"
+      printf 'vc-start: WARN: %s; refusing to skip a possible host.\n' "$_vetcoders_start_inventory_error" >&2
       return 2
     fi
-    [[ "$role" == host ]] || continue
+    case "$role" in
+      host) ;;
+      guest) continue ;;
+      *)
+        _vetcoders_start_inventory_error="live session ${line} has unsupported role ${role:-unknown}"
+        printf 'vc-start: WARN: %s; refusing to skip a possible legacy host.\n' "$_vetcoders_start_inventory_error" >&2
+        return 2
+        ;;
+    esac
     valid_hosts+="${line}"$'\n'
     count=$((count + 1))
     if [[ -z "$chosen" ]]; then
