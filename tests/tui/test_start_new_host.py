@@ -127,7 +127,10 @@ def test_owned_child_without_tty_does_not_open_another_terminal(tmp_path: Path) 
     assert not scene.terminal_launches(wait=0)
 
 
-def test_stale_shell_reenters_verified_active_front_door(tmp_path: Path) -> None:
+@pytest.mark.parametrize("native", [False, True])
+def test_stale_shell_reenters_verified_active_front_door(
+    tmp_path: Path, native: bool
+) -> None:
     import json
     import sys
 
@@ -152,20 +155,45 @@ def test_stale_shell_reenters_verified_active_front_door(tmp_path: Path) -> None
     )
     log = tmp_path / "active-entry.json"
     entry = active / "bin/vc-start"
-    entry.write_text(
-        f"#!{sys.executable}\nimport json, sys\nfrom pathlib import Path\nPath({str(log)!r}).write_text(json.dumps(sys.argv[1:]))\n"
+    logger = (
+        "import json, os, sys\nfrom pathlib import Path\n"
+        f"Path({str(log)!r}).write_text(json.dumps({{'argv': sys.argv[1:], "
+        "'runtime': os.environ.get('VIBECRAFTED_RUNTIME_ROOT'), "
+        "'frame': os.environ.get('VIBECRAFTED_VC_FRAME_BIN'), "
+        "'core': os.environ.get('VIBECRAFTED_CORE_DIR')}))\n"
     )
-    entry.chmod(0o755)
+    if native:
+        import shutil
+
+        if _INSTALLED_PAIR is None:
+            pytest.skip("installed native vc-start required")
+        shutil.copy2(_INSTALLED_PAIR[1] / "bin/vc-start", entry)
+        (active / "bin/python3").symlink_to(sys.executable)
+        (active / "bin/vc-frame").write_text("engine presence for native entry probe")
+        facade = active / "vibecrafted-core/vibecrafted_core/runtime/shell/vetcoders.sh"
+        facade.parent.mkdir(parents=True)
+        facade.write_text(
+            'vc-start() { "$VIBECRAFTED_PYTHON" -c '
+            + shlex.quote(logger)
+            + ' "$@"; }\n'
+        )
+    else:
+        entry.write_text(f"#!{sys.executable}\n" + logger)
+        entry.chmod(0o755)
     result = _run(
         scene,
         f"_vetcoders_vc_frame_loaded_root={shlex.quote(str(old))}; vc-start --new-host",
+        extra_env={
+            "VIBECRAFTED_RUNTIME_ROOT": str(old),
+            "VIBECRAFTED_VC_FRAME_BIN": str(old / "bin/vc-frame"),
+        },
     )
     assert _rc(result) == 0, result.stdout + result.stderr
-    assert json.loads(log.read_text()) == [
-        "--new-host",
-        "--repo",
-        str(scene.root.resolve()),
-    ]
+    receipt = json.loads(log.read_text())
+    assert receipt["argv"] == ["--new-host", "--repo", str(scene.root.resolve())]
+    assert receipt["runtime"] == str(active)
+    assert receipt["frame"] == str(active / "bin/vc-frame")
+    assert receipt["core"] == str(active / "vibecrafted-core")
     assert not scene.calls()
 
 

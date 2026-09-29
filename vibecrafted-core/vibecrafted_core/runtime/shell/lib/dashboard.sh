@@ -2315,6 +2315,15 @@ _vetcoders_start_new_host() (
   local vc_frame_bin="" role="" front_door="" existing="" sessions=""
   owner="$(_vetcoders_vc_frame_owner_root)" || return 4
   active="$(_vetcoders_start_active_host_root)" || return 4
+  if [[ "$(basename "$(dirname "$active")")" == releases ]]; then
+    # The native vc-start front door reads these roots before sourcing its
+    # shell. Pin the admitted owner for both re-entry and the terminal child;
+    # an absolute executable path alone does not defeat inherited old roots.
+    export VIBECRAFTED_ROOT="$active" VIBECRAFTED_RUNTIME_ROOT="$active"
+    export VIBECRAFTED_RUNTIME_BIN="$active/bin" VIBECRAFTED_CORE_DIR="$active/vibecrafted-core"
+    export VIBECRAFTED_PYTHON="$active/bin/python3" VIBECRAFTED_VC_FRAME_BIN="$active/bin/vc-frame"
+    unset VIBECRAFTED_APP_ROOT PYTHONPATH PYTHONHOME
+  fi
   if [[ "$active" != "$owner" ]]; then
     if [[ -n "${VIBECRAFTED_START_CREATED_HOST:-}" ]] && _vetcoders_start_is_owned_terminal_child; then
       printf 'vc-start: active generation changed while opening host %s; it remains intact. Retry --new-host explicitly.\n' "$VIBECRAFTED_START_CREATED_HOST" >&2
