@@ -119,6 +119,28 @@ def test_claude_inbox_and_transient_failures_remain_truthful(
     assert retryable["agent_ack_state"] == "unobserved"
 
 
+def test_copilot_message_uses_durable_inbox_and_explicit_ack(
+    monkeypatch, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    _run(home, "copilot-run", agent="copilot", session="copilot-session")
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+
+    def no_provider_queue(*_args, **_kwargs):
+        raise AssertionError("Copilot message must stay in the run inbox")
+
+    queued = message_control.send_message(
+        run_id="copilot-run", text="check the latest diff", runner=no_provider_queue
+    )
+    assert queued["delivery_state"] == "inbox_pending"
+    assert message_control.receive_messages(run_id="copilot-run") == [queued]
+    acknowledged = message_control.acknowledge_message(
+        queued["message_id"], run_id="copilot-run"
+    )
+    assert acknowledged["delivery_state"] == "agent_acknowledged"
+    assert message_control.receive_messages(run_id="copilot-run") == []
+
+
 def test_missing_or_runtime_provider_identity_is_refused(
     monkeypatch, tmp_path: Path
 ) -> None:

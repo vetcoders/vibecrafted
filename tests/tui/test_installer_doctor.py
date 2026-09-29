@@ -29,6 +29,19 @@ from scripts import vetcoders_install as installer
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+def test_installer_detects_copilot_after_kimi(monkeypatch) -> None:
+    seen: list[str] = []
+
+    def which(binary: str) -> str:
+        seen.append(binary)
+        return f"/opt/agents/bin/{binary}"
+
+    monkeypatch.setattr(installer.shutil, "which", which)
+    found = installer.detect_agent_runtimes()
+    assert found["copilot"] == "/opt/agents/bin/copilot"
+    assert seen[-2:] == ["kimi", "copilot"]
+
+
 def _write_executable(path: Path, body: str) -> None:
     path.write_text(body, encoding="utf-8")
     path.chmod(0o755)

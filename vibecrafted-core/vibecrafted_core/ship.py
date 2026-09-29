@@ -33,6 +33,7 @@ SUPPORTED_AGENTS = {
     "grok",
     "cursor",
     "kimi",
+    "copilot",
 }
 
 DEFAULT_SHIP_PROMPT = (

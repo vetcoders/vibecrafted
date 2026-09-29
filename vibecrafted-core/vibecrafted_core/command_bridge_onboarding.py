@@ -52,12 +52,16 @@ PROVIDER_AUTH_FILES: dict[str, tuple[str, ...]] = {
     "codex": (".codex/auth.json",),
     "grok": (".grok/config.toml",),
     "kimi": (".kimi-code/config.toml",),
+    # Copilot credentials may live in the OS credential store; the config file
+    # is a setup signal only, not a claim that an auth token was verified.
+    "copilot": (".copilot/config.json",),
 }
 PROVIDER_ENV_KEYS: dict[str, tuple[str, ...]] = {
     "claude": ("ANTHROPIC_API_KEY",),
     "codex": ("OPENAI_API_KEY", "OPENAI_API_KEY_CODEX"),
     "grok": ("XAI_API_KEY", "GROK_API_KEY"),
     "kimi": ("KIMI_API_KEY", "MOONSHOT_API_KEY"),
+    "copilot": ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"),
 }
 PROVIDERS = tuple(PROVIDER_AUTH_FILES)
 

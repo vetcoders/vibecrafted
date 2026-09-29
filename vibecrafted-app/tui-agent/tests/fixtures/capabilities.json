@@ -7,6 +7,7 @@
   "grok",
   "junie",
   "kimi",
+  "copilot",
   "swarm"
  ],
  "environments": {
@@ -599,6 +600,162 @@
    "executable": "/opt/agents/bin/codex",
    "model_override": {
     "flag": "-m",
+    "reason": "",
+    "supported": true
+   },
+   "permissions_default": "bypass",
+   "reason": ""
+  },
+  "copilot": {
+   "available": true,
+   "binary": "copilot",
+   "controls": [
+    {
+     "permissions": "",
+     "permissions_effective": "bypass",
+     "provider_flags": [
+      "--allow-all"
+     ],
+     "reason": "",
+     "sandbox": "",
+     "sandbox_effective": "provider-default",
+     "supported": true
+    },
+    {
+     "permissions": "",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "copilot: copilot exposes no explicit sandbox control, so --sandbox true cannot be enforced. Omit --sandbox.",
+     "sandbox": "true",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "copilot: copilot exposes no explicit sandbox control, so --sandbox false cannot be enforced. Omit --sandbox.",
+     "sandbox": "false",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "bypass",
+     "permissions_effective": "bypass",
+     "provider_flags": [
+      "--allow-all"
+     ],
+     "reason": "",
+     "sandbox": "",
+     "sandbox_effective": "provider-default",
+     "supported": true
+    },
+    {
+     "permissions": "bypass",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "copilot: copilot exposes no explicit sandbox control, so --sandbox true cannot be enforced. Omit --sandbox.",
+     "sandbox": "true",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "bypass",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "copilot: copilot exposes no explicit sandbox control, so --sandbox false cannot be enforced. Omit --sandbox.",
+     "sandbox": "false",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "auto",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "copilot: cannot enforce --permissions auto (copilot headless cannot answer permission prompts; use bypass or read-only); supported: bypass, read-only",
+     "sandbox": "",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "auto",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "copilot: cannot enforce --permissions auto (copilot headless cannot answer permission prompts; use bypass or read-only); supported: bypass, read-only",
+     "sandbox": "true",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "auto",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "copilot: cannot enforce --permissions auto (copilot headless cannot answer permission prompts; use bypass or read-only); supported: bypass, read-only",
+     "sandbox": "false",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "accept-edits",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "copilot: cannot enforce --permissions accept-edits (copilot headless cannot answer permission prompts; use bypass or read-only); supported: bypass, read-only",
+     "sandbox": "",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "accept-edits",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "copilot: cannot enforce --permissions accept-edits (copilot headless cannot answer permission prompts; use bypass or read-only); supported: bypass, read-only",
+     "sandbox": "true",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "accept-edits",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "copilot: cannot enforce --permissions accept-edits (copilot headless cannot answer permission prompts; use bypass or read-only); supported: bypass, read-only",
+     "sandbox": "false",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "read-only",
+     "permissions_effective": "read-only",
+     "provider_flags": [
+      "--available-tools=read",
+      "--no-ask-user"
+     ],
+     "reason": "",
+     "sandbox": "",
+     "sandbox_effective": "provider-default",
+     "supported": true
+    },
+    {
+     "permissions": "read-only",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "copilot: copilot exposes no explicit sandbox control, so --sandbox true cannot be enforced. Omit --sandbox.",
+     "sandbox": "true",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "read-only",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "copilot: copilot exposes no explicit sandbox control, so --sandbox false cannot be enforced. Omit --sandbox.",
+     "sandbox": "false",
+     "sandbox_effective": "",
+     "supported": false
+    }
+   ],
+   "executable": "/opt/homebrew/bin/copilot",
+   "model_override": {
+    "flag": "--model",
     "reason": "",
     "supported": true
    },
@@ -1347,7 +1504,8 @@
    "agy",
    "junie",
    "grok",
-   "cursor"
+   "cursor",
+   "copilot"
   ]
  },
  "schema": "vibecrafted.workflow_capabilities.v1",

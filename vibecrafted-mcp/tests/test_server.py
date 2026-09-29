@@ -513,8 +513,9 @@ def test_vc_caretaker_reports_absence_honestly(tmp_path: Path) -> None:
     assert payload["snapshot"] is None
 
 
+@pytest.mark.parametrize("agent", ["codex", "copilot"])
 def test_vc_launch_delegates_to_core_workflow(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent: str
 ) -> None:
     calls: dict[str, Any] = {}
 
@@ -552,7 +553,7 @@ def test_vc_launch_delegates_to_core_workflow(
                 "vc_launch",
                 {
                     "skill": "workflow",
-                    "agent": "codex",
+                    "agent": agent,
                     "prompt": "go",
                     "root": str(tmp_path),
                     "source_dir": str(tmp_path / "source"),
@@ -563,7 +564,7 @@ def test_vc_launch_delegates_to_core_workflow(
     result = _run(_call())
     assert result.data["accepted"] is True
     assert calls["payload"]["skill"] == "workflow"
-    assert calls["payload"]["agent"] == "codex"
+    assert calls["payload"]["agent"] == agent
     assert calls["source_dir"] == str(tmp_path / "source")
     assert calls["launch_source_dir"] == str(tmp_path / "source")
 

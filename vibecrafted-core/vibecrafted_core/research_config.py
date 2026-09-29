@@ -15,7 +15,15 @@ import tomllib
 
 from .runtime_paths import vibecrafted_home
 
-SUPPORTED_RESEARCH_AGENTS = ("claude", "codex", "agy", "junie", "grok", "cursor")
+SUPPORTED_RESEARCH_AGENTS = (
+    "claude",
+    "codex",
+    "agy",
+    "junie",
+    "grok",
+    "cursor",
+    "copilot",
+)
 DEFAULT_RESEARCH_AGENTS = ("claude", "codex", "agy")
 
 

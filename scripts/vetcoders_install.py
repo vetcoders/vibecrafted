@@ -722,7 +722,16 @@ def _is_writable(path: Path) -> bool:
         return False
 
 
-AGENT_RUNTIMES = ["codex", "claude", "agy", "junie", "grok", "cursor"]
+AGENT_RUNTIMES = [
+    "codex",
+    "claude",
+    "agy",
+    "junie",
+    "grok",
+    "cursor",
+    "kimi",
+    "copilot",
+]
 # Fleet agent key → PATH binary when they differ (cursor's CLI is cursor-agent).
 AGENT_RUNTIME_BINARIES = {"cursor": "cursor-agent"}
 SYMLINK_TARGETS = ["agents"]

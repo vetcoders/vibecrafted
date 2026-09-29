@@ -35,6 +35,7 @@ MODEL_ENV_VARS = (
     "JUNIE_MODEL",
     "AGY_MODEL",
     "KIMI_MODEL",
+    "COPILOT_MODEL",
 )
 MODEL_PLACEHOLDERS = {"", "none", "null", "unknown", "pending"}
 COST_PATTERNS = (
@@ -353,7 +354,7 @@ class AgentStreamParser:
     """
 
     def __init__(self, agent: str, *, default_model: str = "") -> None:
-        """Initialize parser state for ``agent`` (claude/codex/gemini/junie/grok/agy/kimi)."""
+        """Initialize parser state for a supported agent stream."""
         self.agent = agent
         self.session_id = ""
         self._rendered_session_ids: set[str] = set()
@@ -438,6 +439,8 @@ class AgentStreamParser:
             return f"cd {root_text} && agy --conversation {session}"
         if self.agent == "kimi":
             return f"cd {root_text} && kimi -S {session}"
+        if self.agent == "copilot":
+            return f"cd {root_text} && copilot --resume {session}"
         if self.agent == "junie":
             return f"cd {root_text} && junie --resume --session-id {session}"
         if self.agent == "grok":
@@ -614,6 +617,8 @@ class AgentStreamParser:
             return self._format_agy_event(event)
         if self.agent == "kimi":
             return self._format_kimi_event(event)
+        if self.agent == "copilot":
+            return self._format_copilot_event(event)
         if self.agent in {"claude", "agy", "cursor"}:
             if self.agent == "cursor":
                 thinking = self._format_cursor_thinking(event)
@@ -628,6 +633,55 @@ class AgentStreamParser:
             return self._format_junie_event(event)
         if self.agent == "grok":
             return self._format_grok_event(event)
+        return ""
+
+    def _format_copilot_event(self, event: dict[str, Any]) -> str:
+        """Render Copilot CLI JSONL while retaining native session truth."""
+        kind = str(event.get("type") or "")
+        data = event.get("data")
+        if not isinstance(data, dict):
+            data = event
+        if kind == "session.start":
+            self.model_id = str(data.get("selectedModel") or self.model_id)
+            session = str(data.get("sessionId") or "")
+            return self._session_banner(session)
+        if kind == "result":
+            # Prompt-mode JSONL closes with a top-level result carrying the
+            # native session ID; session.start is in the persisted events file
+            # but is not emitted on stdout by Copilot CLI 1.0.89-7.
+            return self._session_banner(str(event.get("sessionId") or ""))
+        if kind == "session.model_change":
+            self.model_id = str(data.get("newModel") or self.model_id)
+            return ""
+        if kind == "assistant.message":
+            self.model_id = str(data.get("model") or self.model_id)
+            content = data.get("content")
+            if isinstance(content, str) and content.strip():
+                self.final_response = content
+                return self._emit(f"\n{content}\n")
+            return ""
+        if kind == "assistant.message_delta":
+            # The complete assistant.message is the durable answer. Rendering
+            # both forms would duplicate text and last-message extraction.
+            return ""
+        if kind in {"tool.execution_start", "tool.execution_started"}:
+            name = str(data.get("toolName") or data.get("name") or "tool")
+            self._note_tool(name)
+            return ""
+        if kind == "session.shutdown":
+            metrics = data.get("modelMetrics")
+            if isinstance(metrics, dict):
+                for model, metric in metrics.items():
+                    if not isinstance(metric, dict):
+                        continue
+                    self.model_id = str(model)
+            # modelMetrics is cumulative over the native session. A resumed
+            # run cannot attribute that total to this invocation. The
+            # harness-usage adapter checks the full session window first.
+            return ""
+        if kind in {"session.error", "assistant.error"}:
+            message = str(data.get("message") or data.get("error") or "unknown")
+            return self._emit(f"\n\x1b[31m[{stamp()} error] {message}\x1b[0m\n")
         return ""
 
     def _format_cursor_thinking(self, event: dict[str, Any]) -> str | None:
@@ -1151,7 +1205,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--agent",
         required=True,
-        help="Agent family: grok, claude, codex, gemini, junie, agy, kimi",
+        help="Agent family: grok, claude, codex, gemini, junie, agy, kimi, copilot",
     )
     parser.add_argument(
         "--raw-file",

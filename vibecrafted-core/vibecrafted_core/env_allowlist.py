@@ -138,6 +138,14 @@ _PROVIDER_ALLOW: frozenset[str] = frozenset(
         "KIMI_API_KEY",
         "MOONSHOT_API_KEY",
         "MOONSHOT_BASE_URL",
+        # Copilot CLI login also accepts an OS credential-store token. For
+        # automation these are its documented environment token sources.
+        "COPILOT_GITHUB_TOKEN",
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "COPILOT_HOME",
+        "COPILOT_MODEL",
+        "COPILOT_AUTO_UPDATE",
     }
 )
 

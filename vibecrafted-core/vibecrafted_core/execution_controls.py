@@ -99,6 +99,10 @@ SANDBOX_EVIDENCE: dict[str, str] = {
         "so print mode always runs under kimi's auto (never-ask) permission "
         "policy with static deny rules still in effect"
     ),
+    "copilot": (
+        "GitHub Copilot CLI 1.0.89-7 --help (2026-09-29): permission, path, "
+        "URL and tool controls exist; no explicit shell sandbox on/off flag"
+    ),
 }
 
 # What each provider's sandbox actually confines. Named in every receipt so a
@@ -119,6 +123,7 @@ SANDBOX_BOUNDARY: dict[str, str] = {
     "agy": "agy terminal sandbox ('terminal restrictions') for agent commands",
     "junie": "",
     "kimi": "",
+    "copilot": "",
 }
 
 # Claude Code's documented hard-gate shape: the sandbox must be on, a missing
@@ -377,6 +382,18 @@ def _apply_sandbox(
         raise _refuse(
             provider,
             "kimi 0.42.0 exposes no sandbox control, so --sandbox "
+            f"{sandbox_word(sandbox)} cannot be enforced. Omit --sandbox.",
+        )
+    if provider == "copilot":
+        if sandbox is None:
+            return (
+                base_flags,
+                "provider-default",
+                "copilot exposes no explicit sandbox control",
+            )
+        raise _refuse(
+            provider,
+            "copilot exposes no explicit sandbox control, so --sandbox "
             f"{sandbox_word(sandbox)} cannot be enforced. Omit --sandbox.",
         )
 

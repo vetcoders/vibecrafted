@@ -117,7 +117,7 @@ def _infer_agent(command: Sequence[str]) -> str:
     # (spawn.AGENT_BINARY_NAMES); fold the binary back onto the fleet key.
     if name == "cursor-agent":
         return "cursor"
-    if name in {"claude", "codex", "agy", "junie", "grok", "cursor", "kimi"}:
+    if name in {"claude", "codex", "agy", "junie", "grok", "cursor", "kimi", "copilot"}:
         return name
     if name in {"python", "python3"}:
         return "python"
@@ -127,6 +127,8 @@ def _infer_agent(command: Sequence[str]) -> str:
 def _json_text_fragment(event: dict[str, object]) -> str:
     """Extract the display text (if any) from one parsed JSON stream event line."""
     event_type = str(event.get("type") or "")
+    if event_type == "assistant.message" and isinstance(event.get("data"), dict):
+        return str(event["data"].get("content") or "")
     if event_type == "thought":
         return ""
     if event_type == "item.completed":

@@ -16,7 +16,17 @@ from vibecrafted_core.runtime_paths import (
     selected_runtime_environment,
 )
 
-ALL_AGENTS = ("claude", "codex", "gemini", "agy", "junie", "grok", "cursor", "kimi")
+ALL_AGENTS = (
+    "claude",
+    "codex",
+    "gemini",
+    "agy",
+    "junie",
+    "grok",
+    "cursor",
+    "kimi",
+    "copilot",
+)
 VERDICTS = {
     continuity.SUPPORTED,
     continuity.UNSUPPORTED,
@@ -118,7 +128,7 @@ def test_capability_registry_is_serializable_and_versioned() -> None:
 
 def test_unknown_agent_rejected() -> None:
     with pytest.raises(ValueError, match="unknown agent"):
-        continuity.capability_for("copilot")
+        continuity.capability_for("unknown-provider")
 
 
 def test_package_root_exports_resolve_lazily() -> None:

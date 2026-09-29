@@ -46,10 +46,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CORE_ROOT = REPO_ROOT / "vibecrafted-core"
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
-FLEET = {"claude", "codex", "agy", "junie", "grok", "cursor", "kimi"}
+FLEET = {"claude", "codex", "agy", "junie", "grok", "cursor", "kimi", "copilot"}
 
 # Canonical rendered selector everywhere a workflow asks for an agent name.
-CANONICAL_SELECTOR = "<claude|codex|agy|junie|grok|cursor|kimi>"
+CANONICAL_SELECTOR = "<claude|codex|agy|junie|grok|cursor|kimi|copilot>"
 STALE_SELECTOR = "<claude|codex|agy|junie|grok|cursor>"
 # Dotted fleet list; negative lookahead so the fixed line still matches.
 STALE_DOTTED_RE = re.compile(r"claude · codex · agy · junie · grok · cursor(?! · kimi)")
@@ -127,8 +127,10 @@ def test_deck_mirror_is_byte_identical_to_canonical() -> None:
 
 def test_deck_agent_acceptance_gate_lists_cursor() -> None:
     body = CANONICAL_DECK.read_text(encoding="utf-8")
-    assert "_agents=(claude codex agy junie grok cursor kimi)" in body
-    assert re.search(r"claude\|codex\|agy\|junie\|grok\|cursor\|kimi\) return 0", body)
+    assert "_agents=(claude codex agy junie grok cursor kimi copilot)" in body
+    assert re.search(
+        r"claude\|codex\|agy\|junie\|grok\|cursor\|kimi\|copilot\) return 0", body
+    )
 
 
 def test_deck_probes_cursor_agent_binary_not_editor_cli() -> None:
@@ -142,7 +144,7 @@ def test_deck_help_texts_include_cursor() -> None:
     assert STALE_SELECTOR not in body
     assert not STALE_DOTTED_RE.search(body)
     # help-topic dispatch: `vibecrafted help cursor` must route to agent help
-    assert re.search(r"claude\|codex\|agy\|junie\|grok\|cursor\|kimi\)", body)
+    assert re.search(r"claude\|codex\|agy\|junie\|grok\|cursor\|kimi\|copilot\)", body)
 
 
 def _run_deck(tmp_path: Path, *args: str) -> subprocess.CompletedProcess:
@@ -430,10 +432,12 @@ RUNTIME_SCRIPTS = CORE_ROOT / "vibecrafted_core" / "runtime" / "scripts"
 def test_marbles_scripts_accept_cursor() -> None:
     spawn_body = (RUNTIME_SCRIPTS / "marbles_spawn.sh").read_text(encoding="utf-8")
     assert re.search(
-        r"\^\(claude\|codex\|agy\|junie\|grok\|cursor\|kimi\)\$", spawn_body
+        r"\^\(claude\|codex\|agy\|junie\|grok\|cursor\|kimi\|copilot\)\$", spawn_body
     )
     next_body = (RUNTIME_SCRIPTS / "marbles_next.sh").read_text(encoding="utf-8")
-    assert re.search(r"\(claude\|codex\|agy\|junie\|grok\|cursor\|kimi\)", next_body)
+    assert re.search(
+        r"\(claude\|codex\|agy\|junie\|grok\|cursor\|kimi\|copilot\)", next_body
+    )
 
 
 def test_marbles_verification_skips_cursor_with_warning() -> None:

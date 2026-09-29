@@ -84,6 +84,7 @@ SUPPORTED_AGENTS = {
     "grok",
     "cursor",
     "kimi",
+    "copilot",
     "swarm",
 }
 SUPPORTED_RUNTIMES = {"headless", "terminal", "visible"}

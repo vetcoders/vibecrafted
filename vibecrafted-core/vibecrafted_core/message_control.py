@@ -34,7 +34,7 @@ _UNRESOLVED_OR_FAILED = frozenset(
     {"recorded", "retryable_failure", "permanent_failure"}
 )
 _INBOX_PROVIDERS = frozenset(
-    {"claude", "agy", "grok", "junie", "kimi", "cursor", "gemini"}
+    {"claude", "agy", "grok", "junie", "kimi", "copilot", "cursor", "gemini"}
 )
 # Observed facts only. A value never means the recipient read or executed.
 DELIVERY_STATES: dict[str, str] = {
@@ -367,7 +367,7 @@ def send_message(
     receipts. ``provider_accepted`` is never submitted again. Timeouts are
     ambiguous: the typed reason does not claim exactly-once delivery.
 
-    Inbox providers (Claude, Agy, Grok, Junie, Kimi, Cursor, Gemini) stop at
+    Inbox providers (Claude, Agy, Grok, Junie, Kimi, Copilot, Cursor, Gemini) stop at
     ``inbox_pending``. That is storage for the selected run, not attachment
     to model context. Codex with a native thread is the only provider queue.
     A missing native session still uses the inbox and does not spawn or

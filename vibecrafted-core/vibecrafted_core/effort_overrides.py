@@ -42,6 +42,7 @@ EFFORT_OVERRIDE_STYLES: dict[str, tuple[str, str]] = {
     "grok": ("flag", "--reasoning-effort"),
     "junie": ("assign", "--effort"),
     "codex": ("codex_config", "model_reasoning_effort"),
+    "copilot": ("flag", "--reasoning-effort"),
 }
 
 _CODEX_EFFORT_PREFIX = "model_reasoning_effort="
