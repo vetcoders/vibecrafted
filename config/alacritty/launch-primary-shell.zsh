@@ -15,6 +15,19 @@
 # Source of truth in this repo: config/alacritty/launch-primary-shell.zsh
 # 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
 
+# Fresh product shells start in the canonical vc workplace
+# ($VIBECRAFTED_HOME/projects — Founder decision 2026-09-29), never in "/"
+# (the LaunchServices/launchd fingerprint: Dock, Vibecrafted.app relaunch),
+# never in a cwd that no longer exists (rotated generation, deleted worktree),
+# and not in a bare "$HOME" (an inherited default, not an intention). Every
+# intentional project cwd stays untouched.
+vc_workplace="${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/projects"
+if [[ "$PWD" == "/" || "$PWD" == "$HOME" || ! -d "$PWD" ]]; then
+  mkdir -p "$vc_workplace" 2>/dev/null || :
+  cd "$vc_workplace" 2>/dev/null || cd "$HOME" 2>/dev/null || :
+fi
+unset vc_workplace
+
 # The private .zshrc sources this entry; return instead of replacing that shell.
 if [[ -n "${ZSH_VERSION:-}" && "${ZSH_EVAL_CONTEXT:-}" == *:file ]]; then
   source "$HOME/.config/vibecrafted/vc-terminal/interactive.zsh"
