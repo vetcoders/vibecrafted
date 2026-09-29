@@ -353,6 +353,18 @@ def _add_launch_parser(sub: argparse._SubParsersAction, name: str) -> None:
     run.add_argument("--depth", type=int)
     run.add_argument("--model", default=None)
     run.add_argument(
+        "--effort",
+        default="",
+        metavar="low|medium|high|…",
+        help=(
+            "reasoning-effort pin carried to the agent CLI (claude, agy, "
+            "junie, grok; codex via -c model_reasoning_effort). Effort is a "
+            "cost control: without a pin the provider CLI picks its own "
+            "default. Agents without an effort control record a receipted "
+            "skip instead of refusing the launch."
+        ),
+    )
+    run.add_argument(
         "--session",
         default="",
         help=(
@@ -2876,6 +2888,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "count": args.count,
         "depth": args.depth,
         "model": args.model,
+        "effort": getattr(args, "effort", ""),
         "research_agents": research_agents,
         "synthesizer": getattr(args, "synthesizer", ""),
         "synthesizer_model": getattr(args, "synthesizer_model", ""),

@@ -44,6 +44,7 @@ from .control_plane import (
 )
 from .cron import parse_frontmatter
 from .delivery.store import atomic_write_json
+from .effort_overrides import _effort_override_receipt, _with_effort_override
 from .env_allowlist import dispatcher_identity, filter_headless_worker_env
 from .events import append_event
 from .execution_controls import (
@@ -138,6 +139,11 @@ class WorkflowLaunchSpec:
     count: int | None = None
     depth: int | None = None
     model: str = ""
+    # Operator-requested reasoning-effort pin (``--effort``). Effort is a cost
+    # control: without a pin the provider CLI picks its own default (codex
+    # exec ran gpt-6-astra at high on 2026-09-29). Carried per provider by
+    # effort_overrides; agents without a knob get a receipted skip.
+    effort: str = ""
     repo_requested: str = ""
     repo_kind: str = "path"
     base: str = "HEAD"
@@ -1775,6 +1781,7 @@ def normalize_launch_spec(
         count=count,
         depth=depth,
         model=model,
+        effort=str(payload.get("effort") or "").strip(),
         model_source=model_source,
         source_digest=hashlib.sha256(plan_text.encode("utf-8")).hexdigest(),
         repo_requested=requested_repo,
@@ -2053,14 +2060,18 @@ def build_launch_command(
         prompt_text = spec.prompt
         if prompt_path and Path(prompt_path).is_file():
             prompt_text = Path(prompt_path).read_text(encoding="utf-8")
-        return _with_model_override(
+        return _with_effort_override(
             worker_agent,
-            _default_command(
+            _with_model_override(
                 worker_agent,
-                prompt_text,
-                controls if controls is not None and controls.requested else None,
+                _default_command(
+                    worker_agent,
+                    prompt_text,
+                    controls if controls is not None and controls.requested else None,
+                ),
+                spec.model,
             ),
-            spec.model,
+            spec.effort,
         )
     # The default shape stays byte-identical to the historical command; the
     # resolved argv is injected only when the caller asked for a control.
@@ -2068,7 +2079,11 @@ def build_launch_command(
         worker_command = _stdin_command(worker_agent, controls=controls)
     else:
         worker_command = _stdin_command(worker_agent)
-    return _with_model_override(worker_agent, worker_command, spec.model)
+    return _with_effort_override(
+        worker_agent,
+        _with_model_override(worker_agent, worker_command, spec.model),
+        spec.effort,
+    )
 
 
 def _sweep_stale_runs() -> None:
@@ -3265,6 +3280,7 @@ def launch_workflow(
     # Operator model pin is launch truth, not a dispatcher afterthought.
     # Callers (and tests) read meta.json as soon as the worker exists.
     initial_meta.update(_model_override_receipt(spec.agent, spec.model))
+    initial_meta.update(_effort_override_receipt(spec.agent, spec.effort))
     if spec.model:
         initial_meta["model_effective"] = spec.model
     if claim_digest:
