@@ -50,16 +50,10 @@ struct CommandDeckShell<Workspace: View>: View {
             }
           }
       }
-      .navigationTitle(projectingFrame ? "Frame" : (selection?.title ?? "Vibecrafted"))
+      // The document owns its title; the native toolbar owns window actions.
+      .navigationTitle("Vibecrafted")
       .toolbarRole(.editor)
-      .toolbar {
-        CommandDeckColumnToggles(
-          sidebarHidden: columnVisibility == .detailOnly,
-          inspectorPresented: inspectorPresented,
-          toggleSidebar: toggleSidebar,
-          toggleInspector: toggleInspector
-        )
-      }
+
     }
     .inspector(isPresented: runInspectorPresented) {
       CommandDeckInspector(phase: phase)
@@ -202,26 +196,6 @@ private struct BrowserToolbarStripper: NSViewRepresentable {
     }
     for index in indexes.reversed() {
       toolbar.removeItem(at: index)
-    }
-  }
-}
-
-private struct CommandDeckColumnToggles: ToolbarContent {
-  let sidebarHidden: Bool
-  let inspectorPresented: Bool
-  let toggleSidebar: () -> Void
-  let toggleInspector: () -> Void
-
-  var body: some ToolbarContent {
-    ToolbarItem(placement: .navigation) {
-      Button(sidebarHidden ? "Show Sidebar" : "Hide Sidebar", systemImage: "sidebar.leading", action: toggleSidebar)
-        .accessibilityLabel(sidebarHidden ? "Show Sidebar" : "Hide Sidebar")
-        .help(sidebarHidden ? "Show Sidebar" : "Hide Sidebar")
-    }
-    ToolbarItem(placement: .primaryAction) {
-      Button(inspectorPresented ? "Hide Inspector" : "Show Inspector", systemImage: "sidebar.trailing", action: toggleInspector)
-        .accessibilityLabel(inspectorPresented ? "Hide Inspector" : "Show Inspector")
-        .help(inspectorPresented ? "Hide Inspector" : "Show Inspector")
     }
   }
 }

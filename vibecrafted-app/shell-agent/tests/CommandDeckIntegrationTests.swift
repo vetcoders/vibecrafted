@@ -656,6 +656,9 @@ struct CommandDeckIntegrationTests {
     let consoleView = console.webView
     console.apply(endpoint: endpoint)
     try await waitFor { if case .loaded = console.loadState { return true }; return false }
+    let nativeMarker = try await evaluateString("String(window.__vcNativeShell === true)", in: consoleView)
+    try require(nativeMarker == "true", "Native appearance marker was lost before the document element existed")
+    try require(consoleView.appearance == nil, "Web view froze the launch-time appearance")
     console.navigate(path: "/scaffold")
     try await waitFor { if case .loaded(let url) = console.loadState { return url.path == "/scaffold" }; return false }
     try await evaluate("document.getElementById('draft').value = 'edited-draft'", in: consoleView)
@@ -852,6 +855,12 @@ struct CommandDeckIntegrationTests {
     // 8. One chrome: the bridged toolbar exists at compact and regular widths; no content chrome row.
     try await waitFor { controller.window?.toolbar != nil }
     let toolbar = controller.window!.toolbar!
+    let sidebarItems = toolbar.items.filter {
+      ($0.itemIdentifier.rawValue + " " + $0.label).lowercased().contains("sidebar")
+    }
+    try require(sidebarItems.count == 1, "Expected one native sidebar toggle, found \(sidebarItems.count)")
+    try require(!toolbar.items.contains { $0.label == "Diagnostics" || $0.label == "Reinitialize" },
+      "Online toolbar duplicates machine navigation")
     let identifiersRegular = toolbar.items.map(\.itemIdentifier)
     controller.window?.setContentSize(NSSize(width: 800, height: 600))
     try await tick()

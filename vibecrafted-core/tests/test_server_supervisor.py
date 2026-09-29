@@ -220,6 +220,7 @@ def test_plistlib_renderer_preserves_metacharacters_without_xml_injection(
     payload = plistlib.loads(rendered)
 
     assert payload["Label"] == supervisor.LAUNCH_AGENT_LABEL
+    assert payload["AssociatedBundleIdentifiers"] == ["io.vetcoders.vibecrafted"]
     assert payload["ProgramArguments"][0] == str(supervisor_binary)
     arguments = payload["ProgramArguments"]
     assert arguments[arguments.index("--supervisor-bin") + 1] == str(supervisor_binary)

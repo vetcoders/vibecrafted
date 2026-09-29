@@ -120,7 +120,10 @@ def test_single_native_host_source_contract() -> None:
         "no `WKScriptMessageHandler` is registered", ""
     )
     assert host.count("userContentController.addUserScript(") == 1
-    assert "source: \"document.documentElement.dataset.nativeShell='1';\"" in host
+    # Document-start injection can precede the root element. Publish the flag
+    # first; the page head applies it once documentElement exists.
+    assert "window.__vcNativeShell = true; if (document.documentElement)" in host
+    assert "document.documentElement.dataset.nativeShell='1';" in host
     assert 'openRoute("/workspaces")' in delegate
     assert 'openRoute("/run/\\(runID)")' in delegate
     assert "getServerStatus()" not in delegate

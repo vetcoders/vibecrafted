@@ -1800,6 +1800,9 @@ def render_launch_agent_plist(
         service_environment["VIBECRAFTED_RUNTIME_ROOT"] = str(generation)
     payload: dict[str, Any] = {
         "Label": LAUNCH_AGENT_LABEL,
+        # Attribute this legacy LaunchAgent to the signed product in Login Items.
+        # The packaged executable and App must share the release signing team.
+        "AssociatedBundleIdentifiers": ["io.vetcoders.vibecrafted"],
         "ProgramArguments": [
             str(supervisor),
             "run",

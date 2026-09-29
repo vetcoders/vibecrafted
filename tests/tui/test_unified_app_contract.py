@@ -1323,7 +1323,7 @@ def test_tray_menu_supervises_runtime_pack_carrier_drift() -> None:
     assert "xdgConfigHome: install.configHome.path" in delegate
     assert 'generation.range(of: "+g", options: .backwards)' in policy
     assert "signedSourceRevision.lowercased().hasPrefix(token)" in policy
-    assert "Matches this App's signed carrier" in policy
+    assert "Runtime already current" in policy
     assert "the installed runtime moved; update the App to re-sync" in policy
     # The durable lifecycle trail is supervision evidence, but it is not
     # installer behavior: it lives in its own unit so the AppDelegate hub stays
@@ -1364,6 +1364,14 @@ func expect(_ condition: Bool, _ label: String) {
 
 let fullSha = "0a5eaaea607d07c3dcac1bb321c502d41273e1e0"
 
+expect(!shouldOfferRuntimeUpgrade(installed: "4.3.1+gabcdef12", carrier: "4.3.1+gabcdef12"), "parity stays quiet")
+expect(!shouldOfferRuntimeUpgrade(installed: "4.4.0+gabcdef12", carrier: "4.3.1+gabcdef12"), "older stays quiet")
+expect(!shouldOfferRuntimeUpgrade(installed: "4.3.1+gabcdef12", carrier: "4.3.1+g12345678"), "hashes do not prove order")
+expect(shouldOfferRuntimeUpgrade(installed: "4.3.1+gabcdef12", carrier: "4.4.0+g12345678"), "new release upgrade")
+expect(!shouldOfferRuntimeUpgrade(installed: "", carrier: "unknown"), "unknown stays quiet")
+expect(!shouldOfferRuntimeUpgrade(installed: "+", carrier: "5.0.0"), "malformed stays quiet")
+expect(!shouldOfferRuntimeUpgrade(installed: "unknown", carrier: "5.0.0"), "unknown installed stays quiet")
+
 let waiting = deriveRuntimePackMenuState(
   generation: nil, signedSourceRevision: nil, runtimeReady: false)
 expect(waiting.header == "Runtime Pack: WAITING FOR RUNTIME", "waiting header")
@@ -1379,7 +1387,7 @@ expect(unknown.actionsEnabled, "unknown actions enabled")
 let synced = deriveRuntimePackMenuState(
   generation: "4.4.0+g0a5eaaea", signedSourceRevision: fullSha, runtimeReady: true)
 expect(synced.header == "Runtime Pack: 4.4.0+g0a5eaaea", "synced header")
-expect(synced.detail == "Matches this App's signed carrier", "synced detail")
+expect(synced.detail == "Runtime already current — matches this App's signed carrier", "synced detail")
 expect(synced.health == .healthy, "synced health")
 expect(synced.actionsEnabled, "synced actions enabled")
 
