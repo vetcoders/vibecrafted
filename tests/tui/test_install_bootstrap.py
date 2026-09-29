@@ -9,6 +9,7 @@ import os
 import pty
 import select
 import shlex
+import shutil
 import signal
 import stat
 import struct
@@ -404,6 +405,290 @@ def test_install_sh_blocks_raw_github_fallback_without_channel_archive(
     assert "refusing the untrusted raw GitHub fallback" in result.stderr
     assert "W4 release authentication blocker" in result.stderr
     assert "api.github.com" not in capture.read_text(encoding="utf-8")
+
+
+RELEASE_BASE = "https://release.invalid/v9.9.9"
+RELEASE_ARCHIVE = "vibecrafted-v9.9.9.tar.gz"
+
+
+def _write_fake_release_curl(fake_bin: Path) -> None:
+    """curl that serves `$FAKE_RELEASE_ROOT/<url basename>` and logs each URL."""
+    _write_executable(
+        fake_bin / "curl",
+        """#!/usr/bin/env bash
+set -euo pipefail
+out=""
+url=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    -*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+printf '%s\\n' "$url" >> "$CURL_CAPTURE"
+source_file="$FAKE_RELEASE_ROOT/${url##*/}"
+if [[ ! -f "$source_file" ]]; then
+  printf 'curl: (22) The requested URL returned error: 404\\n' >&2
+  exit 22
+fi
+if [[ -n "$out" ]]; then
+  cp "$source_file" "$out"
+else
+  cat "$source_file"
+fi
+""",
+    )
+
+
+@pytest.mark.parametrize("sums_shape", ["listed", "unlisted", "mismatch"])
+def test_channel_archive_checksum_is_matched_by_release_name(
+    tmp_path: Path, sums_shape: str
+) -> None:
+    """Linux container test 2026-09-29: SHA256SUMS names the release asset
+    (`vibecrafted-v4.1.0.tar.gz`) while the bootstrap grepped for its private
+    temp file (`vibecrafted-input.tar.gz`); no match + pipefail killed the
+    install with a bare RC=1 right after "Fetching vibecrafted (main)…"."""
+    stage_marker = tmp_path / "stage-ran.txt"
+    pack_capture = tmp_path / "pack-installer-args.txt"
+    source_dir = tmp_path / "source"
+    (source_dir / "scripts").mkdir(parents=True)
+    (source_dir / "Makefile").write_text("install:\n\t@echo ok\n", encoding="utf-8")
+    _write_executable(
+        source_dir / "scripts" / "install-runtime-pack.sh",
+        '#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "$PACK_CAPTURE"\n',
+    )
+    _write_distribution_manifest_stub(source_dir, stage_marker=stage_marker)
+
+    server = tmp_path / "server"
+    server.mkdir()
+    archive = server / RELEASE_ARCHIVE
+    _write_v2_archive(source_dir, archive, "vibecrafted-main")
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    sums = {
+        "listed": f"{digest}  {RELEASE_ARCHIVE}\n{'0' * 64}  install.sh\n",
+        "unlisted": f"{'0' * 64}  install.sh\n",
+        "mismatch": f"{'f' * 64}  {RELEASE_ARCHIVE}\n",
+    }[sums_shape]
+    (server / "SHA256SUMS").write_text(sums, encoding="utf-8")
+    (server / "vibecrafted-signing.pub").write_text("fixture key\n", encoding="utf-8")
+    for name in ("pack.tar.gz", "pack.tar.gz.sha256", "pack.tar.gz.sig"):
+        (server / name).write_text(f"fixture {name}\n", encoding="utf-8")
+    (server / "main.json").write_text(
+        json.dumps(
+            {
+                "archive_url": f"{RELEASE_BASE}/{RELEASE_ARCHIVE}",
+                "runtime_pack_url": f"{RELEASE_BASE}/pack.tar.gz",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    fake_bin = tmp_path / "bin"
+    home = tmp_path / "home"
+    capture = tmp_path / "curl-urls.txt"
+    fake_bin.mkdir()
+    home.mkdir()
+    _write_fake_release_curl(fake_bin)
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["XDG_CONFIG_HOME"] = str(home / ".config")
+    env["VIBECRAFTED_HOME"] = str(home / ".vibecrafted")
+    env["PATH"] = f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin"
+    env["CURL_CAPTURE"] = str(capture)
+    env["FAKE_RELEASE_ROOT"] = str(server)
+    env["PACK_CAPTURE"] = str(pack_capture)
+
+    result = subprocess.run(
+        ["bash", str(INSTALL_SH), "--yes"],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    fetched = capture.read_text(encoding="utf-8").splitlines()
+    assert f"{RELEASE_BASE}/{RELEASE_ARCHIVE}" in fetched
+    if sums_shape == "listed":
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert stage_marker.read_text(encoding="utf-8") == "stage-ran\n"
+        assert f"{RELEASE_BASE}/{RELEASE_ARCHIVE}.sig" in fetched
+        assert pack_capture.read_text(encoding="utf-8").splitlines() == [
+            "--expected-source-revision",
+            "0123456789abcdef0123456789abcdef01234567",
+        ]
+        return
+
+    expected = {
+        "unlisted": f"does not list {RELEASE_ARCHIVE}",
+        "mismatch": f"SHA256 mismatch for {RELEASE_ARCHIVE}",
+    }[sums_shape]
+    assert result.returncode == 1
+    # Dual-stream: the refusal survives a caller that only keeps one stream.
+    assert expected in result.stderr
+    assert expected in result.stdout
+    assert "vibecrafted-input" not in result.stderr
+    assert not stage_marker.exists()
+
+
+def test_missing_python_is_named_before_the_channel_manifest_is_fetched(
+    tmp_path: Path,
+) -> None:
+    """Without python3 the manifest parse came back empty and the operator was
+    told the channel was incomplete. The tool preflight must run first."""
+    tool_bin = tmp_path / "tools-bin"
+    home = tmp_path / "home"
+    capture = tmp_path / "curl-urls.txt"
+    tool_bin.mkdir()
+    home.mkdir()
+    for tool in ("uname", "dirname", "grep", "tar", "openssl"):
+        resolved = shutil.which(tool, path="/usr/bin:/bin:/usr/sbin:/sbin")
+        if resolved is not None:
+            (tool_bin / tool).symlink_to(resolved)
+    _write_executable(
+        tool_bin / "curl",
+        '#!/bin/bash\nprintf "%s\\n" "$*" >> "$CURL_CAPTURE"\nexit 7\n',
+    )
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["XDG_CONFIG_HOME"] = str(home / ".config")
+    env["VIBECRAFTED_HOME"] = str(home / ".vibecrafted")
+    env["PATH"] = str(tool_bin)
+    env["CURL_CAPTURE"] = str(capture)
+
+    result = subprocess.run(
+        ["/bin/bash", str(INSTALL_SH), "--yes"],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    missing_line = next(
+        line
+        for line in result.stderr.splitlines()
+        if line.startswith("Error: missing required tools:")
+    )
+    assert "python3" in missing_line.split()
+    assert "hint:" in result.stderr
+    assert "Channel manifest" not in result.stdout + result.stderr
+    assert not capture.exists(), "network was touched before the tool preflight"
+
+
+def _portable_copy(tmp_path: Path, stage_marker: Path) -> Path:
+    """An unpacked portable tarball: root dir carrying install.sh + carrier."""
+    portable = tmp_path / "vibecrafted-9.9.9"
+    (portable / "scripts").mkdir(parents=True)
+    (portable / "Makefile").write_text("install:\n\t@echo ok\n", encoding="utf-8")
+    shutil.copyfile(INSTALL_SH, portable / "install.sh")
+    _write_distribution_manifest_stub(portable, stage_marker=stage_marker)
+    return portable
+
+
+def _run_portable_install(
+    tmp_path: Path, portable: Path, *extra: str
+) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
+    fake_bin = tmp_path / "bin"
+    home = tmp_path / "home"
+    curl_capture = tmp_path / "curl-urls.txt"
+    make_capture = tmp_path / "make-args.txt"
+    fake_bin.mkdir(exist_ok=True)
+    home.mkdir(exist_ok=True)
+    _write_executable(
+        fake_bin / "curl",
+        "#!/usr/bin/env bash\n"
+        'printf "%s\\n" "$*" >> "$CURL_CAPTURE"\n'
+        "printf '{}\\n'\n",
+    )
+    _write_executable(
+        fake_bin / "make",
+        '#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "$MAKE_CAPTURE"\n',
+    )
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["XDG_CONFIG_HOME"] = str(home / ".config")
+    env["VIBECRAFTED_HOME"] = str(home / ".vibecrafted")
+    env["PATH"] = f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin"
+    env["CURL_CAPTURE"] = str(curl_capture)
+    env["MAKE_CAPTURE"] = str(make_capture)
+    result = subprocess.run(
+        ["bash", str(portable / "install.sh"), "--yes", *extra],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result, curl_capture, make_capture
+
+
+def test_portable_copy_installs_its_own_carrier_without_the_channel(
+    tmp_path: Path,
+) -> None:
+    """`bash vibecrafted-<version>/install.sh` from an unpacked portable
+    tarball asked the remote channel for a release and refused offline."""
+    stage_marker = tmp_path / "stage-ran.txt"
+    portable = _portable_copy(tmp_path, stage_marker)
+    # Finder stamps host metadata into an opened folder; it is not payload.
+    (portable / ".DS_Store").write_bytes(b"\0\0\0\1Bud1")
+    (portable / "scripts" / ".DS_Store").write_bytes(b"\0\0\0\1Bud1")
+    # An extraction under a hardened umask (077) must not break the carrier:
+    # modes are re-sealed canonically, the digest still binds every byte.
+    for current, directories, files in os.walk(portable):
+        for name in files:
+            path = Path(current) / name
+            path.chmod(0o700 if path.stat().st_mode & 0o111 else 0o600)
+        for name in directories:
+            (Path(current) / name).chmod(0o700)
+    portable.chmod(0o700)
+
+    result, curl_capture, make_capture = _run_portable_install(
+        tmp_path, portable, "install"
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "local portable copy" in result.stdout
+    assert not curl_capture.exists(), "portable install reached for the network"
+    assert stage_marker.read_text(encoding="utf-8") == "stage-ran\n"
+    make_args = make_capture.read_text(encoding="utf-8").splitlines()
+    assert make_args[:2] == ["--no-print-directory", "-C"]
+    assert Path(make_args[2]).name == "candidate"
+    assert make_args[3:] == ["install"]
+
+
+def test_tampered_portable_copy_is_refused_with_a_way_out(tmp_path: Path) -> None:
+    stage_marker = tmp_path / "stage-ran.txt"
+    portable = _portable_copy(tmp_path, stage_marker)
+    (portable / "Makefile").write_text("install:\n\t@echo tampered\n", encoding="utf-8")
+
+    result, curl_capture, make_capture = _run_portable_install(
+        tmp_path, portable, "install"
+    )
+
+    assert result.returncode == 1
+    assert "distribution tree digest mismatch" in result.stderr
+    assert f"local portable copy at {portable.resolve()}" in result.stderr
+    assert "--archive-file" in result.stderr
+    assert not curl_capture.exists()
+    assert not stage_marker.exists()
+    assert not make_capture.exists()
+
+
+def test_explicit_ref_keeps_a_portable_copy_on_the_channel(tmp_path: Path) -> None:
+    stage_marker = tmp_path / "stage-ran.txt"
+    portable = _portable_copy(tmp_path, stage_marker)
+
+    result, curl_capture, _ = _run_portable_install(tmp_path, portable, "--ref", "main")
+
+    assert result.returncode == 1
+    assert "must bind archive_url and runtime_pack_url" in result.stderr
+    assert "https://vibecrafted.io/channel/main.json" in curl_capture.read_text(
+        encoding="utf-8"
+    )
+    assert not stage_marker.exists()
 
 
 def test_install_sh_help_documents_runtime_flag() -> None:

@@ -15,6 +15,10 @@ Use `--runtime <horse>` to install and activate a lab runtime: wezterm, vc-apprt
 `source-provenance.json` carrier. Create local archives with
 `scripts/distribution_manifest.py archive`: for a Git checkout, that writer
 proves every included byte against the claimed commit before writing the carrier.
+Run from an unpacked portable tarball (`bash vibecrafted-<version>/install.sh`),
+the bootstrap installs that local copy under the same carrier preflight as
+`--archive-file`, without a channel lookup; `--ref`, `--archive-url` or
+`--archive-file` select another source explicitly.
 Non-interactive runs without `--gui` bypass the browser and call the compact installer directly.
 
 Examples:
@@ -26,13 +30,50 @@ Examples:
   bash install.sh doctor
   bash install.sh --runtime locterm
   bash install.sh --archive-file /tmp/vibecrafted.tar.gz vibecrafted
+  bash vibecrafted-<version>/install.sh
 EOF_USAGE
 }
 
+# Every refusal must reach the operator. `set -euo pipefail` alone turned a
+# failed lookup into a bare RC=1 after "Fetching vibecrafted…" (Linux container
+# test, 2026-09-29). Error text goes to stderr and — unless both streams are the
+# same terminal — to stdout as well, so `curl | bash > log` and wrappers that
+# eat stderr (HAK-28/HAK-72 class) still carry the reason.
+bootstrap_error_reported=0
+bootstrap_handoff=0
+tmpdir=""
+
+report_error() {
+  printf '%s\n' "$@" >&2
+  if ! [[ -t 1 && -t 2 ]]; then
+    printf '%s\n' "$@"
+  fi
+  bootstrap_error_reported=1
+}
+
 die() {
-  printf 'Error: %s\n' "$*" >&2
+  report_error "Error: $*"
   exit 1
 }
+
+# Last-resort net: any exit that is neither a success, a named refusal nor the
+# candidate installer's own verdict still says that the bootstrap stopped.
+# shellcheck disable=SC2329  # invoked by name through the EXIT trap below
+on_bootstrap_exit() {
+  local status=$?
+  if [[ "$status" != "0" && "$bootstrap_error_reported" == "0" \
+        && "$bootstrap_handoff" == "0" ]]; then
+    if [[ "$status" == "130" ]]; then
+      report_error "Interrupted; nothing was published."
+    else
+      report_error "Error: the bootstrap stopped unexpectedly (exit $status) before naming the failure; rerun with VERBOSE=1 and report the last lines above."
+    fi
+  fi
+  if [[ -n "$tmpdir" ]]; then
+    rm -rf -- "$tmpdir"
+  fi
+}
+trap on_bootstrap_exit EXIT
 
 info() {
   printf '%s\n' "$*"
@@ -1041,6 +1082,8 @@ prompt_attended_consent() {
 
   if [[ -n "$archive_file" ]]; then
     source_description="unpack"
+  elif [[ -n "$local_carrier_dir" ]]; then
+    source_description="local copy"
   else
     source_description="download"
   fi
@@ -1056,6 +1099,7 @@ prompt_attended_consent() {
     printf 'Proceed? [y/N] ' > /dev/tty
     if ! IFS= read -r response < /dev/tty; then
       printf '\nCancelled.\n' > /dev/tty
+      bootstrap_error_reported=1
       exit 1
     fi
     case "$response" in
@@ -1082,6 +1126,11 @@ default_tools_dir="$(default_vibecrafted_tools_home)"
 default_ref="${VIBECRAFTED_REF:-main}"
 
 ref="$default_ref"
+ref_explicit=0
+# Captured at top level: inside a function, bash 5 reports the bash binary as
+# BASH_SOURCE[0] for a script read from stdin (`curl | bash`); here it is empty.
+bootstrap_script_path="${BASH_SOURCE[0]:-}"
+local_carrier_dir=""
 archive_url=""
 archive_file=""
 runtime_pack_url=""
@@ -1109,6 +1158,7 @@ while [[ $# -gt 0 ]]; do
       shift
       [[ $# -gt 0 ]] || die "Missing value for --ref"
       ref="$1"
+      ref_explicit=1
       ;;
     --archive-url)
       shift
@@ -1174,29 +1224,30 @@ case "$runtime" in
     ;;
 esac
 
-enforce_runtime_root_contract || exit 1
+enforce_runtime_root_contract \
+  || die "Runtime roots drift from the canonical layout (details above)"
 
-if [[ -z "$archive_url" && -z "$archive_file" ]]; then
-  # Resolve latest version from the channel manifest instead of hard-pinning.
-  channel_url="https://vibecrafted.io/channel/${ref}.json"
-  resolved_urls=""
-  if command -v curl >/dev/null 2>&1; then
-    resolved_urls="$(curl -fsSL "$channel_url" 2>/dev/null \
-      | python3 -c "import sys,json; p=json.load(sys.stdin); print(p.get('archive_url','')+'\\t'+p.get('runtime_pack_url',''))" 2>/dev/null)" || true
+# A portable tarball unpacks into a directory whose install.sh sits next to the
+# closed source-provenance.json carrier. `bash vibecrafted-<version>/install.sh`
+# installs exactly that copy — held to the same preflight as --archive-file —
+# instead of asking the remote channel for a different release. An explicit
+# --ref/--archive-url/--archive-file still selects that source; `curl | bash`
+# has no script path; an installed generation under the tools dir is not a
+# portable carrier (`vibecrafted update` re-runs it with --ref).
+detect_local_carrier() {
+  local script_dir tools_physical
+  [[ -z "$archive_url" && -z "$archive_file" && "$ref_explicit" == "0" ]] || return 0
+  [[ -n "$bootstrap_script_path" && -f "$bootstrap_script_path" ]] || return 0
+  script_dir="$(cd "$(dirname "$bootstrap_script_path")" 2>/dev/null && pwd -P)" || return 0
+  [[ -f "$script_dir/source-provenance.json" && ! -L "$script_dir/source-provenance.json" ]] \
+    || return 0
+  tools_physical="$(cd "$tools_dir" 2>/dev/null && pwd -P)" || tools_physical=""
+  if [[ -n "$tools_physical" && "$script_dir/" == "$tools_physical/"* ]]; then
+    return 0
   fi
-  IFS=$'\t' read -r resolved_url resolved_pack_url <<< "$resolved_urls"
-  if [[ -n "$resolved_url" && -n "$resolved_pack_url" ]]; then
-    archive_url="$resolved_url"
-    runtime_pack_url="$resolved_pack_url"
-    vinfo "Resolved from channel ($ref): $archive_url"
-  else
-    # Raw GitHub source archives do not carry the writer-bound v2 distribution
-    # tree receipt.  Minting one after download would let candidate bytes attest
-    # to themselves, so this legacy path is deliberately closed.  Release
-    # authentication remains a named W4 blocker while signature fetch is soft.
-    die "Channel manifest must bind archive_url and runtime_pack_url; refusing the untrusted raw GitHub fallback and incomplete release tuple (W4 release authentication blocker)"
-  fi
-fi
+  local_carrier_dir="$script_dir"
+}
+detect_local_carrier
 
 detect_platform
 detect_linux_distro
@@ -1241,25 +1292,73 @@ preflight_require_all() {
     command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
   done
   [[ ${#missing[@]} -eq 0 ]] && return 0
-  printf 'Error: missing required tools: %s\n' "${missing[*]}" >&2
-  preflight_pkg_hint "${missing[*]}"
+  report_error "Error: missing required tools: ${missing[*]}" \
+    "$(preflight_pkg_hint "${missing[*]}" 2>&1)"
   exit 1
 }
 
+# The preflight runs before the first network byte and before the channel
+# manifest is parsed: without python3 that parse used to come back empty and
+# the operator was told the channel was incomplete instead of what was missing.
 # The public Runtime Pack path needs only extraction, signature verification
-# and bootstrap Python. A local source-only fixture still needs make, but the
+# and bootstrap Python; the channel always binds a Runtime Pack. A local
+# source-only carrier (--archive-file, portable copy) still needs make, but the
 # production channel never gains a compiler toolchain fallback.
+channel_mode=0
+if [[ -z "$archive_url" && -z "$archive_file" && -z "$local_carrier_dir" ]]; then
+  channel_mode=1
+fi
 preflight_tools=(tar python3 openssl)
-if [[ -z "$runtime_pack_file" && -z "$runtime_pack_url" ]]; then
+if [[ "$channel_mode" == "0" && -z "$runtime_pack_file" && -z "$runtime_pack_url" ]]; then
   preflight_tools+=(make)
 fi
-if [[ -z "$archive_file" ]]; then
+if [[ -n "$archive_url" || -n "$runtime_pack_url" || "$channel_mode" == "1" ]]; then
   preflight_tools+=(curl)
 fi
 preflight_require_all "${preflight_tools[@]}"
 bootstrap_python="$(command -v python3)"
 [[ -n "$bootstrap_python" && -f "$bootstrap_python" ]] \
   || die "Could not resolve the bootstrap-owned Python interpreter"
+
+if [[ "$channel_mode" == "1" ]]; then
+  # Resolve latest version from the channel manifest instead of hard-pinning.
+  # Each failure names itself: unreachable channel, unreadable document, or an
+  # incomplete release tuple are three different truths for the operator.
+  channel_url="https://vibecrafted.io/channel/${ref}.json"
+  channel_manifest=""
+  if ! channel_manifest="$(curl -fsSL "$channel_url")"; then
+    die "Could not fetch the channel manifest $channel_url (network, proxy, or unknown --ref '$ref')"
+  fi
+  channel_fields=""
+  if ! channel_fields="$(printf '%s' "$channel_manifest" | "$bootstrap_python" -I -S -c "
+import json, sys
+p = json.load(sys.stdin)
+fields = (p.get('archive_url',''), p.get('runtime_pack_url',''))
+if not all(isinstance(field, str) and field.isprintable() for field in fields):
+    raise SystemExit(3)
+print(fields[0])
+print(fields[1])
+" 2>/dev/null)"; then
+    die "Channel manifest $channel_url is not a JSON object with string archive_url/runtime_pack_url fields; refusing to guess a release"
+  fi
+  resolved_url="${channel_fields%%$'\n'*}"
+  resolved_pack_url=""
+  if [[ "$channel_fields" == *$'\n'* ]]; then
+    resolved_pack_url="${channel_fields#*$'\n'}"
+  fi
+  if [[ -n "$resolved_url" && -n "$resolved_pack_url" ]]; then
+    archive_url="$resolved_url"
+    runtime_pack_url="$resolved_pack_url"
+    vinfo "Resolved from channel ($ref): $archive_url"
+  else
+    # Raw GitHub source archives do not carry the writer-bound v2 distribution
+    # tree receipt.  Minting one after download would let candidate bytes attest
+    # to themselves, so this legacy path is deliberately closed.  Release
+    # authentication remains a named W4 blocker while signature fetch is soft.
+    die "Channel manifest must bind archive_url and runtime_pack_url; refusing the untrusted raw GitHub fallback and incomplete release tuple (W4 release authentication blocker; $channel_url has archive_url=${resolved_url:-<missing>} runtime_pack_url=${resolved_pack_url:-<missing>})"
+  fi
+fi
+
 export VIBECRAFTED_TOOLS_HOME="$tools_dir"
 if [[ -n "$archive_file" ]]; then
   [[ -f "$archive_file" ]] || die "Archive file not found: $archive_file"
@@ -1276,17 +1375,21 @@ prompt_attended_consent
 
 mkdir -p "$tools_dir"
 
-tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/vibecrafted-bootstrap.XXXXXX")"
-trap 'rm -rf -- "$tmpdir"' EXIT
+# on_bootstrap_exit removes the private workspace on every exit path.
+tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/vibecrafted-bootstrap.XXXXXX")" \
+  || die "Could not create a private bootstrap workspace under ${TMPDIR:-/tmp}"
 
 selected_runtime_pack="$runtime_pack_file"
 if [[ -n "$runtime_pack_url" ]]; then
   selected_runtime_pack="$tmpdir/$(basename "$runtime_pack_url")"
-  curl -fsSL "$runtime_pack_url" -o "$selected_runtime_pack"
-  curl -fsSL "$runtime_pack_url.sha256" -o "$selected_runtime_pack.sha256"
-  curl -fsSL "$runtime_pack_url.sig" -o "$selected_runtime_pack.sig"
+  curl -fsSL "$runtime_pack_url" -o "$selected_runtime_pack" \
+    || die "Could not download the Runtime Pack $runtime_pack_url"
+  curl -fsSL "$runtime_pack_url.sha256" -o "$selected_runtime_pack.sha256" \
+    || die "Could not download the Runtime Pack checksum $runtime_pack_url.sha256"
+  curl -fsSL "$runtime_pack_url.sig" -o "$selected_runtime_pack.sig" \
+    || die "Could not download the Runtime Pack signature $runtime_pack_url.sig"
 fi
-if [[ -z "$selected_runtime_pack" && -z "$archive_file" ]]; then
+if [[ -z "$selected_runtime_pack" && -z "$archive_file" && -z "$local_carrier_dir" ]]; then
   die "No Runtime Pack is bound to this public source candidate"
 fi
 
@@ -1295,6 +1398,8 @@ fi
 # under the installer lease; the bootstrap itself never writes `current`.
 run_candidate_command() {
   local status=0
+  # From here the candidate installer owns its verdict and its error text.
+  bootstrap_handoff=1
   "$@" || status=$?
   exit "$status"
 }
@@ -1302,11 +1407,51 @@ run_candidate_command() {
 extract_root="$tmpdir/extract"
 mkdir -p "$extract_root"
 
+# SHA256SUMS names published release assets. Look the archive up by the exact
+# name its URL published (sha256sum's `*name` binary marker tolerated), never by
+# the private temp file it was downloaded into. Mirrors _expected_sha_from_sums
+# in scripts/vibecrafted; this bootstrap runs before any repo file exists.
+expected_sha_from_sums() {
+  local sums_file="$1" target_name="$2"
+  awk -v target="$target_name" '
+    NF >= 2 {
+      name = $2
+      sub(/^\*/, "", name)
+      if (name == target) {
+        print $1
+        exit
+      }
+    }
+  ' "$sums_file"
+}
+
+# Hash with the bootstrap-owned interpreter: `shasum` (perl) is absent from
+# minimal Linux images and `sha256sum` from stock macOS.
+sha256_of_file() {
+  "$bootstrap_python" -I -S - "$1" <<'PY_BOOTSTRAP_SHA256'
+import hashlib
+import sys
+
+digest = hashlib.sha256()
+with open(sys.argv[1], "rb") as handle:
+    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+        digest.update(chunk)
+print(digest.hexdigest())
+PY_BOOTSTRAP_SHA256
+}
+
 verify_signature() {
-  local file="$1" base_url="$2"
+  local file="$1" file_url="$2"
+  local base_url="${file_url%/*}"
+  local release_name="${file_url##*/}"
   local sig_file="${file}.sig"
   local pub_file="$tmpdir/vibecrafted-signing.pub"
   local sums_file="$tmpdir/SHA256SUMS"
+  local expected="" actual=""
+
+  release_name="${release_name%%[?#]*}"
+  [[ -n "$release_name" ]] \
+    || die "Archive URL $file_url does not name a release asset; cannot match it against SHA256SUMS"
 
   if ! curl -fsSL "${base_url}/vibecrafted-signing.pub" -o "$pub_file" 2>/dev/null; then
     info "  [warn] Could not fetch signing key — skipping signature verification"
@@ -1317,43 +1462,99 @@ verify_signature() {
     return 0
   fi
 
-  local expected actual
-  expected="$(grep "$(basename "$file")" "$sums_file" | awk '{print $1}')"
-  actual="$(shasum -a 256 "$file" 2>/dev/null || sha256sum "$file" 2>/dev/null)"
-  actual="${actual%% *}"
-  if [[ -n "$expected" && "$actual" != "$expected" ]]; then
-    die "SHA256 mismatch for $(basename "$file"): expected $expected, got $actual"
-  fi
-  [[ -n "$expected" ]] && vinfo "  SHA256 ✓"
+  expected="$(expected_sha_from_sums "$sums_file" "$release_name")" || expected=""
+  [[ -n "$expected" ]] \
+    || die "SHA256SUMS at ${base_url}/SHA256SUMS does not list $release_name; refusing an archive the published checksums do not cover"
+  actual="$(sha256_of_file "$file")" \
+    || die "Could not compute the SHA256 of the downloaded $release_name"
+  [[ "$actual" == "$expected" ]] \
+    || die "SHA256 mismatch for $release_name: expected $expected, got $actual"
+  vinfo "  SHA256 ✓"
 
-  if curl -fsSL "${base_url}/$(basename "$sig_file")" -o "$sig_file" 2>/dev/null; then
+  if curl -fsSL "${base_url}/${release_name}.sig" -o "$sig_file" 2>/dev/null; then
     if openssl dgst -sha256 -verify "$pub_file" -signature "$sig_file" "$file" >/dev/null 2>&1; then
       vinfo "  Signature ✓  (Developer ID, team MW223P3NPX)"
     else
-      die "Signature verification FAILED for $(basename "$file")"
+      die "Signature verification FAILED for $release_name"
     fi
   else
     info "  [warn] No .sig file found — skipping signature verification"
   fi
 }
 
+# A portable copy unpacked by the operator carries whatever modes their umask
+# left (a hardened 077/027 narrows the canonical 0755/0644) and may collect
+# host metadata. Re-seal it
+# into a private archive with the packer's canonical modes (0755 directories,
+# 0755/0644 files by executable bit, 0777 symlinks), drop .DS_Store (host
+# metadata is not payload), and hand that archive to the very preflight
+# --archive-file gets: the carrier digest still decides every byte.
+pack_local_carrier() {
+  local source="$1"
+  local destination="$2"
+  "$bootstrap_python" -I -S - "$source" "$destination" <<'PY_BOOTSTRAP_LOCAL_CARRIER'
+import os
+import sys
+import tarfile
+
+source, destination = sys.argv[1:]
+
+
+def canonical(info):
+    if os.path.basename(info.name) == ".DS_Store":
+        return None
+    info.uid = info.gid = 0
+    info.uname = info.gname = ""
+    if info.isdir():
+        info.mode = 0o755
+    elif info.issym():
+        info.mode = 0o777
+    elif info.isreg():
+        info.mode = 0o755 if info.mode & 0o111 else 0o644
+    return info
+
+
+try:
+    descriptor = os.open(
+        destination,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+        0o600,
+    )
+    with os.fdopen(descriptor, "wb") as handle:
+        with tarfile.open(fileobj=handle, mode="w:gz", compresslevel=1) as archive:
+            archive.add(
+                source, arcname="vibecrafted-local", recursive=True, filter=canonical
+            )
+except (OSError, tarfile.TarError) as exc:
+    print(f"bootstrap local carrier: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+PY_BOOTSTRAP_LOCAL_CARRIER
+}
+
 local_archive="$tmpdir/vibecrafted-input.tar.gz"
+archive_refusal="Archive failed the bootstrap-owned source-provenance v2 preflight"
 if [[ -n "$archive_file" ]]; then
   info "Unpacking the local snapshot…"
   vinfo "  archive: $archive_file"
   snapshot_local_archive "$archive_file" "$local_archive" \
     || die "Could not make a stable private copy of the local archive"
+elif [[ -n "$local_carrier_dir" ]]; then
+  info "Installing the local portable copy next to install.sh (no channel lookup)…"
+  vinfo "  carrier: $local_carrier_dir/source-provenance.json"
+  pack_local_carrier "$local_carrier_dir" "$local_archive" \
+    || die "Could not read the local portable copy at $local_carrier_dir"
+  archive_refusal="The local portable copy at $local_carrier_dir failed the bootstrap-owned source-provenance v2 preflight; re-extract the portable tarball into a fresh directory, or pass it explicitly: bash install.sh --archive-file <Vibecrafted_…-portable.tar.gz>"
 else
   info "Fetching vibecrafted ($ref)…"
   vinfo "  source: $archive_url"
-  curl -fsSL "$archive_url" -o "$local_archive"
+  curl -fsSL "$archive_url" -o "$local_archive" \
+    || die "Could not download the release archive $archive_url"
 
-  base_url="${archive_url%/*}"
-  verify_signature "$local_archive" "$base_url"
+  verify_signature "$local_archive" "$archive_url"
 fi
 
 bootstrap_receipt="$(bootstrap_integrity_preflight archive "$local_archive")" \
-  || die "Archive failed the bootstrap-owned source-provenance v2 preflight"
+  || die "$archive_refusal"
 IFS=$'\t' read -r archive_root_name expected_carrier_sha expected_owner \
   expected_revision expected_tree_sha expected_entry_count <<< "$bootstrap_receipt"
 [[ -n "$archive_root_name" && -n "$expected_carrier_sha" \
@@ -1361,7 +1562,8 @@ IFS=$'\t' read -r archive_root_name expected_carrier_sha expected_owner \
    && -n "$expected_tree_sha" && -n "$expected_entry_count" ]] \
   || die "Archive returned an incomplete bootstrap integrity receipt"
 
-extract_tarball "$local_archive" "$extract_root"
+extract_tarball "$local_archive" "$extract_root" \
+  || die "Could not extract the verified archive into the private bootstrap workspace"
 source_dir="$extract_root/$archive_root_name"
 [[ -d "$source_dir" && ! -L "$source_dir" ]] \
   || die "Could not find the sole extracted source directory"
@@ -1381,7 +1583,8 @@ stage_args=(
   --mirror
   --require-source-provenance
 )
-"$bootstrap_python" -I -S "$manifest_helper" "${stage_args[@]}" >/dev/null
+"$bootstrap_python" -I -S "$manifest_helper" "${stage_args[@]}" >/dev/null \
+  || die "The verified source's distribution manifest refused to stage the candidate (details above)"
 bootstrap_integrity_preflight tree "$candidate_root" \
   "$expected_carrier_sha" "$expected_owner" "$expected_revision" \
   "$expected_tree_sha" "$expected_entry_count" \
