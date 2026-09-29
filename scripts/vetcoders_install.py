@@ -14798,9 +14798,7 @@ def _print_unicode_summary(
             store_path / "vc-agents" / "scripts" / f"{agent}_spawn.sh"
         ).exists()
 
-    agent_list = " \u00b7 ".join(
-        a for a in ("claude", "codex", "gemini") if _agent_spawn_present(a)
-    )
+    agent_list = " \u00b7 ".join(a for a in AGENT_RUNTIMES if _agent_spawn_present(a))
     shell_str = _helper_surface_label()
     fnd_ok = [f.name for f in FOUNDATIONS if f.is_installed()]
     fnd_str = " \u00b7 ".join(fnd_ok[:3]) if fnd_ok else "none"

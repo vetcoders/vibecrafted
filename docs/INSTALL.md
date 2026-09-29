@@ -49,9 +49,10 @@ gh release view --json assets -q '.assets[].name'
 
 > **Current status.** The build path is exercised end to end
 > (`make release` → codesign → notarytool → `make publish-release`) and its
-> shape is gated by contract tests; 4.1.0 produces a signed, notarized and
-> stapled DMG with a signed `release-output.json`. No _published_ release
-> carries it yet — until the v4.1.0 release goes out, use a channel below.
+> shape is gated by contract tests; the build produces a signed, notarized and
+> stapled DMG with a signed `release-output.json`. The DMG is an artifact of
+> releases from 4.3.1 on; until such a release is _published_ with the DMG
+> attached, use a channel below.
 > Maintainers building the DMG locally: see
 > [Build from source](#build-from-source-power-users).
 
@@ -99,7 +100,8 @@ notary account — only `git` and `python3` — so it builds on Linux too.
 
 > **Current status.** Build path complete and self-verifying (the builder
 > unpacks and re-validates what it just wrote before the bytes may leave the
-> machine). Publication lands with the v4.1.0 release.
+> machine). It is not published yet; it will be attached to the first release that
+> carries it.
 
 ### Runtime boundary
 
@@ -430,8 +432,9 @@ If the CLI is staged in Vibecrafted's own agent bin but is not executable, the
 error says so specifically and gives you the `chmod +x` line for that exact
 path — a different problem gets a different answer.
 
-Vibecrafted appends its bundled agent bin to `PATH` rather than prepending it,
-so a CLI you installed yourself always wins over the bundled copy.
+Vibecrafted appends its own `tools/node/bin` to `PATH` (when that directory
+exists) rather than prepending it, so a CLI you installed yourself always wins.
+Agent CLIs are never bundled.
 
 ### Verify
 

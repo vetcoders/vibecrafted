@@ -18,13 +18,16 @@ The product has six working layers:
 | Public promise        | `README.md`, `docs/QUICK_START.md`, `docs/FAQ.md`                                                             |
 | Operator runbook      | `docs/RUNBOOK.md` — terminal-first: cold start, dispatch, supervision, recovery                               |
 | Install and support   | `docs/INSTALL.md` (channel matrix + status), `docs/DOCKER.md`, `make help`, `make help-dev`                   |
-| Release cut           | `docs/RELEASE_KICKOFF.md` (identity), `docs/RELEASE_CHECKLIST.md` (4.1.0 DMG command sequence)                |
-| Package-manager stage | `packaging/` (Homebrew formula + cask; winget skipped — no native Windows build)                              |
+| Release cut           | `docs/RELEASE_KICKOFF.md` (identity), `docs/RELEASE_CHECKLIST.md` (4.3.1 DMG command sequence)                |
+| Package-manager stage | `packaging/` (Homebrew formula + cask; winget skipped — no published win32-x64 carrier yet)                   |
 | Install (public docs) | `docs/public/getting-started/`: `install.md` · `build-from-source.md` · `first-run.md` · `update.md`          |
 | Command deck          | `scripts/vibecrafted`, `docs/WORKFLOWS.md`, `docs/SKILLS.md`                                                  |
 | Runtime and artifacts | `runtime/README.md`, `docs/runtime/README.md`, `docs/runtime/TOPOLOGY.md`                                     |
-| Skill behavior        | `skills/<skill>/SKILL.md` plus `FLOW.md` and nearby contracts                                                 |
+| Skill behavior        | `vibecrafted-core/vibecrafted_core/skills/<skill>/SKILL.md` plus `FLOW.md` and nearby contracts               |
 | Architecture doctrine | `docs/adr/` — ADR-0002 ownership matrix (`ownership-matrix.json`) gated by `tests/test_ownership_contract.py` |
+
+Skills live in `vibecrafted-core/vibecrafted_core/skills/` (there is no `skills/` directory at the repo root);
+projections into agent homes are generated from there.
 
 Use the current launcher as the quick reality check:
 
@@ -76,7 +79,7 @@ Current runtime is not a future scaffold. It is active.
 | `runtime/shell/lib/`                    | Installed shell facade modules                                                                                     |
 | `runtime/vc-marbles/`                   | Extracted per-workflow runtime pattern                                                                             |
 | `runtime/vc-research/`                  | Extracted research shell runtime                                                                                   |
-| `runtime/vc-operator/`                  | Mission-control helpers, not a public `vibecrafted operator` command                                               |
+| `runtime/vc-operator/`                  | Mission-control helpers behind the public `vibecrafted operator <agent>` command                                   |
 | `vibecrafted dispatch`                  | Deterministic dispatch supervisor and async lifecycle lane                                                         |
 | `vibecrafted gui` / `tui` / `dashboard` | Operator surfaces, second-visit tools                                                                              |
 | Run observability ownership             | Server/VOC canonical browsing; terminal triage is manual compatibility — see `docs/runtime/TRIAGE_AND_SESSIONS.md` |
@@ -101,7 +104,7 @@ Skill-loading and runtime invocation are different things.
 | `$vc-operator`                             | Current agent conducts a multi-wave plan                     |
 | `vibecrafted dispatch <file.toml>`         | Live deterministic supervisor path                           |
 
-Do not document `vibecrafted operator <agent>` as a live public command unless the launcher exposes it again.
+`vibecrafted operator <agent>` is a live public command (`cmd_operator` in `scripts/vibecrafted`, routed by the main dispatcher); `gemini` is refused there in favour of `agy`.
 
 ## Sweep Ledger
 

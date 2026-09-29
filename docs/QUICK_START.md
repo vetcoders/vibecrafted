@@ -26,11 +26,9 @@ make uninstall  # deterministic reset from the same receipt
 ```
 
 On macOS the intended end-user artifact is one signed and notarized
-`Vibecrafted_<version>-<YYYYMMDD>-<sha8>.dmg` from the
-[latest release](https://github.com/vetcoders/vibecrafted/releases/latest),
-verified against its adjacent `.dmg.sha256`. The build path is exercised and
-produces a signed, notarized, stapled artifact; until the release carrying it is
-published, use the bootstrap.
+`Vibecrafted_<version>-<YYYYMMDD>-<sha8>.dmg`, an artifact of releases from
+4.3.1 on, verified against its adjacent `.dmg.sha256`. Until a published
+release carries it, use the bootstrap above (see [INSTALL.md](INSTALL.md)).
 
 Power users can skip the DMG and App entirely. The adjacent
 `Vibecrafted_RuntimePack_<version>-<YYYYMMDD>-<sha8>-darwin-<arch>.tar.gz` is

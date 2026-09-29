@@ -143,8 +143,11 @@ preflighted last fallback. Full doctrine: [docs/FOUNDATION.md](docs/FOUNDATION.m
 | **screenscribe**     | Screencast → structured engineering findings        | [PyPI](https://pypi.org/project/screenscribe/)                                       |
 | **vc-frame**         | Operator cockpit (session rail, layouts)            | Embedded inside `Vibecrafted.app`; no separate installer or update channel           |
 
-The installer verifies these foundations on every run (`vibecrafted doctor`)
-and never silently replaces a product-managed binary with a stale copy.
+Foundations are external: the Runtime Pack does not carry `loct`, `aicx`,
+`prview` or `screenscribe`. Each installs through its own channel (npm, GitHub
+releases, crates.io, PyPI — `scripts/install-foundations.sh` drives them), and
+your own PATH install always wins. `vibecrafted doctor` verifies the ones it
+finds and never silently replaces a product-managed binary with a stale copy.
 
 ---
 
@@ -169,6 +172,9 @@ The `//` is not decoration. It is the mark.
 ```bash
 curl -fsSL https://vibecrafted.io/install.sh | bash
 ```
+
+The desktop app requires macOS 14+ on Apple Silicon (arm64); every other
+system uses the bootstrap above or the portable tarball below.
 
 **Windows:** install WSL2 once, then use the same bootstrap inside it:
 
@@ -201,9 +207,10 @@ Runtime Pack for the current platform and architecture; Linux and WSL2 use the
 Linux x86_64 or arm64 carrier. `make install-source` is the explicit maintainer
 lane and may require the full build toolchain.
 
-A Runtime Pack install gives you the complete headless runtime — `vibecrafted
+A Runtime Pack install gives you the headless Vibecrafted runtime — `vibecrafted
 doctor`, every skill launcher, `observe`/`await`, reports and transcripts under
-`~/.vibecrafted`. The visual cockpit (`vc-frame`, `vc-start`) is not part of it:
+`~/.vibecrafted`. Foundations (`loct`, `aicx`, `prview`, `screenscribe`) and agent
+CLIs are not part of the pack; install them through their own channels. The visual cockpit (`vc-frame`, `vc-start`) is not part of it:
 it ships inside the desktop app below, and `vibecrafted init <agent>` falls back
 to your current terminal until it is present. First run after install:
 
@@ -218,11 +225,11 @@ vibecrafted status                   # today's runs
 **macOS desktop app:** the intended end-user shape is one Developer ID signed
 and notarized `Vibecrafted_<version>-<YYYYMMDD>-<sha8>.dmg` carrying matching
 builds of `vc-terminal`, `vc-frame`, `vc-start` and the complete runtime.
-Download it and its adjacent `.dmg.sha256` from the
-[latest release](https://github.com/vetcoders/vibecrafted/releases/latest),
-verify the checksum, then open the DMG. The build path (`make release`) is
-exercised and produces a Developer ID signed, notarized and stapled artifact;
-until the release carrying it is published, use the bootstrap.
+The DMG is an artifact of releases from 4.3.1 on. Check what a release
+actually carries (`gh release view --json assets -q '.assets[].name'`); if it
+lists a DMG, download it and its adjacent `.dmg.sha256`, verify the checksum,
+then open the DMG. The latest published release may not carry one yet — until
+a release with the DMG is published, use the bootstrap above.
 
 The same release also carries
 `Vibecrafted_RuntimePack_<version>-<YYYYMMDD>-<sha8>-darwin-<arch>.tar.gz`, its
@@ -276,7 +283,7 @@ See [Docker Runtime](docs/DOCKER.md).
 ## Quick Start
 
 ```bash
-cd $VIBECRAFTED_ROOT/your-project
+cd /path/to/your-project   # any git repository
 vibecrafted init claude
 vibecrafted implement codex --prompt "Add JWT authentication"
 ```
@@ -300,9 +307,9 @@ vibecrafted release codex --prompt "Prepare release steps"
 security gate (`make semgrep`), exposed surface inventory, deployment
 mode decision, and post-release install smoke from the **published**
 artifact. The doctrine lives in
-[`skills/vc-release/SKILL.md`](skills/vc-release/SKILL.md) and the
+[`vibecrafted-core/vibecrafted_core/skills/vc-release/SKILL.md`](vibecrafted-core/vibecrafted_core/skills/vc-release/SKILL.md) and the
 default template lives in
-[`skills/vc-release/references/release-report-template.md`](skills/vc-release/references/release-report-template.md).
+[`vibecrafted-core/vibecrafted_core/skills/vc-release/references/release-report-template.md`](vibecrafted-core/vibecrafted_core/skills/vc-release/references/release-report-template.md).
 
 ---
 

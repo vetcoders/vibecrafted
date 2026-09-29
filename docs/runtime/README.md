@@ -114,18 +114,12 @@ Just like in the human teams, AI agents have their strengths and weaknesses.
         Claude --> ClaudeBest
         Claude --> ClaudeAvoid
     end
-
-    subgraph Gemini
-        GeminiDesc[Why choose it:\n\n– Bold reframing\n– Creative system redesign\n– Fearless simplification]
-        GeminiBest[Best for:\n\n– Architecture leaps\n– Radical cleanup ideas\n– Product reframing and high‑variance exploration]
-        GeminiAvoid[Avoid when:\n\n– Task needs predictable, surgical implementation\n– Low‑variance execution suffices]
-        Gemini --> GeminiDesc
-        Gemini --> GeminiBest
-        Gemini --> GeminiAvoid
-    end
 ```
+
+Gemini is deprecated: `vibecrafted init/operator gemini` refuse and point to `agy`
+(Google Antigravity CLI). The launchable fleet is codex, claude, agy, junie, grok, cursor.
 
 ---
 
 _For the full runtime contract and spawn mechanics, see [CONTRACT.md](./CONTRACT.md)._
-_For the delegation doctrine used by agents, see [`skills/vc-agents/SKILL.md`](../../skills/vc-agents/SKILL.md)._
+_For the delegation doctrine used by agents, see [`vibecrafted-core/vibecrafted_core/skills/vc-agents/SKILL.md`](../../vibecrafted-core/vibecrafted_core/skills/vc-agents/SKILL.md)._

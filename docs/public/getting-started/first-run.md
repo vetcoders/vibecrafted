@@ -58,9 +58,9 @@ you already have.
 
 ### Your CLI wins
 
-Vibecrafted **appends** its bundled agent bin to `PATH` rather than prepending
-it. An agent CLI you installed and authenticated yourself always takes
-precedence over a bundled copy. Vibecrafted extends your environment; it does
+Vibecrafted **appends** its own `tools/node/bin` to `PATH` (when that directory
+exists) rather than prepending it. An agent CLI you installed and authenticated
+yourself always takes precedence. Vibecrafted extends your environment; it does
 not shadow it.
 
 ## Reading doctor on a plain install
