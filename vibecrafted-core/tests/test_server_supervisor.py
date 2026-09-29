@@ -2854,3 +2854,113 @@ def test_invalid_held_kernel_lock_remains_fail_closed(tmp_path: Path) -> None:
         ) as failure:
             supervisor.manual_stop_guard(config.paths)
         assert failure.value.exit_code == supervisor.EX_TEMPFAIL
+
+
+def _oversized_stderr(path: Path, tail: bytes = b"CRASH-TAIL-MARKER\n") -> bytes:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = b"x" * (supervisor._STDERR_ROTATE_BYTES + 1) + tail
+    path.write_bytes(payload)
+    return payload
+
+
+def test_stderr_rotation_keeps_crash_tail_and_caps_generations(tmp_path: Path) -> None:
+    log = tmp_path / "server" / "supervisor.stderr.log"
+    payload = _oversized_stderr(log)
+    for index, marker in ((1, b"GEN1"), (2, b"GEN2"), (3, b"GEN3")):
+        log.with_name(f"{log.name}.{index}").write_bytes(marker)
+
+    assert supervisor.rotate_supervisor_stderr_log(log) is True
+
+    assert not log.exists()
+    assert log.with_name(f"{log.name}.1").read_bytes() == payload
+    assert log.with_name(f"{log.name}.2").read_bytes() == b"GEN1"
+    assert log.with_name(f"{log.name}.3").read_bytes() == b"GEN2"
+    assert log.name == "supervisor.stderr.log"
+
+
+def test_stderr_rotation_truncates_live_inode_without_losing_tail(
+    tmp_path: Path,
+) -> None:
+    log = tmp_path / "server" / "supervisor.stderr.log"
+    _oversized_stderr(log)
+    saved = os.dup(2)
+    live = os.open(log, os.O_WRONLY | os.O_APPEND)
+    try:
+        os.dup2(live, 2)
+        assert supervisor.rotate_supervisor_stderr_log(log) is True
+        os.write(2, b"AFTER-ROTATE\n")
+    finally:
+        os.dup2(saved, 2)
+        os.close(saved)
+        os.close(live)
+
+    rotated = log.with_name(f"{log.name}.1").read_bytes()
+    assert rotated.endswith(b"CRASH-TAIL-MARKER\n")
+    assert b"AFTER-ROTATE\n" not in rotated
+    assert log.read_bytes() == b"AFTER-ROTATE\n"
+
+
+def test_stderr_rotation_skips_small_fresh_symlink_and_hardlink(
+    tmp_path: Path,
+) -> None:
+    log = tmp_path / "server" / "supervisor.stderr.log"
+    log.parent.mkdir()
+    log.write_text("still-fresh\n", encoding="utf-8")
+    stamp = log.stat().st_mtime
+    assert (
+        supervisor.rotate_supervisor_stderr_log(
+            log,
+            now=stamp + supervisor._STDERR_ROTATE_AGE_SECONDS - 1,
+        )
+        is False
+    )
+    assert not log.with_name(f"{log.name}.1").exists()
+
+    assert (
+        supervisor.rotate_supervisor_stderr_log(
+            log,
+            now=stamp + supervisor._STDERR_ROTATE_AGE_SECONDS,
+        )
+        is True
+    )
+    assert log.with_name(f"{log.name}.1").read_text(encoding="utf-8") == "still-fresh\n"
+
+    real = tmp_path / "real.log"
+    real.write_text("keep\n", encoding="utf-8")
+    link = tmp_path / "supervisor.stderr.log"
+    link.symlink_to(real)
+    assert supervisor.rotate_supervisor_stderr_log(link, now=stamp + 10**9) is False
+    assert real.read_text(encoding="utf-8") == "keep\n"
+
+    linked = tmp_path / "linked.log"
+    _oversized_stderr(linked)
+    os.link(linked, tmp_path / "extra.log")
+    assert supervisor.rotate_supervisor_stderr_log(linked) is False
+    assert b"CRASH-TAIL-MARKER\n" in linked.read_bytes()
+
+
+def test_run_supervisor_rotates_stderr_before_the_loop(tmp_path: Path) -> None:
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    config = replace(_config(tmp_path, launcher), interval=0)
+    payload = _oversized_stderr(config.paths.stderr_log)
+
+    with pytest.raises(supervisor.SupervisorError, match="timing"):
+        supervisor.run_supervisor(config)
+
+    assert config.paths.stderr_log.name == "supervisor.stderr.log"
+    rotated = config.paths.stderr_log.with_name(f"{config.paths.stderr_log.name}.1")
+    assert rotated.read_bytes() == payload
+    assert not config.paths.stderr_log.exists()
+
+
+def test_start_service_rotates_stderr_before_launch(tmp_path: Path) -> None:
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    config = _config(tmp_path, launcher)
+    payload = _oversized_stderr(config.paths.stderr_log)
+
+    with pytest.raises(supervisor.SupervisorError, match="not installed"):
+        supervisor.start_service(config)
+
+    rotated = config.paths.stderr_log.with_name(f"{config.paths.stderr_log.name}.1")
+    assert rotated.read_bytes() == payload
+    assert not config.paths.stderr_log.exists()
