@@ -2643,36 +2643,63 @@ def restart_service(
     return probe
 
 
+# Reconcile races launchd by construction: `bootout` frees the label and a
+# KeepAlive respawn can reclaim it before the cleanup lease lands, which
+# surfaces as an EX_TEMPFAIL refusal.  That class is transient, so reconcile
+# re-probes the live state and retries instead of leaving the service stopped
+# for an operator to rediscover.
+_RECONCILE_MAX_ATTEMPTS = 3
+_RECONCILE_RETRY_DELAY_SECONDS = 1.0
+
+
 def install_and_reconcile_service(
     config: SupervisorConfig,
     *,
     supervisor_binary: Path,
+    attempts: int = _RECONCILE_MAX_ATTEMPTS,
 ) -> tuple[bool, bool]:
     """Install/refresh the LaunchAgent plist, then restart it if it changed or
     the running supervisor no longer matches the installed identity, or start
-    it fresh if launchd wasn't loaded. Returns (plist_changed, restarted)."""
+    it fresh if launchd wasn't loaded. Returns (plist_changed, restarted).
+
+    Transient (EX_TEMPFAIL) failures — the launchd reactivation race above —
+    are retried against freshly probed state so a startup or post-upgrade
+    reconcile converges without operator intervention; persistent or
+    non-transient failures still raise."""
 
     _require_macos_service()
-    loaded = _launchctl_loaded()
-    previous = probe_supervisor(config.paths)
     changed = install_service(config, supervisor_binary=supervisor_binary)
     installed_identity = _installed_service_identity(config.paths)
-    current = _probe_matches_identity(
-        previous,
-        installed_identity,
-        service_managed=True,
-    )
+    needs_restart = changed
     restarted = False
-    if loaded and (changed or not current):
-        restart_service(config, previous_pid=previous.pid)
-        restarted = True
-    elif not loaded:
-        # `service install` is the canonical install/reconcile entrypoint used by
-        # make install and doctor remediation.  A fresh definition is not a
-        # running service, so always finish the contract by bootstrapping and
-        # verifying the installed identity.
-        start_service(config)
-    return changed, restarted
+    for attempt in range(attempts):
+        loaded = _launchctl_loaded()
+        previous = probe_supervisor(config.paths)
+        current = _probe_matches_identity(
+            previous,
+            installed_identity,
+            service_managed=True,
+        )
+        try:
+            if loaded and (needs_restart or not current):
+                restart_service(config, previous_pid=previous.pid)
+                restarted = True
+            elif not loaded:
+                # `service install` is the canonical install/reconcile entrypoint
+                # used by make install and doctor remediation.  A fresh definition
+                # is not a running service, so always finish the contract by
+                # bootstrapping and verifying the installed identity.
+                start_service(config)
+            return changed, restarted
+        except SupervisorError as exc:
+            if exc.exit_code != EX_TEMPFAIL or attempt + 1 >= attempts:
+                raise
+            # The plist write already landed; the next pass converges on the
+            # freshly probed identity alone instead of re-entering a restart
+            # the respawn may have made unnecessary.
+            needs_restart = False
+            time.sleep(_RECONCILE_RETRY_DELAY_SECONDS)
+    raise AssertionError("unreachable: retry loop returns or raises")
 
 
 def uninstall_service(config: SupervisorConfig) -> bool:
