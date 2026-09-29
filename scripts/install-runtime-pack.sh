@@ -568,9 +568,14 @@ if [[ "$operation" == "install" && "$dry_run" == "1" ]]; then
 fi
 
 if [[ "$operation" == "install" && "$verify_only" != "1" ]]; then
+  # Informational only: installing prebuilt, signed binaries needs no Xcode.
+  # Refusing a beta (or a machine with no Xcode at all) here bricked the App's
+  # own reinstall on hosts where xcode-select points at a beta — and end-user
+  # machines often carry no Xcode whatsoever (Founder 2026-09-29). The
+  # stable-only gate remains a BUILD contract in build-vibecrafted-release.sh.
   # shellcheck source=lib/xcode-channel.sh
   . "$SCRIPT_DIR/lib/xcode-channel.sh"
-  vibecrafted_xcode_require_stable || exit 1
+  vibecrafted_xcode_report_channel
 fi
 
 if [[ -z "$expected_platform" ]]; then

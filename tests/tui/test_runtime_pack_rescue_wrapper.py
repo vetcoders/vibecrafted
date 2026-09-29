@@ -375,9 +375,15 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def test_public_wrapper_xcode_abort_creates_no_install_lease(
+def test_public_wrapper_names_beta_xcode_and_does_not_refuse_install(
     tmp_path: Path, roots, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Installing prebuilt binaries needs no toolchain, so a beta (or absent)
+    Xcode must never abort the installer. The App's own reinstall bricked on a
+    host whose xcode-select pointed at a beta (Founder, 2026-09-29), and end
+    user machines often carry no Xcode at all. The stable-only gate stays a
+    build contract; the installer only names the channel and proceeds until it
+    fails on the actually-missing pack."""
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     uname = fake_bin / "uname"
@@ -395,8 +401,12 @@ def test_public_wrapper_xcode_abort_creates_no_install_lease(
             "PATH": f"{fake_bin}:{os.environ['PATH']}",
         },
     )
+    assert "refusing beta Xcode" not in result.stderr
+    assert f"Xcode: beta ({beta})" in result.stdout
+    # The run still fails — downstream of the channel line (this fixture's
+    # fake uname breaks architecture resolution first), never on Xcode.
     assert result.returncode != 0
-    assert "FATAL: refusing beta Xcode" in result.stderr
+    assert "Xcode" not in result.stderr
     lock = installer._tools_install_lease_path(
         roots["runtime_home"] / "tools" / "vibecrafted-current"
     )
@@ -405,6 +415,33 @@ def test_public_wrapper_xcode_abort_creates_no_install_lease(
         lock.parent / "vibecrafted-current", timeout_seconds=0
     ):
         pass
+
+
+def test_public_wrapper_installs_without_any_xcode_developer_dir(
+    tmp_path: Path, roots, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A machine with no Xcode and no CLT still installs: the channel line
+    reports 'none' and never exits."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    uname = fake_bin / "uname"
+    uname.write_text("#!/bin/sh\necho Darwin\n")
+    uname.chmod(0o755)
+    # xcode-select resolving nothing == host without any developer dir.
+    xcode_select = fake_bin / "xcode-select"
+    xcode_select.write_text("#!/bin/sh\nexit 2\n")
+    xcode_select.chmod(0o755)
+    monkeypatch.delenv("VIBECRAFTED_ALLOW_BETA_XCODE", raising=False)
+    env = {k: v for k, v in os.environ.items() if k != "DEVELOPER_DIR"}
+    result = _run_wrapper(
+        "--pack",
+        str(tmp_path / "unused.tar.gz"),
+        env={**env, "PATH": f"{fake_bin}:{env['PATH']}"},
+    )
+    assert "refusing beta Xcode" not in result.stderr
+    assert "no usable Xcode developer dir" not in result.stderr
+    assert "Xcode: none (not required for install)" in result.stdout
+    assert result.returncode != 0  # the missing pack, not the toolchain
 
 
 @pytest.mark.parametrize("stop_signal", [signal.SIGINT, signal.SIGTERM])

@@ -65,3 +65,34 @@ def test_allow_beta_names_the_channel_and_continues(tmp_path: Path) -> None:
     result = _run(str(beta), allow_beta=True)
     assert result.returncode == 0, result.stderr
     assert f"Xcode: beta ({beta})" in result.stdout
+
+
+def _run_report(developer_dir: str | None) -> subprocess.CompletedProcess[str]:
+    env = dict(os.environ)
+    env.pop("DEVELOPER_DIR", None)
+    if developer_dir is not None:
+        env["DEVELOPER_DIR"] = developer_dir
+    return subprocess.run(
+        ["bash", "-c", f'. "{CHANNEL}"; vibecrafted_xcode_report_channel'],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+
+
+def test_report_channel_names_beta_and_never_refuses(tmp_path: Path) -> None:
+    beta = tmp_path / "Xcode-beta.app" / "Contents" / "Developer"
+    beta.mkdir(parents=True)
+    result = _run_report(str(beta))
+    assert result.returncode == 0, result.stderr
+    assert f"Xcode: beta ({beta})" in result.stdout
+    assert "refusing" not in result.stderr
+
+
+def test_report_channel_tolerates_missing_developer_dir(tmp_path: Path) -> None:
+    missing = tmp_path / "gone" / "Contents" / "Developer"
+    result = _run_report(str(missing))
+    assert result.returncode == 0, result.stderr
+    assert "Xcode: none (not required for install)" in result.stdout
+    assert "no usable Xcode developer dir" not in result.stderr
