@@ -346,6 +346,34 @@ _release_rescue_extract() {
   fi
 }
 
+# Post-install drift healer (same contract as `make reconcile-server-service`):
+# a pack install that leaves the installed LaunchAgent on the previous
+# generation's identity strands the supervisor in "launcher hash differs"
+# backoff — the old server keeps serving silently until the next reboot.
+# Reconcile right after publication so the service follows the runtime it now
+# serves. Never enables supervision on machines that have not opted in
+# (no plist -> no-op).
+reconcile_server_service() {
+  [[ "${operation:-install}" == "install" && "${dry_run:-0}" != "1" ]] || return 0
+  [[ "$(uname -s)" == "Darwin" ]] || return 0
+  local plist="$HOME/Library/LaunchAgents/io.vetcoders.vibecrafted.server.plist"
+  [[ -f "$plist" ]] || return 0
+  local launcher_bin="${VIBECRAFTED_LAUNCHER_BIN:-$HOME/.local/bin}"
+  local launcher="$launcher_bin/vibecrafted"
+  if [[ ! -x "$launcher" ]]; then
+    launcher="$(command -v vibecrafted 2>/dev/null || true)"
+  fi
+  if [[ -z "$launcher" || ! -x "$launcher" ]]; then
+    printf 'install-runtime-pack: LaunchAgent is installed but the vibecrafted launcher is unavailable; run "vibecrafted server service reconcile" once the launcher is restored\n' >&2
+    return 0
+  fi
+  printf 'install-runtime-pack: reconciling installed LaunchAgent with the published runtime...\n'
+  if ! (cd / && env -u PYTHONPATH "$launcher" server service reconcile); then
+    printf 'install-runtime-pack: the runtime is published but the installed service did not reconcile; run "vibecrafted server service reconcile" to converge it\n' >&2
+    return 1
+  fi
+}
+
 # Lock-lifetime tests source this file for the exact helpers. Do not run the
 # installer body when sourced.
 if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
@@ -936,6 +964,9 @@ if [[ -n "$temporary" || -n "$rescue_staging" ]]; then
     printf 'harness injected failure after published\n' >&2
     exit 42
   fi
+  if [[ "$installer_status" -eq 0 ]]; then
+    reconcile_server_service || exit $?
+  fi
   exit "$installer_status"
 fi
 "$pack_python" "$installer_entry" "${arguments[@]}"
@@ -943,5 +974,8 @@ installer_status=$?
 if [[ "$installer_status" -eq 0 && "$fail_after" == "published" ]]; then
   printf 'harness injected failure after published\n' >&2
   exit 42
+fi
+if [[ "$installer_status" -eq 0 ]]; then
+  reconcile_server_service || exit $?
 fi
 exit "$installer_status"

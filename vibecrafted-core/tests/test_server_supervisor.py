@@ -1719,6 +1719,221 @@ def test_install_bootstraps_fresh_service_with_installed_identity(
     assert started[0].launcher_sha256 == supervisor._sha256_file(launcher)
 
 
+def test_install_reconcile_retries_transient_lease_refusal_until_convergence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The F5 race: bootout frees the label, launchd reactivates before the
+    cleanup lease lands, and reconcile used to strand the unloaded service
+    until a manual retry. The transient refusal must be retried in-process so
+    startup/upgrade reconciles converge without operator action."""
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    supervisor_binary = _executable(
+        tmp_path / "bin" / "vc-server-supervisor",
+        "#!/bin/sh\n# build one\nexit 0\n",
+    )
+    config = _config(tmp_path, launcher)
+    supervisor.install_service(config, supervisor_binary=supervisor_binary)
+    stale_probe = _managed_probe(config, pid=1111)
+    supervisor_binary.write_text(
+        "#!/bin/sh\n# build two\nexit 0\n",
+        encoding="utf-8",
+    )
+    supervisor_binary.chmod(0o755)
+    monkeypatch.setattr(supervisor.sys, "platform", "darwin")
+    monkeypatch.setattr(supervisor, "_launchctl_loaded", lambda: True)
+    monkeypatch.setattr(supervisor, "probe_supervisor", lambda _paths: stale_probe)
+    monkeypatch.setattr(supervisor.time, "sleep", lambda _seconds: None)
+    attempts: list[int | None] = []
+
+    def flaky_restart(
+        target: supervisor.SupervisorConfig,
+        *,
+        previous_pid: int | None = None,
+    ) -> supervisor.SupervisorProbe:
+        attempts.append(previous_pid)
+        if len(attempts) == 1:
+            raise supervisor.SupervisorError(
+                "launchd became active while acquiring the service-stop cleanup "
+                "lease; refusing uncoordinated cleanup",
+                supervisor.EX_TEMPFAIL,
+            )
+        return _managed_probe(target, pid=2222)
+
+    monkeypatch.setattr(supervisor, "restart_service", flaky_restart)
+
+    changed, restarted = supervisor.install_and_reconcile_service(
+        config,
+        supervisor_binary=supervisor_binary,
+    )
+
+    assert changed and restarted
+    assert attempts == [1111, 1111]
+
+
+def test_install_reconcile_starts_fresh_when_refusal_left_launchd_unloaded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The refusal can fire after bootout already unloaded the job (the F5 end
+    state: LaunchAgent unloaded, port dead). The retry pass must converge by
+    starting the service instead of restarting a job that is gone."""
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    supervisor_binary = _executable(
+        tmp_path / "bin" / "vc-server-supervisor",
+        "#!/bin/sh\n# build one\nexit 0\n",
+    )
+    config = _config(tmp_path, launcher)
+    supervisor.install_service(config, supervisor_binary=supervisor_binary)
+    stale_probe = _managed_probe(config, pid=1111)
+    supervisor_binary.write_text(
+        "#!/bin/sh\n# build two\nexit 0\n",
+        encoding="utf-8",
+    )
+    supervisor_binary.chmod(0o755)
+    monkeypatch.setattr(supervisor.sys, "platform", "darwin")
+    monkeypatch.setattr(supervisor.time, "sleep", lambda _seconds: None)
+    loaded = True
+    dead_probe = supervisor.SupervisorProbe(False, False, None, None)
+    monkeypatch.setattr(supervisor, "_launchctl_loaded", lambda: loaded)
+    monkeypatch.setattr(
+        supervisor,
+        "probe_supervisor",
+        lambda _paths: stale_probe if loaded else dead_probe,
+    )
+
+    def refusing_restart(
+        target: supervisor.SupervisorConfig,
+        *,
+        previous_pid: int | None = None,
+    ) -> supervisor.SupervisorProbe:
+        nonlocal loaded
+        loaded = False
+        raise supervisor.SupervisorError(
+            "launchd became active while acquiring the service-stop cleanup "
+            "lease; refusing uncoordinated cleanup",
+            supervisor.EX_TEMPFAIL,
+        )
+
+    started: list[supervisor.SupervisorIdentity] = []
+
+    def fake_start(target: supervisor.SupervisorConfig) -> None:
+        identity = supervisor._installed_service_identity(target.paths)
+        assert identity is not None
+        started.append(identity)
+
+    monkeypatch.setattr(supervisor, "restart_service", refusing_restart)
+    monkeypatch.setattr(supervisor, "start_service", fake_start)
+
+    changed, restarted = supervisor.install_and_reconcile_service(
+        config,
+        supervisor_binary=supervisor_binary,
+    )
+
+    assert changed
+    assert not restarted
+    assert len(started) == 1
+
+
+def test_install_reconcile_reraises_persistent_tempfail_after_attempts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    supervisor_binary = _executable(
+        tmp_path / "bin" / "vc-server-supervisor",
+        "#!/bin/sh\n# build one\nexit 0\n",
+    )
+    config = _config(tmp_path, launcher)
+    supervisor.install_service(config, supervisor_binary=supervisor_binary)
+    stale_probe = _managed_probe(config, pid=1111)
+    supervisor_binary.write_text(
+        "#!/bin/sh\n# build two\nexit 0\n",
+        encoding="utf-8",
+    )
+    supervisor_binary.chmod(0o755)
+    monkeypatch.setattr(supervisor.sys, "platform", "darwin")
+    monkeypatch.setattr(supervisor, "_launchctl_loaded", lambda: True)
+    monkeypatch.setattr(supervisor, "probe_supervisor", lambda _paths: stale_probe)
+    sleeps: list[float] = []
+    monkeypatch.setattr(supervisor.time, "sleep", sleeps.append)
+    attempts = 0
+
+    def always_refusing_restart(
+        target: supervisor.SupervisorConfig,
+        *,
+        previous_pid: int | None = None,
+    ) -> supervisor.SupervisorProbe:
+        nonlocal attempts
+        attempts += 1
+        raise supervisor.SupervisorError(
+            "launchd became active while acquiring the service-stop cleanup "
+            "lease; refusing uncoordinated cleanup",
+            supervisor.EX_TEMPFAIL,
+        )
+
+    monkeypatch.setattr(supervisor, "restart_service", always_refusing_restart)
+
+    with pytest.raises(supervisor.SupervisorError, match="became active"):
+        supervisor.install_and_reconcile_service(
+            config,
+            supervisor_binary=supervisor_binary,
+        )
+
+    assert attempts == supervisor._RECONCILE_MAX_ATTEMPTS
+    assert len(sleeps) == supervisor._RECONCILE_MAX_ATTEMPTS - 1
+
+
+def test_install_reconcile_does_not_retry_non_transient_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    supervisor_binary = _executable(
+        tmp_path / "bin" / "vc-server-supervisor",
+        "#!/bin/sh\n# build one\nexit 0\n",
+    )
+    config = _config(tmp_path, launcher)
+    supervisor.install_service(config, supervisor_binary=supervisor_binary)
+    stale_probe = _managed_probe(config, pid=1111)
+    supervisor_binary.write_text(
+        "#!/bin/sh\n# build two\nexit 0\n",
+        encoding="utf-8",
+    )
+    supervisor_binary.chmod(0o755)
+    monkeypatch.setattr(supervisor.sys, "platform", "darwin")
+    monkeypatch.setattr(supervisor, "_launchctl_loaded", lambda: True)
+    monkeypatch.setattr(supervisor, "probe_supervisor", lambda _paths: stale_probe)
+    monkeypatch.setattr(
+        supervisor.time,
+        "sleep",
+        lambda _seconds: pytest.fail("non-transient failure must not sleep"),
+    )
+    attempts = 0
+
+    def broken_restart(
+        target: supervisor.SupervisorConfig,
+        *,
+        previous_pid: int | None = None,
+    ) -> supervisor.SupervisorProbe:
+        nonlocal attempts
+        attempts += 1
+        raise supervisor.SupervisorError(
+            "installed LaunchAgent has no verified supervisor identity",
+            supervisor.EX_CONFIG,
+        )
+
+    monkeypatch.setattr(supervisor, "restart_service", broken_restart)
+
+    with pytest.raises(supervisor.SupervisorError, match="no verified"):
+        supervisor.install_and_reconcile_service(
+            config,
+            supervisor_binary=supervisor_binary,
+        )
+
+    assert attempts == 1
+
+
 def test_hermetic_service_upgrade_restarts_into_new_provenance(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
