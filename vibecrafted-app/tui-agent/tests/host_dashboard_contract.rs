@@ -1,12 +1,16 @@
 //! Host projection acceptance. Guest process/organ preservation and Frame chrome
 //! routing require the separate installed Frame scenario walkaround.
 use control_core::{ControlPlane, FrameSessionInventory};
+use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{Terminal, backend::TestBackend};
 use serde_json::json;
 use std::{collections::BTreeMap, fs, path::Path, time::Duration};
 use voc::{
     config::AppConfig,
-    host::{HostDashboard, HostRoute, HostSnapshot, draw, project_catalog},
+    host::{
+        DoctorReport, HostDashboard, HostRoute, HostSnapshot, RuntimeIdentity, draw,
+        project_catalog, read_active_runtime,
+    },
     launch::Presentation,
     observe::ConsoleView,
 };
@@ -67,6 +71,16 @@ fn catalog(root: &Path) {
         fs::write(dir.join("sessions").join(format!("{sid}.json")), json!({"schema":"vibecrafted.workspace-session.v1", "session_id":sid, "workspace_id":id, "workspace_instance_id":"0198f84e-3333-7abc-8def-1234567890ab", "updated_at":"2026-09-29T00:00:00Z", "attachments":[{"runtime":"vc-frame","runtime_session_id":format!("guest-{i}"),"state":"live","socket_dir":"/fixture/sockets"}]}).to_string()).unwrap();
     }
     fs::write(dir.join("catalog.json"), json!({"schema":"vibecrafted.workspace-catalog.v1", "updated_at":"2026-09-29T00:00:00Z", "selected_workspace_id":null,"workspaces":records}).to_string()).unwrap();
+}
+fn write_run(runs: &Path, run_id: &str, state: &str) {
+    let now = chrono::Utc::now().to_rfc3339();
+    fs::write(runs.join(format!("{run_id}.json")), json!({"run_id":run_id, "state":state,"agent":"codex","skill":"workflow","root":"/another/project", "updated_at":now,"started_at":now,"source":"fixture-receipt","mode":"headless","operator_session":"","latest_report":"","latest_transcript":"","last_error":"","health":"active","lock_present":false,"worker_pid":std::process::id(),"launcher_pid":std::process::id(),"worker_alive":state == "running"}).to_string()).unwrap();
+}
+fn marked(host: &HostDashboard, cfg: &AppConfig) -> Vec<String> {
+    host.lines(cfg)
+        .into_iter()
+        .filter(|line| line.starts_with('▶'))
+        .collect()
 }
 
 #[test]
@@ -194,6 +208,187 @@ fn projection_unknown_does_not_present_a_healthy_zero_or_destroy_ui_state() {
     assert!(!text.contains("Live workspaces 0"));
     host.navigate(HostRoute::Doctor);
     assert!(host.lines(&cfg).join("\n").contains("invalid JSON"));
+}
+
+#[test]
+fn run_views_mark_exactly_the_selected_row_and_list_less_routes_select_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = config(tmp.path());
+    let runs = cfg.state_root.join("runs");
+    fs::create_dir_all(&runs).unwrap();
+    for id in ["fixture-run-a", "fixture-run-b"] {
+        write_run(&runs, id, "running");
+    }
+    let before = tree(tmp.path());
+    let mut host = HostDashboard::new(HostRoute::ActiveRuns);
+    host.apply(HostSnapshot::load(&cfg));
+    let order = host.snapshot.as_ref().unwrap().runs.active_runs.iter();
+    let order = order.map(|r| r.run_id.clone()).collect::<Vec<_>>();
+    assert_eq!(order.len(), 2);
+    assert_eq!(marked(&host, &cfg).len(), 1);
+    assert!(marked(&host, &cfg)[0].contains(&order[0]));
+    let rendered = screen(&host, &cfg);
+    assert!(rendered.contains(&format!("▶ running · codex / workflow · {}", order[0])));
+    assert!(rendered.contains("g open run"));
+    host.move_selection(1);
+    assert!(marked(&host, &cfg)[0].contains(&order[1]));
+    host.move_selection(5);
+    assert_eq!(host.selected, 1, "selection clamps at the last row");
+    host.apply(HostSnapshot::load(&cfg));
+    assert!(
+        marked(&host, &cfg)[0].contains(&order[1]),
+        "a refresh keeps the selected run by run_id"
+    );
+    host.navigate(HostRoute::Voc);
+    assert_eq!(marked(&host, &cfg).len(), 1);
+    for route in [HostRoute::Dashboard, HostRoute::Config, HostRoute::Doctor] {
+        host.navigate(route);
+        host.move_selection(1);
+        host.apply(HostSnapshot::load(&cfg));
+        assert_eq!(host.selected, 0, "{route:?} has no list to move through");
+        let rendered = screen(&host, &cfg);
+        assert!(!rendered.contains('▶'), "{route:?}");
+        assert!(!rendered.contains("g open run"), "{route:?}");
+        assert_eq!(
+            rendered.contains("d run doctor"),
+            route == HostRoute::Doctor,
+            "{route:?}"
+        );
+    }
+    assert_eq!(tree(tmp.path()), before);
+}
+
+#[test]
+fn wheel_scrolls_like_page_keys_instead_of_vanishing_into_mouse_capture() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = config(tmp.path());
+    catalog(&cfg.state_root);
+    let mut host = HostDashboard::new(HostRoute::Projects);
+    host.apply(HostSnapshot::load(&cfg));
+    let mouse = |kind, column, row| MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    };
+    host.handle_mouse(&cfg, mouse(MouseEventKind::ScrollDown, 20, 10));
+    assert_eq!(host.offset, 3);
+    host.handle_mouse(&cfg, mouse(MouseEventKind::ScrollUp, 20, 10));
+    host.handle_mouse(&cfg, mouse(MouseEventKind::ScrollUp, 20, 10));
+    assert_eq!(host.offset, 0);
+    let last = host.lines(&cfg).len() - 1;
+    for _ in 0..100 {
+        host.handle_mouse(&cfg, mouse(MouseEventKind::ScrollDown, 20, 10));
+    }
+    assert_eq!(host.offset, last, "the wheel clamps where PgDn clamps");
+    host.scroll(&cfg, -8);
+    assert_eq!(host.offset, last - 8);
+    assert_eq!(
+        host.selected, 0,
+        "the wheel scrolls; it never moves the selection"
+    );
+    host.handle_mouse(&cfg, mouse(MouseEventKind::Down(MouseButton::Left), 1, 1));
+    assert_eq!(host.route, HostRoute::Dashboard, "tab clicks still route");
+}
+
+#[test]
+fn config_names_the_active_runtime_generation_or_says_unavailable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = config(tmp.path());
+    let pointer = tmp.path().join("runtime/active.json");
+    fs::create_dir_all(pointer.parent().unwrap()).unwrap();
+    let root = tmp.path().join("runtime/releases/4.3.1+gfixture");
+    fs::write(&pointer, json!({"schema":"vibecrafted.active-runtime.v1", "version":"4.3.1+gfixture", "runtime_root":root, "app_root":""}).to_string()).unwrap();
+    let mut host = HostDashboard::new(HostRoute::Config);
+    host.apply(HostSnapshot::load(&cfg));
+    host.snapshot.as_mut().unwrap().runtime = RuntimeIdentity::load(Some(pointer.clone()));
+    let text = host.lines(&cfg).join("\n");
+    assert!(text.contains(&format!(
+        "Active runtime: 4.3.1+gfixture · generation {} · source: {}",
+        root.display(),
+        pointer.display()
+    )));
+    assert!(text.contains("Values are read-only"));
+    for (body, reason) in [
+        ("{broken", "invalid JSON"),
+        (
+            r#"{"schema":"other","runtime_root":"/x"}"#,
+            "not vibecrafted.active-runtime.v1",
+        ),
+        (
+            r#"{"schema":"vibecrafted.active-runtime.v1","runtime_root":"relative"}"#,
+            "runtime_root missing or not absolute",
+        ),
+    ] {
+        fs::write(&pointer, body).unwrap();
+        host.snapshot.as_mut().unwrap().runtime = RuntimeIdentity::load(Some(pointer.clone()));
+        let text = host.lines(&cfg).join("\n");
+        assert!(
+            text.contains(&format!("Active runtime: unavailable · {reason}")),
+            "{text}"
+        );
+        assert!(!text.contains("4.3.1"), "no guessed version: {text}");
+    }
+    fs::remove_file(&pointer).unwrap();
+    assert_eq!(read_active_runtime(&pointer), Err("pointer absent".into()));
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(tmp.path().join("elsewhere.json"), &pointer).unwrap();
+        assert_eq!(
+            read_active_runtime(&pointer),
+            Err("active.json is a symlink".into())
+        );
+    }
+    assert!(
+        RuntimeIdentity::load(None)
+            .line()
+            .starts_with("Active runtime: unavailable")
+    );
+}
+
+#[test]
+fn doctor_route_summarizes_installed_checks_and_keeps_the_projection_disclaimer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = config(tmp.path());
+    let mut host = HostDashboard::new(HostRoute::Doctor);
+    host.apply(HostSnapshot::load(&cfg));
+    let text = host.lines(&cfg).join("\n");
+    assert!(text.contains("not an installation certificate"));
+    assert!(text.contains(&format!(
+        "INSTALLED DOCTOR · d: run {} doctor --json",
+        cfg.command_deck.display()
+    )));
+    assert!(text.contains("Not run in this view yet."));
+    let payload = json!({"ok":2, "warnings":0, "failures":1, "healthy":false, "findings":[
+        {"level":"ok","component":"runtime","message":"ready"},
+        {"level":"ok","component":"launchers","message":"ready"},
+        {"level":"fail","component":"runtime-receipt","message":"receipt/disk live damage"}
+    ], "delivery_receipt":{"schema":"fixture"}});
+    host.doctor = Some(DoctorReport::from_output(
+        "vibecrafted doctor --json".into(),
+        "exit status: 1",
+        payload.to_string().as_bytes(),
+        b"",
+    ));
+    let rendered = screen(&host, &cfg);
+    assert!(rendered.contains("2 ok · 0 warnings · 1 failures"));
+    assert!(rendered.contains("fail runtime-receipt · receipt/disk live damage"));
+    assert!(rendered.contains("not an installation certificate"));
+    assert!(
+        !rendered.contains("delivery_receipt"),
+        "never a raw JSON dump"
+    );
+    host.doctor = Some(DoctorReport::from_output(
+        "vibecrafted doctor --json".into(),
+        "exit status: 2",
+        b"",
+        b"vibecrafted: error: unrecognized arguments: --json\n",
+    ));
+    let text = host.lines(&cfg).join("\n");
+    assert!(text.contains(
+        "Doctor unavailable · exit status: 2 · vibecrafted: error: unrecognized arguments: --json"
+    ));
+    assert!(text.contains("Run manually: vibecrafted doctor --json"));
 }
 
 #[test]

@@ -6,16 +6,25 @@ use crate::config::AppConfig;
 use control_core::{
     ControlPlane, FrameSessionInventory, RunStatus, StateView, WorkspaceProjection,
 };
-use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEventKind};
+use crossterm::event::{
+    self, Event, KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Paragraph, Tabs, Wrap},
 };
+use serde::Deserialize;
 use std::{
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::mpsc,
     time::Duration,
 };
+
+/// PgUp/PgDn move the viewport a page; one wheel notch moves it a few lines.
+const PAGE_STEP: isize = 8;
+const WHEEL_STEP: isize = 3;
+const ACTIVE_RUNTIME_SCHEMA: &str = "vibecrafted.active-runtime.v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostRoute {
@@ -48,6 +57,196 @@ impl HostRoute {
     fn index(self) -> usize {
         Self::ALL.iter().position(|r| *r == self).unwrap_or(0)
     }
+    /// Route-local keys for the status bar: a hint appears only where the key acts.
+    fn keys(self) -> &'static str {
+        match self {
+            Self::ActiveRuns | Self::Voc => "↑/↓ select · g open run · ",
+            Self::Projects => "↑/↓ select · Enter open · ",
+            Self::Doctor => "d run doctor · ",
+            Self::Dashboard | Self::Config => "",
+        }
+    }
+}
+
+/// Identity of the installed Runtime Pack as its `active.json` pointer names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveRuntime {
+    pub version: Option<String>,
+    pub runtime_root: String,
+}
+
+/// Where the pointer was looked up and what reading it produced. An unreadable
+/// pointer is reported as unavailable, never replaced by a guessed version.
+#[derive(Debug, Clone)]
+pub struct RuntimeIdentity {
+    pub pointer: Option<PathBuf>,
+    pub active: Result<ActiveRuntime, String>,
+}
+impl RuntimeIdentity {
+    pub fn load(pointer: Option<PathBuf>) -> Self {
+        let active = match &pointer {
+            Some(pointer) => read_active_runtime(pointer),
+            None => {
+                Err("no runtime home (VIBECRAFTED_RUNTIME_HOME, XDG_DATA_HOME, HOME unset)".into())
+            }
+        };
+        Self { pointer, active }
+    }
+    pub fn line(&self) -> String {
+        let source = self
+            .pointer
+            .as_ref()
+            .map_or_else(|| "unresolved".into(), |p| p.display().to_string());
+        match &self.active {
+            Ok(runtime) => format!(
+                "Active runtime: {} · generation {} · source: {source}",
+                runtime.version.as_deref().unwrap_or("version not recorded"),
+                runtime.runtime_root
+            ),
+            Err(error) => format!("Active runtime: unavailable · {error} · source: {source}"),
+        }
+    }
+}
+
+/// Same order as `runtime_paths.vibecrafted_runtime_home`: explicit runtime
+/// home, then `$XDG_DATA_HOME/vibecrafted`, then `~/.local/share/vibecrafted`.
+/// No home at all yields no pointer, never a cwd-relative guess.
+pub fn default_runtime_pointer() -> Option<PathBuf> {
+    let var = |name: &str| {
+        std::env::var_os(name)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    };
+    let home = var("VIBECRAFTED_RUNTIME_HOME")
+        .or_else(|| var("XDG_DATA_HOME").map(|data| data.join("vibecrafted")));
+    #[cfg(windows)]
+    let home = home.or_else(|| var("LOCALAPPDATA").map(|data| data.join("Vibecrafted")));
+    home.or_else(|| var("HOME").map(|h| h.join(".local").join("share").join("vibecrafted")))
+        .map(|home| home.join("active.json"))
+}
+
+/// Read-only view of the installer's pointer contract: a regular file carrying
+/// `vibecrafted.active-runtime.v1` and an absolute `runtime_root`. A symlinked
+/// pointer is refused, as `runtime_paths` refuses it.
+pub fn read_active_runtime(pointer: &Path) -> Result<ActiveRuntime, String> {
+    let meta = std::fs::symlink_metadata(pointer).map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => "pointer absent".to_string(),
+        _ => error.to_string(),
+    })?;
+    if meta.file_type().is_symlink() {
+        return Err("active.json is a symlink".into());
+    }
+    let text = std::fs::read_to_string(pointer).map_err(|error| error.to_string())?;
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|error| format!("invalid JSON: {error}"))?;
+    if value.get("schema").and_then(|s| s.as_str()) != Some(ACTIVE_RUNTIME_SCHEMA) {
+        return Err(format!("not {ACTIVE_RUNTIME_SCHEMA}"));
+    }
+    let runtime_root = value
+        .get("runtime_root")
+        .and_then(|root| root.as_str())
+        .filter(|root| Path::new(root).is_absolute())
+        .ok_or("runtime_root missing or not absolute")?;
+    Ok(ActiveRuntime {
+        version: value
+            .get("version")
+            .and_then(|v| v.as_str())
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned),
+        runtime_root: runtime_root.to_owned(),
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct DoctorFinding {
+    pub level: String,
+    pub component: String,
+    pub message: String,
+}
+#[derive(Deserialize)]
+struct DoctorPayload {
+    findings: Vec<DoctorFinding>,
+}
+
+/// One `vibecrafted doctor --json` run as the host renders it: the installer's
+/// own findings, or why they could not be read.
+#[derive(Debug, Clone)]
+pub struct DoctorReport {
+    /// The exact command line, so a failure names what to run by hand.
+    pub command: String,
+    pub sampled_at: String,
+    pub outcome: Result<Vec<DoctorFinding>, String>,
+}
+impl DoctorReport {
+    /// Findings come from stdout whatever the exit code: the doctor exits 1
+    /// exactly when it reports failures. Only output without the payload fails.
+    pub fn from_output(command: String, status: &str, stdout: &[u8], stderr: &[u8]) -> Self {
+        let outcome = serde_json::from_slice::<DoctorPayload>(stdout)
+            .map(|payload| payload.findings)
+            .map_err(|error| {
+                let stderr = String::from_utf8_lossy(stderr);
+                let reason = stderr
+                    .lines()
+                    .rev()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                    .map(|line| line.chars().take(240).collect())
+                    .unwrap_or_else(|| format!("no doctor JSON on stdout ({error})"));
+                format!("{status} · {reason}")
+            });
+        Self::new(command, outcome)
+    }
+    pub fn new(command: String, outcome: Result<Vec<DoctorFinding>, String>) -> Self {
+        Self {
+            command,
+            sampled_at: chrono::Utc::now().to_rfc3339(),
+            outcome,
+        }
+    }
+    fn count(&self, level: &str) -> usize {
+        self.outcome
+            .as_ref()
+            .map_or(0, |f| f.iter().filter(|f| f.level == level).count())
+    }
+    fn counts(&self) -> String {
+        format!(
+            "{} ok · {} warnings · {} failures",
+            self.count("ok"),
+            self.count("warn"),
+            self.count("fail")
+        )
+    }
+    pub fn summary_line(&self) -> String {
+        match &self.outcome {
+            Ok(_) => format!("Doctor · {} · details in [4] Doctor", self.counts()),
+            Err(_) => format!("Doctor unavailable · run manually: {}", self.command),
+        }
+    }
+    /// Counts plus every non-ok check, failures first; passing checks stay a number.
+    fn append_to(&self, lines: &mut Vec<String>) {
+        match &self.outcome {
+            Ok(findings) => {
+                lines.push(format!("  {} · {}", self.sampled_at, self.counts()));
+                let mut attention = findings
+                    .iter()
+                    .filter(|f| f.level != "ok")
+                    .collect::<Vec<_>>();
+                attention.sort_by_key(|f| f.level != "fail");
+                lines.extend(
+                    attention
+                        .iter()
+                        .map(|f| format!("  {} {} · {}", f.level, f.component, f.message)),
+                );
+            }
+            Err(error) => {
+                lines.push(format!(
+                    "  {} · Doctor unavailable · {error}",
+                    self.sampled_at
+                ));
+                lines.push(format!("  Run manually: {}", self.command));
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -64,6 +263,7 @@ pub struct HostSnapshot {
     pub projects: Vec<HostProject>,
     pub workspace_error: Option<String>,
     pub server_status: String,
+    pub runtime: RuntimeIdentity,
     pub sampled_at: String,
 }
 impl HostSnapshot {
@@ -89,6 +289,8 @@ impl HostSnapshot {
             projects,
             workspace_error,
             server_status,
+            // One small pointer file per sample; the reader thread owns this IO.
+            runtime: RuntimeIdentity::load(default_runtime_pointer()),
             sampled_at: chrono::Utc::now().to_rfc3339(),
         }
     }
@@ -136,6 +338,9 @@ pub struct HostDashboard {
     pub project_input: Option<String>,
     pub notice: String,
     pub action_pending: bool,
+    /// Last installed-doctor report; only an explicit `d` on Doctor produces one.
+    pub doctor: Option<DoctorReport>,
+    pub doctor_running: bool,
 }
 impl HostDashboard {
     pub fn new(route: HostRoute) -> Self {
@@ -147,6 +352,8 @@ impl HostDashboard {
             project_input: None,
             notice: "Reading host projections…".into(),
             action_pending: false,
+            doctor: None,
+            doctor_running: false,
         }
     }
     pub fn navigate(&mut self, route: HostRoute) {
@@ -164,34 +371,111 @@ impl HostDashboard {
             self.notice = "Host projections loaded · actions require an explicit selection".into();
         }
         // Keep selection by canonical identity, never by a displayed name.
+        // Routes without a list hold no selection at all.
         let run_id = self.run_rows().get(self.selected).map(|r| r.run_id.clone());
-        let id = self
+        let project_id = self
             .snapshot
             .as_ref()
+            .filter(|_| self.route == HostRoute::Projects)
             .and_then(|s| s.projects.get(self.selected))
             .map(|p| p.id.clone());
-        self.selected = id
-            .and_then(|id| snapshot.projects.iter().position(|p| p.id == id))
-            .unwrap_or(0);
         self.snapshot = Some(snapshot);
-        if matches!(self.route, HostRoute::ActiveRuns | HostRoute::Voc) {
-            self.selected = run_id
+        self.selected = match self.route {
+            HostRoute::Projects => project_id
+                .and_then(|id| {
+                    self.snapshot
+                        .as_ref()
+                        .and_then(|s| s.projects.iter().position(|p| p.id == id))
+                })
+                .unwrap_or(0),
+            HostRoute::ActiveRuns | HostRoute::Voc => run_id
                 .and_then(|id| self.run_rows().iter().position(|r| r.run_id == id))
-                .unwrap_or(0);
-        }
+                .unwrap_or(0),
+            HostRoute::Dashboard | HostRoute::Config | HostRoute::Doctor => 0,
+        };
     }
     fn run_rows(&self) -> Vec<&RunStatus> {
         let Some(s) = &self.snapshot else {
             return Vec::new();
         };
-        if self.route == HostRoute::ActiveRuns {
-            s.runs
+        match self.route {
+            HostRoute::ActiveRuns => s
+                .runs
                 .active_runs
                 .iter()
                 .chain(&s.runs.stalled_runs)
-                .collect()
-        } else {
-            s.runs.recent_runs.iter().collect()
+                .collect(),
+            HostRoute::Voc => s.runs.recent_runs.iter().collect(),
+            _ => Vec::new(),
+        }
+    }
+    /// Arrow keys move the highlight only on routes that render a selectable list.
+    pub fn move_selection(&mut self, delta: isize) {
+        let len = match self.route {
+            HostRoute::Projects => self.snapshot.as_ref().map_or(0, |s| s.projects.len()),
+            HostRoute::ActiveRuns | HostRoute::Voc => self.run_rows().len(),
+            HostRoute::Dashboard | HostRoute::Config | HostRoute::Doctor => 0,
+        };
+        self.selected = self
+            .selected
+            .saturating_add_signed(delta)
+            .min(len.saturating_sub(1));
+    }
+    /// PgUp/PgDn and the wheel move one viewport offset, clamped to the text.
+    pub fn scroll(&mut self, config: &AppConfig, delta: isize) {
+        let last = self.lines(config).len().saturating_sub(1);
+        self.offset = self.offset.saturating_add_signed(delta).min(last);
+    }
+    /// Mouse capture covers the whole host, so the wheel must scroll here or it
+    /// does nothing at all; a left click on the tab row switches route.
+    pub fn handle_mouse(&mut self, config: &AppConfig, mouse: MouseEvent) {
+        match mouse.kind {
+            MouseEventKind::ScrollDown => self.scroll(config, WHEEL_STEP),
+            MouseEventKind::ScrollUp => self.scroll(config, -WHEEL_STEP),
+            MouseEventKind::Down(MouseButton::Left) if mouse.row == 1 => {
+                // Tabs use one cell of padding at each end and a one-cell divider.
+                let mut x = 0;
+                for (route, label) in HostRoute::ALL.iter().zip(self.tab_labels()) {
+                    let end = x + label.chars().count() + 2;
+                    if (x..end).contains(&(mouse.column as usize)) {
+                        self.navigate(*route);
+                        break;
+                    }
+                    x = end + 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    fn live_label(&self) -> String {
+        self.snapshot
+            .as_ref()
+            .map(|s| s.live_count().to_string())
+            .unwrap_or_else(|| "?".into())
+    }
+    fn tab_labels(&self) -> Vec<String> {
+        let active = self.live_label();
+        HostRoute::ALL
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                if *r == HostRoute::ActiveRuns {
+                    format!("{} {} · {active}", i + 1, r.label())
+                } else {
+                    format!("{} {}", i + 1, r.label())
+                }
+            })
+            .collect()
+    }
+    fn receive(&mut self, receipt: HostReceipt) {
+        self.action_pending = false;
+        match receipt {
+            HostReceipt::Notice(notice) => self.notice = notice,
+            HostReceipt::Doctor(report) => {
+                self.notice = report.summary_line();
+                self.doctor = Some(report);
+                self.doctor_running = false;
+            }
         }
     }
     pub fn lines(&self, config: &AppConfig) -> Vec<String> {
@@ -247,16 +531,21 @@ impl HostDashboard {
                     s.live_count(),
                     s.runs.stalled_runs.len()
                 ));
+                // `selected` indexes run_rows(): in-progress rows, then attention rows.
                 if self.route == HostRoute::ActiveRuns {
                     lines.push("IN PROGRESS".into());
-                    append_runs(&mut lines, &s.runs.active_runs);
+                    append_runs(&mut lines, &s.runs.active_runs, Some(self.selected));
                     lines.push("NEEDS ATTENTION".into());
-                    append_runs(&mut lines, &s.runs.stalled_runs);
+                    append_runs(
+                        &mut lines,
+                        &s.runs.stalled_runs,
+                        self.selected.checked_sub(s.runs.active_runs.len()),
+                    );
                 } else {
                     lines.push(
                         "GLOBAL RUN FEED · recent/history · canonical state and evidence".into(),
                     );
-                    append_runs(&mut lines, &s.runs.recent_runs);
+                    append_runs(&mut lines, &s.runs.recent_runs, Some(self.selected));
                 }
                 lines.push("g: open selected run through goto-work · ↑/↓ select".into());
                 if let Some(run) = self.run_rows().get(self.selected) {
@@ -277,6 +566,7 @@ impl HostDashboard {
                     "Command deck: {} · source: --deck / installed launcher",
                     config.command_deck.display()
                 ),
+                s.runtime.line(),
                 "Configuration help: vc-o --help · vibecrafted help".into(),
                 "Values are read-only. No settings are changed by navigation.".into(),
             ]),
@@ -302,6 +592,21 @@ impl HostDashboard {
                     "These are projection checks, not an installation certificate.".into(),
                 ]);
                 lines.extend(s.runs.warnings.iter().cloned());
+                lines.push(String::new());
+                lines.push(format!(
+                    "INSTALLED DOCTOR · d: run {} doctor --json",
+                    config.command_deck.display()
+                ));
+                if self.doctor_running {
+                    lines.push("  Running · the report lands here when it finishes.".into());
+                }
+                match &self.doctor {
+                    Some(report) => report.append_to(&mut lines),
+                    None if !self.doctor_running => {
+                        lines.push("  Not run in this view yet.".into())
+                    }
+                    None => {}
+                }
             }
             HostRoute::Projects => {
                 lines.push(
@@ -331,17 +636,23 @@ impl HostDashboard {
         lines
     }
 }
-fn append_runs(lines: &mut Vec<String>, runs: &[RunStatus]) {
+/// `selected` is relative to `runs`; `None` when the selection sits in another section.
+fn append_runs(lines: &mut Vec<String>, runs: &[RunStatus], selected: Option<usize>) {
     if runs.is_empty() {
         lines.push("  None".into());
     }
-    for r in runs {
+    for (i, r) in runs.iter().enumerate() {
         lines.push(format!(
-            "{} · {} / {} · {} · {}",
-            r.state, r.agent, r.skill, r.run_id, r.root
+            "{} {} · {} / {} · {} · {}",
+            if selected == Some(i) { "▶" } else { " " },
+            r.state,
+            r.agent,
+            r.skill,
+            r.run_id,
+            r.root
         ));
         lines.push(format!(
-            "  {} · evidence: {} {} {}",
+            "    {} · evidence: {} {} {}",
             r.updated_at, r.liveness, r.source, r.last_error
         ));
     }
@@ -354,24 +665,9 @@ pub fn draw(frame: &mut Frame, host: &HostDashboard, config: &AppConfig) {
         Constraint::Length(3),
     ])
     .split(frame.area());
-    let active = host
-        .snapshot
-        .as_ref()
-        .map(|s| s.live_count().to_string())
-        .unwrap_or_else(|| "?".into());
-    let labels = HostRoute::ALL
-        .iter()
-        .enumerate()
-        .map(|(i, r)| {
-            if *r == HostRoute::ActiveRuns {
-                format!("{} {} · {active}", i + 1, r.label())
-            } else {
-                format!("{} {}", i + 1, r.label())
-            }
-        })
-        .collect::<Vec<_>>();
+    let active = host.live_label();
     frame.render_widget(
-        Tabs::new(labels)
+        Tabs::new(host.tab_labels())
             .select(host.route.index())
             .highlight_style(Style::default().fg(Color::Yellow))
             .block(
@@ -393,8 +689,9 @@ pub fn draw(frame: &mut Frame, host: &HostDashboard, config: &AppConfig) {
         .map(|p| format!("Open project: {p}  · Enter confirm · Esc cancel"))
         .unwrap_or_else(|| {
             format!(
-                "{}\n1–6 views · o Open project · PgUp/PgDn scroll · q close · LIVE {active}",
-                host.notice
+                "{}\n1–6 views · {}o Open project · PgUp/PgDn scroll · q close · LIVE {active}",
+                host.notice,
+                host.route.keys()
             )
         });
     frame.render_widget(
@@ -407,14 +704,22 @@ pub fn draw(frame: &mut Frame, host: &HostDashboard, config: &AppConfig) {
 enum HostAction {
     OpenProject(String),
     GotoRun(String),
+    Doctor,
 }
-fn perform_action(config: &AppConfig, action: HostAction) -> String {
-    match action {
+/// What an action thread hands back: a receipt line, or the doctor's report.
+#[derive(Debug)]
+enum HostReceipt {
+    Notice(String),
+    Doctor(DoctorReport),
+}
+fn perform_action(config: &AppConfig, action: HostAction) -> HostReceipt {
+    let notice = match action {
+        HostAction::Doctor => return HostReceipt::Doctor(run_doctor(&config.command_deck)),
         HostAction::OpenProject(root) => {
             let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
             let root = match crate::config::resolve_destination_repo(&root, home.as_deref()) {
                 Ok(root) => root,
-                Err(error) => return format!("Open refused: {error}"),
+                Err(error) => return HostReceipt::Notice(format!("Open refused: {error}")),
             };
             match Command::new(&config.command_deck)
                 .args(["start", "resume", "--repo"])
@@ -447,6 +752,25 @@ fn perform_action(config: &AppConfig, action: HostAction) -> String {
                     .map_err(|e| e.to_string())
             })
             .unwrap_or_else(|e| format!("Goto: {e}")),
+    };
+    HostReceipt::Notice(notice)
+}
+/// The installed doctor, through the same deck as every other host verb. Its
+/// stdout is captured, so the probe can never draw over the host terminal.
+fn run_doctor(deck: &Path) -> DoctorReport {
+    let command = format!("{} doctor --json", deck.display());
+    match Command::new(deck)
+        .args(["doctor", "--json"])
+        .stdin(Stdio::null())
+        .output()
+    {
+        Ok(output) => DoctorReport::from_output(
+            command,
+            &output.status.to_string(),
+            &output.stdout,
+            &output.stderr,
+        ),
+        Err(error) => DoctorReport::new(command, Err(format!("could not start: {error}"))),
     }
 }
 
@@ -488,8 +812,7 @@ pub fn run(config: AppConfig, route: HostRoute) -> anyhow::Result<()> {
                 host.apply(snapshot);
             }
             while let Ok(receipt) = action_rx.try_recv() {
-                host.notice = receipt;
-                host.action_pending = false;
+                host.receive(receipt);
             }
             terminal.draw(|f| draw(f, &host, &config))?;
             if !event::poll(config.tick_rate)? {
@@ -525,25 +848,10 @@ pub fn run(config: AppConfig, route: HostRoute) -> anyhow::Result<()> {
                                 host.navigate(HostRoute::ALL[(host.route.index() + 1) % 6])
                             }
                             KeyCode::Char('o') => host.project_input = Some(String::new()),
-                            KeyCode::Up => host.selected = host.selected.saturating_sub(1),
-                            KeyCode::Down => {
-                                let n = if host.route == HostRoute::Projects {
-                                    host.snapshot
-                                        .as_ref()
-                                        .map(|s| s.projects.len())
-                                        .unwrap_or(0)
-                                } else {
-                                    host.run_rows().len()
-                                };
-                                host.selected = (host.selected + 1).min(n.saturating_sub(1));
-                            }
-                            KeyCode::PageDown => {
-                                host.offset = host
-                                    .offset
-                                    .saturating_add(8)
-                                    .min(host.lines(&config).len().saturating_sub(1))
-                            }
-                            KeyCode::PageUp => host.offset = host.offset.saturating_sub(8),
+                            KeyCode::Up => host.move_selection(-1),
+                            KeyCode::Down => host.move_selection(1),
+                            KeyCode::PageDown => host.scroll(&config, PAGE_STEP),
+                            KeyCode::PageUp => host.scroll(&config, -PAGE_STEP),
                             KeyCode::Enter if host.route == HostRoute::Projects => {
                                 action = host
                                     .snapshot
@@ -559,35 +867,14 @@ pub fn run(config: AppConfig, route: HostRoute) -> anyhow::Result<()> {
                                     .get(host.selected)
                                     .map(|r| HostAction::GotoRun(r.run_id.clone()));
                             }
+                            KeyCode::Char('d') if host.route == HostRoute::Doctor => {
+                                action = Some(HostAction::Doctor)
+                            }
                             _ => {}
                         }
                     }
                 }
-                Event::Mouse(mouse)
-                    if mouse.kind == MouseEventKind::Down(event::MouseButton::Left)
-                        && mouse.row == 1 =>
-                {
-                    // Tabs use one cell of padding at each end and a one-cell divider.
-                    let active = host
-                        .snapshot
-                        .as_ref()
-                        .map(|s| s.live_count().to_string())
-                        .unwrap_or_else(|| "?".into());
-                    let mut x = 0;
-                    for (i, route) in HostRoute::ALL.iter().enumerate() {
-                        let label = if *route == HostRoute::ActiveRuns {
-                            format!("{} {} · {active}", i + 1, route.label())
-                        } else {
-                            format!("{} {}", i + 1, route.label())
-                        };
-                        let end = x + label.chars().count() + 2;
-                        if (x..end).contains(&(mouse.column as usize)) {
-                            host.navigate(*route);
-                            break;
-                        }
-                        x = end + 1;
-                    }
-                }
+                Event::Mouse(mouse) => host.handle_mouse(&config, mouse),
                 _ => {}
             }
             if let Some(action) = action {
@@ -602,6 +889,13 @@ pub fn run(config: AppConfig, route: HostRoute) -> anyhow::Result<()> {
                     }
                     HostAction::GotoRun(id) => {
                         format!("Opening run {id} · waiting for product receipt")
+                    }
+                    HostAction::Doctor => {
+                        host.doctor_running = true;
+                        format!(
+                            "Running {} doctor --json · waiting for its report",
+                            config.command_deck.display()
+                        )
                     }
                 };
                 let tx = action_tx.clone();
@@ -652,10 +946,77 @@ mod tests {
             server: "http://127.0.0.1:1".into(),
             view: crate::observe::ConsoleView::Host(HostRoute::Dashboard),
         };
-        let receipt = perform_action(&config, HostAction::OpenProject(repo.display().to_string()));
+        let HostReceipt::Notice(receipt) =
+            perform_action(&config, HostAction::OpenProject(repo.display().to_string()))
+        else {
+            panic!("an open verb answers with a receipt line");
+        };
         assert!(receipt.contains("guest-create refused: fixture denial"));
         assert!(receipt.contains("23"));
         assert!(!receipt.contains("Opened workspace"));
         assert!(!config.state_root.exists());
+    }
+
+    fn deck(dir: &Path, body: &str) -> PathBuf {
+        let deck = dir.join("deck");
+        std::fs::write(&deck, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&deck, std::fs::Permissions::from_mode(0o700)).unwrap();
+        deck
+    }
+
+    #[test]
+    fn doctor_reads_findings_through_the_deck_even_when_it_exits_red() {
+        let temp = tempfile::tempdir().unwrap();
+        // The real doctor exits 1 exactly when it reports failures.
+        let deck = deck(
+            temp.path(),
+            r#"[ "$1" = doctor ] && [ "$2" = --json ] || exit 99
+printf '%s' '{"ok":1,"warnings":1,"failures":1,"findings":[{"level":"ok","component":"runtime","message":"ready"},{"level":"warn","component":"slack-provider","message":"optional"},{"level":"fail","component":"runtime-receipt","message":"live damage"}]}'
+exit 1"#,
+        );
+        let report = run_doctor(&deck);
+        let findings = report.outcome.as_ref().expect("stdout JSON is the report");
+        assert_eq!(findings.len(), 3);
+        assert_eq!(report.command, format!("{} doctor --json", deck.display()));
+        assert_eq!(
+            report.summary_line(),
+            "Doctor · 1 ok · 1 warnings · 1 failures · details in [4] Doctor"
+        );
+        let mut lines = Vec::new();
+        report.append_to(&mut lines);
+        let text = lines.join("\n");
+        let fail = text.find("fail runtime-receipt · live damage").unwrap();
+        let warn = text.find("warn slack-provider · optional").unwrap();
+        assert!(fail < warn, "failures lead: {text}");
+        assert!(
+            !text.contains("runtime · ready"),
+            "passing checks stay a count"
+        );
+        assert!(!text.contains("\"level\""), "never a raw JSON dump");
+    }
+
+    #[test]
+    fn doctor_that_cannot_run_or_speak_json_names_the_manual_command() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = run_doctor(&temp.path().join("absent-deck"));
+        let error = missing.outcome.as_ref().unwrap_err();
+        assert!(error.starts_with("could not start"), "{error}");
+        assert!(missing.summary_line().contains("absent-deck doctor --json"));
+
+        let deck = deck(
+            temp.path(),
+            "echo 'usage: vibecrafted' >&2\necho 'vibecrafted: error: unrecognized arguments: --json' >&2\nexit 2",
+        );
+        let old = run_doctor(&deck);
+        let error = old.outcome.as_ref().unwrap_err();
+        assert!(error.contains("unrecognized arguments: --json"), "{error}");
+        assert!(error.contains('2'), "exit status stays visible: {error}");
+        let mut lines = Vec::new();
+        old.append_to(&mut lines);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == &format!("  Run manually: {} doctor --json", deck.display()))
+        );
     }
 }
