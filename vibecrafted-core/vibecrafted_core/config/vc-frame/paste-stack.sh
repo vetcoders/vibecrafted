@@ -159,7 +159,7 @@ PY
   cmd_list >&2
   printf 'pick number: ' >&2
   local n
-  read -r n || return 1
+  read -r -e n || return 1
   cmd_get "$n"
 }
 

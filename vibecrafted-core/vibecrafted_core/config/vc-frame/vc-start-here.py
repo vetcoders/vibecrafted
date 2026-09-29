@@ -126,7 +126,7 @@ def project_chooser_argv() -> list[str]:
     return [
         "bash",
         "-lc",
-        'printf "Project folder path: "; read -r path; printf "%s" "$path"',
+        'printf "Project folder path: "; read -r -e path; printf "%s" "$path"',
     ]
 
 
