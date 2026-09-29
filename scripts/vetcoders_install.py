@@ -781,6 +781,9 @@ class InstallState:
     updated_at: str = ""
     repo_commit: str = ""
     repo_url: str = ""
+    # Empty unless this state was filled from a Runtime Pack. Git checkouts
+    # leave it blank; pack installs set "pack-provenance".
+    repo_origin: str = ""
     skills: list[str] = field(default_factory=list)
     runtimes: list[str] = field(default_factory=list)
     launcher_entries: list[str] = field(default_factory=list)
@@ -22602,12 +22605,14 @@ def _install_runtime_agent_projections(
                 )
 
     now = datetime.now(timezone.utc).isoformat()
+    repo_commit, repo_url, repo_origin = pack_install_identity(generation)
     state = InstallState(
         installed_at=now,
         updated_at=now,
         framework_version=version,
-        repo_commit="unknown",
-        repo_url="",
+        repo_commit=repo_commit,
+        repo_url=repo_url,
+        repo_origin=repo_origin,
         skills=skill_names,
         runtimes=runtimes,
         launcher_entries=_snapshot_launcher_entries(),
@@ -24054,6 +24059,55 @@ def _load_runtime_pack_provenance(root: Path) -> dict[str, Any]:
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+_PACK_PROVENANCE_SCHEMA = "io.vetcoders.vibecrafted.runtime-pack-provenance.v1"
+_PACK_SOURCE_PROVENANCE_NAME = "source-provenance.json"
+_PACK_INSTALL_ORIGIN = "pack-provenance"
+_PACK_OWNER_REPO = "vetcoders/vibecrafted"
+_PACK_REPO_URL = "https://github.com/vetcoders/vibecrafted"
+_PACK_SHA = re.compile(r"[0-9a-f]{40}")
+
+
+def _load_pack_source_provenance(root: Path) -> dict[str, Any]:
+    path = root / _PACK_SOURCE_PROVENANCE_NAME
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def pack_install_identity(generation: Path) -> tuple[str, str, str]:
+    """Return ``(short_sha, repo_url, origin)`` from a Runtime Pack.
+
+    A missing or untrusted pack yields ``("unknown", "", "")``. A full
+    ``source_revisions.vibecrafted`` SHA is stored as its first 8 hex
+    characters, matching ``get_repo_commit``. The GitHub URL is filled only
+    when ``source-provenance.json`` names ``vetcoders/vibecrafted`` at that
+    same revision. Origin is ``pack-provenance`` whenever the SHA came from
+    the pack, even if the URL cannot be confirmed.
+    """
+    provenance = _load_runtime_pack_provenance(generation)
+    if provenance.get("schema") != _PACK_PROVENANCE_SCHEMA:
+        return "unknown", "", ""
+    revisions = provenance.get("source_revisions")
+    if not isinstance(revisions, dict):
+        return "unknown", "", ""
+    full = revisions.get("vibecrafted")
+    if not isinstance(full, str) or _PACK_SHA.fullmatch(full) is None:
+        return "unknown", "", ""
+    source = _load_pack_source_provenance(generation)
+    url = ""
+    if (
+        source.get("schema") == _SOURCE_PROVENANCE_SCHEMA
+        and source.get("owner_repo") == _PACK_OWNER_REPO
+        and source.get("source_revision") == full
+    ):
+        url = _PACK_REPO_URL
+    return full[:8], url, _PACK_INSTALL_ORIGIN
 
 
 def _runtime_pack_build_date(provenance: Mapping[str, Any]) -> str:

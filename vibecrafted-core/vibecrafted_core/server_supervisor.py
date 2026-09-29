@@ -1334,6 +1334,163 @@ def _run_child(
         return _ChildResult(int(process.returncode or 0), stdout, stderr)
 
 
+_STDERR_ROTATE_BYTES = 1024 * 1024
+_STDERR_ROTATE_AGE_SECONDS = 30 * 24 * 60 * 60
+_STDERR_ROTATE_GENERATIONS = 3
+
+
+def _owned_regular_stat(path: Path) -> os.stat_result | None:
+    """Stat a unique regular file owned by this user. Symlinks are rejected."""
+
+    try:
+        visible = path.lstat()
+    except OSError:
+        return None
+    if (
+        stat.S_ISLNK(visible.st_mode)
+        or not stat.S_ISREG(visible.st_mode)
+        or visible.st_uid != os.getuid()
+        or visible.st_nlink != 1
+    ):
+        return None
+    return visible
+
+
+def _stderr_fd_is(expected: os.stat_result) -> bool:
+    try:
+        current = os.fstat(2)
+    except OSError:
+        return False
+    return (current.st_dev, current.st_ino) == (expected.st_dev, expected.st_ino)
+
+
+def _log_generation(path: Path, index: int) -> Path:
+    return path.with_name(f"{path.name}.{index}")
+
+
+def _shift_log_generations(path: Path) -> bool:
+    oldest = _log_generation(path, _STDERR_ROTATE_GENERATIONS)
+    try:
+        if oldest.exists() or oldest.is_symlink():
+            if _owned_regular_stat(oldest) is None:
+                return False
+            oldest.unlink()
+        for index in range(_STDERR_ROTATE_GENERATIONS - 1, 0, -1):
+            source = _log_generation(path, index)
+            if not source.exists() and not source.is_symlink():
+                continue
+            if _owned_regular_stat(source) is None:
+                return False
+            os.replace(source, _log_generation(path, index + 1))
+    except OSError:
+        return False
+    return True
+
+
+def _write_all(descriptor: int, payload: bytes) -> None:
+    view = memoryview(payload)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise OSError("short write while rotating supervisor stderr")
+        view = view[written:]
+
+
+def _copy_log(src: Path, dst: Path) -> None:
+    src_fd = os.open(src, os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0))
+    dst_fd = -1
+    try:
+        src_stat = os.fstat(src_fd)
+        dst_fd = os.open(
+            dst,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | os.O_CLOEXEC
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        copied = 0
+        while True:
+            chunk = os.read(src_fd, 1024 * 1024)
+            if not chunk:
+                break
+            _write_all(dst_fd, chunk)
+            copied += len(chunk)
+        grown = os.fstat(src_fd).st_size
+        if grown > copied:
+            os.lseek(src_fd, copied, os.SEEK_SET)
+            extra = os.read(src_fd, grown - copied)
+            if extra:
+                _write_all(dst_fd, extra)
+        mode = stat.S_IMODE(src_stat.st_mode) & 0o666
+        os.fchmod(dst_fd, mode or 0o600)
+        os.fsync(dst_fd)
+    except OSError:
+        if dst_fd >= 0:
+            os.close(dst_fd)
+            dst_fd = -1
+            with contextlib.suppress(OSError):
+                os.unlink(dst)
+        raise
+    finally:
+        os.close(src_fd)
+        if dst_fd >= 0:
+            os.close(dst_fd)
+
+
+def _truncate_live_log(path: Path, expected: os.stat_result) -> None:
+    descriptor = os.open(
+        path,
+        os.O_RDWR | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        current = os.fstat(descriptor)
+        if (current.st_dev, current.st_ino) != (expected.st_dev, expected.st_ino):
+            raise OSError("stderr log changed during rotation")
+        os.ftruncate(descriptor, 0)
+    finally:
+        os.close(descriptor)
+    if not _stderr_fd_is(expected):
+        return
+    os.ftruncate(2, 0)
+    os.lseek(2, 0, os.SEEK_SET)
+
+
+def rotate_supervisor_stderr_log(path: Path, *, now: float | None = None) -> bool:
+    """Rotate an owned stderr log larger than 1 MiB or older than 30 days.
+
+    Previous bytes, including a crash tail, move to ``path.1``. Older copies
+    shift up to ``.3`` and the oldest is dropped. When this process already
+    has the log open as stderr, the live inode is truncated after the copy so
+    later appends stay on the same path. Otherwise the file is renamed and the
+    next opener creates a fresh log. Symlinks and other untrusted paths are
+    left untouched.
+    """
+
+    visible = _owned_regular_stat(path)
+    if visible is None or visible.st_size <= 0:
+        return False
+    moment = time.time() if now is None else now
+    oversized = visible.st_size > _STDERR_ROTATE_BYTES
+    stale = (moment - visible.st_mtime) >= _STDERR_ROTATE_AGE_SECONDS
+    if not oversized and not stale:
+        return False
+    live_stderr = _stderr_fd_is(visible)
+    if not _shift_log_generations(path):
+        return False
+    destination = _log_generation(path, 1)
+    try:
+        if live_stderr:
+            _copy_log(path, destination)
+            _truncate_live_log(path, visible)
+        else:
+            os.replace(path, destination)
+    except OSError:
+        return False
+    return True
+
+
 def run_supervisor(
     config: SupervisorConfig,
     *,
@@ -1348,6 +1505,7 @@ def run_supervisor(
     Always returns 0; failures are recorded in the receipt, not the return
     value."""
 
+    rotate_supervisor_stderr_log(config.paths.stderr_log)
     event = stop_event or threading.Event()
     if (
         config.interval <= 0
@@ -2244,6 +2402,7 @@ def start_service(config: SupervisorConfig) -> None:
     the way (unowned lease, foreground supervisor already active, etc.)."""
 
     _require_macos_service()
+    rotate_supervisor_stderr_log(config.paths.stderr_log)
     if not config.paths.launch_agent_file.is_file():
         raise SupervisorError(
             "server service is not installed; run "

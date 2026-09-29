@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from . import product_contract
+from . import product_contract, runtime_pack_contract
 
 SCHEMA_VERSION = "vibecrafted.delivery_receipt.v1"
 
@@ -87,6 +87,15 @@ _VERSION_SHA_RE = re.compile(
 _DIRTY_TRUE_RE = re.compile(
     r"(?:\.dirty\b|dirty\s*=\s*true|\bdirty\s*:\s*true\b|\(dirty\))",
     re.IGNORECASE,
+)
+
+# Generation-private tools stay inside the installed runtime. "Own only your
+# namespace" forbids a PATH wrapper, so absence from PATH is not drift.
+_GENERATION_PRIVATE_BINARIES = frozenset({"scaffold-doctor"})
+_PRODUCT_MANIFEST_RELATIVES = (
+    "manifests/product-manifest.json",
+    "Contents/Resources/product-manifest.json",
+    "product-manifest.json",
 )
 
 
@@ -626,6 +635,9 @@ class ToolSpec:
     # Optional related binaries reported under the same tool
     related_binaries: tuple[str, ...] = ()
     index_kind: str | None = None  # "loctree_snapshot" | "aicx_index" | None
+    # False: the binary is generation-private and must not be judged missing
+    # from PATH. Presence on PATH is still inspected normally.
+    publish_on_path: bool = True
 
 
 def _vibecrafted_package_repo() -> Path | None:
@@ -991,6 +1003,7 @@ def fleet_tool_specs() -> list[ToolSpec]:
                     r"scaffold",
                 ),
             ),
+            publish_on_path=False,
         ),
         ToolSpec(
             name="loct",
@@ -1027,14 +1040,15 @@ def classify_drift(
     ahead: int | dict[str, str] | None,
     index_stale: bool,
     source_known: bool,
+    require_on_path: bool = True,
 ) -> list[str]:
     """Derive the named drift classes for one tool from its already-probed signals.
 
     Order in the returned list is not significance — use :func:`primary_drift`
-    for that.
+    for that. ``require_on_path`` is false for generation-private binaries.
     """
     classes: list[str] = []
-    if not on_path:
+    if require_on_path and not on_path:
         classes.append(DRIFT_NOT_ON_PATH)
         # still may have other signals from source-only inspection
     installed_sha_s = installed_sha if isinstance(installed_sha, str) else None
@@ -1147,6 +1161,106 @@ def _installed_runtime_manifest(installed_path: str | None) -> dict[str, Any] | 
     return probe.source if probe.state == "success" else None
 
 
+_RELEASE_ROOT_WALK = 8
+_GENERATION_PRIVATE_REASON = "generation-private; not published on PATH"
+_NO_GIT_DIRTY_REASON = "release root has no .git; dirty build is unknown"
+
+
+def _json_object(path: Path) -> dict[str, Any] | None:
+    """Read one JSON object. Missing, unreadable, or non-object is no claim."""
+    try:
+        if not path.is_file():
+            return None
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _release_search_roots(source_root: Path, installed_path: str | None) -> list[Path]:
+    """Source root, then a bounded walk up from the installed binary."""
+    roots: list[Path] = []
+    seen: set[Path] = set()
+
+    def add(path: Path) -> None:
+        try:
+            resolved = path.resolve()
+        except OSError:
+            return
+        if resolved in seen or not resolved.is_dir():
+            return
+        seen.add(resolved)
+        roots.append(resolved)
+
+    add(source_root)
+    if installed_path:
+        try:
+            start = Path(installed_path).resolve()
+        except OSError:
+            start = None
+        if start is not None:
+            for directory in list(start.parents)[:_RELEASE_ROOT_WALK]:
+                add(directory)
+    return roots
+
+
+def _explicit_bool(payload: dict[str, Any], key: str) -> bool | None:
+    value = payload.get(key)
+    return value if isinstance(value, bool) else None
+
+
+def _pack_provenance_dirty(payload: dict[str, Any]) -> bool | None:
+    """Closed pack schema has no dirty field. A non-``.dirty`` version is clean.
+
+    An explicit ``dirty`` bool, when a producer added one, wins over the version.
+    """
+    if payload.get("schema") != runtime_pack_contract.SCHEMA:
+        return None
+    explicit = _explicit_bool(payload, "dirty")
+    if explicit is not None:
+        return explicit
+    version = payload.get("version")
+    if not isinstance(version, str) or not version.strip():
+        return None
+    return ".dirty" in version.lower()
+
+
+def _release_dirty_claim(
+    source_root: Path, installed_path: str | None
+) -> tuple[bool | None, str]:
+    """Product-manifest ``dirty`` wins; otherwise the pack provenance claim.
+
+    ``(None, "")`` means neither receipt speaks. Do not treat that as clean.
+    """
+    roots = _release_search_roots(source_root, installed_path)
+    for root in roots:
+        for relative in _PRODUCT_MANIFEST_RELATIVES:
+            payload = _json_object(root / relative)
+            if payload is None:
+                continue
+            claim = _explicit_bool(payload, "dirty")
+            if claim is True:
+                return True, "release receipt says dirty"
+            if claim is False:
+                return False, "product manifest reports a clean build"
+    for root in roots:
+        payload = _json_object(root / runtime_pack_contract.PROVENANCE_NAME)
+        if payload is None:
+            continue
+        claim = _pack_provenance_dirty(payload)
+        if claim is True:
+            return True, "release receipt says dirty"
+        if claim is False:
+            return False, "pack provenance reports a clean build"
+    return None, ""
+
+
+def _path_miss_reason(spec: ToolSpec, name: str) -> str:
+    if not spec.publish_on_path or name in _GENERATION_PRIVATE_BINARIES:
+        return _GENERATION_PRIVATE_REASON
+    return "not on PATH"
+
+
 def inspect_tool(spec: ToolSpec) -> dict[str, Any]:
     """Build the full receipt row for one tool: PATH, source, remote, index, drift."""
     # PATH
@@ -1160,9 +1274,10 @@ def inspect_tool(spec: ToolSpec) -> dict[str, Any]:
     )
 
     version_line = ""
+    absent_reason = _path_miss_reason(spec, primary_bin)
     provenance: dict[str, Any] = {
-        "installed_sha": _unknown("binary not on PATH"),
-        "installed_dirty": _unknown("binary not on PATH"),
+        "installed_sha": _unknown(absent_reason),
+        "installed_dirty": _unknown(absent_reason),
         "version_line": "",
     }
     if installed_path:
@@ -1302,7 +1417,10 @@ def inspect_tool(spec: ToolSpec) -> dict[str, Any]:
         index = probe_aicx_index()
         index_stale = bool(index.get("stale"))
 
-    # DIRTY_BUILD: version says dirty OR installed sha is not a real commit
+    # DIRTY_BUILD: an explicit ``.dirty`` version, a release receipt that says
+    # dirty, or an installed sha that is not a commit in a real checkout.
+    # No ``.git`` is not itself dirty — cat-file cannot answer, so the claim
+    # stays unknown unless pack provenance or the product manifest speaks.
     installed_dirty = provenance.get("installed_dirty")
     installed_sha = provenance.get("installed_sha")
     if (
@@ -1310,17 +1428,43 @@ def inspect_tool(spec: ToolSpec) -> dict[str, Any]:
         and isinstance(installed_sha, str)
         and installed_dirty is not True
     ):
-        exists = commit_exists(source_root, installed_sha)
-        if exists is False:
-            # SHA not in repo → dirty-build provenance (or foreign binary)
-            installed_dirty = True
-            provenance = {
-                **provenance,
-                "installed_dirty": True,
-                "installed_dirty_reason": (
-                    f"installed sha {installed_sha} is not a commit in source"
-                ),
-            }
+        if find_git_dir(source_root) is None:
+            claim, claim_reason = _release_dirty_claim(source_root, installed_path)
+            if claim is True:
+                installed_dirty = True
+                provenance = {
+                    **provenance,
+                    "installed_dirty": True,
+                    "installed_dirty_reason": claim_reason,
+                }
+            elif claim is False:
+                installed_dirty = False
+                provenance = {
+                    **provenance,
+                    "installed_dirty": False,
+                    "installed_dirty_reason": claim_reason,
+                }
+            else:
+                unknown_dirty = _unknown(_NO_GIT_DIRTY_REASON)
+                installed_dirty = unknown_dirty
+                provenance = {
+                    **provenance,
+                    "installed_dirty": unknown_dirty,
+                    "installed_dirty_reason": unknown_dirty["reason"],
+                }
+        else:
+            exists = commit_exists(source_root, installed_sha)
+            if exists is False:
+                # SHA not in this checkout → dirty-build provenance (or foreign binary).
+                # A clean pack receipt does not override a git root that rejects the sha.
+                installed_dirty = True
+                provenance = {
+                    **provenance,
+                    "installed_dirty": True,
+                    "installed_dirty_reason": (
+                        f"installed sha {installed_sha} is not a commit in source"
+                    ),
+                }
 
     classes = classify_drift(
         on_path=bool(on_path and path_hits.get(primary_bin)),
@@ -1330,31 +1474,64 @@ def inspect_tool(spec: ToolSpec) -> dict[str, Any]:
         ahead=ab.get("ahead") if isinstance(ab.get("ahead"), int) else None,
         index_stale=index_stale,
         source_known=isinstance(checkout_sha, str),
+        require_on_path=spec.publish_on_path,
     )
-    # For related binaries (scaffold-doctor under vibecrafted), not primary
-    if not path_hits.get(primary_bin) and DRIFT_NOT_ON_PATH not in classes:
+    # A primary binary that is required on PATH but was shadowed by a sibling hit.
+    if (
+        spec.publish_on_path
+        and not path_hits.get(primary_bin)
+        and DRIFT_NOT_ON_PATH not in classes
+    ):
         classes.insert(0, DRIFT_NOT_ON_PATH)
 
     related: list[dict[str, Any]] = []
     for rel in spec.related_binaries:
         rel_path = which_binary(rel)
-        related.append(
-            {
+        private = rel in _GENERATION_PRIVATE_BINARIES
+        if private and not rel_path:
+            related.append(
+                {
+                    "name": rel,
+                    "on_path": False,
+                    "path": _unknown(_GENERATION_PRIVATE_REASON),
+                    "path_policy": "generation-private",
+                    "drift": [DRIFT_CLEAN],
+                }
+            )
+        elif rel_path:
+            row: dict[str, Any] = {
                 "name": rel,
-                "on_path": bool(rel_path),
-                "path": rel_path or _unknown("not on PATH"),
-                "drift": [DRIFT_NOT_ON_PATH] if not rel_path else [DRIFT_CLEAN],
+                "on_path": True,
+                "path": rel_path,
+                "drift": [DRIFT_CLEAN],
             }
-        )
+            if private:
+                row["path_policy"] = "generation-private"
+            related.append(row)
+        else:
+            related.append(
+                {
+                    "name": rel,
+                    "on_path": False,
+                    "path": _unknown("not on PATH"),
+                    "drift": [DRIFT_NOT_ON_PATH],
+                }
+            )
 
-    return {
+    row_out: dict[str, Any] = {
         "name": spec.name,
         "binaries": {
-            name: path or _unknown("not on PATH") for name, path in path_hits.items()
+            name: path or _unknown(_path_miss_reason(spec, name))
+            for name, path in path_hits.items()
         },
         "on_path": bool(path_hits.get(primary_bin)),
         "installed": {
-            "path": installed_path or _unknown(f"{primary_bin} not on PATH"),
+            "path": installed_path
+            or _unknown(
+                _GENERATION_PRIVATE_REASON
+                if not spec.publish_on_path
+                else f"{primary_bin} not on PATH"
+            ),
             "version_line": provenance.get("version_line") or version_line,
             "sha": provenance.get("installed_sha"),
             "dirty_build": provenance.get("installed_dirty"),
@@ -1390,6 +1567,9 @@ def inspect_tool(spec: ToolSpec) -> dict[str, Any]:
             ),
         },
     }
+    if not spec.publish_on_path:
+        row_out["path_policy"] = "generation-private"
+    return row_out
 
 
 def build_receipt(
@@ -1460,6 +1640,8 @@ def render_receipt_text(receipt: dict[str, Any]) -> str:
         drift_list = ", ".join(tool.get("drift") or [])
         lines.append(f"## {name}  [{primary}]")
         lines.append(f"  drift: {drift_list}")
+        if tool.get("path_policy") == "generation-private":
+            lines.append("  path policy:   generation-private (not published on PATH)")
         chain = tool.get("chain") or {}
         src = tool.get("source") or {}
         # Source↔install drift is a maintainer question. A plain install has no
@@ -1514,10 +1696,12 @@ def render_receipt_text(receipt: dict[str, Any]) -> str:
                 f"gen={_fmt_link(index.get('generation') or index.get('bundle_id'))}"
             )
         for rel in tool.get("related") or []:
+            policy = rel.get("path_policy")
+            policy_bit = f" path_policy={policy}" if policy else ""
             lines.append(
                 f"  related:       {rel.get('name')} "
                 f"on_path={rel.get('on_path')} "
-                f"drift={','.join(rel.get('drift') or [])}"
+                f"drift={','.join(rel.get('drift') or [])}{policy_bit}"
             )
         lines.append("")
     summary = receipt.get("summary") or {}

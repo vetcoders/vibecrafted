@@ -786,3 +786,219 @@ def test_receipt_text_keeps_full_drift_detail_for_a_real_checkout():
     assert "checkout SHA:" in text
     assert "upstream:" in text
     assert "installed-only" not in text
+
+
+_PACK_SHA = "e434f608"
+_CLEAN_PACK_VERSION = f"vibecrafted 4.3.1+g{_PACK_SHA}"
+
+
+def _pack_marker_root(tmp_path: Path) -> Path:
+    root = tmp_path / "pack"
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts" / "vetcoders_install.py").write_text(
+        "# install\n", encoding="utf-8"
+    )
+    cli = root / "vibecrafted-core" / "vibecrafted_core"
+    cli.mkdir(parents=True)
+    (cli / "cli.py").write_text("# cli\n", encoding="utf-8")
+    cargo = root / "vibecrafted-server" / "control-core"
+    cargo.mkdir(parents=True)
+    (cargo / "Cargo.toml").write_text(
+        '[package]\nname = "scaffold-doctor"\n', encoding="utf-8"
+    )
+    return root
+
+
+def _isolate_pack_discovery(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
+    monkeypatch.setenv("VIBECRAFTED_SOURCE", str(root))
+    for key in (
+        "VIBECRAFTED_ROOT",
+        "VIBECRAFTED_FLEET_ROOT",
+        "VC_FLEET_ROOT",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(rr, "_default_candidate_roots", lambda _name: [])
+    monkeypatch.setattr(rr, "_vibecrafted_package_repo", lambda: None)
+    monkeypatch.setattr(rr, "_vibecrafted_tools_path_hints", list)
+
+
+def _write_clean_pack_provenance(root: Path) -> None:
+    payload = {
+        "schema": "io.vetcoders.vibecrafted.runtime-pack-provenance.v1",
+        "version": "4.3.1+ge434f608",
+        "carrier_basename": "VibecraftedRuntime-4.3.1+ge434f608.tar.gz",
+    }
+    (root / "runtime-pack-provenance.json").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+
+
+def _inspect_vibecrafted_pack(
+    monkeypatch: pytest.MonkeyPatch,
+    root: Path,
+    binary: Path,
+    *,
+    version: str = _CLEAN_PACK_VERSION,
+) -> dict:
+    _isolate_pack_discovery(monkeypatch, root)
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(
+        rr,
+        "which_binary",
+        lambda name: str(binary) if name == "vibecrafted" else None,
+    )
+    monkeypatch.setattr(rr, "run_version", lambda _path: version)
+    spec = next(item for item in rr.fleet_tool_specs() if item.name == "vibecrafted")
+    return rr.inspect_tool(spec)
+
+
+def test_pack_without_git_does_not_claim_dirty_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _pack_marker_root(tmp_path)
+    binary = tmp_path / "outside" / "vibecrafted"
+    tool = _inspect_vibecrafted_pack(monkeypatch, root, binary)
+
+    dirty = tool["installed"]["dirty_build"]
+    assert isinstance(dirty, dict)
+    assert dirty["value"] == "unknown"
+    assert "no .git" in dirty["reason"]
+    assert rr.DRIFT_DIRTY_BUILD not in tool["drift"]
+    assert tool["primary_drift"] != rr.DRIFT_DIRTY_BUILD
+
+
+def test_pack_provenance_clean_build_is_not_dirty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _pack_marker_root(tmp_path)
+    _write_clean_pack_provenance(root)
+    binary = tmp_path / "outside" / "vibecrafted"
+    tool = _inspect_vibecrafted_pack(monkeypatch, root, binary)
+
+    assert tool["installed"]["dirty_build"] is False
+    assert tool["installed"]["dirty_build_reason"] == (
+        "pack provenance reports a clean build"
+    )
+    assert rr.DRIFT_DIRTY_BUILD not in tool["drift"]
+
+
+def test_product_manifest_clean_overrides_missing_pack_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _pack_marker_root(tmp_path)
+    manifest = root / "manifests"
+    manifest.mkdir()
+    (manifest / "product-manifest.json").write_text(
+        json.dumps({"dirty": False}), encoding="utf-8"
+    )
+    binary = tmp_path / "outside" / "vibecrafted"
+    tool = _inspect_vibecrafted_pack(monkeypatch, root, binary)
+
+    assert tool["installed"]["dirty_build"] is False
+    assert "product manifest" in tool["installed"]["dirty_build_reason"]
+    assert rr.DRIFT_DIRTY_BUILD not in tool["drift"]
+
+
+def test_explicit_dirty_version_stays_dirty_without_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _pack_marker_root(tmp_path)
+    _write_clean_pack_provenance(root)
+    binary = tmp_path / "outside" / "vibecrafted"
+    tool = _inspect_vibecrafted_pack(
+        monkeypatch,
+        root,
+        binary,
+        version="vibecrafted 4.3.1+ge434f608.dirty",
+    )
+
+    assert tool["installed"]["dirty_build"] is True
+    assert tool["primary_drift"] == rr.DRIFT_DIRTY_BUILD
+
+
+def test_git_root_rejects_unknown_sha_even_when_pack_says_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _pack_marker_root(tmp_path)
+    (root / ".git").mkdir()
+    _write_clean_pack_provenance(root)
+    binary = tmp_path / "outside" / "vibecrafted"
+    tool = _inspect_vibecrafted_pack(monkeypatch, root, binary)
+
+    assert tool["installed"]["dirty_build"] is True
+    assert "not a commit in source" in tool["installed"]["dirty_build_reason"]
+    assert tool["primary_drift"] == rr.DRIFT_DIRTY_BUILD
+
+
+def test_scaffold_doctor_absent_from_path_is_not_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _pack_marker_root(tmp_path)
+    _isolate_pack_discovery(monkeypatch, root)
+    monkeypatch.setattr(rr, "which_binary", lambda _name: None)
+    spec = next(
+        item for item in rr.fleet_tool_specs() if item.name == "scaffold-doctor"
+    )
+    tool = rr.inspect_tool(spec)
+    text = rr.render_receipt_text(rr.build_receipt([spec]))
+
+    assert tool["primary_drift"] == rr.DRIFT_CLEAN
+    assert rr.DRIFT_NOT_ON_PATH not in tool["drift"]
+    assert tool["path_policy"] == "generation-private"
+    assert tool["on_path"] is False
+    assert "generation-private" in tool["installed"]["path"]["reason"]
+    assert "path policy:   generation-private (not published on PATH)" in text
+
+
+def test_vibecrafted_related_scaffold_doctor_is_generation_private(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _pack_marker_root(tmp_path)
+    binary = tmp_path / "outside" / "vibecrafted"
+    tool = _inspect_vibecrafted_pack(monkeypatch, root, binary)
+    [related] = tool["related"]
+
+    assert related["name"] == "scaffold-doctor"
+    assert related["on_path"] is False
+    assert related["drift"] == [rr.DRIFT_CLEAN]
+    assert related["path_policy"] == "generation-private"
+    assert related["path"]["value"] == "unknown"
+    assert "generation-private" in related["path"]["reason"]
+
+
+def test_scaffold_doctor_on_path_is_inspected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for key in (
+        "VIBECRAFTED_SOURCE",
+        "VIBECRAFTED_ROOT",
+        "VIBECRAFTED_FLEET_ROOT",
+        "VC_FLEET_ROOT",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(rr, "_default_candidate_roots", lambda _name: [])
+    monkeypatch.setattr(rr, "_vibecrafted_package_repo", lambda: None)
+    monkeypatch.setattr(rr, "_vibecrafted_tools_path_hints", list)
+    binary = tmp_path / "bin" / "scaffold-doctor"
+    binary.parent.mkdir()
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(
+        rr,
+        "which_binary",
+        lambda name: str(binary) if name == "scaffold-doctor" else None,
+    )
+    monkeypatch.setattr(
+        rr, "run_version", lambda _path: "scaffold-doctor 4.3.1+ge434f608"
+    )
+    spec = next(
+        item for item in rr.fleet_tool_specs() if item.name == "scaffold-doctor"
+    )
+    tool = rr.inspect_tool(spec)
+
+    assert tool["on_path"] is True
+    assert tool["installed"]["path"] == str(binary)
+    assert tool["installed"]["sha"] == _PACK_SHA
+    assert tool["installed"]["dirty_build"] is False
+    assert rr.DRIFT_NOT_ON_PATH not in tool["drift"]
+    assert tool["path_policy"] == "generation-private"
