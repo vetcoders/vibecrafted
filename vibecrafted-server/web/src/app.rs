@@ -3834,6 +3834,7 @@ mod settings_config {
         std::fs::create_dir_all(parent)
             .map_err(|err| format!("cannot create config directory: {err}"))?;
 
+        #[cfg(unix)]
         let mut mode = 0o600;
         if std::fs::symlink_metadata(path).is_ok() {
             let meta = std::fs::symlink_metadata(path)

@@ -138,6 +138,9 @@ if (-not $serverExe -and (Get-Command cargo -ErrorAction SilentlyContinue)) {
 if ($serverExe) {
     Copy-Item $serverExe (Join-Path $payload "bin\vc-server.exe")
 }
+else {
+    Die "vc-server.exe is mandatory on Windows; cargo leptos/ssr build produced no binary"
+}
 
 $controlCoreToml = Join-Path $repoRoot "vibecrafted-server\control-core\Cargo.toml"
 Install-CargoBin $controlCoreToml "scaffold-doctor" "scaffold-doctor" | Out-Null

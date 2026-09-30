@@ -24,8 +24,6 @@ pub mod api {
     use axum::routing::post;
     use serde_json::{Map, Value, json};
 
-    use std::os::unix::fs::OpenOptionsExt;
-
     const ENVELOPE_SPEC: &str = "fleet.envelope/0.1";
     const MAX_BODY: usize = 64 * 1024;
     const CLI_TIMEOUT: Duration = Duration::from_secs(20);
@@ -866,12 +864,20 @@ pub mod api {
             let nonce = NEXT.fetch_add(1, Ordering::Relaxed);
             let path =
                 std::env::temp_dir().join(format!("vc-bus-{}-{nonce}.json", std::process::id()));
+            // Body stays off argv via a tempfile. Unix keeps mode 0600; Windows
+            // uses the same path-based create_new write without POSIX mode bits
+            // (temp dir is already per-user; no ACL identity pretence).
             let mut file = OpenOptions::new()
                 .create_new(true)
                 .write(true)
-                .mode(0o600)
                 .open(&path)
                 .map_err(|_| Fail::code(StatusCode::BAD_GATEWAY, "message_file_create"))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                file.set_permissions(fs::Permissions::from_mode(0o600))
+                    .map_err(|_| Fail::code(StatusCode::BAD_GATEWAY, "message_file_create"))?;
+            }
             file.write_all(body)
                 .map_err(|_| Fail::code(StatusCode::BAD_GATEWAY, "message_file_create"))?;
             Ok(Self { path })
