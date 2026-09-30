@@ -98,13 +98,6 @@ def write_state(path: Path, fields: dict[str, str], prompt: str) -> None:
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
-def update_field(state: LoopState, key: str, value: str) -> None:
-    """Set one field on the loop state and rewrite the state file."""
-    fields = dict(state.fields)
-    fields[key] = value
-    write_state(state.path, fields, state.prompt)
-
-
 def resolve_state_file(raw: str = "") -> Path:
     """Resolve the loop state file path: explicit arg, then env var, then default."""
     if raw:

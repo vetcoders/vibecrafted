@@ -547,21 +547,6 @@ def _is_replaced_snapshot_projection(payload: Mapping[str, Any]) -> bool:
     }
 
 
-def default_settlement_history_path() -> Path:
-    """Return the canonical on-disk path for the settlement history projection."""
-    return vibecrafted_home() / "control_plane" / "settlement_history.json"
-
-
-def default_delivery_outbox_path() -> Path:
-    """Return the canonical on-disk path for the pending vc-frame delivery outbox."""
-    return vibecrafted_home() / "control_plane" / "settlement_history_delivery.json"
-
-
-def default_generation_path() -> Path:
-    """Return the canonical on-disk path for the projection generation marker."""
-    return vibecrafted_home() / "control_plane" / "settlement_history_generation.json"
-
-
 def _read_json(path: Path) -> dict[str, Any]:
     """Read a JSON object file, returning {} if missing; raise on invalid content."""
     try:
@@ -1247,8 +1232,5 @@ __all__ = [
     "SettlementHistoryError",
     "SettlementHistoryPublisher",
     "SettlementHistorySnapshot",
-    "default_delivery_outbox_path",
-    "default_generation_path",
-    "default_settlement_history_path",
     "reconcile_settlement_history",
 ]

@@ -662,82 +662,6 @@ def render_settlements_inspect_text(payload: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def settlements_cli_main(argv: Sequence[str] | None = None) -> int:
-    """Argparse entry for ``vibecrafted settlements``."""
-
-    import argparse
-    import sys
-
-    parser = argparse.ArgumentParser(
-        prog="vibecrafted settlements",
-        description=(
-            "Read-only settlement ledger query (summary / list / inspect). "
-            "Does not mutate history or invent f."
-        ),
-    )
-    sub = parser.add_subparsers(dest="settlements_action", required=True)
-
-    summary = sub.add_parser("summary", help="durable f/x/n lower-bound + inventory")
-    summary.add_argument("--json", action="store_true")
-
-    listing = sub.add_parser("list", help="list or group latest-by-run settlements")
-    listing.add_argument(
-        "--bucket",
-        choices=sorted(_TUI_BUCKETS),
-        help="filter to TUI bucket f, x, or n",
-    )
-    listing.add_argument(
-        "--revalidatable",
-        action="store_true",
-        help="only runs with report+transcript still on disk",
-    )
-    listing.add_argument(
-        "--group",
-        default="",
-        help="comma-separated fields: agent,skill,reason,root,state,verdict",
-    )
-    listing.add_argument("--limit", type=int, default=None)
-    listing.add_argument("--json", action="store_true")
-
-    inspect_p = sub.add_parser("inspect", help="inspect one run_id")
-    inspect_p.add_argument("run_id")
-    inspect_p.add_argument("--json", action="store_true")
-
-    args = parser.parse_args(list(argv or []))
-    try:
-        if args.settlements_action == "summary":
-            payload = settlements_summary()
-            if args.json:
-                print(json.dumps(payload, ensure_ascii=False, indent=2))
-            else:
-                print(render_settlements_summary_text(payload))
-            return 0
-        if args.settlements_action == "list":
-            payload = list_settlements(
-                bucket=args.bucket,
-                revalidatable=bool(args.revalidatable),
-                group=args.group or None,
-                limit=args.limit,
-            )
-            if args.json:
-                print(json.dumps(payload, ensure_ascii=False, indent=2))
-            else:
-                print(render_settlements_list_text(payload))
-            return 0
-        if args.settlements_action == "inspect":
-            payload = inspect_settlement(args.run_id)
-            if args.json:
-                print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
-            else:
-                print(render_settlements_inspect_text(payload))
-            return 0
-    except SettlementsQueryError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-    parser.print_help()
-    return 2
-
-
 __all__ = [
     "SETTLEMENTS_QUERY_SCHEMA",
     "SettlementsQueryError",
@@ -746,6 +670,5 @@ __all__ = [
     "render_settlements_inspect_text",
     "render_settlements_list_text",
     "render_settlements_summary_text",
-    "settlements_cli_main",
     "settlements_summary",
 ]
