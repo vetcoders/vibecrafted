@@ -235,7 +235,11 @@ Write-Host "  PowerShell version: $psVersion"
 
 $delegate = Join-Path $PSScriptRoot "scripts\install-runtime-pack.ps1"
 $hasPack = -not [string]::IsNullOrWhiteSpace($Pack)
-if (-not $hasPack) {
+# Bare -Uninstall must use the installed generation (LOCALAPPDATA projection).
+# Auto-binding a leftover dist/*.tar.gz forces checksum+signature verify and
+# breaks CI cold-install: install uses the rehearsal pubkey, uninstall would
+# fall back to vibecrafted-signing-v1.pub against the same CI-signed pack.
+if (-not $hasPack -and -not $Uninstall) {
     $dist = Join-Path $PSScriptRoot "dist"
     if (Test-Path -LiteralPath $dist) {
         $found = @(Get-ChildItem -LiteralPath $dist -Filter "Vibecrafted_RuntimePack_*-win32-x64.tar.gz" -File)

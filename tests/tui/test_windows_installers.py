@@ -142,6 +142,19 @@ def test_windows_installer_upgrade_and_uninstall_are_explicit() -> None:
     assert 'Return="ignore"' not in product
 
 
+def test_install_ps1_bare_uninstall_skips_dist_autodiscovery() -> None:
+    """Bare ``-Uninstall`` must not bind leftover ``dist/*.tar.gz``.
+
+    CI cold-install leaves the rehearsal-signed pack in ``dist/``. Auto-binding
+    it on uninstall would re-verify with ``vibecrafted-signing-v1.pub`` and fail
+    instead of removing the installed LOCALAPPDATA generation.
+    """
+    entry = (REPO_ROOT / "install.ps1").read_text(encoding="utf-8")
+    assert "if (-not $hasPack -and -not $Uninstall)" in entry
+    assert "Bare -Uninstall must use the installed generation" in entry
+    assert 'Filter "Vibecrafted_RuntimePack_*-win32-x64.tar.gz"' in entry
+
+
 def test_windows_installer_delegates_to_install_runtime_pack() -> None:
     product = PRODUCT.read_text(encoding="utf-8")
     build = BUILD_SCRIPT.read_text(encoding="utf-8")
