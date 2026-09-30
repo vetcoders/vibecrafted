@@ -12729,12 +12729,22 @@ def _runtime_generation_contract_findings() -> list[DoctorFinding]:
         runtime_wrapper_target = _runtime_pack_launcher_target(launcher, current)
         wrapper_matches = False
         if runtime_wrapper_target is not None:
-            try:
-                wrapper_matches = _capture_runtime_bound_file(
-                    runtime_wrapper_target
-                ) == _capture_runtime_bound_file(expected_launcher)
-            except OSError:
-                wrapper_matches = False
+            # Windows .cmd wrappers pin VIBECRAFTED_RUNTIME_ROOT to the generation
+            # root (see _runtime_pack_launcher_target); that root is not a regular
+            # file, so content compare cannot apply. Generation identity is the
+            # wrap proof. POSIX exec wrappers still compare file bytes.
+            if (
+                runtime_wrapper_target == generation
+                or runtime_wrapper_target == expected_launcher
+            ):
+                wrapper_matches = True
+            else:
+                try:
+                    wrapper_matches = _capture_runtime_bound_file(
+                        runtime_wrapper_target
+                    ) == _capture_runtime_bound_file(expected_launcher)
+                except OSError:
+                    wrapper_matches = False
         if launcher_target != expected_launcher and not wrapper_matches:
             errors.append(
                 "canonical vibecrafted launcher neither resolves to nor wraps the "

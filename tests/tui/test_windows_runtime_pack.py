@@ -937,6 +937,73 @@ def test_runtime_pack_launcher_target_recognizes_windows_cmd(
     )
 
 
+def test_runtime_generation_doctor_accepts_windows_cmd_wrap(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression: .cmd pins VIBECRAFTED_RUNTIME_ROOT to the generation root.
+
+    That root is not a regular file, so content-compare against bin/vibecrafted
+    must not be the wrap proof — generation identity is.
+    """
+    profile = tmp_path / "Users" / "operator"
+    local = profile / "AppData" / "Local"
+    local.mkdir(parents=True)
+    monkeypatch.setenv("USERPROFILE", str(profile))
+    monkeypatch.setenv("HOME", str(profile))
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    for name in (
+        "VIBECRAFTED_HOME",
+        "VIBECRAFTED_RUNTIME_HOME",
+        "VIBECRAFTED_LAUNCHER_BIN",
+        "VIBECRAFTED_TOOLS_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CONFIG_HOME",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    runtime = local / "Vibecrafted"
+    generation = runtime / "releases" / "4.3.1"
+    entrypoint = generation / "bin" / "vibecrafted"
+    entrypoint.parent.mkdir(parents=True)
+    entrypoint.write_text("#!/usr/bin/env python\nprint('ok')\n", encoding="utf-8")
+    python = generation / "bin" / "python.exe"
+    python.write_bytes(b"MZ")
+
+    current = runtime / "tools" / "vibecrafted-current"
+    current.parent.mkdir(parents=True)
+    completed = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(current), str(generation.resolve())],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        pytest.skip("cannot create directory junction in this environment")
+
+    launcher_dir = runtime / "bin"
+    launcher_dir.mkdir(parents=True)
+    (launcher_dir / "vibecrafted.cmd").write_text(
+        installer._runtime_cmd_launcher_body(
+            generation=generation.resolve(),
+            config_home=local.parent / "Roaming",
+            crafted_home=runtime / "home",
+            runtime_home=runtime,
+            frame_config=local.parent / "Roaming" / "Vibecrafted" / "vc-frame",
+            executable=entrypoint.resolve(),
+        ),
+        encoding="utf-8",
+        newline="\r\n",
+    )
+
+    monkeypatch.setattr(
+        installer, "_runtime_generation_payload_errors", lambda _generation: []
+    )
+
+    [finding] = installer._runtime_generation_contract_findings()
+    assert finding.level == "ok", finding.message
+    assert "manifest-bound" in finding.message
+
+
 def test_product_config_home_ignores_xdg_on_windows(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
