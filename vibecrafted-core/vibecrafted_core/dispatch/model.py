@@ -76,12 +76,10 @@ class Policy:
     allow_concurrency: bool = False
     require_commit: bool = False
     allow_idempotent_existing: bool = True
-    # A failed `critical = false` dependency does not stop its dependents by
-    # default: the plan declared that cut expendable, so the wave stays
-    # fail-open and the dependent receives the failure in its baton instead
-    # (field incident 2026-09-17: `stopped because dependencies failed`
-    # cascaded from a non-critical straggler). "stop" restores the old fence.
-    on_noncritical_dep_fail: str = "continue"
+    # An unverified non-critical contract fences all queued cuts by default.
+    # Plans that explicitly declare an expendable cut may opt into "continue";
+    # its failure remains visible in the downstream baton.
+    on_noncritical_dep_fail: str = "stop"
 
 
 @dataclass(frozen=True)

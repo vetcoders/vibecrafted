@@ -493,7 +493,7 @@ class DispatchSupervisor:
                     }
                     completed_bad = set(verdicts) - completed_ok
                     # A failed `critical = false` cut was declared expendable
-                    # by the plan: with the (default) fail-open policy it
+                    # by the plan: with an explicit fail-open policy it
                     # resolves its dependents' edges instead of stopping them.
                     # The dependent still sees the failure in its baton.
                     by_id = {cut.id: cut for cut in self.dispatch.cuts}
@@ -611,6 +611,16 @@ class DispatchSupervisor:
                                 self._journal(
                                     f"[{cut.id}] critical cut not verified ({verdict.state}):"
                                     " breaking the dispatch line"
+                                )
+                            elif (
+                                not cut.critical
+                                and not verdict.ok
+                                and self.policy.on_noncritical_dep_fail == "stop"
+                            ):
+                                line_broken = True
+                                self._journal(
+                                    f"[{cut.id}] contract not verified ({verdict.state}):"
+                                    " no next cut may start; breaking the dispatch line"
                                 )
                         made_progress = True
                     if not made_progress and pending:

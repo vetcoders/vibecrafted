@@ -293,6 +293,7 @@ def test_failed_noncritical_dependency_does_not_stop_dependents(
             tmp_path / "norepo",
             _cut_toml("a", verify_run="echo bad", expect="ok")
             + _cut_toml("b", depends_on=("a",)),
+            policy='on_noncritical_dep_fail = "continue"',
         )
     )
     cells = ScriptCells(reports)
@@ -329,7 +330,8 @@ def test_noncritical_dep_fail_stop_policy_restores_the_fence(
     )
 
     assert result.states["a"] == STATE_FAILED
-    assert result.states["b"] == STATE_FAILED
+    assert result.states["b"] == "[ ]"
+    assert result.line_broken
     assert ("b", "initial") not in cells.launches
 
 
@@ -379,7 +381,11 @@ def test_baseline_falls_back_to_plan_head_when_every_dep_failed_open(
     repo = tmp_path / "repo"
     head = _seed_repo(repo)
     dispatch = parse_dispatch(
-        _dispatch_text(repo, _cut_toml("a") + _cut_toml("b", depends_on=("a",)))
+        _dispatch_text(
+            repo,
+            _cut_toml("a") + _cut_toml("b", depends_on=("a",)),
+            policy='on_noncritical_dep_fail = "continue"',
+        )
     )
     supervisor = DispatchSupervisor(
         dispatch,
