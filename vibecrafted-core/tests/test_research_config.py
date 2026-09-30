@@ -137,3 +137,30 @@ def test_research_roster_matches_the_dispatchable_fleet() -> None:
     from vibecrafted_core.research_config import SUPPORTED_RESEARCH_AGENTS
 
     assert set(SUPPORTED_RESEARCH_AGENTS) == AGENTS - {"swarm"}
+
+
+def test_every_agent_roster_copy_agrees() -> None:
+    """Four independent roster copies exist; each has drifted alone at least
+    once (deck refused `swarm` its own banner printed; research dropped kimi).
+    One truth: cli.AGENTS. The deck's shell array is parsed from the owner
+    file, so a shell-side edit cannot drift silently either."""
+    import re
+
+    from vibecrafted_core.cli import AGENTS
+    from vibecrafted_core.research_config import SUPPORTED_RESEARCH_AGENTS
+    from vibecrafted_core.workflow import SUPPORTED_AGENTS
+
+    assert SUPPORTED_AGENTS == AGENTS
+
+    deck = (
+        Path(__file__).resolve().parents[1]
+        / "vibecrafted_core"
+        / "deck"
+        / "vibecrafted"
+    ).read_text(encoding="utf-8")
+    match = re.search(r"^_agents=\(([^)]*)\)", deck, re.MULTILINE)
+    assert match, "deck lost its _agents roster array"
+    deck_agents = set(match.group(1).split())
+    assert deck_agents == AGENTS - {"swarm"}
+
+    assert set(SUPPORTED_RESEARCH_AGENTS) == deck_agents
