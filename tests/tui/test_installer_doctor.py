@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import plistlib
 import shutil
 import struct
@@ -1015,6 +1016,74 @@ def test_runtime_semantic_verifier_uses_candidate_interpreter(
     assert observed[0] == str(candidate_python)
     assert observed[1:4] == ["-I", "-S", "-B"]
     assert str(Path(sys.executable)) not in observed[:1]
+
+
+def test_windows_embed_binds_python_site_detects_pth_entries(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(parents=True)
+    python_exe = bin_dir / "python.exe"
+    python_exe.write_bytes(b"MZ")
+
+    assert installer._windows_embed_binds_python_site(python_exe) is False
+
+    (bin_dir / "python312._pth").write_text(
+        "python312.zip\n.\n# comment\nimport site\n",
+        encoding="utf-8",
+    )
+    assert installer._windows_embed_binds_python_site(python_exe) is False
+
+    (bin_dir / "python312._pth").write_text(
+        "python312.zip\n.\n..\\python-site\n..\\vibecrafted-core\nimport site\n",
+        encoding="utf-8",
+    )
+    assert installer._windows_embed_binds_python_site(python_exe) is True
+
+
+def test_hide_python_site_shim_drops_python_site_from_sys_path(
+    tmp_path: Path,
+) -> None:
+    site = tmp_path / "runtime" / "python-site"
+    site.mkdir(parents=True)
+    other = tmp_path / "runtime" / "vibecrafted-core"
+    other.mkdir(parents=True)
+    shim = tmp_path / "hide-python-site.py"
+    shim.write_text(installer._RUNTIME_VERIFIER_HIDE_PYTHON_SITE_SHIM, encoding="utf-8")
+    probe = tmp_path / "probe.py"
+    probe.write_text(
+        "import sys\n"
+        "from pathlib import Path\n"
+        f"site = Path({str(site.resolve())!r})\n"
+        f"other = Path({str(other.resolve())!r})\n"
+        "kept = [Path(p).resolve() for p in sys.path]\n"
+        "print('HAS_SITE=' + str(any(p == site for p in kept)))\n"
+        "print('HAS_OTHER=' + str(any(p == other for p in kept)))\n",
+        encoding="utf-8",
+    )
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"PYTHONHOME", "PYTHONPYCACHEPREFIX"}
+    }
+    env.update(
+        {
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            # No -I here: PYTHONPATH must seed sys.path so the shim has
+            # something to strip (embeddable ._pth is the production seed).
+            "PYTHONPATH": f"{site}{os.pathsep}{other}",
+        }
+    )
+    result = subprocess.run(
+        [sys.executable, "-S", "-B", str(shim), str(probe)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "HAS_SITE=False" in result.stdout
+    assert "HAS_OTHER=True" in result.stdout
 
 
 def test_runtime_verifier_python_falls_back_only_when_none_is_carried(

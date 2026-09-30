@@ -3553,6 +3553,33 @@ _RUNTIME_VERIFIER_E_HASH = 24
 _RUNTIME_VERIFIER_E_DEPENDENCY = 27
 _RUNTIME_VERIFIER_E_TRANSACTION = 28
 _RUNTIME_VERIFIER_E_PROOF = 33
+# Windows embeddable CPython binds ``..\python-site`` through ``python*._pth``.
+# ``-I``/``-S`` cannot hide those entries, so the schema-without-site negative
+# control must strip ``python-site`` from ``sys.path`` before importing the
+# candidate product contract (otherwise jsonschema stays importable and the
+# control collapses to VCPC021 on the runtime-generation document).
+_RUNTIME_VERIFIER_HIDE_PYTHON_SITE_SHIM = """\
+from __future__ import annotations
+
+import runpy
+import sys
+from pathlib import Path
+
+
+def _is_python_site(entry: str) -> bool:
+    try:
+        resolved = Path(entry).resolve()
+    except OSError:
+        resolved = Path(entry)
+    return "python-site" in {part.lower() for part in resolved.parts}
+
+
+sys.path[:] = [entry for entry in sys.path if not _is_python_site(entry)]
+if len(sys.argv) < 2:
+    raise SystemExit("hide-python-site shim requires a target script")
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+"""
 _RUNTIME_RELEASE_DMG_PATTERN = (
     r"^Vibecrafted_[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?-"
     r"[0-9]{8}-[0-9a-f]{8}\.dmg$"
@@ -9733,6 +9760,29 @@ def _write_runtime_verifier_snapshot(
         )
 
 
+def _windows_embed_binds_python_site(python_executable: Path) -> bool:
+    """True when an embeddable ``python*._pth`` permanently lists ``python-site``."""
+    parent = python_executable.parent
+    try:
+        entries = list(parent.glob("python*._pth"))
+    except OSError:
+        return False
+    for pth in entries:
+        try:
+            body = pth.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in body.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if stripped == "import site":
+                continue
+            if "python-site" in Path(stripped.replace("\\", "/")).parts:
+                return True
+    return False
+
+
 def _run_runtime_verifier_semantic_command(
     argv: Sequence[str],
     *,
@@ -10048,11 +10098,22 @@ def _validate_runtime_verifier_semantics(runtime_root: Path) -> None:
             context="runtime-generation unknown manifest key",
         )
 
+        schema_argv = [
+            str(product),
+            "schema",
+            str(snapshot / _RUNTIME_GENERATION_MANIFEST),
+        ]
+        if sys.platform == "win32" and _windows_embed_binds_python_site(
+            runtime_python
+        ):
+            # Embeddable ._pth keeps python-site on sys.path despite -I/-S.
+            shim = temporary / "hide-python-site.py"
+            shim.write_text(
+                _RUNTIME_VERIFIER_HIDE_PYTHON_SITE_SHIM, encoding="utf-8"
+            )
+            schema_argv = [str(shim), *schema_argv]
         _assert_runtime_verifier_semantic_failure(
-            run_candidate(
-                [str(product), "schema", str(snapshot / _RUNTIME_GENERATION_MANIFEST)],
-                cache=cache,
-            ),
+            run_candidate(schema_argv, cache=cache),
             expected_code=_RUNTIME_VERIFIER_E_DEPENDENCY,
             context="schema without site packages",
         )
