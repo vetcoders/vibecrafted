@@ -652,14 +652,6 @@ def extract_fairness_and_completeness_claims(
     }
 
 
-def recommend_verdict_from_inspect(inspect: Mapping[str, Any]) -> str:
-    """Read the recommended trust verdict out of an inspect() result, defaulting to block."""
-    verdict = str(inspect.get("recommended_verdict") or "block")
-    if verdict not in TRUST_VERDICTS:
-        return "block"
-    return verdict
-
-
 def _parse_journal_bytes(
     raw_journal: bytes,
     path: Path,

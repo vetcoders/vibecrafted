@@ -77,19 +77,3 @@ else:
         if cmd == F_SETFD:
             return arg
         raise OSError(errno.EINVAL, f"unsupported fcntl command on Windows: {cmd}")
-
-
-def current_uid() -> int | None:
-    """POSIX uid, or ``None`` on Windows where file ownership is SID-based."""
-    getter = getattr(os, "getuid", None)
-    if getter is None:
-        return None
-    return int(getter())
-
-
-def owned_by_current_user(info: os.stat_result) -> bool:
-    """True when ``info`` is owned by this process, or when Windows has no uid."""
-    uid = current_uid()
-    if uid is None:
-        return True
-    return int(getattr(info, "st_uid", -1)) == uid

@@ -422,18 +422,6 @@ def validate_report_file(
     return result
 
 
-def claim_bucket_hint(claim_status: str) -> str | None:
-    """Map agent claim to a soft drawer hint (never alone decisive)."""
-    status = (claim_status or "").strip().lower()
-    if status in CLAIM_COMPLETED:
-        return "completed"
-    if status in CLAIM_FAILED:
-        return "failed"
-    if status in CLAIM_BLOCKED or status in CLAIM_PARTIAL:
-        return "needs_attention"
-    return None
-
-
 def render_minimal_frontmatter(
     *,
     run_id: str,

@@ -20,11 +20,10 @@ Standalone quota monitor, token accounting engine, and low-latency statusline ru
 
 ## Szybka instalacja
 
-Rozpakuj i uruchom:
+Uruchom instalator z katalogu pakietu:
 
 ```bash
-tar -xzf kimi-monitor.tar.gz
-cd kimi-monitor
+cd vibecrafted-core/vibecrafted_core/runtime/telemetry/kimi-monitor
 ./install.sh
 ```
 

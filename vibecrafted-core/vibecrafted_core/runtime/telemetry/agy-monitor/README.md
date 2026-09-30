@@ -35,11 +35,10 @@ Monitor stanu, rozliczanie tokenów, estymacja kosztów (shadow pricing) oraz sz
 
 ## Szybka instalacja
 
-Rozpakuj i uruchom:
+Uruchom instalator z katalogu pakietu:
 
 ```bash
-tar -xzf agy-monitor-v1.0.0.tar.gz
-cd agy-monitor
+cd vibecrafted-core/vibecrafted_core/runtime/telemetry/agy-monitor
 ./install.sh
 ```
 
