@@ -318,7 +318,7 @@ def _parse_policy(value: Any, errors: list[str]) -> Policy:
         errors.append(
             f"policy.on_critical_fail: unsupported value {on_critical_fail!r}"
         )
-    on_noncritical_dep_fail = _string(raw.get("on_noncritical_dep_fail")) or "continue"
+    on_noncritical_dep_fail = _string(raw.get("on_noncritical_dep_fail")) or "stop"
     if on_noncritical_dep_fail not in NONCRITICAL_DEP_FAIL_POLICIES:
         errors.append(
             "policy.on_noncritical_dep_fail: unsupported value"

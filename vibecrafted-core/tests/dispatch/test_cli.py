@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
+import shlex
 import subprocess
 from pathlib import Path
 
+import pytest
 from vibecrafted_core import cli as root_cli
 from vibecrafted_core.dispatch import cli as dispatch_cli
+from vibecrafted_core.dispatch import supervisor as supervisor_module
+from vibecrafted_core.dispatch.supervisor import CellRun
 
 
 def _init_repo(path: Path) -> None:
@@ -108,3 +113,75 @@ def test_root_cli_dispatch_subcommand_routes_to_dispatch_cli(
 
     captured = capsys.readouterr()
     assert captured.out.strip() == "dispatch-doctor: ok"
+
+
+@pytest.mark.parametrize("command", ["echo red", "echo ok; exit 7", "echo ok"])
+def test_public_dispatch_contract_controls_next_worktree(
+    tmp_path: Path, capsys, monkeypatch, command: str
+) -> None:
+    dispatch_file, _, _ = _dispatch_file(tmp_path)
+    text = (
+        dispatch_file.read_text()
+        .replace(
+            "repair_rounds = 0",
+            "repair_rounds = 0\nawait = { poll_s = 0.02, timeout_min = 1 }",
+        )
+        .replace('run = "echo ok"', f'run = "{command}"')
+    )
+    dispatch_file.write_text(
+        text
+        + """
+[[cuts]]
+id = "c2"
+agent = "codex"
+workflow = "implement"
+prompt = "next cut"
+  [[cuts.verify]]
+  run = "echo ok"
+  expect = { contains = "ok" }
+"""
+    )
+    launches: list[str] = []
+
+    def stub_launcher_factory(*args, **kwargs):
+        def launch(cut, prompt, kind):
+            launches.append(cut.id)
+            report = Path(cut.artifact_path) / "stub-report.md"
+            report.parent.mkdir(parents=True, exist_ok=True)
+            process = subprocess.Popen(
+                ["bash", "-c", f"printf 'worker done' > {shlex.quote(str(report))}"],
+                cwd=cut.runtime_root,
+            )
+            return CellRun(
+                cut_id=cut.id,
+                kind=kind,
+                accepted=True,
+                run_id=f"stub-{cut.id}",
+                report_path=str(report),
+                proc=process,
+            )
+
+        return launch
+
+    # Only the provider is substituted: CLI validation, isolated worktree
+    # admission, process await, verifiers, scheduler, receipts and exit are real.
+    monkeypatch.setattr(
+        supervisor_module, "workflow_cell_launcher", stub_launcher_factory
+    )
+    expected_green = command == "echo ok"
+    assert root_cli.main(["dispatch", str(dispatch_file), "--json"]) == (
+        0 if expected_green else 1
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["line_broken"] is not expected_green
+    assert launches == (["c1", "c2"] if expected_green else ["c1"])
+    home = Path(os.environ["VIBECRAFTED_HOME"])
+    receipts_path = next(
+        (home / "control_plane" / "dispatches").glob("*/receipts.json")
+    )
+    receipts = json.loads(receipts_path.read_text())
+    assert receipts["cuts"]["c2"]["state"] == (
+        "settled" if expected_green else "stopped"
+    )
+    if not expected_green:
+        assert not list((home / "worktrees" / "vetcoders" / "fixture").glob("*/c2"))

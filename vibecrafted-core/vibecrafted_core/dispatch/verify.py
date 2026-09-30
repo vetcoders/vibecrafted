@@ -169,6 +169,15 @@ def _run_verifier(
     output = proc.stdout + proc.stderr
     excerpt = _excerpt(output)
     failures: list[str] = []
+    # Matching text cannot turn a crashed gate green. Negative-path probes
+    # may explicitly declare a different expected exit code.
+    if proc.returncode != 0 and not any(
+        matcher.kind == "exit_code" for matcher in verify.matchers
+    ):
+        failures.append(
+            f"{cut_id} verify[{index}]: expected exit_code=0"
+            f" (exit_code={proc.returncode}); evidence: {_failure_evidence(excerpt)}"
+        )
     for matcher in verify.matchers:
         if matcher.check(output, exit_code=proc.returncode):
             continue

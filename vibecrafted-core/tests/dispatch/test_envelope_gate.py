@@ -416,6 +416,6 @@ def test_blocked_state_is_recorded_in_tracker_not_swallowed(
     journal = supervisor.journal_path.read_text(encoding="utf-8")
     assert "blocked before spawn" in journal
     # The baton carries the blocked verdict as a first-class state, and the
-    # dispatch line is not torn down by an exception.
+    # dispatch line is fenced by the unverified contract, not an exception.
     assert result.baton.states[0].state == STATE_FAILED
-    assert result.line_broken is False
+    assert result.line_broken is True

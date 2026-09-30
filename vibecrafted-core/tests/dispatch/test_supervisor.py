@@ -29,6 +29,119 @@ from vibecrafted_core.dispatch.supervisor import (
 FAST_AWAIT = "await = { poll_s = 0.02, timeout_min = 1.0 }"
 
 
+@pytest.mark.parametrize("depends_on", [False, True])
+@pytest.mark.parametrize("command", ["echo red", "echo green; exit 7"])
+def test_unverified_contract_blocks_next_cut_by_default(
+    tmp_path: Path, depends_on: bool, command: str
+) -> None:
+    dependency = 'depends_on = ["first"]' if depends_on else ""
+    dispatch, reports_dir, artifacts_dir = build_dispatch(
+        tmp_path,
+        f'''
+[[cuts]]
+id = "first"
+agent = "codex"
+workflow = "implement"
+prompt = "s02-017 first contract"
+  [[cuts.verify]]
+  run = "{command}"
+  expect = {{ contains = "green" }}
+[[cuts]]
+id = "next"
+agent = "codex"
+workflow = "implement"
+prompt = "must not start without first contract"
+{dependency}
+  [[cuts.verify]]
+  run = "echo green"
+  expect = {{ contains = "green" }}
+''',
+    )
+    launcher = FakeCells(reports_dir=reports_dir)
+    marker = dispatch.meta.repo + "/next-started"
+    launcher.cells[("next", "initial")] = FakeCell(bash=f"touch {shlex.quote(marker)}")
+
+    supervisor = DispatchSupervisor(
+        dispatch, launcher=launcher, artifacts_dir=artifacts_dir
+    )
+    result = supervisor.run()
+
+    assert result.line_broken
+    assert result.states == {"first": STATE_FAILED, "next": STATE_PENDING}
+    assert launcher.launches == [("first", "initial")]
+    assert not Path(marker).exists()
+    assert supervisor._receipt_store.cut("next")["state"] == "stopped"
+
+
+def test_unknown_timeout_contract_blocks_next_cut(tmp_path: Path) -> None:
+    dispatch, reports_dir, artifacts_dir = build_dispatch(
+        tmp_path,
+        """
+[[cuts]]
+id = "slow"
+agent = "codex"
+workflow = "implement"
+prompt = "unknown contract"
+  [[cuts.verify]]
+  run = "echo ok"
+  expect = { contains = "ok" }
+[[cuts]]
+id = "next"
+agent = "codex"
+workflow = "implement"
+prompt = "must stay queued"
+  [[cuts.verify]]
+  run = "echo ok"
+  expect = { contains = "ok" }
+""",
+        policy='on_timeout = "continue"\nawait = { poll_s = 0.01, timeout_min = 0.001 }',
+    )
+    launcher = FakeCells(reports_dir=reports_dir)
+    launcher.cells[("slow", "initial")] = FakeCell(bash="sleep 1", write_report=False)
+
+    result = run_dispatch(dispatch, launcher=launcher, artifacts_dir=artifacts_dir)
+
+    assert result.line_broken
+    assert result.states == {"slow": STATE_UNKNOWN, "next": STATE_PENDING}
+    assert launcher.launches == [("slow", "initial")]
+
+
+def test_failed_parallel_contract_fences_queue_and_preserves_active_sibling(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "contract-failed"
+    cuts = "\n".join(
+        f'''
+[[cuts]]
+id = "{cut_id}"
+agent = "codex"
+workflow = "implement"
+prompt = "parallel contract"
+  [[cuts.verify]]
+  run = {json.dumps(f"touch {shlex.quote(str(marker))}; echo red" if cut_id == "bad" else "echo ok")}
+  expect = {{ contains = "ok" }}
+'''
+        for cut_id in ("bad", "active", "queued")
+    )
+    dispatch, reports_dir, artifacts_dir = build_dispatch(
+        tmp_path, cuts, policy="concurrency = 2\nallow_concurrency = true"
+    )
+    launcher = FakeCells(reports_dir=reports_dir)
+    launcher.cells[("active", "initial")] = FakeCell(
+        bash=f"while [ ! -f {shlex.quote(str(marker))} ]; do sleep 0.01; done; sleep 0.2"
+    )
+
+    result = run_dispatch(dispatch, launcher=launcher, artifacts_dir=artifacts_dir)
+
+    assert result.line_broken
+    assert result.states == {
+        "bad": STATE_FAILED,
+        "active": STATE_VERIFIED,
+        "queued": STATE_PENDING,
+    }
+    assert set(launcher.launches) == {("bad", "initial"), ("active", "initial")}
+
+
 @dataclass
 class FakeCell:
     """Echo-script work cell: bash side effects + a literal report body."""
@@ -1024,8 +1137,11 @@ prompt = "fails normally"
 
     result = run_dispatch(dispatch, launcher=launcher, artifacts_dir=artifacts_dir)
 
-    assert result.line_broken is False
+    assert result.line_broken is True
     assert result.states == {"ordinary-failure": STATE_FAILED}
+    assert "dispatch substrate failure" not in (artifacts_dir / "journal.md").read_text(
+        encoding="utf-8"
+    )
     assert marker.read_text(encoding="utf-8") == "dirty"
 
 
