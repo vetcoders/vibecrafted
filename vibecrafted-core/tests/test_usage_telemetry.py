@@ -222,6 +222,32 @@ def test_cost_estimated_covers_the_current_codex_model() -> None:
     assert payload["amount"] == round((1200 * 2.0 + 200 * 0.1 + 300 * 10.0) / 1e6, 6)
 
 
+def test_cost_estimated_covers_copilot_and_dated_openai_stamps() -> None:
+    """Two real cost-unknown runs from 2026-09-30: the copilot workflow ran on
+    gpt-6-sol (40M tokens unpriced) and the research synthesizer settled on
+    gpt-4.1-2025-04-14 — OpenAI dates stamps with dashes, which the version
+    suffix pattern did not cover."""
+    cost = telemetry.resolve_cost(
+        "gpt-6-sol", _known_usage(), reported_amount=None, reported_source=None
+    )
+    payload = cost.as_dict()
+    assert payload["source"] == "estimated:openai-api-2026-09-30"
+    assert payload["amount"] == round((1200 * 2.0 + 200 * 0.2 + 300 * 10.0) / 1e6, 6)
+
+    dated = telemetry.resolve_cost(
+        "gpt-4.1-2025-04-14",
+        _known_usage(),
+        reported_amount=None,
+        reported_source=None,
+    )
+    assert dated.as_dict()["source"] == "estimated:openai-api-2026-09-30"
+    assert dated.as_dict()["amount"] == round(
+        (1200 * 2.0 + 200 * 0.5 + 300 * 8.0) / 1e6, 6
+    )
+    # gpt-6-sol must not swallow its 6.1 sibling or arbitrary suffixes.
+    assert telemetry.model_price("gpt-6-sol-extra") is None
+
+
 @pytest.mark.parametrize(
     "model,usage,reason",
     [

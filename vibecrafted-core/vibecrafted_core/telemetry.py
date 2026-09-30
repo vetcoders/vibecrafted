@@ -42,6 +42,13 @@ _PRICES: tuple[tuple[tuple[str, ...], ModelPrice], ...] = (
         ("gpt-6.1-sol", "gpt-6-1-sol"),
         ModelPrice(2.0, 0.1, 10.0, "openai-api-2026-09-30", 2.5),
     ),
+    # Verified 2026-09-30 (openrouter.ai/openai/gpt-6-sol, eesel, layer3labs):
+    # $2 in / $0.20 cached / $10 out, $2.50 cache write per 1M, standard tier;
+    # >272K-input long-context rate ($4/$15) not modeled, flat standard rate.
+    (("gpt-6-sol",), ModelPrice(2.0, 0.2, 10.0, "openai-api-2026-09-30", 2.5)),
+    # Verified 2026-09-30 (pricepertoken.com, finitizer): $2 in / $0.50 cached
+    # / $8 out per 1M. Covers dated stamps such as gpt-4.1-2025-04-14.
+    (("gpt-4.1", "gpt-4-1"), ModelPrice(2.0, 0.5, 8.0, "openai-api-2026-09-30")),
     # https://platform.claude.com/docs/en/about-claude/pricing
     # Cache creation estimate uses the standard 5-minute write rate.
     (
@@ -121,7 +128,7 @@ def model_price(model: str) -> ModelPrice | None:
             normalized == alias
             or re.fullmatch(
                 re.escape(alias)
-                + r"(?:-\d{8}|-build(?:-fast)?|-(?:low|medium|high|xhigh|max)(?:-fast)?|:cloud)",
+                + r"(?:-\d{8}|-\d{4}-\d{2}-\d{2}|-build(?:-fast)?|-(?:low|medium|high|xhigh|max)(?:-fast)?|:cloud)",
                 normalized,
             )
             for alias in aliases
