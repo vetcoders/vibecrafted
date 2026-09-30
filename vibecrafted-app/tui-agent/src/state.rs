@@ -324,6 +324,8 @@ pub fn is_actionable_kind(kind: RunKind, snapshot: &RunSnapshot, now: DateTime<U
     }
 }
 
+/// A stall stays an operator alert for two hours; past that, or when nothing
+/// can age it, it is history. An unprovable stall must not hold Live forever.
 fn stalled_is_archive(snapshot: &RunSnapshot, now: DateTime<Utc>) -> bool {
     let timestamp = snapshot
         .last_heartbeat
@@ -331,10 +333,7 @@ fn stalled_is_archive(snapshot: &RunSnapshot, now: DateTime<Utc>) -> bool {
         .and_then(parse_timestamp)
         .or_else(|| snapshot.updated_at.as_deref().and_then(parse_timestamp))
         .or_else(|| snapshot.started_at.as_deref().and_then(parse_timestamp));
-    match timestamp {
-        Some(ts) => now.signed_duration_since(ts).num_hours() >= 2,
-        None => false,
-    }
+    timestamp.is_none_or(|ts| now.signed_duration_since(ts).num_hours() >= 2)
 }
 
 pub fn render_runs(state: &ControlPlaneState) -> Vec<RenderedRun> {
@@ -419,6 +418,11 @@ pub fn classify_run(snapshot: &RunSnapshot, now: DateTime<Utc>) -> RunKind {
     if is_active_like(&state) {
         if is_stale(heartbeat, now) {
             return RunKind::Stalled;
+        }
+        // control-core probed no process and found nothing to age: the
+        // claim alone (a lock that only says status=running) is not a run.
+        if heartbeat.is_none() && canonical_health == Some("unknown") {
+            return RunKind::Unknown;
         }
         return RunKind::Active;
     }
@@ -1012,5 +1016,117 @@ mod tests {
         blank.updated_at = Some((now - chrono::Duration::minutes(2)).to_rfc3339());
         blank.last_heartbeat = blank.updated_at.clone();
         assert_eq!(super::classify_run(&blank, now), super::RunKind::Active);
+    }
+
+    fn canonical(state: &str, health: &str) -> super::RunSnapshot {
+        let mut extra = std::collections::HashMap::new();
+        extra.insert("health".to_string(), serde_json::Value::from(health));
+        super::RunSnapshot {
+            run_id: format!("{state}-{health}"),
+            session_id: None,
+            agent: None,
+            skill: None,
+            mode: None,
+            state: Some(state.into()),
+            status: None,
+            started_at: None,
+            updated_at: None,
+            last_heartbeat: None,
+            root: None,
+            operator_session: None,
+            latest_report: None,
+            latest_transcript: None,
+            last_error: None,
+            extra,
+        }
+    }
+
+    #[test]
+    fn stalled_run_without_a_fresh_heartbeat_is_history_not_live() {
+        let now = chrono::Utc::now();
+        // No heartbeat at all, but the run's own stamps are hours old.
+        let mut stalled = canonical("running", "stalled");
+        stalled.updated_at = Some((now - chrono::Duration::hours(3)).to_rfc3339());
+        let kind = super::classify_run(&stalled, now);
+        assert_eq!(kind, super::RunKind::Stalled);
+        assert!(!super::is_actionable_kind(kind, &stalled, now));
+
+        // Nothing to age at all: an unprovable stall cannot hold Live forever.
+        let ageless = canonical("running", "stalled");
+        let kind = super::classify_run(&ageless, now);
+        assert_eq!(kind, super::RunKind::Stalled);
+        assert!(!super::is_actionable_kind(kind, &ageless, now));
+
+        // A stall observed minutes ago is still an operator alert.
+        let mut recent = canonical("running", "stalled");
+        recent.last_heartbeat = Some((now - chrono::Duration::minutes(30)).to_rfc3339());
+        assert!(super::is_actionable_kind(
+            super::classify_run(&recent, now),
+            &recent,
+            now
+        ));
+    }
+
+    #[test]
+    fn running_claim_without_any_liveness_evidence_is_not_live() {
+        let now = chrono::Utc::now();
+        // control-core could neither probe a process nor age the claim.
+        let unproven = canonical("running", "unknown");
+        let kind = super::classify_run(&unproven, now);
+        assert_ne!(kind, super::RunKind::Active);
+        assert!(!super::is_actionable_kind(kind, &unproven, now));
+
+        // Probed live by control-core: live even without a timestamp.
+        let probed = canonical("running", "active");
+        assert_eq!(super::classify_run(&probed, now), super::RunKind::Active);
+    }
+
+    #[test]
+    fn stale_lock_left_on_disk_never_reaches_live() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("control_plane");
+        fs::create_dir_all(root.join("runs")).expect("runs");
+        let locks = dir.path().join("locks/vetcoders/vibecrafted");
+        fs::create_dir_all(&locks).expect("locks");
+        let now = chrono::Utc::now();
+        // Pre-contract lock: no started=, only its file age says April.
+        let legacy = locks.join("impl-legacy.lock");
+        fs::write(
+            &legacy,
+            "run_id=impl-legacy\nagent=codex\nskill=impl\nroot=/repo\nstatus=running\n",
+        )
+        .expect("legacy lock");
+        fs::File::options()
+            .write(true)
+            .open(&legacy)
+            .expect("open lock")
+            .set_modified(
+                std::time::SystemTime::now() - std::time::Duration::from_secs(150 * 86_400),
+            )
+            .expect("backdate lock");
+        fs::write(
+            locks.join("impl-fresh.lock"),
+            format!(
+                "run_id=impl-fresh\nagent=codex\nskill=impl\nroot=/repo\nstarted={}\nstatus=running\n",
+                now.format("%Y-%m-%dT%H:%M:%SZ")
+            ),
+        )
+        .expect("fresh lock");
+
+        let state = ControlPlaneState::load(&root).expect("state");
+        let rendered = super::render_runs(&state);
+        let live = |run_id: &str| {
+            rendered.iter().any(|run| {
+                run.snapshot.run_id == run_id
+                    && super::is_actionable_kind(run.kind, &run.snapshot, now)
+            })
+        };
+
+        assert!(
+            !live("impl-legacy"),
+            "an April lock is history, not a live run"
+        );
+        assert!(live("impl-fresh"), "a just-written lock is a fresh start");
+        assert_eq!(state.canonical_active_count(), 1);
     }
 }
