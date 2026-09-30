@@ -36,7 +36,7 @@ if [ ! -d "$$stable_root/vibecrafted-core" ]; then \
 fi
 endef
 
-.PHONY: help help-dev vibecrafted app dmg dmg-signed release-local notarize release runtime-pack release-prereqs portable publish-release release-rehearsal gui-install wizard wizard-dev check skills-check layouts-check test test-core test-skills test-install test-parity test-vc-frame test-iterm2-migrate test-memex test-aicx-sync test-hammerspoon test-keychain-session dispatch-test unified-product-contract-gate exact-release-contract-gate release-version-gate payload-hygiene install install-source install-auto install-all install-python-tools install-bundle-tools install-tools install-tools-held install-vendored-binaries install-app install-app-dev install-dev install-app-binaries install-hammerspoon skills helpers setup-dev dry-run doctor list update uninstall restore migrate migrate-dry init-hooks seed-commit-msg-hooks bundle bundle-check foundations foundations-check semgrep version version-show version-bump bump-patch bump-minor bump-major iterm-plugin iterm-plugin-refresh iterm-plugin-show iterm-plugin-uninstall iterm-plugin-migrate demo demo-full commit-safe test-race-protection skill-new server server-build build-server-release server-check server-test install-server install-server-payload install-server-service reconcile-server-service server-smoke
+.PHONY: help help-dev vibecrafted app dmg dmg-signed release-local notarize release runtime-pack release-prereqs portable publish-release release-rehearsal gui-install wizard wizard-dev check skills-check layouts-check test test-core test-skills test-install test-parity test-vc-frame test-iterm2-migrate test-memex test-aicx-sync test-hammerspoon test-keychain-session dispatch-test unified-product-contract-gate exact-release-contract-gate release-version-gate payload-hygiene install install-source install-auto install-all install-python-tools install-bundle-tools install-tools install-tools-held install-vendored-binaries install-app install-app-dev install-dev install-app-binaries install-hammerspoon skills helpers setup-dev dry-run doctor list update uninstall restore migrate migrate-dry init-hooks seed-commit-msg-hooks bundle bundle-check foundations foundations-check semgrep version version-show version-bump bump-patch bump-minor bump-major iterm-plugin iterm-plugin-refresh iterm-plugin-show iterm-plugin-uninstall iterm-plugin-migrate demo demo-full checkout-format-only commit-safe test-race-protection skill-new server server-build build-server-release server-check server-test install-server install-server-payload install-server-service reconcile-server-service server-smoke
 
 help:
 	@printf "\n"
@@ -69,7 +69,7 @@ help-dev:
 	@printf "  \033[1mserver\033[0m    server · server-build · server-check · server-test · server-smoke\n"
 	@printf "  \033[1mrelease\033[0m   app · install-app · dmg · dmg-signed · release-local · notarize · release · portable · publish-release · release-rehearsal\n"
 	@printf "  \033[1mversion\033[0m   version · version-show · version-bump · bump-patch · bump-minor · bump-major\n"
-	@printf "  \033[1mhooks\033[0m     init-hooks · seed-commit-msg-hooks · commit-safe\n"
+	@printf "  \033[1mhooks\033[0m     init-hooks · seed-commit-msg-hooks · checkout-format-only · commit-safe\n"
 	@printf "  \033[1mmisc\033[0m      doctor · list · update · uninstall · demo · demo-full · skill-new\n"
 	@printf "\n"
 	@printf "  \033[2minstall-all builds the Rust app/server binaries (voc, vc-admin, vc-server) as real files into ~/.local/bin.\033[0m\n"
@@ -831,6 +831,13 @@ seed-commit-msg-hooks:
 # alone from race-signal to informational notice (pre-commit hooks like
 # prettier --write legitimately mutate staged content; that is not a race).
 # -----------------------------------------------------------------------------
+
+# Preview explicitly selected formatting-only edits before committing.
+# FILES follows commit-safe's space-separated convention; for paths with spaces,
+# use: python3 scripts/checkout_format_only.py --apply -- "path with spaces.md"
+checkout-format-only: export FORMAT_ONLY_FILES = $(FILES)
+checkout-format-only:
+	@env -u PYTHONPATH -u PYTHONHOME $(PYTHON) scripts/checkout_format_only.py --from-env $(if $(filter 1,$(APPLY)),--apply,)
 
 commit-safe:
 	@if [ -z "$(FILES)" ]; then \
