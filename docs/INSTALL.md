@@ -170,17 +170,40 @@ require WSL. Layout:
 - Product config: `%APPDATA%\Vibecrafted`
 - `tools/vibecrafted-current` is a directory **junction**, not a unix symlink.
 
-Mandatory payload: pack-owned `python.exe`, loct, loctree, loctree-mcp,
-loctree-lsp, aicx, aicx-mcp, vc-server. Optional surfaces that must not vanish
-silently: prview/screenscribe (`release-blocker`); voc/vc-start/vc-frame/
-vc-terminal/vc-server-supervisor (`limited-platform-scope`). Rescue/flock
-recovery is POSIX-only and is not claimed here.
+Mandatory payload: pack-owned `python.exe`, `vc-server`, `vc-terminal`, and
+`vc-frame`. Foundations (`loct`, `aicx`, `prview`, `screenscribe`) ship through
+their own channels. `voc` / `vc-o` / `vc-admin` / `vc-procs` / `vc-start` stay
+out of this pack until a Windows AF_UNIX mux transport exists. Rescue/flock,
+PTY/zsh shells, and those omitted radios are **not supported on Windows** —
+`vibecrafted doctor` declares them explicitly; use WSL2 for the POSIX path.
+
+Canonical artifact names (repeatable rebuilds keep the same ProductCode
+`2B1BF36C-C680-48EE-BDCA-648C09D41BB3`):
+
+- Pack: `Vibecrafted_RuntimePack_<ver>-<YYYYMMDD>-<sha8>-win32-x64.tar.gz` (+ `.sha256` + `.sig`)
+- MSI/EXE: `Vibecrafted_<ver>-<YYYYMMDD>-<sha8>-windows-x64.{msi,exe}` (+ `.sha256`)
+
+**Unsigned Authenticode.** The MSI/EXE carriers are not Microsoft-signed.
+SmartScreen will warn. Trust is the same provenance model as the portable
+tarball (checksum + detached signature), not Apple notarization and not a
+self-signed distribution cert.
 
 From a checkout:
 
 ```powershell
 powershell -NoProfile -File .\scripts\build-windows-x64-runtime-pack.ps1
-powershell -NoProfile -File .\install.ps1 -Pack .\build\Vibecrafted_RuntimePack_<version>-win32-x64.tar.gz
+powershell -NoProfile -File .\install.ps1 -Pack .\build\Vibecrafted_RuntimePack_<version>-<YYYYMMDD>-<sha8>-win32-x64.tar.gz
+```
+
+`install.ps1` preflights every missing prerequisite in one pass, does not
+require a developer toolchain, updates User PATH for
+`%LOCALAPPDATA%\Vibecrafted\bin` (or prints that exact directory), and prints a
+human summary — never silent success and never a raw JSON dump as the success
+face. First-run orientation after install:
+
+```powershell
+vibecrafted doctor
+vibecrafted init
 ```
 
 Or call the verifier/installer directly:

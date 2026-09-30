@@ -63,15 +63,21 @@ WSL. From a checkout:
 
 ```powershell
 powershell -NoProfile -File .\scripts\build-windows-x64-runtime-pack.ps1
-powershell -NoProfile -File .\install.ps1 -Pack .\build\Vibecrafted_RuntimePack_<version>-win32-x64.tar.gz
+powershell -NoProfile -File .\install.ps1 -Pack .\build\Vibecrafted_RuntimePack_<version>-<YYYYMMDD>-<sha8>-win32-x64.tar.gz
 ```
+
+Canonical MSI/EXE names look like
+`Vibecrafted_<version>-<YYYYMMDD>-<sha8>-windows-x64.msi` (unsigned
+Authenticode — SmartScreen will warn; trust is `.sha256` + `.sig`).
 
 Runtime home is `%LOCALAPPDATA%\Vibecrafted`. Launchers are `*.cmd` under
 `%LOCALAPPDATA%\Vibecrafted\bin`. `tools/vibecrafted-current` is a directory
-junction. Rescue/flock recovery is POSIX-only and is not claimed here.
+junction. PTY/zsh, flock/rescue, and voc are not supported on native Windows
+(`vibecrafted doctor` declares them).
 
 `install.ps1` delegates to `scripts/install-runtime-pack.ps1` when a pack is
 present. Without a pack it prints the exact next command and exits non-zero.
+First-run: `vibecrafted doctor` then `vibecrafted init`.
 
 WSL2 remains a POSIX alternative: install WSL2, then use `install.sh` inside
 the distro. That is not the native Windows product.

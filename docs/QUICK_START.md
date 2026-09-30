@@ -8,7 +8,14 @@
 curl -fsSL https://vibecrafted.io/install.sh | bash
 ```
 
-**Windows** — install WSL2 once, then use the same bootstrap inside it:
+**Windows (native)** — win32-x64 Runtime Pack via `install.ps1` (no WSL
+required). Artifact names look like
+`Vibecrafted_RuntimePack_<version>-<YYYYMMDD>-<sha8>-win32-x64.tar.gz`. The
+MSI/EXE carriers are unsigned; SmartScreen will warn; trust is `.sha256` +
+`.sig`. See [INSTALL.md](INSTALL.md#windows--native-runtime-pack).
+
+**Windows (POSIX alternative)** — install WSL2 once, then use the same
+bootstrap inside it:
 
 ```powershell
 wsl --install

@@ -623,11 +623,27 @@ def test_macos_publisher_cold_verifies_exact_uploaded_bytes() -> None:
         '"$RUNTIME_PACK_NAME.sig"',
         '"$PORTABLE_NAME"',
         '"$PORTABLE_NAME.sha256"',
+        '"$WINDOWS_MSI_NAME"',
+        '"$WINDOWS_MSI_NAME.sha256"',
+        '"$WINDOWS_EXE_NAME"',
+        '"$WINDOWS_EXE_NAME.sha256"',
+        '"$WINDOWS_PACK_NAME"',
+        '"$WINDOWS_PACK_NAME.sha256"',
+        '"$WINDOWS_PACK_NAME.sig"',
         '"release-output.json"',
         '"release-output.json.sig"',
     ):
         assert entry in allowlist
     assert "LC_ALL=C sort" in publisher
+    assert "*" not in allowlist
+    assert "WINDOWS_MSI_NAME=" in publisher
+    assert "windows-x64.msi" in publisher
+    assert "win32-x64.tar.gz" in publisher
+    assert 'cmp "$WINDOWS_MSI" "$DOWNLOAD_DIR/$WINDOWS_MSI_NAME"' in publisher
+    assert 'cmp "$WINDOWS_PACK" "$DOWNLOAD_DIR/$WINDOWS_PACK_NAME"' in publisher
+    assert 'shasum -a 256 -c "$WINDOWS_PACK_NAME.sha256"' in publisher
+    assert "downloaded Windows Runtime Pack signature verification failed" in publisher
+    assert "Authenticode-unsigned" in publisher or "Authenticode" in publisher
 
 
 def test_macos_publisher_cold_verifies_the_portable_channel() -> None:

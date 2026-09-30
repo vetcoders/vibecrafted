@@ -21,7 +21,7 @@
 <p align="center">
   <a href="LICENSE"><img alt="License: BUSL-1.1" src="https://img.shields.io/badge/license-BUSL--1.1-blue.svg"></a>
   <a href="VERSION"><img alt="Version 4.3.1" src="https://img.shields.io/badge/version-4.3.1-informational.svg"></a>
-  <a href="docs/INSTALL.md"><img alt="Platform: macOS, Linux, Windows (WSL2)" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20(WSL2)-lightgrey.svg"></a>
+  <a href="docs/INSTALL.md"><img alt="Platform: macOS, Linux, Windows native + WSL2" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20native%20%2B%20WSL2-lightgrey.svg"></a>
 </p>
 
 ---
@@ -176,12 +176,32 @@ curl -fsSL https://vibecrafted.io/install.sh | bash
 The desktop app requires macOS 14+ on Apple Silicon (arm64); every other
 system uses the bootstrap above or the portable tarball below.
 
-**Windows:** install WSL2 once, then use the same bootstrap inside it:
+**Windows (native):** build or download the win32-x64 Runtime Pack, then:
+
+```powershell
+powershell -NoProfile -File .\install.ps1 -Pack .\build\Vibecrafted_RuntimePack_<version>-<YYYYMMDD>-<sha8>-win32-x64.tar.gz
+```
+
+The MSI/EXE siblings are unsigned Authenticode — SmartScreen will warn; trust
+is `.sha256` + `.sig` provenance (same idea as the portable tarball not being
+Apple-notarized). `install.ps1` updates User PATH or prints the exact
+`%LOCALAPPDATA%\Vibecrafted\bin` directory to add. Then:
+
+```powershell
+vibecrafted doctor
+vibecrafted init
+```
+
+**Windows (POSIX alternative):** install WSL2 once, then use the Linux
+bootstrap inside it:
 
 ```powershell
 wsl --install
 wsl bash -c 'curl -fsSL https://vibecrafted.io/install.sh | bash'
 ```
+
+Native Windows and WSL2 are both supported; they are not the same product
+surface. PTY/zsh, flock/rescue, and voc stay on the WSL2/POSIX path.
 
 **macOS CLI Runtime Pack** (power users who do not want the App): download the
 signed binary carrier and both sidecars from the latest release, then point the

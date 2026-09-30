@@ -105,6 +105,43 @@ test "$(uv run python3 -c 'import json; print(json.load(open("dist/portable-outp
   shasum -a 256 -c "$(basename "$PORTABLE_CHECKSUM")"
 )
 
+# Windows channel (prep): same ver-date-sha stem as the DMG. Carriers are
+# Authenticode-unsigned; trust is .sha256 (+ .sig for the Runtime Pack), the
+# same provenance idea as the portable tarball not being Apple-notarized.
+# Never invent a wildcard here — every asset must be named before upload.
+if [[ "$DMG_NAME" =~ ^Vibecrafted_([0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?)-([0-9]{8})-([0-9a-f]+)\.dmg$ ]]; then
+  WINDOWS_DATE="${BASH_REMATCH[2]}"
+  WINDOWS_SHA="${BASH_REMATCH[3]}"
+else
+  die "cannot derive Windows asset stem from DMG name: $DMG_NAME"
+fi
+WINDOWS_MSI_NAME="Vibecrafted_${VERSION}-${WINDOWS_DATE}-${WINDOWS_SHA}-windows-x64.msi"
+WINDOWS_EXE_NAME="Vibecrafted_${VERSION}-${WINDOWS_DATE}-${WINDOWS_SHA}-windows-x64.exe"
+WINDOWS_PACK_NAME="Vibecrafted_RuntimePack_${VERSION}-${WINDOWS_DATE}-${WINDOWS_SHA}-win32-x64.tar.gz"
+WINDOWS_MSI="$DIST/$WINDOWS_MSI_NAME"
+WINDOWS_EXE="$DIST/$WINDOWS_EXE_NAME"
+WINDOWS_PACK="$DIST/$WINDOWS_PACK_NAME"
+WINDOWS_MSI_CHECKSUM="$WINDOWS_MSI.sha256"
+WINDOWS_EXE_CHECKSUM="$WINDOWS_EXE.sha256"
+WINDOWS_PACK_CHECKSUM="$WINDOWS_PACK.sha256"
+WINDOWS_PACK_SIGNATURE="$WINDOWS_PACK.sig"
+for windows_required in \
+  "$WINDOWS_MSI" "$WINDOWS_MSI_CHECKSUM" \
+  "$WINDOWS_EXE" "$WINDOWS_EXE_CHECKSUM" \
+  "$WINDOWS_PACK" "$WINDOWS_PACK_CHECKSUM" "$WINDOWS_PACK_SIGNATURE"
+do
+  test -s "$windows_required" || die "missing Windows release asset: $windows_required"
+done
+(
+  cd "$DIST"
+  shasum -a 256 -c "$(basename "$WINDOWS_MSI_CHECKSUM")"
+  shasum -a 256 -c "$(basename "$WINDOWS_EXE_CHECKSUM")"
+  shasum -a 256 -c "$(basename "$WINDOWS_PACK_CHECKSUM")"
+)
+openssl dgst -sha256 -verify "$RUNTIME_PACK_PUBLIC_KEY" \
+  -signature "$WINDOWS_PACK_SIGNATURE" "$WINDOWS_PACK" >/dev/null \
+  || die "Windows Runtime Pack signature verification failed"
+
 RUN_ID="$(gh run list --repo "$REPO" --workflow release.yml --commit "$HEAD_SHA" \
   --json databaseId,status,conclusion --jq 'map(select(.status == "completed" and .conclusion == "success"))[0].databaseId // empty')"
 test -n "$RUN_ID" || die "no successful Release source gate exists for $HEAD_SHA"
@@ -133,6 +170,13 @@ gh release upload "$TAG" --repo "$REPO" \
   "$RUNTIME_PACK_SIGNATURE" \
   "$PORTABLE" \
   "$PORTABLE_CHECKSUM" \
+  "$WINDOWS_MSI" \
+  "$WINDOWS_MSI_CHECKSUM" \
+  "$WINDOWS_EXE" \
+  "$WINDOWS_EXE_CHECKSUM" \
+  "$WINDOWS_PACK" \
+  "$WINDOWS_PACK_CHECKSUM" \
+  "$WINDOWS_PACK_SIGNATURE" \
   "$RELEASE_OUTPUT#release-output.json" \
   "$RELEASE_SIGNATURE#release-output.json.sig" \
   --clobber
@@ -149,6 +193,13 @@ EXPECTED_ASSETS="$(printf '%s\n' \
   "$RUNTIME_PACK_NAME.sig" \
   "$PORTABLE_NAME" \
   "$PORTABLE_NAME.sha256" \
+  "$WINDOWS_MSI_NAME" \
+  "$WINDOWS_MSI_NAME.sha256" \
+  "$WINDOWS_EXE_NAME" \
+  "$WINDOWS_EXE_NAME.sha256" \
+  "$WINDOWS_PACK_NAME" \
+  "$WINDOWS_PACK_NAME.sha256" \
+  "$WINDOWS_PACK_NAME.sig" \
   "release-output.json" \
   "release-output.json.sig" | LC_ALL=C sort)"
 ACTUAL_ASSETS="$(find "$DOWNLOAD_DIR" -maxdepth 1 -type f -exec basename {} \; | LC_ALL=C sort)"
@@ -160,6 +211,13 @@ cmp "$RUNTIME_PACK_CHECKSUM" "$DOWNLOAD_DIR/$RUNTIME_PACK_NAME.sha256"
 cmp "$RUNTIME_PACK_SIGNATURE" "$DOWNLOAD_DIR/$RUNTIME_PACK_NAME.sig"
 cmp "$PORTABLE" "$DOWNLOAD_DIR/$PORTABLE_NAME"
 cmp "$PORTABLE_CHECKSUM" "$DOWNLOAD_DIR/$PORTABLE_NAME.sha256"
+cmp "$WINDOWS_MSI" "$DOWNLOAD_DIR/$WINDOWS_MSI_NAME"
+cmp "$WINDOWS_MSI_CHECKSUM" "$DOWNLOAD_DIR/$WINDOWS_MSI_NAME.sha256"
+cmp "$WINDOWS_EXE" "$DOWNLOAD_DIR/$WINDOWS_EXE_NAME"
+cmp "$WINDOWS_EXE_CHECKSUM" "$DOWNLOAD_DIR/$WINDOWS_EXE_NAME.sha256"
+cmp "$WINDOWS_PACK" "$DOWNLOAD_DIR/$WINDOWS_PACK_NAME"
+cmp "$WINDOWS_PACK_CHECKSUM" "$DOWNLOAD_DIR/$WINDOWS_PACK_NAME.sha256"
+cmp "$WINDOWS_PACK_SIGNATURE" "$DOWNLOAD_DIR/$WINDOWS_PACK_NAME.sig"
 cmp "$RELEASE_OUTPUT" "$DOWNLOAD_DIR/release-output.json"
 cmp "$RELEASE_SIGNATURE" "$DOWNLOAD_DIR/release-output.json.sig"
 (
@@ -167,11 +225,18 @@ cmp "$RELEASE_SIGNATURE" "$DOWNLOAD_DIR/release-output.json.sig"
   shasum -a 256 -c "$DMG_NAME.sha256"
   shasum -a 256 -c "$RUNTIME_PACK_NAME.sha256"
   shasum -a 256 -c "$PORTABLE_NAME.sha256"
+  shasum -a 256 -c "$WINDOWS_MSI_NAME.sha256"
+  shasum -a 256 -c "$WINDOWS_EXE_NAME.sha256"
+  shasum -a 256 -c "$WINDOWS_PACK_NAME.sha256"
 )
 openssl dgst -sha256 -verify "$RUNTIME_PACK_PUBLIC_KEY" \
   -signature "$DOWNLOAD_DIR/$RUNTIME_PACK_NAME.sig" \
   "$DOWNLOAD_DIR/$RUNTIME_PACK_NAME" >/dev/null \
   || die "downloaded Runtime Pack signature verification failed"
+openssl dgst -sha256 -verify "$RUNTIME_PACK_PUBLIC_KEY" \
+  -signature "$DOWNLOAD_DIR/$WINDOWS_PACK_NAME.sig" \
+  "$DOWNLOAD_DIR/$WINDOWS_PACK_NAME" >/dev/null \
+  || die "downloaded Windows Runtime Pack signature verification failed"
 VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY="$RUNTIME_PACK_PUBLIC_KEY" \
   bash "$ROOT/scripts/install-runtime-pack.sh" \
     --pack "$DOWNLOAD_DIR/$RUNTIME_PACK_NAME" \
@@ -325,7 +390,7 @@ bash $PORTABLE_ROOT_NAME/install.sh
 
 ## Sign-off
 
-PASS — the release has exactly three canonically named installable carriers built from one commit: \`$DMG_NAME\` for macOS desktop, \`$RUNTIME_PACK_NAME\` for macOS CLI, and \`$PORTABLE_NAME\` as the cross-platform source fallback. App and CLI consume one Runtime Pack authority; no donor repo owns a competing app, installer or update channel.
+PASS — the release has exactly five canonically named installable carriers built from one commit: \`$DMG_NAME\` for macOS desktop, \`$RUNTIME_PACK_NAME\` for macOS CLI, \`$PORTABLE_NAME\` as the cross-platform source fallback, plus the Windows MSI/EXE (\`$WINDOWS_MSI_NAME\` / \`$WINDOWS_EXE_NAME\`) and Windows Runtime Pack (\`$WINDOWS_PACK_NAME\`). Windows MSI/EXE are Authenticode-unsigned; trust is provenance (.sha256 / .sig), same idea as the portable tarball not being Apple-notarized. App and CLI consume one Runtime Pack authority; no donor repo owns a competing app, installer or update channel.
 EOF
 
 gh release edit "$TAG" --repo "$REPO" --notes-file "$REPORT" --draft=false --latest
