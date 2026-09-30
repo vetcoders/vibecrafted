@@ -135,6 +135,69 @@ def test_pure_rename_reports_content_unchanged(repo: Path) -> None:
     assert "content unchanged" in review_map._describe(change)
 
 
+def test_python_indent_change_is_semantic(repo: Path) -> None:
+    rel = "scripts/m.py"
+    _commit_file(repo, rel, "def f(x):\n    if x:\n        a()\n        b()\n")
+    _write(repo, rel, "def f(x):\n    if x:\n        a()\n    b()\n")
+
+    review = review_map.build_review_map(repo)
+    change = review.changes[0]
+    assert change.kind == "modified"
+    assert change.formatting_only is False
+    assert review.review_first == [change]
+
+
+def test_python_pure_formatting_stays_formatting_only(repo: Path) -> None:
+    rel = "scripts/m.py"
+    _commit_file(repo, rel, "a=b\n")
+    _write(repo, rel, "a = b\n")
+
+    review = review_map.build_review_map(repo)
+    change = review.changes[0]
+    assert change.formatting_only is True
+    assert review.review_first == []
+
+
+def test_python_syntax_error_is_never_formatting_only(repo: Path) -> None:
+    rel = "scripts/m.py"
+    _commit_file(repo, rel, "a = 1\n")
+    _write(repo, rel, "a = (1\n")
+
+    review = review_map.build_review_map(repo)
+    assert review.changes[0].formatting_only is False
+
+
+def test_yaml_indent_change_is_semantic(repo: Path) -> None:
+    rel = "config/app.yaml"
+    _commit_file(repo, rel, "root:\n  child: 1\n  other: 2\n")
+    _write(repo, rel, "root:\n  child: 1\nother: 2\n")
+
+    review = review_map.build_review_map(repo)
+    change = review.changes[0]
+    assert change.formatting_only is False
+    assert review.review_first == [change]
+
+
+def test_yaml_trailing_whitespace_is_formatting_only(repo: Path) -> None:
+    rel = "config/app.yaml"
+    _commit_file(repo, rel, "root:\n  child: 1\n")
+    _write(repo, rel, "root:  \n  child: 1\n\n\n")
+
+    review = review_map.build_review_map(repo)
+    change = review.changes[0]
+    assert change.formatting_only is True
+    assert review.review_first == []
+
+
+def test_makefile_leading_whitespace_is_semantic(repo: Path) -> None:
+    rel = "Makefile"
+    _commit_file(repo, rel, "target:\n\techo hi\n\techo bye\n")
+    _write(repo, rel, "target:\n\techo hi\necho bye\n")
+
+    review = review_map.build_review_map(repo)
+    assert review.changes[0].formatting_only is False
+
+
 def test_render_markdown_separates_noise_from_signal(repo: Path) -> None:
     _commit_file(repo, "docs/runtime/CONTRACT.md", "alpha beta\n")
     _commit_file(repo, "docs/runtime/RULES.md", "one two\n")

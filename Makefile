@@ -875,9 +875,9 @@ test-race-protection:
 test-parity:
 	@bash tests/spawn_parity_test.sh
 	@if command -v uv >/dev/null 2>&1; then \
-		uv run --with pytest pytest tests/agent_dispatch_test.py -q; \
+		uv run --with pytest pytest tests/agent_dispatch_test.py tests/review_map_test.py -q; \
 	else \
-		PYTHONPATH="$(SOURCE)/vibecrafted-core" $(PYTHON) -m pytest tests/agent_dispatch_test.py -q; \
+		PYTHONPATH="$(SOURCE)/vibecrafted-core" $(PYTHON) -m pytest tests/agent_dispatch_test.py tests/review_map_test.py -q; \
 	fi
 
 # -----------------------------------------------------------------------------

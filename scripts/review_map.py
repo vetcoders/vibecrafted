@@ -2,14 +2,18 @@
 """Render the working tree as a review map, not a flat diff list.
 
 Groups changed paths into the repo's structural areas, separates
-formatting-only edits (identical once whitespace is ignored) from changes
-that carry real content, and puts deletions, renames, and semantic diffs
-up front so they are never swept into the "just formatting" bag.
+formatting-only edits from changes that carry real content, and puts
+deletions, renames, and semantic diffs up front so they are never swept
+into the "just formatting" bag. Formatting-only is judged per language:
+Python files compare parsed ASTs, indent-sensitive formats (YAML,
+Makefiles) tolerate only trailing-whitespace differences, and everything
+else falls back to whitespace-insensitive text comparison.
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import subprocess
 import sys
@@ -145,7 +149,7 @@ def _numstat(repo: Path, base: str) -> dict[str, tuple[int | None, int | None]]:
     return stats
 
 
-def _normalized_blob(repo: Path, base: str, path: str) -> str | None:
+def _blob_text(repo: Path, base: str, path: str) -> str | None:
     result = subprocess.run(
         ["git", "-C", str(repo), "show", f"{base}:{path}"],
         capture_output=True,
@@ -154,28 +158,66 @@ def _normalized_blob(repo: Path, base: str, path: str) -> str | None:
     if result.returncode != 0:
         return None
     try:
-        text = result.stdout.decode("utf-8")
+        return result.stdout.decode("utf-8")
     except UnicodeDecodeError:
         return None
-    return "".join(text.split())
 
 
-def _normalized_worktree(repo: Path, path: str) -> str | None:
+def _worktree_text(repo: Path, path: str) -> str | None:
     try:
-        text = (repo / path).read_text(encoding="utf-8")
+        return (repo / path).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return None
-    return "".join(text.split())
+
+
+def _python_formatting_only(before: str, after: str) -> bool:
+    # Whitespace-carrying languages cannot be compared with whitespace
+    # stripped: reindentation moves statements between blocks. Equal ASTs
+    # (ignoring source positions) are the only safe formatting-only verdict.
+    try:
+        return ast.dump(ast.parse(before)) == ast.dump(ast.parse(after))
+    except SyntaxError:
+        return False
+
+
+def _strip_trailing_whitespace(text: str) -> str:
+    lines = [line.rstrip() for line in text.split("\n")]
+    while lines and not lines[-1]:
+        lines.pop()
+    return "\n".join(lines)
+
+
+def _trailing_whitespace_only(before: str, after: str) -> bool:
+    # YAML and Makefiles give leading whitespace meaning; only trailing
+    # line whitespace and trailing blank lines are safe to call formatting.
+    return _strip_trailing_whitespace(before) == _strip_trailing_whitespace(after)
+
+
+def _whitespace_insensitive_equal(before: str, after: str) -> bool:
+    return "".join(before.split()) == "".join(after.split())
+
+
+def _is_indent_sensitive(path: str) -> bool:
+    name = path.rsplit("/", 1)[-1]
+    return name.endswith((".yaml", ".yml", ".mk")) or name == "Makefile"
+
+
+def _is_formatting_equivalent(path: str, before: str, after: str) -> bool:
+    if path.endswith(".py"):
+        return _python_formatting_only(before, after)
+    if _is_indent_sensitive(path):
+        return _trailing_whitespace_only(before, after)
+    return _whitespace_insensitive_equal(before, after)
 
 
 def _is_formatting_only(
     repo: Path, base: str, path: str, orig_path: str | None
 ) -> bool:
-    old = _normalized_blob(repo, base, orig_path or path)
-    new = _normalized_worktree(repo, path)
+    old = _blob_text(repo, base, orig_path or path)
+    new = _worktree_text(repo, path)
     if old is None or new is None:
         return False
-    return old == new
+    return _is_formatting_equivalent(path, old, new)
 
 
 def build_review_map(repo: Path, base: str = "HEAD") -> ReviewMap:
