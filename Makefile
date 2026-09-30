@@ -36,7 +36,7 @@ if [ ! -d "$$stable_root/vibecrafted-core" ]; then \
 fi
 endef
 
-.PHONY: help help-dev vibecrafted app dmg dmg-signed release-local notarize release runtime-pack release-prereqs portable publish-release release-rehearsal gui-install wizard wizard-dev check skills-check layouts-check test test-core test-skills test-install test-parity test-vc-frame test-iterm2-migrate test-memex test-aicx-sync test-hammerspoon test-keychain-session dispatch-test unified-product-contract-gate exact-release-contract-gate release-version-gate payload-hygiene install install-source install-auto install-all install-python-tools install-bundle-tools install-tools install-tools-held install-vendored-binaries install-app install-app-dev install-dev install-app-binaries install-hammerspoon skills helpers setup-dev dry-run doctor list update uninstall restore migrate migrate-dry init-hooks seed-commit-msg-hooks bundle bundle-check foundations foundations-check semgrep version version-show version-bump bump-patch bump-minor bump-major iterm-plugin iterm-plugin-refresh iterm-plugin-show iterm-plugin-uninstall iterm-plugin-migrate demo demo-full commit-safe test-race-protection skill-new server server-build build-server-release server-check server-test install-server install-server-payload install-server-service reconcile-server-service server-smoke
+.PHONY: help help-dev vibecrafted app dmg dmg-signed release-local notarize release runtime-pack release-prereqs portable publish-release release-rehearsal gui-install wizard wizard-dev check skills-check layouts-check test test-core test-skills test-install test-parity test-vc-frame test-iterm2-migrate test-memex test-aicx-sync test-hammerspoon test-keychain-session dispatch-test unified-product-contract-gate exact-release-contract-gate release-version-gate payload-hygiene install install-source install-auto install-all install-python-tools install-bundle-tools install-tools install-tools-held install-vendored-binaries install-app install-app-dev install-dev install-app-binaries install-hammerspoon skills helpers setup-dev dry-run doctor review-map list update uninstall restore migrate migrate-dry init-hooks seed-commit-msg-hooks bundle bundle-check foundations foundations-check semgrep version version-show version-bump bump-patch bump-minor bump-major iterm-plugin iterm-plugin-refresh iterm-plugin-show iterm-plugin-uninstall iterm-plugin-migrate demo demo-full commit-safe test-race-protection skill-new server server-build build-server-release server-check server-test install-server install-server-payload install-server-service reconcile-server-service server-smoke
 
 help:
 	@printf "\n"
@@ -70,7 +70,7 @@ help-dev:
 	@printf "  \033[1mrelease\033[0m   app · install-app · dmg · dmg-signed · release-local · notarize · release · portable · publish-release · release-rehearsal\n"
 	@printf "  \033[1mversion\033[0m   version · version-show · version-bump · bump-patch · bump-minor · bump-major\n"
 	@printf "  \033[1mhooks\033[0m     init-hooks · seed-commit-msg-hooks · commit-safe\n"
-	@printf "  \033[1mmisc\033[0m      doctor · list · update · uninstall · demo · demo-full · skill-new\n"
+	@printf "  \033[1mmisc\033[0m      doctor · list · update · uninstall · demo · demo-full · skill-new · review-map\n"
 	@printf "\n"
 	@printf "  \033[2minstall-all builds the Rust app/server binaries (voc, vc-admin, vc-server) as real files into ~/.local/bin.\033[0m\n"
 	@printf "  \033[2mvc-server is installed with install-all; use make server for a foreground dev run. RUNTIME=<horse> selects a lab runtime.\033[0m\n"
@@ -626,6 +626,9 @@ dry-run:
 
 doctor:
 	@$(PYTHON) $(INSTALLER) doctor
+
+review-map:
+	@$(PYTHON) scripts/review_map.py --repo "$(SOURCE)" $(REVIEW_MAP_FLAGS)
 
 list:
 	@$(PYTHON) $(INSTALLER) list --source "$(SOURCE)"
