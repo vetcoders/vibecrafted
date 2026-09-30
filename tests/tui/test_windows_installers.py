@@ -131,14 +131,14 @@ def test_windows_ci_builds_msi_exe_from_pack_artifact() -> None:
         "Build MSI/EXE from downloaded pack (no second pack build; out under packaging/windows/out)"
         in workflow
     )
-    # Known-good download-artifact v4 pin (cold-install, MSI build, MSI install).
+    # Known-good download-artifact v4 pin (cold-install, MSI build, MSI install, EXE install).
     assert (
         "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4"
         in workflow
     )
     assert workflow.count(
         "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4"
-    ) >= 3
+    ) >= 4
     assert "d3f86a106a0bac45b974a628896ce1e5585c70a7" not in workflow
     assert "path: build" in workflow
     assert "build-windows-x64-runtime-pack.ps1" in workflow
@@ -585,7 +585,18 @@ def test_windows_installer_launches_vc_terminal_after_install_not_uninstall() ->
     assert "UILevel&gt;3" in seq[0] or "UILevel>3" in seq[0]
     assert "VC_BURN_UILEVEL&gt;=4" in seq[0] or "VC_BURN_UILEVEL>=4" in seq[0]
     assert 'MsiProperty Name="VC_BURN_UILEVEL" Value="[WixBundleUILevel]"' in bundle
+    assert (
+        'Name="VC_SKIP_TERMINAL_LAUNCH" Type="string" Value="0" bal:Overridable="yes"'
+        in bundle
+    )
+    assert 'Value="1" bal:Overridable="yes"' not in bundle
+    assert (
+        'MsiProperty Name="VC_SKIP_TERMINAL_LAUNCH" Value="[VC_SKIP_TERMINAL_LAUNCH]"'
+        in bundle
+    )
     assert "must gate LaunchVcTerminal" in build
+    assert "overridable string defaulting to 0" in build
+    assert "must forward VC_SKIP_TERMINAL_LAUNCH into the chained MSI" in build
     assert "WixBundleUILevel" in build
     assert "LaunchVcTerminal" in build
     assert "vc-terminal" in readme.lower()
@@ -635,6 +646,10 @@ def test_windows_ci_installs_msi_then_doctor_then_uninstall() -> None:
     marker = "\n  windows-msi-install:"
     assert marker in workflow
     msi_job = workflow.split(marker, 1)[1]
+    exe_marker = "\n  windows-exe-install:"
+    if exe_marker in msi_job:
+        msi_job = msi_job.split(exe_marker, 1)[0]
+    assert "windows-exe-install:" not in msi_job
     assert "needs: windows-installers" in msi_job
     assert "windows-runtime-pack" not in msi_job
     assert "build-windows-x64-runtime-pack.ps1" not in msi_job
@@ -677,3 +692,81 @@ def test_windows_ci_installs_msi_then_doctor_then_uninstall() -> None:
     assert "uninstall left user PATH entry" in msi_job
     assert "machine PATH changed" in msi_job
     assert "windows-x64-msi-install-logs" in msi_job
+
+
+def test_windows_ci_installs_exe_then_doctor_then_uninstall() -> None:
+    """The matrix must run the unsigned Burn EXE it just built, then doctor, then remove it.
+
+    Separate windows-latest job from the MSI install so the shared ProductCode
+    does not collide. Does not rebuild the Runtime Pack. download-artifact stays
+    on the known-good v4 SHA. Quiet switches are the ones WiX 3.14's engine and
+    this RtfLicense BA honor; ``/install`` is not one of them.
+    """
+    workflow = (REPO_ROOT / ".github" / "workflows" / "install-windows.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "windows-exe-install:" in workflow
+    assert "EXE silent install + doctor + uninstall" in workflow
+    marker = "\n  windows-exe-install:"
+    assert marker in workflow
+    exe_job = workflow.split(marker, 1)[1]
+    assert "windows-msi-install:" not in exe_job
+    assert "needs: windows-installers" in exe_job
+    assert "runs-on: windows-latest" in exe_job
+    assert "windows-runtime-pack" not in exe_job
+    assert "build-windows-x64-runtime-pack.ps1" not in exe_job
+    assert "build-windows-installers.ps1" not in exe_job
+    assert "install.ps1" not in exe_job
+    assert "msiexec" not in exe_job.lower()
+    assert "taskkill" not in exe_job.lower()
+    assert "signtool" not in exe_job.lower()
+    assert "cmd.exe" not in exe_job
+    assert "VIBECRAFTED_WINDOWS_AUTHENTICODE_THUMBPRINT" not in exe_job
+    assert (
+        "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4"
+        in exe_job
+    )
+    assert "d3f86a106a0bac45b974a628896ce1e5585c70a7" not in exe_job
+    assert "name: windows-x64-installers" in exe_job
+    assert 'InstallScope="perUser"' in exe_job
+    assert "LocalAppDataFolder" in exe_job
+    assert "ProgramFiles64Folder" in exe_job
+    assert STABLE_PRODUCT_CODE in exe_job
+    assert "Identity.wxi" in exe_job
+    assert 'bal:Overridable="yes"' in exe_job
+    assert "VC_SKIP_TERMINAL_LAUNCH=1" in exe_job
+    assert "Do not pass /install" in exe_job
+    assert "UseShellExecute = $false" in exe_job
+    assert exe_job.count("WaitForExit()") >= 2
+    assert "Unblock-File" in exe_job
+    argument_lines = [
+        line.strip()
+        for line in exe_job.splitlines()
+        if "$psi.Arguments" in line
+    ]
+    assert len(argument_lines) == 2, argument_lines
+    install_args = argument_lines[0]
+    uninstall_args = argument_lines[1]
+    assert install_args == (
+        '$psi.Arguments = "/quiet /norestart /log `"$installLog`" VC_SKIP_TERMINAL_LAUNCH=1"'
+    )
+    assert "/install" not in install_args
+    assert uninstall_args == (
+        '$psi.Arguments = "/uninstall /quiet /norestart /log `"$uninstallLog`""'
+    )
+    assert "WixBundleUILevel" in exe_job
+    assert "Skipping action: LaunchVcTerminal" in exe_job
+    assert "Doing action: LaunchVcTerminal" in exe_job
+    assert "quiet EXE install did not record WixBundleUILevel 2" in exe_job
+    assert "Burn did not set VC_SKIP_TERMINAL_LAUNCH to 1" in exe_job
+    assert "Applied execute package: VibecraftedRuntimePackMsi" in exe_job
+    assert "action: Uninstall" in exe_job
+    assert "& $cmd doctor" in exe_job
+    assert "DOCTOR_SUMMARY=" in exe_job
+    assert "expected exactly one user PATH entry" in exe_job
+    assert "uninstall left user PATH entry" in exe_job
+    assert "uninstall left residue under $vcHome" in exe_job
+    assert "machine PATH changed" in exe_job
+    assert "windows-x64-exe-install-logs" in exe_job
+    assert "EXE_INSTALL_COMMAND=" in exe_job
+    assert "EXE_UNINSTALL_COMMAND=" in exe_job

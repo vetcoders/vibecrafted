@@ -23,6 +23,12 @@ interactive install the MSI launches `vc-terminal.cmd` (frame-backed). Silent
 installs (`UILevel` <= 3, including `msiexec /qn`) and `VC_SKIP_TERMINAL_LAUNCH=1`
 do not start it. A double-click of the MSI (full UI) still launches it, and the
 Burn EXE wizard does too because the bundle passes `WixBundleUILevel` (full = 4).
+Quiet Burn uses the WiX 3.14 engine switches this bundle honors: `/quiet`
+(display none, `WixBundleUILevel` 2), `/norestart`, `/log` plus a path, and
+`/uninstall`. The default action is install. `VC_SKIP_TERMINAL_LAUNCH` is a
+string bundle variable (`bal:Overridable="yes"`, default `0`) forwarded into
+the chained MSI, so `VC_SKIP_TERMINAL_LAUNCH=1` with `/quiet` keeps vc-terminal
+off. A double-click still uses full UI and still launches vc-terminal.
 Launch never runs on uninstall. The MSI appends `%LOCALAPPDATA%\Vibecrafted\bin`
 to the per-user HKCU PATH when that directory is not already present, and removes
 that entry on uninstall. It does not write the machine PATH. That is the same

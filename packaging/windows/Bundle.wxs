@@ -17,6 +17,9 @@
       Copyright="(c) 2024-2026 Libraxis AI Sp. z o.o."
       AboutUrl="https://vibecrafted.io"
       HelpUrl="https://github.com/vetcoders/vibecrafted/blob/main/SECURITY.md">
+    <!-- Default 0 so a double-click EXE wizard still launches vc-terminal.
+         WixStdBA applies VC_SKIP_TERMINAL_LAUNCH=1 only when Overridable. -->
+    <Variable Name="VC_SKIP_TERMINAL_LAUNCH" Type="string" Value="0" bal:Overridable="yes" />
     <BootstrapperApplicationRef Id="WixStandardBootstrapperApplication.RtfLicense">
       <bal:WixStandardBootstrapperApplication
           LicenseFile="License.rtf"
@@ -30,8 +33,10 @@
           Vital="yes"
           Visible="yes">
         <!-- DisplayInternalUI stays off, so the chained MSI sees a silent UILevel.
-             WixBundleUILevel full is 4; Product.wxs launches vc-terminal only then. -->
+             WixBundleUILevel full is 4; Product.wxs launches vc-terminal only then.
+             /quiet sets that level to 2. VC_SKIP_TERMINAL_LAUNCH=1 is the second gate. -->
         <MsiProperty Name="VC_BURN_UILEVEL" Value="[WixBundleUILevel]" />
+        <MsiProperty Name="VC_SKIP_TERMINAL_LAUNCH" Value="[VC_SKIP_TERMINAL_LAUNCH]" />
       </MsiPackage>
     </Chain>
   </Bundle>

@@ -367,6 +367,12 @@ if ($bundleBody -notmatch "LogoFile=`"burn-logo\.bmp`"") {
 if (-not $bundleBody.Contains('MsiProperty Name="VC_BURN_UILEVEL" Value="[WixBundleUILevel]"')) {
     Die "Bundle.wxs must pass WixBundleUILevel so the EXE wizard still launches vc-terminal"
 }
+if ($bundleBody -notmatch 'Name="VC_SKIP_TERMINAL_LAUNCH" Type="string" Value="0" bal:Overridable="yes"') {
+    Die "Bundle.wxs must expose VC_SKIP_TERMINAL_LAUNCH as an overridable string defaulting to 0"
+}
+if (-not $bundleBody.Contains('MsiProperty Name="VC_SKIP_TERMINAL_LAUNCH" Value="[VC_SKIP_TERMINAL_LAUNCH]"')) {
+    Die "Bundle.wxs must forward VC_SKIP_TERMINAL_LAUNCH into the chained MSI"
+}
 Write-Utf8NoBom -Path $bundleWork -Content $bundleBody
 Copy-Item $licenseRtf (Join-Path $work "License.rtf")
 $assetsRoot = Join-Path $packagingRoot "assets"

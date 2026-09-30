@@ -3,9 +3,10 @@ name: Install (Windows Matrix)
 # Windows native Runtime Pack gate: build the win32-x64 carrier once, cold-install
 # into an isolated LOCALAPPDATA, run `vibecrafted doctor` expecting 0 fail, and
 # adapt the same pack artifact into unsigned per-user MSI/EXE under
-# packaging/windows/out (no second pack build). The MSI job then silent-installs
-# that artifact into the GitHub runner's per-user LocalAppData, runs doctor, and
-# uninstalls. No secrets. Authenticode is skipped without
+# packaging/windows/out (no second pack build). The MSI job and the EXE job
+# each silent-install that artifact on their own windows-latest runner (same
+# ProductCode, so the installs must not share a machine), run doctor, and
+# uninstall. No secrets. Authenticode is skipped without
 # VIBECRAFTED_WINDOWS_AUTHENTICODE_THUMBPRINT (unsigned SmartScreen path is the
 # documented trust model for this channel).
 
@@ -483,4 +484,315 @@ jobs:
         with:
           name: windows-x64-msi-install-logs
           path: ${{ runner.temp }}/vc-msi-logs/
+          if-no-files-found: warn
+
+  windows-exe-install:
+    name: EXE silent install + doctor + uninstall
+    needs: windows-installers
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download windows-x64-installers
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: windows-x64-installers
+          path: dist-installers
+
+      - name: Silent per-user EXE install
+        id: exe_install
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
+
+          function ConvertTo-PathKey([string]$Entry) {
+            if ([string]::IsNullOrWhiteSpace($Entry)) { return $null }
+            try {
+              return [System.IO.Path]::GetFullPath($Entry.Trim()).TrimEnd('\').ToLowerInvariant()
+            } catch {
+              return $Entry.Trim().TrimEnd('\').ToLowerInvariant()
+            }
+          }
+
+          function Get-UserPathKeys {
+            $raw = [Environment]::GetEnvironmentVariable("Path", "User")
+            if ([string]::IsNullOrWhiteSpace($raw)) { return @() }
+            return @($raw -split ';' | ForEach-Object { ConvertTo-PathKey $_ } | Where-Object { $_ })
+          }
+
+          function Show-BurnLog([string]$Path) {
+            if (-not (Test-Path -LiteralPath $Path)) {
+              Write-Host "Burn log missing: $Path"
+              return
+            }
+            Write-Host "---- Burn log tail: $Path ----"
+            Get-Content -LiteralPath $Path -Tail 80
+          }
+
+          function Get-InstallLogText([string]$LogDir, [string]$PrimaryLog) {
+            $files = [System.Collections.Generic.List[string]]::new()
+            if (Test-Path -LiteralPath $PrimaryLog) { $files.Add($PrimaryLog) }
+            Get-ChildItem -LiteralPath $LogDir -Recurse -File -Filter *.log -ErrorAction SilentlyContinue |
+              ForEach-Object { if (-not $files.Contains($_.FullName)) { $files.Add($_.FullName) } }
+            if (Test-Path -LiteralPath $PrimaryLog) {
+              $primary = Get-Content -LiteralPath $PrimaryLog -Raw
+              foreach ($match in [regex]::Matches($primary, "to value '([^']+\.log)'")) {
+                $referenced = $match.Groups[1].Value
+                if ((Test-Path -LiteralPath $referenced) -and -not $files.Contains($referenced)) {
+                  $files.Add($referenced)
+                  Copy-Item -LiteralPath $referenced -Destination (Join-Path $LogDir (Split-Path -Leaf $referenced)) -Force
+                }
+              }
+            }
+            $builder = New-Object System.Text.StringBuilder
+            foreach ($file in $files) {
+              [void]$builder.AppendLine("===== $file =====")
+              [void]$builder.AppendLine([System.IO.File]::ReadAllText($file))
+            }
+            return $builder.ToString()
+          }
+
+          $productSrc = Get-Content -LiteralPath (Join-Path $PWD "packaging\windows\Product.wxs") -Raw
+          if ($productSrc -notmatch 'InstallScope="perUser"') { throw "Product.wxs InstallScope is not perUser" }
+          if ($productSrc -notmatch "LocalAppDataFolder") { throw "Product.wxs does not target LocalAppDataFolder" }
+          if ($productSrc -match "ProgramFiles64Folder" -or $productSrc -match 'InstallScope="perMachine"') {
+            throw "Product.wxs is not a per-user LocalAppData install"
+          }
+          $bundleSrc = Get-Content -LiteralPath (Join-Path $PWD "packaging\windows\Bundle.wxs") -Raw
+          if ($bundleSrc -notmatch 'Name="VC_SKIP_TERMINAL_LAUNCH" Type="string" Value="0" bal:Overridable="yes"') {
+            throw "Bundle.wxs does not expose overridable VC_SKIP_TERMINAL_LAUNCH default 0"
+          }
+          if ($bundleSrc -notmatch 'MsiProperty Name="VC_SKIP_TERMINAL_LAUNCH" Value="\[VC_SKIP_TERMINAL_LAUNCH\]"') {
+            throw "Bundle.wxs does not forward VC_SKIP_TERMINAL_LAUNCH"
+          }
+          if ($bundleSrc -notmatch 'MsiProperty Name="VC_BURN_UILEVEL" Value="\[WixBundleUILevel\]"') {
+            throw "Bundle.wxs does not pass WixBundleUILevel"
+          }
+
+          $stable = "2B1BF36C-C680-48EE-BDCA-648C09D41BB3"
+          $identity = Get-Content -LiteralPath (Join-Path $PWD "packaging\windows\Identity.wxi") -Raw
+          if ($identity -notmatch ('ProductCode = "' + $stable + '"')) {
+            throw "Identity.wxi ProductCode is not the stable $stable"
+          }
+
+          $exes = @(Get-ChildItem -LiteralPath dist-installers -File |
+            Where-Object { $_.Name -like "Vibecrafted_*-windows-x64.exe" -and $_.Extension -eq ".exe" })
+          if ($exes.Count -ne 1) { throw "expected one EXE in windows-x64-installers, found $($exes.Count)" }
+          $exe = $exes[0]
+          $shaFile = "$($exe.FullName).sha256"
+          if (-not (Test-Path -LiteralPath $shaFile)) { throw "missing $($exe.Name).sha256" }
+          $expectedHash = ((Get-Content -LiteralPath $shaFile -Raw) -split '\s+')[0].ToLowerInvariant()
+          $actualHash = (Get-FileHash -LiteralPath $exe.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne $expectedHash) { throw "EXE sha256 mismatch for $($exe.Name)" }
+          Unblock-File -LiteralPath $exe.FullName
+
+          $productRoot = Join-Path $env:LOCALAPPDATA "Vibecrafted"
+          if (Test-Path -LiteralPath $productRoot) { throw "runner LOCALAPPDATA already contains Vibecrafted" }
+          $bin = Join-Path $productRoot "bin"
+          $binKey = ConvertTo-PathKey $bin
+          if (@(Get-UserPathKeys | Where-Object { $_ -eq $binKey }).Count -ne 0) {
+            throw "runner user PATH already contains $bin"
+          }
+          $machineBefore = [Environment]::GetEnvironmentVariable("Path", "Machine")
+          if ($null -eq $machineBefore) { $machineBefore = "" }
+          $userBefore = [Environment]::GetEnvironmentVariable("Path", "User")
+          if ($null -eq $userBefore) { $userBefore = "" }
+
+          $logDir = Join-Path $env:RUNNER_TEMP "vc-exe-logs"
+          New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+          [System.IO.File]::WriteAllText((Join-Path $logDir "machine-path-before.txt"), $machineBefore)
+          [System.IO.File]::WriteAllText((Join-Path $logDir "user-path-before.txt"), $userBefore)
+          $installLog = Join-Path $logDir "exe-install.log"
+          # WiX 3.14 engine switches this Bal honors: /quiet (display none),
+          # /norestart, /log <path>. Default action is install.
+          # Do not pass /install. ParseCommandLine does not recognize it, and
+          # WixStdBA ignores that unknown switch (it only special-cases lang and cache).
+          $psi = New-Object System.Diagnostics.ProcessStartInfo
+          $psi.FileName = $exe.FullName
+          $psi.Arguments = "/quiet /norestart /log `"$installLog`" VC_SKIP_TERMINAL_LAUNCH=1"
+          $psi.UseShellExecute = $false
+          $proc = [System.Diagnostics.Process]::Start($psi)
+          $proc.WaitForExit()
+          $installExit = $proc.ExitCode
+          $installText = Get-InstallLogText $logDir $installLog
+          if ($installExit -ne 0) {
+            Show-BurnLog $installLog
+            throw "Burn install failed with exit $installExit"
+          }
+          if ($installText -match "Doing action: LaunchVcTerminal") {
+            Show-BurnLog $installLog
+            throw "quiet EXE install started LaunchVcTerminal"
+          }
+          if ($installText -notmatch "Skipping action: LaunchVcTerminal \(condition is false\)") {
+            Show-BurnLog $installLog
+            throw "quiet EXE install did not skip LaunchVcTerminal"
+          }
+          $uiLevelQuiet = ($installText -match "WixBundleUILevel' to value '2'") -or ($installText -match 'WixBundleUILevel'' to value 2(\D|$)')
+          if (-not $uiLevelQuiet) {
+            Show-BurnLog $installLog
+            throw "quiet EXE install did not record WixBundleUILevel 2"
+          }
+          if (($installText -match "WixBundleUILevel' to value '4'") -or ($installText -match 'WixBundleUILevel'' to value 4(\D|$)')) {
+            Show-BurnLog $installLog
+            throw "quiet EXE install recorded full WixBundleUILevel 4"
+          }
+          if ($installText -notmatch "VC_SKIP_TERMINAL_LAUNCH' to value '1'") {
+            Show-BurnLog $installLog
+            throw "Burn did not set VC_SKIP_TERMINAL_LAUNCH to 1"
+          }
+          if ($installText -match "Ignoring attempt to set non-overridable variable: 'VC_SKIP_TERMINAL_LAUNCH'") {
+            Show-BurnLog $installLog
+            throw "VC_SKIP_TERMINAL_LAUNCH is not overridable on this bundle"
+          }
+          if ($installText -notmatch 'Applied execute package: VibecraftedRuntimePackMsi, result: 0x0+(,|\s)') {
+            Show-BurnLog $installLog
+            throw "Burn install did not apply VibecraftedRuntimePackMsi"
+          }
+          $machineAfter = [Environment]::GetEnvironmentVariable("Path", "Machine")
+          if ($null -eq $machineAfter) { $machineAfter = "" }
+          if ($machineAfter -ne $machineBefore) { throw "machine PATH changed during EXE install" }
+          $hits = @(Get-UserPathKeys | Where-Object { $_ -eq $binKey })
+          if ($hits.Count -ne 1) {
+            $raw = [Environment]::GetEnvironmentVariable("Path", "User")
+            throw "expected exactly one user PATH entry for $bin, found $($hits.Count): $raw"
+          }
+          foreach ($key in @($userBefore -split ';' | ForEach-Object { ConvertTo-PathKey $_ } | Where-Object { $_ })) {
+            if (@(Get-UserPathKeys | Where-Object { $_ -eq $key }).Count -lt 1) {
+              throw "user PATH lost pre-existing entry $key"
+            }
+          }
+          Write-Host "EXE installed: $($exe.Name)"
+          Write-Host "EXE_INSTALL_COMMAND=$($exe.Name) /quiet /norestart /log <log> VC_SKIP_TERMINAL_LAUNCH=1"
+          Write-Host "User PATH entry: $bin"
+          Write-Host "Install log: $installLog"
+
+      - name: vibecrafted doctor from installed launcher
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
+          $bin = Join-Path $env:LOCALAPPDATA "Vibecrafted\bin"
+          $cmd = Join-Path $bin "vibecrafted.cmd"
+          $terminal = Join-Path $bin "vc-terminal.cmd"
+          if (-not (Test-Path -LiteralPath $cmd)) { throw "missing installed launcher $cmd" }
+          if (-not (Test-Path -LiteralPath $terminal)) { throw "missing installed launcher $terminal" }
+          $logDir = Join-Path $env:RUNNER_TEMP "vc-exe-logs"
+          New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+          $doctorLog = Join-Path $logDir "doctor.log"
+          $env:Path = "$bin;$env:Path"
+          & $cmd doctor *>&1 | Tee-Object -FilePath $doctorLog
+          if ($LASTEXITCODE -ne 0) {
+            Get-Content -LiteralPath $doctorLog
+            throw "vibecrafted doctor failed with exit $LASTEXITCODE"
+          }
+          $doctorText = Get-Content -LiteralPath $doctorLog -Raw
+          $summary = @($doctorText -split "\r?\n" | Where-Object { $_ -match "summary:" })
+          if ($summary.Count -eq 0) {
+            Write-Host "DOCTOR_SUMMARY=(doctor exit 0; no summary line found)"
+          } else {
+            foreach ($line in $summary) { Write-Host "DOCTOR_SUMMARY=$line" }
+          }
+          Write-Host "Doctor log: $doctorLog"
+
+      - name: Silent per-user EXE uninstall
+        if: ${{ always() && steps.exe_install.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
+
+          function ConvertTo-PathKey([string]$Entry) {
+            if ([string]::IsNullOrWhiteSpace($Entry)) { return $null }
+            try {
+              return [System.IO.Path]::GetFullPath($Entry.Trim()).TrimEnd('\').ToLowerInvariant()
+            } catch {
+              return $Entry.Trim().TrimEnd('\').ToLowerInvariant()
+            }
+          }
+
+          function Get-UserPathKeys {
+            $raw = [Environment]::GetEnvironmentVariable("Path", "User")
+            if ([string]::IsNullOrWhiteSpace($raw)) { return @() }
+            return @($raw -split ';' | ForEach-Object { ConvertTo-PathKey $_ } | Where-Object { $_ })
+          }
+
+          function Show-BurnLog([string]$Path) {
+            if (-not (Test-Path -LiteralPath $Path)) {
+              Write-Host "Burn log missing: $Path"
+              return
+            }
+            Write-Host "---- Burn log tail: $Path ----"
+            Get-Content -LiteralPath $Path -Tail 80
+          }
+
+          $stable = "2B1BF36C-C680-48EE-BDCA-648C09D41BB3"
+          $identity = Get-Content -LiteralPath (Join-Path $PWD "packaging\windows\Identity.wxi") -Raw
+          if ($identity -notmatch ('ProductCode = "' + $stable + '"')) {
+            throw "Identity.wxi ProductCode is not the stable $stable"
+          }
+          $exes = @(Get-ChildItem -LiteralPath dist-installers -File |
+            Where-Object { $_.Name -like "Vibecrafted_*-windows-x64.exe" -and $_.Extension -eq ".exe" })
+          if ($exes.Count -ne 1) { throw "expected one EXE in windows-x64-installers, found $($exes.Count)" }
+          $exe = $exes[0]
+          $logDir = Join-Path $env:RUNNER_TEMP "vc-exe-logs"
+          New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+          $uninstallLog = Join-Path $logDir "exe-uninstall.log"
+          # Burn /uninstall removes the bundle and the chained MSI. The stable
+          # ProductCode stays in Identity.wxi so this job and the MSI job agree.
+          $psi = New-Object System.Diagnostics.ProcessStartInfo
+          $psi.FileName = $exe.FullName
+          $psi.Arguments = "/uninstall /quiet /norestart /log `"$uninstallLog`""
+          $psi.UseShellExecute = $false
+          $proc = [System.Diagnostics.Process]::Start($psi)
+          $proc.WaitForExit()
+          $uninstallExit = $proc.ExitCode
+          if ($uninstallExit -ne 0) {
+            Show-BurnLog $uninstallLog
+            throw "Burn uninstall failed with exit $uninstallExit"
+          }
+          $uninstallText = ""
+          if (Test-Path -LiteralPath $uninstallLog) {
+            $uninstallText = Get-Content -LiteralPath $uninstallLog -Raw
+          }
+          if ($uninstallText -notmatch "action: Uninstall") {
+            Show-BurnLog $uninstallLog
+            throw "Burn uninstall log did not record action: Uninstall"
+          }
+          if ($uninstallText -notmatch 'Applied execute package: VibecraftedRuntimePackMsi, result: 0x0+(,|\s)') {
+            Show-BurnLog $uninstallLog
+            throw "Burn uninstall did not remove VibecraftedRuntimePackMsi"
+          }
+          $vcHome = Join-Path $env:LOCALAPPDATA "Vibecrafted"
+          if (Test-Path -LiteralPath $vcHome) {
+            $left = @(Get-ChildItem -LiteralPath $vcHome -Recurse -Force -ErrorAction SilentlyContinue)
+            if ($left.Count -gt 0) {
+              $left | ForEach-Object { $_.FullName }
+              throw "uninstall left residue under $vcHome"
+            }
+          }
+          $bin = Join-Path $vcHome "bin"
+          $binKey = ConvertTo-PathKey $bin
+          $leftPath = @(Get-UserPathKeys | Where-Object { $_ -eq $binKey })
+          if ($leftPath.Count -ne 0) {
+            $raw = [Environment]::GetEnvironmentVariable("Path", "User")
+            throw "uninstall left user PATH entry for $bin : $raw"
+          }
+          $machineBeforePath = Join-Path $logDir "machine-path-before.txt"
+          if (Test-Path -LiteralPath $machineBeforePath) {
+            $machineBefore = [System.IO.File]::ReadAllText($machineBeforePath)
+            $machineAfter = [Environment]::GetEnvironmentVariable("Path", "Machine")
+            if ($null -eq $machineAfter) { $machineAfter = "" }
+            if ($machineAfter -ne $machineBefore) { throw "machine PATH changed during EXE uninstall" }
+          }
+          Write-Host "Uninstall finished."
+          Write-Host "EXE_UNINSTALL_COMMAND=$($exe.Name) /uninstall /quiet /norestart /log <log>"
+          Write-Host "Uninstall log: $uninstallLog"
+
+      - name: Upload EXE install logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-x64-exe-install-logs
+          path: ${{ runner.temp }}/vc-exe-logs/
           if-no-files-found: warn
