@@ -329,21 +329,38 @@ try {
     if ($ExpectedSourceRevision) { $contract += @("--expected-source-revision", $ExpectedSourceRevision) }
     if ($ExpectedTerminalRevision) { $contract += @("--expected-terminal-revision", $ExpectedTerminalRevision) }
     if ($ExpectedFrameRevision) { $contract += @("--expected-frame-revision", $ExpectedFrameRevision) }
-    $contractOutput = & $packPython @contract
-    if ($LASTEXITCODE -ne 0) { Die "Runtime Pack internal provenance verification failed" }
-    if ($VerifyOnly) {
-        Write-Output $contractOutput
-        exit 0
+    # Pack Python prints progress on stderr. Under Stop that becomes a
+    # terminating NativeCommandError even when the process exits 0.
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $contractOutput = & $packPython @contract 2>&1 | ForEach-Object {
+            if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { "$_" }
+        }
+        if ($LASTEXITCODE -ne 0) { Die "Runtime Pack internal provenance verification failed" }
+        if ($VerifyOnly) {
+            Write-Output ($contractOutput -join "`n")
+            exit 0
+        }
+        if ($Uninstall) {
+            $arguments = @($packInstaller, "runtime-uninstall")
+            if ($DryRun) { $arguments += "--dry-run" }
+        }
+        else {
+            $arguments = @($packInstaller, "runtime-install", "--payload-root", $payloadRoot)
+        }
+        $installOutput = & $packPython @arguments 2>&1 | ForEach-Object {
+            if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { "$_" }
+        }
+        $installCode = $LASTEXITCODE
+        if ($installOutput) {
+            Write-Output ($installOutput -join "`n")
+        }
+        exit $installCode
     }
-    if ($Uninstall) {
-        $arguments = @($packInstaller, "runtime-uninstall")
-        if ($DryRun) { $arguments += "--dry-run" }
+    finally {
+        $ErrorActionPreference = $prevEap
     }
-    else {
-        $arguments = @($packInstaller, "runtime-install", "--payload-root", $payloadRoot)
-    }
-    & $packPython @arguments
-    exit $LASTEXITCODE
 }
 finally {
     if (Test-Path -LiteralPath $temporary) {

@@ -278,8 +278,25 @@ if ($hasPack -or $Uninstall -or $VerifyOnly) {
     if ($hasPack) { $invoke["Pack"] = $Pack }
     if ($ExpectedVersion) { $invoke["ExpectedVersion"] = $ExpectedVersion }
 
-    $raw = & $delegate @invoke 2>&1 | Out-String
-    $exitCode = $LASTEXITCODE
+    # The pack installer prints progress on stderr (lease recovery, etc.).
+    # Stop mode would turn those NativeCommandError records into a hard abort
+    # before we can read $LASTEXITCODE — temporarily Continue for the invoke.
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $raw = & $delegate @invoke 2>&1 | ForEach-Object {
+            if ($_ -is [System.Management.Automation.ErrorRecord]) {
+                $_.ToString()
+            }
+            else {
+                "$_"
+            }
+        } | Out-String
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $prevEap
+    }
     $launcherBin = Get-LauncherBinDir
     $pathUpdated = $false
 
