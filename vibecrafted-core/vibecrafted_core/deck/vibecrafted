@@ -6556,7 +6556,6 @@ run_mode() {
       research)  printf '  Research a topic using the agent.\n  Usage: vibecrafted research %s <plan.md>\n' "$agent" ;;
       review)    printf '  Review a bounded PR, branch, commit range, or artifact pack.\n  Usage: vibecrafted review %s <plan.md>\n' "$agent" ;;
       plan)      printf '  Generate an implementation plan.\n  Usage: vibecrafted plan %s <plan.md>\n' "$agent" ;;
-      prompt)    printf '  Free-form prompt with plan context.\n  Usage: vibecrafted prompt %s <plan.md>\n' "$agent" ;;
       resume)    cmd_resume_help; return 0 ;;
     esac
     printf '\n'

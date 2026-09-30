@@ -279,3 +279,16 @@ def test_owned_alias_inventory_keeps_vc_fork_and_refuses_invented_twins() -> Non
         assert name not in vetcoders_install._RUNTIME_WRAPPER_VERBS
         assert name not in cli.SHELL_WRAPPER_VERBS
         assert name not in vetcoders_install.PYTHON_ENTRYPOINT_LAUNCHERS
+
+
+def test_unimplemented_prompt_mode_does_not_advertise_a_launcher(
+    tmp_path: Path,
+) -> None:
+    from vibecrafted_core.workflows.registry import SUPPORTED_WORKFLOWS
+
+    assert "prompt" not in SUPPORTED_WORKFLOWS
+    result = _run(["codex", "prompt", "--help"], home=tmp_path)
+    text = _strip(result.stdout + result.stderr)
+    assert "Usage: vibecrafted prompt" not in text
+    assert "Free-form prompt with plan context" not in text
+    assert "vc-prompt" not in cli.SHELL_WRAPPER_VERBS
