@@ -469,9 +469,15 @@ moving the pointer to the previous generation — sessions already running keep
 owning their live state.
 
 For the desktop app, install a newer `Vibecrafted.app` from the new DMG. The
-app binary can be replaced while session processes continue running; restored
-workspaces re-enter through the new bundled `vc-start`. Roll back by replacing
-the app with the prior notarized release.
+app binary can be replaced while session processes continue running. Opening
+the new app does **not** upgrade the runtime: on launch the app adopts the
+already-active runtime generation and publishes its bundled Runtime Pack only
+when no runtime is installed at all (deliberate protection against a silent
+downgrade). To raise the runtime after replacing the app, install the Runtime
+Pack — the in-app "Repair Runtime…" action or
+`Contents/Resources/runtime-pack/install-runtime-pack.sh` — and the app adopts
+the new generation on its next launch. Roll back by replacing the app with the
+prior notarized release; runtime rollback is the pointer move described above.
 
 See [Update and rollback](public/getting-started/update.md) for the pointer
 mechanics in detail.
