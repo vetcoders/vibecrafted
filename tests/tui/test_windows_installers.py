@@ -755,6 +755,8 @@ def test_windows_ci_installs_exe_then_doctor_then_uninstall() -> None:
         '$psi.Arguments = "/uninstall /quiet /norestart /log `"$uninstallLog`""'
     )
     assert "WixBundleUILevel" in exe_job
+    assert "Variable: WixBundleUILevel = 2" in exe_job
+    assert "Variable: WixBundleUILevel = 4" in exe_job
     assert "Skipping action: LaunchVcTerminal" in exe_job
     assert "Doing action: LaunchVcTerminal" in exe_job
     assert "quiet EXE install did not record WixBundleUILevel 2" in exe_job

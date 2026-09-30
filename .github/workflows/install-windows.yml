@@ -628,12 +628,15 @@ jobs:
             Show-BurnLog $installLog
             throw "quiet EXE install did not skip LaunchVcTerminal"
           }
-          $uiLevelQuiet = ($installText -match "WixBundleUILevel' to value '2'") -or ($installText -match 'WixBundleUILevel'' to value 2(\D|$)')
+          # /quiet sets built-in numeric WixBundleUILevel. WiX 3.14 does not log
+          # "Setting string variable 'WixBundleUILevel' to value '2'". It dumps
+          # the value at shutdown as "Variable: WixBundleUILevel = 2". Full UI is 4.
+          $uiLevelQuiet = ($installText -match "WixBundleUILevel' to value '2'") -or ($installText -match 'WixBundleUILevel'' to value 2(\D|$)') -or ($installText -match 'Variable: WixBundleUILevel = 2(\D|$)')
           if (-not $uiLevelQuiet) {
             Show-BurnLog $installLog
             throw "quiet EXE install did not record WixBundleUILevel 2"
           }
-          if (($installText -match "WixBundleUILevel' to value '4'") -or ($installText -match 'WixBundleUILevel'' to value 4(\D|$)')) {
+          if (($installText -match "WixBundleUILevel' to value '4'") -or ($installText -match 'WixBundleUILevel'' to value 4(\D|$)') -or ($installText -match 'Variable: WixBundleUILevel = 4(\D|$)')) {
             Show-BurnLog $installLog
             throw "quiet EXE install recorded full WixBundleUILevel 4"
           }
