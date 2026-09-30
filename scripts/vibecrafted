@@ -473,6 +473,34 @@ _cron_script() {
   return 1
 }
 
+# `scripts/vibecrafted_housekeeping.py` ships under the top-level `scripts/`
+# tree (distribution_manifest.py carries it into every installed generation
+# alongside vetcoders_install.py), so this mirrors _dispatcher_core_dir's
+# installed-root-first resolution rather than _cron_script's
+# runtime/scripts-bundled-in-package pattern.
+_housekeeping_script_path() {
+  local owner_root candidate repo_source
+  owner_root="$(_script_owner_root 2>/dev/null || true)"
+  if [[ -n "$owner_root" ]] \
+    && { _is_installed_generation_root "$owner_root" || _is_framework_source_root "$owner_root"; }; then
+    candidate="$owner_root/scripts/vibecrafted_housekeeping.py"
+    if [[ -f "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  fi
+  repo_source="$(_repo_source_root 2>/dev/null || true)"
+  for candidate in \
+    "${repo_source:+$repo_source/scripts/vibecrafted_housekeeping.py}" \
+    "$crafted_tools/scripts/vibecrafted_housekeeping.py" \
+    "$(_script_repo_root)/scripts/vibecrafted_housekeeping.py"; do
+    [[ -n "$candidate" && -f "$candidate" ]] || continue
+    printf '%s\n' "$candidate"
+    return 0
+  done
+  return 1
+}
+
 _core_module_dir() {
   _dispatcher_core_dir
 }
@@ -4856,6 +4884,10 @@ cmd_help() {
       cmd_dashboard_help
       return
       ;;
+    housekeeping)
+      cmd_housekeeping_help
+      return
+      ;;
     gui)
       cmd_gui_help
       return
@@ -5069,6 +5101,7 @@ cmd_help_full() {
   printf '  %bvibecrafted dashboard ls%b              List active vc-frame sessions\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted dashboard gc%b [flags]      Prune dead/stale vc-frame sessions\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted dashboard switch%b <name>   Switch to session (vc-frame-native)\n' "$_cyan" "$_reset"
+  printf '  %bvibecrafted housekeeping%b plan|run|schedule  Disk-space reclaim + auto schedule\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted start%b [<workspace>] [--repo <path>]  Create a vc-frame workspace (create-only)\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted gui%b                       Public/local-web launch + observe surface\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted tui%b                       Rust operator console over shared state\n' "$_cyan" "$_reset"
@@ -5692,6 +5725,85 @@ cmd_workspace() {
     "$(_vibecrafted_python)" -c \
       'from vibecrafted_core.workspace_catalog import workspace_cli_main; import sys; raise SystemExit(workspace_cli_main(sys.argv[1:]))' \
       "$@"
+}
+
+cmd_housekeeping_help() {
+  printf '\n'
+  printf '%b⚒%b  %bhousekeeping%b\n' "$_copper" "$_reset" "$_bold" "$_reset"
+  printf '%b─────────────────────────────────────────%b\n' "$_steel" "$_reset"
+  printf '  Receipt-driven disk-space reclaim for VIBECRAFTED_HOME, and the\n'
+  printf '  schedule that runs it automatically over time.\n'
+  printf '\n'
+  printf '%bUsage:%b\n' "$_bold" "$_reset"
+  printf '  vibecrafted housekeeping plan [--retention-days N] [--json]\n'
+  printf '  vibecrafted housekeeping run --confirm DELETE-REGENERABLE-VIBECRAFTED-STATE [flags]\n'
+  printf '  vibecrafted housekeeping schedule status\n'
+  printf '  vibecrafted housekeeping schedule install\n'
+  printf '  vibecrafted housekeeping schedule uninstall\n'
+  printf '\n'
+  printf '%bSafety (two separate Founder opt-ins):%b\n' "$_bold" "$_reset"
+  printf '  plan never deletes anything. schedule install requires\n'
+  printf '  [housekeeping].enabled = true in ~/.config/vibecrafted/config.toml --\n'
+  printf '  without it, nothing is scheduled. An installed schedule still only\n'
+  printf '  plans (writes a receipt) unless you *also* set\n'
+  printf '  [housekeeping].auto_execute = true -- only then does the recurring\n'
+  printf '  run ever delete stale transient/build-cache state. store/ and\n'
+  printf '  secrets/ are never cleanup candidates either way.\n'
+  printf '\n'
+}
+
+cmd_housekeeping() {
+  if _is_help_flag "${1:-}"; then
+    cmd_housekeeping_help
+    return 0
+  fi
+  local script_path
+  script_path="$(_housekeeping_script_path 2>/dev/null || true)"
+  [[ -n "$script_path" ]] || {
+    printf '%b✗%b Housekeeping script not found.\n' "$_red" "$_reset" >&2
+    return 1
+  }
+
+  local sub="${1:-}"
+  case "$sub" in
+    plan)
+      shift || true
+      "$(_vibecrafted_python)" "$script_path" "$@"
+      return
+      ;;
+    run)
+      shift || true
+      "$(_vibecrafted_python)" "$script_path" --execute "$@"
+      return
+      ;;
+    schedule)
+      shift || true
+      if _is_help_flag "${1:-}"; then
+        cmd_housekeeping_help
+        return 0
+      fi
+      local core_dir
+      core_dir="$(_core_module_dir 2>/dev/null || true)"
+      [[ -n "$core_dir" ]] || {
+        printf '%b✗%b Vibecrafted Core module not found.\n' "$_red" "$_reset" >&2
+        return 1
+      }
+      PYTHONPATH="$core_dir${PYTHONPATH:+:$PYTHONPATH}" \
+        "$(_vibecrafted_python)" -c \
+          'from vibecrafted_core.housekeeping_schedule import schedule_cli_main; import sys; raise SystemExit(schedule_cli_main(sys.argv[1:]))' \
+          "$@" --script-path "$script_path"
+      return
+      ;;
+    ""|-h|--help)
+      cmd_housekeeping_help
+      return 1
+      ;;
+    *)
+      printf '%b✗%b Unknown housekeeping subcommand: %s\n' "$_red" "$_reset" "$sub" >&2
+      cmd_housekeeping_help
+      return 1
+      ;;
+  esac
 }
 
 _vc_frame_or_vc_frame_bin() {
@@ -6841,6 +6953,7 @@ main() {
     workspace) cmd_workspace "$@" ;;
     scaffold-doctor) cmd_scaffold_doctor "$@" ;;
     dashboard|mc|mission-control|sessions) cmd_dashboard "$@" ;;
+    housekeeping) cmd_housekeeping "$@" ;;
     loop) cmd_loop "$@" ;;
     cron) cmd_cron "$@" ;;
     ship) cmd_ship "$@" ;;
