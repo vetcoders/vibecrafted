@@ -156,6 +156,9 @@ xdg_config_home = _runtime_paths.xdg_config_home
 classify_vibecrafted_home_child = _runtime_paths.classify_vibecrafted_home_child
 launcher_name = _runtime_paths.launcher_name
 vibecrafted_product_config_home = _runtime_paths.vibecrafted_product_config_home
+canonical_vibecrafted_home = _runtime_paths.canonical_vibecrafted_home
+canonical_vibecrafted_runtime_home = _runtime_paths.canonical_vibecrafted_runtime_home
+canonical_vibecrafted_launcher_bin = _runtime_paths.canonical_vibecrafted_launcher_bin
 is_windows = _runtime_paths.is_windows
 resolve_active_generation = _runtime_paths.resolve_active_generation
 GenerationResolutionError = _runtime_paths.GenerationResolutionError
@@ -3108,6 +3111,23 @@ def _runtime_pack_launcher_target(launcher: Path, current_tools: Path) -> Path |
         generation = current_tools.resolve(strict=True)
     except (OSError, RuntimeError):
         return None
+    # Windows .cmd runtime wrappers pin VIBECRAFTED_RUNTIME_ROOT to the generation
+    # (see _runtime_cmd_launcher_body); they never use POSIX `exec`.
+    if launcher.suffix.lower() in {".cmd", ".bat"} or "VIBECRAFTED_RUNTIME_ROOT=" in text:
+        for match in re.finditer(
+            r'VIBECRAFTED_RUNTIME_ROOT=([^"\r\n]+)',
+            text,
+            flags=re.IGNORECASE,
+        ):
+            raw = match.group(1).strip().strip('"')
+            if not raw:
+                continue
+            try:
+                target = Path(raw).expanduser().resolve(strict=False)
+            except (OSError, RuntimeError):
+                continue
+            if target == generation or _is_subpath(target, generation):
+                return target
     for line in reversed(text.splitlines()):
         if not line.strip().startswith("exec "):
             continue
@@ -11914,10 +11934,13 @@ def _secure_walkaround_launcher_issues(
         os.environ.get("UV_TOOL_DIR", str(xdg_data_home() / "uv" / "tools"))
     ).expanduser()
     expected_uv_wrapper = _canonical_path_preserving_final_symlink(
-        uv_tools_root / "vibecrafted" / "bin" / SECURE_WALKAROUND_LAUNCHER
+        uv_tools_root
+        / "vibecrafted"
+        / "bin"
+        / launcher_name(SECURE_WALKAROUND_LAUNCHER)
     )
     expected_runtime_wrapper = _canonical_path_preserving_final_symlink(
-        vibecrafted_launcher_bin() / SECURE_WALKAROUND_LAUNCHER
+        vibecrafted_launcher_bin() / launcher_name(SECURE_WALKAROUND_LAUNCHER)
     )
     if resolved_launcher not in {expected_uv_wrapper, expected_runtime_wrapper}:
         return [
@@ -11927,7 +11950,11 @@ def _secure_walkaround_launcher_issues(
         wrapper_metadata = resolved_launcher.lstat()
     except OSError as exc:
         return [f"{SECURE_WALKAROUND_LAUNCHER}:corrupt:{exc}"]
-    if not stat.S_ISREG(wrapper_metadata.st_mode) or wrapper_metadata.st_nlink != 1:
+    # Windows NTFS reports nlink idiosyncratically for some .cmd files; the
+    # unique-regular-file gate stays POSIX-strict where geteuid exists.
+    if not stat.S_ISREG(wrapper_metadata.st_mode) or (
+        sys.platform != "win32" and wrapper_metadata.st_nlink != 1
+    ):
         return [
             f"{SECURE_WALKAROUND_LAUNCHER}:corrupt:wrapper is not a unique regular file"
         ]
@@ -11936,20 +11963,27 @@ def _secure_walkaround_launcher_issues(
     except OSError as exc:
         return [f"{SECURE_WALKAROUND_LAUNCHER}:corrupt:{exc}"]
     if resolved_launcher == expected_runtime_wrapper:
-        runtime_python = current_tools / "bin/python3"
-        interpreters = (
-            (_canonical_path_preserving_final_symlink(runtime_python),)
-            if runtime_python.is_file() and os.access(runtime_python, os.X_OK)
-            else ()
+        runtime_python_candidates = (
+            current_tools / "bin" / "python.exe",
+            current_tools / "bin" / "python3",
+            current_tools / "bin" / "python",
+        )
+        interpreters = tuple(
+            _canonical_path_preserving_final_symlink(candidate)
+            for candidate in runtime_python_candidates
+            if candidate.is_file()
+            and (sys.platform == "win32" or os.access(candidate, os.X_OK))
         )
     else:
         interpreters = tuple(
             _canonical_path_preserving_final_symlink(candidate)
             for candidate in (
+                resolved_launcher.parent / "python.exe",
                 resolved_launcher.parent / "python",
                 resolved_launcher.parent / "python3",
             )
-            if candidate.is_file() and os.access(candidate, os.X_OK)
+            if candidate.is_file()
+            and (sys.platform == "win32" or os.access(candidate, os.X_OK))
         )
     matching = [
         interpreter
@@ -12421,18 +12455,27 @@ def describe_dumb_terminal_noise(stdout: str, stderr: str) -> str:
 
 
 def _canonical_store_root() -> Path:
-    """Canonical `~/.vibecrafted` store root, independent of any env override."""
-    return (Path.home() / ".vibecrafted").expanduser()
+    """Canonical store root, independent of any ``VIBECRAFTED_HOME`` override.
+
+    POSIX: ``~/.vibecrafted``. Windows: ``%LOCALAPPDATA%\\Vibecrafted\\home``.
+    """
+    return canonical_vibecrafted_home().expanduser()
 
 
 def _canonical_runtime_root() -> Path:
-    """Canonical `~/.local/share/vibecrafted` runtime root, independent of any env override."""
-    return (Path.home() / ".local" / "share" / "vibecrafted").expanduser()
+    """Canonical runtime root, independent of any ``VIBECRAFTED_RUNTIME_HOME`` override.
+
+    POSIX: ``~/.local/share/vibecrafted``. Windows: ``%LOCALAPPDATA%\\Vibecrafted``.
+    """
+    return canonical_vibecrafted_runtime_home().expanduser()
 
 
 def _canonical_launcher_root() -> Path:
-    """Canonical `~/.local/bin` launcher root, independent of any env override."""
-    return (Path.home() / ".local" / "bin").expanduser()
+    """Canonical launcher bin, independent of any ``VIBECRAFTED_LAUNCHER_BIN`` override.
+
+    POSIX: ``~/.local/bin``. Windows: ``%LOCALAPPDATA%\\Vibecrafted\\bin``.
+    """
+    return canonical_vibecrafted_launcher_bin().expanduser()
 
 
 def _path_with_tilde(path: Path) -> str:
@@ -12671,7 +12714,7 @@ def _runtime_generation_contract_findings() -> list[DoctorFinding]:
         ]
 
     errors = _runtime_generation_payload_errors(generation)
-    launcher = _canonical_launcher_root() / "vibecrafted"
+    launcher = _canonical_launcher_root() / launcher_name("vibecrafted")
     try:
         launcher_target = launcher.resolve(strict=True)
         expected_launcher = (generation / _RUNTIME_GENERATION_ENTRYPOINT).resolve(
@@ -13919,72 +13962,97 @@ def run_doctor(store_path: Path, state: InstallState) -> list[DoctorFinding]:
             break
 
     if common_sh is not None:
-        spawn_ok, spawn_detail = _run_smoke_command(
-            [
-                "bash",
-                "-c",
-                (
-                    'source "$1" && '
-                    "type spawn_write_meta >/dev/null 2>&1 && "
-                    "type spawn_prepare_paths >/dev/null 2>&1 && "
-                    "type spawn_generate_launcher >/dev/null 2>&1 && "
-                    "type spawn_watch_startup >/dev/null 2>&1 && "
-                    'printf "spawn-pipeline-ok\\n"'
-                ),
-                "_",
-                str(common_sh),
-            ],
-            env=os.environ.copy(),
-            expected_text="spawn-pipeline-ok",
-        )
-        findings.append(
-            DoctorFinding(
-                "ok" if spawn_ok else "fail",
-                "spawn-pipeline",
-                "common.sh sources cleanly and exports key functions"
-                if spawn_ok
-                else f"spawn pipeline broken: {spawn_detail}",
+        if sys.platform == "win32":
+            # Native Windows Runtime Pack does not run the POSIX spawn shell
+            # pipeline. Probe-via-bash resolves to WSL on GitHub windows-latest
+            # and fails closed without a distro; declare the gap explicitly.
+            unsupported = (
+                "not supported on Windows "
+                "(use WSL2 for the POSIX path, or stay on the native Runtime Pack surfaces)"
             )
-        )
-        # 7a-2. Spawn e2e smoke: generate a launcher, verify it is valid bash.
-        e2e_ok, e2e_detail = _run_smoke_command(
-            [
-                "bash",
-                "-c",
-                (
-                    'tmpdir="$(mktemp -d)" && '
-                    'export VIBECRAFTED_HOME="$tmpdir/vibecrafted-home" && '
-                    'source "$1" && '
-                    "export SPAWN_AGENT=doctor-smoke SPAWN_RUN_ID=smoke-000 "
-                    "SPAWN_PROMPT_ID=smoke SPAWN_LOOP_NR=0 SPAWN_SKILL_CODE=doctor "
-                    'SPAWN_ROOT="$tmpdir" SPAWN_PLAN="$tmpdir/doctor-plan.md" '
-                    'SPAWN_REPORT="$tmpdir/report.md" '
-                    'SPAWN_TRANSCRIPT="$tmpdir/transcript.md" '
-                    'SPAWN_LAUNCHER="$tmpdir/launcher.sh" && '
-                    'spawn_write_meta "$tmpdir/meta.json" "launching" "$SPAWN_AGENT" '
-                    '"doctor" "$SPAWN_ROOT" "$SPAWN_PLAN" "$SPAWN_REPORT" '
-                    '"$SPAWN_TRANSCRIPT" "$SPAWN_LAUNCHER" && '
-                    'spawn_generate_launcher "$SPAWN_LAUNCHER" "$tmpdir/meta.json" '
-                    '"$SPAWN_REPORT" "$SPAWN_TRANSCRIPT" "$1" "echo ok" && '
-                    'bash -n "$tmpdir/launcher.sh" && '
-                    'rm -rf "$tmpdir" && '
-                    'printf "spawn-e2e-ok\\n"'
-                ),
-                "_",
-                str(common_sh),
-            ],
-            env={k: v for k, v in os.environ.items() if not k.startswith("VC_FRAME")},
-            expected_text="spawn-e2e-ok",
-        )
-        findings.append(
-            DoctorFinding(
-                "ok" if e2e_ok else "warn",
-                "spawn-e2e",
-                "spawn pipeline generates valid launcher end-to-end"
-                if e2e_ok
-                else f"spawn e2e smoke failed: {e2e_detail}",
+            findings.append(
+                DoctorFinding(
+                    "ok",
+                    "spawn-pipeline",
+                    f"POSIX spawn common.sh pipeline: {unsupported}",
+                )
             )
-        )
+            findings.append(
+                DoctorFinding(
+                    "ok",
+                    "spawn-e2e",
+                    f"POSIX spawn e2e smoke: {unsupported}",
+                )
+            )
+        else:
+            spawn_ok, spawn_detail = _run_smoke_command(
+                [
+                    "bash",
+                    "-c",
+                    (
+                        'source "$1" && '
+                        "type spawn_write_meta >/dev/null 2>&1 && "
+                        "type spawn_prepare_paths >/dev/null 2>&1 && "
+                        "type spawn_generate_launcher >/dev/null 2>&1 && "
+                        "type spawn_watch_startup >/dev/null 2>&1 && "
+                        'printf "spawn-pipeline-ok\\n"'
+                    ),
+                    "_",
+                    str(common_sh),
+                ],
+                env=os.environ.copy(),
+                expected_text="spawn-pipeline-ok",
+            )
+            findings.append(
+                DoctorFinding(
+                    "ok" if spawn_ok else "fail",
+                    "spawn-pipeline",
+                    "common.sh sources cleanly and exports key functions"
+                    if spawn_ok
+                    else f"spawn pipeline broken: {spawn_detail}",
+                )
+            )
+            # 7a-2. Spawn e2e smoke: generate a launcher, verify it is valid bash.
+            e2e_ok, e2e_detail = _run_smoke_command(
+                [
+                    "bash",
+                    "-c",
+                    (
+                        'tmpdir="$(mktemp -d)" && '
+                        'export VIBECRAFTED_HOME="$tmpdir/vibecrafted-home" && '
+                        'source "$1" && '
+                        "export SPAWN_AGENT=doctor-smoke SPAWN_RUN_ID=smoke-000 "
+                        "SPAWN_PROMPT_ID=smoke SPAWN_LOOP_NR=0 SPAWN_SKILL_CODE=doctor "
+                        'SPAWN_ROOT="$tmpdir" SPAWN_PLAN="$tmpdir/doctor-plan.md" '
+                        'SPAWN_REPORT="$tmpdir/report.md" '
+                        'SPAWN_TRANSCRIPT="$tmpdir/transcript.md" '
+                        'SPAWN_LAUNCHER="$tmpdir/launcher.sh" && '
+                        'spawn_write_meta "$tmpdir/meta.json" "launching" "$SPAWN_AGENT" '
+                        '"doctor" "$SPAWN_ROOT" "$SPAWN_PLAN" "$SPAWN_REPORT" '
+                        '"$SPAWN_TRANSCRIPT" "$SPAWN_LAUNCHER" && '
+                        'spawn_generate_launcher "$SPAWN_LAUNCHER" "$tmpdir/meta.json" '
+                        '"$SPAWN_REPORT" "$SPAWN_TRANSCRIPT" "$1" "echo ok" && '
+                        'bash -n "$tmpdir/launcher.sh" && '
+                        'rm -rf "$tmpdir" && '
+                        'printf "spawn-e2e-ok\\n"'
+                    ),
+                    "_",
+                    str(common_sh),
+                ],
+                env={
+                    k: v for k, v in os.environ.items() if not k.startswith("VC_FRAME")
+                },
+                expected_text="spawn-e2e-ok",
+            )
+            findings.append(
+                DoctorFinding(
+                    "ok" if e2e_ok else "warn",
+                    "spawn-e2e",
+                    "spawn pipeline generates valid launcher end-to-end"
+                    if e2e_ok
+                    else f"spawn e2e smoke failed: {e2e_detail}",
+                )
+            )
     else:
         findings.append(
             DoctorFinding(

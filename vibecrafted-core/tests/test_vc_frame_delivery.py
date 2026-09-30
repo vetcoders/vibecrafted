@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 from pathlib import Path
 
 import pytest
@@ -36,17 +37,29 @@ def test_product_path_resolution_is_read_only_and_ignores_alternate_roots(
 ) -> None:
     home = tmp_path / "home"
     home.mkdir()
-    config = home / ".config/vibecrafted/vc-frame"
+    if sys.platform == "win32":
+        roaming = home / "AppData" / "Roaming"
+        roaming.mkdir(parents=True)
+        config = roaming / "Vibecrafted" / "vc-frame"
+        monkeypatch.setenv("USERPROFILE", str(home))
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("APPDATA", str(roaming))
+        monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    else:
+        config = home / ".config/vibecrafted/vc-frame"
+        monkeypatch.setenv("HOME", str(home))
     if present:
         config.mkdir(parents=True)
         (config / "config.kdl").write_text("copy_on_select true\n")
-    monkeypatch.setenv("HOME", str(home))
     for name in ("XDG_CONFIG_HOME", "VC_FRAME_CONFIG_DIR", "VIBECRAFTED_RUNTIME_ROOT"):
         monkeypatch.setenv(name, str(tmp_path / "foreign"))
     before = {p: p.stat().st_mtime_ns for p in home.rglob("*")}
     for _ in range(3):
         assert vc_frame_user_config_dir() == config
-        assert vc_frame_user_config_dir(home) == config
+        assert (
+            vc_frame_user_config_dir(home)
+            == home / ".config" / "vibecrafted" / "vc-frame"
+        )
     assert {p: p.stat().st_mtime_ns for p in home.rglob("*")} == before
     assert not (tmp_path / "foreign").exists()
 

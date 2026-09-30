@@ -851,3 +851,132 @@ def test_process_image_reports_current_interpreter() -> None:
     image = _process_image(os.getpid())
     assert image
     assert Path(image).name.lower().startswith("python")
+
+
+def test_canonical_doctor_roots_follow_localappdata(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    profile = tmp_path / "Users" / "operator"
+    local = profile / "AppData" / "Local"
+    roaming = profile / "AppData" / "Roaming"
+    for directory in (profile, local, roaming):
+        directory.mkdir(parents=True)
+    monkeypatch.setenv("USERPROFILE", str(profile))
+    monkeypatch.setenv("HOME", str(profile))
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    monkeypatch.setenv("APPDATA", str(roaming))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(roaming))
+    for name in (
+        "VIBECRAFTED_HOME",
+        "VIBECRAFTED_RUNTIME_HOME",
+        "VIBECRAFTED_LAUNCHER_BIN",
+        "XDG_DATA_HOME",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(installer.sys, "platform", "win32")
+    monkeypatch.setattr(
+        "vibecrafted_core.runtime_paths.is_windows", lambda: True
+    )
+    monkeypatch.setattr(installer, "is_windows", lambda: True)
+    monkeypatch.setattr(
+        installer,
+        "canonical_vibecrafted_home",
+        lambda: local / "Vibecrafted" / "home",
+    )
+    monkeypatch.setattr(
+        installer,
+        "canonical_vibecrafted_runtime_home",
+        lambda: local / "Vibecrafted",
+    )
+    monkeypatch.setattr(
+        installer,
+        "canonical_vibecrafted_launcher_bin",
+        lambda: local / "Vibecrafted" / "bin",
+    )
+
+    assert installer._canonical_store_root() == local / "Vibecrafted" / "home"
+    assert installer._canonical_runtime_root() == local / "Vibecrafted"
+    assert installer._canonical_launcher_root() == local / "Vibecrafted" / "bin"
+
+
+def test_runtime_pack_launcher_target_recognizes_windows_cmd(
+    tmp_path: Path,
+) -> None:
+    generation = tmp_path / "releases" / "4.3.1"
+    generation.mkdir(parents=True)
+    current = tmp_path / "tools" / "vibecrafted-current"
+    current.parent.mkdir(parents=True)
+    if sys.platform == "win32":
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(current), str(generation.resolve())],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            pytest.skip("cannot create directory junction in this environment")
+    else:
+        current.symlink_to(generation, target_is_directory=True)
+    launcher = tmp_path / "bin" / "vc-agents.cmd"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text(
+        "\r\n".join(
+            (
+                "@echo off",
+                "setlocal EnableExtensions",
+                f'set "VIBECRAFTED_RUNTIME_ROOT={generation}"',
+                f'"{generation / "bin" / "python.exe"}" -m vibecrafted_core %*',
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    assert (
+        installer._runtime_pack_launcher_target(launcher, current) == generation.resolve()
+    )
+
+
+def test_product_config_home_ignores_xdg_on_windows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from vibecrafted_core.runtime_paths import vibecrafted_product_config_home
+
+    profile = tmp_path / "Users" / "operator"
+    local = profile / "AppData" / "Local"
+    roaming = profile / "AppData" / "Roaming"
+    for directory in (profile, local, roaming):
+        directory.mkdir(parents=True)
+    monkeypatch.setenv("USERPROFILE", str(profile))
+    monkeypatch.setenv("HOME", str(profile))
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    monkeypatch.setenv("APPDATA", str(roaming))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(roaming))
+    monkeypatch.setattr(
+        "vibecrafted_core.runtime_paths.is_windows", lambda: True
+    )
+
+    assert vibecrafted_product_config_home() == roaming / "Vibecrafted"
+
+
+def test_vc_frame_user_config_dir_uses_appdata_on_windows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from vibecrafted_core.vc_frame_delivery import vc_frame_user_config_dir
+
+    profile = tmp_path / "Users" / "operator"
+    roaming = profile / "AppData" / "Roaming"
+    roaming.mkdir(parents=True)
+    monkeypatch.setenv("USERPROFILE", str(profile))
+    monkeypatch.setenv("HOME", str(profile))
+    monkeypatch.setenv("APPDATA", str(roaming))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setattr(
+        "vibecrafted_core.runtime_paths.is_windows", lambda: True
+    )
+
+    assert vc_frame_user_config_dir() == roaming / "Vibecrafted" / "vc-frame"
+    assert (
+        vc_frame_user_config_dir(profile)
+        == profile / ".config" / "vibecrafted" / "vc-frame"
+    )

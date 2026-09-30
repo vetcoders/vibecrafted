@@ -30,9 +30,18 @@ OPERATOR_SCRIPT_NAMES: tuple[str, ...] = (
 
 
 def vc_frame_user_config_dir(home: Path | None = None) -> Path:
-    """The one product-owned vc-frame config directory."""
-    root = home if home is not None else Path.home()
-    return root / ".config" / "vibecrafted" / "vc-frame"
+    """The one product-owned vc-frame config directory.
+
+    POSIX: ``~/.config/vibecrafted/vc-frame`` (or ``<home>/.config/...`` when
+    tests pass an explicit home). Windows: ``%APPDATA%\\Vibecrafted\\vc-frame``.
+    """
+    if home is not None:
+        return home / ".config" / "vibecrafted" / "vc-frame"
+    from .runtime_paths import is_windows, vibecrafted_product_config_home
+
+    if is_windows():
+        return vibecrafted_product_config_home() / "vc-frame"
+    return Path.home() / ".config" / "vibecrafted" / "vc-frame"
 
 
 def tools_current_path(tools_home: Path | None = None) -> Path:

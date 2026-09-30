@@ -138,11 +138,17 @@ def canonical_vibecrafted_product_config_home() -> Path:
 
 
 def vibecrafted_product_config_home() -> Path:
-    """``$XDG_CONFIG_HOME/vibecrafted`` or native ``APPDATA\\Vibecrafted``."""
-    if os.environ.get("XDG_CONFIG_HOME"):
-        return xdg_config_home() / "vibecrafted"
+    """Native product config home.
+
+    Windows always uses ``%APPDATA%\\Vibecrafted`` — Runtime Pack launchers may
+    export ``XDG_CONFIG_HOME`` as the roaming parent for child tools, but that
+    must not redirect the product tree to ``%APPDATA%\\vibecrafted``.
+    POSIX keeps ``$XDG_CONFIG_HOME/vibecrafted`` (else ``~/.config/vibecrafted``).
+    """
     if is_windows():
         return canonical_vibecrafted_product_config_home()
+    if os.environ.get("XDG_CONFIG_HOME"):
+        return xdg_config_home() / "vibecrafted"
     return xdg_config_home() / "vibecrafted"
 
 

@@ -42,6 +42,50 @@ class _Finding:
     message: str
 
 
+def _vc_frame_windows_launcher_findings(path: Path) -> list[_Finding]:
+    """Accept the Runtime Pack ``.cmd`` product entry that points at libexec."""
+    try:
+        head = path.read_text(encoding="utf-8", errors="ignore")[:4096]
+    except OSError as exc:
+        return [_Finding("warn", "vc-frame:path", f"cannot read {path}: {exc}")]
+    lowered = head.lower()
+    if (
+        "vc-frame.exe" not in lowered
+        and "libexec\\vc-frame" not in lowered
+        and "libexec/vc-frame" not in lowered
+    ):
+        return [
+            _Finding(
+                "fail",
+                "vc-frame:path",
+                f"vc-frame on PATH ({path}) is not a Windows product .cmd "
+                "wrapper that launches libexec\\vc-frame.exe. Reinstall the "
+                "verified Runtime Pack.",
+            )
+        ]
+    root = path.resolve(strict=False).parent.parent
+    native = root / "libexec" / "vc-frame.exe"
+    if not native.is_file():
+        native = root / "libexec" / "vc-frame"
+    if not native.is_file():
+        return [
+            _Finding(
+                "fail",
+                "vc-frame:path",
+                f"Windows product wrapper on PATH ({path}) has no native "
+                f"vc-frame beside the generation at {root / 'libexec'}. "
+                "Reinstall the verified Runtime Pack.",
+            )
+        ]
+    return [
+        _Finding(
+            "ok",
+            "vc-frame:path",
+            f"Windows product wrapper on PATH ({path} -> {native})",
+        )
+    ]
+
+
 def _vc_frame_launcher_findings(
     which: Callable[[str], str | None] = shutil.which,
 ) -> list[_Finding]:
@@ -49,6 +93,8 @@ def _vc_frame_launcher_findings(
 
     A copied binary or an old wrapper without the Darwin ``/tmp`` pin is how
     Claude/CLI keep overflowing macOS sockaddr_un after the app was fixed.
+    On Windows the product entry is a ``.cmd`` that launches
+    ``libexec\\vc-frame.exe`` — shebang + Darwin pin checks do not apply.
     """
 
     resolved = which("vc-frame")
@@ -66,6 +112,8 @@ def _vc_frame_launcher_findings(
             )
         ]
     path = Path(resolved)
+    if path.suffix.lower() in {".cmd", ".bat"}:
+        return _vc_frame_windows_launcher_findings(path)
     try:
         target = path.resolve()
     except OSError:
@@ -75,6 +123,16 @@ def _vc_frame_launcher_findings(
     except OSError as exc:
         return [_Finding("warn", "vc-frame:path", f"cannot read {path}: {exc}")]
     if not head.lstrip().startswith("#!"):
+        if sys.platform == "win32":
+            return [
+                _Finding(
+                    "fail",
+                    "vc-frame:path",
+                    f"vc-frame on PATH ({path}) is not a Windows product .cmd "
+                    "wrapper that launches libexec\\vc-frame.exe. Reinstall the "
+                    "verified Runtime Pack.",
+                )
+            ]
         return [
             _Finding(
                 "fail",

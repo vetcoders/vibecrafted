@@ -242,7 +242,10 @@ def test_vc_frame_launcher_finding_flags_raw_binary(tmp_path: Path) -> None:
 
     assert finding.level == "fail"
     assert finding.component == "vc-frame:path"
-    assert "raw binary" in finding.message
+    if sys.platform == "win32":
+        assert "not a Windows product .cmd" in finding.message
+    else:
+        assert "raw binary" in finding.message
 
 
 def test_vc_frame_launcher_finding_ok_for_pinned_wrapper(tmp_path: Path) -> None:
@@ -577,6 +580,28 @@ def test_server_supervision_finding_is_not_applicable_off_macos() -> None:
     assert findings[0].level == "ok"
     assert findings[0].component == "server-supervisor"
     assert "not applicable" in findings[0].message
+
+
+def test_vc_frame_launcher_finding_ok_for_windows_cmd_wrapper(tmp_path: Path) -> None:
+    generation = tmp_path / "releases" / "4.3.1"
+    wrapper = generation / "bin" / "vc-frame.cmd"
+    wrapper.parent.mkdir(parents=True)
+    wrapper.write_text(
+        "@echo off\r\n"
+        'set "ROOT=%~dp0.."\r\n'
+        'set "NATIVE_HOST=%ROOT%\\libexec\\vc-frame.exe"\r\n'
+        '"%NATIVE_HOST%" %*\r\n',
+        encoding="utf-8",
+    )
+    native = generation / "libexec" / "vc-frame.exe"
+    native.parent.mkdir(parents=True)
+    native.write_bytes(b"MZ" + b"\x00" * 32)
+
+    finding = doctor._vc_frame_launcher_findings(which=lambda _name: str(wrapper))[0]
+
+    assert finding.level == "ok"
+    assert finding.component == "vc-frame:path"
+    assert "Windows product wrapper" in finding.message
 
 
 def test_windows_unsupported_surfaces_are_explicit_ok() -> None:
