@@ -113,6 +113,49 @@ def test_windows_installer_emits_canonical_windows_x64_names() -> None:
     assert 'vetcoders/vibecrafted' in pack_builder
 
 
+def test_windows_ci_builds_msi_exe_from_pack_artifact() -> None:
+    """Install (Windows Matrix) must adapt the uploaded pack into MSI/EXE once.
+
+    Does not rebuild the Runtime Pack. download-artifact stays on the known-good
+    v4 SHA. Output stays under packaging/windows/out (no real LOCALAPPDATA install).
+    """
+    workflow = (REPO_ROOT / ".github" / "workflows" / "install-windows.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "windows-installers:" in workflow
+    assert "build Windows x64 MSI/EXE (unsigned)" in workflow
+    assert "needs: windows-runtime-pack" in workflow
+    assert "build-windows-installers.ps1" in workflow
+    assert "Download Runtime Pack into build/ for build-windows-installers.ps1" in workflow
+    assert (
+        "Build MSI/EXE from downloaded pack (no second pack build; out under packaging/windows/out)"
+        in workflow
+    )
+    # Known-good download-artifact v4 pin (same as cold-install); do not drift.
+    assert (
+        "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4"
+        in workflow
+    )
+    assert workflow.count(
+        "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4"
+    ) >= 2
+    assert "path: build" in workflow
+    assert "build-windows-x64-runtime-pack.ps1" in workflow
+    # Installer job must consume the pack artifact, not invoke the pack builder.
+    installer_job = workflow.split("windows-installers:", 1)[1]
+    assert "build-windows-installers.ps1" in installer_job
+    assert "build-windows-x64-runtime-pack.ps1" not in installer_job
+    assert "packaging/windows/out/Vibecrafted_*-windows-x64.msi" in installer_job
+    assert "packaging/windows/out/Vibecrafted_*-windows-x64.exe" in installer_job
+    assert "packaging/windows/out/Vibecrafted_*-windows-x64.msi.sha256" in installer_job
+    assert "packaging/windows/out/Vibecrafted_*-windows-x64.exe.sha256" in installer_job
+    assert "windows-x64-installers" in installer_job
+    assert "VIBECRAFTED_WINDOWS_AUTHENTICODE_THUMBPRINT" not in installer_job
+    assert "signtool" not in installer_job.lower()
+    assert "LOCALAPPDATA" not in installer_job or "does not install into LOCALAPPDATA" in installer_job
+    assert "install.ps1" not in installer_job
+
+
 def test_windows_installer_is_per_user_portable() -> None:
     product = PRODUCT.read_text(encoding="utf-8")
     build = BUILD_SCRIPT.read_text(encoding="utf-8")
