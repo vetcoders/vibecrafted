@@ -6509,10 +6509,14 @@ cmd_lifecycle_command() {
     printf '%b✗ gemini CLI is deprecated.%b Use agy (Google Antigravity CLI) instead.\n' "$_red" "$_reset" >&2
     return 1
   fi
-  _has_agent "$agent" || {
+  # Even a single-agent dispatch is a swarm: the run meta says agent=swarm and
+  # the dispatch banner prints "await swarm --run-id …". The lifecycle verbs
+  # must accept that identity (core cli.py AGENTS already does); everything
+  # else (init, fork, resume) keeps refusing it.
+  if [[ "$agent" != "swarm" ]] && ! _has_agent "$agent"; then
     printf '%b✗%b Unknown agent: %s\n' "$_red" "$_reset" "$agent" >&2
     return 1
-  }
+  fi
   local arg
   for arg in "$@"; do
     if _is_help_flag "$arg"; then

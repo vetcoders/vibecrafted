@@ -174,6 +174,24 @@ def test_packaged_deck_core_surface_help_reaches_parser(
         assert marker in combined
 
 
+@pytest.mark.parametrize("verb", ["observe", "await", "stop"])
+def test_lifecycle_verbs_accept_the_swarm_identity(tmp_path: Path, verb: str) -> None:
+    """Even a single-agent dispatch is a swarm run (agent=swarm in its meta).
+
+    The dispatch banner prints "vibecrafted await swarm --run-id …"; the deck
+    must not refuse the identity its own banner advertises. Core cli.py AGENTS
+    has carried "swarm" all along — only the deck's shell roster drifted.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    result = _run([verb, "swarm", "--help"], home=home)
+    combined = _display_text(result.stdout + result.stderr)
+    assert "Unknown agent" not in combined
+    assert UNKNOWN not in combined
+    assert result.returncode == 0, combined
+    assert "vibecrafted swarm" in combined
+
+
 def test_unknown_command_stays_a_deck_refusal(tmp_path: Path) -> None:
     home = tmp_path / "home"
     home.mkdir()
