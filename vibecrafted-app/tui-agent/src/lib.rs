@@ -1718,9 +1718,9 @@ fn start_state_watcher(path: &Path, tx: Sender<()>) -> anyhow::Result<Recommende
         },
         NotifyConfig::default(),
     )?;
-    for root in control_plane_watch_roots(path) {
+    for (root, mode) in control_plane_watch_roots(path) {
         if root.exists() {
-            watcher.watch(&root, RecursiveMode::NonRecursive)?;
+            watcher.watch(&root, mode)?;
         }
     }
     Ok(watcher)
@@ -1769,21 +1769,43 @@ fn artifact_watch_root(home: &Path) -> PathBuf {
     home.join("artifacts")
 }
 
-fn control_plane_watch_roots(state_root: &Path) -> Vec<PathBuf> {
-    vec![
-        state_root.to_path_buf(),
-        state_root.join("runs"),
-        state_root.join("runs").join(".archived"),
-        state_root.join("runtime_runs"),
-    ]
+/// Roots the state watcher observes, with their depth. The control-plane
+/// directories are flat. `locks/` and `marbles/` sit beside `control_plane/`
+/// in the Vibecrafted home and are raw run sources the canonical projection
+/// folds, so releasing a lock or settling a loop must refresh a running console
+/// too; both nest (`locks/<org>/<repo>/<id>.lock`,
+/// `marbles/[_archived/<day>/]<id>/state.json`) and are watched recursively.
+fn control_plane_watch_roots(state_root: &Path) -> Vec<(PathBuf, RecursiveMode)> {
+    let mut roots = vec![
+        (state_root.to_path_buf(), RecursiveMode::NonRecursive),
+        (state_root.join("runs"), RecursiveMode::NonRecursive),
+        (
+            state_root.join("runs").join(".archived"),
+            RecursiveMode::NonRecursive,
+        ),
+        (state_root.join("runtime_runs"), RecursiveMode::NonRecursive),
+    ];
+    if let Some((locks, marbles)) = raw_run_source_roots(state_root) {
+        roots.push((locks, RecursiveMode::Recursive));
+        roots.push((marbles, RecursiveMode::Recursive));
+    }
+    roots
+}
+
+/// `locks/` and `marbles/` of the home that owns `state_root`
+/// (`<home>/control_plane`), the same layout control-core reads them from.
+fn raw_run_source_roots(state_root: &Path) -> Option<(PathBuf, PathBuf)> {
+    let home = state_root.parent()?;
+    Some((home.join("locks"), home.join("marbles")))
 }
 
 /// A watcher event is worth a refresh only when it can move
 /// [`projection_revision`], whose inputs are exactly `events.jsonl`, the JSON
-/// snapshots in `runs/` and `runs/.archived/`, and the entry names directly in
-/// `runtime_runs/`. Anything else in the watched roots cannot change the board:
-/// `caretaker.json`, rewritten every five seconds by the server's caretaker,
-/// used to wake every console into a refresh pass around the clock.
+/// snapshots in `runs/` and `runs/.archived/`, the entry names directly in
+/// `runtime_runs/`, and the raw run sources (`locks/**/*.lock`,
+/// `marbles/**/state.json`). Anything else in the watched roots cannot change
+/// the board: `caretaker.json`, rewritten every five seconds by the server's
+/// caretaker, used to wake every console into a refresh pass around the clock.
 fn is_projection_path(path: &Path) -> bool {
     let name = path
         .file_name()
@@ -1797,7 +1819,7 @@ fn is_projection_path(path: &Path) -> bool {
         .and_then(Path::file_name)
         .and_then(|value| value.to_str())
         .unwrap_or_default();
-    match parent {
+    let control_plane = match parent {
         "runtime_runs" => true,
         "runs" | ".archived" => name.ends_with(".json"),
         _ => {
@@ -1806,7 +1828,30 @@ fn is_projection_path(path: &Path) -> bool {
                     .components()
                     .any(|component| component.as_os_str() == "runtime_runs")
         }
+    };
+    control_plane || is_raw_run_source(path, name)
+}
+
+/// Raw run evidence under `locks/` or `marbles/`. A lock counts as its own
+/// file (never the `*.lock.tmp.<pid>` scratch of a PID stamp); marbles count
+/// as `state.json` or as a session directory appearing, vanishing or moving
+/// to `_archived/<day>/`, since a directory rename reports only the directory.
+fn is_raw_run_source(path: &Path, name: &str) -> bool {
+    if name.starts_with('.') {
+        return false;
     }
+    let under = |root: &str| path.components().any(|part| part.as_os_str() == root);
+    let ancestor = |depth: usize| {
+        path.ancestors()
+            .nth(depth)
+            .and_then(Path::file_name)
+            .and_then(|value| value.to_str())
+    };
+    (under("locks") && name.ends_with(".lock"))
+        || (under("marbles")
+            && (name == "state.json"
+                || ancestor(1) == Some("marbles")
+                || ancestor(2) == Some("_archived")))
 }
 
 fn projection_revision(root: &Path) -> u64 {
@@ -1815,7 +1860,39 @@ fn projection_revision(root: &Path) -> u64 {
     hash_dir_entries(&root.join("runs"), &mut hasher);
     hash_dir_entries(&root.join("runs").join(".archived"), &mut hasher);
     hash_dir_names(&root.join("runtime_runs"), &mut hasher);
+    if let Some((locks, marbles)) = raw_run_source_roots(root) {
+        hash_tree_files(&locks, &|name| name.ends_with(".lock"), &mut hasher);
+        hash_tree_files(&marbles, &|name| name == "state.json", &mut hasher);
+    }
     hasher.finish()
+}
+
+/// Hash every file under `root` whose name matches `pred` (path, mtime,
+/// size), in path order. Symlinks are neither followed nor hashed, matching
+/// the control-core walk that folds these files into the projection.
+fn hash_tree_files(root: &Path, pred: &dyn Fn(&str) -> bool, hasher: &mut DefaultHasher) {
+    root.hash(hasher);
+    let mut files = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => stack.push(entry.path()),
+                Ok(kind) if kind.is_file() && entry.file_name().to_str().is_some_and(pred) => {
+                    files.push(entry.path());
+                }
+                _ => {}
+            }
+        }
+    }
+    files.sort();
+    files.len().hash(hasher);
+    for file in files {
+        hash_mtime(&file, hasher);
+    }
 }
 
 fn hash_mtime(path: &Path, hasher: &mut DefaultHasher) {
@@ -2575,11 +2652,76 @@ mod tests {
         let home = PathBuf::from("/tmp/vc-home");
         let state = home.join("control_plane");
         let artifact = artifact_watch_root(&home);
-        for root in control_plane_watch_roots(&state) {
+        for (root, _) in control_plane_watch_roots(&state) {
             assert_ne!(root, artifact);
             assert!(!artifact.starts_with(&root));
             assert!(!root.starts_with(&artifact));
         }
+    }
+
+    #[test]
+    fn raw_run_sources_are_watched_recursively() {
+        let home = PathBuf::from("/tmp/vc-home");
+        let roots = control_plane_watch_roots(&home.join("control_plane"));
+        // Locks nest as locks/<org>/<repo>/<id>.lock and marbles sessions as
+        // marbles/[_archived/<day>/]<id>/state.json: both need the subtree.
+        for raw in [home.join("locks"), home.join("marbles")] {
+            assert!(
+                roots.contains(&(raw.clone(), RecursiveMode::Recursive)),
+                "{} must be watched recursively: {roots:?}",
+                raw.display()
+            );
+        }
+    }
+
+    #[test]
+    fn releasing_a_lock_or_settling_a_marbles_loop_wakes_the_refresh() {
+        for moved in [
+            "/tmp/vc-home/locks/vetcoders/vibecrafted/impl-1.lock",
+            "/tmp/vc-home/locks/mlx-batch-runner/marb-1.lock",
+            "/tmp/vc-home/marbles/marb-1/state.json",
+            "/tmp/vc-home/marbles/_archived/2026-09-04/marb-1/state.json",
+            "/tmp/vc-home/marbles/marb-1",
+            "/tmp/vc-home/marbles/_archived/2026-09-04/marb-1",
+        ] {
+            assert!(is_projection_path(&PathBuf::from(moved)), "{moved}");
+        }
+        for inert in [
+            "/tmp/vc-home/locks/vetcoders/vibecrafted/impl-1.lock.tmp.4242",
+            "/tmp/vc-home/locks/.DS_Store",
+            "/tmp/vc-home/marbles/marb-1/god.md",
+            "/tmp/vc-home/marbles/marb-1/state.json.lock",
+            "/tmp/vc-home/marbles/.DS_Store",
+        ] {
+            assert!(!is_projection_path(&PathBuf::from(inert)), "{inert}");
+        }
+    }
+
+    #[test]
+    fn projection_revision_moves_with_locks_and_marbles_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("control_plane");
+        std::fs::create_dir_all(root.join("runs")).expect("runs");
+        let locks = dir.path().join("locks/vetcoders/vibecrafted");
+        std::fs::create_dir_all(&locks).expect("locks");
+        let lock = locks.join("impl-1.lock");
+        std::fs::write(&lock, "run_id=impl-1\nstatus=running\n").expect("lock");
+        let session = dir.path().join("marbles/marb-1");
+        std::fs::create_dir_all(&session).expect("marbles session");
+        std::fs::write(session.join("state.json"), r#"{"status":"promise"}"#).expect("state");
+        std::fs::write(session.join("god.md"), "plan\n").expect("plan");
+
+        let before = projection_revision(&root);
+        std::fs::write(session.join("god.md"), "plan\nmore\n").expect("plan edit");
+        assert_eq!(before, projection_revision(&root), "plans are not inputs");
+
+        std::fs::remove_file(&lock).expect("release lock");
+        let released = projection_revision(&root);
+        assert_ne!(before, released, "a released lock must move the revision");
+
+        std::fs::write(session.join("state.json"), r#"{"status":"converged"}"#)
+            .expect("settle loop");
+        assert_ne!(released, projection_revision(&root));
     }
 
     #[test]
