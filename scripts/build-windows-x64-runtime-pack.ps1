@@ -38,8 +38,15 @@ $terminalRevision = "d6685ead9018ad89411291d6198476666e48b0f8"
 $terminalArchiveSha256 = "3cd6670c4a80c589b945ed1b45c1f033c80745ceb34d3466e9476a1c3eeb0f71"
 $frameRevision = "7ab84069c9b7994ce0b705ccedd708aa3a35dcb6"
 $frameArchiveSha256 = "55851e094b91d3b41712edcdc66d69f97da5859118395fee497bb104714b125c"
+# Canonical carrier name matches Linux/darwin Runtime Pack shape:
+# Vibecrafted_RuntimePack_<ver>-<YYYYMMDD>-<sha8>-win32-x64.tar.gz
+# (platform token stays win32-x64 for install-runtime-pack.ps1 contract).
+$releaseDate = (Get-Date).ToUniversalTime().ToString("yyyyMMdd")
+$shortSha = $SourceRevision.Substring(0, 8)
 if (-not $Output) {
-    $Output = Join-Path $repoRoot "build\Vibecrafted_RuntimePack_${version}-win32-x64.tar.gz"
+    $Output = Join-Path $repoRoot (
+        "build\Vibecrafted_RuntimePack_${version}-${releaseDate}-${shortSha}-win32-x64.tar.gz"
+    )
 }
 
 $work = Join-Path ([System.IO.Path]::GetTempPath()) ("vc-win-pack-" + [guid]::NewGuid().ToString("N"))

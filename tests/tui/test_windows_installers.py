@@ -76,7 +76,36 @@ def test_windows_installer_identity_matches_version_and_upgrade_code() -> None:
     assert "-b " not in candle_block
     assert '-b "staging=' in build
     assert '-b "out=' in build
+    assert STABLE_PRODUCT_CODE in build
+    assert "windows-x64" in build
+    assert "Write-SiblingSha256" in build
+    assert "canonicalStem" in build or "Vibecrafted_${repoVersion}" in build
+    assert "Invoke-OptionalAuthenticodeSign" in build
+    assert "VIBECRAFTED_WINDOWS_AUTHENTICODE_THUMBPRINT" in build
     assert version.split(".")[0].isdigit()
+
+
+def test_windows_installer_emits_canonical_windows_x64_names() -> None:
+    """MSI/EXE must publish Vibecrafted_<ver>-<date>-<sha>-windows-x64 + .sha256."""
+    build = BUILD_SCRIPT.read_text(encoding="utf-8")
+    assert "Vibecrafted_${repoVersion}-${releaseDate}-${shortSha}-windows-x64" in build
+    assert "Write-SiblingSha256" in build
+    assert "MSI (canonical)" in build
+    assert "EXE (canonical)" in build
+    assert "Authenticode: unsigned unless" in build
+    # Short WiX bind names remain for Burn SourceFile=Vibecrafted.msi.
+    assert 'Join-Path $OutDir "Vibecrafted.msi"' in build
+    assert 'Join-Path $OutDir "Vibecrafted.exe"' in build
+    assert STABLE_PRODUCT_CODE in build
+    pack_builder = (REPO_ROOT / "scripts" / "build-windows-x64-runtime-pack.ps1").read_text(
+        encoding="utf-8"
+    )
+    assert (
+        "Vibecrafted_RuntimePack_${version}-${releaseDate}-${shortSha}-win32-x64.tar.gz"
+        in pack_builder
+    )
+    assert "yyyyMMdd" in pack_builder
+    assert "fake donor" not in pack_builder.lower()
 
 
 def test_windows_installer_is_per_user_portable() -> None:

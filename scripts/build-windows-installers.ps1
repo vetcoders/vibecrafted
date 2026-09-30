@@ -15,12 +15,19 @@
     Path to the win32-x64 Runtime Pack .tar.gz. Required; must exist with .sha256 and .sig.
 
 .PARAMETER OutDir
-    Directory for Vibecrafted.msi and Vibecrafted.exe. Default: packaging/windows/out.
+    Directory for WiX intermediates (Vibecrafted.msi / Vibecrafted.exe) and the
+    canonical release siblings Vibecrafted_<ver>-<date>-<sha>-windows-x64.{msi,exe}
+    plus .sha256. Default: packaging/windows/out.
+
+.PARAMETER SourceRevision
+    Full Git SHA stamped into the canonical artifact basename. Defaults to
+    VIBECRAFTED_SOURCE_REVISION or HEAD.
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$Pack,
-    [string]$OutDir = ""
+    [string]$OutDir = "",
+    [string]$SourceRevision = $env:VIBECRAFTED_SOURCE_REVISION
 )
 
 $ErrorActionPreference = "Stop"
@@ -46,13 +53,56 @@ function Assert-NonEmptyFile([string]$Path, [string]$Label) {
     }
 }
 
+function Get-FileSha256Hex([string]$Path) {
+    return ([BitConverter]::ToString(
+        [System.Security.Cryptography.SHA256]::Create().ComputeHash(
+            [System.IO.File]::ReadAllBytes($Path)
+        )
+    ) -replace '-', '').ToLowerInvariant()
+}
+
+function Write-SiblingSha256([string]$Path) {
+    $hash = Get-FileSha256Hex $Path
+    $name = [System.IO.Path]::GetFileName($Path)
+    $checksumPath = "$Path.sha256"
+    Set-Content -LiteralPath $checksumPath -Value "$hash  $name" -Encoding ascii
+    return $checksumPath
+}
+
+function Invoke-OptionalAuthenticodeSign([string]$Path) {
+    # Founder-owned Authenticode hook. No-ops without a real cert; never
+    # invents, buys, or self-signs a distribution certificate in CI.
+    $thumbprint = $env:VIBECRAFTED_WINDOWS_AUTHENTICODE_THUMBPRINT
+    if ([string]::IsNullOrWhiteSpace($thumbprint)) {
+        Write-Host "Authenticode: skipped (no VIBECRAFTED_WINDOWS_AUTHENTICODE_THUMBPRINT)"
+        return
+    }
+    $signtool = Get-Command signtool.exe -ErrorAction SilentlyContinue
+    if (-not $signtool) {
+        Die "Authenticode thumbprint set but signtool.exe is missing on PATH"
+    }
+    & $signtool.Source sign /sha1 $thumbprint /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $Path
+    if ($LASTEXITCODE -ne 0) {
+        Die "Authenticode sign failed for $Path (exit $LASTEXITCODE)"
+    }
+}
+
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $packagingRoot = Join-Path $repoRoot "packaging\windows"
 $cacheRoot = Join-Path $packagingRoot ".cache\wix314"
 $stagingRoot = Join-Path $packagingRoot "staging"
 $wixObjRoot = Join-Path $packagingRoot ".cache\obj"
 $stableUpgradeCode = "B7E4C2A1-9F3D-4B8E-A6C1-2D5E8F0A1B3C"
+$stableProductCode = "2B1BF36C-C680-48EE-BDCA-648C09D41BB3"
 if (-not $OutDir) { $OutDir = Join-Path $packagingRoot "out" }
+if (-not $SourceRevision) {
+    $SourceRevision = (& git -C $repoRoot rev-parse HEAD).Trim()
+}
+if ($SourceRevision -notmatch '^[0-9a-f]{40}$') {
+    Die "source revision must be a full Git SHA"
+}
+$releaseDate = (Get-Date).ToUniversalTime().ToString("yyyyMMdd")
+$shortSha = $SourceRevision.Substring(0, 8)
 
 if ([string]::IsNullOrWhiteSpace($Pack)) {
     Die "Runtime Pack tarball is missing: (empty -Pack) (build the win32-x64 pack first; refusing to invent one)"
@@ -120,6 +170,9 @@ $identityTemplate = Join-Path $packagingRoot "Identity.wxi"
 $identityText = Get-Content -LiteralPath $identityTemplate -Raw
 if ($identityText -notmatch [regex]::Escape($stableUpgradeCode)) {
     Die "Identity.wxi UpgradeCode drifted from stable lineage $stableUpgradeCode"
+}
+if ($identityText -notmatch [regex]::Escape($stableProductCode)) {
+    Die "Identity.wxi ProductCode drifted from stable lineage $stableProductCode"
 }
 
 $wixZip = Join-Path (Split-Path $cacheRoot) "wix314-binaries.zip"
@@ -282,7 +335,10 @@ foreach ($bmpName in @("banner.bmp", "dialog.bmp", "burn-logo.bmp")) {
 
 $msiOut = Join-Path $OutDir "Vibecrafted.msi"
 $exeOut = Join-Path $OutDir "Vibecrafted.exe"
-foreach ($stale in @($msiOut, $exeOut)) {
+$canonicalStem = "Vibecrafted_${repoVersion}-${releaseDate}-${shortSha}-windows-x64"
+$msiCanonical = Join-Path $OutDir "$canonicalStem.msi"
+$exeCanonical = Join-Path $OutDir "$canonicalStem.exe"
+foreach ($stale in @($msiOut, $exeOut, $msiCanonical, $exeCanonical, "$msiCanonical.sha256", "$exeCanonical.sha256")) {
     if (Test-Path -LiteralPath $stale) {
         Remove-Item -LiteralPath $stale -Force
     }
@@ -316,7 +372,22 @@ finally {
     Pop-Location
 }
 
-Write-Host "MSI: $msiOut"
-Write-Host "EXE: $exeOut"
-Write-Host "ProductVersion=$productVersion UpgradeCode=$stableUpgradeCode"
+# Burn SourceFile still binds Vibecrafted.msi. Publish the release-shaped
+# siblings beside it so distribution never ships an ambiguous short name alone.
+Copy-Item -LiteralPath $msiOut -Destination $msiCanonical -Force
+Copy-Item -LiteralPath $exeOut -Destination $exeCanonical -Force
+Invoke-OptionalAuthenticodeSign -Path $msiCanonical
+Invoke-OptionalAuthenticodeSign -Path $exeCanonical
+$msiSha = Write-SiblingSha256 -Path $msiCanonical
+$exeSha = Write-SiblingSha256 -Path $exeCanonical
+
+Write-Host "MSI (WiX bind): $msiOut"
+Write-Host "EXE (WiX bind): $exeOut"
+Write-Host "MSI (canonical): $msiCanonical"
+Write-Host "EXE (canonical): $exeCanonical"
+Write-Host "MSI sha256: $msiSha"
+Write-Host "EXE sha256: $exeSha"
+Write-Host "ProductVersion=$productVersion UpgradeCode=$stableUpgradeCode ProductCode=$stableProductCode"
+Write-Host "SourceRevision=$SourceRevision ($shortSha) ReleaseDate=$releaseDate"
+Write-Host "Authenticode: unsigned unless VIBECRAFTED_WINDOWS_AUTHENTICODE_THUMBPRINT is set (SmartScreen will warn)."
 Write-Host "Adapter: scripts/install-runtime-pack.ps1 (no install performed by this build)."

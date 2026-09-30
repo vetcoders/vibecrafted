@@ -1,0 +1,170 @@
+name: Install (Windows Matrix)
+
+# Windows native Runtime Pack gate: build the win32-x64 carrier (or reuse a
+# CI-built artifact), cold-install into an isolated LOCALAPPDATA, and run
+# `vibecrafted doctor` expecting 0 fail. No secrets. Authenticode is skipped
+# without VIBECRAFTED_WINDOWS_AUTHENTICODE_THUMBPRINT (unsigned SmartScreen
+# path is the documented trust model for this channel).
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - "release/*"
+      - "port/windows-*"
+  pull_request:
+    branches:
+      - main
+      - develop
+      - "release/*"
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-runtime-pack:
+    name: build Windows x64 Runtime Pack
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install OpenSSL (vc-frame)
+        shell: pwsh
+        run: |
+          choco install openssl -y --no-progress
+          $openssl = "C:\Program Files\OpenSSL-Win64"
+          if (-not (Test-Path -LiteralPath (Join-Path $openssl "include\openssl\ssl.h"))) {
+            throw "OpenSSL-Win64 missing after choco install"
+          }
+          "OPENSSL_DIR=$openssl" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Build Windows Runtime Pack
+        shell: pwsh
+        env:
+          VIBECRAFTED_SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Path build -Force | Out-Null
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-windows-x64-runtime-pack.ps1
+          $pack = Get-ChildItem -LiteralPath build -Filter "Vibecrafted_RuntimePack_*-win32-x64.tar.gz" |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          if (-not $pack) { throw "Windows Runtime Pack missing under build\" }
+          if (-not (Test-Path -LiteralPath "$($pack.FullName).sha256")) {
+            throw "missing $($pack.Name).sha256"
+          }
+          if (-not (Test-Path -LiteralPath "$($pack.FullName).sig")) {
+            throw "missing $($pack.Name).sig"
+          }
+          "WINDOWS_PACK_NAME=$($pack.Name)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Copy-Item $pack.FullName "$env:RUNNER_TEMP\$($pack.Name)"
+          Copy-Item "$($pack.FullName).sha256" "$env:RUNNER_TEMP\$($pack.Name).sha256"
+          Copy-Item "$($pack.FullName).sig" "$env:RUNNER_TEMP\$($pack.Name).sig"
+          if (Test-Path -LiteralPath "$($pack.FullName).rehearsal.pub") {
+            Copy-Item "$($pack.FullName).rehearsal.pub" "$env:RUNNER_TEMP\ci-signing.pub"
+          }
+
+      - name: Upload Windows Runtime Pack
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-x64-runtime-pack
+          path: |
+            ${{ runner.temp }}/Vibecrafted_RuntimePack_*-win32-x64.tar.gz
+            ${{ runner.temp }}/Vibecrafted_RuntimePack_*-win32-x64.tar.gz.sha256
+            ${{ runner.temp }}/Vibecrafted_RuntimePack_*-win32-x64.tar.gz.sig
+            ${{ runner.temp }}/ci-signing.pub
+          if-no-files-found: error
+
+  windows-cold-install:
+    name: install.ps1 + doctor (windows-latest)
+    needs: windows-runtime-pack
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download Windows Runtime Pack
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896ce1e5585c70a7 # v4
+        with:
+          name: windows-x64-runtime-pack
+          path: dist
+
+      - name: Cold install into disposable LOCALAPPDATA
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $pack = Get-ChildItem -LiteralPath dist -Filter "Vibecrafted_RuntimePack_*-win32-x64.tar.gz" |
+            Select-Object -First 1
+          if (-not $pack) { throw "downloaded Windows pack missing" }
+          $pub = Join-Path dist "ci-signing.pub"
+          if (-not (Test-Path -LiteralPath $pub)) {
+            $pub = Join-Path $PWD "vibecrafted-core\vibecrafted_core\trust\vibecrafted-signing-v1.pub"
+          }
+          $sandbox = Join-Path $env:RUNNER_TEMP ("vc-win-cold-" + [guid]::NewGuid().ToString("N"))
+          $local = Join-Path $sandbox "Local"
+          $roaming = Join-Path $sandbox "Roaming"
+          $profile = Join-Path $sandbox "Profile"
+          New-Item -ItemType Directory -Path $local, $roaming, $profile -Force | Out-Null
+          "VC_WINDOWS_COLD_SANDBOX=$sandbox" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $env:LOCALAPPDATA = $local
+          $env:APPDATA = $roaming
+          $env:USERPROFILE = $profile
+          $env:VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY = (Resolve-Path -LiteralPath $pub).Path
+          if (Test-Path -LiteralPath (Join-Path $env:LOCALAPPDATA "Vibecrafted")) {
+            throw "sandbox LOCALAPPDATA already contains Vibecrafted"
+          }
+          $log = Join-Path $sandbox "cold-install.log"
+          & powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Pack $pack.FullName `
+            *>&1 | Tee-Object -FilePath $log
+          if ($LASTEXITCODE -ne 0) {
+            Get-Content -LiteralPath $log
+            throw "cold install failed with exit $LASTEXITCODE"
+          }
+          $bin = Join-Path $local "Vibecrafted\bin"
+          if (-not (Test-Path -LiteralPath (Join-Path $bin "vibecrafted.cmd"))) {
+            throw "missing vibecrafted.cmd after cold install"
+          }
+          $env:Path = "$bin;$env:Path"
+          $doctorLog = Join-Path $sandbox "doctor.log"
+          & (Join-Path $bin "vibecrafted.cmd") doctor *>&1 | Tee-Object -FilePath $doctorLog
+          if ($LASTEXITCODE -ne 0) {
+            Get-Content -LiteralPath $doctorLog
+            throw "vibecrafted doctor failed with exit $LASTEXITCODE"
+          }
+          $doctorText = Get-Content -LiteralPath $doctorLog -Raw
+          if ($doctorText -notmatch "not supported on Windows") {
+            throw "doctor did not declare Windows-unsupported surfaces"
+          }
+          Write-Host "Cold install log: $log"
+          Write-Host "Doctor log: $doctorLog"
+
+      - name: Uninstall leaves no residue in sandbox
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $sandbox = $env:VC_WINDOWS_COLD_SANDBOX
+          if (-not $sandbox -or -not (Test-Path -LiteralPath $sandbox)) {
+            throw "cold-install sandbox missing"
+          }
+          $env:LOCALAPPDATA = Join-Path $sandbox "Local"
+          $env:APPDATA = Join-Path $sandbox "Roaming"
+          $env:USERPROFILE = Join-Path $sandbox "Profile"
+          & powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall
+          if ($LASTEXITCODE -ne 0) { throw "uninstall failed" }
+          $home = Join-Path $env:LOCALAPPDATA "Vibecrafted"
+          if (Test-Path -LiteralPath $home) {
+            $left = @(Get-ChildItem -LiteralPath $home -Recurse -Force -ErrorAction SilentlyContinue)
+            if ($left.Count -gt 0) {
+              $left | ForEach-Object { $_.FullName }
+              throw "uninstall left residue under $home"
+            }
+          }
