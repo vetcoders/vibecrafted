@@ -211,6 +211,17 @@ def test_cost_estimated_names_its_price_table() -> None:
     assert payload["amount"] == round((1200 * 5.0 + 200 * 0.5 + 300 * 30.0) / 1e6, 6)
 
 
+def test_cost_estimated_covers_the_current_codex_model() -> None:
+    """gpt-6.1-sol slipped through the 2026-09-28 refresh; today's audit runs
+    settled cost-unknown. The table must carry the fleet's daily driver."""
+    cost = telemetry.resolve_cost(
+        "gpt-6.1-sol", _known_usage(), reported_amount=None, reported_source=None
+    )
+    payload = cost.as_dict()
+    assert payload["source"] == "estimated:openai-api-2026-09-30"
+    assert payload["amount"] == round((1200 * 2.0 + 200 * 0.1 + 300 * 10.0) / 1e6, 6)
+
+
 @pytest.mark.parametrize(
     "model,usage,reason",
     [

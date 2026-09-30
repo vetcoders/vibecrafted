@@ -35,6 +35,13 @@ class ModelPrice:
 _PRICES: tuple[tuple[tuple[str, ...], ModelPrice], ...] = (
     # Verified 2026-09-28: https://platform.openai.com/pricing
     (("gpt-6-astra",), ModelPrice(10.0, 1.0, 50.0, "openai-api-2026-09-28")),
+    # Verified 2026-09-30: https://openai.com/index/introducing-gpt-6-1-sol/
+    # ($2 in / $0.10 cached / $10 out, $2.50 cache write per 1M, standard tier;
+    # >272K-input requests bill at $4/$15 — not modeled, flat standard rate).
+    (
+        ("gpt-6.1-sol", "gpt-6-1-sol"),
+        ModelPrice(2.0, 0.1, 10.0, "openai-api-2026-09-30", 2.5),
+    ),
     # https://platform.claude.com/docs/en/about-claude/pricing
     # Cache creation estimate uses the standard 5-minute write rate.
     (
