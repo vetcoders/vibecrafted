@@ -200,6 +200,45 @@ function Get-NativeArch {
     return "x64"
 }
 
+function Get-WindowsRuntimeHome {
+    $vcRuntimeHome = $env:VIBECRAFTED_RUNTIME_HOME
+    if (-not $vcRuntimeHome) {
+        $local = $env:LOCALAPPDATA
+        if (-not $local) { $local = Join-Path $env:USERPROFILE "AppData\Local" }
+        $vcRuntimeHome = Join-Path $local "Vibecrafted"
+    }
+    return $vcRuntimeHome
+}
+
+function Clear-WindowsProductRootAfterUninstall {
+    # Python runtime-uninstall keeps .installer-backups for recovery and may leave
+    # doctor-created crafted_home state plus tools/.vibecrafted-install.lock.
+    # On Windows the product root is %LOCALAPPDATA%\Vibecrafted; customer uninstall
+    # (install.ps1 / this wrapper) must remove that tree so cold-install CI and
+    # real machines do not keep a half-present product after "Uninstall finished."
+    param([int]$ExitCode)
+    if ($ExitCode -ne 0) { return }
+    if ($DryRun) { return }
+    $vcProductRoot = Get-WindowsRuntimeHome
+    if (-not (Test-Path -LiteralPath $vcProductRoot)) { return }
+    Remove-Item -LiteralPath $vcProductRoot -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $vcProductRoot) {
+        Start-Sleep -Milliseconds 400
+        Get-ChildItem -LiteralPath $vcProductRoot -Recurse -Force -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                try { $_.Attributes = 'Normal' } catch { }
+            }
+        Remove-Item -LiteralPath $vcProductRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if (Test-Path -LiteralPath $vcProductRoot) {
+        $left = @(Get-ChildItem -LiteralPath $vcProductRoot -Recurse -Force -ErrorAction SilentlyContinue)
+        if ($left.Count -gt 0) {
+            $left | ForEach-Object { $_.FullName }
+            Die "uninstall left residue under $vcProductRoot"
+        }
+    }
+}
+
 if ($Uninstall -and $VerifyOnly) {
     Die "--VerifyOnly cannot be combined with --Uninstall"
 }
@@ -274,6 +313,7 @@ if ($Uninstall -and -not $Pack) {
                 if ($uninstallOutput) {
                     Write-Output ($uninstallOutput -join "`n")
                 }
+                Clear-WindowsProductRootAfterUninstall -ExitCode $uninstallCode
                 exit $uninstallCode
             }
             finally {
@@ -399,6 +439,9 @@ try {
         $installCode = $LASTEXITCODE
         if ($installOutput) {
             Write-Output ($installOutput -join "`n")
+        }
+        if ($Uninstall) {
+            Clear-WindowsProductRootAfterUninstall -ExitCode $installCode
         }
         exit $installCode
     }

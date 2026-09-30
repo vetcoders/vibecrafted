@@ -194,6 +194,21 @@ def test_ps1_generation_uninstall_stages_runner_outside_live_tree() -> None:
     assert "& $packPython @arguments 2>&1" in gen_uninstall
 
 
+def test_ps1_uninstall_clears_windows_product_root() -> None:
+    """Customer uninstall must erase %LOCALAPPDATA%\\Vibecrafted.
+
+    Python runtime-uninstall retains ``.installer-backups`` and may leave
+    doctor-created crafted_home state plus the install lease. CI cold-install
+    requires the disposable product root to be gone after install.ps1 -Uninstall.
+    """
+    installer = INSTALL_SCRIPT.read_text(encoding="utf-8")
+    assert "function Clear-WindowsProductRootAfterUninstall" in installer
+    assert "Clear-WindowsProductRootAfterUninstall -ExitCode $uninstallCode" in installer
+    assert "Clear-WindowsProductRootAfterUninstall -ExitCode $installCode" in installer
+    assert 'Join-Path $local "Vibecrafted"' in installer
+    assert "uninstall left residue under $vcProductRoot" in installer
+
+
 def test_windows_installer_delegates_to_install_runtime_pack() -> None:
     product = PRODUCT.read_text(encoding="utf-8")
     build = BUILD_SCRIPT.read_text(encoding="utf-8")
