@@ -1,6 +1,6 @@
 {
   "schema": "vibecrafted.skill-provenance.v3",
-  "generated_at": "2026-09-29",
+  "generated_at": "2026-09-30",
   "skills": {
     "vc-agents": {
       "sha256": [
@@ -2943,6 +2943,7 @@
         "3645b1d30f893e95bcd02af9ba9351197213691862806c020aa77160d6243681",
         "3ffc78129fda84795143349feb5b983a7b9f57b1ed2dc87756c4b1069efb0a3c",
         "5c9c132214f4875e2bb1f5a0f36227bb932e5ecaba754d162366250c429fe75f",
+        "5d22ba2baf56f51449009faeae163b60220c9f5015d2004ce1eb22e28758e9dc",
         "67e91f24fa2091d4db22230edbab89db86b105c19fa9b3eff02088095257bc1a",
         "81ccab5ef21211994844381f1519cb454ecce502d925cb7b8617c027ed40b1f5",
         "85b6a4c75e60801426f47fe10745b891c4954e7aaed26558feaed3731007d0c2",
@@ -2955,6 +2956,7 @@
         "d6e2275885e35192bb41ca5b6c87cf8282e7a3719ba83ca587c5b6a2bf0f4d23",
         "d9a035d2435d61ab0ba78ead7cf10ecf520143bf0e6caf3b56c6b33602ca0bad",
         "f279e896e78e2daaf760d629038be50b1fadfeb8f568481e8580840f0385b7e6",
+        "fa2d272a386ebe274a3b44030118c3882d64e83dbb656d812e48bc1268943bae",
         "feec056802bb3bd4871aff910782314d2acd624442fe6f317792a74db5633598"
       ],
       "files": {
@@ -2967,6 +2969,8 @@
           "169f3ff4344e49c0968de0eee05cd978eef3fcd1",
           "4f1adddf5c3543d0e82662132f2cf36f596cc8bb",
           "5e0a3f64dc83efdf869a43709cff892bcf201cb0",
+          "640ce353266bac69bd5b35803ba98d505ce4a60b",
+          "658cf475a636beaa4af89eccdb3ba6df715315bf",
           "742575ef3e02cb7110408e2454c1bced1dd4a196",
           "808cdfa35bcbd1946c3d3097056eb2339d577c7d",
           "a6161e361c773bb23059ed5f0e0e3be15dfe6427",
@@ -2992,9 +2996,11 @@
         "CONTRACT.md": [
           "0881ccc86c04799499fe82fa420f4b00deabc068",
           "143e534983169a04219eb928d92137d7bacc9a0a",
+          "45b6d0c462a57d00bb39c5179b02d4b933af2af6",
           "4bae85ccc39c18a654234cd9966f59c9049d4f1a",
           "5274beeb0ffa3e336b1c8f203ff10a81eeb9fb43",
           "5412c195c0fcf1c3019e0e7d17db37af9c1a3c25",
+          "bfd2f75dfc6fe0dfd7462eeee3bd8e5c17033789",
           "d2541fe913b8a21a27122d2aa2d825c306aa01fe"
         ],
         "DASHBOARD.md": [
@@ -3042,8 +3048,10 @@
           "a136fa7dd8f713ef2b2e4d832cb5a0e590f6e406"
         ],
         "FLOW.md": [
+          "0fc17835afc57de444b016f232a55cea6045d0d1",
           "3cab4ef893dcb1f6cf958b925afe3eb691f5233e",
           "409fb5faaa45f15e95225159a33f756ce8a2ef67",
+          "54a3d9f4b7ddfd7883df041a775f50f64adb8e90",
           "5ca8b0155e359fb6b93c25e7067908678822bfbc",
           "931dee10f141956f3c00f8f5826b5368ff141e60",
           "a0f9f5272e391d92443d914159e5a1bd1d060231",
@@ -3053,6 +3061,8 @@
         "FRAME.md": [
           "1f4a7719005ae54758baf47e3006601c983d0b77",
           "27553349f2f3fa27c9027485c16cb070394c95fe",
+          "47a40bcb07825df0699957cb11c34908b5fa8508",
+          "4949ac2673172e341a335c1fb7c43330eb2a5dc3",
           "5421e8426d584fa887e9665815430730a85b5461",
           "5b5db54fa05b0a63e19659bfd39b3c7c2794f619",
           "77540abb1c90fdc5ac0513f7ec4784841f8b468a"
@@ -3067,10 +3077,12 @@
         ],
         "JOURNAL.md": [
           "029ef93d3ab704376e0afc567b0ee8a1374eb549",
+          "1850a8ea275a599ad31537c341eda0bb44b71e77",
           "2aafdfeca18eb8fd5ae5881951515e78ef652067",
           "5011d6eaf908cfc294acad3f995860b33d604a10",
           "5eda79bc806a4892f98e46fe2e8c1688e0d1c871",
-          "cf5abf32cff4943eabe82ba7e3a5ee299c774e5a"
+          "cf5abf32cff4943eabe82ba7e3a5ee299c774e5a",
+          "d006baa2746b4b07a6340341566c3231f06d972b"
         ],
         "RUNNER.md": [
           "0310ed68ad855ffe64b6a5d834be7beab95fbfa9",
@@ -3084,24 +3096,29 @@
           "8f88a46cbfcab5ffabf0dc1ffffba91a9f087e98",
           "90bb2dcd216420372148059f862d5e3f256f0407",
           "9a76c6a517059c5093be6393bf80cb7d79855b9e",
+          "d1c1d3e6a3c6de9734a27991e86f9549c9610b26",
           "d4f622d20da96d128156295d88eafc8889c7d6ab",
           "d770766f44c6b5c21477f041e24be8ef0683a0b7",
+          "e7136b34f9c3ec5e0b2e0e9be18f16f3eba734f2",
           "fabdf708b4b8620ded6f7917694a5bb8a9fbd323"
         ],
         "RUNTIME.md": [
           "024677ff008723f2a152a1b2cccb81aea1c5d142",
           "0c04a4ac90fadea7fed437b590d80fe8fc702c3d",
           "158cbbac2ec3244d5ce196ddb4a5ccfb0dc8951a",
+          "2dd23ab76af9b73401b88f82609144f3b8148e4c",
           "3cae67747f52dfdc60b45713db7ea5e6153043e5",
           "58aa031945dba797d68342413219d38a2cd0694f",
           "69d3477f23f94b93ac28801c47cf3e279219e5eb",
           "7e67706938c6a68aa80084ed0c519c7895ffab81",
+          "a353081c16756bd86c0afabd956782913a4aaae9",
           "a89267b1072c67b2fd88366f86aae7e745eab7b6",
           "c8021c9d96318c2bcd04176b3dd0a17d5289d22b",
           "cf58253fba6ba208e664e735982f45679c2f32cd",
           "f14ddcf0f5d5930509ed98ce1288668bca446be7"
         ],
         "SKILL.md": [
+          "061045577485697d98ca517509a4ae751ad544a8",
           "0ecfdf0d1c08226e4b9a830576518c4b59ef860d",
           "1731852484b03c0913d502e4bb9c257c646def2e",
           "1a84455f29740f3ce9cb9f9a6655d73c4bd1ab50",
@@ -3117,6 +3134,7 @@
           "80494d27ef9730c8bcfe3ec77923480ebd5fad93",
           "8def04b1856a138b01397cc8008492972767d2ec",
           "a7539059a28431999445fbedfe1efb8bf53053b2",
+          "b47680152a103aa37195f066765de2732b0d2763",
           "b8b9caa3daf74e357bd542d4d23228344ee2fa72",
           "c587fd9c32d207e8572d6537de2699d864fea271",
           "d31dbca5c0168d3dfb83ac35f5a7678f8af0139a",
