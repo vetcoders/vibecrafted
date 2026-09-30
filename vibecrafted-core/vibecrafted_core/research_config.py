@@ -16,7 +16,18 @@ import tomllib
 
 from .runtime_paths import vibecrafted_home
 
-SUPPORTED_RESEARCH_AGENTS = ("claude", "codex", "agy", "junie", "grok", "cursor")
+# Every dispatchable provider is a valid research lane (parity with
+# cli.AGENTS minus the swarm coordinator itself — guarded by a test).
+# kimi is fable-class (Founder 2026-09-30): never silently dropped.
+SUPPORTED_RESEARCH_AGENTS = (
+    "claude",
+    "codex",
+    "agy",
+    "junie",
+    "grok",
+    "cursor",
+    "kimi",
+)
 DEFAULT_RESEARCH_AGENTS = ("claude", "codex", "agy")
 
 

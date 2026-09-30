@@ -123,3 +123,17 @@ def test_unknown_key_cannot_overwrite_ignored_collection(config_paths, capsys):
     assert selection.agents == ("codex",)
     assert selection.ignored == ("line 1: _ignored: invalid",)
     assert "Ignored research config element" in capsys.readouterr().err
+
+
+def test_research_roster_matches_the_dispatchable_fleet() -> None:
+    """Every dispatchable provider is a valid lane (kimi drift, 2026-09-30).
+
+    Three rosters drifted apart once already (deck _has_agent, cli.AGENTS,
+    SUPPORTED_RESEARCH_AGENTS); kimi was silently dropped from lanes the same
+    day the Founder called it fable-class. The swarm coordinator itself is the
+    only legitimate difference.
+    """
+    from vibecrafted_core.cli import AGENTS
+    from vibecrafted_core.research_config import SUPPORTED_RESEARCH_AGENTS
+
+    assert set(SUPPORTED_RESEARCH_AGENTS) == AGENTS - {"swarm"}
