@@ -433,3 +433,263 @@ def test_repo_full_marks_failed_upstream_probe_unknown(
 
     assert payload["upstream_divergence"]["status"] == "unknown"
     assert payload["ahead"] is None and payload["behind"] is None
+
+
+def _parallel_receipt(repo: Path, tmp_path: Path) -> Path:
+    from vibecrafted_core.control_plane import control_plane_home
+
+    _init_repo(repo)
+    base = git._git_text(repo, "rev-parse", "HEAD")
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    cuts = {}
+    for name, worktree in (("left", left), ("right", right)):
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                name,
+                str(worktree),
+            ],
+            check=True,
+        )
+        _commit(worktree, "README.md", f"{name} delivery\n")
+        cuts[name] = {
+            "cut_id": name,
+            "state": "settled",
+            "acceptance": "verified",
+            "baseline_sha": base,
+            "delivered_commit_sha": git._git_text(worktree, "rev-parse", "HEAD"),
+            "report_path": f"{name}.md",
+            "provider_run_id": f"work-{name}",
+        }
+    receipt = control_plane_home() / "dispatches" / "parallel" / "receipts.json"
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text(
+        json.dumps(
+            {
+                "schema": "vibecrafted.dispatch-receipts.v1",
+                "run_id": "parallel",
+                "repo_root": str(repo),
+                "cuts": cuts,
+            }
+        )
+    )
+    return receipt
+
+
+def test_compare_completed_parallel_work_from_public_cli(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    receipt = _parallel_receipt(repo, tmp_path)
+    before = receipt.read_bytes()
+    # Later edits/commits cannot change the delivered receipt's comparison.
+    _commit(tmp_path / "left", "later.txt", "not part of delivery\n")
+    (tmp_path / "right" / "README.md").write_text("unfinished later work\n")
+    head = git._git_text(repo, "rev-parse", "HEAD")
+    output = _vc_git(repo, "--compare", "parallel", "--cuts", "left", "right", "--json")
+    payload = json.loads(output.stdout)
+    assert payload["phase"] == "before-deploy"
+    assert payload["deployment_authorized"] is False
+    assert payload["overlapping_files"] == ["README.md"]
+    assert "+left delivery" in payload["deliveries"][0]["patch"]
+    assert "+right delivery" in payload["deliveries"][1]["patch"]
+    assert "later.txt" not in output.stdout
+    assert "unfinished later work" not in output.stdout
+    assert "-left delivery" in payload["tip_diff"]
+    assert "+right delivery" in payload["tip_diff"]
+    rich = _vc_git(repo, "--compare", "parallel", "--cuts", "left", "right").stdout
+    assert "Founder's decision" in rich
+    assert receipt.read_bytes() == before
+    assert git._git_text(repo, "rev-parse", "HEAD") == head
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        "queued",
+        "launching",
+        "active",
+        "reported",
+        "verified",
+        "integrating",
+        "failed",
+        "stopped",
+    ],
+)
+def test_compare_refuses_work_before_both_deliveries_settle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+) -> None:
+    repo = tmp_path / "repo"
+    receipt = _parallel_receipt(repo, tmp_path)
+    ledger = json.loads(receipt.read_text())
+    ledger["cuts"]["right"]["state"] = state
+    receipt.write_text(json.dumps(ledger))
+    original = git._git
+
+    def no_early_diff(path: Path, *args: str, check: bool = False):
+        assert args[0] != "diff", (
+            "must not compare a finished worker while its peer is working"
+        )
+        return original(path, *args, check=check)
+
+    monkeypatch.setattr(git, "_git", no_early_diff)
+    assert (
+        git.main([str(repo), "--compare", "parallel", "--cuts", "left", "right"]) == 2
+    )
+
+
+@pytest.mark.parametrize(
+    "defect",
+    [
+        "identity",
+        "schema",
+        "repo",
+        "acceptance",
+        "baseline",
+        "tip",
+        "ancestry",
+        "missing_cut",
+        "malformed",
+    ],
+)
+def test_compare_fails_closed_on_invalid_receipts(tmp_path: Path, defect: str) -> None:
+    repo = tmp_path / "repo"
+    receipt = _parallel_receipt(repo, tmp_path)
+    ledger = json.loads(receipt.read_text())
+    if defect == "identity":
+        ledger["run_id"] = "another"
+    elif defect == "schema":
+        ledger["schema"] = "unknown"
+    elif defect == "repo":
+        other = tmp_path / "other"
+        _init_repo(other)
+        ledger["repo_root"] = str(other)
+    elif defect == "acceptance":
+        ledger["cuts"]["right"]["acceptance"] = "failed"
+    elif defect == "baseline":
+        ledger["cuts"]["right"]["baseline_sha"] = "HEAD"
+    elif defect == "tip":
+        ledger["cuts"]["right"]["delivered_commit_sha"] = "0" * 40
+    elif defect == "ancestry":
+        ledger["cuts"]["right"]["baseline_sha"] = ledger["cuts"]["left"][
+            "delivered_commit_sha"
+        ]
+    elif defect == "missing_cut":
+        del ledger["cuts"]["right"]
+    receipt.write_text("{" if defect == "malformed" else json.dumps(ledger))
+    assert (
+        git.main([str(repo), "--compare", "parallel", "--cuts", "left", "right"]) == 2
+    )
+
+
+def test_compare_refuses_runtime_that_contradicts_settled_receipt(
+    tmp_path: Path,
+) -> None:
+    from vibecrafted_core.control_plane import control_plane_home
+
+    repo = tmp_path / "repo"
+    _parallel_receipt(repo, tmp_path)
+    runtime = control_plane_home() / "runtime_runs" / "work-right" / "meta.json"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text(
+        json.dumps({"run_id": "work-right", "status": "active", "exit_code": None})
+    )
+    assert (
+        git.main([str(repo), "--compare", "parallel", "--cuts", "left", "right"]) == 2
+    )
+    runtime.write_text(
+        json.dumps({"run_id": "wrong-run", "status": "completed", "exit_code": 0})
+    )
+    assert (
+        git.main([str(repo), "--compare", "parallel", "--cuts", "left", "right"]) == 2
+    )
+    runtime.write_text(
+        json.dumps({"run_id": "work-right", "status": "completed", "exit_code": 0})
+    )
+    assert (
+        git.main([str(repo), "--compare", "parallel", "--cuts", "left", "right"]) == 0
+    )
+
+
+def test_compare_rejects_traversal_missing_receipts_and_self_comparison(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    _parallel_receipt(repo, tmp_path)
+    for dispatch, cuts in (
+        ("../parallel", ["left", "right"]),
+        ("missing", ["left", "right"]),
+        ("parallel", ["left", "left"]),
+    ):
+        assert git.main([str(repo), "--compare", dispatch, "--cuts", *cuts]) == 2
+
+
+def test_compare_refuses_receipt_drift_and_failed_diff(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    receipt = _parallel_receipt(repo, tmp_path)
+    original = git._git
+
+    def drift(path: Path, *args: str, check: bool = False):
+        result = original(path, *args, check=check)
+        if args[0] == "diff":
+            ledger = json.loads(receipt.read_text())
+            ledger["cuts"]["right"]["state"] = "active"
+            receipt.write_text(json.dumps(ledger))
+        return result
+
+    monkeypatch.setattr(git, "_git", drift)
+    with pytest.raises(RuntimeError, match="changed during comparison"):
+        git.compare_parallel_work(repo, "parallel", ["left", "right"])
+    ledger = json.loads(receipt.read_text())
+    ledger["cuts"]["right"]["state"] = "settled"
+    receipt.write_text(json.dumps(ledger))
+
+    def fail_diff(path: Path, *args: str, check: bool = False):
+        if args[0] == "diff":
+            return subprocess.CompletedProcess(["git", *args], 1, "", "failed")
+        return original(path, *args, check=check)
+
+    monkeypatch.setattr(git, "_git", fail_diff)
+    with pytest.raises(RuntimeError, match="Git probe failed: diff"):
+        git.compare_parallel_work(repo, "parallel", ["left", "right"])
+
+
+def test_compare_works_through_installed_console_entrypoint(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _parallel_receipt(repo, tmp_path)
+    result = subprocess.run(
+        [
+            str(Path(sys.executable).with_name("vc-git")),
+            str(repo),
+            "--compare",
+            "parallel",
+            "--cuts",
+            "left",
+            "right",
+            "--json",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={key: value for key, value in os.environ.items() if key != "PYTHONPATH"},
+    )
+    assert json.loads(result.stdout)["overlapping_files"] == ["README.md"]
+
+
+@pytest.mark.parametrize(
+    "args", [["--compare", "parallel"], ["--cuts", "left", "right"]]
+)
+def test_compare_requires_both_options(args: list[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        git.main(args)
+    assert exc.value.code == 2
