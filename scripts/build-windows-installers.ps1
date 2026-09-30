@@ -315,12 +315,24 @@ if ($productBody -notmatch "WixUIBannerBmp" -or $productBody -notmatch "WixUIDia
 if ($productBody -notmatch "LaunchVcTerminal") {
     Die "Product.wxs must launch vc-terminal after install"
 }
+if ($productBody -notmatch "VC_SKIP_TERMINAL_LAUNCH" -or $productBody -notmatch "UILevel") {
+    Die "Product.wxs must gate LaunchVcTerminal for silent UILevel and VC_SKIP_TERMINAL_LAUNCH"
+}
+if ($productBody -notmatch 'Name="PATH"' -or $productBody -notmatch 'System="no"' -or $productBody -notmatch 'Part="last"' -or $productBody -notmatch '\[INSTALLDIR\]bin') {
+    Die "Product.wxs must append the per-user launcher bin to the HKCU PATH"
+}
+if ($productBody -match 'System="yes"') {
+    Die "Product.wxs must not write the machine PATH"
+}
 $productBody = $productBody.Replace("REPLACE_PACK_BASENAME", $packBasename)
 Write-Utf8NoBom -Path $productWork -Content $productBody
 $bundleWork = Join-Path $work "Bundle.wxs"
 $bundleBody = Get-Content -LiteralPath $bundleTemplate -Raw
 if ($bundleBody -notmatch "LogoFile=`"burn-logo\.bmp`"") {
     Die "Bundle.wxs must set LogoFile=burn-logo.bmp (no stock Burn logo)"
+}
+if (-not $bundleBody.Contains('MsiProperty Name="VC_BURN_UILEVEL" Value="[WixBundleUILevel]"')) {
+    Die "Bundle.wxs must pass WixBundleUILevel so the EXE wizard still launches vc-terminal"
 }
 Write-Utf8NoBom -Path $bundleWork -Content $bundleBody
 Copy-Item $licenseRtf (Join-Path $work "License.rtf")

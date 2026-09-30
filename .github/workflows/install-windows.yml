@@ -3,8 +3,9 @@ name: Install (Windows Matrix)
 # Windows native Runtime Pack gate: build the win32-x64 carrier once, cold-install
 # into an isolated LOCALAPPDATA, run `vibecrafted doctor` expecting 0 fail, and
 # adapt the same pack artifact into unsigned per-user MSI/EXE under
-# packaging/windows/out (no second pack build; no product install into a real
-# profile). No secrets. Authenticode is skipped without
+# packaging/windows/out (no second pack build). The MSI job then silent-installs
+# that artifact into the GitHub runner's per-user LocalAppData, runs doctor, and
+# uninstalls. No secrets. Authenticode is skipped without
 # VIBECRAFTED_WINDOWS_AUTHENTICODE_THUMBPRINT (unsigned SmartScreen path is the
 # documented trust model for this channel).
 
@@ -243,3 +244,243 @@ jobs:
             packaging/windows/out/Vibecrafted_*-windows-x64.exe
             packaging/windows/out/Vibecrafted_*-windows-x64.exe.sha256
           if-no-files-found: error
+
+  windows-msi-install:
+    name: MSI silent install + doctor + uninstall
+    needs: windows-installers
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download windows-x64-installers
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: windows-x64-installers
+          path: dist-installers
+
+      - name: Silent per-user MSI install
+        id: msi_install
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
+
+          function ConvertTo-PathKey([string]$Entry) {
+            if ([string]::IsNullOrWhiteSpace($Entry)) { return $null }
+            try {
+              return [System.IO.Path]::GetFullPath($Entry.Trim()).TrimEnd('\').ToLowerInvariant()
+            } catch {
+              return $Entry.Trim().TrimEnd('\').ToLowerInvariant()
+            }
+          }
+
+          function Get-UserPathKeys {
+            $raw = [Environment]::GetEnvironmentVariable("Path", "User")
+            if ([string]::IsNullOrWhiteSpace($raw)) { return @() }
+            return @($raw -split ';' | ForEach-Object { ConvertTo-PathKey $_ } | Where-Object { $_ })
+          }
+
+          function Show-MsiLog([string]$Path) {
+            if (-not (Test-Path -LiteralPath $Path)) {
+              Write-Host "MSI log missing: $Path"
+              return
+            }
+            Write-Host "---- MSI log markers: $Path ----"
+            Select-String -LiteralPath $Path -Pattern "Return value 3|Error [0-9]{3,}|LaunchVcTerminal" |
+              Select-Object -Last 50 |
+              ForEach-Object { $_.Line }
+            Write-Host "---- MSI log tail ----"
+            Get-Content -LiteralPath $Path -Tail 80
+          }
+
+          $productSrc = Get-Content -LiteralPath (Join-Path $PWD "packaging\windows\Product.wxs") -Raw
+          if ($productSrc -notmatch 'InstallScope="perUser"') { throw "Product.wxs InstallScope is not perUser" }
+          if ($productSrc -notmatch "LocalAppDataFolder") { throw "Product.wxs does not target LocalAppDataFolder" }
+          if ($productSrc -match "ProgramFiles64Folder" -or $productSrc -match 'InstallScope="perMachine"') {
+            throw "Product.wxs is not a per-user LocalAppData install"
+          }
+
+          $stable = "2B1BF36C-C680-48EE-BDCA-648C09D41BB3"
+          $identity = Get-Content -LiteralPath (Join-Path $PWD "packaging\windows\Identity.wxi") -Raw
+          if ($identity -notmatch ('ProductCode = "' + $stable + '"')) {
+            throw "Identity.wxi ProductCode is not the stable $stable"
+          }
+
+          $msis = @(Get-ChildItem -LiteralPath dist-installers -File |
+            Where-Object { $_.Name -like "Vibecrafted_*-windows-x64.msi" -and $_.Extension -eq ".msi" })
+          if ($msis.Count -ne 1) { throw "expected one MSI in windows-x64-installers, found $($msis.Count)" }
+          $msi = $msis[0]
+          $shaFile = "$($msi.FullName).sha256"
+          if (-not (Test-Path -LiteralPath $shaFile)) { throw "missing $($msi.Name).sha256" }
+          $expectedHash = ((Get-Content -LiteralPath $shaFile -Raw) -split '\s+')[0].ToLowerInvariant()
+          $actualHash = (Get-FileHash -LiteralPath $msi.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne $expectedHash) { throw "MSI sha256 mismatch for $($msi.Name)" }
+
+          $productRoot = Join-Path $env:LOCALAPPDATA "Vibecrafted"
+          if (Test-Path -LiteralPath $productRoot) { throw "runner LOCALAPPDATA already contains Vibecrafted" }
+          $bin = Join-Path $productRoot "bin"
+          $binKey = ConvertTo-PathKey $bin
+          if (@(Get-UserPathKeys | Where-Object { $_ -eq $binKey }).Count -ne 0) {
+            throw "runner user PATH already contains $bin"
+          }
+          $machineBefore = [Environment]::GetEnvironmentVariable("Path", "Machine")
+          if ($null -eq $machineBefore) { $machineBefore = "" }
+          $userBefore = [Environment]::GetEnvironmentVariable("Path", "User")
+          if ($null -eq $userBefore) { $userBefore = "" }
+
+          $logDir = Join-Path $env:RUNNER_TEMP "vc-msi-logs"
+          New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+          [System.IO.File]::WriteAllText((Join-Path $logDir "machine-path-before.txt"), $machineBefore)
+          [System.IO.File]::WriteAllText((Join-Path $logDir "user-path-before.txt"), $userBefore)
+          $installLog = Join-Path $logDir "msi-install.log"
+          $psi = New-Object System.Diagnostics.ProcessStartInfo
+          $psi.FileName = Join-Path $env:SystemRoot "System32\msiexec.exe"
+          $psi.Arguments = "/i `"$($msi.FullName)`" /qn /l*v `"$installLog`" VC_SKIP_TERMINAL_LAUNCH=1"
+          $psi.UseShellExecute = $false
+          $proc = [System.Diagnostics.Process]::Start($psi)
+          $proc.WaitForExit()
+          $installExit = $proc.ExitCode
+          if ($installExit -ne 0) {
+            Show-MsiLog $installLog
+            throw "msiexec install failed with exit $installExit"
+          }
+          $installText = Get-Content -LiteralPath $installLog -Raw
+          if ($installText -match "Doing action: LaunchVcTerminal") {
+            Show-MsiLog $installLog
+            throw "silent install started LaunchVcTerminal"
+          }
+          if ($installText -notmatch "Skipping action: LaunchVcTerminal \(condition is false\)") {
+            Show-MsiLog $installLog
+            throw "silent install did not skip LaunchVcTerminal"
+          }
+          $machineAfter = [Environment]::GetEnvironmentVariable("Path", "Machine")
+          if ($null -eq $machineAfter) { $machineAfter = "" }
+          if ($machineAfter -ne $machineBefore) { throw "machine PATH changed during MSI install" }
+          $hits = @(Get-UserPathKeys | Where-Object { $_ -eq $binKey })
+          if ($hits.Count -ne 1) {
+            $raw = [Environment]::GetEnvironmentVariable("Path", "User")
+            throw "expected exactly one user PATH entry for $bin, found $($hits.Count): $raw"
+          }
+          foreach ($key in @($userBefore -split ';' | ForEach-Object { ConvertTo-PathKey $_ } | Where-Object { $_ })) {
+            if (@(Get-UserPathKeys | Where-Object { $_ -eq $key }).Count -lt 1) {
+              throw "user PATH lost pre-existing entry $key"
+            }
+          }
+          Write-Host "MSI installed: $($msi.Name)"
+          Write-Host "User PATH entry: $bin"
+          Write-Host "Install log: $installLog"
+
+      - name: vibecrafted doctor from installed launcher
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
+          $bin = Join-Path $env:LOCALAPPDATA "Vibecrafted\bin"
+          $cmd = Join-Path $bin "vibecrafted.cmd"
+          $terminal = Join-Path $bin "vc-terminal.cmd"
+          if (-not (Test-Path -LiteralPath $cmd)) { throw "missing installed launcher $cmd" }
+          if (-not (Test-Path -LiteralPath $terminal)) { throw "missing installed launcher $terminal" }
+          $logDir = Join-Path $env:RUNNER_TEMP "vc-msi-logs"
+          New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+          $doctorLog = Join-Path $logDir "doctor.log"
+          $env:Path = "$bin;$env:Path"
+          & $cmd doctor *>&1 | Tee-Object -FilePath $doctorLog
+          if ($LASTEXITCODE -ne 0) {
+            Get-Content -LiteralPath $doctorLog
+            throw "vibecrafted doctor failed with exit $LASTEXITCODE"
+          }
+          $doctorText = Get-Content -LiteralPath $doctorLog -Raw
+          $summary = @($doctorText -split "\r?\n" | Where-Object { $_ -match "summary:" })
+          if ($summary.Count -eq 0) {
+            Write-Host "DOCTOR_SUMMARY=(doctor exit 0; no summary line found)"
+          } else {
+            foreach ($line in $summary) { Write-Host "DOCTOR_SUMMARY=$line" }
+          }
+          Write-Host "Doctor log: $doctorLog"
+
+      - name: Silent per-user MSI uninstall
+        if: ${{ always() && steps.msi_install.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
+
+          function ConvertTo-PathKey([string]$Entry) {
+            if ([string]::IsNullOrWhiteSpace($Entry)) { return $null }
+            try {
+              return [System.IO.Path]::GetFullPath($Entry.Trim()).TrimEnd('\').ToLowerInvariant()
+            } catch {
+              return $Entry.Trim().TrimEnd('\').ToLowerInvariant()
+            }
+          }
+
+          function Get-UserPathKeys {
+            $raw = [Environment]::GetEnvironmentVariable("Path", "User")
+            if ([string]::IsNullOrWhiteSpace($raw)) { return @() }
+            return @($raw -split ';' | ForEach-Object { ConvertTo-PathKey $_ } | Where-Object { $_ })
+          }
+
+          function Show-MsiLog([string]$Path) {
+            if (-not (Test-Path -LiteralPath $Path)) {
+              Write-Host "MSI log missing: $Path"
+              return
+            }
+            Write-Host "---- MSI log markers: $Path ----"
+            Select-String -LiteralPath $Path -Pattern "Return value 3|Error [0-9]{3,}|LaunchVcTerminal" |
+              Select-Object -Last 50 |
+              ForEach-Object { $_.Line }
+            Write-Host "---- MSI log tail ----"
+            Get-Content -LiteralPath $Path -Tail 80
+          }
+
+          $stable = "2B1BF36C-C680-48EE-BDCA-648C09D41BB3"
+          $identity = Get-Content -LiteralPath (Join-Path $PWD "packaging\windows\Identity.wxi") -Raw
+          if ($identity -notmatch ('ProductCode = "' + $stable + '"')) {
+            throw "Identity.wxi ProductCode is not the stable $stable"
+          }
+          $logDir = Join-Path $env:RUNNER_TEMP "vc-msi-logs"
+          New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+          $uninstallLog = Join-Path $logDir "msi-uninstall.log"
+          $psi = New-Object System.Diagnostics.ProcessStartInfo
+          $psi.FileName = Join-Path $env:SystemRoot "System32\msiexec.exe"
+          $psi.Arguments = "/x `"{$stable}`" /qn /l*v `"$uninstallLog`""
+          $psi.UseShellExecute = $false
+          $proc = [System.Diagnostics.Process]::Start($psi)
+          $proc.WaitForExit()
+          $uninstallExit = $proc.ExitCode
+          if ($uninstallExit -ne 0) {
+            Show-MsiLog $uninstallLog
+            throw "msiexec uninstall failed with exit $uninstallExit"
+          }
+          $vcHome = Join-Path $env:LOCALAPPDATA "Vibecrafted"
+          if (Test-Path -LiteralPath $vcHome) {
+            $left = @(Get-ChildItem -LiteralPath $vcHome -Recurse -Force -ErrorAction SilentlyContinue)
+            if ($left.Count -gt 0) {
+              $left | ForEach-Object { $_.FullName }
+              throw "uninstall left residue under $vcHome"
+            }
+          }
+          $bin = Join-Path $vcHome "bin"
+          $binKey = ConvertTo-PathKey $bin
+          $leftPath = @(Get-UserPathKeys | Where-Object { $_ -eq $binKey })
+          if ($leftPath.Count -ne 0) {
+            $raw = [Environment]::GetEnvironmentVariable("Path", "User")
+            throw "uninstall left user PATH entry for $bin : $raw"
+          }
+          $machineBeforePath = Join-Path $logDir "machine-path-before.txt"
+          if (Test-Path -LiteralPath $machineBeforePath) {
+            $machineBefore = [System.IO.File]::ReadAllText($machineBeforePath)
+            $machineAfter = [Environment]::GetEnvironmentVariable("Path", "Machine")
+            if ($null -eq $machineAfter) { $machineAfter = "" }
+            if ($machineAfter -ne $machineBefore) { throw "machine PATH changed during MSI uninstall" }
+          }
+          Write-Host "Uninstall finished."
+          Write-Host "Uninstall log: $uninstallLog"
+
+      - name: Upload MSI install logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-x64-msi-install-logs
+          path: ${{ runner.temp }}/vc-msi-logs/
+          if-no-files-found: warn

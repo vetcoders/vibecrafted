@@ -28,7 +28,11 @@
           SourceFile="!(bindpath.out)\Vibecrafted.msi"
           Compressed="yes"
           Vital="yes"
-          Visible="yes" />
+          Visible="yes">
+        <!-- DisplayInternalUI stays off, so the chained MSI sees a silent UILevel.
+             WixBundleUILevel full is 4; Product.wxs launches vc-terminal only then. -->
+        <MsiProperty Name="VC_BURN_UILEVEL" Value="[WixBundleUILevel]" />
+      </MsiPackage>
     </Chain>
   </Bundle>
 </Wix>

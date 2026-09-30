@@ -19,9 +19,15 @@ empty box). MSI shows `WixUI_Minimal` + `WixUILicenseRtf` with near-black
 red-CD WixUI face). Burn uses `RtfLicense` with `LicenseFile` and
 `LogoFile=burn-logo.bmp`.
 ARP help link points at `SECURITY.md` (`hello@vetcoders.io`). After a successful
-install the MSI launches `vc-terminal.cmd` (frame-backed); launch never runs on
-uninstall. Pack `.sig` + `vibecrafted-signing-v1.pub` is Runtime Pack signature
-evidence, not Authenticode.
+interactive install the MSI launches `vc-terminal.cmd` (frame-backed). Silent
+installs (`UILevel` <= 3, including `msiexec /qn`) and `VC_SKIP_TERMINAL_LAUNCH=1`
+do not start it. A double-click of the MSI (full UI) still launches it, and the
+Burn EXE wizard does too because the bundle passes `WixBundleUILevel` (full = 4).
+Launch never runs on uninstall. The MSI appends `%LOCALAPPDATA%\Vibecrafted\bin`
+to the per-user HKCU PATH when that directory is not already present, and removes
+that entry on uninstall. It does not write the machine PATH. That is the same
+user-PATH directory `install.ps1` adds. Pack `.sig` + `vibecrafted-signing-v1.pub`
+is Runtime Pack signature evidence, not Authenticode.
 
 Limit for this cut: the voc radio is not in this installer cut because tokio's
 Unix socket types are `cfg(unix)` and this cut does not switch mux-agent to a

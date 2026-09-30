@@ -131,18 +131,22 @@ def test_windows_ci_builds_msi_exe_from_pack_artifact() -> None:
         "Build MSI/EXE from downloaded pack (no second pack build; out under packaging/windows/out)"
         in workflow
     )
-    # Known-good download-artifact v4 pin (same as cold-install); do not drift.
+    # Known-good download-artifact v4 pin (cold-install, MSI build, MSI install).
     assert (
         "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4"
         in workflow
     )
     assert workflow.count(
         "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4"
-    ) >= 2
+    ) >= 3
+    assert "d3f86a106a0bac45b974a628896ce1e5585c70a7" not in workflow
     assert "path: build" in workflow
     assert "build-windows-x64-runtime-pack.ps1" in workflow
-    # Installer job must consume the pack artifact, not invoke the pack builder.
+    # Installer build job must consume the pack artifact, not invoke the pack builder.
+    # Stop before the later MSI install job, which is allowed to touch LOCALAPPDATA.
     installer_job = workflow.split("windows-installers:", 1)[1]
+    if "\n  windows-msi-install:" in installer_job:
+        installer_job = installer_job.split("\n  windows-msi-install:", 1)[0]
     assert "build-windows-installers.ps1" in installer_job
     assert "build-windows-x64-runtime-pack.ps1" not in installer_job
     assert "packaging/windows/out/Vibecrafted_*-windows-x64.msi" in installer_job
@@ -523,16 +527,20 @@ def test_windows_license_rtf_check_fails_when_file_is_plain_text(
 
 
 def test_windows_installer_launches_vc_terminal_after_install_not_uninstall() -> None:
-    """Post-install must start vc-terminal; uninstall must not."""
+    """Interactive install starts vc-terminal; uninstall and silent install do not."""
     product = PRODUCT.read_text(encoding="utf-8")
+    bundle = BUNDLE.read_text(encoding="utf-8")
     build = BUILD_SCRIPT.read_text(encoding="utf-8")
     readme = README.read_text(encoding="utf-8")
     assert 'Id="LaunchVcTerminal"' in product
     assert "vc-terminal.cmd" in product
     assert 'Directory="INSTALLDIR"' in product
+    assert 'ExeCommand="bin\\vc-terminal.cmd"' in product
+    assert 'Return="asyncNoWait"' in product
     assert 'After="InstallFinalize"' in product
     assert "LaunchVcTerminal" in product
-    # Launch is gated on NOT REMOVE; uninstall path stays REMOVE~="ALL" only.
+    # Bare NOT REMOVE would start the GUI on msiexec /qn. Keep uninstall off too.
+    assert 'After="InstallFinalize">NOT REMOVE</Custom>' not in product
     launch_line = [
         line
         for line in product.splitlines()
@@ -540,5 +548,109 @@ def test_windows_installer_launches_vc_terminal_after_install_not_uninstall() ->
     ]
     assert launch_line, product
     assert any("NOT REMOVE" in line for line in launch_line)
+    seq = [
+        line.strip()
+        for line in product.splitlines()
+        if "LaunchVcTerminal" in line and "After=" in line
+    ]
+    assert len(seq) == 1, seq
+    assert "NOT REMOVE" in seq[0]
+    assert "VC_SKIP_TERMINAL_LAUNCH=1" in seq[0]
+    assert 'Id="VC_SKIP_TERMINAL_LAUNCH" Secure="yes" Value="0"' in product
+    assert 'Id="VC_BURN_UILEVEL" Secure="yes" Value="0"' in product
+    assert 'Id="VC_SKIP_TERMINAL_LAUNCH" Secure="yes" Value="1"' not in product
+    assert "UILevel&gt;3" in seq[0] or "UILevel>3" in seq[0]
+    assert "VC_BURN_UILEVEL&gt;=4" in seq[0] or "VC_BURN_UILEVEL>=4" in seq[0]
+    assert 'MsiProperty Name="VC_BURN_UILEVEL" Value="[WixBundleUILevel]"' in bundle
+    assert "must gate LaunchVcTerminal" in build
+    assert "WixBundleUILevel" in build
     assert "LaunchVcTerminal" in build
     assert "vc-terminal" in readme.lower()
+    assert "VC_SKIP_TERMINAL_LAUNCH" in readme
+    assert "UILevel" in readme
+
+
+def test_windows_installer_updates_per_user_path_not_machine_path() -> None:
+    """MSI appends the launcher bin to HKCU PATH and removes it on uninstall."""
+    product = PRODUCT.read_text(encoding="utf-8")
+    build = BUILD_SCRIPT.read_text(encoding="utf-8")
+    readme = README.read_text(encoding="utf-8")
+    assert 'Id="LocalAppDataFolder"' in product
+    assert 'Id="INSTALLDIR" Name="Vibecrafted"' in product
+    env_lines = [line for line in product.splitlines() if "<Environment " in line]
+    assert len(env_lines) == 1, env_lines
+    blob = env_lines[0]
+    assert 'Id="UserLauncherPathEnv"' in blob
+    assert 'Name="PATH"' in blob
+    assert 'Value="[INSTALLDIR]bin"' in blob
+    assert 'System="no"' in blob
+    assert 'Part="last"' in blob
+    assert 'Action="set"' in blob
+    assert 'Permanent="no"' in blob
+    assert 'Separator=";"' in blob
+    assert 'System="yes"' not in product
+    assert 'Root="HKLM"' not in product
+    assert 'Id="UserLauncherPath"' in product
+    assert "must append the per-user launcher bin" in build
+    assert "must not write the machine PATH" in build
+    assert "HKCU PATH" in readme
+    assert "machine PATH" in readme
+    assert "install.ps1" in readme
+
+
+def test_windows_ci_installs_msi_then_doctor_then_uninstall() -> None:
+    """The matrix must install the MSI it just built, then doctor, then remove it.
+
+    Does not rebuild the Runtime Pack. download-artifact stays on the known-good
+    v4 SHA. The stable ProductCode is read from Identity.wxi, not minted here.
+    """
+    workflow = (REPO_ROOT / ".github" / "workflows" / "install-windows.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "windows-msi-install:" in workflow
+    assert "MSI silent install + doctor + uninstall" in workflow
+    marker = "\n  windows-msi-install:"
+    assert marker in workflow
+    msi_job = workflow.split(marker, 1)[1]
+    assert "needs: windows-installers" in msi_job
+    assert "windows-runtime-pack" not in msi_job
+    assert "build-windows-x64-runtime-pack.ps1" not in msi_job
+    assert "build-windows-installers.ps1" not in msi_job
+    assert "install.ps1" not in msi_job
+    assert "taskkill" not in msi_job.lower()
+    assert "signtool" not in msi_job.lower()
+    assert "VIBECRAFTED_WINDOWS_AUTHENTICODE_THUMBPRINT" not in msi_job
+    assert (
+        "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4"
+        in msi_job
+    )
+    assert "d3f86a106a0bac45b974a628896ce1e5585c70a7" not in msi_job
+    assert "name: windows-x64-installers" in msi_job
+    assert 'InstallScope="perUser"' in msi_job
+    assert "LocalAppDataFolder" in msi_job
+    assert "ProgramFiles64Folder" in msi_job
+    assert STABLE_PRODUCT_CODE in msi_job
+    assert "Identity.wxi" in msi_job
+    assert "VC_SKIP_TERMINAL_LAUNCH=1" in msi_job
+    assert "msiexec.exe" in msi_job
+    assert "cmd.exe" not in msi_job
+    assert 'Arguments = "/i' in msi_job
+    assert 'Arguments = "/x' in msi_job
+    assert "UseShellExecute = $false" in msi_job
+    assert msi_job.count("WaitForExit()") >= 2
+    assert "/qn" in msi_job
+    assert "/l*v" in msi_job
+    assert "Skipping action: LaunchVcTerminal" in msi_job
+    assert "Doing action: LaunchVcTerminal" in msi_job
+    assert 'vibecrafted.cmd" doctor' in msi_job or "vibecrafted.cmd" in msi_job
+    assert "doctor" in msi_job
+    assert "DOCTOR_SUMMARY=" in msi_job
+    assert "& $cmd doctor" in msi_job
+    assert "{$stable}" in msi_job
+    assert f'$stable = "{STABLE_PRODUCT_CODE}"' in msi_job
+    assert "/x" in msi_job
+    assert "uninstall left residue under $vcHome" in msi_job
+    assert "expected exactly one user PATH entry" in msi_job
+    assert "uninstall left user PATH entry" in msi_job
+    assert "machine PATH changed" in msi_job
+    assert "windows-x64-msi-install-logs" in msi_job

@@ -5,8 +5,15 @@
   Per-user portable install: payload under LocalAppData, not Program Files.
   License dialog uses packaging/windows/License.rtf generated from the repo
   LICENSE (BUSL-1.1 / Libraxis AI Sp. z o.o.). Security contact from SECURITY.md.
-  After a successful install the MSI launches vc-terminal (with frame) so the
-  operator sees the product; launch never runs on uninstall.
+  After a successful interactive install the MSI launches vc-terminal (with
+  frame) so the operator sees the product. Silent installs (UILevel <= 3)
+  and VC_SKIP_TERMINAL_LAUNCH=1 do not start it. A double-click MSI wizard
+  (full UI) still does, and so does the Burn EXE wizard when WixBundleUILevel
+  is full. Launch never runs on uninstall.
+  The per-user HKCU PATH gains %LOCALAPPDATA%\Vibecrafted\bin without
+  duplicating an entry that is already there, and that entry is removed on
+  uninstall. System=no never writes the machine PATH. This is the MSI form of
+  install.ps1 Add-UserPathDirectory, not a second installer.
   Limit for this cut: the voc radio is not in this installer cut because tokio's
   Unix socket types are cfg(unix) and this cut does not switch mux-agent to a
   Windows AF_UNIX transport. The Runtime Pack inventory remains the authority.
@@ -70,6 +77,12 @@
 
     <Property Id="VIBECRAFTED_PACK_BASENAME" Value="REPLACE_PACK_BASENAME" />
 
+    <!-- Secure so an elevated execute sequence still sees the command line.
+         0 means do not skip. CI passes VC_SKIP_TERMINAL_LAUNCH=1. -->
+    <Property Id="VC_SKIP_TERMINAL_LAUNCH" Secure="yes" Value="0" />
+    <!-- Bundle.wxs overwrites this from WixBundleUILevel. 0 means not in Burn. -->
+    <Property Id="VC_BURN_UILEVEL" Secure="yes" Value="0" />
+
     <SetProperty
         Id="InstallRuntimePack"
         Sequence="execute"
@@ -98,8 +111,10 @@
         Return="check"
         Impersonate="yes" />
 
-    <!-- After successful install, start vc-terminal (frame-backed). Never on uninstall.
-         Type-34 Directory+ExeCommand under INSTALLDIR (already RemoveFolder-owned). -->
+    <!-- After successful interactive install, start vc-terminal (frame-backed).
+         Never on uninstall. Type-34 Directory+ExeCommand under INSTALLDIR
+         (already RemoveFolder-owned). Silent/basic UI and the CI skip property
+         do not start it; asyncNoWait would otherwise linger on a headless runner. -->
     <CustomAction
         Id="LaunchVcTerminal"
         Directory="INSTALLDIR"
@@ -113,7 +128,9 @@
       <Custom Action="InstallRuntimePack" After="InstallFiles">NOT REMOVE</Custom>
       <!-- Uninstall only when the product is fully removed (explicit REMOVE=ALL). -->
       <Custom Action="UninstallRuntimePack" Before="RemoveFiles">REMOVE~="ALL"</Custom>
-      <Custom Action="LaunchVcTerminal" After="InstallFinalize">NOT REMOVE</Custom>
+      <!-- Full MSI UI is UILevel&gt;3. Burn's chained MSI is internally silent;
+           VC_BURN_UILEVEL&gt;=4 is the interactive EXE wizard (WixBundleUILevel full). -->
+      <Custom Action="LaunchVcTerminal" After="InstallFinalize">NOT REMOVE AND NOT (VC_SKIP_TERMINAL_LAUNCH=1) AND (UILevel&gt;3 OR VC_BURN_UILEVEL&gt;=4)</Custom>
     </InstallExecuteSequence>
   </Product>
 
@@ -149,6 +166,14 @@
       <Component Id="RuntimePackSignature" Guid="B6F7A8C9-D0E1-4234-F567-89ABCDEF0123" Directory="InstallerPackDir">
         <RegistryValue Root="HKCU" Key="Software\Vetcoders\Vibecrafted\Installer" Name="RuntimePackSignature" Type="integer" Value="1" KeyPath="yes" />
         <File Id="RuntimePackSig" Source="!(bindpath.staging)\pack\REPLACE_PACK_BASENAME.sig" Name="REPLACE_PACK_BASENAME.sig" />
+      </Component>
+      <!-- HKCU\Environment\Path via the MSI Environment table (WriteEnvironmentStrings).
+           Same directory install.ps1 Add-UserPathDirectory appends. Part=last does
+           not duplicate a segment already present. System=no does not touch HKLM.
+           Action=set + Permanent=no removes the segment on uninstall. -->
+      <Component Id="UserLauncherPath" Guid="C8E1A4B2-7D3F-4E91-9A56-0B2C4D6E8F10" Directory="INSTALLDIR">
+        <RegistryValue Root="HKCU" Key="Software\Vetcoders\Vibecrafted\Installer" Name="UserLauncherPath" Type="integer" Value="1" KeyPath="yes" />
+        <Environment Id="UserLauncherPathEnv" Name="PATH" Value="[INSTALLDIR]bin" Permanent="no" Part="last" Action="set" System="no" Separator=";" />
       </Component>
     </ComponentGroup>
   </Fragment>
