@@ -17,6 +17,15 @@ import tomllib
 DEFAULT_BIND_HOST = "127.0.0.1"
 DEFAULT_PORT = 3024
 
+#: Disk-space housekeeping defaults: disabled until the Founder opts in, and
+#: even once enabled, deletion (`auto_execute`) stays off until the Founder
+#: opts into that *separately* -- enabling the schedule only ever plans by
+#: default.
+DEFAULT_HOUSEKEEPING_ENABLED = False
+DEFAULT_HOUSEKEEPING_AUTO_EXECUTE = False
+DEFAULT_HOUSEKEEPING_RETENTION_DAYS = 7
+DEFAULT_HOUSEKEEPING_INTERVAL_HOURS = 24
+
 #: Tool destinations the native App knows how to open. Each is an optional
 #: ``[tools.<key>]`` table with one ``url`` — the *served* surface of a tool
 #: owned outside this repository. No default URL is invented for any of them:
@@ -115,6 +124,92 @@ def load_server_config(
         bind_host=section.get("bind_host", DEFAULT_BIND_HOST),
         port=section.get("port", DEFAULT_PORT),
         public_url=section.get("public_url", ""),
+    )
+
+
+@dataclass(frozen=True)
+class HousekeepingConfig:
+    """Validated `[housekeeping]` table: the Founder's own opt-in for
+    automatic disk-space reclaim scheduling on `VIBECRAFTED_HOME`.
+
+    `enabled` is the switch that lets `vibecrafted housekeeping schedule
+    install` install anything at all. `auto_execute` is a second, separate
+    switch: even an installed schedule only ever writes a read-only plan
+    receipt unless the Founder also sets `auto_execute = true`, at which
+    point the schedule deletes eligible stale transient/build-cache state
+    the same way a manual `--execute --confirm ...` run would."""
+
+    enabled: bool = DEFAULT_HOUSEKEEPING_ENABLED
+    auto_execute: bool = DEFAULT_HOUSEKEEPING_AUTO_EXECUTE
+    retention_days: int = DEFAULT_HOUSEKEEPING_RETENTION_DAYS
+    interval_hours: int = DEFAULT_HOUSEKEEPING_INTERVAL_HOURS
+
+    def __post_init__(self) -> None:
+        """Validate and normalize all fields in place; raises
+        `ServerConfigError` on any invalid value."""
+
+        enabled = _validate_housekeeping_bool("housekeeping.enabled", self.enabled)
+        auto_execute = _validate_housekeeping_bool(
+            "housekeeping.auto_execute", self.auto_execute
+        )
+        retention_days = _validate_positive_int(
+            "housekeeping.retention_days", self.retention_days
+        )
+        interval_hours = _validate_positive_int(
+            "housekeeping.interval_hours", self.interval_hours
+        )
+        object.__setattr__(self, "enabled", enabled)
+        object.__setattr__(self, "auto_execute", auto_execute)
+        object.__setattr__(self, "retention_days", retention_days)
+        object.__setattr__(self, "interval_hours", interval_hours)
+
+
+def load_housekeeping_config(
+    path: Path | None = None,
+    *,
+    operator_home: Path | None = None,
+) -> HousekeepingConfig:
+    """Load and validate the `[housekeeping]` table from the TOML config
+    file at `path` (or the resolved default); returns defaults (disabled)
+    when the file or table is absent. Raises `ServerConfigError` on
+    unreadable/invalid TOML or an unsupported `[housekeeping]` key."""
+
+    resolved = path or config_path(operator_home=operator_home)
+    try:
+        raw = resolved.read_bytes()
+    except FileNotFoundError:
+        return HousekeepingConfig()
+    except OSError as exc:
+        raise ServerConfigError(
+            f"cannot read server config at {resolved}: {exc}"
+        ) from exc
+    try:
+        payload = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise ServerConfigError(
+            f"invalid TOML in server config at {resolved}: {exc}"
+        ) from exc
+    section = payload.get("housekeeping")
+    if section is None:
+        return HousekeepingConfig()
+    if not isinstance(section, dict):
+        raise ServerConfigError("[housekeeping] must be a TOML table")
+    unknown = sorted(
+        set(section) - {"enabled", "auto_execute", "retention_days", "interval_hours"}
+    )
+    if unknown:
+        raise ServerConfigError(
+            "unsupported [housekeeping] key(s): " + ", ".join(unknown)
+        )
+    return HousekeepingConfig(
+        enabled=section.get("enabled", DEFAULT_HOUSEKEEPING_ENABLED),
+        auto_execute=section.get("auto_execute", DEFAULT_HOUSEKEEPING_AUTO_EXECUTE),
+        retention_days=section.get(
+            "retention_days", DEFAULT_HOUSEKEEPING_RETENTION_DAYS
+        ),
+        interval_hours=section.get(
+            "interval_hours", DEFAULT_HOUSEKEEPING_INTERVAL_HOURS
+        ),
     )
 
 
@@ -338,6 +433,24 @@ def _validate_public_url(value: object) -> str:
             f"server.public_url has an invalid port: {exc}"
         ) from exc
     return value.rstrip("/")
+
+
+def _validate_housekeeping_bool(key: str, value: object) -> bool:
+    """Require a real bool for a `[housekeeping]` on/off switch."""
+
+    if not isinstance(value, bool):
+        raise ServerConfigError(f"{key} must be a boolean")
+    return value
+
+
+def _validate_positive_int(key: str, value: object) -> int:
+    """Require a real int (bool is rejected) that is at least 1."""
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ServerConfigError(f"{key} must be an integer")
+    if value < 1:
+        raise ServerConfigError(f"{key} must be at least 1")
+    return value
 
 
 def origin_for(host: str, port: int) -> str:

@@ -5,8 +5,10 @@ from pathlib import Path
 
 import pytest
 from vibecrafted_core.server_config import (
+    HousekeepingConfig,
     ServerConfig,
     ServerConfigError,
+    load_housekeeping_config,
     load_server_config,
     load_tool_destinations,
     seed_server_config,
@@ -149,3 +151,96 @@ def test_tool_destinations_reject_invalid_contract(
 
     with pytest.raises(ServerConfigError, match=message):
         load_tool_destinations(path)
+
+
+def test_housekeeping_config_defaults_to_disabled_when_file_is_absent(
+    tmp_path: Path,
+) -> None:
+    config = load_housekeeping_config(tmp_path / "missing.toml")
+
+    assert config == HousekeepingConfig()
+    assert config.enabled is False
+    assert config.auto_execute is False
+    assert config.retention_days == 7
+    assert config.interval_hours == 24
+
+
+def test_housekeeping_config_is_the_founders_own_opt_in(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        "[housekeeping]\nenabled = true\nretention_days = 14\ninterval_hours = 12\n",
+        encoding="utf-8",
+    )
+
+    config = load_housekeeping_config(path)
+
+    assert config.enabled is True
+    # Scheduling is opted into, but deletion is not -- a second, separate
+    # opt-in is required before the schedule may ever delete anything.
+    assert config.auto_execute is False
+    assert config.retention_days == 14
+    assert config.interval_hours == 12
+
+
+def test_housekeeping_config_auto_execute_requires_its_own_explicit_flag(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        "[housekeeping]\nenabled = true\nauto_execute = true\n", encoding="utf-8"
+    )
+
+    config = load_housekeeping_config(path)
+
+    assert config.enabled is True
+    assert config.auto_execute is True
+
+
+def test_housekeeping_config_is_independent_of_the_server_table(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        "[server]\nport = 3025\n\n[housekeeping]\nenabled = true\n",
+        encoding="utf-8",
+    )
+
+    assert load_housekeeping_config(path).enabled is True
+    assert load_server_config(path).port == 3025
+
+
+@pytest.mark.parametrize(
+    "body, message",
+    [
+        ("[housekeeping]\nenabled = 1\n", "housekeeping.enabled must be a boolean"),
+        (
+            "[housekeeping]\nauto_execute = 1\n",
+            "housekeeping.auto_execute must be a boolean",
+        ),
+        (
+            "[housekeeping]\nretention_days = 0\n",
+            "housekeeping.retention_days must be at least 1",
+        ),
+        (
+            "[housekeeping]\nretention_days = true\n",
+            "housekeeping.retention_days must be an integer",
+        ),
+        (
+            "[housekeeping]\ninterval_hours = -1\n",
+            "housekeeping.interval_hours must be at least 1",
+        ),
+        (
+            "[housekeeping]\nunknown = 1\n",
+            r"unsupported \[housekeeping\] key",
+        ),
+        ("housekeeping = 3\n", r"\[housekeeping\] must be a TOML table"),
+    ],
+)
+def test_housekeeping_config_rejects_invalid_contract(
+    tmp_path: Path, body: str, message: str
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(body, encoding="utf-8")
+
+    with pytest.raises(ServerConfigError, match=message):
+        load_housekeeping_config(path)
