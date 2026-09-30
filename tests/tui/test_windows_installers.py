@@ -155,6 +155,23 @@ def test_install_ps1_bare_uninstall_skips_dist_autodiscovery() -> None:
     assert 'Filter "Vibecrafted_RuntimePack_*-win32-x64.tar.gz"' in entry
 
 
+def test_ps1_generation_uninstall_tolerates_python_stderr() -> None:
+    """Generation uninstall must not abort on Python stderr under Stop.
+
+    CI runs ``install.ps1 -Uninstall`` via Windows PowerShell 5.1 after cold
+    install. Pack Python may print lease recovery on stderr; without Continue
+    + ``2>&1``, that becomes terminating NativeCommandError and
+    ``uninstall failed`` even though the process exited 0.
+    """
+    installer = INSTALL_SCRIPT.read_text(encoding="utf-8")
+    assert "if ($Uninstall -and -not $Pack)" in installer
+    gen_uninstall = installer.split("if ($Uninstall -and -not $Pack)", 1)[1]
+    gen_uninstall = gen_uninstall.split("if (-not $Pack)", 1)[0]
+    assert '$ErrorActionPreference = "Continue"' in gen_uninstall
+    assert "& $packPython @arguments 2>&1" in gen_uninstall
+    assert "exit $uninstallCode" in gen_uninstall
+
+
 def test_windows_installer_delegates_to_install_runtime_pack() -> None:
     product = PRODUCT.read_text(encoding="utf-8")
     build = BUILD_SCRIPT.read_text(encoding="utf-8")

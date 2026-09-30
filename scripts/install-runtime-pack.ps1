@@ -239,8 +239,24 @@ if ($Uninstall -and -not $Pack) {
         if (-not (Test-Path -LiteralPath $packInstaller)) { Die "installed Runtime Pack installer missing: $packInstaller" }
         $arguments = @($packInstaller, "runtime-uninstall")
         if ($DryRun) { $arguments += "--dry-run" }
-        & $packPython @arguments
-        exit $LASTEXITCODE
+        # Pack Python prints lease recovery on stderr. Under Stop that becomes a
+        # terminating NativeCommandError even when the process exits 0 (same
+        # trap as the -Pack install path below).
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            $uninstallOutput = & $packPython @arguments 2>&1 | ForEach-Object {
+                if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { "$_" }
+            }
+            $uninstallCode = $LASTEXITCODE
+            if ($uninstallOutput) {
+                Write-Output ($uninstallOutput -join "`n")
+            }
+            exit $uninstallCode
+        }
+        finally {
+            $ErrorActionPreference = $prevEap
+        }
     }
     Die "installed Runtime Pack projection is missing; pass -Pack to recover from the receipt"
 }
