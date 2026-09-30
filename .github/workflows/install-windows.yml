@@ -161,11 +161,12 @@ jobs:
           $env:USERPROFILE = Join-Path $sandbox "Profile"
           & powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall
           if ($LASTEXITCODE -ne 0) { throw "uninstall failed" }
-          $home = Join-Path $env:LOCALAPPDATA "Vibecrafted"
-          if (Test-Path -LiteralPath $home) {
-            $left = @(Get-ChildItem -LiteralPath $home -Recurse -Force -ErrorAction SilentlyContinue)
+          # pwsh: $HOME/$home is a read-only automatic variable — do not assign it.
+          $vcHome = Join-Path $env:LOCALAPPDATA "Vibecrafted"
+          if (Test-Path -LiteralPath $vcHome) {
+            $left = @(Get-ChildItem -LiteralPath $vcHome -Recurse -Force -ErrorAction SilentlyContinue)
             if ($left.Count -gt 0) {
               $left | ForEach-Object { $_.FullName }
-              throw "uninstall left residue under $home"
+              throw "uninstall left residue under $vcHome"
             }
           }
