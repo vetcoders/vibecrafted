@@ -311,3 +311,33 @@ across ubuntu + macos. Open the PR against `develop`.
 ---
 
 _𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI_
+
+## Discard selected formatting-only changes before committing
+
+After reviewing the diff and selecting files, preview with:
+
+```bash
+make checkout-format-only FILES="docs/example.md config.json"
+make checkout-format-only FILES="docs/example.md config.json" APPLY=1
+```
+
+The second command restores exactly the selected files to `HEAD`, in both the
+index and worktree. The default command only previews. It compares both versions
+through the existing Prettier installation (`npx --no-install --offline`), using the same
+default formatting options without loading repository configuration or plugins.
+Install Prettier through the existing development setup if it is unavailable.
+Content changes, parser errors, unsupported formats, conflicts, executable mode
+changes, and separately staged edits refuse the entire selection before restoring
+anything. Unselected files stay untouched. Nothing runs automatically on commit.
+Supported formats: Markdown, YAML, JSON, JavaScript/JSX, TypeScript/TSX, CSS, HTML.
+Python, Rust, and other formats require manual diff review and explicit Git restore.
+
+For filenames containing spaces, use literal arguments directly:
+
+```bash
+python3 scripts/checkout_format_only.py --apply -- "docs/file with spaces.md"
+```
+
+Review the resulting `git diff` and staged diff, then use `make commit-safe` for
+the remaining intended changes. This helper deliberately discards the selected
+formatting edits; do not use it for formatting you want to keep.
