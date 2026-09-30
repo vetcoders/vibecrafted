@@ -136,8 +136,8 @@ def test_env_layer_overrides_config_and_still_reports_unsupported(
     assert "gemini" in research["unsupported_configured"]
 
 
-def test_manifest_yaml_layer_overrides_config_toml(isolated_config: Path) -> None:
-    _write_config_toml(isolated_config, ["grok"])
+def test_canonical_config_toml_overrides_deprecated_yaml(isolated_config: Path) -> None:
+    config = _write_config_toml(isolated_config, ["grok"])
     research_yaml = isolated_config / "vc-home" / "config" / "research.yaml"
     research_yaml.parent.mkdir(parents=True, exist_ok=True)
     research_yaml.write_text(
@@ -152,8 +152,8 @@ def test_manifest_yaml_layer_overrides_config_toml(isolated_config: Path) -> Non
     payload = caps.workflow_capabilities_payload()
     research = _by_name(payload)["research"]
 
-    assert research["selection_source"] == str(research_yaml)
-    assert research["effective_agents"] == ["codex", "agy"]
+    assert research["selection_source"] == str(config)
+    assert research["effective_agents"] == ["grok"]
     assert research["unsupported_configured"] == ["gemini"]
     assert research["synthesizer"]["agent"] == "claude"
 

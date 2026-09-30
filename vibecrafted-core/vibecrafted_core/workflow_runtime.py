@@ -1176,7 +1176,9 @@ def _write_parent_report(
             [
                 "## Research Lane Selection",
                 "",
+                "- precedence (low to high): builtin -> install.toml -> deprecated research.yaml -> config.toml -> environment -> explicit",
                 f"- source: {research_selection.source}",
+                f"- warnings: {'; '.join(research_selection.warnings) or 'none'}",
                 f"- agents: {', '.join(research_selection.agents) or 'none'}",
                 f"- ignored: {', '.join(research_selection.ignored) or 'none'}",
                 f"- synthesizer: {research_selection.synthesizer or 'last-survivor'}",
@@ -1333,6 +1335,7 @@ async def run_research(root: str, prompt: str, model_requested: str = "") -> int
         )
     if not selection.agents:
         print("vc-research: no supported research agents configured.", file=sys.stderr)
+        _write_parent_report("research", root, prompt, [], research_selection=selection)
         return 1
     tasks = [
         _run_child(
@@ -1403,6 +1406,7 @@ async def run_research_synthesis(
         )
     if not selection.agents:
         print("vc-research: no supported research agents configured.", file=sys.stderr)
+        _write_parent_report("research", root, prompt, [], research_selection=selection)
         return 1
     hard_timeout = float(
         os.environ.get("VIBECRAFTED_RESEARCH_SYNTHESIS_TIMEOUT", "3600")

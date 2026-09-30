@@ -329,7 +329,7 @@ def test_research_runtime_yaml_wins_over_legacy_toml_and_applies_lane_models(
     home = _runtime_env(monkeypatch, tmp_path, "rsch-yaml")
     legacy_dir = tmp_path / "xdg" / "vibecrafted"
     legacy_dir.mkdir(parents=True)
-    (legacy_dir / "config.toml").write_text(
+    (tmp_path / "install.toml").write_text(
         '[runtime.picking.research]\ndefault_agents = ["claude", "agy"]\n',
         encoding="utf-8",
     )
@@ -1133,3 +1133,47 @@ def test_child_prompt_carries_worker_signal_discipline() -> None:
     assert "background-task completions will NEVER wake" in prompt
     assert "Never end your turn waiting" in prompt
     assert "intentionally blind to prior marbles runs" in prompt
+
+
+def test_research_report_and_stderr_expose_ignored_yaml(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    home = _runtime_env(monkeypatch, tmp_path, "rsch-ignored")
+    config_dir = home / "config"
+    config_dir.mkdir(parents=True)
+    (config_dir / "research.yaml").write_text("lanes:\n  - codex\n  - 42\n  - gemini\n")
+    assert (
+        workflow_runtime.main(
+            ["research", "--root", str(tmp_path), "--prompt", "map it"]
+        )
+        == 0
+    )
+    report = (home / "parent.md").read_text()
+    assert "## Research Lane Selection" in report
+    assert "ignored:" in report and "lanes: 42" in report and "gemini" in report
+    assert "warnings: Deprecated research config" in report
+    assert "research.yaml -> config.toml" in report
+    stderr = capsys.readouterr().err
+    assert "Ignored research config element: lanes: 42" in stderr
+    assert "Ignored research config element: gemini" in stderr
+
+
+def test_research_invalid_roster_fails_with_selection_report(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    home = _runtime_env(monkeypatch, tmp_path, "rsch-invalid")
+    config_dir = home / "config"
+    config_dir.mkdir(parents=True)
+    (config_dir / "research.yaml").write_text("lanes:\n  - 42\n")
+    assert (
+        workflow_runtime.main(
+            ["research", "--root", str(tmp_path), "--prompt", "map it"]
+        )
+        == 1
+    )
+    report = (home / "parent.md").read_text()
+    assert "status: failed" in report
+    assert "ignored: lanes: 42" in report
+    assert "- agents: none" in report
+    assert "no supported research agents" in capsys.readouterr().err
+    assert not (home / "rsch-invalid-children").exists()

@@ -22,6 +22,16 @@ line|once|daemon` plus `telemetry line` / `telemetry once` run those
 
 ### Fixed
 
+- Research agents now prefer canonical `~/.config/vibecrafted/config.toml`
+  (`runtime.picking.research.default_agents`, respecting `XDG_CONFIG_HOME`)
+  over deprecated `~/.vibecrafted/config/research.yaml`. Hosts such as Silver
+  with both files now use the TOML roster. Legacy `install.toml` remains below
+  YAML; environment and explicit agent overrides remain above TOML. YAML model
+  and synthesizer settings remain a compatibility fallback. Any existing YAML
+  emits a deprecation warning. String lanes and flow-list agents are accepted;
+  uninterpretable entries are reported on stderr and in Research Lane Selection.
+  Empty or wholly invalid declared rosters fail instead of launching built-in lanes.
+
 - Run-state readers now share one derivation: events + snapshot + liveness at
   read (`compute_view` / `project_lifecycle_read`). A lifecycle `state.json`
   stuck on `launching` with no live owner is `abandoned` with age, never
