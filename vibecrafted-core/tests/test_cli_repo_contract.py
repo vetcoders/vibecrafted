@@ -32,6 +32,11 @@ def _git_repo(path: Path) -> str:
     (path / "README.md").write_text("seed\n", encoding="utf-8")
     subprocess.run(["git", "add", "-A"], cwd=path, check=True)
     subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=path, check=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/vetcoders/fixture.git"],
+        cwd=path,
+        check=True,
+    )
     return subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=path,

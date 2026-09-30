@@ -20,6 +20,11 @@ def _init_repo(path: Path) -> None:
     (path / "README.md").write_text("seed\n", encoding="utf-8")
     subprocess.run(["git", "add", "-A"], cwd=path, check=True)
     subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=path, check=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/vetcoders/fixture.git"],
+        cwd=path,
+        check=True,
+    )
 
 
 def _dispatch_file(tmp_path: Path) -> tuple[Path, Path, Path]:
@@ -74,7 +79,7 @@ def test_cli_dry_run_renders_prompts_and_machine_result(
     assert dispatch_cli.main([str(dispatch_file), "--dry-run", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    dry_run_dir = home / "artifacts" / "local" / "repo"
+    dry_run_dir = home / "artifacts" / "vetcoders" / "fixture"
     dry_run_dir = next(dry_run_dir.iterdir()) / "plans" / "dry-run"
     assert payload["dry_run"] is True
     assert payload["prompts"]["c1"] == str(dry_run_dir / "prompts" / "c1.md")

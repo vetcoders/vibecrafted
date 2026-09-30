@@ -134,6 +134,11 @@ def bound_checkout(tmp_path: Path) -> Path:
     (checkout / "README.md").write_text("bound\n", encoding="utf-8")
     subprocess.run(["git", "add", "-A"], cwd=checkout, check=True)
     subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=checkout, check=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/vetcoders/fixture.git"],
+        cwd=checkout,
+        check=True,
+    )
     return checkout
 
 

@@ -56,6 +56,12 @@ def _init_read_stage_repo(root: Path) -> Path:
         check=True,
         capture_output=True,
     )
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/vetcoders/fixture.git"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+    )
     return tracked
 
 
@@ -1999,6 +2005,7 @@ def test_write_stage_with_n_cuts_records_n_cut_id_children(
         "vibecrafted_core.lifecycle_runner.load_context_atlas",
         lambda *_args, **_kwargs: {"ok": True, "command": ["loct", "context"]},
     )
+    _init_read_stage_repo(tmp_path)
     launched: list[str] = []
 
     def supervisor(contract: CutDispatchContract) -> dict:
@@ -2130,6 +2137,7 @@ def test_write_stage_prompt_names_fleet_exception_when_cuts_listed(
         "vibecrafted_core.lifecycle_runner.load_context_atlas",
         lambda *_args, **_kwargs: {"ok": True, "command": ["loct", "context"]},
     )
+    _init_read_stage_repo(tmp_path)
     prompts: list[str] = []
 
     def fake_launcher(spec, _source_dir):
@@ -2184,6 +2192,12 @@ def test_public_lifecycle_construction_dispatches_the_fleet_by_default(
     subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
     subprocess.run(
         ["git", "commit", "-q", "-m", "seed"], cwd=repo, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/vetcoders/fixture.git"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
     )
 
     # Three cuts must be open at once or this barrier never clears.

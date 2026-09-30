@@ -176,6 +176,7 @@ def _repo(path: Path) -> str:
     (path / "README.md").write_text("parent\n", encoding="utf-8")
     _git(path, "add", "-A")
     _git(path, "commit", "-q", "-m", "seed")
+    _git(path, "remote", "add", "origin", "https://github.com/vetcoders/fixture.git")
     return _git(path, "rev-parse", "HEAD")
 
 
@@ -1242,7 +1243,9 @@ def test_invalid_worktree_parent_fails_before_runtime_truth(
         _repo(repo)
         (repo / "dirty.txt").write_text("dirty\n", encoding="utf-8")
 
-    with pytest.raises((ValueError, RuntimeError), match="git repository|clean"):
+    with pytest.raises(
+        (ValueError, RuntimeError), match="git repository|clean|org/repo"
+    ):
         prepare_interactive_workspace_launch(
             provider="claude",
             runtime="local-worktrees",

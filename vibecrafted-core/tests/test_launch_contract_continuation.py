@@ -87,6 +87,7 @@ def test_pinned_base_and_dirty_parent(tmp_path):
     git("init", "-b", "trunk")
     git("config", "user.name", "Fixture")
     git("config", "user.email", "fixture@example.invalid")
+    git("remote", "add", "origin", "https://github.com/vetcoders/fixture.git")
     (tmp_path / "tracked").write_text("first")
     git("add", "tracked")
     git("commit", "-m", "first")
