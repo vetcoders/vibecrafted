@@ -31,6 +31,13 @@ if (-not $SourceRevision) {
 if ($SourceRevision -notmatch '^[0-9a-f]{40}$') {
     Die "source revision must be a full Git SHA"
 }
+# resolve_source_provenance refuses a one-sided environment pair. The
+# carrier CLI already passes --owner-repo/--source-revision; export both so
+# the inherited environment is an atomic pair, not a half-set GITHUB_SHA.
+$env:VIBECRAFTED_SOURCE_REVISION = $SourceRevision
+if (-not $env:VIBECRAFTED_SOURCE_OWNER_REPO) {
+    $env:VIBECRAFTED_SOURCE_OWNER_REPO = "vetcoders/vibecrafted"
+}
 $version = (Get-Content -LiteralPath (Join-Path $repoRoot "VERSION") -Raw).Trim()
 # Same donor revisions the Linux assembler builds. Provenance records these
 # only after this Windows builder actually compiles them (fail closed below).

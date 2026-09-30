@@ -106,6 +106,11 @@ def test_windows_installer_emits_canonical_windows_x64_names() -> None:
     )
     assert "yyyyMMdd" in pack_builder
     assert "fake donor" not in pack_builder.lower()
+    # Half-set VIBECRAFTED_SOURCE_REVISION alone fails distribution_manifest
+    # ("environment source provenance must provide an atomic pair").
+    assert "VIBECRAFTED_SOURCE_OWNER_REPO" in pack_builder
+    assert '$env:VIBECRAFTED_SOURCE_REVISION = $SourceRevision' in pack_builder
+    assert 'vetcoders/vibecrafted' in pack_builder
 
 
 def test_windows_installer_is_per_user_portable() -> None:

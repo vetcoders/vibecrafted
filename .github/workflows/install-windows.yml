@@ -50,6 +50,8 @@ jobs:
       - name: Build Windows Runtime Pack
         shell: pwsh
         env:
+          # Atomic pair: distribution_manifest rejects a half-set environment.
+          VIBECRAFTED_SOURCE_OWNER_REPO: ${{ github.repository }}
           VIBECRAFTED_SOURCE_REVISION: ${{ github.sha }}
         run: |
           $ErrorActionPreference = "Stop"

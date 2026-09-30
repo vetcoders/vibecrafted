@@ -725,6 +725,9 @@ def test_windows_ci_openssl_install_is_pinned_curl_not_winget() -> None:
     assert "libssl-3-x64.dll" in script
     assert r"lib\VC\x64\MD" in script
     assert "OPENSSL_DIR=" in script
+    # Pack step must export the owner/revision atomic pair (Linux parity).
+    assert "VIBECRAFTED_SOURCE_OWNER_REPO: ${{ github.repository }}" in workflow
+    assert "VIBECRAFTED_SOURCE_REVISION: ${{ github.sha }}" in workflow
 
 
 def test_windows_release_key_probe_does_not_require_usr_bin() -> None:
