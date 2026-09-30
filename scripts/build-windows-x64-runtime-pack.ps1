@@ -236,8 +236,16 @@ if (-not $env:OPENSSL_DIR) {
 }
 if (-not $env:OPENSSL_LIB_DIR) {
     $libMd = Join-Path $env:OPENSSL_DIR "lib\VC\x64\MD"
+    $libFlat = Join-Path $env:OPENSSL_DIR "lib"
     if (Test-Path -LiteralPath $libMd) {
         $env:OPENSSL_LIB_DIR = $libMd
+    }
+    elseif (
+        (Test-Path -LiteralPath (Join-Path $libFlat "libssl.lib") -PathType Leaf) -and
+        (Test-Path -LiteralPath (Join-Path $libFlat "libcrypto.lib") -PathType Leaf)
+    ) {
+        # FireDaemon OpenSSL ships flat lib\ (not lib\VC\x64\MD\).
+        $env:OPENSSL_LIB_DIR = $libFlat
     }
 }
 if (-not $env:OPENSSL_INCLUDE_DIR) {
