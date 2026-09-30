@@ -1337,6 +1337,40 @@ def _release_drift_findings(
     return findings
 
 
+def _windows_unsupported_surface_findings(
+    platform: str | None = None,
+) -> list[_Finding]:
+    """Declare POSIX-only surfaces explicitly on native Windows (never silent).
+
+    These are informational ``ok`` findings so a clean Windows Runtime Pack
+    install still reports 0 fail, while doctor text names the gap the same way
+    LaunchAgent supervision is declared non-applicable off Darwin.
+    """
+
+    resolved_platform = sys.platform if platform is None else platform
+    if resolved_platform != "win32":
+        return []
+    surfaces = (
+        ("windows:pty", "PTY host shells"),
+        ("windows:zsh", "zsh product profile / zsh plugins"),
+        ("windows:flock", "fcntl flock install leases"),
+        ("windows:rescue", "POSIX rescue/flock recovery path"),
+        ("windows:voc", "voc / vc-o radio (Unix-domain mux transport)"),
+        ("windows:vc-admin", "vc-admin (not shipped in the Windows Runtime Pack)"),
+        ("windows:vc-procs", "vc-procs (not shipped in the Windows Runtime Pack)"),
+        ("windows:vc-start", "vc-start (not shipped in the Windows Runtime Pack)"),
+    )
+    return [
+        _Finding(
+            "ok",
+            component,
+            f"{label}: not supported on Windows "
+            "(use WSL2 for the POSIX path, or stay on the native Runtime Pack surfaces)",
+        )
+        for component, label in surfaces
+    ]
+
+
 def doctor_run(
     store_path: str | Path | None = None,
     state: Any | None = None,
@@ -1366,6 +1400,7 @@ def doctor_run(
     findings.extend(_server_supervision_findings())
     findings.extend(_vc_frame_delivery_findings())
     findings.extend(_vc_frame_truth_drift_findings())
+    findings.extend(_windows_unsupported_surface_findings())
     if release:
         findings.extend(_release_drift_findings())
     return findings

@@ -206,6 +206,7 @@ def test_doctor_run_omits_release_probe_by_default(monkeypatch) -> None:
     monkeypatch.setattr(doctor, "_server_supervision_findings", list)
     monkeypatch.setattr(doctor, "_vc_frame_delivery_findings", list)
     monkeypatch.setattr(doctor, "_vc_frame_truth_drift_findings", lambda: [expected])
+    monkeypatch.setattr(doctor, "_windows_unsupported_surface_findings", list)
     monkeypatch.setattr(doctor, "_release_drift_findings", lambda: [sentinel])
 
     assert doctor.doctor_run() == [expected]
@@ -226,6 +227,7 @@ def test_doctor_run_includes_release_probe_when_requested(monkeypatch) -> None:
     monkeypatch.setattr(doctor, "_server_supervision_findings", list)
     monkeypatch.setattr(doctor, "_vc_frame_delivery_findings", list)
     monkeypatch.setattr(doctor, "_vc_frame_truth_drift_findings", list)
+    monkeypatch.setattr(doctor, "_windows_unsupported_surface_findings", list)
     monkeypatch.setattr(doctor, "_release_drift_findings", lambda: [expected])
 
     assert doctor.doctor_run(release=True) == [expected]

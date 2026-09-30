@@ -579,6 +579,20 @@ def test_server_supervision_finding_is_not_applicable_off_macos() -> None:
     assert "not applicable" in findings[0].message
 
 
+def test_windows_unsupported_surfaces_are_explicit_ok() -> None:
+    findings = doctor._windows_unsupported_surface_findings(platform="win32")
+    components = {finding.component for finding in findings}
+    assert findings
+    assert all(finding.level == "ok" for finding in findings)
+    assert all("not supported on Windows" in finding.message for finding in findings)
+    assert "windows:pty" in components
+    assert "windows:zsh" in components
+    assert "windows:flock" in components
+    assert "windows:rescue" in components
+    assert "windows:voc" in components
+    assert doctor._windows_unsupported_surface_findings(platform="darwin") == []
+
+
 def test_doctor_run_includes_server_supervision_finding(monkeypatch) -> None:
     expected = doctor._Finding("fail", "server-supervisor", "not supervised")
 
@@ -594,6 +608,7 @@ def test_doctor_run_includes_server_supervision_finding(monkeypatch) -> None:
     monkeypatch.setattr(doctor, "_server_supervision_findings", lambda: [expected])
     monkeypatch.setattr(doctor, "_vc_frame_delivery_findings", list)
     monkeypatch.setattr(doctor, "_vc_frame_truth_drift_findings", list)
+    monkeypatch.setattr(doctor, "_windows_unsupported_surface_findings", list)
 
     assert doctor.doctor_run() == [expected]
 
