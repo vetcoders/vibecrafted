@@ -94,6 +94,7 @@ __all__ = [
     "quarantine_legacy_runs",
     "reap_terminal_runs",
     "recorded_worker_pgid",
+    "sweep_orphaned_locks",
 ]
 
 _TRUTHY_OFF = {"0", "false", "no", "off"}
@@ -705,6 +706,73 @@ def _terminal_run_snapshots() -> list[dict[str, Any]]:
         return []
 
 
+_LOCK_LIVE_STATUSES = frozenset({"running", "launching", "active"})
+
+
+def sweep_orphaned_locks(
+    *,
+    now: float | None = None,
+    dry_run: bool = False,
+    alive_check: Callable[[int], bool] | None = None,
+    lock_files: Iterable[Any] | None = None,
+    stall_seconds: float | None = None,
+) -> dict[str, list[str]]:
+    """Remove run-lock files whose runs provably no longer live (F11).
+
+    ``spawn_create_run_lock`` writes a lock at worker start and, historically,
+    nothing ever released it — ``_normalize_lock`` (Python) and
+    ``normalize_lock`` (Rust) then projected every stale ``status=running``
+    lock as a live run forever. The launcher now releases its own lock on
+    exit; this sweep is the janitor for locks that predate that contract or
+    survived a SIGKILL.
+
+    One liveness rule, same as the projections: a lock is *held* only while
+    its recorded ``launcher_pid`` is alive, or while it is younger than the
+    stall threshold (a fresh lock whose PID is not yet stamped or readable is
+    given the benefit of the doubt). A terminal ``status=`` is a lock that was
+    already released in spirit. Never raises; unreadable locks are kept.
+    """
+    from .control_plane import RUN_STALL_SECONDS, _iter_lock_files, _pid_is_alive
+
+    now = time.time() if now is None else now
+    alive_check = _pid_is_alive if alive_check is None else alive_check
+    stall = RUN_STALL_SECONDS if stall_seconds is None else stall_seconds
+    result: dict[str, list[str]] = {"removed": [], "kept": []}
+
+    try:
+        candidates = _iter_lock_files() if lock_files is None else lock_files
+        for lock_path in candidates:
+            try:
+                fields: dict[str, str] = {}
+                for line in lock_path.read_text(encoding="utf-8").splitlines():
+                    key, sep, value = line.partition("=")
+                    if sep:
+                        fields[key.strip()] = value.strip()
+                status = fields.get("status", "running") or "running"
+                reason = ""
+                if status not in _LOCK_LIVE_STATUSES:
+                    reason = "terminal_status"
+                else:
+                    pid_text = fields.get("launcher_pid", "")
+                    pid = int(pid_text) if pid_text.isdigit() else None
+                    if pid is not None and alive_check(pid):
+                        result["kept"].append(str(lock_path))
+                        continue
+                    age = now - lock_path.stat().st_mtime
+                    if age <= stall:
+                        result["kept"].append(str(lock_path))
+                        continue
+                    reason = "pid_gone" if pid is not None else "stale_no_pid"
+                if not dry_run:
+                    lock_path.unlink(missing_ok=True)
+                result["removed"].append(f"{lock_path}:{reason}")
+            except (OSError, ValueError):
+                result["kept"].append(str(lock_path))
+    except Exception as error:  # noqa: BLE001 - a janitor never fails its caller.
+        result["error"] = [f"{type(error).__name__}: {error}"]
+    return result
+
+
 def quarantine_legacy_runs(
     runs: Iterable[Mapping[str, Any]] | None = None,
     table: Sequence[ProcessEntry] | None = None,
@@ -838,6 +906,10 @@ def reap_terminal_runs(
     try:
         if not reaper_enabled(env):
             return ReapPlan(should_run=False, skip_reason="disabled")
+        if not dry_run:
+            # Locks are liveness ephemera with no owner once their launcher is
+            # gone; the terminal seam is the one janitor that always runs.
+            sweep_orphaned_locks()
         run_list = _terminal_run_snapshots() if runs is None else list(runs)
         if not run_list:
             return ReapPlan(should_run=True)

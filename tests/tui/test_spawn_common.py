@@ -1362,6 +1362,90 @@ def test_generated_launcher_runs_from_spawn_root(tmp_path: Path) -> None:
     assert report.read_text(encoding="utf-8").strip() == str(root_dir)
 
 
+def _lock_launcher_script(
+    tmp_path: Path,
+    launcher: Path,
+    lock: Path,
+    cmd: str,
+) -> str:
+    meta = tmp_path / "meta.json"
+    report = tmp_path / "report.txt"
+    transcript = tmp_path / "trace.log"
+    return f'''
+        set -euo pipefail
+        source "{COMMON_SH}"
+        export SPAWN_ROOT="{tmp_path}"
+        export SPAWN_AGENT="claude"
+        export SPAWN_PROMPT_ID="prompt-123"
+        export SPAWN_RUN_ID="run-123"
+        export SPAWN_RUN_LOCK="{lock}"
+        export SPAWN_LOOP_NR="1"
+        export SPAWN_SKILL_CODE="marb"
+        cmd='{cmd}'
+        spawn_write_meta "{meta}" "launching" "claude" "marbles" "{tmp_path}" "{launcher}" "{report}" "{transcript}" "{launcher}"
+        spawn_generate_launcher "{launcher}" "{meta}" "{report}" "{transcript}" "{COMMON_SH}" "$cmd"
+        chmod +x "{launcher}"
+        '''
+
+
+def test_generated_launcher_stamps_and_releases_the_run_lock(tmp_path: Path) -> None:
+    """F11: the launcher owns its lock's lifecycle — stamp on start, release on exit."""
+    launcher = tmp_path / "launch.sh"
+    lock = tmp_path / "run-123.lock"
+    lock.write_text("run_id=run-123\nagent=claude\nstatus=running\n", encoding="utf-8")
+    mid = tmp_path / "mid-lock.txt"
+    report = tmp_path / "report.txt"
+
+    _bash(
+        _lock_launcher_script(
+            tmp_path,
+            launcher,
+            lock,
+            f'cat "$SPAWN_RUN_LOCK" > "{mid}"; printf ok > "{report}"',
+        )
+        + f'bash "{launcher}"'
+    )
+
+    observed = mid.read_text(encoding="utf-8")
+    assert "run_id=run-123" in observed
+    assert "launcher_pid=" in observed
+    assert not lock.exists()
+
+
+def test_generated_launcher_releases_the_run_lock_on_failure(tmp_path: Path) -> None:
+    launcher = tmp_path / "launch.sh"
+    lock = tmp_path / "run-123.lock"
+    lock.write_text("run_id=run-123\nagent=claude\nstatus=running\n", encoding="utf-8")
+
+    _bash(
+        _lock_launcher_script(tmp_path, launcher, lock, "exit 7")
+        + f'''
+        if bash "{launcher}"; then exit 90; else status=$?; fi
+        [ "$status" -eq 7 ]
+        '''
+    )
+
+    assert not lock.exists()
+
+
+def test_generated_launcher_leaves_a_foreign_run_lock_alone(tmp_path: Path) -> None:
+    """Release is ownership-checked: a lock naming another run must survive."""
+    launcher = tmp_path / "launch.sh"
+    lock = tmp_path / "run-123.lock"
+    lock.write_text(
+        "run_id=some-other-run\nagent=claude\nstatus=running\n", encoding="utf-8"
+    )
+    report = tmp_path / "report.txt"
+
+    _bash(
+        _lock_launcher_script(tmp_path, launcher, lock, f'printf ok > "{report}"')
+        + f'bash "{launcher}"'
+    )
+
+    assert lock.exists()
+    assert "run_id=some-other-run" in lock.read_text(encoding="utf-8")
+
+
 def test_generated_launcher_fails_fast_on_invalid_hook_syntax(tmp_path: Path) -> None:
     launcher = tmp_path / "launch.sh"
     meta = tmp_path / "meta.json"

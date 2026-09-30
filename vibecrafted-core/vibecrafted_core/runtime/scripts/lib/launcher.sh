@@ -76,6 +76,12 @@ startup_watch_pid=""
 # spawn-time GC can validate liveness via kill -0. Dead launcher_pid = ghost.
 spawn_update_meta_pid "\$meta" \$\$
 
+# The run lock is liveness state, not history (F11): stamp our PID so both
+# projections can probe it, and guarantee release on every exit path — the
+# trap also covers a set -e death the terminal branches below never reach.
+spawn_stamp_run_lock_pid "\${SPAWN_RUN_LOCK:-}" \$\$
+trap 'spawn_release_run_lock "\${SPAWN_RUN_LOCK:-}" "\${SPAWN_RUN_ID:-}"' EXIT
+
 rm -f "\$transcript" "\$report"
 spawn_write_frontmatter "\$transcript" "\$SPAWN_AGENT" "\${SPAWN_MODEL:-unknown}" "transcript"
 # Machine identity exists before the worker starts. The template marker keeps
