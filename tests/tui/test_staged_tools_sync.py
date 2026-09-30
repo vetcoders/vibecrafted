@@ -6486,6 +6486,35 @@ def test_owned_temporary_cleanup_race_preserves_primary_error(
     assert not list(tmp_path.glob("verifier-race-*"))
 
 
+def test_remove_owned_temporary_tree_retries_winerror_access_denied(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WinError 5 (ACCESS_DENIED) must retry like sharing violations."""
+    target = tmp_path / "scratch"
+    target.mkdir()
+    (target / "payload.txt").write_text("x\n", encoding="utf-8")
+    real_rmtree = installer.shutil.rmtree
+    calls = 0
+
+    def access_denied_once(path: Path, *args: object, **kwargs: object) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            err = OSError(13, "Access is denied", str(path))
+            err.winerror = 5
+            raise err
+        real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(installer.shutil, "rmtree", access_denied_once)
+    monkeypatch.setattr(installer.time, "sleep", lambda _seconds: None)
+
+    installer._remove_owned_temporary_tree(target)
+
+    assert calls == 2
+    assert not target.exists()
+
+
 def test_owned_temporary_cleanup_does_not_suppress_unrelated_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

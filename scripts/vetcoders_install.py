@@ -9859,7 +9859,13 @@ def _assert_runtime_verifier_semantic_failure(
 
 
 def _remove_owned_temporary_tree(path: Path, *, attempts: int = 4) -> None:
-    """Remove one known scratch root, retrying only a late-entry race."""
+    """Remove one known scratch root, retrying transient delete races.
+
+    Retries ``ENOTEMPTY`` (late entry), WinError 32 (sharing violation), and
+    WinError 5 (access denied — common for briefly locked DLLs). Permanent
+    locks still fail after the final attempt.
+    """
+    retryable_winerrors = {5, 32}
     for attempt in range(attempts):
         try:
             shutil.rmtree(path)
@@ -9869,10 +9875,10 @@ def _remove_owned_temporary_tree(path: Path, *, attempts: int = 4) -> None:
         except OSError as exc:
             winerr = getattr(exc, "winerror", None)
             if (
-                exc.errno != errno.ENOTEMPTY and winerr != 32
+                exc.errno != errno.ENOTEMPTY and winerr not in retryable_winerrors
             ) or attempt + 1 == attempts:
                 raise
-            time.sleep(0.01 * (attempt + 1))
+            time.sleep(0.05 * (attempt + 1))
 
 
 @contextmanager

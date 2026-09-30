@@ -172,6 +172,28 @@ def test_ps1_generation_uninstall_tolerates_python_stderr() -> None:
     assert "exit $uninstallCode" in gen_uninstall
 
 
+def test_ps1_generation_uninstall_stages_runner_outside_live_tree() -> None:
+    """Bare uninstall must not run Python from the generation it deletes.
+
+    ``tools/vibecrafted-current`` resolves into ``releases/<ver>``. Launching
+    that tree's ``bin/python.exe`` maps ``bin`` DLLs (observed: libcrypto-3.dll)
+    into the uninstall process; Windows then returns WinError 5 on rmtree.
+    Stage ``bin``/``scripts``/``vibecrafted-core`` under %TEMP% first.
+    """
+    installer = INSTALL_SCRIPT.read_text(encoding="utf-8")
+    gen_uninstall = installer.split("if ($Uninstall -and -not $Pack)", 1)[1]
+    gen_uninstall = gen_uninstall.split("if (-not $Pack)", 1)[0]
+    assert "vc-rt-uninstall-" in gen_uninstall
+    assert 'foreach ($name in @("bin", "scripts", "vibecrafted-core"))' in gen_uninstall
+    assert "Copy-Item -LiteralPath $src -Destination (Join-Path $stageGen $name)" in gen_uninstall
+    assert 'Join-Path $stageGen "bin\\python.exe"' in gen_uninstall
+    assert "Remove-Item -LiteralPath $stageRoot -Recurse -Force" in gen_uninstall
+    # Live generation python is only used as the copy source, never invoked.
+    assert "$livePython = Join-Path $generation" in gen_uninstall
+    assert "& $livePython" not in gen_uninstall
+    assert "& $packPython @arguments 2>&1" in gen_uninstall
+
+
 def test_windows_installer_delegates_to_install_runtime_pack() -> None:
     product = PRODUCT.read_text(encoding="utf-8")
     build = BUILD_SCRIPT.read_text(encoding="utf-8")

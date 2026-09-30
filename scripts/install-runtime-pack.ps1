@@ -233,29 +233,57 @@ if ($Uninstall -and -not $Pack) {
     $current = Join-Path $runtimeHome "tools\vibecrafted-current"
     if (Test-Path -LiteralPath $current) {
         $generation = (Resolve-Path $current).Path
-        $packPython = Join-Path $generation "bin\python.exe"
-        $packInstaller = Join-Path $generation "scripts\vetcoders_install.py"
-        if (-not (Test-Path -LiteralPath $packPython)) { Die "installed Runtime Pack Python missing: $packPython" }
-        if (-not (Test-Path -LiteralPath $packInstaller)) { Die "installed Runtime Pack installer missing: $packInstaller" }
-        $arguments = @($packInstaller, "runtime-uninstall")
-        if ($DryRun) { $arguments += "--dry-run" }
-        # Pack Python prints lease recovery on stderr. Under Stop that becomes a
-        # terminating NativeCommandError even when the process exits 0 (same
-        # trap as the -Pack install path below).
-        $prevEap = $ErrorActionPreference
-        $ErrorActionPreference = "Continue"
+        $livePython = Join-Path $generation "bin\python.exe"
+        $liveInstaller = Join-Path $generation "scripts\vetcoders_install.py"
+        if (-not (Test-Path -LiteralPath $livePython)) { Die "installed Runtime Pack Python missing: $livePython" }
+        if (-not (Test-Path -LiteralPath $liveInstaller)) { Die "installed Runtime Pack installer missing: $liveInstaller" }
+        # Running uninstall Python from the live releases tree maps bin DLLs
+        # (e.g. libcrypto-3.dll) into the process. Windows then returns
+        # WinError 5 on rmtree of that generation. Stage a throwaway runner
+        # outside runtime_home so the delete target is not self-mapped.
+        $stageRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("vc-rt-uninstall-" + [guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Path $stageRoot | Out-Null
         try {
-            $uninstallOutput = & $packPython @arguments 2>&1 | ForEach-Object {
-                if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { "$_" }
+            $stageGen = Join-Path $stageRoot "generation"
+            New-Item -ItemType Directory -Path $stageGen | Out-Null
+            foreach ($name in @("bin", "scripts", "vibecrafted-core")) {
+                $src = Join-Path $generation $name
+                if (-not (Test-Path -LiteralPath $src)) {
+                    Die "installed Runtime Pack generation missing $name for staged uninstall: $src"
+                }
+                Copy-Item -LiteralPath $src -Destination (Join-Path $stageGen $name) -Recurse -Force
             }
-            $uninstallCode = $LASTEXITCODE
-            if ($uninstallOutput) {
-                Write-Output ($uninstallOutput -join "`n")
+            $packPython = Join-Path $stageGen "bin\python.exe"
+            $packInstaller = Join-Path $stageGen "scripts\vetcoders_install.py"
+            if (-not (Test-Path -LiteralPath $packPython)) { Die "staged Runtime Pack Python missing: $packPython" }
+            if (-not (Test-Path -LiteralPath $packInstaller)) { Die "staged Runtime Pack installer missing: $packInstaller" }
+            $env:PYTHONPATH = Join-Path $stageGen "vibecrafted-core"
+            $env:PYTHONNOUSERSITE = "1"
+            $arguments = @($packInstaller, "runtime-uninstall")
+            if ($DryRun) { $arguments += "--dry-run" }
+            # Pack Python prints lease recovery on stderr. Under Stop that becomes a
+            # terminating NativeCommandError even when the process exits 0 (same
+            # trap as the -Pack install path below).
+            $prevEap = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            try {
+                $uninstallOutput = & $packPython @arguments 2>&1 | ForEach-Object {
+                    if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { "$_" }
+                }
+                $uninstallCode = $LASTEXITCODE
+                if ($uninstallOutput) {
+                    Write-Output ($uninstallOutput -join "`n")
+                }
+                exit $uninstallCode
             }
-            exit $uninstallCode
+            finally {
+                $ErrorActionPreference = $prevEap
+            }
         }
         finally {
-            $ErrorActionPreference = $prevEap
+            if (Test-Path -LiteralPath $stageRoot) {
+                Remove-Item -LiteralPath $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
         }
     }
     Die "installed Runtime Pack projection is missing; pass -Pack to recover from the receipt"
