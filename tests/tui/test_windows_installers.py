@@ -256,6 +256,29 @@ def test_ps1_uninstall_clears_windows_product_root() -> None:
     assert "uninstall left residue under $vcProductRoot" in installer
 
 
+def test_windows_installer_verifies_with_the_key_that_signed_the_pack() -> None:
+    """CI rehearsal signatures must not be checked with the product key.
+
+    The deferred MSI custom action cannot see VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY
+    from the workflow process. pack-verify.pub is the key staged into the MSI.
+    """
+    product = PRODUCT.read_text(encoding="utf-8")
+    build = BUILD_SCRIPT.read_text(encoding="utf-8")
+    assert 'Id="PackVerifyPub"' in product
+    assert "pack-verify.pub" in product
+    assert "-PublicKey" in product
+    assert r"trust\pack-verify.pub" in product
+    ci_at = build.index("ci-signing.pub (rehearsal artifact)")
+    rehearsal_at = build.index("rehearsal.pub beside pack")
+    product_at = build.index("vibecrafted-signing-v1.pub (product key)")
+    assert ci_at < rehearsal_at < product_at
+    assert "-VerifyOnly" in build
+    assert "pack-verify.pub" in build
+    assert build.index("disagrees with repo VERSION") < build.index("-VerifyOnly")
+    assert build.index("-VerifyOnly") < build.index("& $candle")
+    assert "must pass -PublicKey pack-verify.pub" in build
+
+
 def test_windows_installer_delegates_to_install_runtime_pack() -> None:
     product = PRODUCT.read_text(encoding="utf-8")
     build = BUILD_SCRIPT.read_text(encoding="utf-8")

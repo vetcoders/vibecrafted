@@ -26,8 +26,10 @@ Burn EXE wizard does too because the bundle passes `WixBundleUILevel` (full = 4)
 Launch never runs on uninstall. The MSI appends `%LOCALAPPDATA%\Vibecrafted\bin`
 to the per-user HKCU PATH when that directory is not already present, and removes
 that entry on uninstall. It does not write the machine PATH. That is the same
-user-PATH directory `install.ps1` adds. Pack `.sig` + `vibecrafted-signing-v1.pub`
-is Runtime Pack signature evidence, not Authenticode.
+user-PATH directory `install.ps1` adds. The MSI checks the pack `.sig` with
+`pack-verify.pub`: `ci-signing.pub` or the pack's `.rehearsal.pub` when the
+carrier is rehearsal-signed, otherwise `vibecrafted-signing-v1.pub`. That is
+Runtime Pack signature evidence, not Authenticode.
 
 Limit for this cut: the voc radio is not in this installer cut because tokio's
 Unix socket types are `cfg(unix)` and this cut does not switch mux-agent to a

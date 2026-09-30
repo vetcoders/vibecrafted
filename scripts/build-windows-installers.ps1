@@ -166,6 +166,34 @@ if ($payloadVersion -ne $repoVersion) {
     Die "Runtime Pack VERSION ($payloadVersion) disagrees with repo VERSION ($repoVersion); refusing to stamp ProductVersion=$productVersion onto a $payloadVersion carrier"
 }
 
+function Resolve-WindowsPackVerifyKey {
+    param([string]$PackPath)
+    # Prefer the key that actually signed this carrier. CI rehearsal packs do
+    # not verify with vibecrafted-signing-v1.pub (openssl: invalid padding).
+    $packDirectory = Split-Path -Parent $PackPath
+    $ciSigningPub = Join-Path $packDirectory "ci-signing.pub"
+    $rehearsalPub = "$PackPath.rehearsal.pub"
+    $productPub = Join-Path $repoRoot "vibecrafted-core\vibecrafted_core\trust\vibecrafted-signing-v1.pub"
+    if (Test-Path -LiteralPath $ciSigningPub -PathType Leaf) {
+        Write-Host "Pack verify key: ci-signing.pub (rehearsal artifact)"
+        return (Resolve-Path -LiteralPath $ciSigningPub).Path
+    }
+    if (Test-Path -LiteralPath $rehearsalPub -PathType Leaf) {
+        Write-Host "Pack verify key: rehearsal.pub beside pack"
+        return (Resolve-Path -LiteralPath $rehearsalPub).Path
+    }
+    Write-Host "Pack verify key: vibecrafted-signing-v1.pub (product key)"
+    return (Resolve-Path -LiteralPath $productPub).Path
+}
+
+$verifyKeySource = Resolve-WindowsPackVerifyKey -PackPath $Pack
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot "scripts\install-runtime-pack.ps1") `
+    -Pack $Pack -PublicKey $verifyKeySource -VerifyOnly
+$verifyExit = $LASTEXITCODE
+if ($verifyExit -ne 0) {
+    Die "Runtime Pack does not verify with the key staged as pack-verify.pub ($verifyKeySource), exit $verifyExit"
+}
+
 $identityTemplate = Join-Path $packagingRoot "Identity.wxi"
 $identityText = Get-Content -LiteralPath $identityTemplate -Raw
 if ($identityText -notmatch [regex]::Escape($stableUpgradeCode)) {
@@ -229,6 +257,8 @@ Copy-Item (Join-Path $repoRoot "VERSION") (Join-Path $stagingRoot "VERSION")
 Copy-Item (Join-Path $repoRoot "scripts\install-runtime-pack.ps1") (Join-Path $stagingRoot "scripts\install-runtime-pack.ps1")
 Copy-Item (Join-Path $repoRoot "vibecrafted-core\vibecrafted_core\trust\vibecrafted-signing-v1.pub") `
     (Join-Path $stagingRoot "vibecrafted-core\vibecrafted_core\trust\vibecrafted-signing-v1.pub")
+Copy-Item -LiteralPath $verifyKeySource `
+    (Join-Path $stagingRoot "vibecrafted-core\vibecrafted_core\trust\pack-verify.pub")
 Copy-Item $Pack (Join-Path $stagingRoot "pack\$packBasename")
 Copy-Item $checksum (Join-Path $stagingRoot "pack\$packBasename.sha256")
 Copy-Item $signature (Join-Path $stagingRoot "pack\$packBasename.sig")
@@ -323,6 +353,9 @@ if ($productBody -notmatch 'Name="PATH"' -or $productBody -notmatch 'System="no"
 }
 if ($productBody -match 'System="yes"') {
     Die "Product.wxs must not write the machine PATH"
+}
+if ($productBody -notmatch "pack-verify.pub" -or $productBody -notmatch "-PublicKey") {
+    Die "Product.wxs must pass -PublicKey pack-verify.pub into InstallRuntimePack"
 }
 $productBody = $productBody.Replace("REPLACE_PACK_BASENAME", $packBasename)
 Write-Utf8NoBom -Path $productWork -Content $productBody

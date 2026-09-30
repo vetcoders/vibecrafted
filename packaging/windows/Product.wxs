@@ -83,11 +83,15 @@
     <!-- Bundle.wxs overwrites this from WixBundleUILevel. 0 means not in Burn. -->
     <Property Id="VC_BURN_UILEVEL" Secure="yes" Value="0" />
 
+    <!-- -PublicKey is the key staged as pack-verify.pub (the key that signed
+         this carrier). A deferred custom action does not see the workflow
+         process environment, so CI cannot pass the rehearsal key any other way.
+         Release carriers stage vibecrafted-signing-v1.pub under that name. -->
     <SetProperty
         Id="InstallRuntimePack"
         Sequence="execute"
         Before="InstallRuntimePack"
-        Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -ExecutionPolicy Bypass -File &quot;[InstallerDir]scripts\install-runtime-pack.ps1&quot; -Pack &quot;[InstallerDir]pack\[VIBECRAFTED_PACK_BASENAME]&quot;" />
+        Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -ExecutionPolicy Bypass -File &quot;[InstallerDir]scripts\install-runtime-pack.ps1&quot; -Pack &quot;[InstallerDir]pack\[VIBECRAFTED_PACK_BASENAME]&quot; -PublicKey &quot;[InstallerDir]vibecrafted-core\vibecrafted_core\trust\pack-verify.pub&quot;" />
 
     <CustomAction
         Id="InstallRuntimePack"
@@ -150,6 +154,7 @@
       <Component Id="SigningPub" Guid="E3C4D5F6-A7B8-4901-C234-56789ABCDEF0" Directory="InstallerTrustLeaf">
         <RegistryValue Root="HKCU" Key="Software\Vetcoders\Vibecrafted\Installer" Name="SigningPub" Type="integer" Value="1" KeyPath="yes" />
         <File Id="SigningV1Pub" Source="!(bindpath.staging)\vibecrafted-core\vibecrafted_core\trust\vibecrafted-signing-v1.pub" />
+        <File Id="PackVerifyPub" Source="!(bindpath.staging)\vibecrafted-core\vibecrafted_core\trust\pack-verify.pub" />
         <RemoveFolder Id="RemoveInstallerTrustLeaf" Directory="InstallerTrustLeaf" On="uninstall" />
         <RemoveFolder Id="RemoveInstallerCoreDir" Directory="InstallerCoreDir" On="uninstall" />
         <RemoveFolder Id="RemoveInstallerTrustDir" Directory="InstallerTrustDir" On="uninstall" />
