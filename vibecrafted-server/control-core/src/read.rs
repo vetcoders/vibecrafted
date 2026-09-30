@@ -973,26 +973,37 @@ impl ControlPlane {
             };
         }
 
+        // Raw launcher evidence (meta sidecars, locks, marbles state) outlives
+        // the run it describes. An id whose terminal snapshot was archived is
+        // closed history, so its raw files are ignored; a retained `runs/`
+        // snapshot for the same id keeps folding them, as the Python sync does.
+        let mut raw = RawSources {
+            sealed: self.archived_run_ids(),
+            touched: HashMap::new(),
+        };
+        for run in &retained_snapshots {
+            raw.sealed.remove(&run.run_id);
+        }
         for path in self.iter_meta_files() {
             if let Some(payload) = read_json::<serde_json::Value>(&path) {
                 if let Ok(meta) = serde_json::from_value::<AgentMeta>(payload.clone()) {
                     if let Some(mut status) = meta.normalize(now) {
                         enrich_run_status(&mut status, &payload, false);
-                        absorb_status(&mut merged, status);
+                        raw.absorb(&mut merged, status, &path);
                     }
                 }
             }
         }
         for path in self.iter_lock_files() {
             if let Some(status) = normalize_lock(&path, now) {
-                absorb_status(&mut merged, status);
+                raw.absorb(&mut merged, status, &path);
             }
         }
         for path in self.iter_marbles_state_files() {
             if let Some(status) =
                 read_json::<MarblesState>(&path).and_then(|state| state.normalize(now))
             {
-                absorb_status(&mut merged, status);
+                raw.absorb(&mut merged, status, &path);
             }
         }
         // Python sync_state folds the event stream after raw sources. The
@@ -1067,7 +1078,7 @@ impl ControlPlane {
                     run.recovery_required = true;
                 }
             }
-            reconcile_orphaned(run, now);
+            reconcile_orphaned(run, now, raw.touched.get(&run.run_id).copied());
             let terminal = run.is_terminal();
             let await_run = !terminal
                 && run
@@ -1170,6 +1181,51 @@ impl ControlPlane {
 
     fn iter_marbles_state_files(&self) -> Vec<PathBuf> {
         rglob(&self.home.join("marbles"), &|name| name == "state.json")
+    }
+
+    /// Ids archived under `runs/.archived/`: the Python sync moves only
+    /// terminal snapshots there and the operator console writes markers only
+    /// for finished runs, so every entry is a closed verdict. Snapshot files
+    /// are `<run_id>.json`, so the listing alone names the ids -- no JSON
+    /// parse, which keeps a years-deep archive cheap on every projection.
+    /// Mirrors `control_plane._archived_run_ids`.
+    fn archived_run_ids(&self) -> HashSet<String> {
+        let Ok(entries) = fs::read_dir(self.run_snapshot_dir().join(".archived")) else {
+            return HashSet::new();
+        };
+        entries
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name().into_string().ok()?;
+                let run_id = name.strip_suffix(".json")?;
+                is_safe_run_id(run_id).then(|| run_id.to_string())
+            })
+            .collect()
+    }
+}
+
+/// Per-projection bookkeeping for raw launcher evidence (`*.meta.json`,
+/// `*.lock`, marbles `state.json`).
+struct RawSources {
+    /// Archived ids no raw file may resurrect.
+    sealed: HashSet<String>,
+    /// Newest raw-file mtime per run id: the age of evidence that carries no
+    /// parseable `updated_at`/`started_at` of its own.
+    touched: HashMap<String, DateTime<Utc>>,
+}
+
+impl RawSources {
+    fn absorb(&mut self, merged: &mut Vec<RunStatus>, status: RunStatus, path: &Path) {
+        if self.sealed.contains(&status.run_id) {
+            return;
+        }
+        if let Some(modified) = modified_at(path).map(DateTime::<Utc>::from) {
+            self.touched
+                .entry(status.run_id.clone())
+                .and_modify(|stamp| *stamp = (*stamp).max(modified))
+                .or_insert(modified);
+        }
+        absorb_status(merged, status);
     }
 }
 
@@ -1898,16 +1954,29 @@ fn enrich_run_status(run: &mut RunStatus, payload: &serde_json::Value, probe_wor
 }
 
 /// Read-only liveness verdict; settlement and canonical meta remain writer-owned.
-fn reconcile_orphaned(run: &mut RunStatus, now: DateTime<Utc>) {
+///
+/// One rule for every in-flight run: it stays live only with a live process
+/// or activity younger than [`RUN_STALL_SECONDS`]. `raw_touched` is the newest
+/// mtime of the run's raw launcher files (lock, meta sidecar, marbles state),
+/// `None` when no raw file backs it. Raw evidence settles whatever non-final
+/// state it claims (a statusless marbles loop reads `unknown`), and its file
+/// age stands in when the evidence carries no parseable stamp -- a legacy lock
+/// without `started=` would otherwise keep its `running` forever.
+fn reconcile_orphaned(run: &mut RunStatus, now: DateTime<Utc>, raw_touched: Option<DateTime<Utc>>) {
+    let in_flight = crate::model::is_active_state(&run.state)
+        || run.state == "prepared"
+        || raw_touched.is_some();
     if run.is_terminal()
-        || !(crate::model::is_active_state(&run.state) || run.state == "prepared")
+        || !in_flight
         || run.state == "paused"
         || run.worker_alive == Some(true)
         || run_has_live_process(run)
     {
         return;
     }
-    let activity = parse_iso(&run.updated_at).or_else(|| parse_iso(&run.started_at));
+    let activity = parse_iso(&run.updated_at)
+        .or_else(|| parse_iso(&run.started_at))
+        .or(raw_touched);
     let transcript = modified_at(Path::new(&run.latest_transcript)).map(DateTime::<Utc>::from);
     let Some(stamp) = activity.into_iter().chain(transcript).max() else {
         return;
