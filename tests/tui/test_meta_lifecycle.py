@@ -322,6 +322,9 @@ def test_spawn_write_meta_schema_contract_pin(tmp_path: Path) -> None:
         "loop_nr",
         "skill_code",
         "framework_version",
+        # f860ba23: dispatcher identity (env allowlist for headless workers)
+        # travels with every meta so receipts can name their spawning surface.
+        "dispatcher",
         "exit_code",
         "launcher_pid",
         "liveness",
