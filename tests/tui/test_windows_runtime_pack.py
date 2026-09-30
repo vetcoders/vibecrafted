@@ -699,6 +699,34 @@ def test_windows_pack_builder_builds_terminal_and_frame_honestly() -> None:
     assert build_at < stamp_at
 
 
+def test_windows_ci_openssl_install_is_pinned_curl_not_winget() -> None:
+    """Install (Windows) must not stall on winget/choco OpenSSL downloads."""
+    workflow = (REPO_ROOT / ".github" / "workflows" / "install-windows.yml").read_text(
+        encoding="utf-8"
+    )
+    script = (REPO_ROOT / "scripts" / "ci-install-openssl-win64.ps1").read_text(
+        encoding="utf-8"
+    )
+    assert "ci-install-openssl-win64.ps1" in workflow
+    assert "winget install" not in workflow
+    assert "choco install" not in workflow
+    assert "ShiningLight.OpenSSL" not in workflow
+    assert (
+        "https://download.firedaemon.com/FireDaemon-OpenSSL/"
+        "FireDaemon-OpenSSL-x64-3.5.2.exe"
+    ) in script
+    assert "69AD22A9CB82D5CF93BA740CDFF0996BE794627BA88C1C478666F5375003DE0A" in script
+    assert "$ExpectedBytes = 14949016" in script
+    assert "$CurlMaxTimeSec = 120" in script
+    assert "curl.exe" in script
+    assert "--max-time" in script
+    assert "winget install" not in script
+    assert "choco install" not in script
+    assert "libssl-3-x64.dll" in script
+    assert r"lib\VC\x64\MD" in script
+    assert "OPENSSL_DIR=" in script
+
+
 def test_windows_release_key_probe_does_not_require_usr_bin() -> None:
     probe = installer._openssl_for_release_key_probe()
     assert probe is None or probe.is_file()

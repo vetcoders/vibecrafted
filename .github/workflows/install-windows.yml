@@ -36,27 +36,11 @@ jobs:
       - name: Install OpenSSL (vc-frame)
         shell: pwsh
         run: |
-          # slproweb downloads via choco are flaky (EOF / 404). Prefer an
-          # existing install, retry choco, then fall back to winget Dev.
-          $openssl = "C:\Program Files\OpenSSL-Win64"
-          $header = Join-Path $openssl "include\openssl\ssl.h"
-          if (-not (Test-Path -LiteralPath $header)) {
-            $ok = $false
-            for ($attempt = 1; $attempt -le 3; $attempt++) {
-              Write-Host "choco openssl attempt $attempt"
-              choco install openssl -y --no-progress --force
-              if (Test-Path -LiteralPath $header) { $ok = $true; break }
-              Start-Sleep -Seconds (15 * $attempt)
-            }
-            if (-not $ok) {
-              Write-Host "choco openssl failed; winget ShiningLight.OpenSSL.Dev"
-              winget install --id ShiningLight.OpenSSL.Dev -e --accept-package-agreements --accept-source-agreements --disable-interactivity
-            }
-          }
-          if (-not (Test-Path -LiteralPath $header)) {
-            throw "OpenSSL-Win64 missing after choco retries and winget fallback"
-          }
-          "OPENSSL_DIR=$openssl" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          # Pinned FireDaemon OpenSSL x64 EXE via curl (retries + max-time).
+          # Package managers without per-attempt download timeouts stall for hours here.
+          $ErrorActionPreference = "Stop"
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\ci-install-openssl-win64.ps1
+          if ($LASTEXITCODE -ne 0) { throw "ci-install-openssl-win64 failed with exit $LASTEXITCODE" }
 
       - name: Setup Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
