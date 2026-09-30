@@ -503,7 +503,7 @@ Research reports:
 """
 
 
-NATIVE_RESUME_AGENTS = frozenset({"claude", "codex", "grok", "agy"})
+NATIVE_RESUME_AGENTS = frozenset({"claude", "codex", "grok", "agy", "copilot"})
 
 
 def native_resume_argv(agent: str, agent_session_id: str) -> list[str]:
@@ -560,6 +560,9 @@ def native_resume_argv(agent: str, agent_session_id: str) -> list[str]:
         # conversation_id (context preserved). Prompt never rides argv.
         command = _stdin_command("agy")
         return [command[0], "--conversation", native_id, *command[1:]]
+    if normalized_agent == "copilot":
+        command = _stdin_command("copilot")
+        return [command[0], "--resume", native_id, *command[1:]]
     raise ValueError(f"native_resume_unsupported:{normalized_agent or 'unknown'}")
 
 

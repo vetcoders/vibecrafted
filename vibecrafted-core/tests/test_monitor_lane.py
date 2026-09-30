@@ -164,6 +164,7 @@ def test_capability_table_is_explicit_per_provider() -> None:
         "grok",
         "junie",
         "kimi",
+        "copilot",
         "cursor",
         "gemini",
     }

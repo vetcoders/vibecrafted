@@ -290,7 +290,7 @@ mod tests {
         let catalog = LauncherCatalog::parse(FIXTURE.as_bytes()).unwrap();
         assert_eq!(
             catalog.agents,
-            vec!["agy", "claude", "codex", "cursor", "grok", "junie", "kimi"]
+            vec!["agy", "claude", "codex", "cursor", "grok", "junie", "kimi", "copilot"]
         );
         assert!(catalog.provider("claude").unwrap().model_override.supported);
         assert!(!catalog.provider("junie").unwrap().model_override.supported);

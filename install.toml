@@ -133,7 +133,7 @@ additional_tools = "Additional tools"
 [diagnostics.commands]
 foundations = ["loctree-mcp", "aicx-mcp", "prview", "screenscribe"]
 toolchains = ["python3", "node", "git", "rsync"]
-agents = ["claude", "codex", "agy", "junie", "grok", "cursor-agent"]
+agents = ["claude", "codex", "agy", "junie", "grok", "cursor-agent", "kimi", "copilot"]
 additional_tools = ["mise", "starship", "atuin", "zoxide", "zsh-autosuggestions", "zsh-syntax-highlighting"]
 
 [diagnostics.paths]

@@ -186,7 +186,7 @@ fn usage_report_filters_window_and_dimensions_without_following_symlinks() {
 fn analytical_adapter_inventory_covers_every_supported_provider() {
     assert_eq!(
         control_core::USAGE_PROVIDER_ADAPTERS,
-        &["agy", "claude", "codex", "cursor", "grok", "junie", "kimi"]
+        &["agy", "claude", "codex", "cursor", "grok", "junie", "kimi", "copilot"]
     );
 }
 

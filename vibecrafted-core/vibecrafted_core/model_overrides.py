@@ -17,6 +17,7 @@ MODEL_OVERRIDE_FLAGS = {
     # kimi 0.42.0 documents both `-m` and `--model <alias>`; inject the long
     # form and treat `-m` as an existing pin (same rule as grok).
     "kimi": "--model",
+    "copilot": "--model",
 }
 
 MODEL_OVERRIDE_FLAG_ALIASES: dict[str, tuple[str, ...]] = {

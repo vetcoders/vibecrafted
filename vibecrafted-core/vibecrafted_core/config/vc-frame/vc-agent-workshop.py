@@ -122,7 +122,7 @@ from vibecrafted_core.spawn import (
 )
 from vibecrafted_core.workspace_catalog import resolve_operator_place_session
 
-AGENTS = ("agy", "claude", "codex", "cursor", "grok", "junie", "kimi")
+AGENTS = ("agy", "claude", "codex", "cursor", "grok", "junie", "kimi", "copilot")
 LAUNCH_MODES = ("init", "resume", "partner", "operator")
 MODE_PROMPTS = {"partner": "/vc-partner", "operator": "/vc-operator"}
 RUNTIME_HELP = {
@@ -149,6 +149,7 @@ _AGENT_BINARIES = {
     "grok": "grok",
     "junie": "junie",
     "kimi": "kimi",
+    "copilot": "copilot",
 }
 PRESENCE_SCOPE = "this session"
 PRESENCE_REFRESH_SECONDS = 15.0

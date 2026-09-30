@@ -108,6 +108,7 @@ def test_every_styled_agent_has_a_deterministic_spelling() -> None:
         "grok": ("flag", "--reasoning-effort"),
         "junie": ("assign", "--effort"),
         "codex": ("codex_config", "model_reasoning_effort"),
+        "copilot": ("flag", "--reasoning-effort"),
     }
 
 

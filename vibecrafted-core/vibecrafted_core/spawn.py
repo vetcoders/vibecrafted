@@ -67,7 +67,16 @@ from .telemetry import tokens_total as _tokens_total
 
 EventCallback = Callable[[dict[str, Any]], None]
 
-POLICY_PROVIDERS = ("codex", "claude", "agy", "grok", "junie", "cursor", "kimi")
+POLICY_PROVIDERS = (
+    "codex",
+    "claude",
+    "agy",
+    "grok",
+    "junie",
+    "cursor",
+    "kimi",
+    "copilot",
+)
 # Fleet agent key → installed CLI binary when they differ (key stays the UX
 # name: `vibecrafted implement cursor`, binary remains `cursor-agent`).
 AGENT_BINARY_NAMES: dict[str, str] = {
@@ -720,6 +729,15 @@ _PERMISSION_CONTRACT: dict[str, dict[str, tuple[tuple[str, ...], str] | None]] =
         "accept-edits": None,
         "read-only": (("--plan",), "plan mode prevents edits and execution"),
     },
+    "copilot": {
+        "bypass": (("--allow-all",), "all tools, paths, and URLs run without prompts"),
+        "auto": ((), "provider asks for permission when needed"),
+        "accept-edits": (
+            ("--allow-tool=write",),
+            "file edits pass; other tools can ask",
+        ),
+        "read-only": (("--available-tools=read",), "only the read tool is available"),
+    },
 }
 
 
@@ -753,6 +771,13 @@ _HEADLESS_PERMISSION_CONTRACT: dict[str, dict[str, tuple[tuple[str, ...], str]]]
                 "auto (never-ask) permission policy; --yolo/--auto/--plan cannot "
                 "combine with --prompt, so no flag is emitted"
             ),
+        ),
+    },
+    "copilot": {
+        "bypass": (("--allow-all",), "all tools, paths, and URLs run without prompts"),
+        "read-only": (
+            ("--available-tools=read", "--no-ask-user"),
+            "only the read tool is available",
         ),
     },
 }
@@ -1277,6 +1302,19 @@ def resolve_provider_policy(
                 "never-ask print default)"
             ),
         )
+    if (
+        provider == "copilot"
+        and mode == "headless"
+        and permissions in {"auto", "accept-edits"}
+    ):
+        return ProviderPolicy(
+            provider,
+            runtime,
+            permissions,
+            mode,
+            False,
+            reason="copilot headless cannot answer permission prompts; use bypass or read-only",
+        )
     flags, behavior = cell
     return ProviderPolicy(provider, runtime, permissions, mode, True, flags, behavior)
 
@@ -1471,6 +1509,13 @@ def interactive_policy_command(
         # exists only as -p, which is non-interactive and conflicts with
         # --auto/--yolo/--plan); the operator types the slash command inside.
         return ["kimi", *flags]
+    if provider == "copilot":
+        if continuity.mode == "bare-fork":
+            raise ValueError("copilot native fork is unsupported; use fresh or resume")
+        session_flags = (
+            ["--session-id", provider_session_id] if provider_session_id else []
+        )
+        return ["copilot", *flags, *session_flags, "-i", prompt]
     raise ValueError(f"unsupported provider: {provider}")
 
 
@@ -4214,6 +4259,17 @@ def _default_command(
             "--output-format",
             "stream-json",
         ]
+    if agent == "copilot":
+        return [
+            "copilot",
+            *flags,
+            "--no-ask-user",
+            "--no-auto-update",
+            "--output-format",
+            "json",
+            "-p",
+            prompt,
+        ]
     raise ValueError(f"unsupported agent: {agent}")
 
 
@@ -4318,6 +4374,15 @@ def _stdin_command(agent: str, controls: ExecutionControls | None = None) -> lis
             "from the materialized prompt file (workflow.build_launch_command "
             "kimi branch); the stdin contract cannot carry kimi."
         )
+    if agent == "copilot":
+        return [
+            "copilot",
+            *flags,
+            "--no-ask-user",
+            "--no-auto-update",
+            "--output-format",
+            "json",
+        ]
     raise ValueError(f"unsupported agent: {agent}")
 
 

@@ -101,6 +101,17 @@ and the evidence line. Provider mapping as probed on 2026-09-08 (read-only
 | cursor-agent 2026.09.08    | `--force --trust` / `--trust` / `--mode ask --trust`; accept-edits refused                                                                | `--sandbox enabled` (verified against `--help`)                                                                                                                                                         | `--sandbox disabled`                                                                                                                     |
 | agy 1.1.27                 | `--dangerously-skip-permissions` / default / `--mode accept-edits` / `--mode plan`                                                        | `--sandbox` (opt-in terminal restrictions)                                                                                                                                                              | refused: only an opt-in flag exists and agy keeps persistent terminal-sandbox settings, so "no flag" is not "disabled"; omit `--sandbox` |
 | junie 26.8.31              | `auto` only in headless runs                                                                                                              | refused (no sandbox surface)                                                                                                                                                                            | refused                                                                                                                                  |
+| kimi 0.42.0                | headless bypass uses its never-ask print default; auto/read-only are interactive only; accept-edits refused                               | refused (no sandbox surface)                                                                                                                                                                            | refused                                                                                                                                  |
+| copilot 1.0.89-7           | bypass → `--allow-all`; headless read-only → `--available-tools=read --no-ask-user`; auto/accept-edits are interactive only               | refused (no explicit sandbox control)                                                                                                                                                                   | refused                                                                                                                                  |
+
+Copilot headless launches pipe the private prompt to stdin and request JSONL
+with `--output-format json`; `-p` would ignore stdin. The final
+`result.sessionId` supplies native resume identity. `--model` and
+`--reasoning-effort` pass through to the CLI. Usage telemetry reads the
+provider's session events only when the whole native session belongs to the
+run; resumed sessions stay unknown rather than inheriting cumulative totals.
+`vibecrafted message` delivers to Copilot's durable run inbox, and
+`vc_launch` / `vc_run_launch` in Vibecrafted MCP accept `agent=copilot`.
 
 Claude's `--settings` document sits at the command-line level: its scalar keys
 override the same keys in user, project and local settings and keep every key
@@ -309,6 +320,7 @@ Provider coverage (verified on the installed CLIs):
 | claude   | `claude --resume <id> --fork-session`                                       | supported                                                                                         |
 | grok     | `grok --resume <id> --fork-session` (never `--restore-code` / `--worktree`) | supported                                                                                         |
 | kimi     | `kimi fork <id> [-y]`                                                       | supported                                                                                         |
+| copilot  | none (`--resume <id>` continues the same session)                           | refused: use `vibecrafted resume copilot --session <id>`                                          |
 | cursor   | none (`--resume [chatId]` only)                                             | refused: `vibecrafted resume cursor --session <id>` continues the original (a resume, not a fork) |
 | agy      | none (`--conversation <id>` only)                                           | refused, same hint                                                                                |
 | junie    | none (`--session-id … --resume` only)                                       | refused, same hint                                                                                |

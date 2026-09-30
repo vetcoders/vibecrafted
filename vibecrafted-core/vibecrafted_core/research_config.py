@@ -27,6 +27,7 @@ SUPPORTED_RESEARCH_AGENTS = (
     "grok",
     "cursor",
     "kimi",
+    "copilot",
 )
 DEFAULT_RESEARCH_AGENTS = ("claude", "codex", "agy")
 
