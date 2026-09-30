@@ -38,13 +38,11 @@ CORE_HELP_MARKERS = {
     "resume-session": ("--agent-session-id", "always headless"),
     "settlements": ("summary", "inspect"),
 }
-INVENTED_ALIASES = (
-    "vc-message",
-    "vc-relocate",
-    "vc-claims",
-    "vc-resume-session",
-    "vc-settlements",
-)
+# Full deck-verb coverage as vc-<command> is the Founder's standing agreement
+# (re-confirmed 2026-09-30). vc-relocate is the one deliberate exception: it
+# ships as a standalone script that must survive without an installed runtime
+# (machine moves), so the wrapper maps must never claim that name.
+INVENTED_ALIASES = ("vc-relocate",)
 
 
 def _strip(text: str) -> str:

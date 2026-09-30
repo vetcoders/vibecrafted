@@ -6733,6 +6733,30 @@ run_wrapper() {
     cmd_scaffold_doctor "$@"
     return
   fi
+  if [[ "$wrapper" == "vc-capabilities" ]]; then
+    cmd_capabilities "$@"
+    return
+  fi
+  if [[ "$wrapper" == "vc-workspace" ]]; then
+    cmd_workspace "$@"
+    return
+  fi
+  if [[ "$wrapper" == "vc-settlements" ]]; then
+    cmd_settlements "$@"
+    return
+  fi
+  if [[ "$wrapper" == "vc-uninstall" ]]; then
+    cmd_uninstall "$@"
+    return
+  fi
+  if [[ "$wrapper" == "vc-message" || "$wrapper" == "vc-claims" || "$wrapper" == "vc-resume-session" ]]; then
+    cmd_core_cli "${wrapper#vc-}" "$@"
+    return
+  fi
+  if [[ "$wrapper" == "vc-observe" || "$wrapper" == "vc-await" || "$wrapper" == "vc-stop" ]]; then
+    cmd_lifecycle_command "${wrapper#vc-}" "$@"
+    return
+  fi
   local skill="${wrapper#vc-}"
   _has_skill "$skill" || {
     printf '%b✗%b Unknown wrapper: %s\n' "$_red" "$_reset" "$wrapper" >&2

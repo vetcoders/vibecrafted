@@ -95,7 +95,10 @@ LAUNCH_ALIASES: dict[str, str] = {}
 # argument as the command.
 SHELL_WRAPPER_VERBS = {
     "telemetry": "telemetry",
+    "vc-await": "await",
     "vc-canary": "canary",
+    "vc-capabilities": "capabilities",
+    "vc-claims": "claims",
     "vc-dashboard": "dashboard",
     "vc-dispatch": "dispatch",
     "vc-doctor": "doctor",
@@ -103,13 +106,20 @@ SHELL_WRAPPER_VERBS = {
     "vc-help": "help",
     "vc-init": "init",
     "vc-justdo": "justdo",
+    "vc-message": "message",
+    "vc-observe": "observe",
     "vc-operator": "operator",
     "vc-receipt": "receipt",
     "vc-resume": "resume",
+    "vc-resume-session": "resume-session",
     "vc-scaffold-doctor": "scaffold-doctor",
+    "vc-settlements": "settlements",
     "vc-start": "start",
     "vc-status": "status",
+    "vc-stop": "stop",
+    "vc-uninstall": "uninstall",
     "vc-update": "update",
+    "vc-workspace": "workspace",
 }
 SUCCESS_STATES = {"report_validated", "completed", "closed"}
 TERMINAL_STATES = {

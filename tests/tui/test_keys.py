@@ -286,7 +286,10 @@ def test_non_python_launcher_wrappers_have_explicit_deck_verbs() -> None:
     assert set(cli.SHELL_WRAPPER_VERBS) == shell_wrappers
     assert cli.SHELL_WRAPPER_VERBS == {
         "telemetry": "telemetry",
+        "vc-await": "await",
         "vc-canary": "canary",
+        "vc-capabilities": "capabilities",
+        "vc-claims": "claims",
         "vc-dashboard": "dashboard",
         "vc-dispatch": "dispatch",
         "vc-doctor": "doctor",
@@ -294,13 +297,20 @@ def test_non_python_launcher_wrappers_have_explicit_deck_verbs() -> None:
         "vc-help": "help",
         "vc-init": "init",
         "vc-justdo": "justdo",
+        "vc-message": "message",
+        "vc-observe": "observe",
         "vc-operator": "operator",
         "vc-receipt": "receipt",
         "vc-resume": "resume",
+        "vc-resume-session": "resume-session",
         "vc-scaffold-doctor": "scaffold-doctor",
+        "vc-settlements": "settlements",
         "vc-start": "start",
         "vc-status": "status",
+        "vc-stop": "stop",
+        "vc-uninstall": "uninstall",
         "vc-update": "update",
+        "vc-workspace": "workspace",
     }
 
 
