@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -367,6 +368,169 @@ def _run_repo_full_shell(path: str | Path) -> int:
     return result.returncode
 
 
+def compare_parallel_work(
+    path: str | Path, dispatch_id: str, cut_ids: list[str]
+) -> dict[str, Any]:
+    """Compare supervisor-accepted deliveries, never mutable work in progress.
+
+    The existing dispatch ledger owns completion and commit attribution. This
+    command only reads it and Git; it grants no merge or deployment authority.
+    """
+    from .control_plane import control_plane_home, lookup_runtime_run_meta
+
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", dispatch_id):
+        raise RuntimeError("invalid dispatch run id")
+    if len(cut_ids) != 2 or len(set(cut_ids)) != 2:
+        raise RuntimeError("select two distinct completed cuts with --cuts")
+    root = _require_git_root(Path(path).expanduser().resolve())
+    receipt_path = control_plane_home() / "dispatches" / dispatch_id / "receipts.json"
+    try:
+        ledger = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"dispatch receipt unavailable: {receipt_path}") from exc
+    if (
+        not isinstance(ledger, dict)
+        or ledger.get("schema") != "vibecrafted.dispatch-receipts.v1"
+        or ledger.get("run_id") != dispatch_id
+        or not isinstance(ledger.get("cuts"), dict)
+        or not isinstance(ledger.get("repo_root"), str)
+        or not ledger["repo_root"]
+    ):
+        raise RuntimeError("dispatch receipt identity/schema is invalid")
+
+    def git_text(*args: str) -> str:
+        result = _git(root, *args)
+        if result.returncode:
+            raise RuntimeError(f"comparison Git probe failed: {args[0]}")
+        return result.stdout
+
+    common = git_text("rev-parse", "--path-format=absolute", "--git-common-dir").strip()
+    declared = _git(
+        Path(ledger["repo_root"]),
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-common-dir",
+    )
+    if declared.returncode or declared.stdout.strip() != common:
+        raise RuntimeError("dispatch belongs to a different or unavailable repository")
+    deliveries = []
+    # Validate BOTH receipts before inspecting either worker's Git changes.
+    for cut_id in cut_ids:
+        cut = ledger["cuts"].get(cut_id)
+        if (
+            not isinstance(cut, dict)
+            or cut.get("cut_id") != cut_id
+            or cut.get("state") != "settled"
+            or cut.get("acceptance") != "verified"
+        ):
+            raise RuntimeError(
+                f"{cut_id}: wait for a settled, verified delivery before comparing"
+            )
+        provider_id = cut.get("provider_run_id")
+        if provider_id:
+            if not isinstance(provider_id, str) or not re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9_.-]*", provider_id
+            ):
+                raise RuntimeError(f"{cut_id}: invalid provider run identity")
+            meta = lookup_runtime_run_meta(provider_id)
+            if meta is not None and (
+                meta.get("run_id") != provider_id
+                or meta.get("status") != "completed"
+                or meta.get("exit_code") != 0
+            ):
+                raise RuntimeError(f"{cut_id}: runtime has not completed successfully")
+        delivery = {"cut_id": cut_id, "report_path": cut.get("report_path", "")}
+        for key in ("baseline_sha", "delivered_commit_sha"):
+            sha = cut.get(key)
+            if not isinstance(sha, str) or not re.fullmatch(
+                r"[0-9a-f]{40}|[0-9a-f]{64}", sha
+            ):
+                raise RuntimeError(f"{cut_id}: missing immutable {key}")
+            if git_text("rev-parse", "--verify", f"{sha}^{{commit}}").strip() != sha:
+                raise RuntimeError(f"{cut_id}: invalid commit {key}")
+            delivery[key] = sha
+        ancestor = _git(
+            root,
+            "merge-base",
+            "--is-ancestor",
+            delivery["baseline_sha"],
+            delivery["delivered_commit_sha"],
+        )
+        if ancestor.returncode:
+            raise RuntimeError(f"{cut_id}: delivery does not descend from its baseline")
+        deliveries.append(delivery)
+    for delivery in deliveries:
+        base, tip = delivery["baseline_sha"], delivery["delivered_commit_sha"]
+        delivery["files"] = (
+            git_text(
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-renames",
+                "--name-only",
+                "-z",
+                base,
+                tip,
+            )
+            .rstrip("\0")
+            .split("\0")
+        )
+        delivery["files"] = [name for name in delivery["files"] if name]
+        delivery["patch"] = git_text(
+            "diff", "--no-ext-diff", "--no-textconv", base, tip, "--"
+        )
+    left, right = deliveries
+    comparison = {
+        "dispatch_id": dispatch_id,
+        "repository": str(root),
+        "phase": "before-deploy",
+        "deliveries": deliveries,
+        "overlapping_files": sorted(set(left["files"]) & set(right["files"])),
+        "tip_diff": git_text(
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            left["delivered_commit_sha"],
+            right["delivered_commit_sha"],
+            "--",
+        ),
+        "deployment_authorized": False,
+    }
+    # A retry may replace a receipt while Git is being read. Never publish a
+    # comparison against superseded lifecycle/commit attribution.
+    try:
+        current = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("dispatch receipt changed during comparison; retry") from exc
+    if current != ledger:
+        raise RuntimeError("dispatch receipt changed during comparison; retry")
+    return comparison
+
+
+def _comparison_summary(comparison: dict[str, Any]) -> str:
+    lines = ["# Parallel work comparison before deploy", ""]
+    for delivery in comparison["deliveries"]:
+        lines.extend(
+            (
+                f"## {delivery['cut_id']}",
+                f"Baseline: {delivery['baseline_sha']}",
+                f"Commit: {delivery['delivered_commit_sha']}",
+                f"Report: {delivery['report_path']}",
+                delivery["patch"] or "No changes from baseline.",
+            )
+        )
+    lines.extend(
+        (
+            "## Shared files (review overlap; this is not conflict detection)",
+            *comparison["overlapping_files"],
+            "## Difference between delivered tips",
+            comparison["tip_diff"] or "Delivered trees are identical.",
+            "Review both reports and patches before choosing integration and deploy. Deployment requires the Founder's decision.",
+        )
+    )
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Expose the original rich repo renderer as a checkout-free executable."""
     parser = argparse.ArgumentParser(
@@ -375,12 +539,33 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("project", nargs="?", default=".", help="repository path")
     parser.add_argument("--json", action="store_true", help="emit structured JSON")
+    parser.add_argument(
+        "--compare",
+        metavar="DISPATCH_RUN_ID",
+        help="compare completed parallel work before deploy",
+    )
+    parser.add_argument(
+        "--cuts",
+        nargs=2,
+        metavar=("LEFT", "RIGHT"),
+        help="two settled, verified dispatch cuts",
+    )
     args = parser.parse_args(argv)
+    if bool(args.compare) != bool(args.cuts):
+        parser.error("--compare and --cuts must be supplied together")
     try:
+        if args.compare:
+            comparison = compare_parallel_work(args.project, args.compare, args.cuts)
+            print(
+                json.dumps(comparison, indent=2, sort_keys=True)
+                if args.json
+                else _comparison_summary(comparison)
+            )
+            return 0
         if not args.json:
             return _run_repo_full_shell(args.project)
         print(json.dumps(repo_full(args.project), indent=2, sort_keys=True))
-    except RuntimeError as exc:
+    except (RuntimeError, OSError) as exc:
         print(f"vc-git: {exc}", file=sys.stderr)
         return 2
     return 0
