@@ -30,6 +30,7 @@ from .continuity.capabilities import (
 )
 from .control_plane import (
     RunNotResolved,
+    _await_child_runs,
     await_run,
     control_plane_home,
     ensure_session_id,
@@ -3788,11 +3789,51 @@ def stop_run(
     if not target:
         raise ValueError("run_id is required")
     with run_mutation_locks(control_plane_home(), run_id=target):
-        return _stop_run_locked(
-            target,
-            reason=reason,
-            grace_seconds=grace_seconds,
+        run = lookup_run(target)
+        if run is None or run.get("agent") != "swarm":
+            return _stop_run_locked(target, reason=reason, grace_seconds=grace_seconds)
+
+        children: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        result: dict[str, Any] = {}
+        # First stop every discovered child, then the coordinator. Sweep again
+        # after its stop to catch a child registered while the first sweep ran.
+        for phase in range(2):
+            child_ids = {
+                str(child["run_id"])
+                for child in _await_child_runs(sync_state(), target)
+            }
+            # Retained control-plane records can outlive raw runtime metadata.
+            snapshots = run_snapshot_dir()
+            if snapshots.is_dir():
+                child_ids.update(
+                    path.stem
+                    for path in snapshots.iterdir()
+                    if path.is_file()
+                    and path.suffix == ".json"
+                    and path.stem.startswith(f"{target}-")
+                )
+            # Each descendant keeps its own mutation lock and identity check.
+            for child_id in sorted(
+                child_ids - seen, key=lambda value: (-len(value), value)
+            ):
+                seen.add(child_id)
+                child = lookup_run(child_id)
+                if child is not None and not _run_is_terminal(child):
+                    children.append(
+                        stop_run(child_id, reason=reason, grace_seconds=grace_seconds)
+                    )
+            if phase == 0:
+                result = _stop_run_locked(
+                    target, reason=reason, grace_seconds=grace_seconds
+                )
+        result["children"] = children
+        result["cascade_complete"] = all(
+            (receipt.get("accepted") and receipt.get("alive_after_grace") is False)
+            or receipt.get("reason") == "run_terminal"
+            for receipt in [*children, result]
         )
+        return result
 
 
 def _stop_run_locked(

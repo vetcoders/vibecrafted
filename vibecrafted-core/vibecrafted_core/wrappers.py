@@ -698,7 +698,7 @@ def stop_main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--run-id", default="")
     parser.add_argument("--last", action="store_true")
-    parser.add_argument("--agent", choices=sorted(AGENTS))
+    parser.add_argument("--agent", choices=sorted(AGENTS | {"swarm"}))
     parser.add_argument("--reason", default="operator stop request")
     parser.add_argument("--grace-seconds", type=float, default=2.0)
     ns = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
@@ -736,6 +736,17 @@ def stop_main(argv: Sequence[str] | None = None) -> int:
         reason=ns.reason,
         grace_seconds=ns.grace_seconds,
     )
+    child_codes = [_print_stop_result(child) for child in result.get("children", [])]
+    parent_code = _print_stop_result(result)
+    if result.get("cascade_complete") is False:
+        print(f"run_id={run_id} swarm stop incomplete", file=sys.stderr)
+        return 1
+    return int(bool(parent_code or any(child_codes)))
+
+
+def _print_stop_result(result: dict[str, Any]) -> int:
+    """Print the same receipt for every child and for its coordinator."""
+    run_id = str(result.get("run_id") or "")
     run = dict(result.get("run") or {})
     reason = str(result.get("reason") or "")
     if result.get("accepted"):

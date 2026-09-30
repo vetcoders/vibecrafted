@@ -4959,3 +4959,177 @@ def test_dispatcher_command_salvages_only_verified_native_resume_streams() -> No
 
     assert "--salvage-report-from-stream" in native_resume
     assert "--salvage-report-from-stream" not in ordinary_worker
+
+
+@pytest.mark.parametrize("terminal_parent", [False, True])
+def test_stop_swarm_children_before_coordinator_and_settle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, terminal_parent: bool
+) -> None:
+    home = tmp_path / ".vibecrafted"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    parent_id = "rese-cascade"
+    child_id = parent_id + "-research-codex"
+    processes = [
+        subprocess.Popen(["sleep", "60"], start_new_session=True) for _ in range(2)
+    ]
+    # A real supervisor reaps its workers; do the same for these owned sleepers.
+    reapers = [threading.Thread(target=proc.wait) for proc in processes]
+    for reaper in reapers:
+        reaper.start()
+    signaled: list[int] = []
+    real_killpg = os.killpg
+
+    def capture_killpg(pgid: int, sig: int) -> None:
+        if sig == signal.SIGTERM:
+            signaled.append(pgid)
+        real_killpg(pgid, sig)
+
+    monkeypatch.setattr(workflow.os, "killpg", capture_killpg)
+    try:
+        for run_id, agent, proc in zip(
+            (parent_id, child_id), ("swarm", "codex"), processes, strict=True
+        ):
+            identity = process_control.process_identity_receipt(proc.pid, run_id=run_id)
+            assert identity is not None
+            _write_run_meta(
+                home,
+                {
+                    "run_id": run_id,
+                    "agent": agent,
+                    "status": "running",
+                    "root": str(tmp_path),
+                    "launcher_pid": proc.pid,
+                    "launcher_identity": identity,
+                    "liveness": "pid_alive",
+                },
+            )
+        if terminal_parent:
+            processes[0].terminate()
+            processes[0].wait(timeout=2)
+            _write_run_meta(
+                home,
+                {
+                    "run_id": parent_id,
+                    "agent": "swarm",
+                    "status": "completed",
+                    "root": str(tmp_path),
+                    "exit_code": 0,
+                },
+            )
+        payload = workflow.stop_run(parent_id, grace_seconds=1.0)
+        processes[1].wait(timeout=2)
+        assert signaled == (
+            [processes[1].pid]
+            if terminal_parent
+            else [processes[1].pid, processes[0].pid]
+        )
+        assert payload["cascade_complete"] is True
+        child = payload["children"][0]
+        assert child["run_id"] == child_id
+        assert child["target_pgid"] == processes[1].pid
+        assert child["run"]["state"] == "stopped"
+        assert child["run"]["exit_code"] == 143
+        assert control_plane.lookup_run(child_id)["state"] == "stopped"
+    finally:
+        for proc in processes:
+            if proc.poll() is None:
+                proc.terminate()
+            proc.wait(timeout=2)
+
+
+def test_public_deck_stop_swarm_reaches_core_and_stops_owned_groups(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = tmp_path / ".vibecrafted"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_PYTHON", sys.executable)
+    ids = ("rese-deck-stop", "rese-deck-stop-research-codex")
+    processes = [subprocess.Popen(["sleep", "60"], start_new_session=True) for _ in ids]
+    for proc in processes:
+        threading.Thread(target=proc.wait).start()
+    try:
+        for run_id, agent, proc in zip(ids, ("swarm", "codex"), processes, strict=True):
+            identity = process_control.process_identity_receipt(proc.pid, run_id=run_id)
+            assert identity is not None
+            _write_run_meta(
+                home,
+                {
+                    "run_id": run_id,
+                    "status": "running",
+                    "agent": agent,
+                    "root": str(tmp_path),
+                    "launcher_pid": proc.pid,
+                    "launcher_identity": identity,
+                    "liveness": "pid_alive",
+                },
+            )
+        deck = Path(workflow.__file__).parent / "deck" / "vibecrafted"
+        result = subprocess.run(
+            [
+                "bash",
+                str(deck),
+                "stop",
+                "swarm",
+                "--run-id",
+                ids[0],
+                "--grace-seconds",
+                "1",
+            ],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert result.stdout.index(f"run_id={ids[1]}") < result.stdout.index(
+            f"run_id={ids[0]} state="
+        )
+        for run_id, proc in zip(ids, processes, strict=True):
+            assert proc.wait(timeout=2) == -signal.SIGTERM
+            assert f"pgid={proc.pid}" in result.stdout
+            assert control_plane.lookup_run(run_id)["state"] == "stopped"
+    finally:
+        for proc in processes:
+            if proc.poll() is None:
+                proc.terminate()
+            proc.wait(timeout=2)
+
+
+@pytest.mark.parametrize("child_accepted", [True, False])
+def test_stop_swarm_sweeps_late_child_and_surfaces_child_refusal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, child_accepted: bool
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    parent = "rese-late"
+    first = parent + "-research-codex"
+    late = parent + "-research-agy"
+    runs = {parent: {"agent": "swarm"}, first: {"agent": "codex"}}
+    stopped: list[str] = []
+    monkeypatch.setattr(workflow, "lookup_run", lambda run_id: runs.get(run_id))
+    monkeypatch.setattr(workflow, "sync_state", dict)
+    monkeypatch.setattr(
+        workflow,
+        "_await_child_runs",
+        lambda snapshot, target: [
+            {"run_id": run_id} for run_id in runs if run_id.startswith(target + "-")
+        ],
+    )
+
+    def stop_locked(run_id, **kwargs):
+        stopped.append(run_id)
+        if run_id == parent:
+            runs[late] = {"agent": "agy"}
+        accepted = child_accepted or run_id == parent
+        return {
+            "run_id": run_id,
+            "accepted": accepted,
+            "alive_after_grace": False if accepted else None,
+            "reason": "manual" if accepted else "identity_mismatch",
+        }
+
+    monkeypatch.setattr(workflow, "_stop_run_locked", stop_locked)
+    result = workflow.stop_run(parent)
+    assert stopped == [first, parent, late]
+    assert [child["run_id"] for child in result["children"]] == [first, late]
+    assert result["cascade_complete"] is child_accepted

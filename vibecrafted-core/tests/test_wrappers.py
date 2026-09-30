@@ -396,3 +396,37 @@ def test_stop_main_accepts_last_for_agent(
 
     assert code == 0
     assert "run_id=work-260816-213657-08420" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("complete", [True, False])
+def test_stop_main_swarm_reports_each_child_and_incomplete_cascade(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], complete: bool
+) -> None:
+    def stopped(run_id: str) -> dict:
+        return {
+            "accepted": True,
+            "run_id": run_id,
+            "target": "worker_pgid",
+            "target_pid": 123,
+            "target_pgid": 123,
+            "run": {"state": "stopped"},
+        }
+
+    monkeypatch.setattr(
+        workflow,
+        "stop_run",
+        lambda run_id, **kwargs: {
+            **stopped(run_id),
+            "children": [stopped(run_id + "-research-codex")],
+            "cascade_complete": complete,
+        },
+    )
+    assert wrappers.stop_main(["--agent", "swarm", "--run-id", "rese-parent"]) == (
+        0 if complete else 1
+    )
+    output = capsys.readouterr()
+    assert output.out.index("run_id=rese-parent-research-codex") < output.out.index(
+        "run_id=rese-parent state="
+    )
+    assert "pgid=123" in output.out
+    assert ("swarm stop incomplete" in output.err) == (not complete)
