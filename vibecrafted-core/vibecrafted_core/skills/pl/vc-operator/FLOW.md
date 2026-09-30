@@ -63,8 +63,9 @@ Tryb operatora utrzymuje dwie różne powierzchnie prawdy:
 
 - datowane trackery/raporty pod `$VIBECRAFTED_HOME/artifacts/...` - stan runu,
   run ID, gałęzie, SHA, bramki, transkrypty i metadane.
-- `<repo-root>/.vibecrafted/JOURNAL.md` - jeden stały, append-only, śledzony
-  przez Git Dziennik Operatora.
+- `<repo-root>/.vibecrafted/THE_JOURNAL.md` - jeden stały, append-only,
+  ignorowany przez Git Dziennik Operatora (dawna nazwa `JOURNAL.md` jest
+  wycofana).
 
 Tracker pozwala operatorowi zaudytować, co wylądowało, bez czytania każdego raportu.
 Dziennik wyjaśnia, dlaczego fala poruszyła się tak, jak się poruszyła.
@@ -94,7 +95,7 @@ falsyfikowalne findingi i pozostają wewnątrz briefów.
 
 - Korzeń artefaktów: `$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/`
 - Stan trackera/wyniku: pliki specyficzne dla dispatchu pod korzeniem artefaktów runu
-- Kanoniczny dziennik: `<repo-root>/.vibecrafted/JOURNAL.md`
+- Kanoniczny dziennik: `<repo-root>/.vibecrafted/THE_JOURNAL.md`
 - Briefy/zamknięcia: datowane projekcje runu zarządzane przez operatora
 - Lock: `$VIBECRAFTED_HOME/locks/<org>/<repo>/<run_id>.lock`
 

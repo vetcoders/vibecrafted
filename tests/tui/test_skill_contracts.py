@@ -93,7 +93,9 @@ def test_vc_operator_uses_one_repository_local_operator_journal() -> None:
         + "\n".join(path.read_text(encoding="utf-8") for path in mirror_docs)
     )
 
-    assert "<repo-root>/.vibecrafted/JOURNAL.md" in corpus
+    assert "<repo-root>/.vibecrafted/THE_JOURNAL.md" in corpus
+    assert "former name `JOURNAL.md` is retired" in corpus
+    assert "Git-tracked" not in all_operator_docs
     assert "journal.md" not in all_operator_docs
     assert "Only the Operator writes the journal" in corpus
     assert "surface a falsifiable finding to the active Operator" in corpus

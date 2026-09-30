@@ -40,7 +40,7 @@ Skonsumuj, po kolei, każde wejście, które dał ci operator:
 - aktywny katalog artefaktów dla tego runu:
   `~/.vibecrafted/artifacts/<org>/<repo>/<YYYY_MMDD>/<plan-slug>/`
 - kanoniczny Dziennik Operatora repozytorium:
-  `<repo-root>/.vibecrafted/JOURNAL.md` — ciągłość ponad ponowne wyprowadzanie
+  `<repo-root>/.vibecrafted/THE_JOURNAL.md` — ciągłość ponad ponowne wyprowadzanie
 
 Datowane raporty, trackery, transkrypty i metadane runu w katalogu artefaktów
 to projekcje runu i evidence. Nie tworzą drugiego systemu dziennika.
@@ -181,14 +181,14 @@ lub małego bounded researchu wewnątrz sesji operatora.
 Przed odpaleniem przeskanuj treść każdego promptu pod kątem niebezpiecznych komend i triggerów
 hard-stop. Jeśli prompt prosi o niedozwolone działanie hard-stop, odmów
 dispatchu i zapisz materialne rozwidlenie w
-`<repo-root>/.vibecrafted/JOURNAL.md`.
+`<repo-root>/.vibecrafted/THE_JOURNAL.md`.
 
 Kształt fali per `./GUIDE.md` (A foundation / B sequential / C
 parallel / D close-out). Odpalaj po jednej fali naraz. W obrębie fali
 odpalaj wszystkie równoległe prompty w jednej paczce; sekwencyjne prompty
 czekają na wylądowanie poprzedniego commita.
 
-### 7. Wejdź w kanoniczny runtime pętli i dopisz do `JOURNAL.md`
+### 7. Wejdź w kanoniczny runtime pętli i dopisz do `THE_JOURNAL.md`
 
 Użyj `vibecrafted loop` jako kanonicznej powierzchni interaktywnej kontynuacji,
 gdy agent operatora musi utrzymać stan między odpowiedziami:
@@ -217,12 +217,12 @@ Wywołania narzędzi per wybudzenie:
 - zweryfikuj, że bramki są zielone, czytając sekcję gate-output raportu
 - przerzuć `[ ]` → `[x]` w trackerze fali per `./EMIL.md` Reguła 1
 
-Dopisz do `<repo-root>/.vibecrafted/JOURNAL.md` tylko wtedy, gdy wybudzenie
+Dopisz do `<repo-root>/.vibecrafted/THE_JOURNAL.md` tylko wtedy, gdy wybudzenie
 przynosi materialne działanie, decyzję, zmianę evidence, ryzyko, odzyskiwanie,
 integrację lub wymaganą lukę akceptacji. Telemetria runtime'u już dowodzi
 rutynowych wybudzeń i niezmienionego stanu; nie powtarzaj rutynowego raportowania
-pracy niewykonanej. Dziennik jest śledzoną przez Git prawdą repozytorium i pisze
-do niego tylko Operator.
+pracy niewykonanej. Dziennik jest ignorowaną przez Git (gitignored) prawdą
+repozytorium i pisze do niego tylko Operator.
 
 Kształt wpisu do dziennika (per wybudzenie):
 
@@ -259,7 +259,7 @@ skill/konwencja) oraz szablon handoffu w punkcie stopu. Soft stopy
 (zmiana kształtu dispatchu, pominięcie scope, dodanie scope, rebase,
 cherry-pick) mogą przebiec bez nowego przycisku, gdy nie zmieniają
 finalnego celu; każda taka mutacja musi być zapisana w
-`<repo-root>/.vibecrafted/JOURNAL.md`.
+`<repo-root>/.vibecrafted/THE_JOURNAL.md`.
 Mutacje zmieniające scope nadal wymagają przycisku.
 
 Gdy tracker fali jest cały `[x]`, a następny ruch jest po stronie operatora
@@ -281,7 +281,7 @@ jest już dozwolony — zrób go po swoich commitach.
 - [ ] krok 5 każdy brief wyrenderowany do `<artifact-dir>/briefs/`
 - [ ] krok 6 każde odpalenie workera poszło przez launcher `vibecrafted`
       (natywne subagenty tylko do zwiadu/researchu, nie do dispatchu floty)
-- [ ] krok 7 `<repo-root>/.vibecrafted/JOURNAL.md` zawiera każdą materialną
+- [ ] krok 7 `<repo-root>/.vibecrafted/THE_JOURNAL.md` zawiera każdą materialną
       decyzję Operatora; tracker fali jest aktualny
 - [ ] handoff w punkcie stopu napisany i operator powiadomiony
 

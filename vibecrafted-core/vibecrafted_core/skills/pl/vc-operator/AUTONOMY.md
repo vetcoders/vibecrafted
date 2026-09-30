@@ -71,7 +71,7 @@ tego w bieżącej sesji, **nie wolno ci** wykonać żadnej z tych rzeczy:
   je kontekst repozytorium/runtime'u, a finalny cel pozostaje spójny
 - cherry-pickowanie z innej gałęzi do aktywnego łańcucha fali
 
-## Przy wszystkich tych dozwoleniach dopisz do `<repo-root>/.vibecrafted/JOURNAL.md`, co się zmieniło, co pominięto, dodano, przestawiono lub cherry-pickowano, każdą zmianę substratu lub integracji, i dlaczego.
+## Przy wszystkich tych dozwoleniach dopisz do `<repo-root>/.vibecrafted/THE_JOURNAL.md`, co się zmieniło, co pominięto, dodano, przestawiono lub cherry-pickowano, każdą zmianę substratu lub integracji, i dlaczego.
 
 Gdy Worker przekazuje sąsiedni defekt, Operator decyduje, czy poprawka jest
 zasadna, zapisuje decyzję w dzienniku, tworzy bounded brief, dispatchuje cięcie

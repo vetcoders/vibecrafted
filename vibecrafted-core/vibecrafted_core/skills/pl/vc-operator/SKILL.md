@@ -255,7 +255,7 @@ wykraczające poza bieżący ITP lub TD, jeśli finalny cel pozostaje spójny.
 Operator może według tego samego niezmiennika pomijać, dodawać, przestawiać lub
 przegrupowywać cięcia oraz cherry-pickować między aktywnymi gałęziami fal.
 Zapisz każde materialne odchylenie w
-`<repo-root>/.vibecrafted/JOURNAL.md`: dodane, pominięte lub przestawione
+`<repo-root>/.vibecrafted/THE_JOURNAL.md`: dodane, pominięte lub przestawione
 cięcie; zmianę substratu; kształt odzyskiwania; cherry-pick lub integrację;
 guardrail bezpieczeństwa; oraz powód. Istniejące punkty stopu na granicach
 zaufania nadal obowiązują.
@@ -266,8 +266,9 @@ Tryb operatora utrzymuje dwie różne powierzchnie prawdy:
 
 - datowane trackery i raporty pod `$VIBECRAFTED_HOME/artifacts/...` - projekcje
   runu i evidence, takie jak stan fali, run ID, SHA i bramki.
-- `<repo-root>/.vibecrafted/JOURNAL.md` - jeden stały, append-only,
-  śledzony przez Git Dziennik Operatora dla repozytorium.
+- `<repo-root>/.vibecrafted/THE_JOURNAL.md` - jeden stały, append-only,
+  ignorowany przez Git Dziennik Operatora dla repozytorium (dawna nazwa
+  `JOURNAL.md` jest wycofana).
 
 Tylko Operator pisze do dziennika. Agenci downstream dopisują zredagowane
 findingi frameworka do centralnego intake

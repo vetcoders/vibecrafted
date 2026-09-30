@@ -84,14 +84,14 @@ terminal_state:
   stopped_at_operator_button:
     requires:
       - wave tracker updated
-      - repository JOURNAL.md updated with material decisions
+      - repository THE_JOURNAL.md updated with material decisions
       - reports and SHAs named
       - remaining unpermitted human action named
   completed_with_plan_permission:
     requires:
       - permission source named
       - tracker updated
-      - repository JOURNAL.md updated with material decisions
+      - repository THE_JOURNAL.md updated with material decisions
       - reports and SHAs named
   blocked_with_evidence:
     requires:

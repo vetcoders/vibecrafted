@@ -29,7 +29,7 @@ inference rather than by interrogation, but never expand it.
 
 **Adjacent finding**: surface a falsifiable finding to the active Operator.
 Do not opportunistically patch adjacent scope and do not write
-`<repo-root>/.vibecrafted/JOURNAL.md`. Redacted framework findings also go to
+`<repo-root>/.vibecrafted/THE_JOURNAL.md`. Redacted framework findings also go to
 the central `~/.vibecrafted/vibecrafted/vibecrafted-fail.md` intake.
 
 **Recursion**: forbidden. No `/vc-agents` from inside a worker. Native

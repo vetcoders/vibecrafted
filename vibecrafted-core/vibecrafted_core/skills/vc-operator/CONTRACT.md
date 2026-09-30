@@ -112,7 +112,7 @@ security_guardrails:
   commit_scans: []
 close_out:
   tracker: ""
-  journal: "<repo-root>/.vibecrafted/JOURNAL.md"
+  journal: "<repo-root>/.vibecrafted/THE_JOURNAL.md"
   stop_point_handoff: ""
 ```
 
@@ -146,7 +146,7 @@ final goal remains coherent:
 - cherry-pick between active wave branches
 
 Each material mutation must be appended to
-`<repo-root>/.vibecrafted/JOURNAL.md` with what changed, why, and what goal
+`<repo-root>/.vibecrafted/THE_JOURNAL.md` with what changed, why, and what goal
 invariant remains unchanged. This includes added/skipped/reordered cuts,
 substrate changes, recovery shape, cherry-picks/integration, and security
 guardrails. Existing trust-boundary stop points still apply.
@@ -158,7 +158,7 @@ triggers. After each worker commit, scan committed changes for secrets,
 personal data, local-only paths, local network topology, IP addresses, and
 internal documents. If detected, revert the offending commit, sanitize the
 surface, commit again, and record the incident in
-`<repo-root>/.vibecrafted/JOURNAL.md`.
+`<repo-root>/.vibecrafted/THE_JOURNAL.md`.
 
 ## Recovery Policy
 
@@ -169,14 +169,14 @@ Allowed recovery requires:
 1. read the stalled worker's report/transcript/meta if present
 2. classify the failure
 3. issue a focused recovery dispatch or escalate to marbles/ownership
-4. append the recovery decision to `<repo-root>/.vibecrafted/JOURNAL.md`
+4. append the recovery decision to `<repo-root>/.vibecrafted/THE_JOURNAL.md`
 
 Blind re-fire is a process failure.
 
 ## Journal Ownership Policy
 
-`<repo-root>/.vibecrafted/JOURNAL.md` is the one permanent, Git-tracked journal
-for the repository. Dated artifact reports, trackers, transcripts, and run
+`<repo-root>/.vibecrafted/THE_JOURNAL.md` is the one permanent, gitignored
+journal for the repository (former name `JOURNAL.md` is retired). Dated artifact reports, trackers, transcripts, and run
 metadata remain evidence projections, not alternative journals. Only the
 Operator writes the journal. It records material actions, decisions, evidence,
 risks, and required acceptance gaps—not routine negative-work reporting.

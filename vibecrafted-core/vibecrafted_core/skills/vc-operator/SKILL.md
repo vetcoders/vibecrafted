@@ -251,7 +251,7 @@ Repository or runtime context may justify a recovery/fix cut beyond the current
 ITP or TD when the final goal remains coherent. The Operator may skip, add,
 reorder, or regroup cuts and may cherry-pick between active wave branches under
 that same invariant. Record every material deviation in
-`<repo-root>/.vibecrafted/JOURNAL.md`: added, skipped, or reordered cuts;
+`<repo-root>/.vibecrafted/THE_JOURNAL.md`: added, skipped, or reordered cuts;
 substrate changes; recovery shape; cherry-pick or integration; security
 guardrails; and the reason. Existing trust-boundary stop points still apply.
 
@@ -261,8 +261,9 @@ Operator mode keeps two distinct truth surfaces:
 
 - dated trackers and reports under `$VIBECRAFTED_HOME/artifacts/...` - run
   projections and evidence such as wave state, run IDs, SHAs, and gates.
-- `<repo-root>/.vibecrafted/JOURNAL.md` - the one permanent, append-only,
-  Git-tracked Operator Journal for the repository.
+- `<repo-root>/.vibecrafted/THE_JOURNAL.md` - the one permanent, append-only,
+  gitignored Operator Journal for the repository (former name `JOURNAL.md` is
+  retired).
 
 Only the Operator writes the journal. Downstream agents append redacted
 framework findings to the central
