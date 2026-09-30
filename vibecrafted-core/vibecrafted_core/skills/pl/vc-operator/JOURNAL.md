@@ -9,10 +9,12 @@ jego dublowania.
 ## Ścieżka
 
 ```text
-<repo-root>/.vibecrafted/JOURNAL.md
+<repo-root>/.vibecrafted/THE_JOURNAL.md
 ```
 
-To jeden kanoniczny dziennik na repozytorium. Jest celowo śledzony przez Git.
+To jeden kanoniczny dziennik na repozytorium. Jest ignorowany przez Git i
+prywatny dla każdej maszyny (dawna nazwa `JOURNAL.md` jest wycofana — nie
+twórz jej ponownie).
 Pozostałe pliki pod repozytoryjnym `.vibecrafted/` pozostają ignorowanym stanem
 runtime'u.
 
@@ -24,10 +26,10 @@ $VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/<run>/tracker.md
 
 ## Dziennik vs tracker
 
-| Artefakt                   | Cel                                                             |
-| -------------------------- | --------------------------------------------------------------- |
-| datowany tracker/raport    | stan runu, run ID, gałęzie, SHA, bramki, transkrypty i metadane |
-| repozytoryjny `JOURNAL.md` | materialne decyzje Operatora i historia misji repozytorium      |
+| Artefakt                       | Cel                                                             |
+| ------------------------------ | --------------------------------------------------------------- |
+| datowany tracker/raport        | stan runu, run ID, gałęzie, SHA, bramki, transkrypty i metadane |
+| repozytoryjny `THE_JOURNAL.md` | materialne decyzje Operatora i historia misji repozytorium      |
 
 Tracker odpowiada na pytanie „co wylądowało?".
 Dziennik odpowiada na pytanie „dlaczego operator zrobił to dalej?".

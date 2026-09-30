@@ -112,7 +112,7 @@ security_guardrails:
   commit_scans: []
 close_out:
   tracker: ""
-  journal: "<repo-root>/.vibecrafted/JOURNAL.md"
+  journal: "<repo-root>/.vibecrafted/THE_JOURNAL.md"
   stop_point_handoff: ""
 ```
 
@@ -146,7 +146,7 @@ przycisku, jeśli finalny cel pozostaje spójny:
 - cherry-pickować między aktywnymi gałęziami fal
 
 Każdą materialną mutację trzeba dopisać do
-`<repo-root>/.vibecrafted/JOURNAL.md` wraz z tym, co się zmieniło, dlaczego i
+`<repo-root>/.vibecrafted/THE_JOURNAL.md` wraz z tym, co się zmieniło, dlaczego i
 jaki niezmiennik celu pozostaje nienaruszony. Obejmuje to dodane/pominięte/
 przestawione cięcia, zmiany substratu, kształt odzyskiwania, cherry-picki/
 integracje i guardraile bezpieczeństwa. Istniejące punkty stopu granic zaufania
@@ -159,7 +159,7 @@ triggerów hard-stop. Po każdym commicie workera przeskanuj scommitowane zmiany
 kątem sekretów, danych osobowych, ścieżek lokalnych, lokalnej topologii sieci,
 adresów IP i dokumentów wewnętrznych. W razie wykrycia zrewertuj wadliwy commit,
 oczyść powierzchnię, scommituj ponownie i odnotuj incydent w
-`<repo-root>/.vibecrafted/JOURNAL.md`.
+`<repo-root>/.vibecrafted/THE_JOURNAL.md`.
 
 ## Polityka odzyskiwania
 
@@ -170,14 +170,14 @@ Dozwolone odzyskiwanie wymaga:
 1. przeczytania raportu/transkryptu/meta zaciętego workera, jeśli są
 2. sklasyfikowania awarii
 3. wydania celowanego dispatchu odzyskiwania lub eskalacji do marbles/ownership
-4. dopisania decyzji o odzyskiwaniu do `<repo-root>/.vibecrafted/JOURNAL.md`
+4. dopisania decyzji o odzyskiwaniu do `<repo-root>/.vibecrafted/THE_JOURNAL.md`
 
 Ślepe ponowne odpalenie to porażka procesu.
 
 ## Polityka własności dziennika
 
-`<repo-root>/.vibecrafted/JOURNAL.md` to jeden stały, śledzony przez Git
-dziennik repozytorium. Datowane raporty artefaktów, trackery, transkrypty i
+`<repo-root>/.vibecrafted/THE_JOURNAL.md` to jeden stały, ignorowany przez Git
+dziennik repozytorium (dawna nazwa `JOURNAL.md` jest wycofana). Datowane raporty artefaktów, trackery, transkrypty i
 metadane runu pozostają projekcjami evidence, nie alternatywnymi dziennikami.
 Tylko Operator pisze do dziennika. Zapisuje materialne działania, decyzje,
 evidence, ryzyka i wymagane luki akceptacji — nie rutynowe raportowanie pracy

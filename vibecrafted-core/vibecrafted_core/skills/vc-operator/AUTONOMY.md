@@ -70,7 +70,7 @@ You **can** perform any of these if it doesn't change the final goal:
   context justifies it and the final goal remains coherent
 - Cherry-picking from another branch into the active wave chain
 
-## For all these allowances append to `<repo-root>/.vibecrafted/JOURNAL.md` what changed, what was skipped, added, reordered, or cherry-picked, any substrate or integration change, and why.
+## For all these allowances append to `<repo-root>/.vibecrafted/THE_JOURNAL.md` what changed, what was skipped, added, reordered, or cherry-picked, any substrate or integration change, and why.
 
 When a Worker surfaces an adjacent defect, the Operator decides whether a fix
 is warranted, journals that decision, creates a bounded brief, dispatches the

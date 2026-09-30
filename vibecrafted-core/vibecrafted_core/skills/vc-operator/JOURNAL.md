@@ -10,12 +10,13 @@ without duplicating it.
 ## Path
 
 ```text
-<repo-root>/.vibecrafted/JOURNAL.md
+<repo-root>/.vibecrafted/THE_JOURNAL.md
 ```
 
-This is the one canonical journal per repository. It is deliberately tracked
-by Git. Other files under repo-local `.vibecrafted/` remain ignored runtime
-state.
+This is the one canonical journal per repository. It is gitignored and
+private to each machine (former name `JOURNAL.md` is retired — do not
+recreate it). Other files under repo-local `.vibecrafted/` remain ignored
+runtime state.
 
 Related artifact:
 
@@ -25,10 +26,10 @@ $VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/<run>/tracker.md
 
 ## Journal vs Tracker
 
-| Artifact                | Purpose                                                          |
-| ----------------------- | ---------------------------------------------------------------- |
-| dated tracker/report    | run state, run IDs, branches, SHAs, gates, transcripts, metadata |
-| repository `JOURNAL.md` | material Operator decisions and repository mission history       |
+| Artifact                    | Purpose                                                          |
+| --------------------------- | ---------------------------------------------------------------- |
+| dated tracker/report        | run state, run IDs, branches, SHAs, gates, transcripts, metadata |
+| repository `THE_JOURNAL.md` | material Operator decisions and repository mission history       |
 
 The tracker answers "what landed?".
 The journal answers "why did the operator do that next?".

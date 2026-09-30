@@ -6,7 +6,7 @@ absorbs:
   - REC-1 (7-step deterministic runner)
   - REC-2 (categorical no native subagents as fleet dispatch)
   - REC-3 (/loop primary cadence)
-  - REC-4 (repository-local JOURNAL.md append-only convention)
+  - REC-4 (repository-local THE_JOURNAL.md append-only convention)
   - REC-11 (vc-scaffold auto-chain on fuzzy plans)
 ---
 
@@ -40,7 +40,7 @@ Consume, in order, every input the operator gave you:
 - the active artifact dir for this run:
   `~/.vibecrafted/artifacts/<org>/<repo>/<YYYY_MMDD>/<plan-slug>/`
 - the repository's canonical Operator Journal:
-  `<repo-root>/.vibecrafted/JOURNAL.md` — continuity over re-derivation
+  `<repo-root>/.vibecrafted/THE_JOURNAL.md` — continuity over re-derivation
 
 Dated reports, trackers, transcripts, and run metadata in the artifact dir are
 run projections and evidence. They are not another journal system.
@@ -181,14 +181,14 @@ or small bounded research inside the operator session.
 Before firing, scan each prompt body for insecure commands and hard-stop
 triggers. If a prompt asks for an unpermitted hard-stop action, refuse the
 dispatch and record the material fork in
-`<repo-root>/.vibecrafted/JOURNAL.md`.
+`<repo-root>/.vibecrafted/THE_JOURNAL.md`.
 
 Wave shape per `./GUIDE.md` (A foundation / B sequential / C
 parallel / D close-out). Fire one wave at a time. Within a wave,
 fire all parallel prompts in a single batch; sequential prompts
 wait for the prior commit to land.
 
-### 7. Enter the canonical loop runtime and append `JOURNAL.md`
+### 7. Enter the canonical loop runtime and append `THE_JOURNAL.md`
 
 Use `vibecrafted loop` as the canonical interactive continuation surface
 when the operator-agent must keep state across replies:
@@ -218,11 +218,11 @@ Tool calls per wake:
 - verify gates green by reading the report's gate-output section
 - flip `[ ]` → `[x]` in the wave tracker per `./EMIL.md` Rule 1
 
-Append to `<repo-root>/.vibecrafted/JOURNAL.md` only when the wake produces a
+Append to `<repo-root>/.vibecrafted/THE_JOURNAL.md` only when the wake produces a
 material action, decision, evidence change, risk, recovery, integration, or
 required acceptance gap. Runtime telemetry already proves routine wakes and
 unchanged state; do not restate routine negative work. The journal is
-Git-tracked repository truth and only the Operator writes it.
+gitignored repository truth and only the Operator writes it.
 
 Journal entry shape (per wake):
 
@@ -259,7 +259,7 @@ surface) and the stop-point handoff template. Soft stops
 (dispatch-shape change, scope skip, scope add, rebase,
 cherry-pick) may proceed without a new button when they do not change
 the final goal; every such mutation must be recorded in
-`<repo-root>/.vibecrafted/JOURNAL.md`.
+`<repo-root>/.vibecrafted/THE_JOURNAL.md`.
 Scope-changing mutations still require the button.
 
 When the wave tracker is all `[x]` and the next move is operator-side
@@ -281,7 +281,7 @@ permitted — do it after authored commits.
 - [ ] step 5 every brief rendered to `<artifact-dir>/briefs/`
 - [ ] step 6 every worker fire went through `vibecrafted` launcher
       (native subagents only for recon/research, not fleet dispatch)
-- [ ] step 7 `<repo-root>/.vibecrafted/JOURNAL.md` contains every material
+- [ ] step 7 `<repo-root>/.vibecrafted/THE_JOURNAL.md` contains every material
       Operator decision; wave tracker is current
 - [ ] stop-point handoff written and operator notified
 

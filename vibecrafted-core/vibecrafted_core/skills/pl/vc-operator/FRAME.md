@@ -29,7 +29,7 @@ wnioskowanie, a nie przez przepytywanie, ale nigdy go nie rozszerzaj.
 
 **Sąsiedni finding**: przekaż aktywnemu Operatorowi falsyfikowalny finding.
 Nie poprawiaj oportunistycznie sąsiedniego scope'u i nie pisz do
-`<repo-root>/.vibecrafted/JOURNAL.md`. Zredagowane findingi frameworka trafiają
+`<repo-root>/.vibecrafted/THE_JOURNAL.md`. Zredagowane findingi frameworka trafiają
 też do centralnego intake `~/.vibecrafted/vibecrafted/vibecrafted-fail.md`.
 
 **Rekursja**: zabroniona. Żadnego `/vc-agents` z wnętrza workera. Natywny

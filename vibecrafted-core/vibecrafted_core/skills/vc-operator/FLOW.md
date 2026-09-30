@@ -30,7 +30,7 @@ flowchart TD
     P --> M
     N -->|green| Q[Verify reports, gates, branch, SHA]
     Q --> R[Scan landed commits for leaks/local-only material]
-    R --> T[Update tracker and append material decisions to repo JOURNAL.md]
+    R --> T[Update tracker and append material decisions to repo THE_JOURNAL.md]
     T --> U[Synthesize wave close-out]
     U --> S
     S -->|yes| K
@@ -63,8 +63,8 @@ Operator mode keeps two distinct truth surfaces:
 
 - dated trackers/reports under `$VIBECRAFTED_HOME/artifacts/...` - run state,
   run IDs, branches, SHAs, gates, transcripts, and metadata.
-- `<repo-root>/.vibecrafted/JOURNAL.md` - the one permanent, append-only,
-  Git-tracked Operator Journal.
+- `<repo-root>/.vibecrafted/THE_JOURNAL.md` - the one permanent, append-only,
+  gitignored Operator Journal (former name `JOURNAL.md` is retired).
 
 The tracker lets the operator audit what landed without reading every report.
 The journal explains why the wave moved the way it did.
@@ -94,7 +94,7 @@ inside their briefs.
 
 - Artifact root: `$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/`
 - Tracker/result state: dispatch-specific files under the run artifact root
-- Canonical journal: `<repo-root>/.vibecrafted/JOURNAL.md`
+- Canonical journal: `<repo-root>/.vibecrafted/THE_JOURNAL.md`
 - Briefs/close-outs: dated operator-managed run projections
 - Lock: `$VIBECRAFTED_HOME/locks/<org>/<repo>/<run_id>.lock`
 
