@@ -1,6 +1,6 @@
 {
   "schema": "vibecrafted.skill-provenance.v3",
-  "generated_at": "2026-09-30",
+  "generated_at": "2026-10-01",
   "skills": {
     "vc-agents": {
       "sha256": [
@@ -2062,6 +2062,10 @@
         ],
         "tools/fleet_scan.py": [
           "77bdb37fb02670b28574e7832e9a3bda19f74807"
+        ],
+        "tools/hook_bridge.py": [
+          "6ce186467e0c39ccb7d645b57c569c93a547eaee",
+          "a0e314507fc0a8cdf6fbcc6a796c86a8bfbd2a10"
         ]
       }
     },
