@@ -34,8 +34,10 @@ def _write_stub_command(bin_dir: Path, name: str, body: str) -> None:
     path.chmod(0o755)
 
 
+@pytest.mark.parametrize("tool", [None, "codex", "claude", "agy", "cursor"])
 def test_skills_sync_dry_run_targets_staged_store_and_touches_no_config(
     tmp_path: Path,
+    tool: str | None,
 ) -> None:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -54,6 +56,7 @@ def test_skills_sync_dry_run_targets_staged_store_and_touches_no_config(
             "fakehost",
             "--source",
             str(REPO_ROOT),
+            *(["--tool", tool] if tool is not None else []),
             "--dry-run",
             "--no-verify",
         ],
@@ -75,6 +78,11 @@ def test_skills_sync_dry_run_targets_staged_store_and_touches_no_config(
     )
     assert "$HOME/.vibecrafted/skills" not in stdout
     assert "_template" not in stdout
+    # Every advertised explicit tool must select its own view; no accidental
+    # fallback to the four-tool default after parsing.
+    advertised = ["codex", "claude", "agy", "cursor"]
+    views = [name for name in advertised if f"-- {name} symlink view ->" in stdout]
+    assert views == ([tool] if tool is not None else advertised)
     # Skills sync never writes configuration or shell startup files.
     assert ".config" not in stdout
     assert ".zshrc" not in stdout
