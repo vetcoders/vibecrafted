@@ -539,6 +539,30 @@ def _settled_fleet(tmp_path: Path, monkeypatch) -> tuple[Path, Path, list[str]]:
             wait=True,
         ),
     )
+    # Waiting ends scheduling, including failed cuts. These tests require a
+    # verified fleet before deliberately changing one receipt's acceptance.
+    store = _receipt_store(repo, plan)
+    ledger = store.read()
+    unsettled = {
+        cut_id: ledger["cuts"].get(cut_id, {})
+        for cut_id in ("W0-a", "W0-b", "W0-c")
+        if ledger["cuts"].get(cut_id, {}).get("state") != "settled"
+        or ledger["cuts"].get(cut_id, {}).get("acceptance") != "verified"
+    }
+    result_path = store.root / "artifacts" / "dispatch-result.json"
+    assert not unsettled, (
+        "settled fleet fixture requires settled+verified receipts before mutation\n"
+        + json.dumps(
+            {
+                "unsettled_cuts": unsettled,
+                "dispatch_result_path": str(result_path),
+                "dispatch_result": json.loads(result_path.read_text(encoding="utf-8"))
+                if result_path.is_file()
+                else None,
+            },
+            indent=2,
+        )
+    )
     return repo, plan, launches
 
 
@@ -596,6 +620,43 @@ def _receipt_store(repo: Path, plan: Path) -> DispatchReceiptStore:
         repo_root=str(repo),
         create=False,
     )
+
+
+def test_settled_fleet_fixture_rejects_failed_verifier(
+    tmp_path: Path, monkeypatch
+) -> None:
+    original_plan = _plan
+
+    def failed_sibling_plan(repo, cuts, agents):
+        plan = original_plan(repo, cuts, agents)
+        contents = plan.read_text(encoding="utf-8")
+        command = "test -s {reports_dir}/W0-b.md"
+        assert contents.count(command) == 1
+        plan.write_text(
+            contents.replace(command, command + " && false"), encoding="utf-8"
+        )
+        return plan
+
+    monkeypatch.setattr(__name__ + "._plan", failed_sibling_plan)
+    with pytest.raises(AssertionError, match="settled fleet fixture") as excinfo:
+        _settled_fleet(tmp_path, monkeypatch)
+
+    # Pytest may append its rewritten assertion after the diagnostic JSON.
+    diagnostic, _ = json.JSONDecoder().raw_decode(
+        str(excinfo.value).split("\n", 1)[1].lstrip()
+    )
+    assert set(diagnostic["unsettled_cuts"]) == {"W0-b"}
+    failed = diagnostic["unsettled_cuts"]["W0-b"]
+    assert failed["state"] == "failed"
+    assert failed["acceptance"] == "failed"
+    assert failed["gates"][0]["exit_code"] == 1
+    assert failed["gates"][0]["matcher_result"] == "fail"
+    assert "matcher exit_code=0 failed" in failed["unresolved_surfaces"][0]
+    result = diagnostic["dispatch_result"]
+    assert result["schema"] == "vibecrafted.dispatch-result.v1"
+    result_cut = next(cut for cut in result["cuts"] if cut["id"] == "W0-b")
+    assert result_cut["scheduler_state"] == "failed"
+    assert failed["unresolved_surfaces"][0] in result_cut["note"]
 
 
 def test_approve_advances_when_the_whole_fleet_is_genuinely_settled(
