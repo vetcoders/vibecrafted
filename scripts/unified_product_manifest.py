@@ -5,14 +5,17 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import ipaddress
 import json
 import os
 import plistlib
+import re
 import stat
 import subprocess
 import tarfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from vibecrafted_core import product_contract as contract
 from vibecrafted_core import runtime_pack_contract
@@ -35,6 +38,92 @@ def _write(path: Path, payload: dict[str, Any], *, canonical: bool = False) -> N
         + "\n",
         encoding="utf-8",
     )
+
+
+def validate_update_feed_url(raw: str) -> str:
+    """Package a locator admitted by ProductUpdatePolicy's HTTPS contract.
+
+    Packaging additionally refuses local origins and ambiguous URL spellings;
+    it never normalizes the approved input or changes release trust metadata.
+    """
+    invalid = "update feed must be an explicit well-formed public HTTPS URL"
+    if (
+        not raw
+        or not raw.isascii()
+        or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in raw)
+        or "\\" in raw
+        or re.search(r"%(?![0-9a-fA-F]{2})", raw)
+        or "#" in raw
+    ):
+        raise SystemExit(invalid)
+    try:
+        url = urlsplit(raw)
+        host = (url.hostname or "").lower().rstrip(".")
+        port = url.port
+    except ValueError:
+        raise SystemExit(invalid) from None
+    if (
+        url.scheme.lower() != "https"
+        or not host
+        or url.username is not None
+        or url.password is not None
+        or (port is not None and not 1 <= port <= 65535)
+        or url.netloc.endswith(":")
+    ):
+        raise SystemExit(invalid)
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        labels = host.split(".")
+        if (
+            len(labels) < 2
+            or len(host) > 253
+            or host.endswith((".local", ".localhost", ".internal", ".home", ".lan"))
+            or all(label.isdigit() for label in labels)
+            or any(
+                not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+                for label in labels
+            )
+        ):
+            raise SystemExit(invalid)
+    else:
+        if not address.is_global:
+            raise SystemExit(invalid)
+    return raw
+
+
+def configure_update_channel(args: argparse.Namespace) -> None:
+    feed = None if args.unprovisioned else validate_update_feed_url(args.feed_url)
+    receipt: dict[str, Any] = {
+        "status": "unprovisioned" if feed is None else "configured",
+        "feed_url": feed,
+    }
+    if args.app is not None:
+        plist_path = args.app / "Contents/Info.plist"
+        if plist_path.is_symlink() or not plist_path.is_file():
+            raise SystemExit("update channel requires a regular Info.plist")
+        with plist_path.open("rb") as handle:
+            plist = plistlib.load(handle)
+        if args.verify_only:
+            if (feed is None and "VCUpdateFeedURL" in plist) or (
+                feed is not None and plist.get("VCUpdateFeedURL") != feed
+            ):
+                raise SystemExit(
+                    "packaged VCUpdateFeedURL does not match explicit input"
+                )
+        else:
+            if (args.app / "Contents/_CodeSignature").exists():
+                raise SystemExit("refusing update channel mutation of a signed App")
+            if feed is None:
+                plist.pop("VCUpdateFeedURL", None)
+            else:
+                plist["VCUpdateFeedURL"] = feed
+            with plist_path.open("wb") as handle:
+                plistlib.dump(plist, handle, sort_keys=True)
+        receipt["info_plist_sha256"] = contract._sha256(plist_path)
+    elif args.verify_only:
+        raise SystemExit("--verify-only requires --app")
+    print(json.dumps(receipt, sort_keys=True))
 
 
 def _entry(root: Path, relative: str, *, kind: str | None = None) -> dict[str, Any]:
@@ -373,11 +462,19 @@ def main() -> int:
     release.add_argument("--dmg", type=Path, required=True)
     release.add_argument("--runtime-pack", type=Path, required=True)
     release.add_argument("--output", type=Path, required=True)
+    channel = commands.add_parser("update-channel")
+    choice = channel.add_mutually_exclusive_group(required=True)
+    choice.add_argument("--feed-url")
+    choice.add_argument("--unprovisioned", action="store_true")
+    channel.add_argument("--app", type=Path)
+    channel.add_argument("--verify-only", action="store_true")
     args = parser.parse_args()
     if args.command == "app":
         produce_app(args)
-    else:
+    elif args.command == "release":
         produce_release(args)
+    else:
+        configure_update_channel(args)
     return 0
 
 

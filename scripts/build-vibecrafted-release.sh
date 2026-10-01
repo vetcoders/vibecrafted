@@ -22,6 +22,7 @@ RELEASE_TOOLCHAIN_CONTRACT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/re
 
 MODE="release"
 SNAPSHOT_DONORS=0
+UNPROVISIONED_UPDATE_CHANNEL=0
 for argument in "$@"; do
   case "$argument" in
     --app-only) MODE="app" ;;
@@ -29,12 +30,14 @@ for argument in "$@"; do
     --no-notarize) MODE="dmg" ;;
     --notarize-only) MODE="notarize" ;;
     --snapshot-donors) SNAPSHOT_DONORS=1 ;;
+    --unprovisioned-update-channel) UNPROVISIONED_UPDATE_CHANNEL=1 ;;
     --help|-h)
-      echo "usage: $0 [--app-only|--runtime-pack-only|--no-notarize|--notarize-only] [--snapshot-donors]" >&2
+      echo "usage: $0 [--app-only|--runtime-pack-only|--no-notarize|--notarize-only] [--snapshot-donors] [--unprovisioned-update-channel]" >&2
+      echo "App builds use the approved GitHub Releases feed; VIBECRAFTED_UPDATE_FEED_URL can explicitly override it. Unprovisioned is for developer app/dmg only." >&2
       exit 0
       ;;
     *)
-      echo "usage: $0 [--app-only|--runtime-pack-only|--no-notarize|--notarize-only] [--snapshot-donors]" >&2
+      echo "usage: $0 [--app-only|--runtime-pack-only|--no-notarize|--notarize-only] [--snapshot-donors] [--unprovisioned-update-channel]" >&2
       exit 2
       ;;
   esac
@@ -156,6 +159,44 @@ if [[ "$MODE" != "notarize" ]]; then
   DONOR_SNAPSHOT_OWNER="$RUNTIME_PACK_SELECTION_ATTEMPT"
   export DONOR_SNAPSHOT_OWNER
 fi
+
+# Bind the approved GitHub default or exact caller override once (Founder
+# approval 2026-10-01). The same arguments configure the unsigned
+# App and verify it after signing; notarize-only gets verification, never writes.
+# Runtime-Pack-only produces no App and therefore has no feed requirement.
+UPDATE_CHANNEL_ARGS=()
+validate_update_channel() {
+  if (( UNPROVISIONED_UPDATE_CHANNEL )); then
+    [[ "$MODE" == "app" || "$MODE" == "dmg" ]] \
+      || die "unprovisioned Update channel is allowed only for developer app/dmg builds"
+    [[ ! ${VIBECRAFTED_UPDATE_FEED_URL+x} ]] \
+      || die "choose an explicit feed or unprovisioned Update channel, not both"
+    UPDATE_CHANNEL_ARGS=(--unprovisioned)
+  elif [[ "$MODE" == "runtime-pack" ]]; then
+    return
+  else
+    UPDATE_CHANNEL_ARGS=(--feed-url "${VIBECRAFTED_UPDATE_FEED_URL-https://github.com/vetcoders/vibecrafted/releases/latest/download/release-output.json}")
+  fi
+  PYTHONPATH="$REPO_ROOT/vibecrafted-core" "$REPO_ROOT/scripts/project-python" \
+    "$REPO_ROOT/scripts/unified_product_manifest.py" update-channel \
+    "${UPDATE_CHANNEL_ARGS[@]}" \
+    || die "invalid explicit Update channel"
+}
+configure_update_channel() {
+  PYTHONPATH="$SOURCE_ROOT/vibecrafted-core" "$SOURCE_ROOT/scripts/project-python" \
+    "$SOURCE_ROOT/scripts/unified_product_manifest.py" update-channel \
+    "${UPDATE_CHANNEL_ARGS[@]}" --app "$APP" \
+    || die "could not configure unsigned App Update channel"
+}
+verify_update_channel() {
+  mkdir -p "$BUILD_DIR"
+  PYTHONPATH="$REPO_ROOT/vibecrafted-core" "$REPO_ROOT/scripts/project-python" \
+    "$REPO_ROOT/scripts/unified_product_manifest.py" update-channel \
+    "${UPDATE_CHANNEL_ARGS[@]}" --app "$APP" --verify-only \
+    > "$BUILD_DIR/update-channel-receipt.json" \
+    || die "packaged App Update channel differs from explicit input"
+}
+validate_update_channel
 
 # The donor is where the source lives; the repo is what we compile. They differ
 # only under --snapshot-donors, where the repo becomes a detached worktree at the
@@ -1189,6 +1230,7 @@ build_product() {
   built_app="$(find "$BUILD_DIR/DerivedData" -type d -name Vibecrafted.app -print -quit)"
   [[ -n "$built_app" ]] || die "xcodebuild did not produce Vibecrafted.app"
   /usr/bin/ditto "$built_app" "$APP"
+  configure_update_channel
   local resources="$APP/Contents/Resources"
   mkdir -p "$resources"
   log "Binding the canonical vc-terminal icon to Vibecrafted.app"
@@ -1261,6 +1303,7 @@ build_product() {
     die "bundled Python mutated the signed application payload"
   fi
   codesign --verify --deep --strict --verbose=2 "$APP"
+  verify_update_channel
   run_bundled_verifier app "$APP" --require-clean
 }
 
@@ -1322,6 +1365,7 @@ verify_runtime_pack_projection() {
 
 if [[ "$MODE" == "notarize" ]]; then
   [[ -d "$APP" ]] || die "missing $APP; run make dmg-signed first"
+  verify_update_channel
   verify_runtime_pack_projection
   notarize_product
   emit_release_tuple
