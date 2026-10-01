@@ -2007,6 +2007,10 @@
         ".claude-plugin/plugin.json": [
           "c8bcdeb7fdfdaaa521e65bdaf30572be88fd7e51"
         ],
+        "FLOW.md": [
+          "44edb18b577c0062ab16cc73d8b43501ec4f0036",
+          "4cd0913cdeb285424b179cfb2f00dc9afaf3c77a"
+        ],
         "SKILL.md": [
           "28637e82d74a990697f1baa2297bb7d4ffc2304e",
           "427f80acc9c937ed8597fd82bed0e2d34dcb0540",
@@ -2055,23 +2059,28 @@
     },
     "vc-hello": {
       "sha256": [
+        "3110387bd6bac7145510b65e8486685cd3149fdf1b669f0797fce0ee27377eb0",
         "4017de1bb25885c7ec638c8c3ce3d959da53df92074a9950968ed8fa78bb4fd7",
         "dcf97d8e5a1b34e65b2cf30d43a251d7e2c7e0cb4775a9a011f7f1175eaa1900"
       ],
       "files": {
         "FLOW.md": [
-          "5519c60437d19345c8af8ea0239df52b984d05c9"
+          "5519c60437d19345c8af8ea0239df52b984d05c9",
+          "dc5a1cf8f852a4dc9a3f10d2320f8a502fd74faf"
         ],
         "SKILL.md": [
           "1c5aab432c591e896f55af34cd867bd3e5ffbf76",
-          "335432fed3a6970f8fbf7fb596e320164cb63e66"
+          "335432fed3a6970f8fbf7fb596e320164cb63e66",
+          "ad0bc4e2f47972c2fbc460bad2d76c7369511796"
         ],
         "references/fleet-config-map.md": [
           "598b9280a7fe058d158dd29bc309f8cec694e872",
+          "70fbf1cdcfcc26f62afc19d865e6360ad2e5bbdf",
           "b1ef34735412ee9e90c28b7c0fa57a8e42324d59"
         ],
         "references/onboarding-stack.md": [
-          "0bca831bb23d0c35f8c5a7817e729706e2ceae03"
+          "0bca831bb23d0c35f8c5a7817e729706e2ceae03",
+          "e32b0a760915eba79e7d3786ca39207de348b889"
         ],
         "tools/fleet_scan.py": [
           "77bdb37fb02670b28574e7832e9a3bda19f74807",
@@ -2453,12 +2462,14 @@
         ],
         "examples/codescribe-two-hosts.md": [
           "33e7e6a08323d2e973732c90453e980176d4eb41",
-          "bbead6d8d65b587912887740e05f59035ab601a1"
+          "bbead6d8d65b587912887740e05f59035ab601a1",
+          "e0b835e0343cf6f4d89501a34c3a610ee9c9b505"
         ],
         "references/aicx-retrieval.md": [
           "60973cd6fefb46a15d6fe78514b36f0a6b996b7b",
           "97d72077d33a85f4bb0b87bde0ee488f67c9d92a",
-          "b69d045df4bf7e6424f5fcbff9b782b82bc2c415"
+          "b69d045df4bf7e6424f5fcbff9b782b82bc2c415",
+          "c25d397eb646d5667ea1ef5e074b9f320c9afc75"
         ],
         "references/confrontation-brief.md": [
           "13b47fa709da16a8139cff0cddc4c5f7155bbca4",
@@ -2467,7 +2478,8 @@
         ],
         "references/dispatch.md": [
           "a8c2776b482d097bff838107270ba036363c376d",
-          "b48bbfedd53d6de85809e876fae20ebf8a915da5"
+          "b48bbfedd53d6de85809e876fae20ebf8a915da5",
+          "bd9fa282c2e025a7f420d93964e0899fdbac3f2a"
         ],
         "references/extraction-brief.md": [
           "96571f29ba82ec8d2f8e6473e5af9c6436b9ca58",
@@ -2475,21 +2487,25 @@
         ],
         "references/ledger-schema.md": [
           "1504db79ac6525e76277f3f7f2d20a2a528801d8",
+          "7ca2d175d1d79fd3cbe0d6253dca78a10f65d63e",
           "b4ca4e13af93f0abd158bf2becaa51d5a88c6b96",
           "db7cef04866c7a6790dc285b643f9d5b0f5b0b80"
         ],
         "references/loctree-questions.md": [
           "57c37c4593781bd3439b83043e9066484531b5a9",
-          "8998065023b448373e6d56016f57b4a1b1b7e339"
+          "8998065023b448373e6d56016f57b4a1b1b7e339",
+          "f0959b72551e0364ebdae4f43191a8a93471db4e"
         ],
         "references/replication.md": [
           "1c1893f5cec3ab28d7efd9499a0f0932f6d11c85",
+          "a61c067c42f2529ab4b5ad1ffeeccf7d924ff3be",
           "d59930873f5966141a0c54d58bdf8c286b38a2c8"
         ],
         "references/review-surface.md": [
           "0a5e91dbd7e4439e38da7db03a6dde8094a790c7",
           "170c5a34ebd1e0c296bce6353273bb640afefecf",
-          "a7c50e6fc0010fa90e62bd9738683d3ee2eaf279"
+          "a7c50e6fc0010fa90e62bd9738683d3ee2eaf279",
+          "ad5d96ce0b70b89e7cda18d4330ad6f00f392c8b"
         ],
         "scripts/intents_cli.py": [
           "234b9ff40267b687e4ddfd63015449fb8979b8c3",

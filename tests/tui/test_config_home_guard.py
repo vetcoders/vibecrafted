@@ -51,7 +51,7 @@ SIBLING_CONFIG = re.compile(
             # Python: home / ".config" / "vetcoders"
             rf"\"\.config\"\s*/\s*\"{_SIBLING}",
             # Python: xdg_config_home() / "vetcoders", config_root / "vc-frame"
-            rf"(?:config_home|config_root|config_base)(?:\(\))?\s*/\s*\"{_SIBLING}",
+            rf"(?<![\w])(?:xdg_config_home|config_home|config_root|config_base)(?:\(\))?\s*/\s*\"{_SIBLING}",
             # Shell: $config_base/vetcoders, ${CONFIG_HOME}/zellij
             (
                 r"\$\{?(?:xdg_config_home|config_home|config_root|config_base|"
@@ -183,6 +183,7 @@ def test_sibling_config_pattern_catches_known_offender_shapes(line: str) -> None
     [
         'export VC_FRAME_CONFIG_DIR="$HOME/.config/vibecrafted/vc-frame"',
         'return root / ".config" / "vibecrafted" / "vc-frame"',
+        'return vibecrafted_product_config_home() / "vc-frame"',
         '"$repo_root/vibecrafted-core/vibecrafted_core/config/vc-frame"',
         'product / "vc-terminal" / "vc-terminal.toml"',
         '"${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/shell/vc-skills.sh"',
