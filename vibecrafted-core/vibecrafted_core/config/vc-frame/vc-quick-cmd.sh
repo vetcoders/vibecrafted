@@ -125,16 +125,21 @@ trap ':' INT
 
 _banner
 while :; do
-  if [[ -t 0 ]]; then
-    printf '❯_ '
-  fi
   cmd=""
-  if IFS= read -r cmd; then
-    :
+  # A TTY prompt gets readline (-e): arrows, Alt+b/f word motion, Tab file
+  # completion, and up-arrow history within a pinned pane. The prompt must go
+  # through -p so readline can redraw the line during edits. A non-TTY stdin
+  # (tests, pipes) keeps the plain read.
+  if [[ -t 0 ]]; then
+    read_ok=0
+    IFS= read -r -e -p '❯_ ' cmd || read_ok=$?
   else
+    read_ok=0
+    IFS= read -r cmd || read_ok=$?
+  fi
+  if (( read_ok != 0 )); then
     # >128: Ctrl-C at the prompt clears the line; anything else is EOF.
-    read_status=$?
-    if (( read_status > 128 )); then
+    if (( read_ok > 128 )); then
       printf '\n'
       continue
     fi
@@ -145,6 +150,8 @@ while :; do
   if [[ -z "${cmd}" ]]; then
     continue
   fi
+  # In-memory only: lets up-arrow recall earlier commands in a pinned pane.
+  history -s -- "${cmd}" 2>/dev/null || true
   if [[ "${cmd}" == "exit" ]]; then
     break
   fi
