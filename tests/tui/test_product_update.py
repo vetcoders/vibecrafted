@@ -460,12 +460,30 @@ def test_product_update_source_and_physical_gate_routes() -> None:
     assert "test-product-update-physical:" in makefile
     assert "--strict-markers" in makefile
     assert "VIBECRAFTED_UPDATE_PRIOR_FIXTURE_ROOT" in makefile
+    workflow_budgets: dict[str, tuple[int, int]] = {}
     for filename in ("portable.yml", "release.yml", "gate-rehearsal.yml"):
         workflow = (REPO_ROOT / ".github/workflows" / filename).read_text(
             encoding="utf-8"
         )
         assert "run: make test-source" in workflow
         assert "run: make test\n" not in workflow
+        job_budget = re.search(r"^    timeout-minutes: (\d+)$", workflow, re.MULTILINE)
+        installer_budget = re.search(
+            r"^      - name: Run installer[^\n]*\n"
+            r"        timeout-minutes: (\d+)\n"
+            r"        run: make test-source$",
+            workflow,
+            re.MULTILINE,
+        )
+        assert job_budget and installer_budget, f"{filename} must budget the full gate"
+        workflow_budgets[filename] = (
+            int(job_budget.group(1)),
+            int(installer_budget.group(1)),
+        )
+    assert workflow_budgets["gate-rehearsal.yml"] == workflow_budgets["release.yml"]
+    assert workflow_budgets["portable.yml"] == workflow_budgets["release.yml"]
+    job_minutes, installer_minutes = workflow_budgets["release.yml"]
+    assert job_minutes > installer_minutes > 0, "other release gates need time to run"
     publisher = (REPO_ROOT / "scripts/publish-vibecrafted-release.sh").read_text(
         encoding="utf-8"
     )
