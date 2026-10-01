@@ -16,10 +16,14 @@ flowchart TD
 
 ## Routes
 
-| Entry                           | Args                             | Produces                                 | Exit             |
-| ------------------------------- | -------------------------------- | ---------------------------------------- | ---------------- |
-| `vibecrafted forensics <agent>` | `--prompt` or `--file`           | report, transcript, run metadata         | dispatch receipt |
-| `/vc-forensics`                 | bounded investigation and repair | evidence, regression and authored commit | report           |
+| Wejście                                          | Argumenty                                        | Wynik                                   | Wyjście           |
+| ------------------------------------------------ | ------------------------------------------------ | --------------------------------------- | ----------------- |
+| `/vc-forensics`                                  | ograniczone śledztwo i naprawa                   | dowody, regresja i własny commit        | raport            |
+| `vibecrafted workflow <agent> --file <brief.md>` | ograniczony brief jawnie ładujący ten `SKILL.md` | raport workflow, transkrypt i meta runu | receipt dispatchu |
+
+Dedykowana komenda `vibecrafted forensics` jest niedostępna w aktualnym command
+decku. Istniejąca droga workflow zachowuje tożsamość runu workflow; brief wybiera
+protokół forensics. Sam zainstalowany skill nie dodaje verba CLI.
 
 ## Evidence and boundaries
 

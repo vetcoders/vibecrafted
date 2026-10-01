@@ -74,7 +74,7 @@ while [[ $# -gt 0 ]]; do
       shift
       [[ $# -gt 0 ]] || die "Missing value for --tool"
       case "$1" in
-        codex|claude|agy) tools+=("$1") ;;
+        codex|claude|agy|cursor) tools+=("$1") ;;
         *) die "Unknown tool: $1" ;;
       esac
       ;;

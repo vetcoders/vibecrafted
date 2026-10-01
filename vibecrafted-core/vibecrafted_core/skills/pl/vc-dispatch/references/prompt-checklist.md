@@ -1,11 +1,11 @@
-# Składanie promptu — odwrotna checklista
+# Prompt assembly — the reverse checklist
 
 vc-dispatch nie niesie **żadnego kanonicznego szablonu**. To skill wykonawczy:
 wyczuwa kontekst osadzenia i weryfikuje, że złożony prompt POKRYWA wymagane
 pola. Plany nadrzędnego flow, repozytoryjne CLAUDE.md/AGENTS.md oraz evidence
 z vc-init są materiałem źródłowym; checklista poniżej jest bramką.
 
-## Wyczuwanie kontekstu (przed złożeniem czegokolwiek)
+## Context sensing (before composing anything)
 
 1. Jaki jest nadrzędny flow? (faza vc-workflow, linia vc-ship, ad-hocowe
    zlecenie operatora) — jego artefakty dyktują kształt briefu i cele raportów.
@@ -17,43 +17,59 @@ z vc-init są materiałem źródłowym; checklista poniżej jest bramką.
 4. Co ruszyło się na Living Tree, odkąd napisano briefy? (`git log` od baseline'u
    — to staje się treścią EXTRA i BATON.)
 
-## Cztery warstwy (jeden plik .md, w tej kolejności)
+## The four layers (one .md file, in this order)
 
-### 1. COMMON — kontrakt środowiskowy
+### 1. COMMON — environment contract
 
 Musi pokryć (złożone Z kontekstu, nie skopiowane z szablonu):
 
-- [ ] ścieżka repo + gałąź; tryb drzewa wprost: Living Tree (zero worktree,
-      zero przełączania gałęzi, re-read przed edycją, nigdy stash/discard
-      cudzej pracy) ALBO formacja Fleet Worktrees (Tryb B kanonu: verifiery
-      przed dispatchem, rozłączne domeny, `.claude/worktrees/<cut-id>` na
-      `cut/<cut-id>`, workerzy bez push/merge, integruje koordynator)
+- [ ] wybrany runtime + parent/effective roots + baseline branch/full SHA;
+      szanuj jawny wybór Foundera: `local-worktrees`, `local-native`/Living Tree
+      albo VM. Supervisor typowanego dispatchu daje dedykowany checkout workera
+      na `cut/<cut-id>`; bez drugiego worktree tworzonego przez workera,
+      przełączania gałęzi, zapisów w drzewie nadrzędnym ani self-integration
+- [ ] re-read przed edycją; wąski staging (`git add -- <owned-path>` albo własne
+      hunki); nigdy `git add -A`, `git add .`, stash/discard lub commit cudzej pracy
+
 - [ ] kolejność narzędzi prawdy strukturalnej (loctree-first; ścieżka raportu
       fallbacku dla miss)
 - [ ] inwarianty architektury (np. prezentacja w app/ nigdy core/) oraz
       NIETYKALNE ścieżki/wartości, precedencja configu
 - [ ] footguny języka/toolchaina istotne dla repo (np. Rust 2024 if-let temp
       scope: snapshot-into-let przed `if let` na lockach)
-- [ ] twarde zakazy: ZERO pushu workera/PR/release; `--no-verify` wyłącznie dla
-      lokalnego checkpointu compile embargo jawnie autoryzowanego przez
-      Foundera, z receiptem pominiętych bramek; push z nim jest Founder-only;
-      tabu lintera
-      repo (no unwrap(), no sleep() in tests, …)
+- [ ] granice push/PR/install/release bieżącej fali; Charter pozwala na
+      fast-forward push własnej feature branch, chyba że fala go zabrania.
+      Trunk merge, force-push, PR merge/close, kasowanie tagów/gałęzi i deploy
+      to przyciski Foundera. `--no-verify` wyłącznie dla jawnie autoryzowanego
+      przez Foundera lokalnego checkpointu compile embargo, z receiptem
+      pominiętych bramek; push z nim jest Founder-only; tabu lintera repo
+      (no unwrap(), no sleep() in tests, …)
+
 - [ ] kontrakt commita: format + trailery, które egzekwuje hook (własna
       tożsamość agenta/runtime'u workera, prawdziwy session id, komenda date)
-- [ ] linijka gates-before-commit (worker je uruchamia; dyspozytor nie)
+- [ ] skupione bramki przed commitem headless worker uruchamia synchronicznie;
+      supervisor uruchamia zadeklarowane verifiery, integrator posiada szerokie
+      bramki integracji. Raport i commit kończysz w tej turze; zakończenia w tle
+      nie mogą wybudzić workerów
 - [ ] furtka ucieczkowa SUBSTRATE_FAILURE: zatrute drzewo → żadnego
       half-commita, zamiast tego zaraportuj linię awarii
-- [ ] ścieżka REPORT: `<reports_dir>/<cut_id>_report.md` + wymagane sekcje
-      (pliki, evidence bramek, acceptance [x]/[?]/[!], unverified, next step,
-      SHA commita + 3 fakty)
+- [ ] ścieżka REPORT: `VIBECRAFTED_REPORT_PATH` od launchera pod kanonicznym
+      rootem artefaktów; zachowaj maszynowe `run_id`/`session_id`, semantykę
+      finalized/status/claim oraz wymagane sekcje (pliki, evidence bramek,
+      acceptance [x]/[?]/[!], unverified, next step, SHA commita + 3 fakty)
+- [ ] wyłącznie Operator pisze ignored `<repo-root>/.vibecrafted/THE_JOURNAL.md`;
+      workerzy zwracają raporty. Pola workera to claimy, nigdy podpisy za
+      Operatora/Foundera; bramki źródła nie dowodzą installed/live acceptance
+- [ ] właściciel generowanego manifestu skillów (`scripts/gen_skill_provenance.py`),
+      `make skills-check UPDATE=1` po zmianach bajtów i admission zależności dla
+      cuta generatora; integrator regeneruje wspólną historię po admission
 
-### 2. BRIEF — pełny brief cięcia
+### 2. BRIEF — the full cut brief
 
 - [ ] wklejony W CAŁOŚCI, nigdy streszczony (brief jest spec)
 - [ ] kotwice (file:line) rozumiane jako wskazówki — żywe drzewo jest prawdą
 
-### 3. EXTRA — korekty względem HEAD briefu
+### 3. EXTRA — corrections vs the brief's HEAD
 
 - [ ] „brief napisany przy <SHA>, drzewo ruszyło — ufaj żywemu drzewu" z
       konkretnymi deltami, które dotykają plików tego cięcia
@@ -65,7 +81,7 @@ Musi pokryć (złożone Z kontekstu, nie skopiowane z szablonu):
 - [ ] fazowanie dla wielkich cięć: zacommituj działający podzbiór + uczciwy
       raport zamiast półproduktu rozsmarowanego po N plikach
 
-### 4. BATON — stan linii od dyspozytora
+### 4. BATON — line state from the dispatcher
 
 - [ ] które cięcia są [x], ich SHA commitów, które pliki dotknęły
 - [ ] wprost „HEAD może iść do przodu, gdy pracujesz; operator testuje żywą
@@ -78,7 +94,7 @@ Musi pokryć (złożone Z kontekstu, nie skopiowane z szablonu):
       („nie dziedziczysz nic" albo dokładny opis WIP), z evidence
 - [ ] co przychodzi po tym cięciu (żeby worker ogrodził swój scope)
 
-## Mechaniczne bramki przed launchem
+## Mechanical gates before launch
 
 ```bash
 grep -c '{repo}\|{id}\|{reports_dir}\|{[a-z_]*}' prompt.md   # MUST be 0
@@ -96,7 +112,11 @@ Launch tylko przez plik:
 bash -c 'ulimit -f unlimited; vibecrafted <skill> <agent> --file <prompt.md>'
 ```
 
-## Reguła idempotencji (gotowość na refire)
+Przekaż zadeklarowany pin przez `--model <pin>` przy bezpośrednim launchu
+workera. W typowanym planie użyj `cuts[].model`; bez cichej podmiany modelu.
+Uzbrój supervisor-side `vibecrafted await <agent> --run-id <id>` zaraz po starcie.
+
+## Idempotency rule (refire-readiness)
 
 Każdy prompt musi pozostać bezpieczny do re-fire'a verbatim: kryteria
 acceptance są sprawdzalne względem drzewa, EXTRA zawiera klauzulę
@@ -104,7 +124,7 @@ acceptance są sprawdzalne względem drzewa, EXTRA zawiera klauzulę
 po częściowej rundzie (refire czyta drzewo, nie twoją pamięć). Jeśli promptu nie
 da się bezpiecznie re-fire'ować, nie jest skończony.
 
-## Reguła evidence checkpointów
+## Evidence checkpoint rule
 
 Nie pozwalaj, żeby prompty workerów traktowały baseline, bramki, raporty albo
 handoff notes jak ceremonię. To granice atrybucji regresji. Pominięcie ich to

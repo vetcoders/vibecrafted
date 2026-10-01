@@ -16,10 +16,15 @@ flowchart TD
 
 ## Routes
 
-| Entry                           | Args                             | Produces                                 | Exit             |
-| ------------------------------- | -------------------------------- | ---------------------------------------- | ---------------- |
-| `vibecrafted forensics <agent>` | `--prompt` or `--file`           | report, transcript, run metadata         | dispatch receipt |
-| `/vc-forensics`                 | bounded investigation and repair | evidence, regression and authored commit | report           |
+| Entry                                            | Args                                             | Produces                                     | Exit             |
+| ------------------------------------------------ | ------------------------------------------------ | -------------------------------------------- | ---------------- |
+| `/vc-forensics`                                  | bounded investigation and repair                 | evidence, regression and authored commit     | report           |
+| `vibecrafted workflow <agent> --file <brief.md>` | bounded brief explicitly loading this `SKILL.md` | workflow report, transcript and run metadata | dispatch receipt |
+
+The dedicated `vibecrafted forensics` command is unavailable in the current
+command deck. The existing workflow route retains workflow run identity; its
+brief selects the forensics protocol. An installed skill alone does not add a
+CLI verb.
 
 ## Evidence and boundaries
 
