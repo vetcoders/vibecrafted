@@ -780,6 +780,14 @@ fn append_run_table(
         lines.push("  None".into());
         return;
     }
+    lines.push(format!(
+        "  {} · {} · {} · {} · {}",
+        run_cell("STATE", 10),
+        run_cell("AGENT", 9),
+        run_cell("LABEL", 46),
+        run_cell("TIME", 25),
+        "SKILL"
+    ));
     let mut group = String::new();
     for (i, r) in runs.iter().enumerate() {
         let (label, repo) = run_location(&r.root);
@@ -789,24 +797,14 @@ fn append_run_table(
                 .filter(|r| run_location(&r.root).1 == repo)
                 .count();
             lines.push(format!("  {} · {count}", run_cell(&repo, 32).trim_end()));
-            lines.push(format!(
-                "  {} · {} · {} · {} · {} · {}",
-                run_cell("STATE", 10),
-                run_cell("AGENT", 9),
-                run_cell("LABEL", 26),
-                run_cell("REPO", 17),
-                run_cell("TIME", 25),
-                "SKILL"
-            ));
             group = repo.clone();
         }
         lines.push(format!(
-            "{} {} · {} · {} · {} · {} · {}",
+            "{} {} · {} · {} · {} · {}",
             if selected == Some(i) { "▶" } else { " " },
             run_cell(&r.state, 10),
             run_cell(&r.agent, 9),
-            run_cell(&label, 26),
-            run_cell(&repo, 17),
+            run_cell(&label, 46),
             run_cell(&run_time(r, now, active), 25),
             run_cell(if r.skill == "implement" { "" } else { &r.skill }, 14).trim_end()
         ));

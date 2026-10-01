@@ -529,7 +529,7 @@ fn active_runs_are_grouped_single_rows_with_fresh_attention_and_identity_selecti
                 && !row.contains("pid_alive")
                 && !row.contains("fixture-receipt")
         );
-        assert_eq!(row.split(" · ").nth(2).unwrap().chars().count(), 26);
+        assert_eq!(row.split(" · ").nth(2).unwrap().chars().count(), 46);
         assert!(row.contains("trwa 2 h 5 min") || row.contains("ostatnio 1 d 23 h temu"));
     }
     for (i, id) in ["s-live", "c-live", "v-new", "v-old", "fresh"]
@@ -600,6 +600,76 @@ fn active_run_columns_clip_unicode_and_keep_invalid_times_visible() {
             .count(),
         2
     );
+}
+
+#[test]
+fn run_table_header_is_printed_once_above_groups_and_repo_column_is_gone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = config(tmp.path());
+    let runs = cfg.state_root.join("runs");
+    fs::create_dir_all(&runs).unwrap();
+    write_run(&runs, "template", "running");
+    let mut snapshot = HostSnapshot::load(&cfg);
+    let template = snapshot.runs.active_runs[0].clone();
+    let run = |id: &str, root: &str| {
+        let mut r = template.clone();
+        r.run_id = id.into();
+        r.root = root.into();
+        r
+    };
+    snapshot.runs.active_runs = vec![
+        run(
+            "a-one",
+            "/fixture/.vibecrafted/worktrees/vetcoders/alpha/2026_1001/cut-one",
+        ),
+        run("b-one", "/work/beta/.worktrees/cut-two"),
+        run("a-two", "/work/alpha/.worktrees/cut-three"),
+    ];
+    snapshot.runs.stalled_runs.clear();
+    let mut host = HostDashboard::new(HostRoute::ActiveRuns);
+    host.apply(snapshot);
+    let lines = host.lines(&cfg);
+    let text = lines.join("\n");
+    let section = |name: &str| -> String {
+        let start = lines.iter().position(|l| l == name).unwrap();
+        let end = lines[start + 1..]
+            .iter()
+            .position(|l| l == "IN PROGRESS" || l == "NEEDS ATTENTION" || l.starts_with("g: open"))
+            .map(|p| start + 1 + p)
+            .unwrap_or(lines.len());
+        lines[start..end].join("\n")
+    };
+    for name in ["IN PROGRESS", "NEEDS ATTENTION"] {
+        let body = section(name);
+        assert!(
+            body.matches("STATE").count() <= 1,
+            "{name}: one header per table, not per repo group:\n{text}"
+        );
+        assert!(
+            !body.contains("REPO"),
+            "{name}: repo column retired:\n{text}"
+        );
+    }
+    let in_progress = section("IN PROGRESS");
+    assert_eq!(
+        in_progress.matches("STATE").count(),
+        1,
+        "runs from two repos share one header:\n{text}"
+    );
+    assert!(in_progress.contains("alpha · 2"));
+    assert!(in_progress.contains("beta · 1"));
+    let rows = lines
+        .iter()
+        .filter(|l| l.starts_with("  running") || l.starts_with("▶ running"))
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 3, "{text}");
+    for row in &rows {
+        assert_eq!(
+            row.matches("alpha").count() + row.matches("beta").count(),
+            0,
+            "rows carry labels, the group header carries the repo: {row}"
+        );
+    }
 }
 
 #[test]
