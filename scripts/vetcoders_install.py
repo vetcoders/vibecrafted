@@ -25507,6 +25507,8 @@ def _runtime_retirement_legacy_guard(
     rollback = receipt.get("retirement_rollback") or {}
     if str(target) in {rollback.get("generation"), rollback.get("publication")}:
         raise RuntimeError("legacy retirement target is the healthy rollback")
+    current = runtime / "tools/vibecrafted-current"
+    selector_identity = _capture_stat_identity(current.lstat())
     pins = [
         label
         for label, value in _runtime_retirement_references(
@@ -25530,9 +25532,8 @@ def _runtime_retirement_legacy_guard(
     )
     if not verified:
         raise RuntimeError("current publication is not verified: " + reason)
-    current = runtime / "tools/vibecrafted-current"
     generation = current.resolve(strict=True)
-    return {
+    binding = {
         "roots": receipt["roots"],
         "version": receipt["version"],
         "generation": str(generation),
@@ -25540,11 +25541,16 @@ def _runtime_retirement_legacy_guard(
             generation / _RUNTIME_GENERATION_MANIFEST
         ),
         "generation_identity": [generation.stat().st_dev, generation.stat().st_ino],
-        "selector_identity": [current.lstat().st_dev, current.lstat().st_ino],
+        # Unlink/recreate may reuse an inode. Bind change time and the existing
+        # stable metadata contract as well, excluding read-induced atime changes.
+        "selector_identity": list(selector_identity),
         "active_sha256": _sha256_path(runtime / "active.json"),
         "configuration_digest": _runtime_config_digest(paths["product_config"]),
         "selector": str(current.readlink()),
     }
+    if _capture_stat_identity(current.lstat()) != selector_identity:
+        raise RuntimeError("current publication selector changed during legacy guard")
+    return binding
 
 
 def _runtime_retirement_legacy_kind(paths: Mapping[str, Path], target: Path) -> str:
