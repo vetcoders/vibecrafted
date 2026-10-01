@@ -242,6 +242,21 @@ def _committed_repo(path: Path, home: Path) -> str:
     subprocess.run(
         ["git", "init", "-q", str(path)], check=True, capture_output=True, env=env
     )
+    # Worktree artifact identity comes from the selected parent's forge origin.
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(path),
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/fixture/start-contract.git",
+        ],
+        check=True,
+        capture_output=True,
+        env=env,
+    )
     (path / "README.md").write_text("seed\n", encoding="utf-8")
     subprocess.run(
         ["git", "-C", str(path), "add", "-A"], check=True, capture_output=True, env=env

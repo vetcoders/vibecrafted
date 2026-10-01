@@ -112,8 +112,8 @@ class _World:
             self.bin,
             ("claude", "codex", "grok", "cursor-agent", "agy", "junie"),
             body=(
-                'printf "%s\\n" "$@" > "$FORK_TEST_ARGV.$(basename "$0")"\n'
-                'cat > "$FORK_TEST_ARGV.$(basename "$0").stdin"\n'
+                'printf "%s\\n" "$@" > "$VIBECRAFTED_TEST_FORK_ARGV.$(basename "$0")"\n'
+                'cat > "$VIBECRAFTED_TEST_FORK_ARGV.$(basename "$0").stdin"\n'
                 "exit 0\n"
             ),
         )
@@ -152,7 +152,8 @@ class _World:
             for key, value in os.environ.items()
             if key not in {"PYTHONPATH", "PYTHONHOME", *_fixtures.PARENT_CONTEXT_ENV}
         }
-        env["FORK_TEST_ARGV"] = str(self.provider_argv_prefix)
+        # Tracked task forks filter provider environments through env_allowlist.
+        env["VIBECRAFTED_TEST_FORK_ARGV"] = str(self.provider_argv_prefix)
         env["HOME"] = str(self.home)
         env["PATH"] = f"{self.bin}{os.pathsep}{env.get('PATH', '')}"
         env["VIBECRAFTED_HOME"] = str(self.vibecrafted_home)
