@@ -701,7 +701,9 @@ impl Aggregator {
 /// directory cannot be inspected — the store is then always asked.
 fn messages_fingerprint(plane: &ControlPlane) -> Option<SystemTime> {
     let dir = plane.control_plane_home().join("messages");
-    std::fs::metadata(dir).ok().and_then(|meta| meta.modified().ok())
+    std::fs::metadata(dir)
+        .ok()
+        .and_then(|meta| meta.modified().ok())
 }
 
 impl ToolCacheEntry {
