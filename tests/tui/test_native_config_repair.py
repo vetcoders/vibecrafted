@@ -182,6 +182,26 @@ case "preference-conflict":
   emit(preferenceResolutionChoice(from: decoded, action: "keep-current")?.action ?? "none")
   emit(preferenceResolutionChoice(from: decoded, action: "use-incoming")?.action ?? "none")
   emit(decoded.previousRuntimeAvailable == true ? "previous-ready" : "no-prior")
+case "reinstall-unresolved", "reinstall-absent", "reinstall-current",
+     "reinstall-upgrade", "reinstall-republish", "reinstall-service",
+     "reinstall-same-version-other-source":
+  let resolution: RuntimeResolution<String>
+  switch scenario {
+  case "reinstall-unresolved": resolution = .unusable("receipt could not be read")
+  case "reinstall-absent": resolution = .absent("neither identity document exists")
+  case "reinstall-upgrade": resolution = .ready("4.3.1+gaaaaaaaa")
+  case "reinstall-same-version-other-source": resolution = .ready("4.3.2+gbbbbbbbb")
+  default: resolution = .ready("4.3.2+gaaaaaaaa")
+  }
+  let presentation = runtimeReinstallPresentation(
+    resolution: resolution, carrierGeneration: "4.3.2+gaaaaaaaa",
+    configuration: "Configuration inspection found no changes to make.",
+    serviceFailure: scenario == "reinstall-service" ? "receipt admission refused" : nil,
+    canUpgrade: scenario == "reinstall-upgrade",
+    explicitRepublish: scenario == "reinstall-republish")
+  emit(presentation.title)
+  emit(presentation.actionTitle ?? "<none>")
+  emit(presentation.detail)
 default:
   emit("unknown scenario")
 }
@@ -324,3 +344,83 @@ def test_preference_conflict_names_settings_and_keeps_a_bound_choice(
     assert keep == "keep-current"
     assert incoming == "use-incoming"
     assert availability == "previous-ready"
+
+
+def test_service_repair_does_not_infer_absence_from_missing_launch_contract() -> None:
+    delegate = (POLICY.parent / "AppDelegate.swift").read_text(encoding="utf-8")
+    assert "No usable runtime is currently installed." not in delegate
+    assert "Configuration already matches the installed generation." not in delegate
+    offer = delegate.split("private func offerRuntimePackReinstall(", 1)[1].split(
+        "private func presentRuntimePackReinstall(", 1
+    )[0]
+    assert "resolveInstalledRuntime(forceRefresh: true)" in offer
+    assert "serviceFailure: detail.message" in delegate
+
+
+def test_unresolved_runtime_has_a_diagnostic_without_an_upgrade(
+    policy_binary: Path,
+) -> None:
+    title, action, detail = _run(policy_binary, "reinstall-unresolved")
+    assert title == "Runtime installation could not be verified"
+    assert action == "<none>"
+    assert "receipt could not be read" in detail
+    assert "No runtime installation was found" not in detail
+    assert "Installed generation:" not in detail
+
+
+def test_positive_absence_offers_installation(policy_binary: Path) -> None:
+    title, action, detail = _run(policy_binary, "reinstall-absent")
+    assert title == "Install the Vibecrafted runtime from this App?"
+    assert action == "Install"
+    assert "No runtime installation was found" in detail
+    assert "neither identity document exists" in detail
+
+
+def test_known_current_generation_has_no_implicit_republish(
+    policy_binary: Path,
+) -> None:
+    title, action, detail = _run(policy_binary, "reinstall-current")
+    assert title == "Vibecrafted runtime already current"
+    assert action == "<none>"
+    assert "Installed generation: 4.3.2+gaaaaaaaa" in detail
+    assert "This App carries the same generation" in detail
+    assert "Republish anyway…" in detail
+
+
+def test_a_different_hash_of_the_same_version_is_not_an_upgrade(
+    policy_binary: Path,
+) -> None:
+    title, action, detail = _run(policy_binary, "reinstall-same-version-other-source")
+    assert title == "Runtime upgrade is not available"
+    assert action == "<none>"
+    assert "Installed generation: 4.3.2+gbbbbbbbb" in detail
+    assert "not proven newer" in detail
+
+
+def test_a_verified_newer_carrier_keeps_the_upgrade_choice(policy_binary: Path) -> None:
+    title, action, detail = _run(policy_binary, "reinstall-upgrade")
+    assert title == "Upgrade the Vibecrafted runtime from this App?"
+    assert action == "Upgrade"
+    assert "Installed generation: 4.3.1+gaaaaaaaa" in detail
+
+
+def test_same_generation_republish_requires_the_explicit_choice(
+    policy_binary: Path,
+) -> None:
+    title, action, detail = _run(policy_binary, "reinstall-republish")
+    assert title == "Republish the Vibecrafted runtime from this App?"
+    assert action == "Republish anyway"
+    assert "App carrier generation: 4.3.2+gaaaaaaaa" in detail
+    assert "refuses to replace a newer runtime" in detail
+
+
+def test_service_admission_failure_keeps_its_reason_and_installed_identity(
+    policy_binary: Path,
+) -> None:
+    title, action, detail = _run(policy_binary, "reinstall-service")
+    assert title == "Runtime service repair failed"
+    assert action == "<none>"
+    assert "Installed generation: 4.3.2+gaaaaaaaa" in detail
+    assert "Service repair failed: receipt admission refused" in detail
+    assert "may not resolve this failure" in detail
+    assert "No runtime installation was found" not in detail

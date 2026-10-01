@@ -400,6 +400,65 @@ enum RuntimeResolution<Runtime> {
   case unusable(String)
 }
 
+/// Presentation of the existing carrier confirmation, using the owner's
+/// current answer. An unresolved launch contract is never installation absence.
+struct RuntimeReinstallPresentation {
+  let title: String
+  let detail: String
+  let actionTitle: String?
+}
+
+func runtimeReinstallPresentation(
+  resolution: RuntimeResolution<String>,
+  carrierGeneration: String,
+  configuration: String,
+  serviceFailure: String? = nil,
+  canUpgrade: Bool = false,
+  explicitRepublish: Bool = false
+) -> RuntimeReinstallPresentation {
+  var title: String
+  var detail: String
+  var actionTitle: String?
+  switch resolution {
+  case .ready(let installed):
+    detail = "Installed generation: \(installed)."
+    if canUpgrade {
+      title = "Upgrade the Vibecrafted runtime from this App?"
+      actionTitle = "Upgrade"
+    } else if installed == carrierGeneration {
+      title = "Vibecrafted runtime already current"
+      detail += "\nThis App carries the same generation."
+    } else {
+      title = "Runtime upgrade is not available"
+      detail += "\nThis carrier is not proven newer than the installed runtime."
+    }
+  case .absent(let reason):
+    title = "Install the Vibecrafted runtime from this App?"
+    detail = "No runtime installation was found.\n\(reason)"
+    actionTitle = "Install"
+  case .unusable(let reason):
+    title = "Runtime installation could not be verified"
+    detail = "Runtime installation could not be verified.\n\(reason)"
+  }
+  if !configuration.isEmpty { detail += "\n\n" + configuration }
+  if let failure = serviceFailure {
+    title = "Runtime service repair failed"
+    detail += "\n\nService repair failed: " + failure
+    detail += "\nRepublishing the carrier is a separate choice and may not resolve this failure."
+  }
+  detail += "\n\nApp carrier generation: \(carrierGeneration)."
+  if explicitRepublish {
+    title = "Republish the Vibecrafted runtime from this App?"
+    actionTitle = "Republish anyway"
+  } else if actionTitle == nil {
+    detail += "\nTo publish this carrier again, explicitly choose Republish anyway… in the App menu."
+  }
+  if actionTitle != nil {
+    detail += "\nThis publishes the Runtime Pack carried by this App. The installer refuses to replace a newer runtime with an older carrier."
+  }
+  return RuntimeReinstallPresentation(title: title, detail: detail, actionTitle: actionTitle)
+}
+
 /// `vibecrafted.runtime-resolution.v1`. Unknown keys are ignored on purpose —
 /// a newer owner may report more without invalidating this read.
 struct RuntimeResolutionEnvelope<Runtime: Decodable>: Decodable {

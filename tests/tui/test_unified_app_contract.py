@@ -1228,7 +1228,7 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
         )
     ]
     assert "reconcileLaunchAgentThenOfferReinstallIfNeeded" in repair
-    assert "Configuration already matches the installed generation." in repair
+    assert "Configuration inspection found no changes to make." in repair
     assert "presentHealthyRepairResult" in repair
     assert "offerReconcileAfterServiceHashMismatch" in delegate
     assert "launcher hash differs from the installed LaunchAgent" in delegate

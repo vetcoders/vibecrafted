@@ -1765,7 +1765,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       case .healthy(let envelope):
         self.lastConfigRepair = envelope
         self.reconcileLaunchAgentThenOfferReinstallIfNeeded(
-          note: "Configuration already matches the installed generation.")
+          note: "Configuration inspection found no changes to make.")
       case .absent(let reason):
         self.repairInFlight = false
         self.updateDeckPresentation()
@@ -1786,7 +1786,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     guard let install = canonicalInstall, let environment = canonicalRuntimeEnvironment else {
       repairInFlight = false
       updateDeckPresentation()
-      offerRuntimePackReinstall(configuration: note)
+      offerRuntimePackReinstall(
+        configuration: note,
+        serviceFailure: runtimeResolutionFailure ?? "The runtime could not be confirmed for service repair.")
       return
     }
     reconcileControlPlaneEye(install: install, environment: environment) { [weak self] result in
@@ -1797,7 +1799,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       case .success:
         self.presentHealthyRepairResult(note: note)
       case .failure(let detail):
-        self.offerRuntimePackReinstall(configuration: note + "\n\n" + detail.message)
+        self.offerRuntimePackReinstall(configuration: note, serviceFailure: detail.message)
       }
     }
   }
@@ -1964,33 +1966,61 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   /// Normal opening never reaches here — it resolves whatever is installed —
   /// so replacing a runtime stays something the Founder asks for, with the
   /// generation that would be written named before the fact.
-  private func offerRuntimePackReinstall(configuration: String, explicitRepublish: Bool = false) {
+  private func offerRuntimePackReinstall(
+    configuration: String, serviceFailure: String? = nil, explicitRepublish: Bool = false
+  ) {
+    guard !repairInFlight, runtimeActionPreflight == nil, serverActionInFlight == nil
+    else { return }
+    // Reuse the owner's fingerprint-bound resolver. A missing or stale cached
+    // launch contract cannot justify either an absence claim or an upgrade.
+    repairInFlight = true
+    updateDeckPresentation()
+    resolveInstalledRuntime(forceRefresh: true) { [weak self] resolution in
+      guard let self else { return }
+      self.repairInFlight = false
+      self.updateDeckPresentation()
+      self.presentRuntimePackReinstall(
+        resolution: resolution, configuration: configuration,
+        serviceFailure: serviceFailure, explicitRepublish: explicitRepublish)
+    }
+  }
+
+  private func presentRuntimePackReinstall(
+    resolution: RuntimeContract, configuration: String,
+    serviceFailure: String?, explicitRepublish: Bool
+  ) {
     guard !repairInFlight, runtimeActionPreflight == nil, serverActionInFlight == nil
     else { return }
     let identity = currentProductUpdateIdentity()
-    if !explicitRepublish, let installed = identity.packGeneration,
-      !shouldOfferRuntimeUpgrade(installed: installed, carrier: identity.appGeneration) {
-      runtimeAdvisory = installed == identity.appGeneration
-        ? "Runtime already current. " + configuration
-        : "The carrier is not proven newer than the installed runtime. " + configuration
-      applyRuntimePackMenuState()
-      return
+    let presentationResolution: RuntimeResolution<String>
+    let canUpgrade: Bool
+    switch resolution {
+    case .ready(let install):
+      let installed = install.root.lastPathComponent
+      presentationResolution = .ready(installed)
+      canUpgrade = shouldOfferRuntimeUpgrade(installed: installed, carrier: identity.appGeneration)
+    case .absent(let reason):
+      presentationResolution = .absent(reason)
+      canUpgrade = false
+    case .unusable(let reason):
+      presentationResolution = .unusable(reason)
+      canUpgrade = false
     }
+    let presentation = runtimeReinstallPresentation(
+      resolution: presentationResolution, carrierGeneration: identity.appGeneration,
+      configuration: configuration, serviceFailure: serviceFailure,
+      canUpgrade: canUpgrade, explicitRepublish: explicitRepublish)
     let confirmation = NSAlert()
     confirmation.alertStyle = .warning
-    confirmation.messageText = explicitRepublish
-      ? "Republish the Vibecrafted runtime from this App?"
-      : "Upgrade the Vibecrafted runtime from this App?"
-    let installed = canonicalInstall.map { "Installed generation: \($0.root.lastPathComponent).\n" }
-      ?? "No usable runtime is currently installed.\n"
-    confirmation.informativeText =
-      installed
-      + configuration + "\n"
-      + "This publishes the Runtime Pack carried by this App"
-      + (signedCarrierRevisions.map { " (source \(String($0.source.prefix(8))))" } ?? "")
-      + ". The installer refuses to replace a newer runtime with an older carrier."
+    confirmation.messageText = presentation.title
+    confirmation.informativeText = presentation.detail
+    guard let actionTitle = presentation.actionTitle else {
+      confirmation.addButton(withTitle: "OK")
+      confirmation.runModal()
+      return
+    }
     confirmation.addButton(withTitle: "Cancel")
-    confirmation.addButton(withTitle: explicitRepublish ? "Republish anyway" : "Upgrade")
+    confirmation.addButton(withTitle: actionTitle)
     guard confirmation.runModal() == .alertSecondButtonReturn else { return }
     repairInFlight = true
     updateDeckPresentation()
@@ -2195,7 +2225,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       self.repairInFlight = false
       self.updateDeckPresentation()
       if case .failure(let reconcileError) = result {
-        self.offerRuntimePackReinstall(configuration: reconcileError.message)
+        self.offerRuntimePackReinstall(configuration: "", serviceFailure: reconcileError.message)
       }
     }
   }
