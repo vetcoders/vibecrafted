@@ -129,12 +129,40 @@ with the same evidence/digest resumes partial deletion or returns its settlement
 original failed/restored/missing history remains intact. Publication drift requires
 a new inventory and review. Source/fixture success is not host cleanup acceptance.
 
-The old rescue `pre-rescue` capture remains a specific residual. Its directory
-labels have aggregate hashes but no historical per-leaf hashes. The existing
-rescue owner must authenticate each original capture token, separate the 21
-generation-directory payloads from four configuration and three agent-skills directory
-captures, validate owned generation contents through carrier lineage, and preserve
-all config/state and unproven leaves through the drift owner before proposing
-disposal. The three changed generations need separate proof/preservation; neither
-`.DS_Store` speculation nor a new aggregate inventory closes their ownership.
-This admission path refuses rescue captures and never rewrites `label.json`.
+The same reviewed owner also accepts one exact `releases/<version>` generation
+or `.installer-backups/rescue/<attempt>/pre-rescue` capture. Use the same inventory,
+evidence, plan and admitted digest commands above with that target. These kinds
+add `kind: generation` or `kind: rescue` to the existing schema. Generation roles
+require an original receipt directory binding. Rescue roles require the adjacent
+archived original receipt and matching raw SHA256, original roots, unchanged
+label bytes, and each exact captured source-path/type/token binding. Capture
+basenames are path hashes; original source names establish version identity.
+Unknown top-level captures and unavailable carrier lineage refuse.
+
+The leaf review distinguishes `owned-carrier` (exact carrier digest/size/mode),
+`owned-manifest` (exact transformed manifest hash), and `preserve` (every changed,
+unknown, config, skills or pointer leaf). Ordinary strict generation acceptance
+is unchanged; reviewed preservation does not declare a changed carrier healthy.
+All preserved bytes use the same content-addressed drift archive and bounded
+receipt checkpoints before disposal. Current, rollback, pending, process and
+provider pins still refuse, including on resumed apply. An interrupted deletion
+may release only its authenticated historical directory claim while verifying
+current publication; unrelated missing recovery backups remain errors.
+
+For rescue, `label.json` has the sole `retain-original-label` role. Its bytes,
+inode and original location remain unchanged when reviewed capture payload is
+removed. The original archived receipt also remains untouched. Durable plans and
+compact receipts bind this retained evidence; ordinary retirement recognizes only
+that exact settled label-only tree. The old aggregate can remain unavailable:
+the receipt explicitly attributes current inventory and preservation to reviewed
+admission, never to a reconstructed original preimage. Changed generations use
+this same narrow path when original directory/carrier lineage is authentic;
+missing binding or pinned generations remain residuals. No label rewrite,
+`.DS_Store` speculation, recursive whole-payload archive or deletion bypass is
+part of this contract.
+
+Reviewed evidence/plan/state/receipt documents use an explicit 128 MiB bound
+through the same stable unique-file reader; ordinary runtime manifests keep
+their 16 MiB bound. Large preserved leaves stream through the existing descriptor
+copy owner and stable raw-SHA256 checks, without a manifest-size ceiling or
+whole-file memory allocation. A document beyond its bound refuses before mutation.

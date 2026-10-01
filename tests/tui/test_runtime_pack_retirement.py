@@ -961,3 +961,443 @@ def test_linux_argv_and_dependency_paths_pin_even_with_lsof(tmp_path, monkeypatc
     assert ("process:123:argv", str(old)) in references
     assert ("process:123:environment", str(old)) in references
     assert "must-not-persist" not in json.dumps(references)
+
+
+@pytest.fixture
+def reviewed_capture(tmp_path, roots, capsys, monkeypatch, quiet_census):
+    """Authentic historical rescue label/receipt with hashed physical children."""
+    old, _ = publish(tmp_path, roots, capsys, 0)
+    real_delete = installer._runtime_retirement_delete
+
+    def keep_old(path, proof):
+        if path == old:
+            raise OSError("fixture retains historical generation")
+        return real_delete(path, proof)
+
+    monkeypatch.setattr(installer, "_runtime_retirement_delete", keep_old)
+    publish(tmp_path, roots, capsys, 1)
+    publish(tmp_path, roots, capsys, 2)
+    monkeypatch.setattr(installer, "_runtime_retirement_delete", real_delete)
+    for key in ("retirement_pending",):
+        r = receipt(roots)
+        r.get(key, {}).pop(str(old), None)
+        installer._checkpoint_runtime_install_receipt(roots["runtime_home"], r)
+    preferences = roots["product_config"] / "human-history"
+    preferences.write_bytes(b"unique configuration/history capture")
+    skills = installer.runtime_skills_dir(installer.STANDARD_VIEW_RUNTIMES[0])
+    skills.mkdir(parents=True, exist_ok=True)
+    (skills / "private-skill").write_bytes(b"unique protected skill bytes")
+    shell = Path.home() / ".zshrc"
+    shell.write_bytes(b"unique shell startup bytes")
+    attempt = roots["runtime_home"] / ".installer-backups/rescue/legacy-fixture"
+    attempt.mkdir(parents=True)
+    original = installer._capture_runtime_bound_file(
+        installer._runtime_receipt_path(roots["runtime_home"])
+    )
+    (attempt / "original-receipt.json").write_bytes(original)
+    (attempt / "original-receipt.sha256").write_text(
+        installer.hashlib.sha256(original).hexdigest() + "\n"
+    )
+    # Historical rescue captured generation directories. Only discovery is
+    # replaced; original capture/label/digest owner constructs the evidence.
+    monkeypatch.setattr(
+        installer,
+        "_runtime_rescue_capture_paths",
+        lambda *a: [old, roots["product_config"], skills, shell],
+    )
+    installer._runtime_rescue_snapshot_pre_rescue(
+        roots, receipt(roots), attempt, tmp_path / "pack-2"
+    )
+    target = attempt / "pre-rescue"
+    token = installer.hashlib.sha256(str(old).encode()).hexdigest()[:20]
+    # Exact old aggregate is now unavailable. Changed owned source and foreign
+    # hook must be archived; their names cannot silently become shipped proof.
+    for directory in (old, target / token):
+        (directory / installer._RUNTIME_GENERATION_ENTRYPOINT).write_bytes(
+            b"changed historical Python bytes"
+        )
+        (directory / "unproven-hook.py").write_bytes(b"unique unproven hook bytes")
+    return target, old, token, original
+
+
+def test_reviewed_rescue_hashed_source_binding_preserves_label_and_unknown_bytes(
+    tmp_path, roots, capsys, reviewed_capture
+):
+    target, old, token, original = reviewed_capture
+    label = (target / "label.json").read_bytes()
+    evidence_path, evidence = legacy_evidence(
+        tmp_path, capsys, target, state="restored"
+    )
+    assert evidence["kind"] == "rescue"
+    assert evidence["roles"][token] == {"role": "generation", "destination": str(old)}
+    assert evidence["leaves"][token + "/unproven-hook.py"] == "preserve"
+    assert evidence["leaves"][token + "/VERSION"] in {"owned-carrier", "owned-manifest"}
+    digest = reviewed_plan(capsys, evidence_path)
+    before_config = installer._runtime_config_digest(roots["product_config"])
+    before_skill = (
+        installer.runtime_skills_dir(installer.STANDARD_VIEW_RUNTIMES[0])
+        / "private-skill"
+    ).read_bytes()
+    code, result = retire(
+        capsys, "--legacy-evidence", str(evidence_path), "--admit-plan", digest
+    )
+    assert code == 0, result
+    assert sorted(x.name for x in target.iterdir()) == ["label.json"]
+    assert (target / "label.json").read_bytes() == label
+    assert (target.parent / "original-receipt.json").read_bytes() == original
+    wanted = {
+        b"changed historical Python bytes",
+        b"unique unproven hook bytes",
+        b"unique configuration/history capture",
+        b"unique protected skill bytes",
+        b"unique shell startup bytes",
+    }
+    archives = {
+        Path(record["archive"]).read_bytes() for record in result["preserved"].values()
+    }
+    assert wanted <= archives
+    assert result["history"]["state"] == "restored"
+    assert installer._runtime_config_digest(roots["product_config"]) == before_config
+    assert (
+        installer.runtime_skills_dir(installer.STANDARD_VIEW_RUNTIMES[0])
+        / "private-skill"
+    ).read_bytes() == before_skill
+    code, repeated = retire(
+        capsys, "--legacy-evidence", str(evidence_path), "--admit-plan", digest
+    )
+    assert code == 0 and repeated["preserved"] == result["preserved"]
+    code, ordinary = retire(capsys, "--plan")
+    assert code == 0 and not any(
+        entry["path"] == str(target) for entry in ordinary["copies"]
+    )
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "absent-review",
+        "wrong-review",
+        "stale-leaf",
+        "label",
+        "receipt",
+        "role",
+        "namespace",
+    ],
+)
+def test_reviewed_rescue_refuses_unbound_or_stale_authority(
+    tmp_path, roots, capsys, reviewed_capture, damage
+):
+    target, old, token, original = reviewed_capture
+    evidence_path, evidence = legacy_evidence(tmp_path, capsys, target)
+    digest = reviewed_plan(capsys, evidence_path)
+    if damage == "stale-leaf":
+        (target / token / "unproven-hook.py").write_bytes(b"new unique bytes")
+    elif damage == "label":
+        label = json.loads((target / "label.json").read_bytes())
+        label["paths"][0]["path"] = str(old.parent / "unbound")
+        (target / "label.json").write_text(json.dumps(label))
+    elif damage == "receipt":
+        (target.parent / "original-receipt.json").write_bytes(original + b" ")
+    elif damage == "role":
+        evidence["roles"][token]["destination"] = str(old.parent / "unbound")
+        evidence_path.write_text(json.dumps(evidence))
+    elif damage == "namespace":
+        evidence["path"] = str(tmp_path)
+        evidence_path.write_text(json.dumps(evidence))
+    options = ["--legacy-evidence", str(evidence_path)]
+    if damage != "absent-review":
+        options += ["--admit-plan", "0" * 64 if damage == "wrong-review" else digest]
+    code, result = retire(capsys, *options)
+    assert code == 2, result
+    assert (target / token / "unproven-hook.py").exists()
+    assert not result.get("preserved")
+
+
+@pytest.mark.parametrize("failure", ["archive", "partial-delete", "after-delete"])
+@pytest.mark.parametrize("kind", ["rescue", "generation"])
+def test_reviewed_rescue_resume_has_no_false_completion(
+    tmp_path, roots, capsys, monkeypatch, reviewed_capture, failure, kind
+):
+    snapshot, old, token, _ = reviewed_capture
+    target = snapshot if kind == "rescue" else old
+    unknown = (
+        target / token / "unproven-hook.py"
+        if kind == "rescue"
+        else target / "unproven-hook.py"
+    )
+    label = (snapshot / "label.json").read_bytes()
+    evidence_path, _evidence = legacy_evidence(tmp_path, capsys, target, state="failed")
+    digest = reviewed_plan(capsys, evidence_path)
+    real_archive = installer._backup_runtime_drift
+    real_delete = installer._runtime_retirement_delete
+    calls = 0
+
+    def archive(*a, **k):
+        nonlocal calls
+        result = real_archive(*a, **k)
+        calls += 1
+        if calls == 2:
+            raise OSError("fixture archive interruption")
+        return result
+
+    def delete(path, proof):
+        if path == target:
+            if failure == "partial-delete":
+                unknown.unlink()
+            else:
+                real_delete(path, proof)
+            raise OSError("fixture disposal interruption")
+        return real_delete(path, proof)
+
+    monkeypatch.setattr(
+        installer,
+        "_backup_runtime_drift",
+        archive if failure == "archive" else real_archive,
+    )
+    monkeypatch.setattr(
+        installer,
+        "_runtime_retirement_delete",
+        real_delete if failure == "archive" else delete,
+    )
+    code, result = retire(
+        capsys, "--legacy-evidence", str(evidence_path), "--admit-plan", digest
+    )
+    assert code == 2 and result["status"] == "residual"
+    assert (snapshot / "label.json").read_bytes() == label
+    assert not list(
+        (roots["runtime_home"] / ".installer-backups/retirement").glob(
+            "legacy-*.receipt.json"
+        )
+    )
+    monkeypatch.setattr(installer, "_backup_runtime_drift", real_archive)
+    monkeypatch.setattr(installer, "_runtime_retirement_delete", real_delete)
+    code, result = retire(
+        capsys, "--legacy-evidence", str(evidence_path), "--admit-plan", digest
+    )
+    assert code == 0, result
+    if kind == "rescue":
+        assert sorted(x.name for x in target.iterdir()) == ["label.json"]
+    else:
+        assert not target.exists() and str(target) not in receipt(roots)["owned_dirs"]
+    assert b"unique unproven hook bytes" in {
+        Path(x["archive"]).read_bytes() for x in result["preserved"].values()
+    }
+    assert result["history"]["state"] == "failed"
+
+
+@pytest.mark.parametrize("pin", ["provider", "live", "rollback", "pending", "current"])
+def test_reviewed_generation_keeps_pins_and_archives_changed_payload(
+    tmp_path, roots, capsys, monkeypatch, reviewed_capture, pin
+):
+    _, old, _, _ = reviewed_capture
+    evidence_path, evidence = legacy_evidence(tmp_path, capsys, old)
+    assert evidence["kind"] == "generation"
+    assert evidence["leaves"]["unproven-hook.py"] == "preserve"
+    digest = reviewed_plan(capsys, evidence_path)
+    pointer = roots["runtime_home"] / "tools/vibecrafted-current"
+    original_pointer = pointer.readlink()
+    config = Path.home() / ".codex/config.toml"
+    real_refs = installer._runtime_retirement_references
+    r = receipt(roots)
+    if pin == "provider":
+        config.parent.mkdir(exist_ok=True)
+        config.write_text(f'dependency = "{old}/python"\nsecret = "must-not-print"\n')
+    elif pin == "live":
+        monkeypatch.setattr(
+            installer,
+            "_runtime_retirement_references",
+            lambda *a, **k: [("process:fixture:cwd", str(old)), *real_refs(*a, **k)],
+        )
+    elif pin == "rollback":
+        r["retirement_rollback"]["generation"] = str(old)
+        installer._checkpoint_runtime_install_receipt(roots["runtime_home"], r)
+    elif pin == "current":
+        pointer.unlink()
+        pointer.symlink_to(old)
+    else:
+        r["install_pending"] = True
+        installer._checkpoint_runtime_install_receipt(roots["runtime_home"], r)
+    code, result = retire(
+        capsys, "--legacy-evidence", str(evidence_path), "--admit-plan", digest
+    )
+    assert code == 2 and old.is_dir()
+    assert "must-not-print" not in json.dumps(result)
+    if pin == "provider":
+        config.unlink()
+    elif pin == "live":
+        monkeypatch.setattr(installer, "_runtime_retirement_references", real_refs)
+    elif pin == "rollback":
+        installer._checkpoint_runtime_install_receipt(
+            roots["runtime_home"],
+            receipt(roots)
+            | {
+                "retirement_rollback": r["retirement_rollback"]
+                | {"generation": str(roots["runtime_home"] / "releases/9.9.1+r4")}
+            },
+        )
+    elif pin == "current":
+        pointer.unlink()
+        pointer.symlink_to(original_pointer)
+    else:
+        live = receipt(roots)
+        live.pop("install_pending")
+        installer._checkpoint_runtime_install_receipt(roots["runtime_home"], live)
+    if pin == "current":
+        # Replacing/restoring a selector creates a fresh physical identity. The
+        # old review must remain stale even after its target reference releases.
+        code, _stale = retire(
+            capsys, "--legacy-evidence", str(evidence_path), "--admit-plan", digest
+        )
+        assert code == 2 and old.exists()
+        digest = reviewed_plan(capsys, evidence_path)
+    code, result = retire(
+        capsys, "--legacy-evidence", str(evidence_path), "--admit-plan", digest
+    )
+    assert code == 0, result
+    assert not old.exists() and str(old) not in receipt(roots)["owned_dirs"]
+    assert {b"changed historical Python bytes", b"unique unproven hook bytes"} <= {
+        Path(x["archive"]).read_bytes() for x in result["preserved"].values()
+    }
+    assert installer._runtime_rescue_verify_destination(roots)[0]
+
+
+def test_reviewed_rescue_original_receipt_tamper_after_archive_refuses_resume(
+    tmp_path, roots, capsys, monkeypatch, reviewed_capture
+):
+    target, _, _, original = reviewed_capture
+    evidence_path, _ = legacy_evidence(tmp_path, capsys, target)
+    digest = reviewed_plan(capsys, evidence_path)
+    real_archive = installer._backup_runtime_drift
+
+    def interrupt(*a, **k):
+        real_archive(*a, **k)
+        raise OSError("fixture archive interruption after durable original proof")
+
+    monkeypatch.setattr(installer, "_backup_runtime_drift", interrupt)
+    code, _ = retire(
+        capsys, "--legacy-evidence", str(evidence_path), "--admit-plan", digest
+    )
+    assert code == 2
+    monkeypatch.setattr(installer, "_backup_runtime_drift", real_archive)
+    (target.parent / "original-receipt.json").write_bytes(original + b" ")
+    code, result = retire(
+        capsys, "--legacy-evidence", str(evidence_path), "--admit-plan", digest
+    )
+    assert code == 2 and "original rescue receipt" in result["reason"]
+    assert len(list(target.iterdir())) > 1
+
+
+def test_ordinary_empty_rescue_capture_keeps_original_admission(
+    tmp_path, roots, capsys, monkeypatch, quiet_census
+):
+    publish(tmp_path, roots, capsys, 0)
+    attempt = roots["runtime_home"] / ".installer-backups/rescue/empty-fixture"
+    attempt.mkdir(parents=True)
+    original = installer._capture_runtime_bound_file(
+        installer._runtime_receipt_path(roots["runtime_home"])
+    )
+    (attempt / "original-receipt.json").write_bytes(original)
+    (attempt / "original-receipt.sha256").write_text(
+        installer.hashlib.sha256(original).hexdigest()
+    )
+    monkeypatch.setattr(installer, "_runtime_rescue_capture_paths", lambda *a: [])
+    installer._runtime_rescue_snapshot_pre_rescue(
+        roots, receipt(roots), attempt, tmp_path / "pack-0"
+    )
+    code, result = retire(capsys)
+    assert code == 0, result
+    assert not (attempt / "pre-rescue").exists()
+    assert (attempt / "original-receipt.json").read_bytes() == original
+
+
+def test_reviewed_large_evidence_and_leaf_use_existing_stream_owner(
+    tmp_path, roots, capsys, reviewed_capture, monkeypatch
+):
+    target, _, token, _ = reviewed_capture
+    large = target / token / "unproven-large-history"
+    with large.open("wb") as output:
+        output.write(b"private prefix")
+        output.truncate(installer._MAX_RUNTIME_BOUND_FILE_BYTES + 4096)
+    expected = installer._sha256_path(large)
+    evidence_path, _ = legacy_evidence(tmp_path, capsys, target)
+    # JSON whitespace is legal; this crosses the old manifest-reader ceiling
+    # while leaving closed inventory/roles exactly the production owner output.
+    with evidence_path.open("ab") as output:
+        output.write(b" " * (installer._MAX_RUNTIME_BOUND_FILE_BYTES + 1))
+    digest = reviewed_plan(capsys, evidence_path)
+    real_capture = installer._capture_runtime_bound_file
+
+    def document_only(path, **kwargs):
+        assert path != large, "large leaf must stream through the existing copy owner"
+        assert not path.name.startswith("legacy-file-"), (
+            "archive verification must stream"
+        )
+        return real_capture(path, **kwargs)
+
+    monkeypatch.setattr(installer, "_capture_runtime_bound_file", document_only)
+    code, result = retire(
+        capsys, "--legacy-evidence", str(evidence_path), "--admit-plan", digest
+    )
+    assert code == 0, result
+    archive = Path(result["preserved"][token + "/unproven-large-history"]["archive"])
+    assert archive.stat().st_size == installer._MAX_RUNTIME_BOUND_FILE_BYTES + 4096
+    assert installer._sha256_path(archive) == expected
+    assert archive.stat().st_nlink == 1 and archive.stat().st_mode & 0o777 == 0o600
+    assert not large.exists()
+
+
+def test_reviewed_document_size_ceiling_remains_closed(
+    tmp_path, roots, capsys, reviewed_capture
+):
+    target, _, token, _ = reviewed_capture
+    evidence_path, _ = legacy_evidence(tmp_path, capsys, target)
+    with evidence_path.open("r+b") as output:
+        output.truncate(installer._RUNTIME_LEGACY_DOCUMENT_MAX_BYTES + 1)
+    code, result = retire(capsys, "--plan", "--legacy-evidence", str(evidence_path))
+    assert code == 2 and "size limit" in result["reason"]
+    assert (target / token / "unproven-hook.py").exists()
+
+
+@pytest.mark.parametrize("kind", ["rescue", "generation"])
+def test_reviewed_disposed_root_replacement_never_claims_completion(
+    tmp_path, roots, capsys, monkeypatch, reviewed_capture, kind
+):
+    snapshot, old, _, _ = reviewed_capture
+    target = snapshot if kind == "rescue" else old
+    evidence_path, _ = legacy_evidence(tmp_path, capsys, target)
+    digest = reviewed_plan(capsys, evidence_path)
+    real_delete = installer._runtime_retirement_delete
+
+    def replace_root(path, proof):
+        real_delete(path, proof)
+        if path != target:
+            return
+        if kind == "rescue":
+            moved = path.with_name("moved-original")
+            path.rename(moved)
+            path.mkdir()
+            (moved / "label.json").rename(path / "label.json")
+        else:
+            path.mkdir()
+            (path / "foreign-data").write_bytes(b"preserve replacement occupant")
+
+    monkeypatch.setattr(installer, "_runtime_retirement_delete", replace_root)
+    code, result = retire(
+        capsys, "--legacy-evidence", str(evidence_path), "--admit-plan", digest
+    )
+    assert code == 2 and result["status"] == "residual"
+    assert target.exists()
+    assert not list(
+        (roots["runtime_home"] / ".installer-backups/retirement").glob(
+            "legacy-*.receipt.json"
+        )
+    )
+    monkeypatch.setattr(installer, "_runtime_retirement_delete", real_delete)
+    code, result = retire(
+        capsys, "--legacy-evidence", str(evidence_path), "--admit-plan", digest
+    )
+    assert code == 2 and target.exists()
+    if kind == "generation":
+        assert (
+            target / "foreign-data"
+        ).read_bytes() == b"preserve replacement occupant"
