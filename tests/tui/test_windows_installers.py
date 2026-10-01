@@ -9,7 +9,9 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 import tarfile
+import uuid
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -53,7 +55,7 @@ def test_windows_installer_identity_matches_version_and_upgrade_code() -> None:
     build = BUILD_SCRIPT.read_text(encoding="utf-8")
 
     assert f'UpgradeCode = "{STABLE_UPGRADE_CODE}"' in identity
-    assert f'ProductCode = "{STABLE_PRODUCT_CODE}"' in identity
+    assert 'ProductCode = "REPLACE_PRODUCT_CODE"' in identity
     assert 'ProductName = "Vibecrafted. Framework"' in identity
     assert 'ProductName = "Vibecrafted"' not in identity
     assert 'ProductVersion = "0.0.0.0"' in identity
@@ -76,7 +78,7 @@ def test_windows_installer_identity_matches_version_and_upgrade_code() -> None:
     assert "-b " not in candle_block
     assert '-b "staging=' in build
     assert '-b "out=' in build
-    assert STABLE_PRODUCT_CODE in build
+    assert "scripts\\windows_product_code.py" in build
     assert "windows-x64" in build
     assert "Write-SiblingSha256" in build
     assert "canonicalStem" in build or "Vibecrafted_${repoVersion}" in build
@@ -96,10 +98,10 @@ def test_windows_installer_emits_canonical_windows_x64_names() -> None:
     # Short WiX bind names remain for Burn SourceFile=Vibecrafted.msi.
     assert 'Join-Path $OutDir "Vibecrafted.msi"' in build
     assert 'Join-Path $OutDir "Vibecrafted.exe"' in build
-    assert STABLE_PRODUCT_CODE in build
-    pack_builder = (REPO_ROOT / "scripts" / "build-windows-x64-runtime-pack.ps1").read_text(
-        encoding="utf-8"
-    )
+    assert "scripts\\windows_product_code.py" in build
+    pack_builder = (
+        REPO_ROOT / "scripts" / "build-windows-x64-runtime-pack.ps1"
+    ).read_text(encoding="utf-8")
     assert (
         "Vibecrafted_RuntimePack_${version}-${releaseDate}-${shortSha}-win32-x64.tar.gz"
         in pack_builder
@@ -109,8 +111,8 @@ def test_windows_installer_emits_canonical_windows_x64_names() -> None:
     # Half-set VIBECRAFTED_SOURCE_REVISION alone fails distribution_manifest
     # ("environment source provenance must provide an atomic pair").
     assert "VIBECRAFTED_SOURCE_OWNER_REPO" in pack_builder
-    assert '$env:VIBECRAFTED_SOURCE_REVISION = $SourceRevision' in pack_builder
-    assert 'vetcoders/vibecrafted' in pack_builder
+    assert "$env:VIBECRAFTED_SOURCE_REVISION = $SourceRevision" in pack_builder
+    assert "vetcoders/vibecrafted" in pack_builder
 
 
 def test_windows_ci_builds_msi_exe_from_pack_artifact() -> None:
@@ -126,7 +128,9 @@ def test_windows_ci_builds_msi_exe_from_pack_artifact() -> None:
     assert "build Windows x64 MSI/EXE (unsigned)" in workflow
     assert "needs: windows-runtime-pack" in workflow
     assert "build-windows-installers.ps1" in workflow
-    assert "Download Runtime Pack into build/ for build-windows-installers.ps1" in workflow
+    assert (
+        "Download Runtime Pack into build/ for build-windows-installers.ps1" in workflow
+    )
     assert (
         "Build MSI/EXE from downloaded pack (no second pack build; out under packaging/windows/out)"
         in workflow
@@ -136,9 +140,12 @@ def test_windows_ci_builds_msi_exe_from_pack_artifact() -> None:
         "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4"
         in workflow
     )
-    assert workflow.count(
-        "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4"
-    ) >= 4
+    assert (
+        workflow.count(
+            "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4"
+        )
+        >= 4
+    )
     assert "d3f86a106a0bac45b974a628896ce1e5585c70a7" not in workflow
     assert "path: build" in workflow
     assert "build-windows-x64-runtime-pack.ps1" in workflow
@@ -156,7 +163,10 @@ def test_windows_ci_builds_msi_exe_from_pack_artifact() -> None:
     assert "windows-x64-installers" in installer_job
     assert "VIBECRAFTED_WINDOWS_AUTHENTICODE_THUMBPRINT" not in installer_job
     assert "signtool" not in installer_job.lower()
-    assert "LOCALAPPDATA" not in installer_job or "does not install into LOCALAPPDATA" in installer_job
+    assert (
+        "LOCALAPPDATA" not in installer_job
+        or "does not install into LOCALAPPDATA" in installer_job
+    )
     assert "install.ps1" not in installer_job
 
 
@@ -232,7 +242,10 @@ def test_ps1_generation_uninstall_stages_runner_outside_live_tree() -> None:
     gen_uninstall = gen_uninstall.split("if (-not $Pack)", 1)[0]
     assert "vc-rt-uninstall-" in gen_uninstall
     assert 'foreach ($name in @("bin", "scripts", "vibecrafted-core"))' in gen_uninstall
-    assert "Copy-Item -LiteralPath $src -Destination (Join-Path $stageGen $name)" in gen_uninstall
+    assert (
+        "Copy-Item -LiteralPath $src -Destination (Join-Path $stageGen $name)"
+        in gen_uninstall
+    )
     assert 'Join-Path $stageGen "bin\\python.exe"' in gen_uninstall
     assert "Remove-Item -LiteralPath $stageRoot -Recurse -Force" in gen_uninstall
     # Live generation python is only used as the copy source, never invoked.
@@ -250,7 +263,9 @@ def test_ps1_uninstall_clears_windows_product_root() -> None:
     """
     installer = INSTALL_SCRIPT.read_text(encoding="utf-8")
     assert "function Clear-WindowsProductRootAfterUninstall" in installer
-    assert "Clear-WindowsProductRootAfterUninstall -ExitCode $uninstallCode" in installer
+    assert (
+        "Clear-WindowsProductRootAfterUninstall -ExitCode $uninstallCode" in installer
+    )
     assert "Clear-WindowsProductRootAfterUninstall -ExitCode $installCode" in installer
     assert 'Join-Path $local "Vibecrafted"' in installer
     assert "uninstall left residue under $vcProductRoot" in installer
@@ -406,7 +421,7 @@ def test_windows_installer_license_comes_from_repo_license() -> None:
     build = BUILD_SCRIPT.read_text(encoding="utf-8")
     readme = README.read_text(encoding="utf-8")
 
-    # Full legal company name from vista-win LICENSE Company definition.
+    # Full legal company name from this product's LICENSE.
     full_licensor = "Libraxis AI Sp. z o.o."
     # ASCII brand + Framework for WiX RichEdit; keep former name. No math-sans.
     licensed_work = "Vibecrafted. Framework (formerly Vetcoders Skills)."
@@ -636,7 +651,7 @@ def test_windows_ci_installs_msi_then_doctor_then_uninstall() -> None:
     """The matrix must install the MSI it just built, then doctor, then remove it.
 
     Does not rebuild the Runtime Pack. download-artifact stays on the known-good
-    v4 SHA. The stable ProductCode is read from Identity.wxi, not minted here.
+    v4 SHA. The versioned ProductCode comes from the shared generator.
     """
     workflow = (REPO_ROOT / ".github" / "workflows" / "install-windows.yml").read_text(
         encoding="utf-8"
@@ -667,8 +682,7 @@ def test_windows_ci_installs_msi_then_doctor_then_uninstall() -> None:
     assert 'InstallScope="perUser"' in msi_job
     assert "LocalAppDataFolder" in msi_job
     assert "ProgramFiles64Folder" in msi_job
-    assert STABLE_PRODUCT_CODE in msi_job
-    assert "Identity.wxi" in msi_job
+    assert "windows_product_code.py" in msi_job
     assert "VC_SKIP_TERMINAL_LAUNCH=1" in msi_job
     assert "msiexec.exe" in msi_job
     assert "cmd.exe" not in msi_job
@@ -685,7 +699,7 @@ def test_windows_ci_installs_msi_then_doctor_then_uninstall() -> None:
     assert "DOCTOR_SUMMARY=" in msi_job
     assert "& $cmd doctor" in msi_job
     assert "{$stable}" in msi_job
-    assert f'$stable = "{STABLE_PRODUCT_CODE}"' in msi_job
+    assert "$stable = (& python scripts/windows_product_code.py).Trim()" in msi_job
     assert "/x" in msi_job
     assert "uninstall left residue under $vcHome" in msi_job
     assert "expected exactly one user PATH entry" in msi_job
@@ -731,8 +745,7 @@ def test_windows_ci_installs_exe_then_doctor_then_uninstall() -> None:
     assert 'InstallScope="perUser"' in exe_job
     assert "LocalAppDataFolder" in exe_job
     assert "ProgramFiles64Folder" in exe_job
-    assert STABLE_PRODUCT_CODE in exe_job
-    assert "Identity.wxi" in exe_job
+    assert "windows_product_code.py" in exe_job
     assert 'bal:Overridable="yes"' in exe_job
     assert "VC_SKIP_TERMINAL_LAUNCH=1" in exe_job
     assert "Do not pass /install" in exe_job
@@ -740,9 +753,7 @@ def test_windows_ci_installs_exe_then_doctor_then_uninstall() -> None:
     assert exe_job.count("WaitForExit()") >= 2
     assert "Unblock-File" in exe_job
     argument_lines = [
-        line.strip()
-        for line in exe_job.splitlines()
-        if "$psi.Arguments" in line
+        line.strip() for line in exe_job.splitlines() if "$psi.Arguments" in line
     ]
     assert len(argument_lines) == 2, argument_lines
     install_args = argument_lines[0]
@@ -772,3 +783,40 @@ def test_windows_ci_installs_exe_then_doctor_then_uninstall() -> None:
     assert "windows-x64-exe-install-logs" in exe_job
     assert "EXE_INSTALL_COMMAND=" in exe_job
     assert "EXE_UNINSTALL_COMMAND=" in exe_job
+
+
+def test_product_codes_are_stable_per_version_and_change_for_upgrades() -> None:
+    def code(version: str) -> str:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "scripts/windows_product_code.py"),
+                "--version",
+                version,
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout.strip()
+
+    assert code("4.3.1") == STABLE_PRODUCT_CODE
+    assert code("4.3.1") == code("4.3.1+rebuild")
+    versions = ["4.3.2", "4.4.0", "5.0.0"]
+    codes = [code(version) for version in versions]
+    assert len({STABLE_PRODUCT_CODE, *codes}) == 4
+    for version, value in zip(versions, codes, strict=True):
+        assert str(uuid.UUID(value)).upper() == value
+        assert code(version) == value
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts/windows_product_code.py"),
+            "--version",
+            "invalid",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0

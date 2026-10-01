@@ -34,7 +34,7 @@ def _event(
     }[verdict]
     claim_digest = hashlib.sha256(f"{run_id}:{revision}:{verdict}".encode()).hexdigest()
     receipt = TrustReceiptV1.issue(
-        repo_root="/tmp/vibecrafted-ledger-test",
+        repo_root=str(Path(__file__).resolve().parent),
         run_id=run_id,
         commit_sha="a" * 40,
         trust_verdict=trust_verdict,
@@ -69,6 +69,10 @@ def _event(
 def _isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = tmp_path / "crafted"
     monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    if sys.platform == "win32":
+        # Snapshot fixtures precede ledger initialization. Create their root
+        # with the production privacy policy rather than inherited temp ACLs.
+        settlement_ledger._secure_control_plane_home()
     return home
 
 
@@ -534,3 +538,46 @@ def test_v2_emission_is_fail_closed_before_transient_event(
     with pytest.raises(OSError, match="ledger unavailable"):
         emit_settlement_event(event)
     assert transient_calls == []
+
+
+def test_tail_repair_without_posix_pread(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Native Windows lacks pread; recovery must still preserve the hash chain."""
+    monkeypatch.delattr(os, "pread", raising=False)
+    original = _event(run_id="run-portable-tail", revision=1, verdict="failed", tui="x")
+    settlement_ledger._append_settlement_fact(original)
+    path = settlement_ledger.settlement_ledger_path()
+    with path.open("ab") as stream:
+        stream.write(b'{"interrupted":')
+    duplicate = settlement_ledger._append_settlement_fact(original)
+    assert duplicate.appended is False
+    snapshot = settlement_ledger.read_settlement_ledger()
+    assert snapshot["integrity"]["valid"] is True
+    assert snapshot["counts"]["historical_transitions"]["total"] == 1
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows ACL")
+def test_windows_initializer_creates_private_custom_root(tmp_path: Path) -> None:
+    path = tmp_path / "new-private-root" / "ledger.jsonl"
+    settlement_ledger.initialize_settlement_ledger(path)
+    snapshot = settlement_ledger.read_settlement_ledger(path)
+    assert snapshot["integrity"]["valid"] is True
+    assert snapshot["counts"]["historical_transitions"]["total"] == 0
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows ACL")
+@pytest.mark.parametrize("target", ["home", "ledger", "lock"])
+def test_windows_ledger_rejects_other_user_write_access(target: str) -> None:
+    settlement_ledger.initialize_settlement_ledger()
+    path = settlement_ledger.settlement_ledger_path()
+    selected = {
+        "home": path.parent,
+        "ledger": path,
+        "lock": path.with_name(".settlement_ledger.lock"),
+    }[target]
+    subprocess.run(
+        ["icacls", str(selected), "/grant", "*S-1-1-0:(W)"],
+        check=True,
+        capture_output=True,
+    )
+    with pytest.raises(PermissionError, match="writable by another principal"):
+        settlement_ledger.read_settlement_ledger()

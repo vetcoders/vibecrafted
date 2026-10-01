@@ -520,3 +520,89 @@ def test_pre_commit_hook_runs_the_host_path_gate() -> None:
     assert "payload_hygiene.py" in hook
     assert "--host-paths" in hook
     assert "--null" in hook
+
+
+def test_pre_commit_refuses_host_path_introduced_in_a_staged_rename(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args], cwd=repo, capture_output=True, text=True, check=True
+        )
+
+    git("init", "-q")
+    original = repo / "old.txt"
+    original.write_text("anonymous line\n" * 50, encoding="utf-8")
+    git("add", "old.txt")
+    git(
+        "-c",
+        "user.name=fixture",
+        "-c",
+        "user.email=fixture@vetcoders.io",
+        "commit",
+        "-qm",
+        "baseline",
+    )
+    git("mv", "old.txt", "renamed.txt")
+    renamed = repo / "renamed.txt"
+    renamed.write_text(
+        renamed.read_text() + "/Users/fixture-account/private\n", encoding="utf-8"
+    )
+    git("add", "renamed.txt")
+    assert git("diff", "--cached", "--name-status").stdout.startswith("R")
+    scripts = repo / "scripts"
+    scripts.mkdir()
+    shutil.copy2(SCANNER, scripts / "payload_hygiene.py")
+    shutil.copy2(REPO_ROOT / "scripts/project-python", scripts / "project-python")
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "scripts/hooks/pre-commit")],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "staged text names a host account path" in result.stdout + result.stderr
+    assert "renamed.txt" in result.stdout + result.stderr
+
+
+def test_pre_commit_uses_project_python_instead_of_old_host(tmp_path: Path) -> None:
+    import os
+
+    repo = tmp_path / "repo"
+    scripts = repo / "scripts"
+    scripts.mkdir(parents=True)
+    for name in ("payload_hygiene.py", "project-python"):
+        shutil.copy2(REPO_ROOT / "scripts" / name, scripts / name)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "staged.txt").write_text(
+        "/Users/fixture-account/private\n", encoding="utf-8"
+    )
+    subprocess.run(["git", "add", "staged.txt"], cwd=repo, check=True)
+    old_bin = tmp_path / "old-host-bin"
+    old_bin.mkdir()
+    old_python = old_bin / "python3"
+    old_python.write_text(
+        "#!/bin/sh\necho old-host-python >&2\nexit 93\n", encoding="utf-8"
+    )
+    old_python.chmod(0o755)
+    env = {
+        **os.environ,
+        "PYTHON": sys.executable,
+        "PATH": str(old_bin) + os.pathsep + os.environ["PATH"],
+    }
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "scripts/hooks/pre-commit")],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "staged.txt" in result.stdout + result.stderr
+    assert "host-account hit(s)" in result.stdout
+    assert "old-host-python" not in result.stderr

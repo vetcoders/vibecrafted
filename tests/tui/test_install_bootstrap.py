@@ -532,18 +532,25 @@ def test_channel_archive_checksum_is_matched_by_release_name(
     assert not stage_marker.exists()
 
 
-def test_missing_python_is_named_before_the_channel_manifest_is_fetched(
+@pytest.mark.parametrize("missing_tool", ["python3", "file"])
+def test_missing_runtime_dependency_is_named_before_the_channel_manifest_is_fetched(
     tmp_path: Path,
+    missing_tool: str,
 ) -> None:
-    """Without python3 the manifest parse came back empty and the operator was
-    told the channel was incomplete. The tool preflight must run first."""
+    """Name missing Python/native-format tools before fetching or installing."""
     tool_bin = tmp_path / "tools-bin"
     home = tmp_path / "home"
     capture = tmp_path / "curl-urls.txt"
     tool_bin.mkdir()
     home.mkdir()
-    for tool in ("uname", "dirname", "grep", "tar", "openssl"):
-        resolved = shutil.which(tool, path="/usr/bin:/bin:/usr/sbin:/sbin")
+    for tool in ("uname", "dirname", "grep", "tar", "openssl", "python3", "file"):
+        if tool == missing_tool:
+            continue
+        resolved = (
+            sys.executable
+            if tool == "python3"
+            else shutil.which(tool, path="/usr/bin:/bin:/usr/sbin:/sbin")
+        )
         if resolved is not None:
             (tool_bin / tool).symlink_to(resolved)
     _write_executable(
@@ -572,7 +579,7 @@ def test_missing_python_is_named_before_the_channel_manifest_is_fetched(
         for line in result.stderr.splitlines()
         if line.startswith("Error: missing required tools:")
     )
-    assert "python3" in missing_line.split()
+    assert missing_tool in missing_line.split()
     assert "hint:" in result.stderr
     assert "Channel manifest" not in result.stdout + result.stderr
     assert not capture.exists(), "network was touched before the tool preflight"

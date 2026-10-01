@@ -20,11 +20,11 @@ cask "vibecrafted-app" do
   app "Vibecrafted.app"
 
   caveats <<~EOS
-    macOS 14+ arm64 only. There is no Intel build and no native Windows
-    package. Verify the adjacent .dmg.sha256 before first launch if you
+    macOS 14+ arm64 only. There is no Intel build of this cask.
+    Verify the adjacent .dmg.sha256 before first launch if you
     downloaded the DMG by hand.
 
-    Fill version.csv (4.3.0, YYYYMMDD, sha8) and sha256 from the
+    Fill version.csv (4.3.1, YYYYMMDD, sha8) and sha256 from the
     published asset name after `make publish-release`.
   EOS
 end

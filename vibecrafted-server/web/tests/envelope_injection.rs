@@ -547,7 +547,11 @@ async fn http_sse_puts_the_block_in_the_only_result_event() {
 async fn run_without_meta_field_gets_the_derived_nonce() {
     let home = TempHome::new("derived");
     write_run(&home.path, None);
-    let store = MemStore::new(vec![envelope("msg-derived", "maciej", "no producer needed")]);
+    let store = MemStore::new(vec![envelope(
+        "msg-derived",
+        "maciej",
+        "no producer needed",
+    )]);
     let app = router(&home.path, Arc::clone(&store));
     let (status, body) = post(&app, ping_body(), "application/json", Some(RUN)).await;
     assert_eq!(status, StatusCode::OK);

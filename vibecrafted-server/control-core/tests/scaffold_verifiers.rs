@@ -117,7 +117,9 @@ fn explicit_repo_is_verifier_cwd_for_simple_file_probes() {
     let report = doctor_plan_root_in_repo(&root, Some(&repo)).expect("doctor");
 
     assert!(
-        !codes(&report).iter().any(|code| code.starts_with("verifier_")),
+        !codes(&report)
+            .iter()
+            .any(|code| code.starts_with("verifier_")),
         "errors={:?}",
         report.errors
     );
