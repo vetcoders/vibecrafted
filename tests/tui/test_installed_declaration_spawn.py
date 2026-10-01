@@ -156,7 +156,11 @@ def packaged_generation(tmp_path_factory: pytest.TempPathFactory) -> Path:
     (gen / "VERSION").write_text(GENERATION_VERSION + "\n", encoding="utf-8")
     (gen / "runtime-manifest.json").write_text("{}\n", encoding="utf-8")
     (gen / "python" / "bin").mkdir(parents=True)
-    (gen / "python" / "bin" / RAW_INTERPRETER).symlink_to(raw)
+    # Runtime Packs materialize their interpreter. Homebrew framework Python
+    # resolves a symlink back to the host in sys.executable, hiding this
+    # generation from the provider-boundary bootstrap scrub. Copy the binary
+    # so this packaged-layout fixture retains its real invocation identity.
+    shutil.copy2(raw, gen / "python" / "bin" / RAW_INTERPRETER)
     _write(gen / "bin" / "python3", PACKAGED_BOOTSTRAP)
     shutil.copytree(
         CORE_PACKAGE,
@@ -199,6 +203,14 @@ class PaneHost:
         self.home.mkdir()
         self.stubs = tmp_path / "pane-stubs"
         _write(self.stubs / "codex", PROVIDER_STUB)
+        # A real login shell runs the host's global path_helper first. Restore
+        # this fixture's PATH in its own login profile before resolving codex.
+        # Keep the preflight below: the generated script must never reach a
+        # real provider, even on a host with a CLI installed globally.
+        self.path = f"{self.stubs}{os.pathsep}/usr/bin:/bin:/usr/sbin:/sbin"
+        (self.home / ".zprofile").write_text(
+            f"export PATH={shlex.quote(self.path)}\n", encoding="utf-8"
+        )
         self.events = tmp_path / "provider-events.jsonl"
         # The composer resolves the default `--base HEAD` to one commit
         # (repo_selection.resolve_repository_base, 5b25a6cd): an empty
@@ -214,7 +226,7 @@ class PaneHost:
         env = {
             "HOME": str(self.home),
             "ZDOTDIR": str(self.home),
-            "PATH": f"{self.stubs}{os.pathsep}/usr/bin:/bin:/usr/sbin:/sbin",
+            "PATH": self.path,
             "TMPDIR": "/tmp",
             "LANG": "en_US.UTF-8",
             "TERM": "xterm-256color",
@@ -296,6 +308,53 @@ class PaneHost:
             json.loads(meta.read_text(encoding="utf-8"))
             for meta in sorted(runs.glob("*/meta.json"))
         ]
+
+
+def test_packaged_raw_interpreter_keeps_generation_identity(
+    tmp_path: Path, packaged_generation: Path
+) -> None:
+    raw = packaged_generation / "python" / "bin" / RAW_INTERPRETER
+    probe = subprocess.run(
+        [str(raw), "-c", "import sys; print(sys.executable); import vibecrafted_core"],
+        cwd=tmp_path,
+        env={"HOME": str(tmp_path), "PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=15,
+    )
+    assert Path(probe.stdout.strip()).parent == raw.parent, probe
+    assert probe.returncode != 0, probe
+    assert "ModuleNotFoundError: No module named 'vibecrafted_core'" in probe.stderr
+
+
+@pytest.mark.parametrize("restore_fixture_path", [True, False])
+def test_pane_login_preflight_isolates_or_refuses_foreign_provider(
+    tmp_path: Path, packaged_generation: Path, restore_fixture_path: bool
+) -> None:
+    host = PaneHost(tmp_path, packaged_generation)
+    foreign = tmp_path / "foreign-bin"
+    sentinel = tmp_path / "FOREIGN_PROVIDER_STARTED"
+    _write(
+        foreign / "codex", f"#!/bin/sh\ntouch {shlex.quote(str(sentinel))}\nexit 99\n"
+    )
+    host.path = f"{foreign}:{host.path}"
+    if restore_fixture_path:
+        # The parent PATH is hostile; the fixture login profile restores it.
+        script = host.write_pane_script("probe.sh", "codex --version")
+        result = host.run_pane(script)
+        assert result.returncode == 0, result
+        assert "codex-cli 0.0.0-fixture" in result.stdout, result
+    else:
+        # If login startup really selects a foreign CLI, refuse before exec.
+        (host.home / ".zprofile").write_text(
+            f"export PATH={shlex.quote(host.path)}\n", encoding="utf-8"
+        )
+        script = host.write_pane_script("refused.sh", "codex --version")
+        with pytest.raises(pytest.fail.Exception, match="resolves another codex"):
+            host.run_pane(script)
+    assert host.provider_events() == []
+    assert not sentinel.exists()
 
 
 def _compose(host: PaneHost, root: Path) -> list[str]:
