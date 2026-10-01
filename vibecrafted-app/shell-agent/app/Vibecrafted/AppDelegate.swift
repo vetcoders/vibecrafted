@@ -2455,7 +2455,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
           productUpdateExtractApp(from: dmg, to: destination, completion: completion)
         },
         closeUIAfterHelperArmed: { [weak self] in self?.requestQuit() },
-        checkTimeout: 180))
+        checkTimeout: 180,
+        settleCaptures: { [weak self] completion in
+          guard let self else { return }
+          let home = self.craftedHomeURL()
+          let helper = self.resolveLiveUpdateChannel().helperURL
+          let runtimeHome = self.currentRuntimeHome()
+          let destination = Bundle.main.bundleURL
+          DispatchQueue.global(qos: .utility).async {
+            let result = settleProductUpdateLocalCaptures(
+              home: home, destination: destination, helper: helper, runtimeHome: runtimeHome)
+            Task { @MainActor in completion(result.mapError { $0 as Error }) }
+          }
+        }))
     coordinator.onProgress = { [weak self] _ in
       self?.renderProductUpdatePanel()
       self?.updateDeckPresentation()
@@ -2937,9 +2949,31 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
         }
         return
       }
-      try? FileManager.default.removeItem(at: pendingURL)
-      productUpdateStartupAdoption = .none
-      connectCommandDeck()
+      let helper = resolveLiveUpdateChannel().helperURL
+      let runtimeHome = currentRuntimeHome()
+      DispatchQueue.global(qos: .utility).async { [weak self] in
+        let settlement = settleProductUpdateCapture(
+          handoff: handoff, helper: helper, runtimeHome: runtimeHome)
+        DispatchQueue.main.async {
+          guard let self else { return }
+          switch settlement {
+          case .success:
+            do {
+              try FileManager.default.removeItem(at: pendingURL)
+              self.productUpdateStartupAdoption = .none
+            } catch {
+              self.retainProductUpdateEvidence(
+                handoff, reason: "The update completed, but its pending record could not be cleared. \(error.localizedDescription)")
+              self.productUpdateStartupAdoption = .retained
+            }
+          case .failure(let error):
+            self.retainProductUpdateEvidence(
+              handoff, reason: "The update published, but capture cleanup did not finish. \(error.localizedDescription)")
+            self.productUpdateStartupAdoption = .retained
+          }
+          self.connectCommandDeck()
+        }
+      }
     case .unpublished, .rolledBack:
       if let prior = productUpdateOwnedPriorApp(at: handoff.capturePath) {
         _ = beginProductUpdateRecover(handoff: handoff, prior: prior)

@@ -380,7 +380,10 @@ func productUpdateObserveInstallerPublication(runtimeHome: URL) -> ProductUpdate
   }
   let generation = pointerRoot["version"] as? String ?? ""
   let receiptVersion = receipt["version"] as? String ?? ""
-  let pendingFlags = ["install_pending", "config_pending", "uninstall_pending", "config_conflicts"]
+  let pendingFlags = [
+    "install_pending", "config_pending", "uninstall_pending", "config_conflicts",
+    "rescue_pending", "foundation_service_pending",
+  ]
     .contains { installerPendingPublicationValue(receipt[$0]) }
   let phase = receipt["install_phase"] as? String ?? ""
   let midPublish = phase == "preparing" || phase == "ancillary"

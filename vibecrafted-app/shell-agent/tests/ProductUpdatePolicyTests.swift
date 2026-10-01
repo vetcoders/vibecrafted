@@ -354,7 +354,8 @@ struct ProductUpdatePolicyTests {
     },
     closeUI: @escaping () -> Void = {},
     timeout: TimeInterval = 15,
-    homeURL: URL? = nil
+    homeURL: URL? = nil,
+    settleCaptures: ((@escaping @MainActor @Sendable (Result<Void, Error>) -> Void) -> Void)? = nil
   ) -> ProductUpdateCoordinator {
     let staging = FileManager.default.temporaryDirectory.appendingPathComponent(
       "vc-update-stage-\(UUID().uuidString)", isDirectory: true)
@@ -412,7 +413,8 @@ struct ProductUpdatePolicyTests {
           return {}
         },
         closeUIAfterHelperArmed: closeUI,
-        checkTimeout: timeout))
+        checkTimeout: timeout,
+        settleCaptures: settleCaptures))
   }
 
   static func testCoordinatorMissingFeedNeverInstalls() throws {
@@ -504,6 +506,7 @@ struct ProductUpdatePolicyTests {
   static func testCoordinatorSameAppRepairPublishesPack() throws {
     var packs = 0
     var replaces = 0
+    var settlements = 0
     let coordinator = makeCoordinator(
       installed: { matchingInstalled(pack: previous) },
       installPack: { admitted, _, completion in
@@ -518,6 +521,10 @@ struct ProductUpdatePolicyTests {
       replaceApp: { _, _ in
         replaces += 1
         return {}
+      },
+      settleCaptures: { completion in
+        settlements += 1
+        completion(.success(()))
       })
     coordinator.checkForUpdates()
     try wait { coordinator.progress.canInstall }
@@ -525,7 +532,28 @@ struct ProductUpdatePolicyTests {
     try wait { coordinator.progress.phase == .success }
     try require(packs == 1, "same-app repair did not use the installer")
     try require(replaces == 0, "same-app repair replaced the UI")
+    try require(settlements == 1, "same-app repair skipped capture settlement")
     try require(coordinator.progress.claimsHealthy, "matching repair did not claim healthy")
+  }
+
+  static func testCoordinatorCleanupFailureRemainsRetryable() throws {
+    let coordinator = makeCoordinator(
+      installed: { matchingInstalled(pack: previous) },
+      installPack: { admitted, _, completion in
+        completion(.success(ProductUpdateIdentity(
+          appGeneration: admitted.generation, packGeneration: admitted.generation,
+          sourceRevision: admitted.sourceRevision)))
+        return {}
+      },
+      settleCaptures: { completion in
+        completion(.failure(Failure(message: "cleanup failed")))
+      })
+    coordinator.checkForUpdates()
+    try wait { coordinator.progress.canInstall }
+    coordinator.installUpdate()
+    try wait { coordinator.progress.phase == .retained }
+    try require(!coordinator.progress.claimsHealthy, "cleanup failure reported clean")
+    try require(coordinator.receipt.packPublished, "cleanup failure erased publication truth")
   }
 
   static func testCoordinatorHelperUnableToReplaceIsRetained() throws {
@@ -1328,6 +1356,7 @@ struct ProductUpdatePolicyTests {
     let pendingBodies = [
       "{\"schema\":\"vibecrafted.runtime-install.v1\",\"version\":\"\(generation)\",\"config_pending\":{\"staged\":true}}",
       "{\"schema\":\"vibecrafted.runtime-install.v1\",\"version\":\"\(generation)\",\"uninstall_pending\":true}",
+      "{\"schema\":\"vibecrafted.runtime-install.v1\",\"version\":\"\(generation)\",\"install_pending\":false,\"rescue_pending\":true}",
       "{\"schema\":\"vibecrafted.runtime-install.v1\",\"version\":\"\(generation)\",\"config_transaction\":{}}",
       "{\"schema\":\"vibecrafted.runtime-install.v1\",\"version\":\"\(generation)\",\"config_conflicts\":{\"keep\":\"x\"}}",
       "{\"schema\":\"vibecrafted.runtime-install.v1\",\"version\":\"\"}",
@@ -1449,7 +1478,8 @@ struct ProductUpdatePolicyTests {
     var closed = 0
     let blocked = FileManager.default.temporaryDirectory.appendingPathComponent(
       "vc-handoff-blocked-\(UUID().uuidString)")
-    FileManager.default.createFile(atPath: blocked.path, contents: Data(), attributes: nil)
+    try FileManager.default.createDirectory(
+      at: productUpdatePendingHandoffURL(home: blocked), withIntermediateDirectories: true)
     let coordinator = makeCoordinator(
       replaceApp: { request, completion in
         completion(
@@ -1526,6 +1556,7 @@ struct ProductUpdatePolicyTests {
     try testCoordinatorReadyOffersInstallNotQuit()
     try testCoordinatorInstallsNewerAppViaReplacement()
     try testCoordinatorSameAppRepairPublishesPack()
+    try testCoordinatorCleanupFailureRemainsRetryable()
     try testCoordinatorHelperUnableToReplaceIsRetained()
     try testCoordinatorInterruptDuringDownloadRetains()
     try testCoordinatorInterruptDuringPackDoesNotLie()

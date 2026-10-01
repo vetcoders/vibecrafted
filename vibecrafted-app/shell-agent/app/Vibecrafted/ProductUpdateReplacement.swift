@@ -450,3 +450,111 @@ func decodeReplacementReceipt(_ data: Data) -> ProductUpdateReplacementReceipt? 
     sourceIdentity: root["source_identity"] as? String,
     priorIdentity: root["prior_identity"] as? String)
 }
+
+/// Dispose rollback bytes only through the existing helper, which re-observes
+/// installer publication and signed identity under the destination flock.
+/// Exit 13 is a live replacement helper, not permission to bypass its lock.
+func settleProductUpdateCapture(
+  handoff: ProductUpdateHandoffRecord, helper: URL?, runtimeHome: URL
+) -> Result<Void, ProductUpdateReplacementError> {
+  guard let helper else { return .failure(.helperMissing) }
+  let arguments = [
+    helper.path, "--mode", "settle",
+    "--source", handoff.destination,
+    "--destination", handoff.destination,
+    "--receipt", handoff.receiptURL,
+    "--admission", handoff.admissionURL,
+    "--journal", handoff.journalURL,
+    "--transaction", handoff.transactionID,
+  ]
+  return runProductUpdateCaptureSettlement(arguments: arguments, runtimeHome: runtimeHome)
+}
+
+/// Same-generation UI repair can complete a CLI replacement that previously
+/// retained recovery. Only our unique transaction registry is a discovery
+/// surface; the helper still validates every receipt, inode and publication.
+func settleProductUpdateLocalCaptures(
+  home: URL, destination: URL, helper: URL?, runtimeHome: URL
+) -> Result<Void, ProductUpdateReplacementError> {
+  let registry = home.appendingPathComponent("vibecrafted-product-update/transactions")
+  let latest = home.appendingPathComponent("vibecrafted-product-update/app-capture-latest.json")
+  guard FileManager.default.fileExists(atPath: registry.path)
+    || FileManager.default.fileExists(atPath: latest.path)
+  else { return .success(()) }
+  guard let helper, let identity = productUpdateContentIdentityToken(at: destination) else {
+    return .failure(.helperMissing)
+  }
+  do {
+    var references: [(URL, String)] = []
+    if FileManager.default.fileExists(atPath: latest.path) {
+      let data = try Data(contentsOf: latest)
+      guard let projection = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+        let receipt = projection["receipt"] as? String,
+        let admission = projection["admission"] as? String
+      else { return .failure(.receiptMissing) }
+      references.append((URL(fileURLWithPath: receipt), admission))
+    }
+    let transactions = FileManager.default.fileExists(atPath: registry.path)
+      ? try FileManager.default.contentsOfDirectory(at: registry, includingPropertiesForKeys: nil)
+      : []
+    for transaction in transactions {
+      for name in ["receipt.json", "replacement-receipt.json"] {
+        let url = transaction.appendingPathComponent(name)
+        if FileManager.default.fileExists(atPath: url.path) {
+          references.append((url, name == "receipt.json"
+            ? transaction.appendingPathComponent("admission.json").path
+            : url.path + ".admission.json"))
+        }
+      }
+    }
+    var seen: Set<String> = []
+    for (url, admission) in references {
+      guard seen.insert(url.path).inserted else { continue }
+      guard let receipt = productUpdateObservedReplacementReceipt(at: url) else {
+        return .failure(.receiptMissing)
+      }
+      guard receipt.destination == destination.path, receipt.sourceIdentity == identity,
+        receipt.operation == "replace"
+      else { continue }
+      guard let journal = receipt.journal, let txn = receipt.transaction else {
+        return .failure(.receiptMissing)
+      }
+      let result = runProductUpdateCaptureSettlement(arguments: [
+        helper.path, "--mode", "settle", "--source", destination.path,
+        "--destination", destination.path, "--receipt", url.path,
+        "--admission", admission, "--journal", journal, "--transaction", txn,
+      ], runtimeHome: runtimeHome)
+      if case .failure = result { return result }
+    }
+    return .success(())
+  } catch {
+    return .failure(.helperFailed(error.localizedDescription))
+  }
+}
+
+private func runProductUpdateCaptureSettlement(
+  arguments: [String], runtimeHome: URL
+) -> Result<Void, ProductUpdateReplacementError> {
+  let deadline = Date().addingTimeInterval(20)
+  repeat {
+    switch runProductUpdateBoundProcess(
+      executable: "/bin/bash", arguments: arguments, timeout: 120,
+      extraEnvironment: ["VIBECRAFTED_RUNTIME_HOME": runtimeHome.path])
+    {
+    case .failure:
+      return .failure(.helperFailed("The capture settlement helper could not start."))
+    case .success(let result):
+      if result.status == 13 && !result.timedOut {
+        Thread.sleep(forTimeInterval: 0.1)
+        continue
+      }
+      guard !result.timedOut && result.status == 0 else {
+        return .failure(.helperFailed(
+          String(data: result.stderr, encoding: .utf8)
+            ?? "Capture cleanup did not finish; the transaction remains retryable."))
+      }
+      return .success(())
+    }
+  } while Date() < deadline
+  return .failure(.destinationBusy)
+}

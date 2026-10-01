@@ -31,6 +31,8 @@ final class ProductUpdateCoordinator {
     var extractApp: ((URL, URL, @escaping ProductUpdateURLCompletion) -> ProductUpdateCancel)?
     var closeUIAfterHelperArmed: () -> Void
     var checkTimeout: TimeInterval
+    var settleCaptures:
+      ((@escaping @MainActor @Sendable (Result<Void, Error>) -> Void) -> Void)? = nil
   }
 
   private let dependencies: Dependencies
@@ -480,10 +482,27 @@ final class ProductUpdateCoordinator {
           self.receipt.packPublished = true
           self.receipt.boundary = .packPublished
           if productUpdateClaimsHealthy(installed: published, candidate: staged.candidate) {
-            self.finish(
-              deriveProductUpdateProgress(
-                phase: .success, installed: published, candidate: staged.candidate),
-              token: token, terminal: .committed)
+            let finish: @MainActor @Sendable (Result<Void, Error>) -> Void = { [weak self] result in
+              guard let self, self.generation == token else { return }
+              switch result {
+              case .success:
+                self.finish(
+                  deriveProductUpdateProgress(
+                    phase: .success, installed: published, candidate: staged.candidate),
+                  token: token, terminal: .committed)
+              case .failure(let error):
+                self.finish(
+                  deriveProductUpdateProgress(
+                    phase: .retained, installed: published, candidate: staged.candidate,
+                    detail: "The update published, but capture cleanup did not finish. \(error.localizedDescription)"),
+                  token: token, terminal: .retained)
+              }
+            }
+            if let settle = self.dependencies.settleCaptures {
+              settle(finish)
+            } else {
+              finish(.success(()))
+            }
           } else {
             self.finish(
               deriveProductUpdateProgress(
@@ -509,8 +528,23 @@ final class ProductUpdateCoordinator {
       self.receipt.boundary = .appReplacing
       let identity = captureProductUpdateProcessIdentity(
         pid: ProcessInfo.processInfo.processIdentifier)
-      let receiptURL = staged.staging.appendingPathComponent("replacement-receipt.json")
       let transactionID = UUID().uuidString.lowercased()
+      let transactionDirectory = self.dependencies.home()
+        .appendingPathComponent("vibecrafted-product-update/transactions/\(transactionID)")
+      do {
+        try FileManager.default.createDirectory(
+          at: transactionDirectory, withIntermediateDirectories: true,
+          attributes: [.posixPermissions: 0o700])
+      } catch {
+        self.finish(
+          deriveProductUpdateProgress(
+            phase: .retained, installed: self.dependencies.installed(),
+            candidate: staged.candidate,
+            detail: "Could not save this update transaction. \(error.localizedDescription)"),
+          token: token, terminal: .retained)
+        return
+      }
+      let receiptURL = transactionDirectory.appendingPathComponent("replacement-receipt.json")
       let request = ProductUpdateReplacementRequest(
         waitPID: identity?.pid ?? ProcessInfo.processInfo.processIdentifier,
         waitStart: identity?.startTime,
