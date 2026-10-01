@@ -20987,23 +20987,32 @@ def _runtime_rescue_apply_shell_stanzas(
             )
             continue
         try:
-            content = rcfile.read_text(encoding="utf-8")
+            content = rcfile.read_bytes().decode("utf-8")
         except OSError as exc:
             residuals.append({"path": str(rcfile), "reason": str(exc)[:400]})
-            continue
-        if _sha256_bytes(content.encode("utf-8")) != stanza.get("current_sha256"):
-            residuals.append(
-                {
-                    "path": str(rcfile),
-                    "reason": "shell rc changed after plan; doctor --fix-rc was not applied",
-                }
-            )
             continue
         if _rc_has_unclosed_vibecrafted_block(content):
             residuals.append(
                 {
                     "path": str(rcfile),
                     "reason": "unclosed Vibecrafted block; attribution is ambiguous",
+                }
+            )
+            continue
+        current_digest = _sha256_bytes(content.encode("utf-8"))
+        planned_postimage = stanza.get("proposed_sha256") or ""
+        if (
+            re.fullmatch(r"[0-9a-f]{64}", planned_postimage)
+            and current_digest == planned_postimage
+        ):
+            # Verification may retry after the planned edit was already applied.
+            # Preserve the postimage and any original backup; invent no history.
+            continue
+        if current_digest != stanza.get("current_sha256"):
+            residuals.append(
+                {
+                    "path": str(rcfile),
+                    "reason": "shell rc changed after plan; doctor --fix-rc was not applied",
                 }
             )
             continue

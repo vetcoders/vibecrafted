@@ -939,6 +939,80 @@ def test_fix_rc_is_explicit_planned_stanza_preserving_user_content(installed, ca
     assert unclosed.read_text(encoding="utf-8").endswith("export KEEP_ME=1\n")
 
 
+@pytest.mark.parametrize("rcname", [".zprofile", ".zshrc"])
+@pytest.mark.parametrize("keep_backup", [True, False])
+def test_shell_stanza_planned_postimage_retry_is_unchanged(
+    roots, monkeypatch, rcname, keep_backup
+):
+    rcfile = Path.home() / rcname
+    preimage = (
+        "# user aliases\nalias keep=true\n" + installer._shell_source_line() + "\n"
+    ).encode()
+    rcfile.write_bytes(preimage)
+    rcfile.chmod(0o640)
+    stanza = next(
+        item
+        for item in installer._runtime_rescue_shell_plan()["stanzas"]
+        if item["path"] == str(rcfile)
+    )
+    assert stanza["action"] == "doctor_fix_rc"
+    assert installer._runtime_rescue_apply_shell_stanzas([stanza]) == []
+    assert hashlib.sha256(rcfile.read_bytes()).hexdigest() == stanza["proposed_sha256"]
+    backup = installer._runtime_rescue_rc_backup_path(rcfile)
+    assert backup.read_bytes() == preimage
+    assert rcfile.stat().st_mode & 0o777 == 0o640
+    assert backup.stat().st_mode & 0o777 == 0o640
+    if not keep_backup:
+        backup.unlink()
+    before = {p: (p.read_bytes(), p.stat()) for p in (rcfile, backup) if p.exists()}
+
+    def unexpected_write(*_args, **_kwargs):
+        pytest.fail("planned postimage retry must not write shell or backup bytes")
+
+    monkeypatch.setattr(installer, "_atomic_bytes_file", unexpected_write)
+    monkeypatch.setattr(installer.shutil, "copy2", unexpected_write)
+    assert installer._runtime_rescue_apply_shell_stanzas([stanza]) == []
+    assert {p: (p.read_bytes(), p.stat()) for p in before} == before
+    assert backup.exists() is keep_backup
+
+
+@pytest.mark.parametrize("digest", [None, "", "invalid", "A" * 64])
+def test_shell_stanza_retry_requires_valid_postimage_digest(roots, digest):
+    rcfile = Path.home() / ".zprofile"
+    rcfile.write_text("# already changed\n", encoding="utf-8")
+    stanza = {
+        "path": str(rcfile),
+        "action": "doctor_fix_rc",
+        "current_sha256": "0" * 64,
+        "proposed_sha256": digest,
+    }
+    before = (rcfile.read_bytes(), rcfile.stat())
+    residuals = installer._runtime_rescue_apply_shell_stanzas([stanza])
+    assert (
+        residuals[0]["reason"]
+        == "shell rc changed after plan; doctor --fix-rc was not applied"
+    )
+    assert (rcfile.read_bytes(), rcfile.stat()) == before
+    assert not installer._runtime_rescue_rc_backup_path(rcfile).exists()
+
+
+@pytest.mark.parametrize("unsafe", ["path", "unclosed"])
+def test_shell_stanza_postimage_keeps_integrity_guards(roots, unsafe):
+    rcfile = Path.home() / ("foreign-rc" if unsafe == "path" else ".zprofile")
+    content = b"# >>> vibecrafted >>>\n" if unsafe == "unclosed" else b"# user\n"
+    rcfile.write_bytes(content)
+    stanza = {
+        "path": str(rcfile),
+        "action": "doctor_fix_rc",
+        "current_sha256": "0" * 64,
+        "proposed_sha256": hashlib.sha256(content).hexdigest(),
+    }
+    before = (rcfile.read_bytes(), rcfile.stat())
+    assert installer._runtime_rescue_apply_shell_stanzas([stanza])
+    assert (rcfile.read_bytes(), rcfile.stat()) == before
+    assert not installer._runtime_rescue_rc_backup_path(rcfile).exists()
+
+
 def test_plan_does_not_execute_user_startup_marker(installed, capsys):
     paths, payload, _ = installed
     _plant_missing_historical(paths)
@@ -1647,6 +1721,93 @@ def test_verification_failed_retry_keeps_pending_then_finalizes(
     assert receipt["rescue"]["verified"] is True
     assert receipt["rescue"]["healthy_restorepoint"] is True
     assert receipt["rescue"]["schema"] == "vibecrafted.runtime-rescue.v1"
+
+
+@pytest.mark.parametrize("drift", ["none", "foreign", "crlf"])
+def test_verification_resume_preserves_planned_shell_postimage(
+    installed, capsys, monkeypatch, drift
+):
+    paths, payload, _ = installed
+    _plant_missing_historical(paths)
+    rcfile = Path.home() / ".zprofile"
+    preimage = (
+        "# user login\nexport KEEP_ME=1\n" + installer._shell_source_line() + "\n"
+    ).encode()
+    rcfile.write_bytes(preimage)
+    rcfile.chmod(0o640)
+    _, plan = _plan(payload, capsys)
+    original = installer._runtime_rescue_interactive_shell_check
+
+    def fail_verification(*_args, **_kwargs):
+        return {
+            "ok": "false",
+            "reason": "injected verification block",
+            "returncode": "1",
+            "stderr": "",
+        }
+
+    monkeypatch.setattr(
+        installer, "_runtime_rescue_interactive_shell_check", fail_verification
+    )
+    code, first = _apply(payload, capsys, plan["plan_digest"])
+    assert code == 2
+    assert first["status"] == "residual"
+    assert first["reason"] == "injected verification block"
+    journal_path = installer._runtime_rescue_journal_path(paths["runtime_home"])
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    assert journal["phase"] == installer.RUNTIME_RESCUE_PHASE_VERIFICATION
+    stanza = next(
+        item for item in journal["shell"]["stanzas"] if item["path"] == str(rcfile)
+    )
+    assert hashlib.sha256(rcfile.read_bytes()).hexdigest() == stanza["proposed_sha256"]
+    assert stanza["current_sha256"] == hashlib.sha256(preimage).hexdigest()
+    pending = _load_receipt(paths)["rescue_pending"]
+    assert pending["plan_digest"] == plan["plan_digest"]
+    assert pending["binding"] == journal["binding"]
+    backup = installer._runtime_rescue_rc_backup_path(rcfile)
+    assert backup.read_bytes() == preimage
+    assert rcfile.stat().st_mode & 0o777 == 0o640
+    if drift == "foreign":
+        rcfile.write_bytes(rcfile.read_bytes() + b"export FOUNDER_EDIT=1\n")
+    elif drift == "crlf":
+        rcfile.write_bytes(rcfile.read_bytes().replace(b"\n", b"\r\n"))
+    before = {p: (p.read_bytes(), p.stat()) for p in (rcfile, backup)}
+    archive = Path(journal["archived_receipt"]["path"])
+    archive_before = (archive.read_bytes(), archive.stat())
+    label = Path(journal["pre_rescue_snapshot"]["path"]) / "label.json"
+    label_before = (label.read_bytes(), label.stat())
+
+    def unexpected_copy(*_args, **_kwargs):
+        pytest.fail("verification resume must not copy or recreate evidence")
+
+    monkeypatch.setattr(installer, "_runtime_rescue_interactive_shell_check", original)
+    monkeypatch.setattr(installer.shutil, "copy2", unexpected_copy)
+    code, second = _apply(payload, capsys, plan["plan_digest"])
+    assert {p: (p.read_bytes(), p.stat()) for p in before} == before
+    assert (archive.read_bytes(), archive.stat()) == archive_before
+    resumed = json.loads(journal_path.read_text(encoding="utf-8"))
+    assert resumed["binding"] == journal["binding"]
+    assert resumed["archived_receipt"] == journal["archived_receipt"]
+    assert resumed["pre_rescue_snapshot"] == journal["pre_rescue_snapshot"]
+    receipt = _load_receipt(paths)
+    if drift == "none":
+        assert code == 0
+        assert second["status"] == "rescued"
+        assert second["healthy_restorepoint"] is True
+        assert resumed["phase"] == installer.RUNTIME_RESCUE_PHASE_COMPLETED
+        assert not receipt.get("rescue_pending")
+        assert receipt["rescue"]["verified"] is True
+    else:
+        assert (label.read_bytes(), label.stat()) == label_before
+        assert code == 2
+        assert second["status"] == "residual"
+        assert (
+            second["reason"]
+            == "shell rc changed after plan; doctor --fix-rc was not applied"
+        )
+        assert second["healthy_restorepoint"] is False
+        assert resumed["phase"] == installer.RUNTIME_RESCUE_PHASE_VERIFICATION
+        assert receipt["rescue_pending"] == pending
 
 
 def test_owned_pending_identity_requires_validated_binding():
