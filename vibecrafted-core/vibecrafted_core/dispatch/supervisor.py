@@ -2350,6 +2350,8 @@ class DispatchSupervisor:
             f"- repo: {meta.repo}",
             f"- baseline_branch: {meta.baseline.get('branch', '')}",
             f"- baseline_head: {meta.baseline.get('head', '')}",
+            f"- allow_red_baseline: {str(meta.baseline.get('allow_red_baseline', False)).lower()}",
+            f"- baseline_verification: {json.dumps(meta.baseline.get('verification', {}), ensure_ascii=False)}",
             f"- validated_copy: {self.artifacts_dir / 'validated-dispatch.toml'}",
             f"- updated: {written.isoformat(timespec='seconds')}",
             (
