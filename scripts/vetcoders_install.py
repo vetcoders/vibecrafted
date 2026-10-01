@@ -12993,6 +12993,121 @@ def _openssl_for_release_key_probe() -> Path | None:
     return None
 
 
+def _doctor_generation_integrity_findings() -> list[DoctorFinding]:
+    """Read-only pack inventory diff, independent of the install-state receipt.
+
+    Reuse admission's walker (including its .DS_Store exception and symlink
+    refusal). This is content drift detection, not signed release admission or
+    an attribution of every difference to a human: installation and Python can
+    also add files. Keep those differences visible, but list source edits first.
+    """
+    component = "runtime-generation:integrity"
+    try:
+        generation = resolve_active_generation()
+    except (OSError, RuntimeError) as exc:
+        return [DoctorFinding("warn", component, f"integrity not checked: {exc}")]
+
+    try:
+        contract = _runtime_pack_contract_module()
+        provenance_path = generation / contract.PROVENANCE_NAME
+        if provenance_path.is_symlink():
+            raise ValueError("Runtime Pack provenance is a symlink")
+        provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+        payload = provenance.get("payload") if isinstance(provenance, dict) else None
+        files = payload.get("files") if isinstance(payload, dict) else None
+        if (
+            not isinstance(payload, dict)
+            or payload.get("algorithm") != "sha256"
+            or not isinstance(files, list)
+            or not files
+        ):
+            raise ValueError(
+                "Runtime Pack payload.files inventory is missing or invalid"
+            )
+        expected: dict[str, dict[str, Any]] = {}
+        for record in files:
+            if not isinstance(record, dict) or set(record) != {
+                "path",
+                "sha256",
+                "size",
+                "mode",
+            }:
+                raise ValueError("invalid Runtime Pack inventory record")
+            relative = record["path"]
+            if (
+                not isinstance(relative, str)
+                or not relative
+                or Path(relative).is_absolute()
+                or ".." in Path(relative).parts
+                or Path(relative).as_posix() != relative
+                or relative in expected
+                or not isinstance(record["sha256"], str)
+                or re.fullmatch(r"[0-9a-f]{64}", record["sha256"]) is None
+                or type(record["size"]) is not int
+                or record["size"] < 0
+                or not isinstance(record["mode"], str)
+                or re.fullmatch(r"[0-7]{4}", record["mode"]) is None
+            ):
+                raise ValueError("invalid or duplicate Runtime Pack inventory record")
+            expected[relative] = record
+        # All files may have been deleted after installation. Admission still
+        # rejects an empty pack; diagnosis must name the missing files instead.
+        observed = {
+            item["path"]: item
+            for item in contract._payload_files(generation, allow_empty=True)
+        }
+    except (OSError, RuntimeError, ValueError, UnicodeError) as exc:
+        return [
+            DoctorFinding(
+                "fail",
+                component,
+                f"generation {generation.name}: integrity could not be verified: {exc}",
+            )
+        ]
+
+    changed = sorted(
+        path
+        for path in expected.keys() & observed.keys()
+        if expected[path] != observed[path]
+    )
+    missing = sorted(expected.keys() - observed.keys())
+    additional = sorted(observed.keys() - expected.keys())
+    count = len(changed) + len(missing) + len(additional)
+    if not count:
+        return [
+            DoctorFinding(
+                "ok",
+                component,
+                f"generation {generation.name}: {len(expected)} files match "
+                "payload.files (sha256/size/mode); no missing or additional files",
+            )
+        ]
+    rows = [(path, "CHANGED") for path in changed]
+    rows.extend((path, "MISSING") for path in missing)
+    rows.extend((path, "ADDITIONAL") for path in additional)
+    rows.sort(
+        key=lambda row: (
+            _runtime_rescue_inventory_is_generation_artifact(row[0])
+            or "__pycache__" in Path(row[0]).parts,
+            row[0],
+        )
+    )
+    detail = "\n".join(f"  {kind}: {path}" for path, kind in rows[:20])
+    if count > 20:
+        detail += f"\n  ... {count - 20} more paths"
+    return [
+        DoctorFinding(
+            "warn",
+            component,
+            f"generation {generation.name}: {count} file differences against payload.files "
+            f"({len(changed)} changed, {len(missing)} missing, {len(additional)} additional). "
+            "Manual edits will be lost at the next installation; move changes to source. "
+            "Differences can also include installer-generated files and Python bytecode; "
+            f"source paths are listed first.\n{detail}",
+        )
+    ]
+
+
 def _doctor_runtime_receipt_findings() -> list[DoctorFinding]:
     """Compare the runtime install receipt against what is actually on disk.
 
@@ -13167,6 +13282,10 @@ def _doctor_foundation_service_findings() -> list[DoctorFinding]:
 def run_doctor(store_path: Path, state: InstallState) -> list[DoctorFinding]:
     """Run full installation health check."""
     findings: list[DoctorFinding] = []
+
+    # Inspect the active generation even if install state is missing and the
+    # remainder of the installer doctor returns early.
+    findings.extend(_doctor_generation_integrity_findings())
 
     # 0. Framework version. The install state may predate the stamped-identity
     # contract (or be written by a lane that never filled it); the published

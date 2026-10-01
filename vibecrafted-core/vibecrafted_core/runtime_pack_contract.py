@@ -360,7 +360,7 @@ def _validate_revision(value: str, *, field: str) -> str:
     return value
 
 
-def _payload_files(root: Path) -> list[dict[str, Any]]:
+def _payload_files(root: Path, *, allow_empty: bool = False) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for path in sorted(root.rglob("*")):
         relative = path.relative_to(root).as_posix()
@@ -392,7 +392,7 @@ def _payload_files(root: Path) -> list[dict[str, Any]]:
                 "mode": f"{stat.S_IMODE(mode):04o}",
             }
         )
-    if not records:
+    if not records and not allow_empty:
         raise RuntimePackContractError("Runtime Pack payload is empty")
     return records
 

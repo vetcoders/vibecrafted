@@ -28,6 +28,23 @@ vibecrafted doctor --release      # VERSION vs GitHub Latest + last source gate
 | Skill-copy shadows  | No per-runtime skill directory (`~/.junie/skills`, `~/.agy/skills`, `~/.grok/skills`, `~/.cursor/skills`) holds a real directory copy of a bundled skill shadowing the canonical `~/.agents/skills` view |
 | Skill-root links    | Every per-runtime skill root is a real directory. One reached through a symlink or junction, or resolving into the skill store, is named (`skill-root:<runtime>`) rather than skipped in silence         |
 
+## Generation integrity (`runtime-generation:integrity`)
+
+Every ordinary doctor run compares the active generation with
+`runtime-pack-provenance.json` → `payload.files`. It hashes the files and checks
+their sizes and modes, reporting `CHANGED`, `MISSING`, and `ADDITIONAL` paths.
+The report lists up to 20 paths and counts the remainder. Move manual fixes into
+the source checkout: changes made directly in an installed generation will be
+lost at the next installation.
+
+This is a difference report against the pack inventory, not proof that a person
+authored every difference. Installer-generated files and Python bytecode can
+also appear as additional files; source changes are listed before those paths.
+Only the admission contract's `.DS_Store` exception is ignored. Invalid or
+missing inventory, symlinks, and unreadable payloads fail verification; an
+unresolvable active generation is explicitly reported as not checked. Doctor
+does not repair or rebaseline the generation.
+
 ## Skill-copy shadows (`shadow-dir:<runtime>/<skill>`)
 
 Installers before 3.x materialized **real directory copies** of `vc-*` skills into per-runtime skill dirs instead of views. Those copies survive next to the canonical `~/.agents/skills` symlink view, drift silently, and an agent that reads both directories (Junie does) sees a stale duplicate. Neither install, update nor doctor used to notice: shadow pruning covered only `claude`/`codex` and only symlinks, and orphan pruning covered only names that had left the bundle.
