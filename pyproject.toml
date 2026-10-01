@@ -49,3 +49,6 @@ follow_imports = "skip"
 [tool.pytest.ini_options]
 addopts = "--import-mode=importlib"
 pythonpath = ["vibecrafted-core", "vibecrafted-acp"]
+markers = [
+    "product_update_physical: mandatory macOS acceptance using authentic candidate and prior signed release carriers",
+]

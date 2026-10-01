@@ -154,6 +154,13 @@ OPEN_ALERTS="$(gh api "/repos/$REPO/code-scanning/alerts?state=open&ref=refs/hea
   --jq 'length')"
 test "$OPEN_ALERTS" = "0" || die "$OPEN_ALERTS open CodeQL alert(s) remain on main"
 
+# Source CI cannot certify replacement/rollback of signed applications. Run the
+# mandatory physical gate on these exact candidate bytes and an explicitly
+# provisioned prior release before creating or uploading any public draft.
+VIBECRAFTED_UPDATE_FIXTURE_ROOT="$DIST" \
+VIBECRAFTED_UPDATE_SOURCE_REVISION="$HEAD_SHA" \
+  make --no-print-directory test-product-update-physical
+
 if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
   test "$(gh release view "$TAG" --repo "$REPO" --json isDraft --jq .isDraft)" = "true" \
     || die "refusing to mutate already-published release $TAG"

@@ -54,7 +54,7 @@ jobs:
 
       - name: Run installer and product tests
         timeout-minutes: 90
-        run: make test
+        run: make test-source
 
       # The portable channel is the only artifact non-macOS users ever get, so
       # the tag gate must prove it builds from the immutable tag source — not

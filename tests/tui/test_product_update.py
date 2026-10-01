@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import pwd
+import re
 import secrets
 import shutil
 import signal
@@ -27,11 +28,13 @@ HELPER = REPO_ROOT / "scripts/vc-app-update.sh"
 
 # tests/conftest.py strips every VIBECRAFTED_* variable before each test
 # (fe814585), so the signed-fixture roots named in _fail_missing_fixture never
-# reached _signed_search_roots. They are deliberate launch-time inputs, never
+# reached the fixture loader. They are deliberate launch-time inputs, never
 # ambient launcher env: capture them at import, before that isolation runs.
 _FIXTURE_ROOT_KEYS = (
     "VIBECRAFTED_UPDATE_FIXTURE_ROOT",
     "VIBECRAFTED_UPDATE_PRIOR_FIXTURE_ROOT",
+    "VIBECRAFTED_UPDATE_SOURCE_REVISION",
+    "VIBECRAFTED_UPDATE_PRIOR_SOURCE_REVISION",
 )
 _LAUNCH_FIXTURE_ROOTS = {key: os.environ.get(key, "") for key in _FIXTURE_ROOT_KEYS}
 
@@ -151,22 +154,12 @@ def _function_calls_install_signed_pack_allow_older(fn: ast.AST) -> bool:
     return False
 
 
-def _installed_frame_engine() -> Path | None:
-    for candidate in (
-        os.environ.get("VIBECRAFTED_VC_FRAME_BIN", ""),
-        os.environ.get("VIBECRAFTED_RUNTIME_ROOT", "")
-        and os.path.join(os.environ["VIBECRAFTED_RUNTIME_ROOT"], "libexec", "vc-frame"),
-    ):
-        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return Path(candidate)
-    founder = Path(pwd.getpwuid(os.getuid()).pw_dir)
-    releases = founder / ".local" / "share" / "vibecrafted" / "releases"
-    if releases.is_dir():
-        found = sorted(
-            releases.glob("*/libexec/vc-frame"), key=lambda p: p.stat().st_mtime
-        )
-        if found:
-            return found[-1]
+def _installed_frame_engine(candidate_app: Path) -> Path | None:
+    # The physically admitted candidate App owns the engine under test.
+    # An arbitrary Founder-installed generation cannot stand in for these bytes.
+    candidate = candidate_app / "Contents/Helpers/vc-frame"
+    if candidate.is_file() and os.access(candidate, os.X_OK):
+        return candidate
     return None
 
 
@@ -440,6 +433,49 @@ def test_product_update_source_contract() -> None:
     assert "commandDeckThemed()" in view
 
 
+def test_product_update_source_and_physical_gate_routes() -> None:
+    authored = Path(__file__).read_text(encoding="utf-8")
+    functions = _module_functions(ast.parse(authored))
+    physical = {
+        name
+        for name, fn in functions.items()
+        if any(
+            isinstance(node, ast.Call) and _call_func_name(node) == "_SignedApps"
+            for node in ast.walk(fn)
+        )
+    }
+    marked = {
+        name
+        for name, fn in functions.items()
+        if any(
+            ast.unparse(decorator) == "pytest.mark.product_update_physical"
+            for decorator in fn.decorator_list
+        )
+    }
+    assert len(physical) == 10, "the ten real-carrier scenarios must remain present"
+    assert marked == physical, "only real-carrier scenarios belong in this gate"
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    assert "test-source:" in makefile
+    assert "not product_update_physical" in makefile
+    assert "test-product-update-physical:" in makefile
+    assert "--strict-markers" in makefile
+    assert "VIBECRAFTED_UPDATE_PRIOR_FIXTURE_ROOT" in makefile
+    for filename in ("portable.yml", "release.yml", "gate-rehearsal.yml"):
+        workflow = (REPO_ROOT / ".github/workflows" / filename).read_text(
+            encoding="utf-8"
+        )
+        assert "run: make test-source" in workflow
+        assert "run: make test\n" not in workflow
+    publisher = (REPO_ROOT / "scripts/publish-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+    assert publisher.index("test-product-update-physical") < publisher.index(
+        'gh release create "$TAG"'
+    )
+    assert 'VIBECRAFTED_UPDATE_FIXTURE_ROOT="$DIST"' in publisher
+    assert 'VIBECRAFTED_UPDATE_SOURCE_REVISION="$HEAD_SHA"' in publisher
+
+
 def test_product_update_quit_stays_ui_only() -> None:
     delegate = (APP / "AppDelegate.swift").read_text(encoding="utf-8")
     coordinator = (APP / "ProductUpdateCoordinator.swift").read_text(encoding="utf-8")
@@ -471,6 +507,140 @@ def test_product_update_quit_stays_ui_only() -> None:
     assert "launchctl" not in helper
     assert "stop runtime" not in helper.lower()
     assert "trap '' HUP" in helper
+
+
+@pytest.fixture
+def unsigned_release_locator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Invalid input for refusal tests; never an accepted product fixture."""
+    for key in _FIXTURE_ROOT_KEYS:
+        monkeypatch.setitem(_LAUNCH_FIXTURE_ROOTS, key, "")
+    monkeypatch.setenv("VIBECRAFTED_UPDATE_FIXTURE_ROOT", str(tmp_path))
+    monkeypatch.setenv("VIBECRAFTED_UPDATE_SOURCE_REVISION", "a" * 40)
+    (tmp_path / "candidate.dmg").write_bytes(b"invalid DMG refusal input")
+    (tmp_path / "candidate.tar.gz").write_bytes(b"invalid pack refusal input")
+    payload = {
+        "schema": "io.vetcoders.vibecrafted.release-output.v1",
+        "source_revisions": {"vibecrafted": "a" * 40},
+        "dmg": {
+            "path": "candidate.dmg",
+            "sha256": _sha256_file(tmp_path / "candidate.dmg"),
+        },
+        "runtime_pack": {
+            "path": "candidate.tar.gz",
+            "sha256": _sha256_file(tmp_path / "candidate.tar.gz"),
+        },
+    }
+    (tmp_path / "release-output.json").write_text(json.dumps(payload))
+    (tmp_path / "release-output.json.sig").write_bytes(b"\0" * 256)
+    return tmp_path
+
+
+def _load_refusal_input() -> dict[str, Path]:
+    return _require_signed_artifacts(
+        root_key="VIBECRAFTED_UPDATE_FIXTURE_ROOT",
+        source_key="VIBECRAFTED_UPDATE_SOURCE_REVISION",
+        label="refusal input",
+    )
+
+
+def test_product_update_physical_gate_refuses_missing_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for key in _FIXTURE_ROOT_KEYS:
+        monkeypatch.setitem(_LAUNCH_FIXTURE_ROOTS, key, "")
+        monkeypatch.delenv(key, raising=False)
+    with pytest.raises(pytest.fail.Exception, match="is required"):
+        _load_refusal_input()
+
+
+@pytest.mark.parametrize("source", ("", "a" * 8, "g" * 40))
+def test_product_update_physical_gate_requires_full_source(
+    unsigned_release_locator: Path, monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_UPDATE_SOURCE_REVISION", source)
+    with pytest.raises(pytest.fail.Exception, match="exact full Git SHA"):
+        _load_refusal_input()
+
+
+def test_product_update_physical_gate_refuses_another_source(
+    unsigned_release_locator: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_UPDATE_SOURCE_REVISION", "b" * 40)
+    with pytest.raises(pytest.fail.Exception, match="does not match"):
+        _load_refusal_input()
+
+
+def test_product_update_physical_gate_binds_candidate_to_head(
+    unsigned_release_locator: Path,
+) -> None:
+    with pytest.raises(pytest.fail.Exception, match="exact source HEAD"):
+        _require_candidate_artifacts()
+
+
+@pytest.mark.parametrize("path", ("../other.dmg", "/other.dmg", "sub/other.dmg", ""))
+def test_product_update_physical_gate_refuses_carrier_path_escape(
+    unsigned_release_locator: Path, path: str
+) -> None:
+    feed = unsigned_release_locator / "release-output.json"
+    payload = json.loads(feed.read_text())
+    payload["dmg"]["path"] = path
+    feed.write_text(json.dumps(payload))
+    with pytest.raises(pytest.fail.Exception, match="exact carrier basename"):
+        _load_refusal_input()
+
+
+def test_product_update_physical_gate_refuses_changed_carrier(
+    unsigned_release_locator: Path,
+) -> None:
+    (unsigned_release_locator / "candidate.dmg").write_bytes(b"changed")
+    with pytest.raises(pytest.fail.Exception, match="does not match the carrier"):
+        _load_refusal_input()
+
+
+def test_product_update_physical_gate_refuses_unsigned_locator(
+    unsigned_release_locator: Path,
+) -> None:
+    (unsigned_release_locator / "release-output.json.sig").write_bytes(b"")
+    with pytest.raises(pytest.fail.Exception, match="not 256 bytes"):
+        _load_refusal_input()
+
+
+def test_product_update_physical_gate_runs_real_signature_verifier(
+    unsigned_release_locator: Path,
+) -> None:
+    with pytest.raises(pytest.fail.Exception, match="product_contract refused"):
+        _load_refusal_input()
+
+
+@pytest.mark.parametrize(
+    ("platform", "error"),
+    (
+        ("Linux", "physical product-update acceptance requires macOS"),
+        ("Darwin", "authentic candidate release fixture is required"),
+    ),
+)
+def test_product_update_physical_target_fails_before_unprovisioned_execution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str, error: str
+) -> None:
+    command_dir = tmp_path / "commands"
+    command_dir.mkdir()
+    uname = command_dir / "uname"
+    uname.write_text(f"#!/bin/sh\nprintf '%s\\n' {platform}\n")
+    uname.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{command_dir}{os.pathsep}{os.environ['PATH']}")
+    for key in _FIXTURE_ROOT_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    result = subprocess.run(
+        ["make", "--no-print-directory", "test-product-update-physical"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert error in result.stderr
+    assert "pytest" not in result.stdout
 
 
 def test_product_update_helper_refuses_unsigned_source(tmp_path: Path) -> None:
@@ -690,39 +860,21 @@ def _run_helper(
 def _fail_missing_fixture(detail: str) -> None:
     pytest.fail(
         "unresolved required gate: signed update fixture is missing. "
-        f"{detail} Mount the SSD dist pair or set VIBECRAFTED_UPDATE_FIXTURE_ROOT "
-        "(*20260910-e37be2c9*) and VIBECRAFTED_UPDATE_PRIOR_FIXTURE_ROOT "
-        "(*20260909-79001c3d*). This is not skippable."
+        f"{detail} Set VIBECRAFTED_UPDATE_FIXTURE_ROOT and "
+        "VIBECRAFTED_UPDATE_PRIOR_FIXTURE_ROOT to authentic signed release "
+        "directories, with their exact full source revisions. This is not skippable."
     )
 
 
-def _signed_search_roots() -> list[Path]:
-    roots: list[Path] = []
-    for key in _FIXTURE_ROOT_KEYS:
-        # A root a test sets itself wins over the launch-time value.
-        configured = os.environ.get(key) or _LAUNCH_FIXTURE_ROOTS[key]
-        if configured:
-            roots.append(Path(configured))
-    roots.append(REPO_ROOT / "dist")
-    seen: set[Path] = set()
-    unique: list[Path] = []
-    for root in roots:
-        resolved = root.expanduser()
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        unique.append(resolved)
-    return unique
+def _fixture_input(key: str) -> str:
+    return os.environ.get(key) or _LAUNCH_FIXTURE_ROOTS[key]
 
 
-def _first_glob(roots: list[Path], pattern: str) -> Path | None:
-    for root in roots:
-        if not root.is_dir():
-            continue
-        matches = sorted(root.glob(pattern))
-        if matches:
-            return matches[0]
-    return None
+def _fixture_source(key: str) -> str:
+    source = _fixture_input(key)
+    if re.fullmatch(r"[0-9a-f]{40}", source) is None:
+        _fail_missing_fixture(f"{key} must name an exact full Git SHA.")
+    return source
 
 
 def _sha256_file(path: Path) -> str:
@@ -733,60 +885,42 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _sibling_feed(artifact: Path) -> tuple[Path, Path] | None:
-    feed = artifact.parent / "release-output.json"
-    signature = artifact.parent / "release-output.json.sig"
-    if feed.is_file() and signature.is_file():
-        return feed, signature
-    return None
-
-
-def _require_pair(label: str, dmg_glob: str, pack_glob: str) -> tuple[Path, Path]:
-    roots = _signed_search_roots()
-    dmg = _first_glob(roots, dmg_glob)
-    pack = _first_glob(roots, pack_glob)
-    if dmg is None or pack is None:
+def _require_signed_artifacts(
+    *, root_key: str, source_key: str, label: str
+) -> dict[str, Path]:
+    configured = _fixture_input(root_key)
+    if not configured:
+        _fail_missing_fixture(f"{root_key} is required for {label}.")
+    root = Path(configured).expanduser().resolve()
+    source = _fixture_source(source_key)
+    feed = root / "release-output.json"
+    signature = root / "release-output.json.sig"
+    if not feed.is_file() or not signature.is_file():
         _fail_missing_fixture(
-            f"{label} DMG/pack not found with {dmg_glob} / {pack_glob}."
+            f"{label} release-output.json + .sig not found in {root}."
         )
-    return dmg, pack
-
-
-_E37_ARTIFACTS: dict[str, Path] | None = None
-
-
-def _require_e37_artifacts() -> dict[str, Path]:
-    global _E37_ARTIFACTS
-    if _E37_ARTIFACTS is not None:
-        return _E37_ARTIFACTS
-    dmg, pack = _require_pair(
-        "e37",
-        "*20260910-e37be2c9*.dmg",
-        "*20260910-e37be2c9*.tar.gz",
-    )
-    sibling = _sibling_feed(dmg) or _sibling_feed(pack)
-    if sibling is None:
-        _fail_missing_fixture(
-            "e37 release-output.json + .sig must sit next to the e37 DMG or pack; "
-            "do not reuse another generation's feed."
-        )
-    feed, signature = sibling
     payload = json.loads(feed.read_text(encoding="utf-8"))
     if payload.get("schema") != "io.vetcoders.vibecrafted.release-output.v1":
-        pytest.fail("e37 feed is not release-output.v1")
-    source = str((payload.get("source_revisions") or {}).get("vibecrafted") or "")
-    if "e37be2c9" not in source.lower():
-        pytest.fail(
-            f"sibling feed source {source} is not the e37 generation; "
-            "refusing to treat a different manifest as the current pair"
-        )
-    dmg_name = Path(str((payload.get("dmg") or {}).get("path") or "")).name
-    if dmg_name and dmg_name != dmg.name:
-        pytest.fail(f"e37 feed dmg.path {dmg_name} does not name {dmg.name}")
-    if payload.get("dmg", {}).get("sha256") != _sha256_file(dmg):
-        pytest.fail("e37 feed dmg.sha256 does not match the DMG bytes")
-    if payload.get("runtime_pack", {}).get("sha256") != _sha256_file(pack):
-        pytest.fail("e37 feed runtime_pack.sha256 does not match the pack bytes")
+        pytest.fail(f"{label} feed is not release-output.v1")
+    actual_source = (payload.get("source_revisions") or {}).get("vibecrafted")
+    if actual_source != source:
+        pytest.fail(f"{label} feed source {actual_source} does not match {source}")
+    artifacts = {"feed": feed, "signature": signature}
+    for field, suffix in (("dmg", ".dmg"), ("runtime_pack", ".tar.gz")):
+        entry = payload.get(field) or {}
+        basename = entry.get("path")
+        if (
+            not isinstance(basename, str)
+            or Path(basename).name != basename
+            or not basename.endswith(suffix)
+        ):
+            pytest.fail(f"{label} {field}.path must name one exact carrier basename")
+        carrier = root / basename
+        if carrier.is_symlink() or not carrier.is_file():
+            _fail_missing_fixture(f"{label} carrier is not a regular file: {carrier}")
+        if entry.get("sha256") != _sha256_file(carrier):
+            pytest.fail(f"{label} {field}.sha256 does not match the carrier bytes")
+        artifacts["pack" if field == "runtime_pack" else "dmg"] = carrier
     if signature.stat().st_size != 256:
         pytest.fail(
             "unresolved required gate: detached signature is not 256 bytes; "
@@ -812,35 +946,32 @@ def _require_e37_artifacts() -> dict[str, Path]:
     )
     if verified.returncode != 0:
         pytest.fail(
-            "unresolved required gate: product_contract refused the e37 pair: "
+            f"unresolved required gate: product_contract refused the {label} pair: "
             f"{verified.stderr or verified.stdout}"
         )
-    _E37_ARTIFACTS = {"dmg": dmg, "pack": pack, "feed": feed, "signature": signature}
-    return _E37_ARTIFACTS
-
-
-def _require_prior_79001_artifacts() -> dict[str, Path]:
-    dmg, pack = _require_pair(
-        "79001",
-        "*20260909-79001c3d*.dmg",
-        "*20260909-79001c3d*.tar.gz",
-    )
-    artifacts: dict[str, Path] = {"dmg": dmg, "pack": pack}
-    sibling = _sibling_feed(dmg) or _sibling_feed(pack)
-    if sibling is None:
-        return artifacts
-    feed, signature = sibling
-    try:
-        payload = json.loads(feed.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return artifacts
-    source = str((payload.get("source_revisions") or {}).get("vibecrafted") or "")
-    if "79001c3d" not in source.lower():
-        # Current e37 feed sitting in the same dist/ must not be labeled prior.
-        return artifacts
-    artifacts["feed"] = feed
-    artifacts["signature"] = signature
     return artifacts
+
+
+def _require_candidate_artifacts() -> dict[str, Path]:
+    expected = _fixture_source("VIBECRAFTED_UPDATE_SOURCE_REVISION")
+    head = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True
+    ).strip()
+    if expected != head:
+        pytest.fail("candidate fixture must name the exact source HEAD under test")
+    return _require_signed_artifacts(
+        root_key="VIBECRAFTED_UPDATE_FIXTURE_ROOT",
+        source_key="VIBECRAFTED_UPDATE_SOURCE_REVISION",
+        label="candidate",
+    )
+
+
+def _require_prior_artifacts() -> dict[str, Path]:
+    return _require_signed_artifacts(
+        root_key="VIBECRAFTED_UPDATE_PRIOR_FIXTURE_ROOT",
+        source_key="VIBECRAFTED_UPDATE_PRIOR_SOURCE_REVISION",
+        label="prior",
+    )
 
 
 def _verify_signed_generation(app: Path, *, source_token: str, label: str) -> None:
@@ -885,7 +1016,7 @@ def _verify_signed_generation(app: Path, *, source_token: str, label: str) -> No
         pytest.fail(f"{label} has no Contents/Resources/product-manifest.json")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     git_sha = str(manifest.get("git_sha") or "")
-    if source_token.lower() not in git_sha.lower():
+    if git_sha != source_token:
         pytest.fail(
             f"{label} product-manifest git_sha {git_sha} is not {source_token}; "
             "refusing to treat another generation as this fixture"
@@ -1268,39 +1399,47 @@ def _identity_token(app: Path) -> str:
 class _SignedApps:
     def __init__(self, tmp_path: Path) -> None:
         self.tmp = tmp_path
-        self.e37 = _require_e37_artifacts()
-        self.prior = _require_prior_79001_artifacts()
+        self.current_source = _fixture_source("VIBECRAFTED_UPDATE_SOURCE_REVISION")
+        self.prior_source = _fixture_source("VIBECRAFTED_UPDATE_PRIOR_SOURCE_REVISION")
+        if self.current_source == self.prior_source:
+            pytest.fail(
+                "cross-generation acceptance requires two different source SHAs"
+            )
+        self.current = _require_candidate_artifacts()
+        self.prior = _require_prior_artifacts()
         self.mounts: list[Path] = []
         self.copies: list[Path] = []
 
     def __enter__(self) -> Self:
         try:
-            e37_mount = self.tmp / "mnt-e37"
-            prior_mount = self.tmp / "mnt-79001"
-            self.mounts.append(e37_mount)
-            self.e37_app = _attach_signed_app(self.e37["dmg"], e37_mount)
+            current_mount = self.tmp / "mnt-current"
+            prior_mount = self.tmp / "mnt-prior"
+            self.mounts.append(current_mount)
+            self.current_app = _attach_signed_app(self.current["dmg"], current_mount)
             self.mounts.append(prior_mount)
             self.prior_app = _attach_signed_app(self.prior["dmg"], prior_mount)
             _verify_signed_generation(
-                self.e37_app, source_token="e37be2c9", label="e37 app"
+                self.current_app,
+                source_token=self.current_source,
+                label="candidate app",
             )
             _verify_signed_generation(
-                self.prior_app, source_token="79001c3d", label="79001 app"
+                self.prior_app, source_token=self.prior_source, label="prior app"
             )
             if "feed" in self.prior:
                 prior_feed = json.loads(self.prior["feed"].read_text(encoding="utf-8"))
                 prior_source = str(
                     (prior_feed.get("source_revisions") or {}).get("vibecrafted") or ""
                 )
-                if "79001c3d" not in prior_source.lower():
+                if prior_source != self.prior_source:
                     pytest.fail(
-                        "prior artifacts labeled a non-79001 feed as the prior manifest"
+                        "prior artifacts named a different source as the prior manifest"
                     )
-            self.e37_identity = _identity_token(self.e37_app)
+            self.current_identity = _identity_token(self.current_app)
             self.prior_identity = _identity_token(self.prior_app)
-            if self.e37_identity == self.prior_identity:
+            if self.current_identity == self.prior_identity:
                 pytest.fail(
-                    "unresolved required gate: e37 and 79001 fixtures have the same "
+                    "unresolved required gate: candidate and prior fixtures have the same "
                     "CDHash; cross-generation acceptance needs two signed generations"
                 )
             return self
@@ -1315,7 +1454,7 @@ class _SignedApps:
             evidence.write_text(
                 json.dumps(
                     {
-                        "e37_identity": getattr(self, "e37_identity", ""),
+                        "current_identity": getattr(self, "current_identity", ""),
                         "prior_identity": getattr(self, "prior_identity", ""),
                         "error": str(exc),
                     },
@@ -1353,10 +1492,10 @@ class _SignedApps:
             shutil.rmtree(path, ignore_errors=True)
         self.copies = [item for item in self.copies if item != path]
 
-    def copy_e37(self, dest: Path) -> Path:
+    def copy_current(self, dest: Path) -> Path:
         self.copies.append(dest)
         try:
-            copied = _copy_signed_app(self.e37_app, dest)
+            copied = _copy_signed_app(self.current_app, dest)
             if len(self.copies) >= 2:
                 self.detach_mounts()
             return copied
@@ -1376,10 +1515,11 @@ class _SignedApps:
             raise
 
 
+@pytest.mark.product_update_physical
 def test_product_update_helper_writes_ready_before_waiting(tmp_path: Path) -> None:
     with _SignedApps(tmp_path) as apps:
         dest = apps.copy_prior(tmp_path / "Installed.app")
-        source = apps.copy_e37(tmp_path / "Candidate.app")
+        source = apps.copy_current(tmp_path / "Candidate.app")
         dest_identity = apps.prior_identity
         receipt = tmp_path / "receipt.json"
         gate = tmp_path / "continue"
@@ -1426,7 +1566,7 @@ def test_product_update_helper_writes_ready_before_waiting(tmp_path: Path) -> No
             assert payload["destination"] == str(dest)
             assert payload["parent_pid"] == str(sleeper.pid)
             assert payload["parent_start"] == start
-            assert payload["source_identity"] == apps.e37_identity
+            assert payload["source_identity"] == apps.current_identity
             assert _identity_token(dest) == dest_identity
             assert helper.poll() is None
             gate.write_text("go", encoding="utf-8")
@@ -1445,10 +1585,11 @@ def test_product_update_helper_writes_ready_before_waiting(tmp_path: Path) -> No
                 helper.wait(timeout=5)
 
 
+@pytest.mark.product_update_physical
 def test_product_update_helper_copy_failure_keeps_destination(tmp_path: Path) -> None:
     with _SignedApps(tmp_path) as apps:
         dest = apps.copy_prior(tmp_path / "Installed.app")
-        source = apps.copy_e37(tmp_path / "Candidate.app")
+        source = apps.copy_current(tmp_path / "Candidate.app")
         receipt = tmp_path / "receipt.json"
         result = _run_helper(
             [
@@ -1470,18 +1611,19 @@ def test_product_update_helper_copy_failure_keeps_destination(tmp_path: Path) ->
         )
         assert journal["phase"] == "captured"
         assert journal["prior_identity"] == apps.prior_identity
-        assert journal["source_identity"] == apps.e37_identity
+        assert journal["source_identity"] == apps.current_identity
         assert not receipt.exists() or '"replaced":true' not in receipt.read_text(
             encoding="utf-8"
         )
 
 
+@pytest.mark.product_update_physical
 def test_product_update_helper_write_ahead_displace_is_resumable(
     tmp_path: Path,
 ) -> None:
     with _SignedApps(tmp_path) as apps:
         dest = apps.copy_prior(tmp_path / "Installed.app")
-        source = apps.copy_e37(tmp_path / "Candidate.app")
+        source = apps.copy_current(tmp_path / "Candidate.app")
         receipt = tmp_path / "receipt.json"
         first = _run_helper(
             [
@@ -1528,14 +1670,15 @@ def test_product_update_helper_write_ahead_displace_is_resumable(
         assert payload["replaced"] is True
         assert payload["detail"] == "replaced"
         assert payload["mode"] == "replace"
-        assert _identity_token(dest) == apps.e37_identity
+        assert _identity_token(dest) == apps.current_identity
         assert (sibling / "keep.txt").read_text(encoding="utf-8") == "old"
 
 
+@pytest.mark.product_update_physical
 def test_product_update_helper_resume_requires_complete_journal(tmp_path: Path) -> None:
     with _SignedApps(tmp_path) as apps:
         dest = apps.copy_prior(tmp_path / "Installed.app")
-        source = apps.copy_e37(tmp_path / "Candidate.app")
+        source = apps.copy_current(tmp_path / "Candidate.app")
         receipt = tmp_path / "receipt.json"
         first = _run_helper(
             [
@@ -1579,10 +1722,11 @@ def test_product_update_helper_resume_requires_complete_journal(tmp_path: Path) 
         )
 
 
+@pytest.mark.product_update_physical
 def test_product_update_helper_rejects_overlapping_lock(tmp_path: Path) -> None:
     with _SignedApps(tmp_path) as apps:
         dest = apps.copy_prior(tmp_path / "Installed.app")
-        source = apps.copy_e37(tmp_path / "Candidate.app")
+        source = apps.copy_current(tmp_path / "Candidate.app")
         receipt = tmp_path / "receipt.json"
         gate = tmp_path / "continue"
         first = subprocess.Popen(
@@ -1675,10 +1819,11 @@ def test_product_update_helper_rejects_overlapping_lock(tmp_path: Path) -> None:
                 first.wait(timeout=5)
 
 
+@pytest.mark.product_update_physical
 def test_product_update_helper_missing_receipt_is_not_success(tmp_path: Path) -> None:
     with _SignedApps(tmp_path) as apps:
         dest = apps.copy_prior(tmp_path / "Installed.app")
-        source = apps.copy_e37(tmp_path / "Candidate.app")
+        source = apps.copy_current(tmp_path / "Candidate.app")
         receipt = tmp_path / "receipt.json"
         result = _run_helper(
             [
@@ -1732,10 +1877,11 @@ def test_product_update_helper_rejects_traversal_transaction(tmp_path: Path) -> 
     assert linked.returncode == 6
 
 
+@pytest.mark.product_update_physical
 def test_product_update_result_before_new_ui_and_restore(tmp_path: Path) -> None:
     with _SignedApps(tmp_path) as apps:
         dest = apps.copy_prior(tmp_path / "Installed.app")
-        source = apps.copy_e37(tmp_path / "Candidate.app")
+        source = apps.copy_current(tmp_path / "Candidate.app")
         receipt = tmp_path / "receipt.json"
         new_ui_started = tmp_path / "new-ui-started"
         sleeper = subprocess.Popen(["/bin/sleep", "30"])
@@ -1780,9 +1926,9 @@ def test_product_update_result_before_new_ui_and_restore(tmp_path: Path) -> None
             assert payload["replaced"] is True
             assert payload["detail"] == "replaced"
             assert payload["transaction"]
-            assert payload["source_identity"] == apps.e37_identity
+            assert payload["source_identity"] == apps.current_identity
             assert payload["prior_identity"] == apps.prior_identity
-            assert _identity_token(dest) == apps.e37_identity
+            assert _identity_token(dest) == apps.current_identity
             assert not new_ui_started.exists()
             new_ui_started.write_text("started after receipt", encoding="utf-8")
             journal = json.loads(
@@ -1886,7 +2032,7 @@ def test_product_update_result_before_new_ui_and_restore(tmp_path: Path) -> None
             assert not dest.exists()
             assert (
                 _identity_token(Path(journal2["capture"]) / "failed-new.app")
-                == apps.e37_identity
+                == apps.current_identity
             )
             assert _identity_token(prior2) == apps.prior_identity
             resume_displacing = _run_helper(
@@ -2003,7 +2149,7 @@ while True:
 
 
 class _IsolatedFrameSession:
-    """Real signed/admitted vc-frame engine, isolated from the Founder namespace.
+    """Exact signed candidate-App Frame, isolated from the Founder namespace.
 
     Create path is `--layout` plus `attach --create-background`: the detached
     create is the only form that needs no TTY, and `--layout` is the surface
@@ -2036,7 +2182,7 @@ class _IsolatedFrameSession:
         self.config_dir = self.root / "c"
         self.probe = self.root / "p"
         self.session = self.tag
-        self.frame = _installed_frame_engine()
+        self.frame: Path | None = None
         self.pane_id = ""
         self.worker_pid = 0
         self.worker_start = ""
@@ -2045,13 +2191,18 @@ class _IsolatedFrameSession:
         self.server_start = ""
         self._prepared = False
 
-    def start(self) -> None:
+    def start(self, candidate_app: Path) -> None:
+        self.frame = _installed_frame_engine(candidate_app)
         if self.frame is None:
             pytest.fail(
                 "installed vc-frame engine is required for whole-tuple recover proof"
             )
         try:
             self._prepare()
+            original_frame = self.frame
+            self.frame = self.probe / "vc-frame"
+            shutil.copy2(original_frame, self.frame)
+            assert _sha256_file(self.frame) == _sha256_file(original_frame)
             created = self._frame(
                 "--layout",
                 str(self.layout),
@@ -2387,27 +2538,28 @@ def _replace_prior_with_candidate(
         if helper is not None and helper.poll() is None:
             helper.terminate()
             helper.wait(timeout=5)
-    assert _identity_token(dest) == apps.e37_identity
+    assert _identity_token(dest) == apps.current_identity
     return json.loads(Path(str(receipt) + ".journal.json").read_text(encoding="utf-8"))
 
 
+@pytest.mark.product_update_physical
 def test_product_update_cross_generation_publish_then_restore_previous_tuple(
     tmp_path: Path,
 ) -> None:
     founder_before = _founder_identity_stamps()
     session = _IsolatedFrameSession()
     try:
-        session.start()
         env = _isolated_product_env(tmp_path, frame_socket_dir=session.socket_dir)
         settings = _plant_custom_settings(env)
         runtime_home = Path(env["VIBECRAFTED_RUNTIME_HOME"])
         with _SignedApps(tmp_path) as apps:
+            session.start(apps.current_app)
             dest = apps.copy_prior(tmp_path / "Installed.app")
-            source = apps.copy_e37(tmp_path / "Candidate.app")
+            source = apps.copy_current(tmp_path / "Candidate.app")
             prior_pack = _install_signed_pack(apps.prior["pack"], dest, env)
             assert prior_pack.returncode == 0, prior_pack.stderr or prior_pack.stdout
             prior_pub = _read_installer_publication(runtime_home)
-            assert "79001c3d" in str(prior_pub["version"]).lower()
+            assert apps.prior_source[:8] in str(prior_pub["version"]).lower()
             _assert_isolated_receipt_roots(prior_pub["receipt"], tmp_path)  # type: ignore[arg-type]
             _assert_receipt_names_live_app(prior_pub["receipt"], dest)  # type: ignore[arg-type]
 
@@ -2417,17 +2569,17 @@ def test_product_update_cross_generation_publish_then_restore_previous_tuple(
             )
             apps.release(source)
             published = _install_signed_pack(
-                apps.e37["pack"], dest, env, fail_after="published"
+                apps.current["pack"], dest, env, fail_after="published"
             )
             assert published.returncode == 42, published.stderr or published.stdout
             assert "harness injected failure after published" in (
                 published.stderr or ""
             )
-            e37_pub = _read_installer_publication(runtime_home)
-            assert "e37be2c9" in str(e37_pub["version"]).lower()
-            assert e37_pub["version"] != prior_pub["version"]
-            _assert_isolated_receipt_roots(e37_pub["receipt"], tmp_path)  # type: ignore[arg-type]
-            _assert_receipt_names_live_app(e37_pub["receipt"], dest)  # type: ignore[arg-type]
+            current_pub = _read_installer_publication(runtime_home)
+            assert apps.current_source[:8] in str(current_pub["version"]).lower()
+            assert current_pub["version"] != prior_pub["version"]
+            _assert_isolated_receipt_roots(current_pub["receipt"], tmp_path)  # type: ignore[arg-type]
+            _assert_receipt_names_live_app(current_pub["receipt"], dest)  # type: ignore[arg-type]
 
             capture = Path(journal["capture"])
             prior_app = capture / "prior.app"
@@ -2461,7 +2613,7 @@ def test_product_update_cross_generation_publish_then_restore_previous_tuple(
             assert payload["installer_status"] == "0"
             assert payload["pack_generation"] == prior_pub["version"]
             assert _identity_token(dest) == apps.prior_identity
-            assert "79001c3d" in str(prior_pub["version"]).lower()
+            assert apps.prior_source[:8] in str(prior_pub["version"]).lower()
             _assert_shared_recovered_tuple(
                 env=env,
                 dest=dest,
@@ -2479,6 +2631,7 @@ def test_product_update_cross_generation_publish_then_restore_previous_tuple(
         session.close()
 
 
+@pytest.mark.product_update_physical
 def test_product_update_whole_tuple_recovery_fails_on_damaged_signed_historical_app(
     tmp_path: Path,
 ) -> None:
@@ -2487,7 +2640,7 @@ def test_product_update_whole_tuple_recovery_fails_on_damaged_signed_historical_
     runtime_home = Path(env["VIBECRAFTED_RUNTIME_HOME"])
     with _SignedApps(tmp_path) as apps:
         dest = apps.copy_prior(tmp_path / "Installed.app")
-        source = apps.copy_e37(tmp_path / "Candidate.app")
+        source = apps.copy_current(tmp_path / "Candidate.app")
         prior_pack = _install_signed_pack(apps.prior["pack"], dest, env)
         assert prior_pack.returncode == 0, prior_pack.stderr or prior_pack.stdout
         prior_pub = _read_installer_publication(runtime_home)
@@ -2497,10 +2650,10 @@ def test_product_update_whole_tuple_recovery_fails_on_damaged_signed_historical_
         )
         apps.release(source)
         published = _install_signed_pack(
-            apps.e37["pack"], dest, env, fail_after="published"
+            apps.current["pack"], dest, env, fail_after="published"
         )
         assert published.returncode == 42, published.stderr or published.stdout
-        e37_pub = _read_installer_publication(runtime_home)
+        current_pub = _read_installer_publication(runtime_home)
         capture = Path(journal["capture"])
         prior_app = capture / "prior.app"
         pack_dir = prior_app / "Contents/Resources/runtime-pack"
@@ -2541,27 +2694,28 @@ def test_product_update_whole_tuple_recovery_fails_on_damaged_signed_historical_
             not recover_receipt.is_file()
             or "recovered" not in recover_receipt.read_text(encoding="utf-8")
         )
-        assert _identity_token(dest) == apps.e37_identity
+        assert _identity_token(dest) == apps.current_identity
         still = _read_installer_publication(runtime_home)
-        assert still["version"] == e37_pub["version"]
+        assert still["version"] == current_pub["version"]
         assert still["version"] != prior_pub["version"]
         _assert_founder_identity_untouched(founder_before)
 
 
+@pytest.mark.product_update_physical
 def test_product_update_whole_tuple_recovery_interrupted_then_resumed(
     tmp_path: Path,
 ) -> None:
     founder_before = _founder_identity_stamps()
     session = _IsolatedFrameSession()
     try:
-        session.start()
         env = _isolated_product_env(tmp_path, frame_socket_dir=session.socket_dir)
         settings = _plant_custom_settings(env)
         runtime_home = Path(env["VIBECRAFTED_RUNTIME_HOME"])
         helper_env = {**_helper_env(), **env}
         with _SignedApps(tmp_path) as apps:
+            session.start(apps.current_app)
             dest = apps.copy_prior(tmp_path / "Installed.app")
-            source = apps.copy_e37(tmp_path / "Candidate.app")
+            source = apps.copy_current(tmp_path / "Candidate.app")
             prior_pack = _install_signed_pack(apps.prior["pack"], dest, env)
             assert prior_pack.returncode == 0, prior_pack.stderr or prior_pack.stdout
             prior_pub = _read_installer_publication(runtime_home)
@@ -2571,7 +2725,7 @@ def test_product_update_whole_tuple_recovery_interrupted_then_resumed(
             )
             apps.release(source)
             published = _install_signed_pack(
-                apps.e37["pack"], dest, env, fail_after="published"
+                apps.current["pack"], dest, env, fail_after="published"
             )
             assert published.returncode == 42, published.stderr or published.stdout
             capture = Path(journal["capture"])
@@ -2626,7 +2780,7 @@ def test_product_update_whole_tuple_recovery_interrupted_then_resumed(
                         break
                     time.sleep(0.2)
                 assert mid is not None and mid["version"] == prior_pub["version"]
-                assert _identity_token(dest) == apps.e37_identity
+                assert _identity_token(dest) == apps.current_identity
                 held = dest.parent / ".vc-update.lock" / "held"
                 assert held.is_file()
                 held_inode = held.stat()
