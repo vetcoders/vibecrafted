@@ -171,6 +171,8 @@ class Cut:
     mode: str = "write"
     model: str = ""
     model_source: str = "provider_default"
+    effort: str = ""
+    effort_source: str = "provider_default"
     source_text: str | None = None
     source_digest: str = ""
     prompt: str = ""

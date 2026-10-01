@@ -45,7 +45,11 @@ from .control_plane import (
 )
 from .cron import parse_frontmatter
 from .delivery.store import atomic_write_json
-from .effort_overrides import _effort_override_receipt, _with_effort_override
+from .effort_overrides import (
+    EFFORT_OVERRIDE_STYLES,
+    _effort_override_receipt,
+    _with_effort_override,
+)
 from .env_allowlist import dispatcher_identity, filter_headless_worker_env
 from .events import append_event
 from .execution_controls import (
@@ -71,6 +75,11 @@ from .report_contract import CLAIM_DIGEST_ENV, reserve_launcher_report_template
 from .research_config import ResearchAgentSelection, resolve_research_runtime_config
 from .run_mutation import mutate_run_meta, run_mutation_locks
 from .runtime_paths import agent_tool_search_path, selected_runtime_environment
+from .server_config import (
+    AgentLaunchConfig,
+    load_agent_launch_config,
+    validate_agent_pin,
+)
 from .spawn import _default_command, _resolve_agent_command, _stdin_command
 from .workflow_runtime import WORKER_SIGNAL_DISCIPLINE, native_resume_argv
 from .workflows import registry as workflow_registry
@@ -157,6 +166,7 @@ class WorkflowLaunchSpec:
     source_path: str = ""
     research_model_agent: str = ""
     model_source: str = "provider_default"
+    effort_source: str = "provider_default"
     research_agents: tuple[str, ...] = ()
     research_synthesizer: str = ""
     research_synthesizer_model: str = ""
@@ -1508,8 +1518,10 @@ def select_plan_model(
     model: str = "",
     previous: str = "",
     enforce_agent: bool = True,
+    defaults: AgentLaunchConfig | None = None,
 ) -> tuple[str, str]:
     """Select an exact provider identifier without altering the source document."""
+    configured = defaults if defaults is not None else load_agent_launch_config(agent)
     fields = parse_frontmatter(text=text, strict=True)
     if enforce_agent and fields.get("agent") and fields["agent"] != agent:
         raise ValueError("frontmatter agent conflicts with selected provider")
@@ -1527,7 +1539,66 @@ def select_plan_model(
         return fields["model"], "plan_frontmatter"
     if previous:
         return previous, "resume_previous"
+    if configured.model:
+        return configured.model, "config.toml"
     return "", "provider_default"
+
+
+def select_plan_effort(
+    agent: str, *, effort: object = "", defaults: AgentLaunchConfig | None = None
+) -> tuple[str, str]:
+    """Select a CLI/cut effort pin before the configured fleet default."""
+    configured = defaults if defaults is not None else load_agent_launch_config(agent)
+    if effort not in (None, ""):
+        return validate_agent_pin(effort, "effort"), "cli"
+    if configured.effort:
+        return configured.effort, "config.toml"
+    return "", "provider_default"
+
+
+def launch_selection_receipt(spec: WorkflowLaunchSpec) -> dict[str, Any]:
+    """Cost controls admitted before spawn, plus safe provider-default context.
+
+    Provider config is an observation, never proof of the effective CLI model:
+    profiles or other provider settings can override it. Only model/effort
+    values from Codex's config may leave this function.
+    """
+    receipt: dict[str, Any] = {
+        **_effort_override_receipt(spec.agent, spec.effort),
+        "model_requested": spec.model,
+        "model_effective": spec.model,
+        "model_source": "plan"
+        if spec.model_source == "plan_frontmatter"
+        else spec.model_source,
+        "effort_requested": spec.effort,
+        "effort_effective": spec.effort if spec.agent in EFFORT_OVERRIDE_STYLES else "",
+        "effort_source": spec.effort_source,
+    }
+    if spec.agent == "codex" and "provider_default" in (
+        spec.model_source,
+        spec.effort_source,
+    ):
+        import tomllib
+
+        config_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+        try:
+            payload = tomllib.loads(
+                (config_home / "config.toml").read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+            payload = {}
+        for key, field in (
+            ("model", "provider_config_model"),
+            ("model_reasoning_effort", "provider_config_effort"),
+        ):
+            value = payload.get(key)
+            if (
+                isinstance(value, str)
+                and value.strip()
+                and not any(ord(c) < 32 for c in value)
+            ):
+                receipt[field] = value
+    return receipt
 
 
 def _identity_base_hint(requested_repo: str, base: str) -> str:
@@ -1607,11 +1678,16 @@ def normalize_launch_spec(
     )
     if (file_path or payload.get("input_explicit")) and not plan_text.strip():
         raise ValueError("explicit prompt input must not be empty")
+    defaults = load_agent_launch_config(model_agent)
     model, model_source = select_plan_model(
         model_agent,
         plan_text,
         model=payload.get("model") or payload.get("model_requested") or "",
         enforce_agent=skill != "polarize",
+        defaults=defaults,
+    )
+    effort, effort_source = select_plan_effort(
+        model_agent, effort=payload.get("effort", ""), defaults=defaults
     )
     if model and definition.runtime_kind == "supervised_research" and not model_agent:
         raise ValueError("research --model requires an explicit provider role")
@@ -1783,7 +1859,8 @@ def normalize_launch_spec(
         count=count,
         depth=depth,
         model=model,
-        effort=str(payload.get("effort") or "").strip(),
+        effort=effort,
+        effort_source=effort_source,
         model_source=model_source,
         source_digest=hashlib.sha256(plan_text.encode("utf-8")).hexdigest(),
         repo_requested=requested_repo,
@@ -2178,6 +2255,14 @@ def machine_launch_receipt(payload: dict[str, Any]) -> dict[str, Any]:
         "model_requested",
         "model_effective",
         "model_source",
+        "effort_requested",
+        "effort_effective",
+        "effort_source",
+        "effort_override_supported",
+        "effort_override_skipped",
+        "effort_override_skip_reason",
+        "provider_config_model",
+        "provider_config_effort",
         "repo_requested",
         "repo_kind",
         "base_requested",
@@ -2191,6 +2276,8 @@ def machine_launch_receipt(payload: dict[str, Any]) -> dict[str, Any]:
         "source_digest",
     ):
         receipt[key] = payload.get(key, "")
+    if receipt["model_source"] == "plan_frontmatter":
+        receipt["model_source"] = "plan"
     for key in (
         "report",
         "transcript",
@@ -3232,7 +3319,7 @@ def launch_workflow(
         "source_origin": "file" if spec.file or spec.source_path else "inline",
         "source_snapshot": str(source_snapshot),
         "source_digest": hashlib.sha256(source_prompt.encode("utf-8")).hexdigest(),
-        "model_source": spec.model_source,
+        **launch_selection_receipt(spec),
     }
     prompt_path = _write_prompt_file(artifacts["prompt"], prompt_body)
     claim_digest = str(spec.claim_digest or "").strip()
@@ -3388,8 +3475,16 @@ def launch_workflow(
     merged_env["VIBECRAFTED_RUNTIME"] = spec.runtime
     if claim_digest:
         merged_env[CLAIM_DIGEST_ENV] = claim_digest
+    merged_env.pop("VIBECRAFTED_MODEL_REQUESTED", None)
+    merged_env.pop("VIBECRAFTED_MODEL_SOURCE", None)
+    merged_env.pop("VIBECRAFTED_EFFORT_REQUESTED", None)
+    merged_env.pop("VIBECRAFTED_EFFORT_SOURCE", None)
     if spec.model:
         merged_env["VIBECRAFTED_MODEL_REQUESTED"] = spec.model
+        merged_env["VIBECRAFTED_MODEL_SOURCE"] = str(source_receipt["model_source"])
+    if spec.effort:
+        merged_env["VIBECRAFTED_EFFORT_REQUESTED"] = spec.effort
+        merged_env["VIBECRAFTED_EFFORT_SOURCE"] = spec.effort_source
     if research_selection is not None:
         merged_env["VIBECRAFTED_RESEARCH_MODEL_AGENT"] = spec.research_model_agent
         if spec.research_agents:

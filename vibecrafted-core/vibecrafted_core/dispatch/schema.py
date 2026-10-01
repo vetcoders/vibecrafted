@@ -16,7 +16,11 @@ import tomllib
 from vibecrafted_core.autonomy_surface import destructive_remote_push
 from vibecrafted_core.delivery.model import ContractError, ExecutionEnvelope
 from vibecrafted_core.runtime_paths import vibecrafted_home
-from vibecrafted_core.workflow import SUPPORTED_WORKFLOWS, select_plan_model
+from vibecrafted_core.workflow import (
+    SUPPORTED_WORKFLOWS,
+    select_plan_effort,
+    select_plan_model,
+)
 
 from .model import (
     BASE_CUT_PREFIX,
@@ -462,6 +466,22 @@ def _parse_cuts(
             except (OSError, ValueError) as exc:
                 errors.append(f"cuts[{index}].model: {exc}")
 
+        effort, effort_source = "", "provider_default"
+        raw_effort = item.get("effort", "")
+        if "effort" in item and (
+            not isinstance(raw_effort, str) or not raw_effort.strip()
+        ):
+            errors.append(f"cuts[{index}].effort: expected a non-empty string")
+        else:
+            try:
+                effort, effort_source = select_plan_effort(
+                    _string(item.get("agent")), effort=raw_effort
+                )
+                if "effort" in item:
+                    effort_source = "plan"
+            except ValueError as exc:
+                errors.append(f"cuts[{index}].effort: {exc}")
+
         mode = _string(item.get("mode")) or "write"
         mutation = _string(item.get("mutation"))
         observational = bool(item.get("observational") or item.get("observe"))
@@ -492,6 +512,8 @@ def _parse_cuts(
                 mode=mode,
                 model=model,
                 model_source=model_source,
+                effort=effort,
+                effort_source=effort_source,
                 source_text=plan_text,
                 source_digest=hashlib.sha256(plan_text.encode("utf-8")).hexdigest(),
                 prompt=prompt,

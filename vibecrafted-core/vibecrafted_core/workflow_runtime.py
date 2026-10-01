@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .effort_overrides import _with_effort_override
 from .model_overrides import _with_model_override
 from .package_resources import package_root
 from .report_contract import parse_report_path
@@ -24,6 +25,7 @@ from .research_config import (
     resolve_research_runtime_config,
 )
 from .runtime_paths import agent_tool_search_path, selected_runtime_environment
+from .server_config import load_agent_launch_config
 from .spawn import _resolve_agent_command, _stdin_command
 from .supervisor_async import AsyncRunHandle, AsyncSupervisor
 from .telemetry import tokens_total as _tokens_total
@@ -199,6 +201,7 @@ def _child_env(
     env["VIBECRAFTED_TRANSCRIPT_PATH"] = str(transcript)
     env["VIBECRAFTED_META_PATH"] = str(meta)
     env["PATH"] = agent_tool_search_path(env)
+    env.pop("VIBECRAFTED_MODEL_REQUESTED", None)
     if model_requested:
         env["VIBECRAFTED_MODEL_REQUESTED"] = model_requested
     return env
@@ -591,6 +594,43 @@ async def _run_child(
     file, resolving its command, applying a requested model pin once, and
     returning the collected `ChildResult`.
     """
+    from .workflow import (
+        WorkflowLaunchSpec,
+        launch_selection_receipt,
+        select_plan_effort,
+        select_plan_model,
+    )
+
+    defaults = load_agent_launch_config(agent)
+    model, model_source = select_plan_model(
+        agent, "", model=model_requested, defaults=defaults
+    )
+    effort, effort_source = select_plan_effort(
+        agent,
+        effort=os.environ.get("VIBECRAFTED_EFFORT_REQUESTED", ""),
+        defaults=defaults,
+    )
+    if model_requested and model_requested == os.environ.get(
+        "VIBECRAFTED_MODEL_REQUESTED"
+    ):
+        model_source = os.environ.get("VIBECRAFTED_MODEL_SOURCE") or model_source
+    if os.environ.get("VIBECRAFTED_EFFORT_REQUESTED"):
+        effort_source = os.environ.get("VIBECRAFTED_EFFORT_SOURCE") or effort_source
+    selection = launch_selection_receipt(
+        WorkflowLaunchSpec(
+            agent=agent,
+            mode=kind,
+            skill="workflow",
+            prompt=prompt,
+            file="",
+            runtime="headless",
+            root=root,
+            model=model,
+            model_source=model_source,
+            effort=effort,
+            effort_source=effort_source,
+        )
+    )
     safe_label = _safe_label(label)
     run_id = f"{_parent_run_id()}-{safe_label}"
     report, transcript, meta, prompt_file = _child_artifact_paths(
@@ -603,13 +643,18 @@ async def _run_child(
     prompt_file.write_text(
         prompt_body or _child_prompt(kind, label, root, prompt), encoding="utf-8"
     )
-    child_command = _with_model_override(
+    child_command = _with_effort_override(
         agent,
-        command if command is not None else _stdin_command(agent),
-        model_requested,
+        _with_model_override(
+            agent,
+            command if command is not None else _stdin_command(agent),
+            model,
+        ),
+        effort,
     )
-    child_env = _child_env(agent, report, transcript, meta, model_requested)
+    child_env = _child_env(agent, report, transcript, meta, model)
     child_command = _resolve_agent_command(agent, child_command, child_env)
+    _write_json(meta, {"run_id": run_id, "agent": agent, **selection})
     if _tee_enabled():
         print(f"\n===== {kind}:{label}:{agent} =====", flush=True)
     handle: AsyncRunHandle = await AsyncSupervisor().run(

@@ -1,8 +1,8 @@
 """Operator-owned `~/.config/vibecrafted/config.toml`: the `[server]` table
 (load, validate, seed-once), the optional `[tools]` table naming served tool
 consoles the native App may open in a tab, and the optional
-`[agents.copilot.provider]` table pinning a BYOK provider for the `copilot`
-agent."""
+`[agents.<agent>]` fleet model/effort defaults and `[agents.copilot.provider]`
+table pinning a BYOK provider for the `copilot` agent."""
 
 from __future__ import annotations
 
@@ -89,6 +89,78 @@ def config_path(*, operator_home: Path | None = None) -> Path:
             return Path(configured).expanduser() / "vibecrafted" / "config.toml"
         operator_home = Path(os.environ.get("HOME", str(Path.home())))
     return operator_home.expanduser() / ".config" / "vibecrafted" / "config.toml"
+
+
+def _load_config_payload(resolved: Path) -> dict[str, object]:
+    """Shared config owner for agent defaults and the Copilot BYOK loader."""
+    try:
+        raw = resolved.read_bytes()
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        raise ServerConfigError(
+            f"cannot read server config at {resolved}: {exc}"
+        ) from exc
+    try:
+        return tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise ServerConfigError(
+            f"invalid TOML in server config at {resolved}: {exc}"
+        ) from exc
+
+
+@dataclass(frozen=True)
+class AgentLaunchConfig:
+    """Optional fleet cost controls, independent of interactive CLI defaults."""
+
+    model: str = ""
+    effort: str = ""
+
+
+def validate_agent_pin(value: object, label: str) -> str:
+    """Validate the argv value's shape; provider catalogs own valid identifiers."""
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or value != value.strip()
+        or value.startswith("-")
+        or any(ord(char) < 32 for char in value)
+    ):
+        raise ServerConfigError(f"{label} must be a non-empty provider identifier")
+    return value
+
+
+def load_agent_launch_config(
+    agent: str, path: Path | None = None, *, operator_home: Path | None = None
+) -> AgentLaunchConfig:
+    """Read the selected agent's model/effort defaults; invalid tables refuse.
+
+    Validate even when a CLI or plan pin will override the values. A misspelled
+    or malformed cost control must never silently revert to the CLI default.
+    Copilot's existing provider table remains owned by its BYOK validator.
+    """
+    resolved = path or config_path(operator_home=operator_home)
+    payload = _load_config_payload(resolved)
+    agents = payload.get("agents", {})
+    if not isinstance(agents, dict):
+        raise ServerConfigError("[agents] must be a TOML table")
+    section = agents.get(agent, {})
+    if not isinstance(section, dict):
+        raise ServerConfigError(f"[agents.{agent}] must be a TOML table")
+    allowed = {"model", "effort"} | ({"provider"} if agent == "copilot" else set())
+    unknown = sorted(set(section) - allowed)
+    if unknown:
+        raise ServerConfigError(
+            f"unsupported [agents.{agent}] key(s): " + ", ".join(unknown)
+        )
+    values = {
+        key: validate_agent_pin(section[key], f"agents.{agent}.{key}")
+        for key in ("model", "effort")
+        if key in section
+    }
+    if agent == "copilot" and "provider" in section:
+        load_copilot_provider_config(resolved)
+    return AgentLaunchConfig(**values)
 
 
 def load_server_config(
@@ -391,20 +463,7 @@ def load_copilot_provider_config(
     """
 
     resolved = path or config_path(operator_home=operator_home)
-    try:
-        raw = resolved.read_bytes()
-    except FileNotFoundError:
-        return CopilotProviderConfig()
-    except OSError as exc:
-        raise ServerConfigError(
-            f"cannot read server config at {resolved}: {exc}"
-        ) from exc
-    try:
-        payload = tomllib.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
-        raise ServerConfigError(
-            f"invalid TOML in server config at {resolved}: {exc}"
-        ) from exc
+    payload = _load_config_payload(resolved)
     agents = payload.get("agents")
     if agents is None:
         return CopilotProviderConfig()

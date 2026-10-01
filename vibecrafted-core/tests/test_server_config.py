@@ -26,6 +26,58 @@ def test_server_config_defaults_when_file_is_absent(tmp_path: Path) -> None:
     assert config.public_url == "http://127.0.0.1:3024"
 
 
+def test_agent_launch_defaults_share_config_owner_and_keep_byok(tmp_path, monkeypatch):
+    from vibecrafted_core.server_config import load_agent_launch_config
+
+    directory = tmp_path / "vibecrafted"
+    directory.mkdir()
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    path = directory / "config.toml"
+    assert load_agent_launch_config("codex").model == ""
+    path.write_text(
+        '[agents.codex]\nmodel = "fleet-model"\neffort = "low"\n'
+        '[agents.copilot]\nmodel = "copilot-fleet"\n'
+        '[agents.copilot.provider]\nbase_url = "http://localhost:11434/v1"\n'
+        'model = "provider-model"\n'
+    )
+    codex = load_agent_launch_config("codex")
+    assert (codex.model, codex.effort) == ("fleet-model", "low")
+    assert load_agent_launch_config("claude").model == ""
+    assert load_agent_launch_config("copilot").model == "copilot-fleet"
+    assert load_copilot_provider_config(path).model == "provider-model"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        'agents = "bad"\n',
+        '[agents]\ncodex = "bad"\n',
+        "[agents.codex]\nmodel = false\n",
+        "[agents.codex]\neffort = []\n",
+        '[agents.codex]\nmodel = ""\n',
+        '[agents.codex]\neffort = " high "\n',
+        '[agents.codex]\nmodel = "-bad"\n',
+        '[agents.codex]\nmodle = "oops"\n',
+    ],
+)
+def test_agent_launch_defaults_fail_closed(tmp_path, body):
+    from vibecrafted_core.server_config import load_agent_launch_config
+
+    path = tmp_path / "config.toml"
+    path.write_text(body)
+    with pytest.raises(ServerConfigError, match="agents"):
+        load_agent_launch_config("codex", path)
+
+
+def test_invalid_copilot_provider_still_refuses_fleet_defaults(tmp_path):
+    from vibecrafted_core.server_config import load_agent_launch_config
+
+    path = tmp_path / "config.toml"
+    path.write_text('[agents.copilot.provider]\nmodel = "local"\n')
+    with pytest.raises(ServerConfigError, match="base_url"):
+        load_agent_launch_config("copilot", path)
+
+
 def test_seed_server_config_preserves_other_tables_and_existing_owner(
     tmp_path: Path,
 ) -> None:

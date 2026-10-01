@@ -498,7 +498,7 @@ def test_interactive_admission_snapshot_and_private_command(
     assert admission["parent_run_id"] == "work-parent"
     assert admission["skill"] == skill
     assert admission["model_requested"] == "exact-codex"
-    assert admission["model_source"] == "plan_frontmatter"
+    assert admission["model_source"] == "plan"
     snapshot = Path(admission["source_snapshot"])
     assert snapshot.parent.name == admission["run_id"]
     assert snapshot.read_bytes() == body.encode()
