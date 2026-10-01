@@ -77,13 +77,21 @@ behavior of the very line executing it — expect the old behavior for the
 whole flight, and leave `make install` as the operator's post-line button.
 Corollary: a cut can demonstrably _reproduce_ the bug it fixes while flying.
 
-## Living Tree concurrency clause
+## Selected substrate and owned staging
 
-When other sessions edit the same checkout during the line, say so in
-`[common]` explicitly: name the concurrent work, require re-reading each
-file's current state before editing, and state that `git add -A` sweeps are
-commitment, not destruction. Workers must not "protect" themselves with
-worktrees or branch switches.
+Declare the Founder/plan/launcher-selected runtime in `[common]`: Living Tree /
+`local-native`, Fleet Worktrees / `local-worktrees`, Fleet VM local, or Fleet VM
+cloud. Preserve an explicit choice; do not infer it from old worktrees.
+For typed dispatch the supervisor assigns every non-integrator a dedicated
+worktree and `cut/<cut-id>` branch from the resolved baseline. `{repo}` resolves
+to the worker checkout, not the parent Living Tree. Workers do not create an
+additional branch/worktree or integrate themselves. Use `base = "cut:<cut-id>"`
+with the matching dependency when a cut needs predecessor bytes, not only order.
+
+Name concurrent work and untouchable paths; re-read before editing. Stage only
+owned files/hunks with `git add -- <owned-path>` or hunk selection. Never sweep
+with `git add -A` or `git add .`, stash/discard foreign changes, or commit them.
+If overlap prevents honest isolation, preserve the diff and report the boundary.
 
 ## Launch shape
 
@@ -91,10 +99,15 @@ worktrees or branch switches.
 bash -c 'ulimit -f unlimited; exec vibecrafted dispatch <plan> --json'   # detached/background
 ```
 
-Receipt = supervisor-written `tracker.md` (single writer, baseline branch +
-head) plus the first worker's run_id in the control plane. Then spanko:
-await through artifacts and the task/await notification — no pane staring,
-no hedge pollers.
+Receipt = supervisor-written tracker and control-plane run_id plus runtime class,
+parent/effective roots, baseline branch/full SHA, worker branch, and artifact paths.
+Artifacts live under `${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/artifacts`; preserve
+the launcher report's machine-owned identity. Arm supervisor-side
+`vibecrafted await <agent> --run-id <id>` immediately; artifacts are diagnostic,
+not wake signals. No pane staring or hedge pollers. Headless workers finish their
+foreground gates, report and commit before ending the turn; they cannot await a
+background task wakeup. Pins ride verbatim; unavailable pins require an honest
+failure, never silent model substitution.
 
 ## Substrate contract pair + recovery (field-learned, flights 2–4)
 
@@ -110,16 +123,21 @@ deadlocks the line: the orphan delivery blocks every refire.
   and the orphan run's provenance in the body, THEN resume. Never discard.
 - **`repair_rounds` does not fire** on `CellContractError` — repair covers
   red verifiers, not substrate contract breaks.
-- **A failed resume clobbers the tracker**: every dispatch run rewrites
-  `tracker.md` at start, so a resume that dies on a substrate gate erases
-  prior `[x]` states and the NEXT resume restarts from the first cut. Keep
-  the delivered commit SHAs in the journal/notes — you will need them.
+- **Resume from durable evidence**: current typed dispatch uses receipts and
+  Git ancestry; a missing directory or matching commit subject is not admission.
+  The Operator records material recovery in ignored
+  `<repo-root>/.vibecrafted/THE_JOURNAL.md`; workers return reports and never
+  write that journal. Preserve delivered SHAs and integration disposition.
 - **Idempotent settle needs explicit proof**
   (`supervisor.py::_existing_delivery_commit`): a worker that finds the work
   already landed must put a standalone line `commit: <sha>` in its report;
   the supervisor accepts it only if the sha resolves, is an ancestor of
   HEAD, and the commit message identifies the cut (keep `[<cut-id>]` in
   delivery commit subjects). Bake this clause into `[common]` from the
-  start — "nothing to do" without the proof line is a contract failure, and
-  a full-line idempotent resume is also the clean way to re-settle a
-  clobbered tracker.
+  start — "nothing to do" without the proof line is a contract failure.
+
+Skill-byte changes regenerate `vibecrafted-core/vibecrafted_core/skills/SKILL_PROVENANCE.json`
+through `make skills-check UPDATE=1` (owner: `scripts/gen_skill_provenance.py`).
+Respect a separate generator cut and preserve historical entries. The integrator
+regenerates the combined manifest after admission; worker source-green never
+claims installation, live acceptance, or Founder approval.
