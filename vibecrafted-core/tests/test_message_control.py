@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -48,17 +49,201 @@ def test_codex_message_is_recorded_then_queued_without_resume_or_spawn(
 
     assert result["delivery_state"] == "provider_accepted"
     assert result["agent_ack_state"] == "unobserved"
-    assert seen[-6:] == [
+    assert seen == [
         "codex",
         "queue",
         "--thread",
         "codex-thread-42",
-        "--message",
-        "private steering",
+        "--message=private steering",
     ]
     assert "resume" not in seen and "exec" not in seen
     saved = message_control.inspect_message(result["message_id"])
     assert saved is not None and saved["text"] == "private steering"
+
+
+@pytest.mark.parametrize("prefix", ["---\n", "-x ", "@note "])
+def test_literal_body_survives_provider_option_parser(
+    monkeypatch, tmp_path: Path, prefix: str
+) -> None:
+    home = tmp_path / "home"
+    _run(home, "run-1")
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    parser = tmp_path / "queue.py"
+    parser.write_text(
+        "import argparse,json\n"
+        "p=argparse.ArgumentParser(); p.add_argument('queue'); "
+        "p.add_argument('--thread'); p.add_argument('--message'); "
+        "print(json.dumps(p.parse_args().message))\n"
+    )
+    monkeypatch.setattr(
+        message_control,
+        "_resolve_agent_command",
+        lambda _agent, argv, _env: [sys.executable, str(parser), *argv[1:]],
+    )
+    sentinel = tmp_path / "executed"
+    body = prefix + f"'quotes' \"more\"\nZażółć 🐾\n$(touch {sentinel}) `id` /a b/@c\n"
+    received = []
+
+    def runner(argv, **kwargs):
+        assert argv[-1] == f"--message={body}"
+        # No credentials or live runtime configuration in the child.
+        kwargs["env"] = {"HOME": str(home)}
+        kwargs.pop("check", None)
+        result = subprocess.run(argv, check=False, **kwargs)
+        if result.returncode == 0:
+            received.append(json.loads(result.stdout))
+        return result
+
+    result = message_control.send_message(run_id="run-1", text=body, runner=runner)
+    assert result["delivery_state"] == "provider_accepted"
+    assert received == [body]
+    assert not sentinel.exists()
+
+
+def test_accepted_queue_remains_receivable_until_recipient_ack(
+    monkeypatch, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    _run(home, "run-1")
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    monkeypatch.setattr(
+        message_control, "_resolve_agent_command", lambda _agent, argv, _env: argv
+    )
+    calls = []
+
+    def runner(argv, **_kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="queued", stderr="")
+
+    sent = message_control.send_message(
+        run_id="run-1",
+        text="harmless checkpoint marker",
+        idempotency_key="one",
+        runner=runner,
+    )
+    assert sent["delivery_state"] == "provider_accepted"
+    assert sent["agent_ack_state"] == "unobserved"
+    for _ in range(2):
+        received = message_control.receive_messages(run_id="run-1")
+        assert [row["message_id"] for row in received] == [sent["message_id"]]
+        assert received[0]["delivery_state"] == "provider_accepted"
+    # Provider acceptance is not eligible for automatic MCP reinjection.
+    assert message_control.pending_messages(run_id="run-1") == []
+    ack = message_control.acknowledge_message(sent["message_id"], run_id="run-1")
+    assert ack["agent_ack_state"] == "claimed_by_recipient"
+    assert ack["provider_receipt"] == sent["provider_receipt"]
+    assert message_control.receive_messages(run_id="run-1") == []
+    replay = message_control.send_message(
+        run_id="run-1",
+        text=sent["text"],
+        idempotency_key="one",
+        retry=True,
+        runner=runner,
+    )
+    assert replay["delivery_state"] == "agent_acknowledged"
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("code", "error", "category"),
+    [
+        (2, "error: unexpected argument '--private-body'", "cli_arguments_rejected"),
+        (1, "remote app server does not support thread/queue/add", "queue_unsupported"),
+        (1, "thread not found: private-thread", "session_unavailable"),
+        (1, "session private-thread is archived", "session_not_queueable"),
+        (1, "failed to connect: private-endpoint", "queue_connection_failed"),
+        (1, "unrecognized subcommand 'queue'", "queue_unsupported"),
+        (1, "unknown error private-token", "queue_nonzero"),
+        (1, "x" * 8192 + "thread not found", "queue_nonzero"),
+    ],
+)
+def test_queue_failure_has_safe_actionable_diagnostic_and_receiver(
+    monkeypatch, tmp_path: Path, code: int, error: str, category: str
+) -> None:
+    home = tmp_path / "home"
+    _run(home, "run-1")
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    monkeypatch.setattr(
+        message_control, "_resolve_agent_command", lambda _agent, argv, _env: argv
+    )
+
+    def runner(argv, **_kwargs):
+        return subprocess.CompletedProcess(
+            argv, code, stdout="private-token", stderr=error
+        )
+
+    sent = message_control.send_message(
+        run_id="run-1", text="private-body", runner=runner
+    )
+    diagnostic = sent["failure"]["diagnostic"]
+    assert diagnostic["category"] == category
+    assert "--receive" in diagnostic["action"]
+    assert "--receive" in sent["receiver_command"]
+    assert "private-" not in json.dumps(sent["failure"])
+    assert "private-" not in json.dumps(sent["attempts"])
+    received = message_control.receive_messages(run_id="run-1")
+    assert received == [sent]
+    ack = message_control.acknowledge_message(sent["message_id"], run_id="run-1")
+    assert ack["failure"] == sent["failure"]
+    assert message_control.receive_messages(run_id="run-1") == []
+
+
+def test_legacy_accepted_receipt_is_receivable_and_cli_keeps_body_out_of_send_summary(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    from vibecrafted_core import cli
+
+    home = tmp_path / "home"
+    _run(home, "run-1")
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    monkeypatch.setattr(
+        message_control, "_resolve_agent_command", lambda _agent, argv, _env: argv
+    )
+    original = message_control.send_message
+    monkeypatch.setattr(
+        message_control,
+        "send_message",
+        lambda **kwargs: original(
+            **kwargs,
+            runner=lambda argv, **kw: subprocess.CompletedProcess(
+                argv, 0, "queued", ""
+            ),
+        ),
+    )
+    note = tmp_path / "note.txt"
+    note.write_text("private-body")
+    assert cli.main(["message", "--run-id", "run-1", "--file", str(note)]) == 0
+    display = capsys.readouterr().out
+    assert "private-body" not in display
+    assert "receiver_command: vibecrafted message --run-id run-1 --receive" in display
+    assert "automatic mid-turn" in display
+    sent = message_control.receive_messages(run_id="run-1")[0]
+    path = home / "control_plane/messages" / f"{sent['message_id']}.json"
+    legacy = {
+        key: value
+        for key, value in sent.items()
+        if key not in {"receiver_command", "delivery_notice"}
+    }
+    path.write_text(json.dumps(legacy))
+    assert cli.main(["message", "--run-id", "run-1", "--receive"]) == 0
+    received = json.loads(capsys.readouterr().out)
+    assert received == [legacy]
+    assert cli.main(["message", "--run-id", "run-1", "--ack", sent["message_id"]]) == 0
+    ack = json.loads(capsys.readouterr().out)
+    assert ack["provider_receipt"] == sent["provider_receipt"]
+    assert cli.main(["message", "--run-id", "run-1", "--receive"]) == 0
+    assert json.loads(capsys.readouterr().out) == []
+
+
+def test_nul_body_is_rejected_before_persistence(monkeypatch, tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    _run(home, "run-1")
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    with pytest.raises(
+        message_control.MessageControlError, match="message_contains_nul"
+    ):
+        message_control.send_message(run_id="run-1", text="before\0after")
+    assert not (home / "control_plane/messages").exists()
 
 
 def test_duplicate_idempotency_does_not_submit_again_and_crash_state_is_inspectable(
@@ -416,7 +601,9 @@ def test_retry_resubmits_unresolved_timeout_on_same_run_only(
     )
     assert calls == 2
     assert recovered["delivery_state"] == "provider_accepted"
+    assert "failure" not in recovered
     assert recovered["message_id"] == timed_out["message_id"]
+    assert recovered["attempts"][0]["outcome"] == "provider_queue_timeout"
 
     with pytest.raises(
         message_control.MessageControlError, match="idempotency_key_run_mismatch"

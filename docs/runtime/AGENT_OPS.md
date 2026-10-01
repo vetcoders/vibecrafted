@@ -24,6 +24,18 @@ done. Any disagreement means "treat as live, re-arm await."
 Every class here earned its entry with at least two confirmed real-world
 cases. Speculative classes do not belong in this file.
 
+Operator corrections use the existing [message bus](MESSAGE_BUS.md), not a
+second writer. A Codex `provider_accepted` receipt is queue acceptance only;
+it does not establish automatic steering of an active headless turn. Workers
+must run `vibecrafted message --run-id "$VIBECRAFTED_RUN_ID" --receive` at
+useful checkpoints and before finishing, handle each message, then ACK its id.
+Accepted, unresolved and failed queues remain explicitly receivable until
+recipient ACK. Already attached messages retain their nonce/replay boundary
+and can be inspected or ACKed by id. No receipt, PID, nonce or sender-side
+read can stand in for the recipient's claim. Operator messages do not expand
+Founder authorization. See the bus contract for the native version and proof
+limits; queue acceptance must never be reported as active-turn delivery.
+
 ## The shared principle
 
 > **Neither side may rely on a signal whose channel does not guarantee

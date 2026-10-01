@@ -653,7 +653,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     message.add_argument("--file", default="", help="UTF-8 message body file")
     message.add_argument(
-        "--receive", action="store_true", help="read pending inbox messages"
+        "--receive",
+        action="store_true",
+        help="recipient checkpoint: read unacknowledged inbox and queue messages; inspect attached receipts by id",
     )
     message.add_argument(
         "--ack", metavar="MESSAGE_ID", default="", help="acknowledge one inbox message"
@@ -2613,7 +2615,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             acknowledge_message,
             inspect_message,
             mark_context_injected,
-            pending_messages,
+            receive_messages,
             send_message,
         )
 
@@ -2649,7 +2651,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "inbox_action_conflicts_with_send_or_inspect"
                     )
                 result = (
-                    pending_messages(run_id=args.run_id, session=args.session)
+                    receive_messages(run_id=args.run_id, session=args.session)
                     if args.receive
                     else acknowledge_message(
                         args.ack, run_id=args.run_id, session=args.session
@@ -2695,6 +2697,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"delivery_state: {result['delivery_state']}\n"
                     f"agent_ack_state: {result.get('agent_ack_state', 'unobserved')}"
                 )
+                receiver = (
+                    result.get("receiver_command")
+                    or f"vibecrafted message --run-id {result['run_id']} --receive"
+                )
+                print(f"receiver_command: {receiver}")
+                print(
+                    result.get("delivery_notice")
+                    or "Recipient checkpoint required until ACK; queue acceptance is not context receipt."
+                )
+                failure = result.get("failure") or {}
+                if failure:
+                    print(f"failure_reason: {failure.get('reason', 'unknown')}")
+                    diagnostic = failure.get("diagnostic") or {}
+                    if diagnostic:
+                        print(
+                            f"failure_category: {diagnostic['category']}\nnext_action: {diagnostic['action']}"
+                        )
             return (
                 0
                 if result["delivery_state"]

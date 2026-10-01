@@ -526,7 +526,7 @@ Options:
   --run-id <id>            Exact tracked run
   --session <id>           Exact runtime or provider session (must be unique)
   --file <path>            UTF-8 message body file
-  --receive                Read pending inbox messages without consuming them
+  --receive                Read unacknowledged messages at a recipient checkpoint
   --ack <message-id>       Recipient claims receipt of one inbox message
   --idempotency-key <key>  Replay key; same body+run is a receipt replay
   --retry                  Resubmit only unresolved or failed receipts
@@ -539,9 +539,12 @@ Options:
 Contract:
   Codex `queue --thread` is used once its thread is known; earlier messages
   and Claude/other-provider messages use the durable inbox.
-  Inbox messages require explicit polling; inbox_pending is not delivery into
-  model context. context_injected records attachment to a tool response and
-  is not proof the recipient read it; --receive does not list those receipts.
+  Native queue acceptance does not establish automatic mid-turn delivery.
+  --receive includes provider_accepted, unresolved and failed
+  receipts until recipient ACK. Reads do not change delivery state.
+  inbox_pending is not delivery into model context. context_injected is attachment,
+  not proof of reading; inspect or ACK those receipts by id.
+  Automatic lanes use inbox_pending only, avoiding queue/attachment replay.
   This command never starts or resumes another worker.
   provider_accepted is not an agent ACK; --ack is a recipient claim only.
 

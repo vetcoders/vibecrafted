@@ -52,7 +52,7 @@ DELIVERY_STATES: dict[str, str] = {
     "retryable_failure": "queue attempt failed in a way retry may resubmit",
     "permanent_failure": "queue attempt cannot be retried as the same operation",
 }
-_ACKABLE_STATES = frozenset({"inbox_pending", "context_injected", "agent_acknowledged"})
+_ACKABLE_STATES = frozenset(DELIVERY_STATES)
 _INJECTION_NONCE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+/=-]{0,255}$")
 
 
@@ -179,10 +179,11 @@ def resolve_message_run(*, run_id: str = "", session: str = "") -> str:
 
 
 def pending_messages(*, run_id: str = "", session: str = "") -> list[dict[str, Any]]:
-    """Read ``inbox_pending`` receipts without consuming them.
+    """Read injection-eligible inbox receipts without consuming them.
 
-    Historical name for :func:`receive_messages`. Same selector rules and
-    the same ``inbox_pending``-only result.
+    Automatic lanes use this subset. A provider queue may still deliver an
+    accepted message later, so do not automatically inject it a second time.
+    Recipient checkpoint reads use :func:`receive_messages` instead.
     """
     target = resolve_message_run(run_id=run_id, session=session)
     result: list[dict[str, Any]] = []
@@ -199,21 +200,36 @@ def pending_messages(*, run_id: str = "", session: str = "") -> list[dict[str, A
 
 
 def receive_messages(*, run_id: str = "", session: str = "") -> list[dict[str, Any]]:
-    """Return ``inbox_pending`` receipts for one run without consuming them.
+    """Return unacknowledged, unattached receipts for a recipient checkpoint.
 
     Contract:
     - Resolve exactly one run via :func:`resolve_message_run`. Inbox providers,
       including Gemini with no native session, are addressable by run id or by
       a recorded runtime session.
-    - Include only ``inbox_pending``. ``context_injected`` is not pending:
-      attachment to a tool response is a separate observation and is not proof
-      the recipient read the text.
+    - Include ``inbox_pending``, queue-accepted, failed and unresolved messages until
+      recipient ACK. Acceptance or attachment never proves context receipt.
+      Delivery state and provider receipts remain unchanged by this read.
+    - Attached receipts stay inspectable/ackable by id. Do not repeat their
+      injection; preserve the established explicit nonce/replay boundary.
     - Do not acknowledge, delete, or change ``delivery_state``.
     - An empty list is not proof the run is idle. This call does not wake a
       stopped worker.
     """
 
-    return pending_messages(run_id=run_id, session=session)
+    target = resolve_message_run(run_id=run_id, session=session)
+    rows = []
+    for path in _outbox_root().glob("msg-*.json"):
+        record = _read_json(path)
+        if (
+            record.get("run_id") == target
+            and record.get("delivery_state") in _ACKABLE_STATES
+            and record.get("delivery_state")
+            not in {"agent_acknowledged", "context_injected"}
+        ):
+            rows.append(record)
+    return sorted(
+        rows, key=lambda row: (str(row.get("created_at")), str(row.get("message_id")))
+    )
 
 
 def acknowledge_message(
@@ -221,7 +237,7 @@ def acknowledge_message(
 ) -> dict[str, Any]:
     """Record explicit recipient acknowledgement, without claiming execution.
 
-    Contract: ``inbox_pending`` or ``context_injected`` advances to
+    Contract: any known unacknowledged receipt advances to
     ``agent_acknowledged`` with ``agent_ack_state`` ``claimed_by_recipient``.
     A repeated ACK returns the stored receipt. ACK is the recipient's claim,
     not proof the text was read before the claim and not proof the requested
@@ -297,10 +313,51 @@ def mark_context_injected(message_id: str, nonce: str) -> dict[str, Any]:
 
 def _provider_argv(provider: str, session: str, text: str) -> list[str]:
     if provider == "codex":
-        # Queue is Codex's native steering primitive. Do not use exec resume:
-        # that starts another writer and is not a message delivery operation.
-        return ["codex", "queue", "--thread", session, "--message", text]
+        # Queue acceptance is not active-turn steering. Bind the value to its
+        # option: clap rejects a separate value starting with '-' (e.g. YAML).
+        # subprocess receives literal argv; no shell or payload transformation.
+        return ["codex", "queue", "--thread", session, f"--message={text}"]
     raise MessageControlError(f"provider_steering_unsupported:{provider or 'unknown'}")
+
+
+def _queue_failure_diagnostic(exit_code: int, stderr: str) -> dict[str, str]:
+    """Classify bounded stderr; return only fixed, payload-free diagnostics."""
+
+    bounded = stderr[:8192].casefold()
+    if (
+        "does not support thread/queue/add" in bounded
+        or "unrecognized subcommand 'queue'" in bounded
+    ):
+        category, action = (
+            "queue_unsupported",
+            "Check the provider CLI/server version; use recipient --receive.",
+        )
+    elif "thread not found" in bounded or "no active session found" in bounded:
+        category, action = (
+            "session_unavailable",
+            "Check the exact native thread identity; use recipient --receive.",
+        )
+    elif "is archived" in bounded or "ephemeral thread" in bounded:
+        category, action = (
+            "session_not_queueable",
+            "Use recipient --receive; the native session cannot accept this queue operation.",
+        )
+    elif "connection refused" in bounded or "failed to connect" in bounded:
+        category, action = (
+            "queue_connection_failed",
+            "Check the provider server connection; use recipient --receive before retrying.",
+        )
+    elif exit_code == 2:
+        category, action = (
+            "cli_arguments_rejected",
+            "Check exact native queue help and adapter argv; use recipient --receive.",
+        )
+    else:
+        category, action = (
+            "queue_nonzero",
+            "Use recipient --receive; inspect exit code and digests before an explicit retry.",
+        )
+    return {"category": category, "action": action}
 
 
 def _record_failure(
@@ -314,6 +371,16 @@ def _record_failure(
             "failure": {"reason": reason, "at": _now()},
         }
     )
+    if reason == "provider_queue_timeout":
+        category = "queue_timeout"
+        action = "Outcome is ambiguous; use recipient --receive before considering an explicit retry."
+    elif reason.startswith("provider_command_unavailable:"):
+        category = "provider_command_unavailable"
+        action = "Check the selected provider executable; use recipient --receive."
+    else:
+        category = "queue_unavailable"
+        action = "Check the provider queue transport; use recipient --receive before retrying."
+    updated["failure"]["diagnostic"] = {"category": category, "action": action}
     _write_json_durable(_message_path(str(updated["message_id"])), updated)
     return updated
 
@@ -372,6 +439,10 @@ def send_message(
     to model context. Codex with a native thread is the only provider queue.
     A missing native session still uses the inbox and does not spawn or
     resume a provider process.
+
+    Accepted or failed queue messages remain explicitly receivable until
+    recipient ACK. Automatic lanes must use pending_messages, not this
+    checkpoint route, to avoid a second delivery of a native queued message.
     """
 
     target = resolve_message_run(run_id=run_id, session=session)
@@ -380,6 +451,8 @@ def send_message(
         raise MessageControlError("message_empty")
     if len(body.encode("utf-8")) > MAX_MESSAGE_BYTES:
         raise MessageControlError("message_too_large")
+    if "\0" in body:
+        raise MessageControlError("message_contains_nul")
     key = str(idempotency_key or "").strip() or f"message:{uuid.uuid4()}"
 
     with run_mutation_locks(control_plane_home(), run_id=target, idempotency_key=key):
@@ -423,6 +496,11 @@ def send_message(
                 "created_at": _now(),
                 "updated_at": _now(),
                 "attempts": [],
+                "receiver_command": f"vibecrafted message --run-id {target} --receive",
+                "delivery_notice": (
+                    "Explicit recipient checkpoint required until ACK. Native queue "
+                    "acceptance does not establish context receipt or automatic mid-turn delivery."
+                ),
             }
             _write_json_durable(_message_path(message_id), record)
             _write_json_durable(
@@ -489,6 +567,7 @@ def send_message(
         updated["attempts"] = [*list(record.get("attempts") or []), receipt]
         updated["updated_at"] = _now()
         if completed.returncode == 0:
+            updated.pop("failure", None)
             updated["delivery_state"] = "provider_accepted"
             updated["provider_receipt"] = receipt
             # Explicitly retain the absence of semantic evidence.
@@ -499,6 +578,9 @@ def send_message(
                 "reason": "provider_queue_nonzero",
                 "at": _now(),
                 "provider_receipt": receipt,
+                "diagnostic": _queue_failure_diagnostic(
+                    int(completed.returncode), stderr
+                ),
             }
         _write_json_durable(_message_path(str(updated["message_id"])), updated)
         return updated

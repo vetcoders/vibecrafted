@@ -6,6 +6,7 @@ import io
 import json
 import os
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -182,11 +183,13 @@ def test_capability_table_is_explicit_per_provider() -> None:
         monitor_lane.effective_level("claude", process_alive=False, stdin_open=True)
         == "injected-on-call"
     )
-    assert rows["codex"].declared_level == "live"
-    assert rows["codex"].monitor == "native-queue"
-    assert monitor_lane.effective_level("codex", native_session=True) == "live"
+    assert rows["codex"].declared_level == "checkpoint-poll"
+    assert rows["codex"].monitor is None
+    assert (
+        monitor_lane.effective_level("codex", native_session=True) == "checkpoint-poll"
+    )
     assert monitor_lane.effective_level("codex", native_session=False) == (
-        "injected-on-call"
+        "checkpoint-poll"
     )
     for name in ("agy", "grok", "junie", "kimi", "cursor", "gemini"):
         assert rows[name].declared_level == "injected-on-call"
@@ -204,11 +207,41 @@ def test_codex_queue_is_not_injected_again(
     stub = _Stdin()
     with monitor_lane.RunFollower("run-1", stdin=stub, pid=os.getpid()) as follower:
         delivered = follower.poll()
-    assert delivered[0].level == "injected-on-call"
+    assert delivered[0].level == "checkpoint-poll"
     assert delivered[0].injected is False
     assert delivered[0].reason == "no_native_thread"
     assert stub.writes == 0
     assert message_control.receive_messages(run_id="run-1")[0]["text"] == "early"
+
+
+def test_accepted_codex_queue_is_checkpoint_only_and_not_monitor_acknowledged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = _home(monkeypatch, tmp_path)
+    _run(home, "run-1", agent="codex", session="native-thread")
+    monkeypatch.setattr(
+        message_control, "_resolve_agent_command", lambda _agent, argv, _env: argv
+    )
+    sent = message_control.send_message(
+        run_id="run-1",
+        text="harmless accepted packet",
+        runner=lambda argv, **kwargs: subprocess.CompletedProcess(
+            argv, 0, "queued", ""
+        ),
+    )
+    for _ in range(2):
+        stub = _Stdin()
+        with monitor_lane.RunFollower("run-1", stdin=stub, pid=os.getpid()) as follower:
+            assert follower.poll() == []
+            assert follower._push(sent) == (
+                "checkpoint-poll",
+                False,
+                "store_queue_already_accepted",
+            )
+        assert stub.writes == 0
+        received = message_control.receive_messages(run_id="run-1")
+        assert [row["message_id"] for row in received] == [sent["message_id"]]
+        assert received[0]["agent_ack_state"] == "unobserved"
 
 
 def test_second_follower_is_refused_until_the_lease_closes(
