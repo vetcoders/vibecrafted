@@ -421,6 +421,53 @@ def test_public_install_surfaces_name_all_release_carriers() -> None:
         assert "vc-frame/releases/latest/download/install.sh" not in text
 
 
+@pytest.mark.parametrize("doctor_step", [0, 1], ids=["ubuntu", "debian"])
+@pytest.mark.parametrize("failing_donor", [None, "vc-frame", "vc-terminal"])
+def test_linux_install_doctor_rejects_unrunnable_owned_donors(
+    tmp_path: Path, doctor_step: int, failing_donor: str | None
+) -> None:
+    """A green doctor must not hide an installed engine's loader failure."""
+    workflow = (REPO_ROOT / ".github/workflows/install-linux.yml").read_text(
+        encoding="utf-8"
+    )
+    steps = re.findall(
+        r"      - name: Run vibecrafted doctor\n        run: \|\n"
+        r"((?:          [^\n]*\n|\n)+)",
+        workflow,
+    )
+    assert len(steps) == 2
+    home = tmp_path / "home"
+    generation = home / ".local/share/vibecrafted/releases/4.3.1"
+    path_bin = home / ".local/bin"
+    path_bin.mkdir(parents=True)
+    (generation / "bin").mkdir(parents=True)
+    doctor = path_bin / "vibecrafted"
+    doctor.write_text("#!/bin/bash\necho '65 ok, 13 warnings, 0 failures'\n")
+    doctor.chmod(0o755)
+    for donor in ("vc-frame", "vc-terminal"):
+        binary = generation / "bin" / donor
+        exit_code = 126 if donor == failing_donor else 0
+        binary.write_text(f"#!/bin/bash\necho '{donor} identity'\nexit {exit_code}\n")
+        binary.chmod(0o755)
+    (tmp_path / "VERSION").write_text("4.3.1\n")
+    env = os.environ.copy()
+    env.update(
+        HOME=str(home),
+        XDG_DATA_HOME=str(home / ".local/share"),
+        RUNNER_TEMP=str(tmp_path),
+        PATH=f"{path_bin}:/usr/bin:/bin",
+    )
+    result = subprocess.run(
+        ["bash", "-c", textwrap.dedent(steps[doctor_step])],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert (result.returncode == 0) == (failing_donor is None), result.stdout
+
+
 def test_tag_workflow_is_a_read_only_source_gate() -> None:
     workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
 

@@ -3,8 +3,8 @@ name: Install (Linux Matrix)
 # Plan 03 (META_22) cross-platform install gate. Exercises the install.sh
 # Linux path against Ubuntu (runner-native) and Debian (container) and
 # verifies `vibecrafted doctor` reports green afterwards. Doctor stays green in
-# headless CI because absent externally-managed product foundations
-# (loctree/aicx/vc-frame) are reported as warnings, not failures.
+# headless CI because absent external foundations (loctree/aicx) are warnings.
+# Owned vc-frame/vc-terminal engines must also execute on every matrix host.
 #
 # The Ubuntu job uses the GitHub-hosted runner directly so we exercise the
 # real /etc/os-release detection and the apt-family hint path. The Debian
@@ -36,7 +36,9 @@ permissions:
 jobs:
   linux-runtime-pack:
     name: build Linux x64 Runtime Pack
-    runs-on: ubuntu-latest
+    # Build against the oldest supported GNU libc. ubuntu-latest binaries
+    # required GLIBC_2.38 and failed to launch on the green 22.04 install job.
+    runs-on: ubuntu-22.04
     # The carrier assembler exports this same toolchain before it builds the
     # vc-frame WASI plugins. Keep provisioning out of rustup's ambient default:
     # a target installed there is invisible to cargo selected by RUSTUP_TOOLCHAIN.
@@ -44,6 +46,11 @@ jobs:
       RUSTUP_TOOLCHAIN: "1.97.0"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
 
       - name: Install Runtime Pack build prerequisites
         run: |
@@ -199,7 +206,7 @@ jobs:
           # PATH adjustments mirror what the install.sh interactive path does
           # — make sure the staged CLI is visible to this step. Foundations
           # come from their own channels: loct/aicx from npm (its global bin),
-          # prview from its GitHub release and screenscribe through pipx
+          # prview from its GitHub release and screenscribe through uv/pipx
           # (both ~/.local/bin); a channel CI cannot reach stays a warning.
           export PATH="$HOME/.vibecrafted/bin:$HOME/.cargo/bin:$HOME/.local/bin:$HOME/.local/share/vibecrafted/bin:$PATH"
           if command -v vibecrafted >/dev/null 2>&1; then
@@ -213,6 +220,12 @@ jobs:
             # isn't on PATH yet (smoke uses the repo source tree).
             make doctor
           fi
+          # Doctor warnings cannot admit a missing or ABI-incompatible owned
+          # engine. Probe the selected installed generation, bypassing PATH.
+          generation="${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted/releases/$(tr -d '[:space:]' < VERSION)"
+          for donor in vc-frame vc-terminal; do
+            "$generation/bin/$donor" --version
+          done
 
       - name: Run skill-loader smoke
         # Installed-runtime health is the immediately preceding owned gate.
@@ -347,6 +360,10 @@ jobs:
           else
             make doctor
           fi
+          generation="${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted/releases/$(tr -d '[:space:]' < VERSION)"
+          for donor in vc-frame vc-terminal; do
+            "$generation/bin/$donor" --version
+          done
 
       - name: Run skill-loader smoke
         run: |
