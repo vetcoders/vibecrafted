@@ -401,10 +401,8 @@ final class ProductUpdateCoordinator {
               self.staged = ProductUpdateStagedTuple(
                 candidate: admitted, staging: staging, pack: pack, appOrDMG: preparedApp, proof: proof)
               if productUpdateClaimsHealthy(installed: installed, candidate: admitted) {
-                self.finish(
-                  deriveProductUpdateProgress(
-                    phase: .success, installed: installed, candidate: admitted),
-                  token: token, terminal: .committed)
+                self.finishCaptureSettlement(
+                  installed: installed, candidate: admitted, token: token)
                 return
               }
               self.busy = false
@@ -482,27 +480,8 @@ final class ProductUpdateCoordinator {
           self.receipt.packPublished = true
           self.receipt.boundary = .packPublished
           if productUpdateClaimsHealthy(installed: published, candidate: staged.candidate) {
-            let finish: @MainActor @Sendable (Result<Void, Error>) -> Void = { [weak self] result in
-              guard let self, self.generation == token else { return }
-              switch result {
-              case .success:
-                self.finish(
-                  deriveProductUpdateProgress(
-                    phase: .success, installed: published, candidate: staged.candidate),
-                  token: token, terminal: .committed)
-              case .failure(let error):
-                self.finish(
-                  deriveProductUpdateProgress(
-                    phase: .retained, installed: published, candidate: staged.candidate,
-                    detail: "The update published, but capture cleanup did not finish. \(error.localizedDescription)"),
-                  token: token, terminal: .retained)
-              }
-            }
-            if let settle = self.dependencies.settleCaptures {
-              settle(finish)
-            } else {
-              finish(.success(()))
-            }
+            self.finishCaptureSettlement(
+              installed: published, candidate: staged.candidate, token: token)
           } else {
             self.finish(
               deriveProductUpdateProgress(
@@ -515,6 +494,34 @@ final class ProductUpdateCoordinator {
       }
     }
     cancelInFlight = cancel
+  }
+
+  private func finishCaptureSettlement(
+    installed: ProductUpdateIdentity,
+    candidate: ProductUpdateCandidate,
+    token: UInt64
+  ) {
+    let finish: @MainActor @Sendable (Result<Void, Error>) -> Void = { [weak self] result in
+      guard let self, self.generation == token else { return }
+      switch result {
+      case .success:
+        self.finish(
+          deriveProductUpdateProgress(
+            phase: .success, installed: installed, candidate: candidate),
+          token: token, terminal: .committed)
+      case .failure(let error):
+        self.finish(
+          deriveProductUpdateProgress(
+            phase: .retained, installed: installed, candidate: candidate,
+            detail: "The update published, but capture cleanup did not finish. \(error.localizedDescription)"),
+          token: token, terminal: .retained)
+      }
+    }
+    if let settle = dependencies.settleCaptures {
+      settle(finish)
+    } else {
+      finish(.success(()))
+    }
   }
 
   private func replaceRunningApp(

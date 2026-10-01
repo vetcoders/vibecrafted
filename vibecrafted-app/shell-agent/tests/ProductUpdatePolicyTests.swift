@@ -537,23 +537,51 @@ struct ProductUpdatePolicyTests {
   }
 
   static func testCoordinatorCleanupFailureRemainsRetryable() throws {
+    var current = matchingInstalled(pack: previous)
+    var packs = 0
+    var settlements = 0
+    var dependencyReleased = false
     let coordinator = makeCoordinator(
-      installed: { matchingInstalled(pack: previous) },
-      installPack: { admitted, _, completion in
-        completion(.success(ProductUpdateIdentity(
-          appGeneration: admitted.generation, packGeneration: admitted.generation,
-          sourceRevision: admitted.sourceRevision)))
+      installed: { current },
+      installPack: { _, _, completion in
+        packs += 1
+        current = matchingInstalled()
+        completion(.success(current))
         return {}
       },
       settleCaptures: { completion in
-        completion(.failure(Failure(message: "cleanup failed")))
+        settlements += 1
+        if dependencyReleased {
+          completion(.success(()))
+        } else {
+          completion(.failure(Failure(message: "live capture dependency")))
+        }
       })
     coordinator.checkForUpdates()
     try wait { coordinator.progress.canInstall }
     coordinator.installUpdate()
-    try wait { coordinator.progress.phase == .retained }
+    try wait { !coordinator.isBusy }
+    try require(coordinator.progress.phase == .retained, "cleanup failure was not retained")
     try require(!coordinator.progress.claimsHealthy, "cleanup failure reported clean")
     try require(coordinator.receipt.packPublished, "cleanup failure erased publication truth")
+    try require(settlements == 1, "publication skipped capture settlement")
+
+    coordinator.checkForUpdates()
+    try wait { !coordinator.isBusy }
+    try require(settlements == 2, "Check Again skipped failed capture cleanup")
+    try require(coordinator.progress.phase == .retained, "repeated cleanup refusal was not retained")
+    try require(coordinator.receipt.terminal == .retained, "cleanup refusal committed the receipt")
+    try require(!coordinator.progress.claimsHealthy, "Check Again reported clean despite refusal")
+    try require(packs == 1, "Check Again republished the unchanged candidate")
+
+    dependencyReleased = true
+    coordinator.checkForUpdates()
+    try wait { !coordinator.isBusy }
+    try require(settlements == 3, "Check Again did not retry cleanup after dependency release")
+    try require(coordinator.progress.phase == .success, "settled candidate did not succeed")
+    try require(coordinator.receipt.terminal == .committed, "settled candidate did not commit")
+    try require(coordinator.progress.claimsHealthy, "settled candidate did not claim healthy")
+    try require(packs == 1, "cleanup retry republished the unchanged candidate")
   }
 
   static func testCoordinatorHelperUnableToReplaceIsRetained() throws {
