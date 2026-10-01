@@ -3034,39 +3034,60 @@ def _write_run_meta(shared_home: Path, run_id: str, **meta) -> None:
 def test_active_uninstall_runs_drops_ghosts_proven_by_dispatcher_meta(
     tmp_path: Path,
 ) -> None:
-    shared_home = tmp_path / ".vibecrafted"
-    _write_run_meta(
-        shared_home, "work-done", status="completed", worker_pid=os.getpid()
+    # A PID namespace can inherit PGID 0 from an outer group. Own a valid
+    # session instead of assuming pytest's ambient process group is safe.
+    worker = subprocess.Popen(
+        [sys.executable, "-I", "-c", "import sys; sys.stdin.buffer.read()"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
     )
-    _write_run_meta(shared_home, "work-dead", status="active", worker_pid=2**22 - 7)
-    _write_run_meta(
-        shared_home,
-        "rese-live",
-        status="active",
-        worker_pid=os.getpid(),
-        worker_pgid=os.getpgid(0),
-        agent="swarm",
-    )
-    ghosts: list[tuple[str, str]] = []
-    payload = {
-        "active_runs": [
-            {"run_id": "work-done", "agent": "codex"},
-            {"run_id": "work-dead", "agent": "claude"},
-            {"run_id": "work-nometa", "agent": "codex"},
-            {"run_id": "rese-live", "agent": "swarm"},
-        ]
-    }
+    try:
+        worker_pgid = os.getpgid(worker.pid)
+        assert worker_pgid == worker.pid and worker_pgid > 1
+        shared_home = tmp_path / ".vibecrafted"
+        _write_run_meta(
+            shared_home, "work-done", status="completed", worker_pid=os.getpid()
+        )
+        _write_run_meta(shared_home, "work-dead", status="active", worker_pid=2**22 - 7)
+        _write_run_meta(
+            shared_home,
+            "rese-live",
+            status="active",
+            worker_pid=worker.pid,
+            worker_pgid=worker_pgid,
+            agent="swarm",
+        )
+        ghosts: list[tuple[str, str]] = []
+        payload = {
+            "active_runs": [
+                {"run_id": "work-done", "agent": "codex"},
+                {"run_id": "work-dead", "agent": "claude"},
+                {"run_id": "work-nometa", "agent": "codex"},
+                {"run_id": "rese-live", "agent": "swarm"},
+            ]
+        }
 
-    runs = installer._active_uninstall_runs(payload, shared_home, ghosts=ghosts)
+        runs = installer._active_uninstall_runs(payload, shared_home, ghosts=ghosts)
 
-    assert [run["run_id"] for run in runs] == ["work-nometa", "rese-live"]
-    assert runs[1]["worker_pgid"] == str(os.getpgid(0))
-    assert dict(ghosts) == {
-        "work-done": "meta status completed",
-        "work-dead": f"worker pid {2**22 - 7} is dead",
-    }
-    # Without a state home the board is trusted verbatim (fail-closed).
-    assert len(installer._active_uninstall_runs(payload)) == 4
+        assert [run["run_id"] for run in runs] == ["work-nometa", "rese-live"]
+        assert runs[1]["worker_pgid"] == str(worker_pgid)
+        assert dict(ghosts) == {
+            "work-done": "meta status completed",
+            "work-dead": f"worker pid {2**22 - 7} is dead",
+        }
+        # Without a state home the board is trusted verbatim (fail-closed).
+        assert len(installer._active_uninstall_runs(payload)) == 4
+    finally:
+        # EOF releases only the process this fixture created; wait reaps it.
+        try:
+            worker.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            worker.kill()
+            worker.communicate(timeout=5)
+            raise
+    assert worker.returncode == 0
 
 
 def test_request_uninstall_run_stop_signals_swarm_process_group(
