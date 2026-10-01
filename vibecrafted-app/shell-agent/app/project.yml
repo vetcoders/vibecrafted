@@ -35,7 +35,7 @@ targets:
           ./shell-agent/scripts/normalize-bindings.sh shell-agent/app/Vibecrafted/Bridge
     settings:
       base:
-        MARKETING_VERSION: "4.3.1"
+        MARKETING_VERSION: "4.3.2"
         CURRENT_PROJECT_VERSION: 1
         GENERATE_INFOPLIST_FILE: false
         INFOPLIST_FILE: Vibecrafted/Info.plist
