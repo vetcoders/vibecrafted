@@ -21,6 +21,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from socketserver import TCPServer
 from threading import Thread
 
 import pytest
@@ -235,6 +236,13 @@ def voc_binary() -> Path:
     return _build_voc()
 
 
+class _LoopbackTranscriptServer(ThreadingHTTPServer):
+    def server_bind(self) -> None:
+        # The numeric transcript endpoint does not need a DNS-derived name.
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
 @pytest.fixture
 def transcript_server(tmp_path: Path):
     """Observe reads the writer's transcript API, rather than local run paths."""
@@ -256,7 +264,7 @@ def transcript_server(tmp_path: Path):
         def log_message(self, _format: str, *args) -> None:
             pass
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server = _LoopbackTranscriptServer(("127.0.0.1", 0), Handler)
     thread = Thread(target=server.serve_forever, daemon=True)
     try:
         yield server, thread
@@ -265,6 +273,25 @@ def transcript_server(tmp_path: Path):
             server.shutdown()
             thread.join()
         server.server_close()
+
+
+def test_transcript_server_does_not_resolve_loopback(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse_name_resolution(_host: str) -> str:
+        raise AssertionError("the loopback transcript fixture must not query DNS")
+
+    # Refuse resolution only while constructing this test's owned fixture.
+    with monkeypatch.context() as guard:
+        guard.setattr("http.server.socket.getfqdn", refuse_name_resolution)
+        server, thread = request.getfixturevalue("transcript_server")
+
+    assert isinstance(server, ThreadingHTTPServer)
+    assert server.server_name == "127.0.0.1"
+    assert server.server_port == server.server_address[1] > 0
+    assert server.socket.getsockname() == server.server_address
+    assert server.daemon_threads and thread.daemon
+    assert thread.ident is None
 
 
 def _prepare(tmp_path: Path) -> dict[str, str]:
