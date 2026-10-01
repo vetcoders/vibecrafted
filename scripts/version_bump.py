@@ -31,11 +31,13 @@ PACKAGED_VERSION_RELATIVES = (
 CARGO_RELATIVES = (
     Path("vibecrafted-server/web/Cargo.toml"),
     Path("vibecrafted-server/control-core/Cargo.toml"),
+    Path("vibecrafted-server/mcp-shim/Cargo.toml"),
 )
 CARGO_LOCK_PACKAGES = {
     Path("vibecrafted-server/Cargo.lock"): (
         "control-core",
         "vibecrafted-server-web",
+        "vc-mcp-shim",
     ),
     Path("vibecrafted-app/Cargo.lock"): ("control-core",),
 }
@@ -114,6 +116,14 @@ def check_version_declarations(version_file: Path) -> str:
         raise ValueError(
             f"Version drift detected; expected {current} in every declaration: {details}"
         )
+    for relative, package_names in CARGO_LOCK_PACKAGES.items():
+        lock_path = version_file.parent / relative
+        if lock_path.exists():
+            # Reuse the writer's fail-closed local-package validation without
+            # writing or asking Cargo to alter registry dependency resolution.
+            _replace_lock_package_versions(
+                lock_path.read_text(encoding="utf-8"), package_names, current, current
+            )
     return current
 
 
