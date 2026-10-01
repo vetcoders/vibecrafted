@@ -868,8 +868,8 @@ repo-full() {
 
   echo "==================== TOP 10 LARGEST TRACKED FILES ===================="
   if git ls-files -z | grep -q . 2>/dev/null; then
-    { git ls-files -z | xargs -0 stat -f "%z%t%N" 2>/dev/null ||
-      git ls-files -z | xargs -0 stat -c "%s\t%n" 2>/dev/null; } \
+    { git ls-files -z | xargs -0 stat --printf '%s\t%n\n' 2>/dev/null ||
+      git ls-files -z | xargs -0 stat -f "%z%t%N" 2>/dev/null; } \
       | sort -nr \
       | head -n 10 \
       | awk -F '\t' "$_repo_full_human_awk"

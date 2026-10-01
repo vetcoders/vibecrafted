@@ -5,17 +5,22 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DISPATCH_SH = (
     REPO_ROOT / "vibecrafted-core/vibecrafted_core/runtime/shell/lib/dispatch.sh"
 )
 
 
-def test_repo_full_largest_tracked_files_include_size_and_name(tmp_path: Path) -> None:
+@pytest.mark.parametrize("filename", ["known-size.bin", "known size.bin"])
+def test_repo_full_largest_tracked_files_include_size_and_name(
+    tmp_path: Path, filename: str
+) -> None:
     repo = tmp_path / "fixture-repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    tracked = repo / "known-size.bin"
+    tracked = repo / filename
     tracked.write_bytes(b"x" * 2048)
     subprocess.run(["git", "-C", str(repo), "add", tracked.name], check=True)
     subprocess.run(
@@ -53,6 +58,7 @@ def test_repo_full_largest_tracked_files_include_size_and_name(tmp_path: Path) -
 
     assert "2.0 KB" in largest
     assert tracked.name in largest
+    assert largest.strip() == f"2.0 KB  {tracked.name}"
 
 
 def test_scaffold_doctor_prefers_runtime_pack_binary_outside_monorepo(
