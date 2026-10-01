@@ -43,3 +43,12 @@ scripts/installer/.venv
 # Website and verification screenshots are useful in the repo, not in the
 # operator runtime image.
 *.png
+
+# The hardened VM image consumes only these sealed Runtime Pack archives.
+# Keep build caches and every other generated input outside the context.
+!build/
+build/*
+!build/Vibecrafted_RuntimePack_linux-arm64.tar.gz
+!build/linux-arm64-runtime-pack/
+build/linux-arm64-runtime-pack/*
+!build/linux-arm64-runtime-pack/Vibecrafted_RuntimePack_linux-arm64.tar.gz

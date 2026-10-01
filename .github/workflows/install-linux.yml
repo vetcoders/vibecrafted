@@ -390,6 +390,18 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
+      - name: Install uv for VM context test
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+
+      - name: Verify hardened VM carrier build context
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/vibecrafted-vm-context-venv
+          VIBECRAFTED_HOME: ${{ runner.temp }}/vibecrafted-vm-context-home
+        run: |
+          env -u PYTHONPATH uv run --project vibecrafted-core \
+            --with pytest --with docker==7.1.0 python -m pytest -q \
+            tests/tui/test_linux_arm64_runtime_pack.py::test_vm_docker_context_admits_only_exact_runtime_pack_archives
+
       - name: Build vibecrafted:ci-smoke
         run: docker build -t vibecrafted:ci-smoke .
 

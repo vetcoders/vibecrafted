@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import stat
 import subprocess
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -69,6 +70,56 @@ def test_local_vm_image_consumes_only_the_exact_runtime_pack_carrier() -> None:
     assert "vc-frame vc-terminal voc" in entry
 
 
+def test_vm_docker_context_admits_only_exact_runtime_pack_archives(
+    tmp_path: Path,
+) -> None:
+    # Reuse Docker's actual context tar helper; no daemon or image build is needed.
+    # The Linux Docker CI lane installs docker==7.1.0 explicitly for this probe.
+    docker_build = pytest.importorskip("docker.utils.build")
+    context = tmp_path / "context"
+    required = {
+        "build/Vibecrafted_RuntimePack_linux-arm64.tar.gz",
+        "build/linux-arm64-runtime-pack/Vibecrafted_RuntimePack_linux-arm64.tar.gz",
+    }
+    excluded = {
+        "build/private.env",
+        "build/runtime-cache/unrelated.tar.gz",
+        "build/linux-arm64-runtime-pack/cache/private.json",
+        "build/linux-arm64-runtime-pack/unrelated.tar.gz",
+        "build/linux-arm64-runtime-pack/Vibecrafted_RuntimePack_linux-arm64.tar.gz.sha256",
+        "other/build/Vibecrafted_RuntimePack_linux-arm64.tar.gz",
+        "operator-tui/target/cache.bin",
+        ".vibecrafted/private.cfg",
+    }
+    controls = {
+        "vibecrafted-vm/Containerfile",
+        "vibecrafted-vm/runtime-entry.sh",
+        "vibecrafted-vm/runtime-provider-lock.json",
+    }
+    for name in required | excluded | controls:
+        path = context / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"synthetic context fixture")
+    patterns = (REPO_ROOT / ".dockerignore").read_text(encoding="utf-8")
+    (context / ".dockerignore").write_text(patterns, encoding="utf-8")
+
+    with (
+        docker_build.tar(
+            str(context),
+            exclude=patterns.splitlines(),
+            dockerfile=("vibecrafted-vm/Containerfile", None),
+        ) as archive,
+        tarfile.open(fileobj=archive) as payload,
+    ):
+        members = set(payload.getnames())
+
+    assert required <= members, f"missing required carrier inputs: {required - members}"
+    assert controls <= members
+    assert not (excluded & members), (
+        f"excluded build inputs leaked: {excluded & members}"
+    )
+
+
 def test_linux_builder_uses_pinned_public_inputs_for_arm64_and_x64() -> None:
     builder = (REPO_ROOT / "vibecrafted-vm/RuntimePack.Containerfile").read_text(
         encoding="utf-8"
@@ -86,8 +137,8 @@ def test_linux_builder_uses_pinned_public_inputs_for_arm64_and_x64() -> None:
         "WORKDIR /src/vibecrafted"
     )
     assert "69616218470b2ad053617efb9e7027b1518ea38918d933c2791e113d99cec507" in builder
-    assert "d6685ead9018ad89411291d6198476666e48b0f8" in assembler
-    assert "7ab84069c9b7994ce0b705ccedd708aa3a35dcb6" in assembler
+    assert "c5bb229673401742bf22d05e2caa17337e3e20de" in assembler
+    assert "5436995ed643def9e827c0f9ceed7378d4613d6f" in assembler
     assert "git clone" not in assembler
     assert "VIBECRAFTED_SOURCE_OWNER_REPO" in assembler
     assert 'export VIBECRAFTED_SOURCE_REVISION="$source_revision"' in assembler
