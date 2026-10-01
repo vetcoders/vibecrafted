@@ -7,7 +7,7 @@ import threading
 from pathlib import Path
 
 import pytest
-from vibecrafted_core import control_plane, ship, wrappers
+from vibecrafted_core import cli, control_plane, ship, wrappers
 from vibecrafted_core.dispatch.supervisor import CellRun
 from vibecrafted_core.lifecycle_delivery import claim_digest_for_text
 from vibecrafted_core.lifecycle_fleet import (
@@ -1412,31 +1412,49 @@ def test_vc_ship_file_mission_is_not_shadowed_by_default_prompt(
     assert captured[0].file == str(mission)
 
 
-def test_vc_dou_wrapper_routes_to_lifecycle_runner(
-    monkeypatch, tmp_path: Path, capsys
+@pytest.mark.parametrize("skill", ["audit", "dou", "hydrate", "release", "workflow"])
+def test_single_stage_wrapper_uses_canonical_launch(
+    monkeypatch, tmp_path: Path, capsys, skill: str
 ) -> None:
-    captured: list[LifecycleRunSpec] = []
+    captured = []
+    _init_read_stage_repo(tmp_path)
+    root = tmp_path
 
-    def fake_run_lifecycle(spec: LifecycleRunSpec):
+    def fake_launch(spec, source_dir):
         captured.append(spec)
         return {
-            "run_id": "life-dou-test",
-            "workflow": spec.workflow_id,
+            "accepted": True,
+            "run_id": "alias-test",
+            "skill": spec.skill,
             "status": "launching",
-            "state_path": str(tmp_path / "state.json"),
-            "report_path": str(tmp_path / "report.md"),
         }
 
+    monkeypatch.setattr(cli, "launch_workflow", fake_launch)
     monkeypatch.setattr(
-        "vibecrafted_core.lifecycle_runner.run_lifecycle", fake_run_lifecycle
+        "vibecrafted_core.lifecycle_runner.run_lifecycle",
+        lambda *a, **k: pytest.fail("single-stage alias entered lifecycle runner"),
     )
-    rc = wrappers.dou_main(["codex", "--prompt", "audit readiness"])
+    rc = getattr(wrappers, f"{skill}_main")(
+        [
+            "codex",
+            "--prompt",
+            "audit readiness",
+            "--model",
+            "gpt-6.1-sol",
+            "--worktree",
+            "true",
+            "--repo",
+            str(root),
+            "--json",
+        ]
+    )
 
     assert rc == 0
-    assert captured[0].workflow_id == "vc-dou"
+    assert captured[0].skill == skill
     assert captured[0].agent == "codex"
     assert captured[0].prompt == "audit readiness"
-    assert "VC-DOU LIFECYCLE RECEIPT" in capsys.readouterr().out
+    assert captured[0].model == "gpt-6.1-sol" and captured[0].worktree
+    assert json.loads(capsys.readouterr().out)["run_id"] == "alias-test"
 
 
 def test_vc_marbles_wrapper_uses_lifecycle_runner_with_loop_options(
@@ -1492,39 +1510,19 @@ def test_vc_polarize_wrapper_uses_lifecycle_runner_with_loop_options(
 
 
 @pytest.mark.parametrize(
-    ("wrapper_name", "workflow_id"),
-    [
-        # scaffold/implement/review/followup: supervised_skill_main (one path
-        # with `vibecrafted <skill>`). Lifecycle stages remain under `ship`.
-        ("workflow_main", "vc-workflow"),
-        ("release_main", "vc-release"),
-    ],
+    "skill",
+    ["audit", "dou", "hydrate", "release", "workflow"],
 )
-def test_ship_stage_wrappers_route_to_lifecycle_runner(
-    monkeypatch, tmp_path: Path, wrapper_name: str, workflow_id: str
+def test_single_stage_wrapper_preserves_console_argv_and_exit(
+    monkeypatch, skill: str
 ) -> None:
-    captured: list[LifecycleRunSpec] = []
+    import sys
 
-    def fake_run_lifecycle(spec: LifecycleRunSpec):
-        captured.append(spec)
-        return {
-            "run_id": f"life-{workflow_id}-test",
-            "workflow": spec.workflow_id,
-            "status": "launching",
-            "state_path": str(tmp_path / "state.json"),
-            "report_path": str(tmp_path / "report.md"),
-        }
-
-    monkeypatch.setattr(
-        "vibecrafted_core.lifecycle_runner.run_lifecycle", fake_run_lifecycle
-    )
-    wrapper = getattr(wrappers, wrapper_name)
-    rc = wrapper(["codex", "--prompt", "run the stage"])
-
-    assert rc == 0
-    assert captured[0].workflow_id == workflow_id
-    assert captured[0].agent == "codex"
-    assert captured[0].prompt == "run the stage"
+    seen = []
+    monkeypatch.setattr(cli, "main", lambda argv: seen.append(argv) or 7)
+    monkeypatch.setattr(sys, "argv", [f"vc-{skill}", "codex", "--file", "mission.md"])
+    assert getattr(wrappers, f"{skill}_main")() == 7
+    assert seen == [[skill, "codex", "--file", "mission.md"]]
 
 
 def test_scaffold_main_uses_supervised_skill_not_lifecycle(monkeypatch) -> None:

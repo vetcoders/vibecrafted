@@ -12,6 +12,8 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DISPATCH = (
     REPO_ROOT
@@ -34,6 +36,12 @@ MARBLES = (
     / "marbles.sh"
 )
 MATRIX = REPO_ROOT / "tests" / "shell" / "vc_alias_matrix.sh"
+
+
+@pytest.mark.parametrize("skill", ["release", "workflow", "audit", "dou", "hydrate"])
+def test_single_stage_shell_alias_is_exact_deck_passthrough(skill: str) -> None:
+    text = DISPATCH.read_text(encoding="utf-8")
+    assert f'vc-{skill}() {{ _vetcoders_vc_passthrough {skill} "$@"; }}' in text
 
 
 def test_dispatch_defines_passthrough_helper() -> None:
