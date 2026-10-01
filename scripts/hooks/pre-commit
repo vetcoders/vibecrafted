@@ -25,7 +25,7 @@ done <<< "$STAGED_FILES"
 
 if [ ${#SH_FILES[@]} -gt 0 ]; then
     echo "▸ shellcheck (${#SH_FILES[@]} files)"
-    python3 scripts/check_shell.py "${SH_FILES[@]}"
+    env -u PYTHONPATH -u PYTHONHOME scripts/project-python scripts/check_shell.py "${SH_FILES[@]}"
 fi
 
 if [ ${#PY_FILES[@]} -gt 0 ]; then
@@ -51,7 +51,7 @@ echo "▸ host-paths"
 # — a missing scanner or a hit refuses the commit, not the release.
 if ! git diff --cached --name-only --diff-filter=ACMR -z \
     | env -u PYTHONPATH -u PYTHONHOME \
-      python3 scripts/payload_hygiene.py --host-paths --null; then
+      scripts/project-python scripts/payload_hygiene.py --host-paths --null; then
     echo "FATAL: staged text names a host account path; refuse the commit" >&2
     exit 1
 fi

@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -14,6 +15,29 @@ assert SPEC and SPEC.loader
 housekeeping = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = housekeeping
 SPEC.loader.exec_module(housekeeping)
+
+
+def test_housekeeping_wrapper_uses_selected_project_python(tmp_path: Path) -> None:
+    old_python = tmp_path / "python3"
+    old_python.write_text(
+        "#!/bin/sh\necho old-host-python >&2\nexit 93\n", encoding="utf-8"
+    )
+    old_python.chmod(0o755)
+    env = {
+        **os.environ,
+        "PYTHON": sys.executable,
+        "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+    }
+    result = subprocess.run(
+        [str(ROOT / "scripts/vibecrafted-housekeeping"), "--help"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "--retention-days" in result.stdout
+    assert "old-host-python" not in result.stderr
 
 
 def age(path: Path, days: int) -> None:
