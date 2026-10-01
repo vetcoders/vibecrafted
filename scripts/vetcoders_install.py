@@ -3113,7 +3113,10 @@ def _runtime_pack_launcher_target(launcher: Path, current_tools: Path) -> Path |
         return None
     # Windows .cmd runtime wrappers pin VIBECRAFTED_RUNTIME_ROOT to the generation
     # (see _runtime_cmd_launcher_body); they never use POSIX `exec`.
-    if launcher.suffix.lower() in {".cmd", ".bat"} or "VIBECRAFTED_RUNTIME_ROOT=" in text:
+    if (
+        launcher.suffix.lower() in {".cmd", ".bat"}
+        or "VIBECRAFTED_RUNTIME_ROOT=" in text
+    ):
         for match in re.finditer(
             r'VIBECRAFTED_RUNTIME_ROOT=([^"\r\n]+)',
             text,
@@ -10129,14 +10132,10 @@ def _validate_runtime_verifier_semantics(runtime_root: Path) -> None:
             "schema",
             str(snapshot / _RUNTIME_GENERATION_MANIFEST),
         ]
-        if sys.platform == "win32" and _windows_embed_binds_python_site(
-            runtime_python
-        ):
+        if sys.platform == "win32" and _windows_embed_binds_python_site(runtime_python):
             # Embeddable ._pth keeps python-site on sys.path despite -I/-S.
             shim = temporary / "hide-python-site.py"
-            shim.write_text(
-                _RUNTIME_VERIFIER_HIDE_PYTHON_SITE_SHIM, encoding="utf-8"
-            )
+            shim.write_text(_RUNTIME_VERIFIER_HIDE_PYTHON_SITE_SHIM, encoding="utf-8")
             schema_argv = [str(shim), *schema_argv]
         _assert_runtime_verifier_semantic_failure(
             run_candidate(schema_argv, cache=cache),
