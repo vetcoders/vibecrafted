@@ -6,7 +6,10 @@ both the MSI (`Product.wxs`) and the Burn EXE (`Bundle.wxs`).
 
 Per-user portable MSI: `InstallScope=perUser`, payload under `LocalAppDataFolder`
 (`%LOCALAPPDATA%\Vibecrafted\Installer`). MajorUpgrade uses the stable
-UpgradeCode; same-version upgrades are refused. Uninstall runs only when
+UpgradeCode. `scripts/windows_product_code.py` keeps ProductCode stable for a
+given major.minor.patch and rotates it for the next version. Existing 4.3.1
+repair/reinstall retains its original GUID; same-version upgrades are refused.
+Uninstall runs only when
 `REMOVE=ALL` and fails closed (`Return=check`).
 
 License and publisher identity come from the repo `LICENSE` (BUSL-1.1,

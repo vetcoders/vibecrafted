@@ -9,7 +9,9 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 import tarfile
+import uuid
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -53,7 +55,7 @@ def test_windows_installer_identity_matches_version_and_upgrade_code() -> None:
     build = BUILD_SCRIPT.read_text(encoding="utf-8")
 
     assert f'UpgradeCode = "{STABLE_UPGRADE_CODE}"' in identity
-    assert f'ProductCode = "{STABLE_PRODUCT_CODE}"' in identity
+    assert 'ProductCode = "REPLACE_PRODUCT_CODE"' in identity
     assert 'ProductName = "Vibecrafted. Framework"' in identity
     assert 'ProductName = "Vibecrafted"' not in identity
     assert 'ProductVersion = "0.0.0.0"' in identity
@@ -76,7 +78,7 @@ def test_windows_installer_identity_matches_version_and_upgrade_code() -> None:
     assert "-b " not in candle_block
     assert '-b "staging=' in build
     assert '-b "out=' in build
-    assert STABLE_PRODUCT_CODE in build
+    assert "scripts\\windows_product_code.py" in build
     assert "windows-x64" in build
     assert "Write-SiblingSha256" in build
     assert "canonicalStem" in build or "Vibecrafted_${repoVersion}" in build
@@ -96,7 +98,7 @@ def test_windows_installer_emits_canonical_windows_x64_names() -> None:
     # Short WiX bind names remain for Burn SourceFile=Vibecrafted.msi.
     assert 'Join-Path $OutDir "Vibecrafted.msi"' in build
     assert 'Join-Path $OutDir "Vibecrafted.exe"' in build
-    assert STABLE_PRODUCT_CODE in build
+    assert "scripts\\windows_product_code.py" in build
     pack_builder = (
         REPO_ROOT / "scripts" / "build-windows-x64-runtime-pack.ps1"
     ).read_text(encoding="utf-8")
@@ -649,7 +651,7 @@ def test_windows_ci_installs_msi_then_doctor_then_uninstall() -> None:
     """The matrix must install the MSI it just built, then doctor, then remove it.
 
     Does not rebuild the Runtime Pack. download-artifact stays on the known-good
-    v4 SHA. The stable ProductCode is read from Identity.wxi, not minted here.
+    v4 SHA. The versioned ProductCode comes from the shared generator.
     """
     workflow = (REPO_ROOT / ".github" / "workflows" / "install-windows.yml").read_text(
         encoding="utf-8"
@@ -680,8 +682,7 @@ def test_windows_ci_installs_msi_then_doctor_then_uninstall() -> None:
     assert 'InstallScope="perUser"' in msi_job
     assert "LocalAppDataFolder" in msi_job
     assert "ProgramFiles64Folder" in msi_job
-    assert STABLE_PRODUCT_CODE in msi_job
-    assert "Identity.wxi" in msi_job
+    assert "windows_product_code.py" in msi_job
     assert "VC_SKIP_TERMINAL_LAUNCH=1" in msi_job
     assert "msiexec.exe" in msi_job
     assert "cmd.exe" not in msi_job
@@ -698,7 +699,7 @@ def test_windows_ci_installs_msi_then_doctor_then_uninstall() -> None:
     assert "DOCTOR_SUMMARY=" in msi_job
     assert "& $cmd doctor" in msi_job
     assert "{$stable}" in msi_job
-    assert f'$stable = "{STABLE_PRODUCT_CODE}"' in msi_job
+    assert "$stable = (& python scripts/windows_product_code.py).Trim()" in msi_job
     assert "/x" in msi_job
     assert "uninstall left residue under $vcHome" in msi_job
     assert "expected exactly one user PATH entry" in msi_job
@@ -744,8 +745,7 @@ def test_windows_ci_installs_exe_then_doctor_then_uninstall() -> None:
     assert 'InstallScope="perUser"' in exe_job
     assert "LocalAppDataFolder" in exe_job
     assert "ProgramFiles64Folder" in exe_job
-    assert STABLE_PRODUCT_CODE in exe_job
-    assert "Identity.wxi" in exe_job
+    assert "windows_product_code.py" in exe_job
     assert 'bal:Overridable="yes"' in exe_job
     assert "VC_SKIP_TERMINAL_LAUNCH=1" in exe_job
     assert "Do not pass /install" in exe_job
@@ -783,3 +783,40 @@ def test_windows_ci_installs_exe_then_doctor_then_uninstall() -> None:
     assert "windows-x64-exe-install-logs" in exe_job
     assert "EXE_INSTALL_COMMAND=" in exe_job
     assert "EXE_UNINSTALL_COMMAND=" in exe_job
+
+
+def test_product_codes_are_stable_per_version_and_change_for_upgrades() -> None:
+    def code(version: str) -> str:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "scripts/windows_product_code.py"),
+                "--version",
+                version,
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout.strip()
+
+    assert code("4.3.1") == STABLE_PRODUCT_CODE
+    assert code("4.3.1") == code("4.3.1+rebuild")
+    versions = ["4.3.2", "4.4.0", "5.0.0"]
+    codes = [code(version) for version in versions]
+    assert len({STABLE_PRODUCT_CODE, *codes}) == 4
+    for version, value in zip(versions, codes, strict=True):
+        assert str(uuid.UUID(value)).upper() == value
+        assert code(version) == value
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts/windows_product_code.py"),
+            "--version",
+            "invalid",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0

@@ -327,10 +327,9 @@ jobs:
             throw "Product.wxs is not a per-user LocalAppData install"
           }
 
-          $stable = "2B1BF36C-C680-48EE-BDCA-648C09D41BB3"
-          $identity = Get-Content -LiteralPath (Join-Path $PWD "packaging\windows\Identity.wxi") -Raw
-          if ($identity -notmatch ('ProductCode = "' + $stable + '"')) {
-            throw "Identity.wxi ProductCode is not the stable $stable"
+          $stable = (& python scripts/windows_product_code.py).Trim()
+          if ($LASTEXITCODE -ne 0 -or $stable -notmatch '^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$') {
+            throw "versioned ProductCode generator failed"
           }
 
           $msis = @(Get-ChildItem -LiteralPath dist-installers -File |
@@ -460,10 +459,9 @@ jobs:
             Get-Content -LiteralPath $Path -Tail 80
           }
 
-          $stable = "2B1BF36C-C680-48EE-BDCA-648C09D41BB3"
-          $identity = Get-Content -LiteralPath (Join-Path $PWD "packaging\windows\Identity.wxi") -Raw
-          if ($identity -notmatch ('ProductCode = "' + $stable + '"')) {
-            throw "Identity.wxi ProductCode is not the stable $stable"
+          $stable = (& python scripts/windows_product_code.py).Trim()
+          if ($LASTEXITCODE -ne 0 -or $stable -notmatch '^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$') {
+            throw "versioned ProductCode generator failed"
           }
           $logDir = Join-Path $env:RUNNER_TEMP "vc-msi-logs"
           New-Item -ItemType Directory -Path $logDir -Force | Out-Null
@@ -596,10 +594,9 @@ jobs:
             throw "Bundle.wxs does not pass WixBundleUILevel"
           }
 
-          $stable = "2B1BF36C-C680-48EE-BDCA-648C09D41BB3"
-          $identity = Get-Content -LiteralPath (Join-Path $PWD "packaging\windows\Identity.wxi") -Raw
-          if ($identity -notmatch ('ProductCode = "' + $stable + '"')) {
-            throw "Identity.wxi ProductCode is not the stable $stable"
+          $stable = (& python scripts/windows_product_code.py).Trim()
+          if ($LASTEXITCODE -ne 0 -or $stable -notmatch '^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$') {
+            throw "versioned ProductCode generator failed"
           }
 
           $exes = @(Get-ChildItem -LiteralPath dist-installers -File |
@@ -755,10 +752,9 @@ jobs:
             Get-Content -LiteralPath $Path -Tail 80
           }
 
-          $stable = "2B1BF36C-C680-48EE-BDCA-648C09D41BB3"
-          $identity = Get-Content -LiteralPath (Join-Path $PWD "packaging\windows\Identity.wxi") -Raw
-          if ($identity -notmatch ('ProductCode = "' + $stable + '"')) {
-            throw "Identity.wxi ProductCode is not the stable $stable"
+          $stable = (& python scripts/windows_product_code.py).Trim()
+          if ($LASTEXITCODE -ne 0 -or $stable -notmatch '^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$') {
+            throw "versioned ProductCode generator failed"
           }
           $exes = @(Get-ChildItem -LiteralPath dist-installers -File |
             Where-Object { $_.Name -like "Vibecrafted_*-windows-x64.exe" -and $_.Extension -eq ".exe" })

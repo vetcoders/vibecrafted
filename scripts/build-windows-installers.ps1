@@ -93,7 +93,6 @@ $cacheRoot = Join-Path $packagingRoot ".cache\wix314"
 $stagingRoot = Join-Path $packagingRoot "staging"
 $wixObjRoot = Join-Path $packagingRoot ".cache\obj"
 $stableUpgradeCode = "B7E4C2A1-9F3D-4B8E-A6C1-2D5E8F0A1B3C"
-$stableProductCode = "2B1BF36C-C680-48EE-BDCA-648C09D41BB3"
 if (-not $OutDir) { $OutDir = Join-Path $packagingRoot "out" }
 if (-not $SourceRevision) {
     $SourceRevision = (& git -C $repoRoot rev-parse HEAD).Trim()
@@ -199,8 +198,8 @@ $identityText = Get-Content -LiteralPath $identityTemplate -Raw
 if ($identityText -notmatch [regex]::Escape($stableUpgradeCode)) {
     Die "Identity.wxi UpgradeCode drifted from stable lineage $stableUpgradeCode"
 }
-if ($identityText -notmatch [regex]::Escape($stableProductCode)) {
-    Die "Identity.wxi ProductCode drifted from stable lineage $stableProductCode"
+if ($identityText -notmatch 'ProductCode = "REPLACE_PRODUCT_CODE"') {
+    Die "Identity.wxi must keep ProductCode placeholder for the versioned builder stamp"
 }
 
 $wixZip = Join-Path (Split-Path $cacheRoot) "wix314-binaries.zip"
@@ -273,27 +272,35 @@ if (-not (Test-Path -LiteralPath $licenseGenerator -PathType Leaf)) {
 # LICENSE is the only legal source. Plain text in License.rtf makes the MSI
 # ScrollableText box empty, so render RTF before candle even if a stale copy exists.
 $licenseRendered = $false
+$renderPython = $null
+$renderPythonArgs = @()
 $python3 = Get-Command python3 -ErrorAction SilentlyContinue
 if ($python3) {
     & $python3.Source $licenseGenerator --write
-    if ($LASTEXITCODE -eq 0) { $licenseRendered = $true }
+    if ($LASTEXITCODE -eq 0) { $licenseRendered = $true; $renderPython = $python3.Source }
 }
 if (-not $licenseRendered) {
     $python = Get-Command python -ErrorAction SilentlyContinue
     if ($python) {
         & $python.Source $licenseGenerator --write
-        if ($LASTEXITCODE -eq 0) { $licenseRendered = $true }
+        if ($LASTEXITCODE -eq 0) { $licenseRendered = $true; $renderPython = $python.Source }
     }
 }
 if (-not $licenseRendered) {
     $pyLauncher = Get-Command py -ErrorAction SilentlyContinue
     if ($pyLauncher) {
         & $pyLauncher.Source -3 $licenseGenerator --write
-        if ($LASTEXITCODE -eq 0) { $licenseRendered = $true }
+        if ($LASTEXITCODE -eq 0) { $licenseRendered = $true; $renderPython = $pyLauncher.Source; $renderPythonArgs = @("-3") }
     }
 }
 if (-not $licenseRendered) {
     Die "python is required to render License.rtf from LICENSE"
+}
+# Reuse the interpreter that rendered the license, including the Windows py launcher.
+$identityGenerator = Join-Path $repoRoot "scripts\windows_product_code.py"
+$productCode = & $renderPython @renderPythonArgs $identityGenerator --version $repoVersion
+if ($LASTEXITCODE -ne 0 -or $productCode -notmatch '^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$') {
+    Die "versioned ProductCode generator failed"
 }
 foreach ($path in @($productTemplate, $bundleTemplate, $identityTemplate, $licenseRtf)) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { Die "missing WiX source: $path" }
@@ -323,6 +330,7 @@ if ($identityBody -notmatch 'ProductVersion = "0\.0\.0\.0"') {
     Die "Identity.wxi must keep ProductVersion placeholder 0.0.0.0 for the builder stamp"
 }
 $identityBody = $identityBody -replace 'ProductVersion = "0\.0\.0\.0"', ("ProductVersion = `"{0}`"" -f $productVersion)
+$identityBody = $identityBody -replace 'ProductCode = "REPLACE_PRODUCT_CODE"', ("ProductCode = `"{0}`"" -f $productCode)
 Write-Utf8NoBom -Path $identityWork -Content $identityBody
 
 $productWork = Join-Path $work "Product.wxs"
@@ -438,7 +446,7 @@ Write-Host "MSI (canonical): $msiCanonical"
 Write-Host "EXE (canonical): $exeCanonical"
 Write-Host "MSI sha256: $msiSha"
 Write-Host "EXE sha256: $exeSha"
-Write-Host "ProductVersion=$productVersion UpgradeCode=$stableUpgradeCode ProductCode=$stableProductCode"
+Write-Host "ProductVersion=$productVersion UpgradeCode=$stableUpgradeCode ProductCode=$productCode"
 Write-Host "SourceRevision=$SourceRevision ($shortSha) ReleaseDate=$releaseDate"
 Write-Host "Authenticode: unsigned unless VIBECRAFTED_WINDOWS_AUTHENTICODE_THUMBPRINT is set (SmartScreen will warn)."
 Write-Host "Adapter: scripts/install-runtime-pack.ps1 (no install performed by this build)."

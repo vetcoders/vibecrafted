@@ -8,7 +8,7 @@
   "terminals": [
     {
       "name": "vc-server",
-      "command": "export PATH=\"/usr/local/cargo/bin:/usr/local/bin:$HOME/.local/bin:$PATH\"; mkdir -p \"$HOME/.vibecrafted/control_plane\"; make server"
+      "command": "export PATH=\"/usr/local/cargo/bin:/usr/local/bin:$HOME/.local/bin:$PATH\"; mkdir -p \"$HOME/.vibecrafted/control_plane\"; make server SERVER_ADDR=0.0.0.0:3024"
     }
   ],
   "ports": [{ "name": "vc-server", "port": 3024 }]
