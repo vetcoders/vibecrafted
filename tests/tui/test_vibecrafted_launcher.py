@@ -1086,7 +1086,14 @@ def test_dispatch_help_documents_async_lifecycle_contract() -> None:
 
     assert "vibecrafted.dispatch.v1 TOML plan" in result.stdout
     assert "vibecrafted dispatch <plan.dispatch.toml>" in result.stdout
-    assert "--doctor validates only" in result.stdout
+    assert (
+        "--doctor validates and runs unique verifiers in a clean detached baseline."
+        in result.stdout
+    )
+    assert (
+        "Red baseline verifiers block launch; --allow-red-baseline records an "
+        "explicit override in the tracker." in result.stdout
+    )
     assert "transcript capture" in result.stdout
     assert "artifact contract failed" in result.stdout
 
