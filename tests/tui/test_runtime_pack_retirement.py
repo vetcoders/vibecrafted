@@ -1033,7 +1033,7 @@ def test_lease_plan_and_finish_cli_are_idempotent(tmp_path, roots, capsys):
 
 @pytest.mark.parametrize("module", ["foundation", "iterm2_plugin"])
 def test_proven_legacy_empty_retired_module_is_not_foreign_payload(
-    tmp_path, roots, capsys, module
+    tmp_path, roots, capsys, module, quiet_census
 ):
     old, _ = publish(tmp_path, roots, capsys, 0)
     r = receipt(roots)
