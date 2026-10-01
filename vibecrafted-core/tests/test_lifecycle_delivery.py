@@ -16,6 +16,32 @@ from vibecrafted_core.lifecycle_delivery import (
 from vibecrafted_core.settlement import settle_payload
 
 
+def test_mission_claim_digest_preserves_export_and_legacy_inputs() -> None:
+    from vibecrafted_core import lifecycle_delivery
+    from vibecrafted_core.lifecycle_delivery import mission_claim_digest
+
+    assert "mission_claim_digest" in lifecycle_delivery.__all__
+    assert mission_claim_digest() == ""
+    assert mission_claim_digest(mission_text="  compat mission  ") == "cc2e78d04181c1cf"
+    assert (
+        mission_claim_digest(mission_text="compat mission", payload={})
+        == "cc2e78d04181c1cf"
+    )
+    assert (
+        mission_claim_digest(
+            mission_text="compat mission",
+            payload={"claim_digest": "0123456789abcdef"},
+        )
+        == "0123456789abcdef"
+    )
+    assert (
+        mission_claim_digest(
+            mission_text="compat mission", payload={"mission": "payload mission"}
+        )
+        == "f3ace54b55ecaefb"
+    )
+
+
 def _valid_report(
     path: Path, *, status: str = "completed", claim_digest: str = ""
 ) -> None:

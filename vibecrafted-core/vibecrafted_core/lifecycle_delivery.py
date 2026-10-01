@@ -37,10 +37,12 @@ from .delivery.proof import run_proof
 from .delivery.scope import ScopeEvidence, qualify_scope
 from .delivery.store import DeliveryStore, atomic_write_json
 from .report_contract import CLAIM_COMPLETED, parse_report_path
+from .settlement import claim_digest_from_payload
 
 __all__ = [
     "StageSealResult",
     "claim_digest_for_text",
+    "mission_claim_digest",
     "report_claim_matches",
     "resettle_retained_snapshots",
     "try_grant_lifecycle_stage_seal",
@@ -115,6 +117,19 @@ def claim_digest_for_text(text: str) -> str:
     if not material:
         return ""
     return hashlib.sha256(material).hexdigest()[:16]
+
+
+def mission_claim_digest(
+    *,
+    mission_text: str = "",
+    payload: Mapping[str, Any] | None = None,
+) -> str:
+    """Public adapter: prefer the payload claim surface, else mission text."""
+    if payload is not None:
+        existing = claim_digest_from_payload(payload)
+        if existing:
+            return existing
+    return claim_digest_for_text(mission_text)
 
 
 def _file_sha256(path: Path) -> str:
