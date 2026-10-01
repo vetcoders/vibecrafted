@@ -16999,6 +16999,7 @@ RUNTIME_RESCUE_PHASE_CAPTURED = "captured"
 RUNTIME_RESCUE_PHASE_RESUMED = "resumed"
 RUNTIME_RESCUE_PHASE_VERIFICATION = "verification"
 RUNTIME_RESCUE_PHASE_COMPLETED = "completed"
+RUNTIME_RESCUE_PHASE_ROLLED_BACK = "rolled_back"
 _RUNTIME_RESCUE_IN_FLIGHT_PHASES = frozenset(
     {
         RUNTIME_RESCUE_PHASE_CAPTURED,
@@ -19544,9 +19545,20 @@ def _runtime_rescue_expected_publication_paths(
         paths["product_config"] / "vc-terminal" / _PRODUCT_PRIMARY_SHELL_NAME,
         paths["crafted_home"] / STATE_FILE,
     ]
-    expected.extend(Path(raw) for raw in receipt.get("owned_files", {}))
-    expected.extend(Path(raw) for raw in receipt.get("owned_symlinks", {}))
-    expected.extend(Path(raw) for raw in receipt.get("owned_dirs", []))
+    # Ownership history is not a mutation set. Immutable releases are reused
+    # or newly created; no historical generation is overwritten by publication.
+    releases = paths["runtime_home"] / "releases"
+    for raw in [*receipt.get("owned_files", {}), *receipt.get("owned_symlinks", {})]:
+        path = Path(raw)
+        if path != releases and releases not in path.parents:
+            expected.append(path)
+    version = (payload_root / "VERSION").read_text(encoding="utf-8").strip()
+    if version and re.fullmatch(r"[A-Za-z0-9.+_-]+", version):
+        candidate = releases / version
+        if not _path_present(candidate):
+            # Capture absence so a failed publication removes only its new
+            # candidate after restoring the previous selector/configuration.
+            expected.append(candidate)
     bin_dir = payload_root / "bin"
     names = set(_RUNTIME_WRAPPER_VERBS)
     names.update({"vc-terminal", SECURE_WALKAROUND_LAUNCHER})
@@ -19582,6 +19594,96 @@ def _runtime_rescue_expected_publication_paths(
         seen.add(key)
         ordered.append(path)
     return ordered
+
+
+def _runtime_rescue_capture_paths(
+    paths: Mapping[str, Path], payload_root: Path, receipt: Mapping[str, Any]
+) -> list[Path]:
+    """Capture physical parent trees once; leaf symlinks remain separate."""
+    selected: list[Path] = []
+    for path in sorted(
+        _runtime_rescue_expected_publication_paths(paths, payload_root, receipt),
+        key=lambda p: (len(p.parts), str(p)),
+    ):
+        if not (
+            _runtime_owned_path_is_managed(path, paths)
+            or _runtime_rescue_shell_path_allowed(path)
+        ):
+            continue
+        if any(
+            parent in path.parents and parent.is_dir() and not parent.is_symlink()
+            for parent in selected
+        ):
+            continue
+        selected.append(path)
+    return selected
+
+
+def _runtime_rescue_capacity_preflight(
+    paths: Mapping[str, Path],
+    payload_root: Path,
+    receipt: Mapping[str, Any],
+    *,
+    include_snapshot: bool = True,
+) -> dict[str, int]:
+    """Metadata-only conservative copy budget before any rescue evidence writes.
+
+    Reserve covers mutable preimages, payload staging, config staging/rollback,
+    and generation materialization. It is an admission check, not a reservation
+    against other processes consuming disk; failures still use exact rollback.
+    """
+
+    def copy_bytes(path: Path) -> int:
+        if path.is_symlink() or not path.exists():
+            return 0
+        if path.is_file():
+            return path.stat().st_size
+        _assert_runtime_physical_path(path)
+        total = 0
+
+        def refuse(error: OSError) -> None:
+            raise error
+
+        for parent, directories, files in os.walk(
+            path, followlinks=False, onerror=refuse
+        ):
+            directories[:] = [
+                name for name in directories if not (Path(parent) / name).is_symlink()
+            ]
+            for name in files:
+                info = (Path(parent) / name).lstat()
+                if stat.S_ISREG(info.st_mode):
+                    total += info.st_size
+                elif not stat.S_ISLNK(info.st_mode):
+                    raise RuntimeError(f"cannot estimate rescue copy capacity: {path}")
+        return total
+
+    snapshot_bytes = (
+        sum(
+            copy_bytes(path)
+            for path in _runtime_rescue_capture_paths(paths, payload_root, receipt)
+        )
+        if include_snapshot
+        else 0
+    )
+    payload_bytes = copy_bytes(payload_root)
+    config_bytes = copy_bytes(paths["product_config"])
+    required = snapshot_bytes + 3 * payload_bytes + 3 * config_bytes + 64 * 1024 * 1024
+    probe = paths["runtime_home"]
+    while not probe.exists():
+        probe = probe.parent
+    available = shutil.disk_usage(probe).free
+    if available < required:
+        raise RuntimeError(
+            f"insufficient space before rescue mutation: need {required} bytes "
+            f"(snapshot={snapshot_bytes}, payload={payload_bytes}), available={available}"
+        )
+    return {
+        "required_bytes": required,
+        "available_bytes": available,
+        "snapshot_bytes": snapshot_bytes,
+        "payload_bytes": payload_bytes,
+    }
 
 
 def _runtime_rescue_directory_evidence(root: Path) -> str:
@@ -20569,7 +20671,7 @@ def _runtime_rescue_destination_matches_requested_target(
 def _runtime_rescue_resume_phase_error(journal: Mapping[str, Any]) -> str:
     """Completed or pre-publication journals are historical, not this attempt."""
     phase = str(journal.get("phase") or "")
-    if phase == RUNTIME_RESCUE_PHASE_COMPLETED:
+    if phase in {RUNTIME_RESCUE_PHASE_COMPLETED, RUNTIME_RESCUE_PHASE_ROLLED_BACK}:
         return (
             "rescue journal is completed historical evidence; "
             "it is not an in-flight publication to resume"
@@ -20816,9 +20918,7 @@ def _runtime_rescue_snapshot_pre_rescue(
     snapshot_root.mkdir(parents=True, exist_ok=False)
     captured: list[dict[str, str]] = []
     seen: set[str] = set()
-    for path in _runtime_rescue_expected_publication_paths(
-        paths, payload_root, receipt
-    ):
+    for path in _runtime_rescue_capture_paths(paths, payload_root, receipt):
         key = str(path)
         if key in seen:
             continue
@@ -21076,6 +21176,20 @@ def _runtime_rescue_rollback_captured_state(
             receipt_path.write_bytes(evidence)
         except OSError as exc:
             residuals.append({"path": str(receipt_path), "reason": str(exc)[:400]})
+    if not residuals:
+        # A restored receipt has no pending markers. Seal that same truth in
+        # the journal rather than leaving a misleading resumable capture.
+        try:
+            _runtime_rescue_persist_journal_phase(
+                paths, journal, RUNTIME_RESCUE_PHASE_ROLLED_BACK
+            )
+        except OSError as exc:
+            residuals.append(
+                {
+                    "path": str(_runtime_rescue_journal_path(paths["runtime_home"])),
+                    "reason": str(exc)[:400],
+                }
+            )
     return residuals
 
 
@@ -21600,6 +21714,8 @@ def _runtime_rescue_apply(args: argparse.Namespace, paths: Mapping[str, Path]) -
     original_bytes: bytes | None = None
     owned_journal: dict[str, Any] = {}
     publication_owned = False
+    capture_root: Path | None = None
+    capture_identity: tuple[int, int] | None = None
     try:
         disk_journal: dict[str, Any] = {}
         if journal_path.is_file():
@@ -21658,6 +21774,9 @@ def _runtime_rescue_apply(args: argparse.Namespace, paths: Mapping[str, Path]) -
             print(json.dumps(envelope, sort_keys=True))
             return 2
         if journal_matches:
+            envelope["capacity"] = _runtime_rescue_capacity_preflight(
+                paths, Path(args.payload_root), live, include_snapshot=False
+            )
             owned_journal = _runtime_rescue_persist_journal_phase(
                 paths, disk_journal, RUNTIME_RESCUE_PHASE_RESUMED
             )
@@ -21759,6 +21878,9 @@ def _runtime_rescue_apply(args: argparse.Namespace, paths: Mapping[str, Path]) -
             print(json.dumps(envelope, sort_keys=True))
             return 2
         original_bytes = receipt_bytes
+        envelope["capacity"] = _runtime_rescue_capacity_preflight(
+            paths, Path(args.payload_root), receipt
+        )
         binding = _runtime_rescue_input_binding(
             Path(args.payload_root),
             allow_older_runtime=bool(getattr(args, "allow_older_runtime", False)),
@@ -21767,6 +21889,9 @@ def _runtime_rescue_apply(args: argparse.Namespace, paths: Mapping[str, Path]) -
             paths["runtime_home"], str(plan["receipt"]["sha256"])
         )
         evidence_root = _runtime_rescue_evidence_root(paths["runtime_home"], token)
+        capture_root = evidence_root
+        info = evidence_root.lstat()
+        capture_identity = (info.st_dev, info.st_ino)
         archive = evidence_root / "original-receipt.json"
         archive.write_bytes(original_bytes)
         (evidence_root / "original-receipt.sha256").write_text(
@@ -21852,6 +21977,33 @@ def _runtime_rescue_apply(args: argparse.Namespace, paths: Mapping[str, Path]) -
             residuals = _runtime_rescue_rollback_captured_state(
                 paths, owned_journal, receipt_path, original_bytes
             )
+        elif capture_root is not None:
+            # No publication started: discard only this freshly allocated
+            # failed capture, never an old rescue archive or aliased successor.
+            try:
+                info = capture_root.lstat()
+                durable = (
+                    json.loads(journal_path.read_text())
+                    if journal_path.is_file()
+                    else {}
+                )
+                journal_bound = (
+                    isinstance(durable, dict)
+                    and durable.get("token") == capture_root.name
+                )
+                if (
+                    journal_bound
+                    or capture_root.is_symlink()
+                    or (info.st_dev, info.st_ino) != capture_identity
+                ):
+                    raise RuntimeError(
+                        "failed capture identity changed or is journal-bound; retained for recovery"
+                    )
+                shutil.rmtree(capture_root)
+            except (OSError, RuntimeError, ValueError) as cleanup_error:
+                residuals.append(
+                    {"path": str(capture_root), "reason": str(cleanup_error)[:400]}
+                )
         envelope.update(
             status="residual" if residuals else "unusable",
             reason=str(exc)[:1200] or "runtime rescue apply failed",

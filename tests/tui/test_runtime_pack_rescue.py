@@ -7,6 +7,7 @@ import json
 import re
 import shutil
 from argparse import Namespace
+from collections import namedtuple
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -150,6 +151,148 @@ def _load_receipt(paths: dict) -> dict:
 
 def _write_receipt(paths: dict, receipt: dict) -> None:
     _receipt(paths).write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+
+
+def test_rescue_capture_excludes_immutable_history_and_deduplicates_parents(
+    installed, tmp_path, monkeypatch
+):
+    paths, _payload, _ = installed
+    receipt = _load_receipt(paths)
+    history = paths["runtime_home"] / "releases" / "old-live"
+    history.mkdir()
+    (history / "payload").write_bytes(b"old-live-payload")
+    receipt["owned_dirs"].append(str(history))
+    candidate_pack = tmp_path / "incoming"
+    candidate_pack.mkdir()
+    (candidate_pack / "VERSION").write_text("9.9.9+b")
+    candidate = paths["runtime_home"] / "releases" / "9.9.9+b"
+    captures = installer._runtime_rescue_capture_paths(paths, candidate_pack, receipt)
+    assert not any(p == history or history in p.parents for p in captures)
+    assert candidate in captures
+    assert paths["product_config"] in captures
+    assert paths["product_config"] / "vc-frame" not in captures
+    copied = []
+    original = installer._copy_path_to_backup
+
+    def record(source, destination):
+        copied.append(source)
+        return original(source, destination)
+
+    monkeypatch.setattr(installer, "_copy_path_to_backup", record)
+    label = installer._runtime_rescue_snapshot_pre_rescue(
+        paths, receipt, tmp_path / "ev", candidate_pack
+    )
+    assert history not in copied
+    assert not any(history in p.parents for p in copied)
+    assert sum(p == paths["product_config"] for p in copied) == 1
+    assert any(
+        e["path"] == str(candidate) and e["kind"] == "absent" for e in label["paths"]
+    )
+    assert (history / "payload").read_bytes() == b"old-live-payload"
+
+
+def test_rescue_capacity_refuses_before_allocating_evidence(
+    installed, capsys, monkeypatch
+):
+    paths, payload, _ = installed
+    _plant_missing_historical(paths)
+    _, plan = _plan(payload, capsys)
+    before = _receipt(paths).read_bytes()
+    disk = namedtuple("Disk", "total used free")
+    monkeypatch.setattr(installer.shutil, "disk_usage", lambda _: disk(1, 1, 0))
+    code, result = _apply(payload, capsys, plan["plan_digest"])
+    assert code == 2
+    assert "insufficient space before rescue mutation" in result["reason"]
+    assert _receipt(paths).read_bytes() == before
+    assert not (paths["runtime_home"] / ".installer-backups/rescue").exists()
+
+
+def test_failed_capture_cleans_only_new_attempt_and_preserves_prior_evidence(
+    installed, capsys, monkeypatch
+):
+    paths, payload, _ = installed
+    _plant_missing_historical(paths)
+    old = paths["runtime_home"] / ".installer-backups/rescue/previous/pre-rescue"
+    old.mkdir(parents=True)
+    (old / "important").write_bytes(b"previous-recovery")
+    before = _receipt(paths).read_bytes()
+    _, plan = _plan(payload, capsys)
+    original = installer._copy_path_to_backup
+
+    def fail_capture(source, destination):
+        if "pre-rescue" in destination.parts:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(b"partial")
+            raise OSError("injected ENOSPC during capture")
+        return original(source, destination)
+
+    monkeypatch.setattr(installer, "_copy_path_to_backup", fail_capture)
+    code, result = _apply(payload, capsys, plan["plan_digest"])
+    assert code == 2 and result["residuals"] == []
+    assert _receipt(paths).read_bytes() == before
+    assert (old / "important").read_bytes() == b"previous-recovery"
+    assert sorted(p.name for p in old.parent.parent.iterdir()) == ["previous"]
+
+
+def test_snapshot_owned_mutable_directory_and_leaf_symlink_are_preserved(
+    installed, tmp_path
+):
+    paths, payload, _ = installed
+    receipt = _load_receipt(paths)
+    mutable = paths["product_config"] / "vc-terminal"
+    assert str(mutable) in receipt["owned_dirs"]
+    outside = tmp_path / "founder-data"
+    outside.mkdir()
+    (outside / "work").write_bytes(b"preserve")
+    alias = mutable / "custom-reference"
+    alias.symlink_to(outside, target_is_directory=True)
+    label = installer._runtime_rescue_snapshot_pre_rescue(
+        paths, receipt, tmp_path / "ev", payload
+    )
+    root_entry = next(
+        e for e in label["paths"] if e["path"] == str(paths["product_config"])
+    )
+    snapshot = tmp_path / "ev/pre-rescue"
+    copied_alias = snapshot / root_entry["rel"] / "vc-terminal/custom-reference"
+    assert copied_alias.is_symlink()
+    assert copied_alias.readlink() == outside
+    alias.unlink()
+    (mutable / "injected").write_text("remove on rollback")
+    assert installer._runtime_rescue_restore_pre_rescue(paths, label, snapshot) == []
+    assert alias.is_symlink() and alias.readlink() == outside
+    assert not (mutable / "injected").exists()
+    assert (outside / "work").read_bytes() == b"preserve"
+
+
+def test_failed_new_generation_is_removed_and_rollback_journal_sealed(
+    installed, tmp_path, capsys, monkeypatch
+):
+    paths, old_payload, _ = installed
+    payload = seed_runtime_pack(tmp_path / "pack-b", version="9.9.9+b")
+    _seal_runtime_pack_for_admission(payload)
+    _plant_missing_historical(paths)
+    before = _receipt(paths).read_bytes()
+    current = paths["runtime_home"] / "tools/vibecrafted-current"
+    prior = current.resolve()
+    _, plan = _plan(payload, capsys)
+
+    def fail(**kwargs):
+        assert (paths["runtime_home"] / "releases/9.9.9+b").is_dir()
+        raise OSError("injected ENOSPC after generation staging")
+
+    monkeypatch.setattr(installer, "_publish_runtime_config_transaction", fail)
+    code, result = _apply(payload, capsys, plan["plan_digest"])
+    assert code == 2 and result["residuals"] == []
+    assert _receipt(paths).read_bytes() == before
+    assert current.resolve() == prior
+    assert prior.is_dir() and old_payload.is_dir()
+    assert not (paths["runtime_home"] / "releases/9.9.9+b").exists()
+    assert not list((paths["runtime_home"] / "releases").glob(".*.staging-*"))
+    journal = json.loads(
+        installer._runtime_rescue_journal_path(paths["runtime_home"]).read_text()
+    )
+    assert journal["phase"] == installer.RUNTIME_RESCUE_PHASE_ROLLED_BACK
+    assert installer._runtime_rescue_resume_phase_error(journal)
 
 
 def _plant_missing_historical(paths: dict, count: int = 3) -> list[str]:
@@ -448,6 +591,10 @@ def test_interrupted_pending_journal_resumes_same_digest(
     journal = json.loads(journal_path.read_text(encoding="utf-8"))
     assert journal["plan_digest"] == plan["plan_digest"]
     # Crash-after-checkpoint: sanitized pending receipt remains; apply resumes.
+    # The injected exception above completed rollback. Reconstruct the earlier
+    # crash checkpoint explicitly rather than treating that terminal as live.
+    journal["phase"] = installer.RUNTIME_RESCUE_PHASE_CAPTURED
+    journal_path.write_text(json.dumps(journal))
     receipt = _load_receipt(paths)
     sanitized = installer._runtime_receipt_without_missing_historical(
         receipt, set(planted)
@@ -698,10 +845,12 @@ def test_snapshot_covers_new_publication_and_validates_evidence(
     label = json.loads((snapshot / "label.json").read_text(encoding="utf-8"))
     assert label["healthy_restorepoint"] is False
     assert re.fullmatch(r"[0-9a-f]{64}", label["evidence_sha256"])
+    # The physical parent view captures this child's absence once.
     assert any(
-        entry["path"] == str(projected) and entry["kind"] == "absent"
+        entry["path"] == str(projected.parent) and entry["kind"] == "directory"
         for entry in label["paths"]
     )
+    assert not projected.exists()
     captured = next(entry for entry in label["paths"] if entry["kind"] == "file")
     tampered = snapshot / captured["rel"]
     tampered.write_bytes(tampered.read_bytes() + b"tamper")
@@ -914,6 +1063,10 @@ def test_same_type_foreign_symlink_target_refuses(tmp_path, installed, capsys):
 
 
 def _leave_interrupted_pending(paths: dict, plan_digest: str) -> None:
+    journal_path = installer._runtime_rescue_journal_path(paths["runtime_home"])
+    journal = json.loads(journal_path.read_text())
+    journal["phase"] = installer.RUNTIME_RESCUE_PHASE_CAPTURED
+    journal_path.write_text(json.dumps(journal))
     receipt = _load_receipt(paths)
     receipt["install_pending"] = True
     receipt["rescue_pending"] = {

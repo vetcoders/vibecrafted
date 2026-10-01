@@ -58,3 +58,27 @@ vibecrafted dispatch "$PLAN" --cleanup-settled <dispatch-run-id>
 
 That command validates settled state, retains branches/evidence, and records
 the cleanup outcome. Do not replace it with `rm -rf`.
+
+## Runtime rescue footprint
+
+Runtime releases and app Update captures belong to the existing installer/Update
+lifecycle, outside this state-home cache policy. Rescue captures publication's
+mutation set rather than every historically owned release. Physical mutable
+parent trees are copied once; existing immutable generations remain in place.
+A new candidate's absence is recorded so rollback can remove that candidate
+after restoring the prior configuration and selector.
+
+Rescue checks a conservative copy budget on the runtime filesystem before
+allocating evidence and before resumed publication. This is not a reservation
+against concurrent disk consumers or a guarantee for separate mounts. A failed
+capture discards only its newly allocated, unchanged, unjournaled attempt;
+older recovery evidence stays intact. Successful rollback seals the journal
+as `rolled_back`, distinct from interrupted `captured` publication.
+
+Automatic retirement of superseded releases and app captures remains unfinished.
+The installer and Update completion owners need receipt-bound identity,
+complete live/service/detached-session references, one verified healthy rollback,
+in-flight protection, and disposal receipts under their existing locks. Neither
+size, age, nor an absent process match authorizes deleting this history. The
+bounded rescue repair avoids recopying that history; it does not claim that the
+accumulated payloads or captures have been reclaimed.
