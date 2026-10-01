@@ -272,6 +272,9 @@ def test_install_paths_reconcile_server_service_after_launcher_replacement() -> 
     assert 'if [ "$$(uname -s)" != "Darwin" ]' in reconcile_block
     assert "io.vetcoders.vibecrafted.server.plist" in reconcile_block
     assert "server service reconcile" in reconcile_block
+    # d5-installer-self-lock: the drift-healer queues behind a concurrent
+    # install transaction for a bounded wait instead of failing `make install`.
+    assert "VIBECRAFTED_SERVICE_MUTATION_LOCK_TIMEOUT" in reconcile_block
 
 
 def test_makefile_keeps_install_as_terminal_first_front_door() -> None:

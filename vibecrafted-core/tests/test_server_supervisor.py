@@ -2650,6 +2650,166 @@ def test_service_mutation_lease_accepts_verified_inherited_descriptor(
         os.close(descriptor)
 
 
+def _hold_install_lock(
+    lock_path: Path,
+    hold_seconds: float,
+    ready: threading.Event,
+) -> None:
+    """Hold the install lease flock from a second open description — the
+    old-generation holder signature: no owner metadata, a 0-byte lock file."""
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        ready.set()
+        time.sleep(hold_seconds)
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
+
+
+def test_service_mutation_lease_waits_out_transient_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A concurrent install that finishes inside the bounded wait must not
+    fail the service mutation (d5-installer-self-lock)."""
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    config = _config(tmp_path, launcher)
+    tools_home = tmp_path / "tools"
+    tools_home.mkdir()
+    lock_path = tools_home / supervisor._TOOLS_INSTALL_LOCK_NAME
+    monkeypatch.setenv("VIBECRAFTED_TOOLS_HOME", str(tools_home))
+    monkeypatch.delenv(supervisor._TOOLS_INSTALL_LEASE_ENV, raising=False)
+    monkeypatch.setenv(supervisor._SERVICE_MUTATION_LOCK_TIMEOUT_ENV, "10")
+    ready = threading.Event()
+    holder = threading.Thread(
+        target=_hold_install_lock,
+        args=(lock_path, 0.4, ready),
+        daemon=True,
+    )
+    holder.start()
+    assert ready.wait(timeout=5)
+
+    started = time.monotonic()
+    with supervisor._ToolsInstallMutationLease(config.paths):
+        pass
+    elapsed = time.monotonic() - started
+    holder.join(timeout=5)
+
+    assert elapsed >= 0.3
+    assert "waiting up to 10s" in capsys.readouterr().err
+
+
+def test_service_mutation_lease_still_refuses_live_foreign_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A foreign install that outlives the bounded wait is still refused."""
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    config = _config(tmp_path, launcher)
+    tools_home = tmp_path / "tools"
+    tools_home.mkdir()
+    lock_path = tools_home / supervisor._TOOLS_INSTALL_LOCK_NAME
+    monkeypatch.setenv("VIBECRAFTED_TOOLS_HOME", str(tools_home))
+    monkeypatch.delenv(supervisor._TOOLS_INSTALL_LEASE_ENV, raising=False)
+    monkeypatch.setenv(supervisor._SERVICE_MUTATION_LOCK_TIMEOUT_ENV, "0.2")
+    ready = threading.Event()
+    holder = threading.Thread(
+        target=_hold_install_lock,
+        args=(lock_path, 5.0, ready),
+        daemon=True,
+    )
+    holder.start()
+    assert ready.wait(timeout=5)
+
+    started = time.monotonic()
+    try:
+        with (
+            pytest.raises(
+                supervisor.SupervisorError,
+                match="runtime install is active",
+            ) as failure,
+            supervisor._ToolsInstallMutationLease(config.paths),
+        ):
+            pass
+    finally:
+        elapsed = time.monotonic() - started
+    assert failure.value.exit_code == supervisor.EX_TEMPFAIL
+    assert elapsed >= 0.2
+
+
+def test_service_mutation_lease_admits_installer_ownership_proof_same_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """install -> reconcile in the same process: the installer's lease
+    descriptor plus its owner metadata admit the service mutation through the
+    inherited path, so a reconcile under the install transaction never bounces
+    off the installer's own lock."""
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    config = _config(tmp_path, launcher)
+    tools_home = tmp_path / "tools"
+    tools_home.mkdir()
+    lock_path = tools_home / supervisor._TOOLS_INSTALL_LOCK_NAME
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    os.write(
+        descriptor,
+        (
+            json.dumps(
+                {
+                    "pid": os.getpid(),
+                    "operation": "runtime-install",
+                    "started_at": "2026-10-01T00:00:00+00:00",
+                }
+            )
+            + "\n"
+        ).encode(),
+    )
+    monkeypatch.setenv("VIBECRAFTED_TOOLS_HOME", str(tools_home))
+    monkeypatch.setenv(supervisor._TOOLS_INSTALL_LEASE_ENV, str(descriptor))
+
+    try:
+        with supervisor._ToolsInstallMutationLease(config.paths) as lease:
+            assert lease.inherited
+            assert lease.descriptor == descriptor
+        # The installer's own flock survives the mutation: the inherited
+        # lease is never unlocked or closed by the borrower.
+        probe = os.open(lock_path, os.O_RDWR)
+        try:
+            with pytest.raises(OSError):
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(probe)
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def test_service_mutation_lock_timeout_env_must_be_finite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    config = _config(tmp_path, launcher)
+    tools_home = tmp_path / "tools"
+    tools_home.mkdir()
+    monkeypatch.setenv("VIBECRAFTED_TOOLS_HOME", str(tools_home))
+    monkeypatch.delenv(supervisor._TOOLS_INSTALL_LEASE_ENV, raising=False)
+    monkeypatch.setenv(supervisor._SERVICE_MUTATION_LOCK_TIMEOUT_ENV, "often")
+
+    with (
+        pytest.raises(
+            supervisor.SupervisorError,
+            match="VIBECRAFTED_SERVICE_MUTATION_LOCK_TIMEOUT",
+        ) as failure,
+        supervisor._ToolsInstallMutationLease(config.paths),
+    ):
+        pass
+    assert failure.value.exit_code == supervisor.EX_CONFIG
+
+
 @pytest.fixture
 def service_admission(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Two receipted generations with all process/service boundaries mocked."""
