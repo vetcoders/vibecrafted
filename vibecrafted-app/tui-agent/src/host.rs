@@ -399,12 +399,13 @@ impl HostDashboard {
             return Vec::new();
         };
         match self.route {
-            HostRoute::ActiveRuns => s
-                .runs
-                .active_runs
-                .iter()
-                .chain(&s.runs.stalled_runs)
-                .collect(),
+            HostRoute::ActiveRuns => {
+                let now = run_timestamp(&s.sampled_at).unwrap_or_else(chrono::Utc::now);
+                ordered_runs(&s.runs.active_runs.iter().collect::<Vec<_>>())
+                    .into_iter()
+                    .chain(ordered_runs(&attention_runs(&s.runs.stalled_runs, now)))
+                    .collect()
+            }
             HostRoute::Voc => s.runs.recent_runs.iter().collect(),
             _ => Vec::new(),
         }
@@ -501,7 +502,11 @@ impl HostDashboard {
                     format!(
                         "Active runs {} · needs attention {}",
                         s.live_count(),
-                        s.runs.stalled_runs.len()
+                        attention_runs(
+                            &s.runs.stalled_runs,
+                            run_timestamp(&s.sampled_at).unwrap_or_else(chrono::Utc::now)
+                        )
+                        .len()
                     ),
                     format!("Server {} · {}", config.server, s.server_status),
                     format!(
@@ -531,16 +536,30 @@ impl HostDashboard {
                     s.live_count(),
                     s.runs.stalled_runs.len()
                 ));
-                // `selected` indexes run_rows(): in-progress rows, then attention rows.
+                // Rendering and actions share the same grouped, filtered order.
                 if self.route == HostRoute::ActiveRuns {
-                    lines.push("IN PROGRESS".into());
-                    append_runs(&mut lines, &s.runs.active_runs, Some(self.selected));
-                    lines.push("NEEDS ATTENTION".into());
-                    append_runs(
-                        &mut lines,
-                        &s.runs.stalled_runs,
-                        self.selected.checked_sub(s.runs.active_runs.len()),
+                    let now = run_timestamp(&s.sampled_at).unwrap_or_else(chrono::Utc::now);
+                    let active = ordered_runs(&s.runs.active_runs.iter().collect::<Vec<_>>());
+                    let attention = ordered_runs(&attention_runs(&s.runs.stalled_runs, now));
+                    lines[2] = format!(
+                        "Active runs {} · needs attention {}",
+                        active.len(),
+                        attention.len()
                     );
+                    lines.push("IN PROGRESS".into());
+                    append_run_table(&mut lines, &active, Some(self.selected), now, true);
+                    lines.push("NEEDS ATTENTION".into());
+                    append_run_table(
+                        &mut lines,
+                        &attention,
+                        self.selected.checked_sub(active.len()),
+                        now,
+                        false,
+                    );
+                    let archived = s.runs.stalled_runs.len() - attention.len();
+                    if archived > 0 {
+                        lines.push(format!("  +{archived} archiwalnych (starsze niż 48 h)"));
+                    }
                 } else {
                     lines.push(
                         "GLOBAL RUN FEED · recent/history · canonical state and evidence".into(),
@@ -549,7 +568,15 @@ impl HostDashboard {
                 }
                 lines.push("g: open selected run through goto-work · ↑/↓ select".into());
                 if let Some(run) = self.run_rows().get(self.selected) {
-                    lines.push(format!("Selected: {} · {}", run.run_id, run.root));
+                    lines.push(format!(
+                        "Selected: {} · {} / {} · {}",
+                        run.run_id, run.agent, run.skill, run.state
+                    ));
+                    lines.push(format!("Root: {}", run.root));
+                    lines.push(format!("Evidence: {} · {}", run.liveness, run.source));
+                    if !run.last_error.is_empty() {
+                        lines.push(format!("Last error: {}", run.last_error));
+                    }
                 }
             }
             HostRoute::Config => lines.extend([
@@ -636,6 +663,156 @@ impl HostDashboard {
         lines
     }
 }
+/// Presentation-only location: canonical fleet roots carry namespace/repo/date/cut.
+/// Living Trees use their basename; repo-local .worktrees use their parent repo.
+fn run_location(root: &str) -> (String, String) {
+    let parts = root
+        .split('/')
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>();
+    let label = parts.last().copied().unwrap_or("unknown");
+    let repo = parts
+        .windows(4)
+        .find(|p| {
+            p[0] == "worktrees"
+                && p[3].len() == 9
+                && p[3].as_bytes()[4] == b'_'
+                && p[3]
+                    .chars()
+                    .filter(|c| *c != '_')
+                    .all(|c| c.is_ascii_digit())
+        })
+        .map(|p| p[2])
+        .or_else(|| {
+            parts
+                .windows(2)
+                .find(|p| p[1] == ".worktrees")
+                .map(|p| p[0])
+        })
+        .unwrap_or(label);
+    (label.into(), repo.into())
+}
+
+fn run_timestamp(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .map(|t| t.with_timezone(&chrono::Utc))
+}
+
+fn attention_runs(runs: &[RunStatus], now: chrono::DateTime<chrono::Utc>) -> Vec<&RunStatus> {
+    runs.iter()
+        .filter(|r| {
+            run_timestamp(&r.updated_at)
+                .is_none_or(|t| now.signed_duration_since(t) <= chrono::Duration::hours(48))
+        })
+        .collect()
+}
+
+fn ordered_runs<'a>(runs: &[&'a RunStatus]) -> Vec<&'a RunStatus> {
+    let mut rows = runs.to_vec();
+    rows.sort_by(|a, b| {
+        run_location(&a.root)
+            .1
+            .cmp(&run_location(&b.root).1)
+            .then_with(|| run_timestamp(&b.updated_at).cmp(&run_timestamp(&a.updated_at)))
+            .then_with(|| a.run_id.cmp(&b.run_id))
+    });
+    rows
+}
+
+/// Terminal-cell widths, including wide Unicode; controls cannot create extra rows.
+fn run_cell(value: &str, width: usize) -> String {
+    let clean = value
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>();
+    let mut text = String::new();
+    if Line::from(clean.as_str()).width() <= width {
+        text = clean;
+    } else {
+        for c in clean.chars() {
+            let mut candidate = text.clone();
+            candidate.push(c);
+            if Line::from(candidate.as_str()).width() + 1 > width {
+                break;
+            }
+            text.push(c);
+        }
+        text.push('…');
+    }
+    let padding = width.saturating_sub(Line::from(text.as_str()).width());
+    text.push_str(&" ".repeat(padding));
+    text
+}
+
+fn run_time(run: &RunStatus, now: chrono::DateTime<chrono::Utc>, active: bool) -> String {
+    let (raw, prefix) = if active && run_timestamp(&run.started_at).is_some() {
+        (run.started_at.as_str(), "trwa")
+    } else {
+        (run.updated_at.as_str(), "ostatnio")
+    };
+    let Some(time) = run_timestamp(raw) else {
+        return "czas nieznany".into();
+    };
+    let minutes = now.signed_duration_since(time).num_minutes().max(0);
+    let age = if minutes < 60 {
+        format!("{minutes} min")
+    } else if minutes < 1440 {
+        format!("{} h {} min", minutes / 60, minutes % 60)
+    } else {
+        format!("{} d {} h", minutes / 1440, minutes % 1440 / 60)
+    };
+    if prefix == "trwa" {
+        format!("trwa {age}")
+    } else {
+        format!("ostatnio {age} temu")
+    }
+}
+
+fn append_run_table(
+    lines: &mut Vec<String>,
+    runs: &[&RunStatus],
+    selected: Option<usize>,
+    now: chrono::DateTime<chrono::Utc>,
+    active: bool,
+) {
+    if runs.is_empty() {
+        lines.push("  None".into());
+        return;
+    }
+    let mut group = String::new();
+    for (i, r) in runs.iter().enumerate() {
+        let (label, repo) = run_location(&r.root);
+        if group != repo {
+            let count = runs
+                .iter()
+                .filter(|r| run_location(&r.root).1 == repo)
+                .count();
+            lines.push(format!("  {} · {count}", run_cell(&repo, 32).trim_end()));
+            lines.push(format!(
+                "  {} · {} · {} · {} · {} · {}",
+                run_cell("STATE", 10),
+                run_cell("AGENT", 9),
+                run_cell("LABEL", 26),
+                run_cell("REPO", 17),
+                run_cell("TIME", 25),
+                "SKILL"
+            ));
+            group = repo.clone();
+        }
+        lines.push(format!(
+            "{} {} · {} · {} · {} · {} · {}",
+            if selected == Some(i) { "▶" } else { " " },
+            run_cell(&r.state, 10),
+            run_cell(&r.agent, 9),
+            run_cell(&label, 26),
+            run_cell(&repo, 17),
+            run_cell(&run_time(r, now, active), 25),
+            run_cell(if r.skill == "implement" { "" } else { &r.skill }, 14).trim_end()
+        ));
+    }
+}
+
 /// `selected` is relative to `runs`; `None` when the selection sits in another section.
 fn append_runs(lines: &mut Vec<String>, runs: &[RunStatus], selected: Option<usize>) {
     if runs.is_empty() {
@@ -677,12 +854,43 @@ pub fn draw(frame: &mut Frame, host: &HostDashboard, config: &AppConfig) {
             ),
         areas[0],
     );
-    frame.render_widget(
-        Paragraph::new(host.lines(config).join("\n"))
-            .scroll((host.offset.min(u16::MAX as usize) as u16, 0))
-            .wrap(Wrap { trim: false }),
-        areas[1],
-    );
+    let mut lines = host.lines(config);
+    if host.route == HostRoute::ActiveRuns {
+        lines = lines
+            .into_iter()
+            .flat_map(|line| {
+                if ["Selected:", "Root:", "Evidence:", "Last error:"]
+                    .iter()
+                    .any(|p| line.starts_with(p))
+                {
+                    let mut rows = vec![String::new()];
+                    for c in line.chars() {
+                        let last = rows.last_mut().expect("one detail row");
+                        let mut next = last.clone();
+                        next.push(c);
+                        if Line::from(next.as_str()).width() > areas[1].width as usize
+                            && !last.is_empty()
+                        {
+                            rows.push(c.to_string());
+                        } else {
+                            last.push(c);
+                        }
+                    }
+                    rows
+                } else {
+                    vec![line]
+                }
+            })
+            .collect();
+    }
+    let body =
+        Paragraph::new(lines.join("\n")).scroll((host.offset.min(u16::MAX as usize) as u16, 0));
+    let body = if host.route == HostRoute::ActiveRuns {
+        body
+    } else {
+        body.wrap(Wrap { trim: false })
+    };
+    frame.render_widget(body, areas[1]);
     let status = host
         .project_input
         .as_ref()
