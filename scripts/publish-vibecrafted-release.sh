@@ -109,9 +109,9 @@ test "$(uv run python3 -c 'import json; print(json.load(open("dist/portable-outp
 # Authenticode-unsigned; trust is .sha256 (+ .sig for the Runtime Pack), the
 # same provenance idea as the portable tarball not being Apple-notarized.
 # Never invent a wildcard here — every asset must be named before upload.
-if [[ "$DMG_NAME" =~ ^Vibecrafted_([0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?)-([0-9]{8})-([0-9a-f]+)\.dmg$ ]]; then
-  WINDOWS_DATE="${BASH_REMATCH[2]}"
-  WINDOWS_SHA="${BASH_REMATCH[3]}"
+if [[ "$DMG_NAME" =~ ^Vibecrafted_"$VERSION"-([0-9]{8})-([0-9a-f]{8})\.dmg$ ]]; then
+  WINDOWS_DATE="${BASH_REMATCH[1]}"
+  WINDOWS_SHA="${BASH_REMATCH[2]}"
 else
   die "cannot derive Windows asset stem from DMG name: $DMG_NAME"
 fi
@@ -324,7 +324,7 @@ cat > "$REPORT" <<EOF
 | Vibecrafted.app desktop UI | local process | none | logged-in macOS user | app-owned runtime environment |
 | Runtime Pack install (macOS CLI) | none; same immutable payload as the App | not applicable | invoking user | one receipted runtime/config layout |
 | Portable source install (Linux / WSL2 / explicit source fallback) | none; \`install.sh\` publishes into the user-owned runtime home | not applicable | invoking user | user-owned runtime home, no host config rewrites |
-| vc-server service | typed Vibecrafted settings; default loopback, operator may choose any host:port such as \`100.82.232.70:3025\` | operator-owned for non-loopback exposure | configured service policy | runtime service environment, never host config rewrites |
+| vc-server service | typed Vibecrafted settings; default loopback \`127.0.0.1:3025\`; the Founder chooses any non-loopback bind | Founder-owned for non-loopback exposure | configured service policy | runtime service environment, never host config rewrites |
 | vc-frame web client | disabled unless explicitly configured | operator-owned | vc-frame auth boundary | runtime-only |
 
 ## 3. Deployment mode decision
@@ -390,7 +390,7 @@ bash $PORTABLE_ROOT_NAME/install.sh
 
 ## Sign-off
 
-PASS — the release has exactly five canonically named installable carriers built from one commit: \`$DMG_NAME\` for macOS desktop, \`$RUNTIME_PACK_NAME\` for macOS CLI, \`$PORTABLE_NAME\` as the cross-platform source fallback, plus the Windows MSI/EXE (\`$WINDOWS_MSI_NAME\` / \`$WINDOWS_EXE_NAME\`) and Windows Runtime Pack (\`$WINDOWS_PACK_NAME\`). Windows MSI/EXE are Authenticode-unsigned; trust is provenance (.sha256 / .sig), same idea as the portable tarball not being Apple-notarized. App and CLI consume one Runtime Pack authority; no donor repo owns a competing app, installer or update channel.
+PASS — the release has exactly six canonically named installable carriers built from one commit: \`$DMG_NAME\` for macOS desktop, \`$RUNTIME_PACK_NAME\` for macOS CLI, \`$PORTABLE_NAME\` as the cross-platform source fallback, plus the Windows MSI/EXE (\`$WINDOWS_MSI_NAME\` / \`$WINDOWS_EXE_NAME\`) and Windows Runtime Pack (\`$WINDOWS_PACK_NAME\`). Windows MSI/EXE are Authenticode-unsigned; trust is provenance (.sha256 / .sig), same idea as the portable tarball not being Apple-notarized. App and CLI consume one Runtime Pack authority; no donor repo owns a competing app, installer or update channel.
 EOF
 
 gh release edit "$TAG" --repo "$REPO" --notes-file "$REPORT" --draft=false --latest

@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -14,11 +15,12 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RELEASE_PAGE = "https://github.com/vetcoders/vibecrafted/releases/latest"
 
-# Pinned so the Windows entry point cannot drift silently. Measured
-# 2026-08-18; both copies agreed at this digest. See
+# Pinned to the native Windows entry point selected for v4.3.1 on 2026-10-01.
+# The public website still serves the older WSL-only copy; release acceptance
+# must separately settle that deployment drift. See
 # test_windows_entry_point_does_not_drift_between_its_two_copies for why a
 # constant is needed on top of the cross-repo comparison.
-INSTALL_PS1_SHA256 = "258a7e1d20292572937d77d74ac4f18bf609569ae8d712750042da4dcb13d6da"
+INSTALL_PS1_SHA256 = "595ec587d69448419073efdc6d0d490d87c80c6149ba3cad658370b9fb1ec30c"
 
 # Binaries a developer laptop always has and the GitHub macos-15 image does
 # not. Measured 2026-08-18 against actions/runner-images
@@ -216,8 +218,8 @@ def test_darwin_linker_wrapper_uses_measured_xcode_pair_without_ld_classic(
             "/Library/Developer/CommandLineTools/usr/bin/ld-classic",
             str(tmp_path / "absent" / "ld-classic"),
         ),
-        ("Apple clang version 21.0.0 (clang-2100.3.27.1)", "Fake xcode clang"),
-        ("@(#)PROGRAM:ld PROJECT:ld-27036.1", "Fake xcode ld"),
+        ("Apple clang version 21.0.0 (clang-2100.3.34.2)", "Fake xcode clang"),
+        ("@(#)PROGRAM:ld PROJECT:ld-27037.1", "Fake xcode ld"),
     ):
         assert old in contract
         contract = contract.replace(old, new)
@@ -900,6 +902,78 @@ def test_tag_release_builds_all_carriers_from_a_commit_on_main() -> None:
         assert artifact in workflow
 
 
+def test_tag_dmg_donors_match_the_public_cross_platform_source_pins() -> None:
+    workflow = (REPO_ROOT / ".github/workflows/release-dmg.yml").read_text()
+    linux = (REPO_ROOT / "scripts/build-linux-arm64-runtime-pack.sh").read_text()
+    windows = (REPO_ROOT / "scripts/build-windows-x64-runtime-pack.ps1").read_text()
+    for donor in ("frame", "terminal"):
+        revision = re.search(rf'{donor}_revision="([0-9a-f]{{40}})"', linux)
+        assert revision is not None
+        sha = revision.group(1)
+        assert f'${donor}Revision = "{sha}"' in windows
+        assert f"ref: ${{{{ inputs.{donor}_ref || '{sha}' }}}}" in workflow
+        assert f"repository: vetcoders/vc-{donor}" in workflow
+
+
+@pytest.mark.parametrize("mechanism", ["api", "apple-id", "incomplete"])
+def test_hosted_notary_materialization_accepts_complete_credentials_only(
+    tmp_path: Path, mechanism: str
+) -> None:
+    workflow = (REPO_ROOT / ".github/workflows/release-dmg.yml").read_text()
+    step = workflow.split("      - name: Materialize signing keys from secrets\n", 1)[1]
+    step = step.split("      - name:", 1)[0]
+    script = textwrap.dedent(step.split("        run: |\n", 1)[1])
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    for command, body in {
+        "xcrun": 'printf "%s\\n" "$1 $2" > "$NOTARY_CAPTURE"\n',
+        "openssl": "exit 0\n",
+        "file": "exit 0\n",
+    }.items():
+        tool = fake_bin / command
+        tool.write_text("#!/bin/sh\nset -eu\n" + body)
+        tool.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+        "KEYS": str(tmp_path / "keys"),
+        "GITHUB_ENV": str(tmp_path / "github-env"),
+        "NOTARY_CAPTURE": str(tmp_path / "notary-called"),
+        "PAYLOAD_HYGIENE_EXTRA_LITERALS": "/workspace/private-fixture",
+        "VC_CERT_P12_B64": "Zml4dHVyZQ==",
+        "VC_CERT_PASSWORD": "fixture-password",
+        "VC_SIGNING_IDENTITY": "fixture-identity",
+        "VC_SIGNING_KEY": "fixture-key",
+        "VC_FONT_PASSPHRASE": "fixture-font-passphrase",
+        "VC_NOTARY_API_KEY_B64": "Zml4dHVyZQ==" if mechanism == "api" else "",
+        "VC_NOTARY_API_KEY_ID": "fixture-key-id" if mechanism == "api" else "",
+        "VC_NOTARY_API_ISSUER": "fixture-issuer" if mechanism == "api" else "",
+        "VC_NOTARY_APPLE_ID": "test@example.com",
+        "VC_NOTARY_PASSWORD": "fixture-password" if mechanism == "apple-id" else "",
+        "VC_NOTARY_TEAM_ID": "fixture-team",
+    }
+    result = subprocess.run(
+        ["bash", "-c", script], env=env, text=True, capture_output=True, check=False
+    )
+    if mechanism == "incomplete":
+        assert result.returncode != 0
+        assert "provide a complete notary" in result.stdout
+        assert not (tmp_path / "github-env").exists()
+    elif mechanism == "apple-id":
+        assert result.returncode == 0, result.stderr
+        assert (
+            tmp_path / "notary-called"
+        ).read_text().strip() == "notarytool store-credentials"
+        assert (
+            tmp_path / "github-env"
+        ).read_text().strip() == "NOTARY_PROFILE=vibecrafted-ci-notary"
+        assert not (tmp_path / "keys/notary-api-key.p8").exists()
+    else:
+        assert result.returncode == 0, result.stderr
+        assert (tmp_path / "keys/notary-api-key.p8").read_bytes() == b"fixture"
+        assert not (tmp_path / "notary-called").exists()
+
+
 def test_notary_authentication_never_puts_the_password_in_process_argv() -> None:
     builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
         encoding="utf-8"
@@ -1145,7 +1219,39 @@ def test_publisher_writes_the_mandatory_release_report() -> None:
     ):
         assert heading in publisher
     assert ".vibecrafted/artifacts" in publisher
-    assert "100.82.232.70:3025" in publisher
+    assert "127.0.0.1:3025" in publisher
+
+
+@pytest.mark.parametrize("version", ["4.3.1", "4.3.1-rc.1", "4.3.1+g12345678"])
+def test_publisher_derives_windows_carriers_with_bash_ere(version: str) -> None:
+    publisher = (REPO_ROOT / "scripts/publish-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+    block = publisher[
+        publisher.index('if [[ "$DMG_NAME" =~') : publisher.index('WINDOWS_MSI="$DIST/')
+    ]
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "set -eu\ndie() { exit 2; }\n"
+            + block
+            + '\nprintf "%s\\n" "$WINDOWS_MSI_NAME" "$WINDOWS_PACK_NAME"',
+        ],
+        env={
+            **os.environ,
+            "VERSION": version,
+            "DMG_NAME": f"Vibecrafted_{version}-20261001-12345678.dmg",
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        f"Vibecrafted_{version}-20261001-12345678-windows-x64.msi",
+        f"Vibecrafted_RuntimePack_{version}-20261001-12345678-win32-x64.tar.gz",
+    ]
 
 
 def test_vc_release_skill_locks_four_mandatory_report_sections() -> None:

@@ -12,14 +12,25 @@
 - Embedded donors: `vc-terminal`, `vc-frame`
 - Entry: bundled `vc-start` with durable `workspace_id`
 
-The donor repositories never publish an app, DMG, MSI, installer or update
-channel. Apple signing and notarization run in one of two places; publication
-stays an explicit operator step either way:
+The public donor repositories supply source, not separate app, DMG, MSI,
+installer or update channels. Tag builds use the same immutable donor commits
+as the Linux and Windows builders: vc-frame `7ab84069c9b7994ce0b705ccedd708aa3a35dcb6`
+and vc-terminal `d6685ead9018ad89411291d6198476666e48b0f8`. The public source
+archive digests are pinned in those builders. Manual DMG rehearsals may select
+different donor refs; their signed receipts record the actual revisions.
+
+Foundations use their own public channels: npm `@loctree/loctree` and
+`@loctree/aicx`, PyPI `screenscribe`, and GitHub Releases
+`vetcoders/prview-rs`. The Runtime Pack neither carries them nor installs a
+bundled substitute. Existing working PATH installations are preserved.
+
+Apple signing and notarization run in one of two places; publication stays an
+explicit Founder-authorized step either way:
 
 - **Hosted runner** (`.github/workflows/release-dmg.yml`, macos-15): builds,
   signs and notarizes `Vibecrafted_<version>-<YYYYMMDD>-<sha8>.dmg` on every
   `v*` tag or via `workflow_dispatch` (ref, donor refs, notarize on/off) and
-  uploads it as the `vibecrafted-dmg-<run_id>` artifact together with
+  uploads it as the `vibecrafted-release-<run_id>` artifact together with
   `release-output.json[.sig]`. The runner's home is declared ephemeral for the
   payload-hygiene gate; the operator's account and checkout are still refused.
   Nothing is published from CI.
@@ -31,8 +42,22 @@ make portable
 GH_TOKEN=... make publish-release
 ```
 
-Either way `gh run download -n vibecrafted-dmg-<run_id>` / `dist/` is what
+Either way `gh run download -n vibecrafted-release-<run_id>` / `dist/` is what
 `publish-vibecrafted-release.sh` takes to the GitHub release.
+
+Tag DMG builds require the tagged commit to be on `main`. Merging a PR into
+`release/v4.3.1-candidate` does not satisfy that check. Promote the reviewed
+candidate to `main` before retagging; the annotated tag must match `VERSION`.
+The hosted notary step accepts either the complete App Store Connect API key
+set or the complete Apple ID credential set, which it stores in an ephemeral
+runner Keychain profile before invoking the builder.
+
+The Windows matrix also runs on `v*` tags. Tag carriers require `VC_SIGNING_KEY`
+and must verify against the committed product public key; PR carriers keep
+their isolated rehearsal signatures. Download the Windows pack and MSI/EXE
+artifacts for the same exact commit into `dist/` before `make publish-release`.
+The publisher remains explicit: retagging builds and verifies carriers but
+does not itself publish a GitHub Release.
 
 `make portable` needs neither signing identity nor notary account — it is a
 provenance-bound source distribution, so it builds anywhere `git` and `python3`

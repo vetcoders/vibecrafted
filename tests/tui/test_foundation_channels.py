@@ -267,6 +267,31 @@ def test_a_prview_asset_that_misses_its_sha256sums_is_refused(tmp_path: Path) ->
         assert "does not match the release SHA256SUMS" in output
 
 
+def test_prview_cannot_bypass_its_public_channel_with_a_bundled_copy(
+    tmp_path: Path,
+) -> None:
+    target = _prview_release(tmp_path, checksum="0" * 64)
+    bundled = tmp_path / "bundled"
+    _executable(bundled / "prview", "#!/bin/sh\necho 'unverified bundled prview'\n")
+    runtime_bin = tmp_path / "runtime/bin"
+
+    result = _run_installer(
+        tmp_path,
+        "prview",
+        path=[tmp_path / "bin"],
+        VIBECRAFTED_BUNDLED_BIN=str(bundled),
+        VIBECRAFTED_BIN=str(runtime_bin),
+        PRVIEW_RELEASE_BASE=f"file://{tmp_path / 'release'}",
+        REQUIRE_FOUNDATIONS="1",
+    )
+
+    assert not (runtime_bin / "prview").exists()
+    assert not (tmp_path / "home/.local/bin/prview").exists()
+    assert result.returncode == 1
+    if target != "unpublished-host":
+        assert "does not match the release SHA256SUMS" in result.stdout + result.stderr
+
+
 def test_a_matching_prview_asset_still_needs_the_publishers_signature_on_macos(
     tmp_path: Path,
 ) -> None:

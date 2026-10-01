@@ -137,15 +137,15 @@ preflighted last fallback. Full doctrine: [docs/FOUNDATION.md](docs/FOUNDATION.m
 
 | Foundation           | What it does                                        | Channel                                                                              |
 | -------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| **Loctree** (`loct`) | Structural code perception — maps, impact, findings | `0.14.x` · [npm](https://www.npmjs.com/package/loctree) · GitHub releases            |
+| **Loctree** (`loct`) | Structural code perception — maps, impact, findings | [npm `@loctree/loctree`](https://www.npmjs.com/package/@loctree/loctree)             |
 | **AICX** (`aicx`)    | Agent-session memory — catalog, search, intents     | [npm `@loctree/aicx`](https://www.npmjs.com/package/@loctree/aicx) · GitHub releases |
-| **prview**           | PR review artifact generator                        | [crates.io](https://crates.io/crates/prview)                                         |
+| **prview**           | PR review artifact generator                        | [GitHub Releases](https://github.com/vetcoders/prview-rs/releases/latest)            |
 | **screenscribe**     | Screencast → structured engineering findings        | [PyPI](https://pypi.org/project/screenscribe/)                                       |
 | **vc-frame**         | Operator cockpit (session rail, layouts)            | Embedded inside `Vibecrafted.app`; no separate installer or update channel           |
 
 Foundations are external: the Runtime Pack does not carry `loct`, `aicx`,
 `prview` or `screenscribe`. Each installs through its own channel (npm, GitHub
-releases, crates.io, PyPI — `scripts/install-foundations.sh` drives them), and
+releases, PyPI — `scripts/install-foundations.sh` drives them), and
 your own PATH install always wins. `vibecrafted doctor` verifies the ones it
 finds and never silently replaces a product-managed binary with a stale copy.
 
@@ -166,6 +166,15 @@ The `//` is not decoration. It is the mark.
 ---
 
 ## Install
+
+Download installable carriers from [GitHub Releases](https://github.com/vetcoders/vibecrafted/releases/latest):
+
+- macOS desktop: `Vibecrafted_<version>-<YYYYMMDD>-<sha8>.dmg`
+- macOS CLI: `Vibecrafted_RuntimePack_<version>-<YYYYMMDD>-<sha8>-darwin-<arch>.tar.gz`
+- Portable source: `Vibecrafted_<version>-<YYYYMMDD>-<sha8>-portable.tar.gz`
+- Windows native: `Vibecrafted_<version>-<YYYYMMDD>-<sha8>-windows-x64.msi` or `.exe`, with the matching `Vibecrafted_RuntimePack_<version>-<YYYYMMDD>-<sha8>-win32-x64.tar.gz`
+
+Use the adjacent checksums and detached Runtime Pack signatures to verify downloads.
 
 **macOS and Linux:**
 

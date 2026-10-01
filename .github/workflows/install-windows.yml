@@ -6,7 +6,8 @@ name: Install (Windows Matrix)
 # packaging/windows/out (no second pack build). The MSI job and the EXE job
 # each silent-install that artifact on their own windows-latest runner (same
 # ProductCode, so the installs must not share a machine), run doctor, and
-# uninstall. No secrets. Authenticode is skipped without
+# uninstall. PRs use rehearsal signatures; tag builds require the product
+# signing key and verify it against the committed trust anchor. Authenticode is skipped without
 # VIBECRAFTED_WINDOWS_AUTHENTICODE_THUMBPRINT (unsigned SmartScreen path is the
 # documented trust model for this channel).
 
@@ -17,6 +18,8 @@ on:
       - develop
       - "release/*"
       - "port/windows-*"
+    tags:
+      - "v*"
   pull_request:
     branches:
       - main
@@ -35,7 +38,9 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
 
       - name: Install OpenSSL (vc-frame)
         shell: pwsh
@@ -57,8 +62,17 @@ jobs:
           # Atomic pair: distribution_manifest rejects a half-set environment.
           VIBECRAFTED_SOURCE_OWNER_REPO: ${{ github.repository }}
           VIBECRAFTED_SOURCE_REVISION: ${{ github.sha }}
+          VC_RELEASE_SIGNING_KEY: ${{ startsWith(github.ref, 'refs/tags/') && secrets.VC_SIGNING_KEY || '' }}
         run: |
           $ErrorActionPreference = "Stop"
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            if (-not $env:VC_RELEASE_SIGNING_KEY) { throw "tag builds require VC_SIGNING_KEY" }
+            $version = (Get-Content VERSION -Raw).Trim()
+            if ($env:GITHUB_REF_NAME -ne "v$version") { throw "tag does not match VERSION" }
+            $releaseKey = Join-Path $env:RUNNER_TEMP "vibecrafted-release-signing.key"
+            [IO.File]::WriteAllText($releaseKey, $env:VC_RELEASE_SIGNING_KEY, [Text.Encoding]::ASCII)
+            $env:VIBECRAFTED_SIGNING_KEY = $releaseKey
+          }
           New-Item -ItemType Directory -Path build -Force | Out-Null
           powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-windows-x64-runtime-pack.ps1
           $pack = Get-ChildItem -LiteralPath build -Filter "Vibecrafted_RuntimePack_*-win32-x64.tar.gz" |
@@ -70,6 +84,11 @@ jobs:
           }
           if (-not (Test-Path -LiteralPath "$($pack.FullName).sig")) {
             throw "missing $($pack.Name).sig"
+          }
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $productPublicKey = Join-Path $PWD "vibecrafted-core\vibecrafted_core\trust\vibecrafted-signing-v1.pub"
+            & openssl dgst -sha256 -verify $productPublicKey -signature "$($pack.FullName).sig" $pack.FullName
+            if ($LASTEXITCODE -ne 0) { throw "tag carrier is not signed by the product key" }
           }
           "WINDOWS_PACK_NAME=$($pack.Name)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Copy-Item $pack.FullName "$env:RUNNER_TEMP\$($pack.Name)"
@@ -89,6 +108,13 @@ jobs:
             ${{ runner.temp }}/Vibecrafted_RuntimePack_*-win32-x64.tar.gz.sig
             ${{ runner.temp }}/ci-signing.pub
           if-no-files-found: error
+
+      - name: Scrub release signing key
+        if: always()
+        shell: pwsh
+        run: |
+          $releaseKey = Join-Path $env:RUNNER_TEMP "vibecrafted-release-signing.key"
+          if (Test-Path -LiteralPath $releaseKey) { Remove-Item -LiteralPath $releaseKey -Force }
 
   windows-cold-install:
     name: install.ps1 + doctor (windows-latest)

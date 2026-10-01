@@ -15,6 +15,8 @@ name: Release DMG (hosted macOS)
 #   VC_SIGNING_IDENTITY    "Developer ID Application: <name> (<team>)"
 #   VC_SIGNING_KEY         vibecrafted-signing.key (release-output signature)
 #   VC_NOTARY_API_KEY_B64 / VC_NOTARY_API_KEY_ID / VC_NOTARY_API_ISSUER  notarytool
+#   Or VC_NOTARY_APPLE_ID / VC_NOTARY_PASSWORD / VC_NOTARY_TEAM_ID, stored
+#   in a temporary runner Keychain profile before invoking the builder.
 #   VC_FONT_PASSPHRASE     decrypts assets/fonts/SpotMono.ttc.enc (licensed font, AES-256-CBC/PBKDF2)
 #
 # 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
@@ -27,13 +29,13 @@ on:
         required: false
         default: main
       frame_ref:
-        description: vc-frame donor ref (develop is the integration line; main lags it)
+        description: vc-frame immutable donor revision
         required: false
-        default: develop
+        default: 7ab84069c9b7994ce0b705ccedd708aa3a35dcb6
       terminal_ref:
-        description: vc-terminal donor ref
+        description: vc-terminal immutable donor revision
         required: false
-        default: master
+        default: d6685ead9018ad89411291d6198476666e48b0f8
       notarize:
         description: submit to Apple notary (false = sign only)
         type: boolean
@@ -92,14 +94,14 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: vetcoders/vc-frame
-          ref: ${{ inputs.frame_ref || 'develop' }}
+          ref: ${{ inputs.frame_ref || '7ab84069c9b7994ce0b705ccedd708aa3a35dcb6' }}
           path: vc-frame
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: vetcoders/vc-terminal
-          ref: ${{ inputs.terminal_ref || 'master' }}
+          ref: ${{ inputs.terminal_ref || 'd6685ead9018ad89411291d6198476666e48b0f8' }}
           path: vc-terminal
           fetch-depth: 0
           persist-credentials: false
@@ -131,10 +133,13 @@ jobs:
           VC_NOTARY_API_KEY_B64: ${{ secrets.VC_NOTARY_API_KEY_B64 }}
           VC_NOTARY_API_KEY_ID: ${{ secrets.VC_NOTARY_API_KEY_ID }}
           VC_NOTARY_API_ISSUER: ${{ secrets.VC_NOTARY_API_ISSUER }}
+          VC_NOTARY_APPLE_ID: ${{ secrets.VC_NOTARY_APPLE_ID }}
+          VC_NOTARY_PASSWORD: ${{ secrets.VC_NOTARY_PASSWORD }}
+          VC_NOTARY_TEAM_ID: ${{ secrets.VC_NOTARY_TEAM_ID }}
           VC_FONT_PASSPHRASE: ${{ secrets.VC_FONT_PASSPHRASE }}
         run: |
           set -euo pipefail
-          for v in VC_CERT_P12_B64 VC_CERT_PASSWORD VC_SIGNING_IDENTITY VC_SIGNING_KEY VC_NOTARY_API_KEY_B64 VC_NOTARY_API_KEY_ID VC_NOTARY_API_ISSUER VC_FONT_PASSPHRASE; do
+          for v in VC_CERT_P12_B64 VC_CERT_PASSWORD VC_SIGNING_IDENTITY VC_SIGNING_KEY VC_FONT_PASSPHRASE; do
             [[ -n "${!v:-}" ]] || { echo "::error::missing secret $v"; exit 1; }
           done
           [[ -n "${PAYLOAD_HYGIENE_EXTRA_LITERALS//[[:space:]]/}" ]] \
@@ -145,7 +150,17 @@ jobs:
           printf '%s\n' "$VC_CERT_PASSWORD" > "$KEYS/cert_password.txt"
           printf '%s\n' "$VC_SIGNING_IDENTITY" > "$KEYS/signing-identity.txt"
           printf '%s\n' "$VC_SIGNING_KEY" > "$KEYS/vibecrafted-signing.key"
-          printf '%s' "$VC_NOTARY_API_KEY_B64" | base64 --decode > "$KEYS/notary-api-key.p8"
+          if [[ -n "$VC_NOTARY_API_KEY_B64" && -n "$VC_NOTARY_API_KEY_ID" && -n "$VC_NOTARY_API_ISSUER" ]]; then
+            printf '%s' "$VC_NOTARY_API_KEY_B64" | base64 --decode > "$KEYS/notary-api-key.p8"
+          elif [[ -n "$VC_NOTARY_APPLE_ID" && -n "$VC_NOTARY_PASSWORD" && -n "$VC_NOTARY_TEAM_ID" ]]; then
+            xcrun notarytool store-credentials vibecrafted-ci-notary \
+              --apple-id "$VC_NOTARY_APPLE_ID" --password "$VC_NOTARY_PASSWORD" \
+              --team-id "$VC_NOTARY_TEAM_ID"
+            printf '%s\n' 'NOTARY_PROFILE=vibecrafted-ci-notary' >> "$GITHUB_ENV"
+          else
+            echo "::error::provide a complete notary API key or Apple ID credential set"
+            exit 1
+          fi
           openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 \
             -in vibecrafted/assets/fonts/SpotMono.ttc.enc -out "$KEYS/fonts/SpotMono.ttc" \
             -pass env:VC_FONT_PASSPHRASE

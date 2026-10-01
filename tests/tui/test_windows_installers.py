@@ -97,9 +97,9 @@ def test_windows_installer_emits_canonical_windows_x64_names() -> None:
     assert 'Join-Path $OutDir "Vibecrafted.msi"' in build
     assert 'Join-Path $OutDir "Vibecrafted.exe"' in build
     assert STABLE_PRODUCT_CODE in build
-    pack_builder = (REPO_ROOT / "scripts" / "build-windows-x64-runtime-pack.ps1").read_text(
-        encoding="utf-8"
-    )
+    pack_builder = (
+        REPO_ROOT / "scripts" / "build-windows-x64-runtime-pack.ps1"
+    ).read_text(encoding="utf-8")
     assert (
         "Vibecrafted_RuntimePack_${version}-${releaseDate}-${shortSha}-win32-x64.tar.gz"
         in pack_builder
@@ -109,8 +109,8 @@ def test_windows_installer_emits_canonical_windows_x64_names() -> None:
     # Half-set VIBECRAFTED_SOURCE_REVISION alone fails distribution_manifest
     # ("environment source provenance must provide an atomic pair").
     assert "VIBECRAFTED_SOURCE_OWNER_REPO" in pack_builder
-    assert '$env:VIBECRAFTED_SOURCE_REVISION = $SourceRevision' in pack_builder
-    assert 'vetcoders/vibecrafted' in pack_builder
+    assert "$env:VIBECRAFTED_SOURCE_REVISION = $SourceRevision" in pack_builder
+    assert "vetcoders/vibecrafted" in pack_builder
 
 
 def test_windows_ci_builds_msi_exe_from_pack_artifact() -> None:
@@ -126,7 +126,9 @@ def test_windows_ci_builds_msi_exe_from_pack_artifact() -> None:
     assert "build Windows x64 MSI/EXE (unsigned)" in workflow
     assert "needs: windows-runtime-pack" in workflow
     assert "build-windows-installers.ps1" in workflow
-    assert "Download Runtime Pack into build/ for build-windows-installers.ps1" in workflow
+    assert (
+        "Download Runtime Pack into build/ for build-windows-installers.ps1" in workflow
+    )
     assert (
         "Build MSI/EXE from downloaded pack (no second pack build; out under packaging/windows/out)"
         in workflow
@@ -136,9 +138,12 @@ def test_windows_ci_builds_msi_exe_from_pack_artifact() -> None:
         "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4"
         in workflow
     )
-    assert workflow.count(
-        "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4"
-    ) >= 4
+    assert (
+        workflow.count(
+            "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4"
+        )
+        >= 4
+    )
     assert "d3f86a106a0bac45b974a628896ce1e5585c70a7" not in workflow
     assert "path: build" in workflow
     assert "build-windows-x64-runtime-pack.ps1" in workflow
@@ -156,7 +161,10 @@ def test_windows_ci_builds_msi_exe_from_pack_artifact() -> None:
     assert "windows-x64-installers" in installer_job
     assert "VIBECRAFTED_WINDOWS_AUTHENTICODE_THUMBPRINT" not in installer_job
     assert "signtool" not in installer_job.lower()
-    assert "LOCALAPPDATA" not in installer_job or "does not install into LOCALAPPDATA" in installer_job
+    assert (
+        "LOCALAPPDATA" not in installer_job
+        or "does not install into LOCALAPPDATA" in installer_job
+    )
     assert "install.ps1" not in installer_job
 
 
@@ -232,7 +240,10 @@ def test_ps1_generation_uninstall_stages_runner_outside_live_tree() -> None:
     gen_uninstall = gen_uninstall.split("if (-not $Pack)", 1)[0]
     assert "vc-rt-uninstall-" in gen_uninstall
     assert 'foreach ($name in @("bin", "scripts", "vibecrafted-core"))' in gen_uninstall
-    assert "Copy-Item -LiteralPath $src -Destination (Join-Path $stageGen $name)" in gen_uninstall
+    assert (
+        "Copy-Item -LiteralPath $src -Destination (Join-Path $stageGen $name)"
+        in gen_uninstall
+    )
     assert 'Join-Path $stageGen "bin\\python.exe"' in gen_uninstall
     assert "Remove-Item -LiteralPath $stageRoot -Recurse -Force" in gen_uninstall
     # Live generation python is only used as the copy source, never invoked.
@@ -250,7 +261,9 @@ def test_ps1_uninstall_clears_windows_product_root() -> None:
     """
     installer = INSTALL_SCRIPT.read_text(encoding="utf-8")
     assert "function Clear-WindowsProductRootAfterUninstall" in installer
-    assert "Clear-WindowsProductRootAfterUninstall -ExitCode $uninstallCode" in installer
+    assert (
+        "Clear-WindowsProductRootAfterUninstall -ExitCode $uninstallCode" in installer
+    )
     assert "Clear-WindowsProductRootAfterUninstall -ExitCode $installCode" in installer
     assert 'Join-Path $local "Vibecrafted"' in installer
     assert "uninstall left residue under $vcProductRoot" in installer
@@ -406,7 +419,7 @@ def test_windows_installer_license_comes_from_repo_license() -> None:
     build = BUILD_SCRIPT.read_text(encoding="utf-8")
     readme = README.read_text(encoding="utf-8")
 
-    # Full legal company name from vista-win LICENSE Company definition.
+    # Full legal company name from this product's LICENSE.
     full_licensor = "Libraxis AI Sp. z o.o."
     # ASCII brand + Framework for WiX RichEdit; keep former name. No math-sans.
     licensed_work = "Vibecrafted. Framework (formerly Vetcoders Skills)."
@@ -740,9 +753,7 @@ def test_windows_ci_installs_exe_then_doctor_then_uninstall() -> None:
     assert exe_job.count("WaitForExit()") >= 2
     assert "Unblock-File" in exe_job
     argument_lines = [
-        line.strip()
-        for line in exe_job.splitlines()
-        if "$psi.Arguments" in line
+        line.strip() for line in exe_job.splitlines() if "$psi.Arguments" in line
     ]
     assert len(argument_lines) == 2, argument_lines
     install_args = argument_lines[0]
