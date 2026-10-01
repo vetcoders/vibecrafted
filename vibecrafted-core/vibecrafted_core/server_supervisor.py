@@ -46,6 +46,10 @@ SUPERVISOR_LOCK_SCHEMA = "vibecrafted.server-supervisor-lock.v1"
 LAUNCH_AGENT_LABEL = "io.vetcoders.vibecrafted.server"
 EX_TEMPFAIL = 75
 EX_CONFIG = 78
+# Match the installer's bounded retirement/history document contract. Only
+# install-receipt.json uses this budget; status, locks and active.json keep
+# the descriptor reader's small default limit.
+_INSTALL_RECEIPT_MAX_BYTES = 128 * 1024 * 1024
 _TOOLS_INSTALL_LEASE_ENV = "VIBECRAFTED_INSTALL_LEASE_FD"
 _TOOLS_INSTALL_LOCK_NAME = ".vibecrafted-install.lock"
 _SERVICE_MUTATION_LOCK_TIMEOUT_ENV = "VIBECRAFTED_SERVICE_MUTATION_LOCK_TIMEOUT"
@@ -3268,9 +3272,9 @@ def _admit_service_mutation(
             EX_CONFIG,
         )
 
-    # Install receipts include all owned projections and can exceed the small
-    # status/lock receipt limit. Keep the same descriptor/ownership checks.
-    encoded = _read_owned_bytes(receipt_path, max_bytes=16 * 1024 * 1024)
+    # Owned projections and preserved settlement history share this receipt.
+    # Keep the same descriptor/ownership checks and a finite document ceiling.
+    encoded = _read_owned_bytes(receipt_path, max_bytes=_INSTALL_RECEIPT_MAX_BYTES)
     try:
         receipt = json.loads(encoded) if encoded is not None else None
         if (

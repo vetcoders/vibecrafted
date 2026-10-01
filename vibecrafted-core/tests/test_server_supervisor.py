@@ -3119,6 +3119,134 @@ def test_service_admission_reads_large_projection_receipt(service_admission):
     assert command("reconcile") == 0
 
 
+@pytest.fixture
+def settlement_receipt(service_admission):
+    """Distinct historical leaves sharing a preserved archive, as after retirement."""
+    base, _generations, _publish, _command, _mutations = service_admission
+    path = base.paths.runtime_home / "install-receipt.json"
+    receipt = json.loads(path.read_bytes())
+    archive = path.parent / ".installer-backups/drift/fixture/preference"
+    archive.parent.mkdir(parents=True)
+    archive.write_bytes(b"preserved preference and session bytes\n")
+    source = path.parent / "releases/0.9.0+retired" / ("capture-" + "x" * 180)
+
+    def write(minimum_mib=40):
+        history = {}
+        row = {str(source / "preference-000000"): [str(archive)]}
+        count = minimum_mib * 1024 * 1024 // len(json.dumps(row)) + 1
+        history.update(
+            {
+                str(source / f"preference-{index:06d}"): [str(archive)]
+                for index in range(count)
+            }
+        )
+        receipt["drift_backup_history"] = history
+        path.write_text(json.dumps(receipt))
+        assert minimum_mib * 1024 * 1024 < path.stat().st_size < 128 * 1024 * 1024
+        return path, archive
+
+    return write
+
+
+@pytest.mark.parametrize("minimum_mib", [18, 40])
+def test_service_admission_reads_settlement_receipt(
+    service_admission, settlement_receipt, minimum_mib
+):
+    base, generations, _publish, command, mutations = service_admission
+    path, archive = settlement_receipt(minimum_mib)
+    before = supervisor._sha256_file(path)
+    assert command("reconcile") == 0
+    assert supervisor._sha256_file(path) == before
+    assert archive.read_bytes() == b"preserved preference and session bytes\n"
+    config, binary, _module = generations["1.0.0"]
+    assert supervisor._installed_service_identity(
+        base.paths
+    ) == supervisor._supervisor_identity(binary, launcher=config.launcher)
+    mutations.restart.assert_called_once()
+    assert not mutations.launchctl.called
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "over-budget",
+        "schema",
+        "selection",
+        "pending",
+        "symlink",
+        "hardlink",
+        "owner",
+        "replacement",
+    ],
+)
+def test_service_admission_refuses_untrusted_settlement_receipt(
+    service_admission, settlement_receipt, monkeypatch, capsys, invalid
+):
+    base, _generations, _publish, command, mutations = service_admission
+    path, archive = settlement_receipt()
+    service_before = base.paths.launch_agent_file.read_bytes()
+    if invalid == "over-budget":
+        with path.open("ab") as output:
+            # Valid JSON may have trailing whitespace, but must remain bounded.
+            output.write(b" " * (128 * 1024 * 1024 + 1 - path.stat().st_size))
+    elif invalid in {"schema", "selection", "pending"}:
+        receipt = json.loads(path.read_bytes())
+        if invalid == "schema":
+            receipt["schema"] = "foreign.v1"
+        elif invalid == "selection":
+            receipt["owned_files"][str(path.parent / "active.json")] = "a" * 64
+        else:
+            receipt["install_pending"] = True
+        path.write_text(json.dumps(receipt))
+    elif invalid == "symlink":
+        other = path.with_name("original-receipt.json")
+        path.rename(other)
+        path.symlink_to(other)
+    elif invalid == "hardlink":
+        os.link(path, path.with_name("receipt-alias.json"))
+    elif invalid == "owner":
+        lstat = Path.lstat
+
+        def foreign_owner(named):
+            actual = lstat(named)
+            if named == path:
+                fields = list(actual)
+                fields[4] = os.getuid() + 1
+                return os.stat_result(fields)
+            return actual
+
+        monkeypatch.setattr(Path, "lstat", foreign_owner)
+    else:
+        open_file = os.open
+        replacement = path.with_name("replacement.json")
+        replacement.write_bytes(path.read_bytes())
+        replaced = []
+
+        def replace_before_open(named, *args, **kwargs):
+            if Path(named) == path and not replaced:
+                os.replace(replacement, path)
+                replaced.append(True)
+            return open_file(named, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", replace_before_open)
+    assert command("reconcile") == supervisor.EX_CONFIG
+    assert "no coherent install identity" in capsys.readouterr().err
+    assert base.paths.launch_agent_file.read_bytes() == service_before
+    assert mutations.mock_calls == []
+    assert archive.read_bytes() == b"preserved preference and session bytes\n"
+
+
+def test_service_admission_keeps_active_document_small(service_admission):
+    base, _generations, _publish, command, mutations = service_admission
+    path = base.paths.runtime_home / "active.json"
+    with path.open("ab") as output:
+        output.write(b" " * (64 * 1024 + 1 - path.stat().st_size))
+    before = base.paths.launch_agent_file.read_bytes()
+    assert command("reconcile") == supervisor.EX_CONFIG
+    assert base.paths.launch_agent_file.read_bytes() == before
+    assert mutations.mock_calls == []
+
+
 def test_service_admission_rejects_stale_imported_version(
     service_admission, monkeypatch
 ):
