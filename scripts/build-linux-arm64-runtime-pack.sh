@@ -186,7 +186,8 @@ find "$payload" -type l -print -quit | grep -q . && die "payload contains symlin
 
 PAYLOAD="$payload" SOURCE_REVISION="$source_revision" \
 RUNTIME_PLATFORM="$platform" RUNTIME_ARCHITECTURE="$architecture" RUNTIME_TARGET="$target" \
-TERMINAL_REVISION="$terminal_revision" FRAME_REVISION="$frame_revision" python3 - <<'PY'
+TERMINAL_REVISION="$terminal_revision" FRAME_REVISION="$frame_revision" \
+TERMINAL_ARCHIVE_SHA256="$terminal_archive_sha256" FRAME_ARCHIVE_SHA256="$frame_archive_sha256" python3 - <<'PY'
 import hashlib, json, os, subprocess
 from pathlib import Path
 
@@ -194,8 +195,8 @@ root = Path(os.environ["PAYLOAD"])
 source_manifest_sha = hashlib.sha256((root / "source-provenance.json").read_bytes()).hexdigest()
 sources = {
     "vibecrafted": ("https://github.com/vetcoders/vibecrafted", os.environ["SOURCE_REVISION"], source_manifest_sha, "MIT"),
-    "vc-terminal": (f"https://codeload.github.com/vetcoders/vc-terminal/tar.gz/{os.environ['TERMINAL_REVISION']}", os.environ["TERMINAL_REVISION"], "3cd6670c4a80c589b945ed1b45c1f033c80745ceb34d3466e9476a1c3eeb0f71", "Apache-2.0"),
-    "vc-frame": (f"https://codeload.github.com/vetcoders/vc-frame/tar.gz/{os.environ['FRAME_REVISION']}", os.environ["FRAME_REVISION"], "55851e094b91d3b41712edcdc66d69f97da5859118395fee497bb104714b125c", "MIT"),
+    "vc-terminal": (f"https://codeload.github.com/vetcoders/vc-terminal/tar.gz/{os.environ['TERMINAL_REVISION']}", os.environ["TERMINAL_REVISION"], os.environ["TERMINAL_ARCHIVE_SHA256"], "Apache-2.0"),
+    "vc-frame": (f"https://codeload.github.com/vetcoders/vc-frame/tar.gz/{os.environ['FRAME_REVISION']}", os.environ["FRAME_REVISION"], os.environ["FRAME_ARCHIVE_SHA256"], "MIT"),
 }
 owners = {
     "vibecrafted": "vibecrafted", "vc-server": "vibecrafted", "voc": "vibecrafted",
