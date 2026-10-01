@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
+import signal
 import subprocess
+import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Self
@@ -27,6 +31,94 @@ from vibecrafted_core.dispatch.supervisor import (
 )
 
 FAST_AWAIT = "await = { poll_s = 0.02, timeout_min = 1.0 }"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX sessions and signals")
+@pytest.mark.parametrize("process_handle", [True, False])
+def test_timeout_fail_kills_detached_descendants(
+    tmp_path: Path, process_handle: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_REAPER_GRACE_SECONDS", "0.1")
+    dispatch, _, artifacts_dir = build_dispatch(
+        tmp_path,
+        """
+[[cuts]]
+id = "slow"
+agent = "codex"
+workflow = "implement"
+prompt = "timeout tree regression"
+  [[cuts.verify]]
+  run = "echo ok"
+  expect = { contains = "ok" }
+""",
+        policy='on_timeout = "fail"\nawait = { poll_s = 0.01, timeout_min = 0.002 }',
+    )
+    ready = tmp_path / "descendants.json"
+    # Both descendants escape the worker's group/session and ignore TERM.
+    grandchild = "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('ready', flush=True); time.sleep(60)"
+    child = f"""
+import json, os, signal, subprocess, sys, time
+from pathlib import Path
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+p = subprocess.Popen([sys.executable, "-c", {grandchild!r}], start_new_session=True, stdout=subprocess.PIPE, text=True)
+assert p.stdout.readline().strip() == "ready"
+Path({str(ready)!r}).write_text(json.dumps([os.getpid(), p.pid]))
+time.sleep(60)
+"""
+    worker = f"""
+import subprocess, sys, time
+subprocess.Popen([sys.executable, "-c", {child!r}], start_new_session=True)
+time.sleep(60)
+"""
+    proc = subprocess.Popen([sys.executable, "-c", worker], start_new_session=True)
+    descendants: list[int] = []
+
+    def executing(pid: int) -> bool:
+        state = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "stat="],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip()
+        return bool(state) and not state.startswith("Z")
+
+    try:
+        deadline = time.monotonic() + 5
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists(), "worker descendants did not become ready"
+        descendants = json.loads(ready.read_text())
+        assert all(os.getpgid(pid) != proc.pid for pid in descendants)
+
+        def launcher(cut, prompt, kind):
+            return CellRun(
+                cut_id=cut.id,
+                kind=kind,
+                accepted=True,
+                pid=proc.pid,
+                proc=proc if process_handle else None,
+            )
+
+        result = run_dispatch(dispatch, launcher=launcher, artifacts_dir=artifacts_dir)
+        assert result.states == {"slow": STATE_FAILED}
+        deadline = time.monotonic() + 2
+        while (
+            any(executing(pid) for pid in [proc.pid, *descendants])
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.02)
+        assert not executing(proc.pid)
+        assert not any(executing(pid) for pid in descendants)
+    finally:
+        # Red-before proof must not leave the very orphans it reproduces.
+        if ready.exists():
+            descendants = json.loads(ready.read_text())
+        for pid in [*reversed(descendants), proc.pid]:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        proc.wait(timeout=5)
 
 
 @pytest.mark.parametrize("depends_on", [False, True])
@@ -669,7 +761,7 @@ prompt = "sleeps forever"
     assert result.states == {"slow": STATE_UNKNOWN}
     journal = (artifacts_dir / "journal.md").read_text(encoding="utf-8")
     assert "timed out" in journal
-    assert "process terminated" in journal
+    assert "process tree termination signals sent" in journal
 
 
 def test_broken_announced_report_recovers_by_mtime(tmp_path: Path) -> None:

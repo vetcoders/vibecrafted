@@ -67,6 +67,7 @@ __all__ = [
     "process_start_token",
     "snapshot_processes",
     "terminate_process",
+    "terminate_process_tree",
     "validate_process_identity",
 ]
 
@@ -482,6 +483,87 @@ def _looks_vc_family(command: str) -> bool:
         ".vibecrafted",
     )
     return any(m in low for m in markers)
+
+
+def terminate_process_tree(pid: int, *, grace: float | None = None) -> TerminateOutcome:
+    """Stop an owned worker and its PPID descendants, including detached sessions.
+
+    The caller must own the root (e.g. a launched cell). Capture the complete
+    subtree and start identities BEFORE signalling anything: killing the root
+    first reparents escaped descendants and loses their ownership evidence.
+    Recheck start tokens before each signal so PID reuse during the grace window
+    cannot target an unrelated process. PGID/PPID may change after capture.
+    """
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 1:
+        return TerminateOutcome(
+            ok=False, outcome="unproven", pid=pid, detail="invalid_root"
+        )
+    table = build_process_table()
+    if not table:
+        return TerminateOutcome(
+            ok=False, outcome="unproven", pid=pid, detail="process_table_unavailable"
+        )
+    by_pid = {entry.pid: entry for entry in table}
+    if pid not in by_pid:
+        return TerminateOutcome(ok=True, outcome="already_gone", pid=pid)
+    children: dict[int, list[int]] = {}
+    for entry in table:
+        children.setdefault(entry.ppid, []).append(entry.pid)
+    targets = [pid]
+    seen = {pid}
+    for parent in targets:
+        for child in children.get(parent, []):
+            if child > 1 and child not in seen:
+                targets.append(child)
+                seen.add(child)
+    if os.getpid() in seen:
+        return TerminateOutcome(
+            ok=False, outcome="protected", pid=pid, detail="contains_self"
+        )
+    identities = {
+        target: process_start_token(target, by_pid[target].command)
+        for target in targets
+    }
+    receipt: dict[str, Any] = {"pid": pid, "pids": targets, "steps": []}
+    failures = []
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        # Snapshot once per phase; start tokens are rechecked at signal time.
+        current = {entry.pid: entry for entry in build_process_table()}
+        if not current:
+            return TerminateOutcome(
+                ok=False,
+                outcome="unproven",
+                pid=pid,
+                detail="process_table_unavailable",
+                receipt=receipt,
+            )
+        for target in reversed(targets):
+            entry = current.get(target)
+            if entry is None:
+                continue
+            if process_start_token(target, entry.command) != identities[target]:
+                receipt["steps"].append(
+                    {"pid": target, "signal": sig.name, "result": "identity_changed"}
+                )
+                continue
+            result = _signal_pid(target, sig)
+            receipt["steps"].append(
+                {"pid": target, "signal": sig.name, "result": result}
+            )
+            if result not in {"signalled", "already_gone"}:
+                failures.append(f"{target}:{sig.name}:{result}")
+        if sig == signal.SIGTERM:
+            window = grace_seconds() if grace is None else grace
+            if window > 0:
+                time.sleep(window)
+    # Signal delivery is receipted separately from process exit/reaping.
+    return TerminateOutcome(
+        ok=not failures,
+        outcome="signal_failed" if failures else "signals_sent",
+        pid=pid,
+        detail="; ".join(failures),
+        receipt=receipt,
+    )
 
 
 def terminate_process(
