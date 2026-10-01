@@ -79,6 +79,45 @@ def test_install_reconciles_installed_service(tmp_path: Path) -> None:
     ]
 
 
+def test_reconcile_queues_behind_concurrent_install_with_bounded_wait(
+    tmp_path: Path,
+) -> None:
+    """d5-installer-self-lock: the post-install reconcile must hand the
+    supervisor a bounded lease wait so a transient concurrent install
+    finishes instead of failing the whole install."""
+    bin_dir = tmp_path / "launcher-bin"
+    bin_dir.mkdir(parents=True)
+    capture = tmp_path / "wait-capture.log"
+    stub = bin_dir / "vibecrafted"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        f'printf \'%s\\n\' "${{VIBECRAFTED_SERVICE_MUTATION_LOCK_TIMEOUT:-unset}}" > "{capture}"\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    stub.chmod(stat.S_IRWXU)
+    result = _run_sourced(
+        tmp_path,
+        f'export VIBECRAFTED_LAUNCHER_BIN="{bin_dir}"\n'
+        f'mkdir -p "$HOME/Library/LaunchAgents"\n'
+        f'touch "$HOME/{PLIST_RELATIVE}"\n'
+        "reconcile_server_service\n",
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert capture.read_text(encoding="utf-8") == "120\n"
+
+    result = _run_sourced(
+        tmp_path,
+        f'export VIBECRAFTED_LAUNCHER_BIN="{bin_dir}"\n'
+        f'mkdir -p "$HOME/Library/LaunchAgents"\n'
+        f'touch "$HOME/{PLIST_RELATIVE}"\n'
+        "export VIBECRAFTED_SERVICE_MUTATION_LOCK_TIMEOUT=7\n"
+        "reconcile_server_service\n",
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert capture.read_text(encoding="utf-8") == "7\n"
+
+
 def test_install_without_launchagent_is_a_noop(tmp_path: Path) -> None:
     bin_dir, calls = _write_launcher_stub(tmp_path)
     result = _run_sourced(

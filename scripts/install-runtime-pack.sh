@@ -352,7 +352,9 @@ _release_rescue_extract() {
 # backoff — the old server keeps serving silently until the next reboot.
 # Reconcile right after publication so the service follows the runtime it now
 # serves. Never enables supervision on machines that have not opted in
-# (no plist -> no-op).
+# (no plist -> no-op). The reconcile queues behind a concurrent first-party
+# install/update transaction for a bounded wait instead of failing the whole
+# install: the mutation lease stays exclusive, only the refusal is deferred.
 reconcile_server_service() {
   [[ "${operation:-install}" == "install" && "${dry_run:-0}" != "1" ]] || return 0
   [[ "$(uname -s)" == "Darwin" ]] || return 0
@@ -368,7 +370,7 @@ reconcile_server_service() {
     return 0
   fi
   printf 'install-runtime-pack: reconciling installed LaunchAgent with the published runtime...\n'
-  if ! (cd / && env -u PYTHONPATH "$launcher" server service reconcile); then
+  if ! (cd / && env -u PYTHONPATH VIBECRAFTED_SERVICE_MUTATION_LOCK_TIMEOUT="${VIBECRAFTED_SERVICE_MUTATION_LOCK_TIMEOUT:-120}" "$launcher" server service reconcile); then
     printf 'install-runtime-pack: the runtime is published but the installed service did not reconcile; run "vibecrafted server service reconcile" to converge it\n' >&2
     return 1
   fi

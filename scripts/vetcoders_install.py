@@ -23651,11 +23651,14 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
         _assert_runtime_physical_path(path)
     current = paths["runtime_home"] / "tools/vibecrafted-current"
     _assert_runtime_physical_path(current, leaf_symlink=True)
-    with (
-        _tools_install_lease(current, operation="runtime-install") as descriptor,
-        _inherited_tools_install_lease(descriptor),
-    ):
-        return _install_runtime_pack(args)
+    with _tools_install_lease(current, operation="runtime-install") as descriptor:
+        # The env token exported below is only a valid ownership proof for
+        # children while the descriptor itself can cross exec; otherwise a
+        # child sees VIBECRAFTED_INSTALL_LEASE_FD naming a closed (or recycled)
+        # fd and its service mutation bounces off this process's own lease.
+        os.set_inheritable(descriptor, True)
+        with _inherited_tools_install_lease(descriptor):
+            return _install_runtime_pack(args)
 
 
 def _install_runtime_pack(

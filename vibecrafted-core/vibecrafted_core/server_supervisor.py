@@ -14,6 +14,7 @@ except ImportError:  # native Windows — flock-shaped portable_lock
 import hashlib
 import http.client
 import json
+import math
 import os
 import plistlib
 import re
@@ -47,6 +48,7 @@ EX_TEMPFAIL = 75
 EX_CONFIG = 78
 _TOOLS_INSTALL_LEASE_ENV = "VIBECRAFTED_INSTALL_LEASE_FD"
 _TOOLS_INSTALL_LOCK_NAME = ".vibecrafted-install.lock"
+_SERVICE_MUTATION_LOCK_TIMEOUT_ENV = "VIBECRAFTED_SERVICE_MUTATION_LOCK_TIMEOUT"
 _HOST_PATTERN = re.compile(r"[A-Za-z0-9._:-]+")
 _MINIMAL_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 # Child environments start from the operator's full environment — the product
@@ -1114,6 +1116,33 @@ def _validate_tools_install_descriptor(descriptor: int, lock_path: Path) -> None
         )
 
 
+def _service_mutation_lock_wait_seconds() -> float:
+    """Bounded wait for a foreign install lease before refusing a service
+    mutation: `VIBECRAFTED_SERVICE_MUTATION_LOCK_TIMEOUT` seconds, default 0
+    (the historical fail-fast contract). Non-interactive post-install
+    reconciles opt into a bounded queue so a transient concurrent install
+    finishes instead of failing the whole install."""
+
+    raw = os.environ.get(_SERVICE_MUTATION_LOCK_TIMEOUT_ENV)
+    if not raw:
+        return 0.0
+    try:
+        wait = float(raw)
+    except ValueError as exc:
+        raise SupervisorError(
+            f"{_SERVICE_MUTATION_LOCK_TIMEOUT_ENV} must be a finite "
+            f"non-negative number of seconds, got {raw!r}",
+            EX_CONFIG,
+        ) from exc
+    if not math.isfinite(wait) or wait < 0:
+        raise SupervisorError(
+            f"{_SERVICE_MUTATION_LOCK_TIMEOUT_ENV} must be a finite "
+            f"non-negative number of seconds, got {raw!r}",
+            EX_CONFIG,
+        )
+    return wait
+
+
 class _ToolsInstallMutationLease:
     """Serialize service mutations with runtime publication and uv replacement."""
 
@@ -1162,6 +1191,7 @@ class _ToolsInstallMutationLease:
                 f"tools directory is not an owned regular directory: {lock_path.parent}",
                 EX_CONFIG,
             )
+        wait_seconds = _service_mutation_lock_wait_seconds()
         descriptor = os.open(
             lock_path,
             os.O_RDWR
@@ -1172,31 +1202,49 @@ class _ToolsInstallMutationLease:
         )
         try:
             _validate_tools_install_descriptor(descriptor, lock_path)
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as exc:
-            try:
-                if exc.errno in {errno.EACCES, errno.EAGAIN}:
+            deadline = time.monotonic() + wait_seconds
+            notified = False
+            while True:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError as exc:
+                    if exc.errno not in {errno.EACCES, errno.EAGAIN}:
+                        raise
+                    # Re-read the payload on every pass: a current-generation
+                    # holder writes its metadata after acquiring, so later
+                    # passes attribute the owner better than the first.
                     owner = _read_lock_payload(descriptor) or {}
-                    pid = owner.get("pid", "unknown")
-                    alive = (
-                        _process_alive(pid)
-                        if type(pid) is int and 1 < pid <= 2**31 - 1
-                        else "unknown"
-                    )
-                    raise SupervisorError(
-                        "runtime install is active; refusing concurrent service mutation: "
-                        f"{lock_path} (pid={pid}, alive={alive}, "
-                        f"operation={owner.get('operation', owner.get('role', 'unknown'))}, "
-                        f"started_at={owner.get('started_at', owner.get('acquired_at', 'unknown'))}). "
-                        f"Inspect holders with lsof {shlex.quote(str(lock_path))} "
-                        "and ps -p <pid> -o pid,ppid,etime,command. "
-                        "A child may retain the lease after its recorded owner exits; "
-                        "do not remove the lock file.",
-                        EX_TEMPFAIL,
-                    ) from exc
-                raise
-            finally:
-                os.close(descriptor)
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        pid = owner.get("pid", "unknown")
+                        alive = (
+                            _process_alive(pid)
+                            if type(pid) is int and 1 < pid <= 2**31 - 1
+                            else "unknown"
+                        )
+                        raise SupervisorError(
+                            "runtime install is active; refusing concurrent service mutation: "
+                            f"{lock_path} (pid={pid}, alive={alive}, "
+                            f"operation={owner.get('operation', owner.get('role', 'unknown'))}, "
+                            f"started_at={owner.get('started_at', owner.get('acquired_at', 'unknown'))}). "
+                            f"Inspect holders with lsof {shlex.quote(str(lock_path))} "
+                            "and ps -p <pid> -o pid,ppid,etime,command. "
+                            "A child may retain the lease after its recorded owner exits; "
+                            "do not remove the lock file.",
+                            EX_TEMPFAIL,
+                        ) from exc
+                    if not notified:
+                        print(
+                            "vc-server-supervisor: runtime install is active at "
+                            f"{lock_path} (pid={owner.get('pid', 'unknown')}, "
+                            f"operation={owner.get('operation', owner.get('role', 'unknown'))}); "
+                            f"waiting up to {wait_seconds:g}s for it to finish "
+                            "before refusing the service mutation",
+                            file=sys.stderr,
+                        )
+                        notified = True
+                    time.sleep(min(0.1, remaining))
         except BaseException:
             os.close(descriptor)
             raise

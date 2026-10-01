@@ -103,6 +103,46 @@ def _user_edit(config: Path, old: bytes, new: bytes) -> None:
     config.write_bytes(before.replace(old, new))
 
 
+def test_runtime_install_exports_an_inheritable_lease_descriptor(
+    roots, monkeypatch
+) -> None:
+    """d5-installer-self-lock: the lease token the runtime-install transaction
+    exports for children must name a descriptor that can cross exec while the
+    flock is held. A close-on-exec (or recycled) fd makes a child's service
+    mutation bounce off the installer's own lease with no readable owner."""
+    observed = {}
+
+    def fake_install(args) -> int:
+        descriptor = int(os.environ[installer._TOOLS_INSTALL_LEASE_ENV])
+        observed["inheritable"] = os.get_inheritable(descriptor)
+        lock_path = (
+            Path(os.environ["VIBECRAFTED_RUNTIME_HOME"])
+            / "tools"
+            / ".vibecrafted-install.lock"
+        )
+        probe = os.open(lock_path, os.O_RDWR)
+        try:
+            with pytest.raises(OSError):
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(probe)
+        owner = json.loads(lock_path.read_text(encoding="utf-8"))
+        assert owner["pid"] == os.getpid()
+        assert owner["operation"] == "runtime-install"
+        assert owner["started_at"]
+        return 0
+
+    monkeypatch.setattr(installer, "_install_runtime_pack", fake_install)
+    monkeypatch.delenv(installer._TOOLS_INSTALL_LEASE_ENV, raising=False)
+    assert (
+        installer.cmd_runtime_install(
+            Namespace(rescue=False, plan=False, apply=False, runtime_home=None)
+        )
+        == 0
+    )
+    assert observed["inheritable"] is True
+
+
 def _install(payload: Path, capsys, **choice) -> dict:
     assert (
         installer.cmd_runtime_install(

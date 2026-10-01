@@ -1203,6 +1203,9 @@ install-server-service:
 # `install-source`). Reconciles the installed LaunchAgent against the freshly
 # published runtime so a reboot never meets a stale-identity refusal. Never
 # enables supervision on machines that have not opted in (no plist -> no-op).
+# A concurrent first-party install/update transaction holds the service
+# mutation lease briefly; queue behind it for a bounded wait instead of
+# failing the install (the lease itself stays exclusive).
 reconcile-server-service:
 	@if [ "$$(uname -s)" != "Darwin" ]; then \
 		echo "[server-service] launchd not available — skipping service reconcile"; \
@@ -1221,7 +1224,7 @@ reconcile-server-service:
 		exit 0; \
 	fi; \
 	echo "[server-service] reconciling installed LaunchAgent with the published runtime..."; \
-	(cd / && "$$launcher" server service reconcile)
+	(cd / && VIBECRAFTED_SERVICE_MUTATION_LOCK_TIMEOUT="$${VIBECRAFTED_SERVICE_MUTATION_LOCK_TIMEOUT:-120}" "$$launcher" server service reconcile)
 
 server-smoke: install-server
 	@echo "[server-smoke] Run 1/3" && bash tests/server_smoke.sh
