@@ -339,6 +339,42 @@ def test_prview_never_overwrites_another_install_in_the_launcher_bin(
 # --- screenscribe from PyPI through pipx ---------------------------------------
 
 
+def test_screenscribe_uses_uv_with_compatible_python_and_external_bin(
+    tmp_path: Path,
+) -> None:
+    fake_bin = tmp_path / "bin"
+    capture = tmp_path / "uv-args.txt"
+    screenscribe = tmp_path / "provider-bin/screenscribe"
+    screenscribe.parent.mkdir()
+    _executable(fake_bin / "pipx", "#!/bin/sh\nexit 3\n")
+    _executable(
+        fake_bin / "uv",
+        "#!/bin/sh\nset -eu\n"
+        'if [ "$1 $2" = "tool dir" ]; then\n'
+        '  dirname "$SCREENSCRIBE_BIN"\n'
+        'elif [ "$1 $2" = "tool install" ]; then\n'
+        '  printf "%s\\n" "$@" > "$UV_CAPTURE"\n'
+        '  printf "#!/bin/sh\\nexit 0\\n" > "$SCREENSCRIBE_BIN"\n'
+        '  chmod +x "$SCREENSCRIBE_BIN"\n'
+        "else\n  exit 2\nfi\n",
+    )
+    result = _run_installer(
+        tmp_path,
+        "screenscribe",
+        path=[fake_bin],
+        REQUIRE_FOUNDATIONS="1",
+        UV_CAPTURE=str(capture),
+        SCREENSCRIBE_BIN=str(screenscribe),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    args = capture.read_text().splitlines()
+    assert args[:2] == ["tool", "install"]
+    assert args[args.index("--python") + 1] == ">=3.11"
+    assert args[args.index("--default-index") + 1] == "https://pypi.org/simple"
+    assert args[-1] == "screenscribe"
+    assert screenscribe.exists()
+
+
 def test_screenscribe_installs_from_pypi_through_pipx(tmp_path: Path) -> None:
     fake_bin = tmp_path / "bin"
     capture = tmp_path / "pipx-args.txt"
@@ -366,6 +402,19 @@ def test_screenscribe_installs_from_pypi_through_pipx(tmp_path: Path) -> None:
         "--force",
         "screenscribe",
     ]
+
+
+@pytest.mark.parametrize("required", ["0", "1"])
+def test_uv_channel_failure_keeps_foundation_admission_explicit(
+    tmp_path: Path, required: str
+) -> None:
+    fake_bin = tmp_path / "bin"
+    _executable(fake_bin / "uv", "#!/bin/sh\nexit 1\n")
+    result = _run_installer(
+        tmp_path, "screenscribe", path=[fake_bin], REQUIRE_FOUNDATIONS=required
+    )
+    assert (result.returncode == 0) == (required == "0")
+    assert "uv failed to install screenscribe from PyPI." in result.stdout
 
 
 def _run_screenscribe_install_with_failing_pipx(

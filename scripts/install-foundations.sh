@@ -9,7 +9,7 @@ set -euo pipefail
 #   aicx / aicx-mcp       — npm: @loctree/aicx
 #   vc-frame               — required donor BINARY installed by this owner from sibling source
 #   prview                 — GitHub releases: vetcoders/prview-rs (SHA256SUMS-verified)
-#   screenscribe           — PyPI: screenscribe, installed through pipx
+#   screenscribe           — PyPI: screenscribe, installed through uv or pipx
 #
 # Usage:
 #   bash scripts/install-foundations.sh                   # install/validate foundations
@@ -412,8 +412,22 @@ install_screenscribe() {
   fi
 
   if (( CHECK_ONLY )); then
-    info "Would install $SCREENSCRIBE_PACKAGE from PyPI via pipx"
+    info "Would install $SCREENSCRIBE_PACKAGE from PyPI via uv or pipx"
     return 0
+  fi
+
+  if has_cmd uv; then
+    info "Installing $SCREENSCRIBE_PACKAGE from PyPI via uv (Python >= 3.11)..."
+    uv tool install --force --python '>=3.11' \
+      --default-index https://pypi.org/simple "$SCREENSCRIBE_PACKAGE" || {
+      warn "uv failed to install $SCREENSCRIBE_PACKAGE from PyPI."
+      return 1
+    }
+    local tool_bin
+    tool_bin="$(uv tool dir --bin)" || return 1
+    export PATH="$tool_bin:$PATH"
+    binary_runs screenscribe
+    return
   fi
 
   ensure_pipx || return 1
