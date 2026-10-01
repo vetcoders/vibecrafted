@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+import re
+import shlex
 import stat
 import subprocess
+import sys
 import tarfile
 from pathlib import Path
 
@@ -15,6 +20,110 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 def _executable(path: Path, body: str) -> None:
     path.write_text(body, encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+
+@pytest.mark.parametrize("builder", ["linux", "windows"])
+@pytest.mark.parametrize("changed_pin", [False, True])
+def test_runtime_inventory_uses_verified_donor_archive_digests(
+    tmp_path: Path, builder: str, changed_pin: bool
+) -> None:
+    """Execute the shipped writer and its bindings, without a native build."""
+    source = (
+        REPO_ROOT
+        / "scripts"
+        / (
+            "build-linux-arm64-runtime-pack.sh"
+            if builder == "linux"
+            else "build-windows-x64-runtime-pack.ps1"
+        )
+    ).read_text(encoding="utf-8")
+    variables = {}
+    for donor in ("terminal", "frame"):
+        for field, suffix in (
+            ("revision", "Revision"),
+            ("archive_sha256", "ArchiveSha256"),
+        ):
+            name = f"{donor}_{field}" if builder == "linux" else f"{donor}{suffix}"
+            prefix = "" if builder == "linux" else r"\$"
+            match = re.search(rf'^{prefix}{name}="([0-9a-f]+)"$', source, re.MULTILINE)
+            if builder == "windows":
+                match = re.search(rf'^\${name} = "([0-9a-f]+)"$', source, re.MULTILINE)
+            assert match is not None, name
+            value = match.group(1)
+            if changed_pin:
+                digest = hashlib.sha256(f"next {donor} {field}".encode()).hexdigest()
+                value = digest[:40] if field == "revision" else digest
+            variables[name] = value
+
+    payload = tmp_path / "payload"
+    (payload / "bin").mkdir(parents=True)
+    (payload / "libexec").mkdir()
+    provenance = b'{"fixture": "inventory unit input, not a release manifest"}\n'
+    (payload / "source-provenance.json").write_bytes(provenance)
+    for name in set(LINUX_EXECUTABLES) | {
+        "python",
+        "vc-server",
+        "vc-terminal",
+        "vc-frame",
+    }:
+        for suffix in ("", ".exe"):
+            _executable(
+                payload / "bin" / f"{name}{suffix}",
+                f"#!{sys.executable}\nprint('synthetic version probe')\n",
+            )
+    for name in ("vc-terminal", "vc-frame"):
+        (payload / "libexec" / f"{name}.exe").write_bytes(b"synthetic native input")
+
+    env = os.environ.copy()
+    for name in ("TERMINAL_ARCHIVE_SHA256", "FRAME_ARCHIVE_SHA256"):
+        env.pop(name, None)
+    if builder == "linux":
+        writer = source.split('PAYLOAD="$payload" SOURCE_REVISION=', 1)[1]
+        writer = (
+            'PAYLOAD="$payload" SOURCE_REVISION='
+            + writer.split("\nPY\n", 1)[0]
+            + "\nPY\n"
+        )
+        setup = "\n".join(
+            f"{name}={shlex.quote(value)}" for name, value in variables.items()
+        )
+        setup += f"\npayload={shlex.quote(str(payload))}\nsource_revision={'a' * 40}\n"
+        setup += (
+            "platform=linux-x64\narchitecture=x64\ntarget=x86_64-unknown-linux-gnu\n"
+        )
+        command = ["bash", "-c", f"set -euo pipefail\n{setup}{writer}"]
+    else:
+        section = source.split(
+            '$inventoryScript = Join-Path $work "write_inventory.py"', 1
+        )[1]
+        writer, bindings = section.split("@'\n", 1)[1].split("\n'@ | Set-Content", 1)
+        values = {**variables, "payload": str(payload), "SourceRevision": "a" * 40}
+        for name, variable in re.findall(
+            r"^\$env:([A-Z_0-9]+) = \$(\w+)$", bindings, re.MULTILINE
+        ):
+            if variable in values:
+                env[name] = values[variable]
+        command = [sys.executable, "-c", writer]
+    result = subprocess.run(
+        command, env=env, text=True, capture_output=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    inventory = json.loads((payload / "runtime-inventory.json").read_text())
+    records = {row["name"]: row for row in inventory["executables"]}
+    for donor in ("terminal", "frame"):
+        sha_name = (
+            f"{donor}_archive_sha256" if builder == "linux" else f"{donor}ArchiveSha256"
+        )
+        revision_name = (
+            f"{donor}_revision" if builder == "linux" else f"{donor}Revision"
+        )
+        assert records[f"vc-{donor}"]["source_archive_sha256"] == variables[sha_name]
+        assert records[f"vc-{donor}"]["source_revision"] == variables[revision_name]
+    for name, row in records.items():
+        if name not in {"vc-terminal", "vc-frame"}:
+            assert (
+                row["source_archive_sha256"] == hashlib.sha256(provenance).hexdigest()
+            )
 
 
 def test_linux_arm64_is_no_longer_blocked_by_channel_foundations() -> None:

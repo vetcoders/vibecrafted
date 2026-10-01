@@ -439,6 +439,10 @@ def exe_path(name):
 records = []
 unsupported = []
 donor_revisions = {"vc-terminal": terminal_revision, "vc-frame": frame_revision}
+donor_archive_sha256 = {
+    "vc-terminal": os.environ["TERMINAL_ARCHIVE_SHA256"],
+    "vc-frame": os.environ["FRAME_ARCHIVE_SHA256"],
+}
 donor_urls = {
     "vc-terminal": f"https://github.com/vetcoders/vc-terminal/tree/{terminal_revision}",
     "vc-frame": f"https://github.com/vetcoders/vc-frame/tree/{frame_revision}",
@@ -467,7 +471,7 @@ for name in mandatory:
         "version_argv": argv, "version_output": output,
         "source_url": donor_urls.get(name, "https://github.com/vetcoders/vibecrafted"),
         "source_revision": donor_revisions.get(name, source_revision),
-        "source_archive_sha256": source_manifest_sha,
+        "source_archive_sha256": donor_archive_sha256.get(name, source_manifest_sha),
         "target": "x86_64-pc-windows-msvc", "license": "MIT",
     })
 reasons = {
@@ -511,6 +515,8 @@ $env:PAYLOAD = $payload
 $env:SOURCE_REVISION = $SourceRevision
 $env:TERMINAL_REVISION = $terminalRevision
 $env:FRAME_REVISION = $frameRevision
+$env:TERMINAL_ARCHIVE_SHA256 = $terminalArchiveSha256
+$env:FRAME_ARCHIVE_SHA256 = $frameArchiveSha256
 & python $inventoryScript
 if ($LASTEXITCODE -ne 0) { Die "inventory closed with missing mandatory payload" }
 
