@@ -245,6 +245,11 @@ done
 
 log "prepare fake repo and fake agent CLIs"
 git -C "$work_repo" init -q
+# Explicit continuation resolves HEAD to a real baseline commit. This sandbox
+# owns its fixture identity; host signing and hooks are outside the smoke.
+git -C "$work_repo" -c core.hooksPath=/dev/null -c commit.gpgsign=false \
+  -c user.name='Portable smoke' -c user.email='portable@example.invalid' \
+  commit --allow-empty -qm 'Seed portable smoke baseline'
 mkdir -p "$work_repo/.vibecrafted/plans"
 cat > "$work_repo/.vibecrafted/plans/test.md" <<'PLAN'
 # Test plan
@@ -266,8 +271,16 @@ case "${1:-}" in
 esac
 report=""
 json_mode=0
-if [[ -n "${FAKE_CODEX_CAPTURE:-}" ]]; then
-  printf "%s\n" "$@" > "$FAKE_CODEX_CAPTURE"
+argv_capture=""
+stdin_capture=""
+# The real headless boundary drops arbitrary fixture environment variables.
+# A marker beside this disposable stub binds capture paths only for resume.
+if [[ -f "${BASH_SOURCE[0]}.resume-capture" ]]; then
+  {
+    IFS= read -r argv_capture
+    IFS= read -r stdin_capture
+  } < "${BASH_SOURCE[0]}.resume-capture"
+  printf "%s\n" "$@" > "$argv_capture"
 fi
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -281,8 +294,8 @@ while [[ $# -gt 0 ]]; do
   esac
   shift || true
 done
-if [[ -n "${FAKE_CODEX_STDIN_CAPTURE:-}" ]]; then
-  cat > "$FAKE_CODEX_STDIN_CAPTURE"
+if [[ -n "$stdin_capture" ]]; then
+  cat > "$stdin_capture"
 else
   cat >/dev/null || true
 fi
@@ -426,13 +439,12 @@ jq -e '.liveness == "terminal"' "$codex_meta" >/dev/null || die "codex meta miss
 log "launcher resume smoke"
 resume_capture="$workspace/resume-codex.txt"
 resume_prompt_capture="$workspace/resume-codex-prompt.txt"
+printf '%s\n' "$resume_capture" "$resume_prompt_capture" > "$fake_bin/codex.resume-capture"
 resume_output="$(
   env -u VIBECRAFTED_RUN_ID -u VIBECRAFTED_OPERATOR_SESSION \
     -u VC_FRAME -u VC_FRAME_PANE_ID -u VC_FRAME_SESSION_NAME \
     -u ZELLIJ -u ZELLIJ_PANE_ID -u ZELLIJ_SESSION_NAME \
     HOME="$home_dir" XDG_CONFIG_HOME="$config_dir" PATH="$fake_bin:$PATH" \
-    FAKE_CODEX_CAPTURE="$resume_capture" \
-    FAKE_CODEX_STDIN_CAPTURE="$resume_prompt_capture" \
     "$home_dir/.local/bin/vibecrafted" resume codex \
       --repo "$work_repo" --session fake-session-001 --prompt "resume smoke"
 )"
@@ -454,6 +466,7 @@ require_file "$resume_prompt_capture"
 assert_contains "$resume_capture" 'resume'
 assert_contains "$resume_capture" 'fake-session-001'
 assert_contains "$resume_prompt_capture" 'resume smoke'
+rm -f "$fake_bin/codex.resume-capture"
 
 log "helper bash smoke"
 # shellcheck disable=SC2016  # expansion belongs to the child shell

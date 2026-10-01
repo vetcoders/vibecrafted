@@ -188,6 +188,25 @@ while True:
 # scripts/vc-frame-product-entry.sh, shell/lib/core.sh, shell/lib/dashboard.sh).
 # Reading VIBECRAFTED_ROOT as "the project" behind those doors names sessions
 # and workspaces after the release instead of the operator's repository.
+_vetcoders_is_source_owner() {
+  local root="${1:-}"
+  [[ -n "$root" ]] || return 1
+  # A receipt, including an unsafe/dangling link, or the reserved generation
+  # namespace must never be downgraded to source when a payload is damaged.
+  [[ ! -e "$root/runtime-manifest.json" && ! -L "$root/runtime-manifest.json" ]] || return 1
+  [[ "$(basename "$(dirname "$root")")" != "releases" ]] || return 1
+  [[ -e "$root/.git" ]] && return 0
+
+  # The public source carrier deliberately excludes .git. Its regular
+  # provenance/build surfaces and framework layout identify the source lane;
+  # they do not stamp or admit an immutable Runtime Pack generation.
+  [[ -f "$root/source-provenance.json" && ! -L "$root/source-provenance.json" \
+    && -f "$root/Makefile" && ! -L "$root/Makefile" \
+    && -f "$root/VERSION" && -f "$root/scripts/vibecrafted" ]] || return 1
+  [[ -d "$root/skills" || -d "$root/vibecrafted-core/vibecrafted_core/skills" ]] || return 1
+  [[ -d "$root/runtime" || -d "$root/vibecrafted-core/vibecrafted_core/runtime" ]]
+}
+
 _vetcoders_ambient_project_root() {
   local root="${SPAWN_ROOT:-}"
   if [[ -n "$root" ]]; then
@@ -199,12 +218,12 @@ _vetcoders_ambient_project_root() {
     && "$root" == "${VIBECRAFTED_RUNTIME_ROOT}" ]]; then
     return 0
   fi
-  # Source-checkout owner (core.sh unsets RUNTIME_ROOT): the facade binds
+  # Source owner (core.sh unsets RUNTIME_ROOT): the facade binds
   # VIBECRAFTED_ROOT to the loaded shell, not to the operator's project.
   # Treating that path as the project names sessions after the worktree
   # instead of cwd / --root.
   if [[ -n "$root" && -z "${VIBECRAFTED_RUNTIME_ROOT:-}" \
-    && -e "$root/.git" && ! -f "$root/runtime-manifest.json" ]]; then
+    ]] && _vetcoders_is_source_owner "$root"; then
     return 0
   fi
   printf '%s\n' "$root"

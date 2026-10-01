@@ -20,10 +20,10 @@ environment. A direct source execution keeps its own deliberate route, and a
 selected generation missing its own helper fails closed instead of borrowing
 another tree's.
 
-Unlike test_terminal_entry_escalation.py, these cases never source the shell
-facade and never set `_vetcoders_vc_frame_loaded_root` by hand -- doing so would
-pin the answer the deck is supposed to compute. The real launcher deck is
-executed as host argv, which is the only surface where this defect is visible.
+Unlike test_terminal_entry_escalation.py, the entry cases execute the real deck
+as host argv instead of setting `_vetcoders_vc_frame_loaded_root` by hand.
+Source-carrier regressions also source the real adjacent facade to prove that
+its ownership binding cannot restore a false runtime-generation identity.
 
 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
 """
@@ -40,6 +40,8 @@ import time
 from pathlib import Path
 
 import pytest
+
+from scripts import distribution_manifest as manifest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DECK = REPO_ROOT / "scripts" / "vibecrafted"
@@ -584,6 +586,138 @@ def test_direct_source_execution_keeps_its_own_route(world: dict[str, Path]) -> 
     assert launch is None
     assert "no installed vibecrafted front door" in result.stderr
     assert env_log.read_text(encoding="utf-8").strip() == f"{checkout}|"
+
+
+def _archive_source_owner(world: dict[str, Path]) -> Path:
+    owner = world["checkout"]
+    (owner / ".git").rmdir()
+    _write(owner / "VERSION", "4.3.2\n", executable=False)
+    _write(owner / "Makefile", "# source-carrier build surface\n", executable=False)
+    _write(
+        owner / manifest.SOURCE_PROVENANCE_FILE,
+        json.dumps({"source_revision": "a" * 40}) + "\n",
+        executable=False,
+    )
+    return owner
+
+
+def _facade_owner_environment(
+    world: dict[str, Path], owner: Path, shell: str, *, hostile: bool = False
+) -> list[str]:
+    executable = shutil.which(shell)
+    if executable is None:
+        pytest.skip(f"{shell} is not available")
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("VIBECRAFTED_", "VC_FRAME", "ZELLIJ", "PYTHON"))
+        and key != "SPAWN_ROOT"
+    }
+    env.update(
+        HOME=str(world["home"]),
+        XDG_CONFIG_HOME=str(world["home"] / ".config"),
+        VIBECRAFTED_HOME=str(world["home"] / ".vibecrafted"),
+    )
+    if hostile:
+        env.update(
+            VIBECRAFTED_ROOT=str(world["generation"]),
+            VIBECRAFTED_RUNTIME_ROOT=str(world["generation"]),
+            VIBECRAFTED_RUNTIME_BIN=str(world["generation"] / "bin"),
+            VIBECRAFTED_RUNTIME_HOME=str(world["base"] / "foreign-runtime"),
+        )
+    options = ["-f"] if shell == "zsh" else ["--noprofile", "--norc"]
+    result = subprocess.run(
+        [
+            executable,
+            *options,
+            "-c",
+            (
+                'source "$1" || exit $?; '
+                'printf "%s\\n" "${VIBECRAFTED_ROOT-}" '
+                '"${VIBECRAFTED_RUNTIME_ROOT-unset}" '
+                '"${VIBECRAFTED_RUNTIME_BIN-unset}" '
+                '"${VIBECRAFTED_RUNTIME_HOME-unset}"; '
+                "_vetcoders_effective_project_root"
+            ),
+            "fixture",
+            str(owner / CORE / "runtime" / "shell" / "vetcoders.sh"),
+        ],
+        cwd=world["project"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout.splitlines()
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+@pytest.mark.parametrize("archive", [False, True])
+@pytest.mark.parametrize("hostile", [False, True])
+def test_source_facade_does_not_claim_runtime_generation_or_project(
+    world: dict[str, Path], shell: str, archive: bool, hostile: bool
+) -> None:
+    owner = _archive_source_owner(world) if archive else world["checkout"]
+    values = _facade_owner_environment(world, owner, shell, hostile=hostile)
+    # Source/test overrides remain valid without a selected runtime root, and
+    # runtime-home is also the authority for excluding stale generation PATHs.
+    runtime_bin = str(world["generation"] / "bin") if hostile else "unset"
+    runtime_home = str(world["base"] / "foreign-runtime") if hostile else "unset"
+    assert values == [
+        str(owner),
+        "unset",
+        runtime_bin,
+        runtime_home,
+        str(world["project"]),
+    ]
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "missing-provenance",
+        "linked-provenance",
+        "receipt",
+        "linked-receipt",
+        "dangling-receipt",
+        "reserved-generation",
+    ],
+)
+def test_non_source_owner_never_downgrades_selected_generation(
+    world: dict[str, Path], shell: str, damage: str
+) -> None:
+    owner = _archive_source_owner(world)
+    if damage == "missing-provenance":
+        (owner / manifest.SOURCE_PROVENANCE_FILE).unlink()
+    elif damage == "linked-provenance":
+        provenance = owner / manifest.SOURCE_PROVENANCE_FILE
+        external = provenance.rename(world["base"] / "provenance.json")
+        provenance.symlink_to(external)
+    elif damage == "receipt":
+        _write(owner / "runtime-manifest.json", "{}\n", executable=False)
+    elif damage in {"linked-receipt", "dangling-receipt"}:
+        external = world["base"] / "manifest.json"
+        if damage == "linked-receipt":
+            _write(external, "{}\n", executable=False)
+        (owner / "runtime-manifest.json").symlink_to(external)
+    else:
+        owner = owner.rename(_ensure_dir(world["base"] / "releases") / "damaged")
+    values = _facade_owner_environment(world, owner, shell)
+    assert values[0:2] == [str(owner), str(owner)]
+    assert values[-1] == str(world["project"])
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+def test_receipt_backed_facade_retains_its_physical_generation(
+    world: dict[str, Path], shell: str
+) -> None:
+    owner = world["generation"]
+    values = _facade_owner_environment(world, owner, shell)
+    assert values[0:2] == [str(owner), str(owner)]
+    assert values[-1] == str(world["project"])
 
 
 @pytest.mark.parametrize("stale", [False, True])
