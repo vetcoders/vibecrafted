@@ -26,6 +26,85 @@ TERMINAL_RUN = {
 }
 
 
+def test_terminate_tree_captures_recursive_ppid_targets_before_signalling(monkeypatch):
+    table = [entry(100), entry(200, ppid=100), entry(300, ppid=200), entry(400)]
+    monkeypatch.setattr(pc, "build_process_table", lambda: tuple(table))
+    monkeypatch.setattr(pc, "process_start_token", lambda pid, command: f"start:{pid}")
+    signals = []
+
+    def signal_pid(pid, sig):
+        signals.append((pid, sig))
+        if pid == 100:
+            # TERM kills the root; descendants are reparented to init and
+            # have unrelated PGIDs. The pre-signal capture must survive this.
+            table[:] = [entry(200), entry(300), entry(400)]
+        return "signalled"
+
+    monkeypatch.setattr(pc, "_signal_pid", signal_pid)
+    sleeps = []
+    monkeypatch.setattr(
+        pc.time, "sleep", lambda window: sleeps.append((window, list(signals)))
+    )
+
+    outcome = pc.terminate_process_tree(100, grace=0.25)
+
+    assert outcome.ok
+    assert signals == [
+        (300, signal.SIGTERM),
+        (200, signal.SIGTERM),
+        (100, signal.SIGTERM),
+        (300, signal.SIGKILL),
+        (200, signal.SIGKILL),
+    ]
+    assert sleeps == [(0.25, signals[:3])]
+    assert outcome.receipt["pids"] == [100, 200, 300]
+
+
+def test_terminate_tree_does_not_kill_reused_pid_after_grace(monkeypatch):
+    monkeypatch.setattr(
+        pc, "build_process_table", lambda: [entry(100), entry(200, ppid=100)]
+    )
+    generation = {100: "original", 200: "original"}
+    monkeypatch.setattr(pc, "process_start_token", lambda pid, command: generation[pid])
+    signals = []
+    monkeypatch.setattr(
+        pc, "_signal_pid", lambda pid, sig: signals.append((pid, sig)) or "signalled"
+    )
+    monkeypatch.setattr(
+        pc.time, "sleep", lambda window: generation.update({200: "reused"})
+    )
+
+    outcome = pc.terminate_process_tree(100, grace=0.1)
+
+    assert outcome.ok
+    assert (200, signal.SIGTERM) in signals
+    assert (200, signal.SIGKILL) not in signals
+    assert (100, signal.SIGKILL) in signals
+
+
+@pytest.mark.parametrize("table", [[], [entry(100), entry(999, ppid=100)]])
+def test_terminate_tree_refuses_missing_table_or_own_ancestor(monkeypatch, table):
+    monkeypatch.setattr(pc, "build_process_table", lambda: table)
+    monkeypatch.setattr(pc.os, "getpid", lambda: 999)
+    signals = []
+    monkeypatch.setattr(pc, "_signal_pid", lambda pid, sig: signals.append((pid, sig)))
+
+    assert not pc.terminate_process_tree(100, grace=0).ok
+    assert signals == []
+
+
+def test_terminate_tree_reports_signal_permission_failure(monkeypatch):
+    monkeypatch.setattr(pc, "build_process_table", lambda: [entry(100)])
+    monkeypatch.setattr(pc, "process_start_token", lambda pid, command: "start:100")
+    monkeypatch.setattr(pc, "_signal_pid", lambda pid, sig: "permission_denied")
+
+    outcome = pc.terminate_process_tree(100, grace=0)
+
+    assert not outcome.ok
+    assert outcome.outcome == "signal_failed"
+    assert "permission_denied" in outcome.detail
+
+
 def test_snapshot_marks_owned_process_killable():
     table = [entry(900, pgid=4242, command="node worker")]
     snap = pc.snapshot_processes(

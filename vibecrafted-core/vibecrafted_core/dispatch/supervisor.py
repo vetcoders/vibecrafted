@@ -7,7 +7,6 @@ import json
 import os
 import re
 import shlex
-import signal
 import subprocess
 import threading
 import time
@@ -20,7 +19,10 @@ from typing import Any
 
 from vibecrafted_core.control_plane import lookup_run, lookup_runtime_run_meta
 from vibecrafted_core.delivery.model import ExecutionEnvelope
-from vibecrafted_core.process_control import validate_process_identity
+from vibecrafted_core.process_control import (
+    terminate_process_tree,
+    validate_process_identity,
+)
 from vibecrafted_core.report_contract import (
     parse_report_text,
     worker_authored_report,
@@ -1707,7 +1709,7 @@ class DispatchSupervisor:
             self._terminate(cell)
             self._journal(
                 f"[{cut.id}] {kind} cell timed out after {outcome.elapsed_s:.0f}s;"
-                " process terminated"
+                " process tree termination signals sent"
             )
         else:
             recovered = " (recovered by mtime)" if outcome.recovered_by_mtime else ""
@@ -1864,16 +1866,26 @@ class DispatchSupervisor:
         return False
 
     def _terminate(self, cell: CellRun) -> None:
-        """Kill a timed-out cell's process (or process group for launch_workflow pids)."""
-        try:
-            if cell.proc is not None:
-                cell.proc.terminate()
-            elif cell.pid:
-                # launch_workflow spawns with start_new_session, so the pid
-                # doubles as the process-group id.
-                os.killpg(cell.pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError, OSError):
-            pass
+        """TERM→grace→KILL the captured worker subtree, across PGID/SID changes."""
+        pid = cell.proc.pid if cell.proc is not None else cell.pid
+        if not pid:
+            return
+        outcome = terminate_process_tree(pid)
+        self._journal(
+            f"[{cell.cut_id}] timeout termination: "
+            f"{json.dumps(outcome.as_dict(), sort_keys=True)}"
+        )
+        if not outcome.ok:
+            raise CellContractError(
+                f"[{cell.cut_id}] timeout termination failed: {outcome.detail}"
+            )
+        if cell.proc is not None:
+            try:
+                cell.exit_code = cell.proc.wait(timeout=2)
+            except subprocess.TimeoutExpired as exc:
+                raise CellContractError(
+                    f"[{cell.cut_id}] worker survived timeout termination"
+                ) from exc
 
     def _resolve_report(
         self, cell: CellRun, wall_started: float
