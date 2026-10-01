@@ -48,6 +48,15 @@ Properties the installer depends on:
 * **Idempotent.** Running twice on the same repository produces the same bytes.
 * **Sorted.** Stable diffs; the manifest is reviewed like source.
 
+The history a regeneration renders is hermetic: it comes from `HEAD` plus the
+tags — the refs that represent the tree being released and the releases
+already made — never from `--all`. Worktrees of one repository share a single
+ref store, so under `--all` a fleet sibling committing under `skills/` on its
+own branch made every other worktree's manifest "stale" for bytes that tree
+never carried, and its `make check` failed for a neighbour's commit. A
+released side line is not lost to this: a tag is a release wherever it
+points, reachable from `HEAD` or not.
+
 Usage:
     scripts/gen_skill_provenance.py [--repo <dir>] [--manifest <path>] [--check]
 
@@ -101,6 +110,22 @@ def _git(repo: Path, *args: str) -> bytes:
     ).stdout
 
 
+def _released_refs(repo: Path) -> list[str]:
+    """Revision selectors for the history the manifest proves: `HEAD` + tags.
+
+    `HEAD` is the tree about to be released; a tag is a release wherever it
+    points, so tags unreachable from `HEAD` still count. Never `--all`:
+    worktrees share one ref store, and a fleet sibling's branch must not
+    widen — or stale — this tree's proof. An unborn `HEAD` (no commits yet)
+    contributes nothing.
+    """
+    try:
+        _git(repo, "rev-parse", "--verify", "--quiet", "HEAD")
+    except subprocess.CalledProcessError:
+        return ["--tags"]
+    return ["HEAD", "--tags"]
+
+
 def _raw_entries(
     repo: Path, pathspecs: list[str]
 ) -> list[tuple[str, str, str, str, str]]:
@@ -125,7 +150,7 @@ def _raw_entries(
     out = _git(
         repo,
         "log",
-        "--all",
+        *_released_refs(repo),
         "--raw",
         "--no-abbrev",
         "--no-renames",
