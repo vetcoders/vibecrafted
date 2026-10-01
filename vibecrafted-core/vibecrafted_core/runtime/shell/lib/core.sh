@@ -63,8 +63,10 @@ _vetcoders_source_runtime_helpers() {
     # The sourced helper resolves later runtime scripts through VIBECRAFTED_ROOT.
     # Bind it to this helper's physical owner only after the source succeeds.
     export VIBECRAFTED_ROOT="$owner_root"
-    if [[ -e "$owner_root/.git" && ! -f "$owner_root/runtime-manifest.json" ]]; then
-      # Source checkout ownership is not an immutable Runtime Pack generation.
+    if _vetcoders_is_source_owner "$owner_root"; then
+      # A checkout or extracted source carrier owns code, not a Runtime Pack.
+      # Unselected bin/home overrides remain source/test inputs, including the
+      # runtime-home authority used to remove stale generation bins from PATH.
       unset VIBECRAFTED_RUNTIME_ROOT
     else
       export VIBECRAFTED_RUNTIME_ROOT="$owner_root"
