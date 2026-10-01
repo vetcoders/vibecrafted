@@ -2,10 +2,11 @@
 # Publish the installable Vibecrafted artifacts after a cold verification of the
 # exact bytes downloaded back from a draft GitHub Release.
 #
-# Three carriers, one release, one commit:
+# Six carriers, one release, one commit:
 #   macOS desktop -> the signed, notarized, stapled DMG
 #   macOS CLI     -> the signed binary Runtime Pack embedded in that App
 #   other systems -> the provenance-bound portable source tarball
+#   Windows       -> checksummed MSI/EXE and a signed Windows Runtime Pack
 # Each channel is verified against the bytes GitHub hands back, never against
 # the bytes this machine still has in dist/. The asset allowlist below stays
 # exact: a release that grew an asset nobody named is a release nobody audited.
@@ -329,7 +330,7 @@ cat > "$REPORT" <<EOF
 
 ## 3. Deployment mode decision
 
-The shipped topology is one runtime product with three carriers: a signed and notarized macOS desktop DMG, the same signed binary Runtime Pack for macOS CLI users, and one portable source distribution for systems Apple notarization cannot reach. \`Vibecrafted.app\` owns app/DMG/onboarding/update but does not own a second runtime. \`vc-terminal\` is a deterministic embedded terminal substrate and \`vc-frame\` is the embedded session interior. App onboarding and \`make install\` invoke the same receipted installer. Rollback is deterministic uninstall plus installation of the prior carrier; live session state remains separate runtime state.
+The shipped topology is one runtime product with six carriers: a signed and notarized macOS desktop DMG, the same signed binary Runtime Pack for macOS CLI users, a portable source distribution, Windows MSI/EXE installers, and the signed Windows Runtime Pack. \`Vibecrafted.app\` owns app/DMG/onboarding/update but does not own a second runtime. \`vc-terminal\` is a deterministic embedded terminal substrate and \`vc-frame\` is the embedded session interior. App onboarding and \`make install\` invoke the same receipted installer. Rollback is deterministic uninstall plus installation of the prior carrier; live session state remains separate runtime state.
 
 The portable channel is not a second product: it is the same commit, projected through the allowlisted distribution writer, carrying a closed \`source-provenance.json\` whose distribution-tree digest names that commit. It installs through \`install.sh --archive-file\`, which refuses a payload whose provenance does not close. Rollback is re-running the installer from the prior release asset.
 

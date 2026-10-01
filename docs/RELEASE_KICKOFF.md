@@ -3,12 +3,14 @@
 ## Public product
 
 - Owner: `vetcoders/vibecrafted`
-- Artifacts: three carriers, one commit
+- Artifacts: six carriers, one commit
   - macOS desktop: `Vibecrafted_<version>-<YYYYMMDD>-<sha8>.dmg`
   - macOS CLI: `Vibecrafted_RuntimePack_<version>-<YYYYMMDD>-<sha8>-darwin-<arch>.tar.gz`
-  - every other system: `Vibecrafted_<version>-<YYYYMMDD>-<sha8>-portable.tar.gz`
+  - source fallback: `Vibecrafted_<version>-<YYYYMMDD>-<sha8>-portable.tar.gz`
+  - Windows installers: `Vibecrafted_<version>-<YYYYMMDD>-<sha8>-windows-x64.msi` and `.exe`
+  - Windows CLI: `Vibecrafted_RuntimePack_<version>-<YYYYMMDD>-<sha8>-win32-x64.tar.gz`
 - App: `Vibecrafted.app`
-- Download: `https://github.com/vetcoders/vibecrafted/releases/latest` → DMG (macOS desktop), `RuntimePack_...tar.gz` (macOS CLI), or `-portable.tar.gz` (Linux / WSL2 / source fallback)
+- Download: `https://github.com/vetcoders/vibecrafted/releases/latest` → DMG (macOS desktop), MSI/EXE (Windows), the platform Runtime Pack (CLI), or `-portable.tar.gz` (Linux / WSL2 / source fallback)
 - Embedded donors: `vc-terminal`, `vc-frame`
 - Entry: bundled `vc-start` with durable `workspace_id`
 
@@ -90,6 +92,10 @@ Linux, WSL2, or the explicit source fallback: download
 `Vibecrafted_<version>-<YYYYMMDD>-<sha8>-portable.tar.gz` and its `.sha256` from
 the same release, verify the checksum, unpack, and run the packed `install.sh`.
 
+Windows: download the canonical `-windows-x64.msi` or `-windows-x64.exe` and
+its `.sha256` from that same release. The installers are Authenticode-unsigned;
+the Windows Runtime Pack additionally has a product-key `.sig`.
+
 ## Required proof
 
 The generated release report must contain:
@@ -97,7 +103,7 @@ The generated release report must contain:
 1. Security gate.
 2. Exposed surface inventory.
 3. Deployment topology and rollback decision.
-4. Post-release smoke from the published URL — both channels.
+4. Post-release smoke from the published URLs for every supported channel.
 
 The canonical report lives under
 `~/.vibecrafted/artifacts/vetcoders/vibecrafted/<YYYY_MMDD>/reports/` and is
