@@ -69,6 +69,10 @@ def _event(
 def _isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = tmp_path / "crafted"
     monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    if sys.platform == "win32":
+        # Snapshot fixtures precede ledger initialization. Create their root
+        # with the production privacy policy rather than inherited temp ACLs.
+        settlement_ledger._secure_control_plane_home()
     return home
 
 
@@ -549,6 +553,15 @@ def test_tail_repair_without_posix_pread(monkeypatch: pytest.MonkeyPatch) -> Non
     snapshot = settlement_ledger.read_settlement_ledger()
     assert snapshot["integrity"]["valid"] is True
     assert snapshot["counts"]["historical_transitions"]["total"] == 1
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows ACL")
+def test_windows_initializer_creates_private_custom_root(tmp_path: Path) -> None:
+    path = tmp_path / "new-private-root" / "ledger.jsonl"
+    settlement_ledger.initialize_settlement_ledger(path)
+    snapshot = settlement_ledger.read_settlement_ledger(path)
+    assert snapshot["integrity"]["valid"] is True
+    assert snapshot["counts"]["historical_transitions"]["total"] == 0
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="native Windows ACL")

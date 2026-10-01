@@ -38,6 +38,7 @@ def _api() -> tuple[ctypes.CDLL, ctypes.CDLL]:
             ],
         ),
         (kernel.CloseHandle, wintypes.BOOL, [wintypes.HANDLE]),
+        (kernel.CreateDirectoryW, wintypes.BOOL, [wintypes.LPCWSTR, pointer]),
         (kernel.LocalFree, pointer, [pointer]),
         (kernel.GetCurrentProcess, wintypes.HANDLE, []),
         (
@@ -62,6 +63,16 @@ def _api() -> tuple[ctypes.CDLL, ctypes.CDLL]:
             ],
         ),
         (security.ConvertSidToStringSidW, wintypes.BOOL, [pointer, out_pointer]),
+        (
+            security.ConvertStringSecurityDescriptorToSecurityDescriptorW,
+            wintypes.BOOL,
+            [
+                wintypes.LPCWSTR,
+                wintypes.DWORD,
+                out_pointer,
+                ctypes.POINTER(wintypes.DWORD),
+            ],
+        ),
         (
             security.GetSecurityInfo,
             wintypes.DWORD,
@@ -208,6 +219,38 @@ def directory_guard(path: Path) -> Iterator[None]:
         yield
     finally:
         _api()[0].CloseHandle(handle)
+
+
+def create_private_directory(path: Path) -> None:
+    """Create with a protected DACL; never rewrite an existing object's ACL."""
+    kernel, security = _api()
+    current = _token_sid(1)
+    # Only this user, SYSTEM and Administrators can modify new state. OI/CI
+    # carries that policy to new ledger/lock files and snapshot descendants.
+    sddl = f"O:{current}D:P(A;OICI;FA;;;{current})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+    descriptor = ctypes.c_void_p()
+    if not security.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        sddl, 1, ctypes.byref(descriptor), None
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    class SecurityAttributes(ctypes.Structure):
+        _fields_ = [
+            ("length", wintypes.DWORD),
+            ("descriptor", ctypes.c_void_p),
+            ("inherit_handle", wintypes.BOOL),
+        ]
+
+    attributes = SecurityAttributes(
+        ctypes.sizeof(SecurityAttributes), descriptor, False
+    )
+    try:
+        if not kernel.CreateDirectoryW(str(path), ctypes.byref(attributes)):
+            error = ctypes.get_last_error()
+            if error != 183:  # ERROR_ALREADY_EXISTS: subsequent validation is mandatory
+                raise ctypes.WinError(error)
+    finally:
+        kernel.LocalFree(descriptor)
 
 
 def open_private_file(path: Path, flags: int) -> int:

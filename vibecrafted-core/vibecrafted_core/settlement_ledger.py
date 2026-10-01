@@ -147,7 +147,13 @@ def _secure_control_plane_home(path: Path | None = None) -> Path:
     """
     ledger_path = settlement_ledger_path() if path is None else path
     home = ledger_path.parent
-    home.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if sys.platform == "win32":
+        from ._windows_private_files import create_private_directory
+
+        home.parent.mkdir(parents=True, exist_ok=True)
+        create_private_directory(home)
+    else:
+        home.mkdir(parents=True, exist_ok=True, mode=0o700)
     metadata = home.lstat()
     if not stat.S_ISDIR(metadata.st_mode):
         raise NotADirectoryError(f"control-plane home is not a directory: {home}")
