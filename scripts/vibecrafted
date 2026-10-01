@@ -1066,6 +1066,7 @@ cmd_dispatch_help() {
   printf '  dispatch run owns process spawn, transcript capture, artifact validation, and exit status.\n'
   printf '\n'
   printf '%bUsage:%b\n' "$_bold" "$_reset"
+  printf '  vibecrafted dispatch <agent> "<prompt>" [--skill implement] [--await] [launch flags]\n'
   printf '  vibecrafted dispatch <plan.dispatch.toml> [--doctor|--dry-run|--json|--resume <run-id>] [--allow-red-baseline]\n'
   printf '  vibecrafted dispatch run --run-id <id> --root <path> --report <path> --transcript <path> -- <command> [args]\n'
   printf '\n'

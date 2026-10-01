@@ -214,30 +214,18 @@ def _print_completed(run_id: str, payload: dict[str, Any]) -> int:
             print(f"transcript={run['latest_transcript']}")
         if run.get("session_id"):
             print(f"session_id={run['session_id']}")
-        state = str(run.get("state") or "")
-        errors = [str(item) for item in (run.get("artifact_errors") or []) if str(item)]
-        worker_alive = bool(payload.get("worker_alive"))
-        delivered = str(payload.get("reason") or "") == "report_delivered"
-        terminal = control_plane._run_is_terminal(run) and not worker_alive
-        succeeded = (
-            state in SUCCESS_STATES
-            and run.get("artifact_ok") is not False
-            and not errors
-        )
-        if terminal and succeeded:
-            return int(run.get("exit_code") or 0)
-        if delivered and not worker_alive:
-            exit_code = int(run.get("exit_code") or 0)
-            if run.get("artifact_ok") is False or errors:
-                return exit_code or 3
-            return exit_code
-        print(
-            "run_id="
-            f"{run_id} non-terminal completion disagreement "
-            f"reason={payload.get('reason')}",
-            file=sys.stderr,
-        )
-        return 3
+        code = _completion_exit_code(payload)
+        if code and not control_plane._run_is_terminal(run):
+            print(
+                f"run_id={run_id} non-terminal completion disagreement "
+                f"reason={payload.get('reason')}",
+                file=sys.stderr,
+            )
+        elif payload.get("worker_alive"):
+            print(
+                f"run_id={run_id} non-terminal completion disagreement", file=sys.stderr
+            )
+        return code
     print(
         f"run_id={run_id} completed without control-plane payload",
         file=sys.stderr,
@@ -245,17 +233,43 @@ def _print_completed(run_id: str, payload: dict[str, Any]) -> int:
     return 3
 
 
-def _await_run_forever(run_id: str, interval: float = 5.0) -> dict[str, Any]:
-    """Poll the control plane until a run completes, printing a heartbeat each poll."""
+def _completion_exit_code(payload: dict[str, Any]) -> int:
+    """Preserve worker failure codes and reject incomplete or invalid artifacts."""
+    run = payload.get("run") or {}
+    if not payload.get("completed") or payload.get("worker_alive"):
+        return 3
+    if not control_plane._run_is_terminal(run):
+        return 3
+    code = int(run.get("exit_code") or 0)
+    if code:
+        return code
+    if (
+        run.get("state") in SUCCESS_STATES
+        and run.get("artifact_ok") is not False
+        and not run.get("artifact_errors")
+    ):
+        return 0
+    return 3
+
+
+def _await_run_forever(
+    run_id: str, interval: float = 5.0, *, heartbeat: bool = True
+) -> dict[str, Any]:
+    """Join the canonical dispatcher monitor; re-arm only while the run exists."""
     while True:
         payload = control_plane.await_run(
             run_id,
             timeout_seconds=interval,
             interval_seconds=max(min(interval, 1.0), 0.1),
         )
-        if payload.get("completed"):
+        if (
+            payload.get("completed")
+            or not payload.get("worker_alive")
+            or payload.get("reason") == "hard_cap"
+        ):
             return payload
-        print(f"waiting run_id={run_id}", flush=True)
+        if heartbeat:
+            print(f"waiting run_id={run_id}", flush=True)
 
 
 def supervised_skill_main(skill: str, argv: Sequence[str] | None = None) -> int:

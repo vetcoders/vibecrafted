@@ -654,6 +654,7 @@ def build_server() -> Any:
         source_dir: str = ".",
         mode: str | None = None,
         home: str | None = None,
+        await_completion: bool = False,
     ) -> dict[str, Any]:
         """Launch a workflow through the Vibecrafted core runtime.
 
@@ -682,7 +683,20 @@ def build_server() -> Any:
                     "error": str(exc),
                 }
             spec = _workflow.normalize_launch_spec(payload, source_dir)
-            return _workflow.launch_workflow(spec, source_dir, env=dict(os.environ))
+            result = _workflow.launch_workflow(spec, source_dir, env=dict(os.environ))
+            if await_completion and result.get("accepted") and result.get("run_id"):
+                from vibecrafted_core.wrappers import (
+                    _await_run_forever,
+                    _completion_exit_code,
+                )
+
+                completion = _await_run_forever(str(result["run_id"]), heartbeat=False)
+                return {
+                    **result,
+                    "completion": completion,
+                    "exit_code": _completion_exit_code(completion),
+                }
+            return result
 
     @mcp.tool(
         annotations={
@@ -701,8 +715,13 @@ def build_server() -> Any:
         source_dir: str = ".",
         mode: str | None = None,
         home: str | None = None,
+        await_completion: bool = False,
     ) -> dict[str, Any]:
         """Mutating: launch a workflow through the Vibecrafted core runtime.
+
+        With ``await_completion``, join the canonical monitor and return the
+        launch receipt (including run_id/report), completion verdict and exit_code.
+        Otherwise return the receipt immediately.
 
         This spawns an agent process and writes control-plane artifacts.
         Launch validation and process creation stay in
@@ -718,6 +737,7 @@ def build_server() -> Any:
             source_dir=source_dir,
             mode=mode,
             home=home,
+            await_completion=await_completion,
         )
 
     @mcp.tool(
@@ -737,8 +757,13 @@ def build_server() -> Any:
         source_dir: str = ".",
         mode: str | None = None,
         home: str | None = None,
+        await_completion: bool = False,
     ) -> dict[str, Any]:
         """Mutating alias of ``vc_launch`` for run-lifecycle naming symmetry.
+
+        With ``await_completion``, join the canonical monitor and return the
+        launch receipt (including run_id/report), completion verdict and exit_code.
+        Otherwise return the receipt immediately.
 
         This spawns an agent process and writes control-plane artifacts.
         """
@@ -752,6 +777,7 @@ def build_server() -> Any:
             source_dir=source_dir,
             mode=mode,
             home=home,
+            await_completion=await_completion,
         )
 
     @mcp.tool(annotations={"readOnlyHint": True})
