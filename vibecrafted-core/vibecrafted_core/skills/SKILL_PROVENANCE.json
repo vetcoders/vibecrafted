@@ -2049,23 +2049,27 @@
     },
     "vc-hello": {
       "sha256": [
-        "4017de1bb25885c7ec638c8c3ce3d959da53df92074a9950968ed8fa78bb4fd7"
+        "4017de1bb25885c7ec638c8c3ce3d959da53df92074a9950968ed8fa78bb4fd7",
+        "dcf97d8e5a1b34e65b2cf30d43a251d7e2c7e0cb4775a9a011f7f1175eaa1900"
       ],
       "files": {
         "FLOW.md": [
           "5519c60437d19345c8af8ea0239df52b984d05c9"
         ],
         "SKILL.md": [
+          "1c5aab432c591e896f55af34cd867bd3e5ffbf76",
           "335432fed3a6970f8fbf7fb596e320164cb63e66"
         ],
         "references/fleet-config-map.md": [
+          "598b9280a7fe058d158dd29bc309f8cec694e872",
           "b1ef34735412ee9e90c28b7c0fa57a8e42324d59"
         ],
         "references/onboarding-stack.md": [
           "0bca831bb23d0c35f8c5a7817e729706e2ceae03"
         ],
         "tools/fleet_scan.py": [
-          "77bdb37fb02670b28574e7832e9a3bda19f74807"
+          "77bdb37fb02670b28574e7832e9a3bda19f74807",
+          "90d20cbfe3423a99ad391f7ef74be00c22917630"
         ],
         "tools/hook_bridge.py": [
           "6ce186467e0c39ccb7d645b57c569c93a547eaee",
