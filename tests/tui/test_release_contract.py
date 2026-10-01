@@ -1219,7 +1219,7 @@ def test_publisher_writes_the_mandatory_release_report() -> None:
     ):
         assert heading in publisher
     assert ".vibecrafted/artifacts" in publisher
-    assert "127.0.0.1:3025" in publisher
+    assert "127.0.0.1:3024" in publisher
 
 
 @pytest.mark.parametrize("version", ["4.3.1", "4.3.1-rc.1", "4.3.1+g12345678"])
