@@ -1,6 +1,6 @@
 {
   "schema": "vibecrafted.skill-provenance.v3",
-  "generated_at": "2026-09-30",
+  "generated_at": "2026-10-01",
   "skills": {
     "vc-agents": {
       "sha256": [
@@ -1991,8 +1991,10 @@
     "vc-forensics": {
       "sha256": [
         "462002285cc0e2f8b3aa512271912afbf5a2eccaaddc823550f3239fb46e5a4f",
+        "a3f03215187999b85149ecff3dbed3dd6a9139c6fbf93ff71ba507d7a546d26f",
         "a85869a6878db2b03f355ba7eddc3c51a7db0095a6740b66c69acd77ccaba6e1",
         "b7865cc887ef17422f660f2a8f59b9761e87ef2b3bf55a3e499016fd2cb73dd2",
+        "f89c10af4cd995a25174d2c50a67d1e8c7e050493a783075722d9ba9f2819afe",
         "faf7fde58db75c6c97baa4f568cfca6817cc3d3a810398552470352263db678d"
       ],
       "files": {
@@ -2000,10 +2002,12 @@
           "c8bcdeb7fdfdaaa521e65bdaf30572be88fd7e51"
         ],
         "SKILL.md": [
+          "28637e82d74a990697f1baa2297bb7d4ffc2304e",
           "427f80acc9c937ed8597fd82bed0e2d34dcb0540",
           "8bf204b94932eefec91083fd88d1d084a6d4564c",
           "ad1e854391e12c0cefb6ef0f3a087c2fd6bc4fae",
-          "d80a7861357016ccc8390b936cd95b96135e4f43"
+          "d80a7861357016ccc8390b936cd95b96135e4f43",
+          "fa0513953758736059056860dd3f16d7b0bd8e35"
         ],
         "agents/openai.yaml": [
           "f5c5e0cb0e53a2236de36c5a5c396400cc20e92b"
@@ -2062,6 +2066,9 @@
         ],
         "tools/fleet_scan.py": [
           "77bdb37fb02670b28574e7832e9a3bda19f74807"
+        ],
+        "tools/hook_bridge.py": [
+          "6ce186467e0c39ccb7d645b57c569c93a547eaee"
         ]
       }
     },

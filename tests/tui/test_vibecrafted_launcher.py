@@ -12,6 +12,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -37,6 +38,39 @@ def _write_fake_agent(bin_dir: Path, name: str, capture_file: Path) -> None:
                 'if [[ "${1:-}" == "--help" ]]; then printf "  --session-id <uuid>\\n"; exit 0; fi',
                 'if [[ "${1:-}" == "--version" ]]; then printf "2.1.232 (Claude Code)\\n"; exit 0; fi',
                 'printf "%s\\n" "$@" > "$CAPTURE_FILE"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+
+
+def _write_fake_agent_for_headless_worker(
+    bin_dir: Path, name: str, capture_file: Path
+) -> None:
+    """Like ``_write_fake_agent``, for providers spawned by the detached
+    headless worker (``cmd_core_workflow_skill`` -> supervisor_async.py /
+    spawn.py) rather than invoked inline by the launcher's own bash process.
+
+    That worker rebuilds its child environment through
+    ``env_allowlist.filter_headless_worker_env`` (see
+    vibecrafted_core/env_allowlist.py) so a parent Claude/Codex messaging
+    bus or stray API token cannot leak into the spawned provider. A bare
+    ``CAPTURE_FILE`` is not on that allowlist and would be silently dropped
+    before this fake agent ever saw it; only the ``VIBECRAFTED_`` prefix
+    (among others) survives the gate, so this script reads
+    ``VIBECRAFTED_TEST_CAPTURE_FILE`` instead.
+    """
+    script = bin_dir / name
+    script.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                'if [[ "${1:-}" == "--help" ]]; then printf "  --session-id <uuid>\\n"; exit 0; fi',
+                'if [[ "${1:-}" == "--version" ]]; then printf "2.1.232 (Claude Code)\\n"; exit 0; fi',
+                'printf "%s\\n" "$@" > "$VIBECRAFTED_TEST_CAPTURE_FILE"',
             ]
         )
         + "\n",
@@ -253,6 +287,41 @@ def _assert_generic_launch(
     spec = receipt["spec"]
     assert (spec["agent"], spec["skill"], spec["root"]) == ("codex", skill, str(root))
     assert Path(receipt["source_snapshot"]).read_text(encoding="utf-8") == prompt
+
+
+def _await_generic_launch(
+    home: Path,
+    root: Path,
+    skill: str,
+    prompt: str,
+    marker: Path,
+    *,
+    timeout: float = 15.0,
+) -> None:
+    """Await the headless launch's async worker before asserting its receipt.
+
+    ``cmd_core_workflow_skill`` accepts the launch synchronously (the launches/
+    *.log receipt is written before Popen) but the worker that ultimately
+    invokes the agent runs detached. Polling instead of a fixed sleep avoids
+    both flakiness under load and masking a genuinely broken launch.
+    """
+    deadline = time.monotonic() + timeout
+    last_exc: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            _assert_generic_launch(home, root, skill, prompt, marker)
+            return
+        except (
+            FileNotFoundError,
+            AssertionError,
+            json.JSONDecodeError,
+            IndexError,
+        ) as exc:
+            last_exc = exc
+            time.sleep(0.05)
+    pytest.fail(
+        f"async launch for skill {skill!r} did not settle within {timeout}s: {last_exc}"
+    )
 
 
 def _seed_launcher_ulimits(script_path: Path) -> None:
@@ -586,23 +655,6 @@ def _write_fake_helper(script_path: Path, spawn_script: Path) -> None:
             [
                 "_vetcoders_spawn_script() {",
                 f'  printf "%s\\n" "{spawn_script}"',
-                "}",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-
-def _write_generic_skill_helper(script_path: Path) -> None:
-    script_path.parent.mkdir(parents=True, exist_ok=True)
-    script_path.write_text(
-        "\n".join(
-            [
-                "_vetcoders_skill_entry() {",
-                '  printf "%s\\n" "$1" "$2" > "$CAPTURE_FILE"',
-                "  shift 2",
-                '  printf "%s\\n" "$@" >> "$CAPTURE_FILE"',
                 "}",
             ]
         )
@@ -2324,34 +2376,33 @@ def test_skill_wrapper_help_is_human_readable_without_agent(
 def test_generic_skill_fallback_routes_unwrapped_skills(
     tmp_path: Path, skill: str, prompt: str
 ) -> None:
+    """intents/ownership now have a full native launch contract.
+
+    `scripts/vibecrafted` dispatches every execution skill (including intents
+    and ownership) through `run_skill` -> `cmd_core_workflow_skill`: a full
+    VIBECRAFTED LAUNCH RECEIPT (control_plane/launches/*.log) plus an
+    asynchronously spawned agent. Neither skill reaches the legacy generic
+    shell fallback (`_vetcoders_skill_entry` in
+    vibecrafted_core/runtime/shell/vetcoders.sh) when invoked this way, so
+    this test no longer stages that helper stub — it would never be read.
+    The name is kept because this is the exact node id the regression
+    tracks; what changed is the contract it now proves.
+    """
     home = tmp_path / "home"
     fake_bin = tmp_path / "fake-bin"
     wrapper = tmp_path / "vibecrafted"
     capture_file = tmp_path / "generic-skill-args.txt"
-    helper = (
-        home
-        / ".local"
-        / "share"
-        / "vibecrafted"
-        / "tools"
-        / "vibecrafted-current"
-        / "vibecrafted-core"
-        / "vibecrafted_core"
-        / "runtime"
-        / "shell"
-        / "vetcoders.sh"
-    )
 
     home.mkdir()
     fake_bin.mkdir()
     _initialize_git_fixture(tmp_path)
     wrapper.symlink_to(LAUNCHER)
-    _write_generic_skill_helper(helper)
-    _write_fake_agent(fake_bin, "codex", capture_file)
+    _write_fake_agent_for_headless_worker(fake_bin, "codex", capture_file)
 
     env = os.environ.copy()
     env["HOME"] = str(home)
-    env["CAPTURE_FILE"] = str(capture_file)
+    env["VIBECRAFTED_HOME"] = str(home / ".vibecrafted")
+    env["VIBECRAFTED_TEST_CAPTURE_FILE"] = str(capture_file)
     env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
 
     subprocess.run(
@@ -2361,7 +2412,7 @@ def test_generic_skill_fallback_routes_unwrapped_skills(
         env=env,
     )
 
-    _assert_generic_launch(home, tmp_path, skill, prompt, capture_file)
+    _await_generic_launch(home, tmp_path, skill, prompt, capture_file)
 
 
 @pytest.mark.parametrize(
@@ -2378,34 +2429,28 @@ def test_generic_skill_fallback_routes_unwrapped_skills(
 def test_generic_skill_fallback_routes_skill_wrappers(
     tmp_path: Path, wrapper_name: str, skill: str, prompt: str
 ) -> None:
+    """vc-intents/vc-ownership wrappers resolve to the same native contract.
+
+    Same rationale as test_generic_skill_fallback_routes_unwrapped_skills:
+    `run_wrapper` maps the wrapper name to `run_skill`, which is identical
+    to the direct-skill invocation path above. No generic vetcoders.sh stub
+    is staged because the deck never reads it for this skill.
+    """
     home = tmp_path / "home"
     fake_bin = tmp_path / "fake-bin"
     wrapper = tmp_path / wrapper_name
     capture_file = tmp_path / "generic-wrapper-args.txt"
-    helper = (
-        home
-        / ".local"
-        / "share"
-        / "vibecrafted"
-        / "tools"
-        / "vibecrafted-current"
-        / "vibecrafted-core"
-        / "vibecrafted_core"
-        / "runtime"
-        / "shell"
-        / "vetcoders.sh"
-    )
 
     home.mkdir()
     fake_bin.mkdir()
     _initialize_git_fixture(tmp_path)
     wrapper.symlink_to(LAUNCHER)
-    _write_generic_skill_helper(helper)
-    _write_fake_agent(fake_bin, "codex", capture_file)
+    _write_fake_agent_for_headless_worker(fake_bin, "codex", capture_file)
 
     env = os.environ.copy()
     env["HOME"] = str(home)
-    env["CAPTURE_FILE"] = str(capture_file)
+    env["VIBECRAFTED_HOME"] = str(home / ".vibecrafted")
+    env["VIBECRAFTED_TEST_CAPTURE_FILE"] = str(capture_file)
     env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
 
     subprocess.run(
@@ -2415,7 +2460,7 @@ def test_generic_skill_fallback_routes_skill_wrappers(
         env=env,
     )
 
-    _assert_generic_launch(home, tmp_path, skill, prompt, capture_file)
+    _await_generic_launch(home, tmp_path, skill, prompt, capture_file)
 
 
 def test_marbles_help_lists_delete_control_subcommand() -> None:

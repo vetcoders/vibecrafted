@@ -31,6 +31,25 @@ _AMBIENT_RUNTIME_ENV = (
 )
 
 
+# Skills that deliberately never gain a repo-orientation gate. Each entry
+# must justify itself here rather than receiving a copy-pasted gate section
+# that would misrepresent what the skill actually requires.
+_NO_REPO_ORIENTATION_EXEMPT_SKILLS = frozenset(
+    {
+        # vc-init *is* the orientation procedure; it cannot depend on itself.
+        "vc-init",
+        # vc-hello operates on operator/fleet CLI home-directory configs, not
+        # on repo code (see its SKILL.md front-matter
+        # `loctree_value: "not structural — operates on CLI config files, not
+        # repo code"` and its own "no-repo exception: no `vc-init` gate" and
+        # "Repo-level orientation — that is `vc-init`" lines). Forcing a
+        # Loctree/vc-init gate onto it would be a false orientation claim
+        # about a skill that never inspects the Code-Derived Application Map.
+        "vc-hello",
+    }
+)
+
+
 def test_vc_skills_preserve_init_and_loctree_orientation_contract() -> None:
     skill_files = sorted(
         (REPO_ROOT / "vibecrafted-core" / "vibecrafted_core" / "skills").glob(
@@ -41,7 +60,7 @@ def test_vc_skills_preserve_init_and_loctree_orientation_contract() -> None:
 
     missing: list[str] = []
     for skill_file in skill_files:
-        if skill_file.parent.name == "vc-init":
+        if skill_file.parent.name in _NO_REPO_ORIENTATION_EXEMPT_SKILLS:
             continue
         text = skill_file.read_text(encoding="utf-8")
         has_gate = (

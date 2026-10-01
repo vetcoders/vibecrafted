@@ -66,6 +66,16 @@ Oprogramowanie budowane przez agentów nie upada przez brak kodu — upada przez
 
 ---
 
+## Canonical Orientation Gate
+
+Przed każdym krokiem dotyczącym repo — analizą, planowaniem, implementacją, review, release albo delegacją — uruchom albo skonsumuj procedurę `vc-init` dla przydzielonego repo. Jeśli brak świeżych dowodów `vc-init`, wykonaj najpierw init i traktuj pracę skillową jako zablokowaną, dopóki nie istnieje prawda repo.
+
+`Loctree:loctree` jest domyślnym skillem percepcji strukturalnej w tym przebiegu. Użyj Loctree przed grepem czy twierdzeniami z dokumentacji, żeby wytworzyć albo odświeżyć Code-Derived Application Map: repo-view, focus, slice, impact, find i follow. Szukaj istniejących symboli i kontraktów przed tworzeniem nowych; uruchom impact przed usunięciem albo dużym refaktorem; uruchom slice przed edycją.
+
+Chodzi o znalezienie haków: hubów nośnych, bliźniaków, martwego kodu, dryfu, runtime entrypoints i pułapek blast-radius. Jeśli zadanie jest jawnie no-repo albo no-code, zadeklaruj wyjątek no-repo w raporcie. W przeciwnym razie brak dowodów `vc-init`/Loctree to błąd procesu.
+
+---
+
 ## 1. Zakres Śledztwa (Co Tropimy)
 
 Skup się na wadach krytycznych. Odrzucaj kosmetykę i luźne przypuszczenia:
