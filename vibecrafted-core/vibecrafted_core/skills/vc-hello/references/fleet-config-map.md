@@ -8,12 +8,13 @@ below.
 
 ## Locations
 
-| CLI    | User-level config                                    | Format      | Notes                                                              |
-| ------ | ---------------------------------------------------- | ----------- | ------------------------------------------------------------------ |
-| Claude | `~/.claude/settings.json`                            | JSON        | hooks, permissions, model, theme all in one file                   |
-| Codex  | `~/.codex/config.toml`                               | TOML        | large; MCP servers carry `env` blocks (secrets — never copy)       |
-| Grok   | `~/.grok/config.toml`                                | TOML        | `[ui]` / `[models]` / `[cli]` sections                             |
-| Kimi   | `~/.kimi-code/config.toml` + `tui.toml` + `mcp.json` | TOML + JSON | runtime vs TUI split; MCP lives in `mcp.json`, **not** config.toml |
+| CLI     | User-level config                                    | Format      | Notes                                                                    |
+| ------- | ---------------------------------------------------- | ----------- | ------------------------------------------------------------------------ |
+| Claude  | `~/.claude/settings.json`                            | JSON        | hooks, permissions, model, theme all in one file                         |
+| Codex   | `~/.codex/config.toml`                               | TOML        | large; MCP servers carry `env` blocks (secrets — never copy)             |
+| Grok    | `~/.grok/config.toml`                                | TOML        | `[ui]` / `[models]` / `[cli]` sections                                   |
+| Kimi    | `~/.kimi-code/config.toml` + `tui.toml` + `mcp.json` | TOML + JSON | runtime vs TUI split; MCP lives in `mcp.json`, **not** config.toml       |
+| Copilot | `~/.copilot/hooks/vibecrafted-fleet.json`            | JSON        | hooks only — no permission/effort/theme keys yet, those axes stay `None` |
 
 `KIMI_CODE_HOME` overrides the kimi dir when set; resolve it first, never assume.
 
@@ -66,6 +67,17 @@ honored), so Claude guard scripts run unchanged. Codex hooks live in
 | `strip-redirect`                                | yes               | —            | no   | no — uses Claude-only `updatedInput`, dead weight elsewhere                                         |
 | `cc-status` (iTerm2)                            | yes (many events) | —            | no   | no — compiled binary tuned to Claude payloads                                                       |
 | post-compact recall via `SessionStart(compact)` | yes               | yes          | no   | no — kimi `SessionStart` has no `compact` source; `PostCompact` is observer-only (known parity gap) |
+
+Copilot wires the same Claude-shaped scripts (`aicx-sessionstart.sh`,
+`loct-context-card.sh`, `aicx-precompact.sh`, `loctree-first-guard.py`) through
+`hook_bridge.py` (`python3 hook_bridge.py --to copilot --timeout N -- <wrapped
+command>`), since the Copilot CLI harness treats any non-zero hook exit as a
+hard deny and the bridge enforces a timeout + fail-open contract the wrapped
+scripts do not provide natively. **Every hook command here must resolve to a
+real file** — `fleet_scan.py check` verifies both the bridge path and the
+wrapped script path exist; a missing one denied every bash call overnight on
+2026-09-28/29 before anyone noticed (fixed 2026-09-30, detection added
+2026-10-01).
 
 ## Validation gates per CLI
 

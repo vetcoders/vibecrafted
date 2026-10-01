@@ -100,7 +100,13 @@ confirms or rewrites this paragraph before the skill is canonical.
 4. **Smoke-test before wiring.** Any carried-over hook or script gets run once
    against a payload in the target's format (exit 2 blocks, exit 0 allows,
    fail-open is clean). A hook that does nothing in the target (e.g. relies on
-   an unsupported `updatedInput`) is dead weight — do not wire it.
+   an unsupported `updatedInput`) is dead weight — do not wire it. Then run
+   `uv run tools/fleet_scan.py check` — a payload smoke-test proves the
+   _behavior_ of a reachable script; it does not catch a hook command that
+   points at a path absent from this generation entirely (2026-10-01 incident:
+   `~/.copilot/hooks/vibecrafted-fleet.json` wired a bridge script nobody had
+   smoke-tested against a missing file, and every hook silently denied all
+   night).
 5. **Apply through the validated path.** Copy → edit candidate → target-native
    validation (`kimi doctor`, `codex --validate`, …) → timestamped backup →
    overwrite. For kimi-code targets this stage **is** the `update-config`
@@ -121,10 +127,19 @@ unless the user asks for the fix.
 - `scan --output FILE` — fleet posture JSON: per-CLI normalized axes +
   `consensus` (majority per axis with conflicts; MCP servers and hook families
   shared by ≥2 members). Secrets never enter the posture by construction; a
-  defensive scrub redacts residual secret-shaped strings.
-- `diff --target {claude,codex,grok,kimi} --output FILE [--posture FILE]` —
+  defensive scrub redacts residual secret-shaped strings. `consensus.hooks`
+  also carries `status`/`broken`: every hook command is resolved to its
+  interpreter/script path(s) (including a script wrapped by `hook_bridge.py`
+  after its `--` separator) and flagged if the path does not exist.
+- `diff --target {claude,codex,grok,kimi,copilot} --output FILE [--posture FILE]` —
   per-axis drift report with equivalence classes (top-tier effort
   `xhigh`≈`max`, full-auto across vendor spellings).
+- `check [--output FILE]` — resolves every fleet member's hook commands to
+  real paths and exits non-zero if any is missing (see the 2026-10-01
+  `~/.copilot/hooks/vibecrafted-fleet.json` incident: a wrapped bridge script
+  absent from every generation turned every hook into a hard deny, unnoticed
+  overnight, because nothing before this checked path existence). Run this
+  after wiring any hook, not just during onboarding.
 
 Exit 1 with the error on stderr on any failure; stdout stays a one-line status.
 
