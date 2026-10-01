@@ -26,6 +26,109 @@ ENTRY = (
 )
 
 
+def _close_owned_pty(pid: int, descriptor: int, *, timeout: float = 5) -> int:
+    """Release the PTY, then require an actual reap of this test's child."""
+    # Hosted Darwin hung in waitpid after SIGKILL with the master still open.
+    # Release the terminal before stopping the shell; never wait indefinitely
+    # for terminal teardown, and never count a live child as successful cleanup.
+    os.close(descriptor)
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid, signal.SIGKILL)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        reaped, status = os.waitpid(pid, os.WNOHANG)
+        if reaped == pid:
+            return status
+        time.sleep(0.01)
+    raise AssertionError(
+        f"PTY child {pid} was not reaped within {timeout}s; "
+        f"identity={_process_identity(pid)}"
+    )
+
+
+@pytest.mark.parametrize("deliver_kill", [True, False])
+def test_owned_pty_cleanup_reaps_or_reports_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    deliver_kill: bool,
+) -> None:
+    """A stopped PTY child must be reaped even when the scenario fails."""
+    pid, descriptor = pty.fork()
+    if pid == 0:
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        os.kill(os.getpid(), signal.SIGSTOP)
+        while True:
+            signal.pause()
+    kill = os.kill
+    waitpid = os.waitpid
+    master_closed = False
+
+    def kill_after_close(child: int, sig: int) -> None:
+        nonlocal master_closed
+        assert child == pid
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+        master_closed = True
+        if deliver_kill:
+            kill(child, sig)
+
+    def bounded_wait(child: int, flags: int) -> tuple[int, int]:
+        if child == pid:
+            assert flags == os.WNOHANG, "teardown must never block in waitpid"
+        return waitpid(child, flags)
+
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            observed, status = waitpid(pid, os.WUNTRACED | os.WNOHANG)
+            if observed == pid:
+                assert os.WIFSTOPPED(status), "regression child did not stop"
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail(f"Regression child {pid} did not stop within 5s")
+        monkeypatch.setattr(os, "kill", kill_after_close)
+        monkeypatch.setattr(os, "waitpid", bounded_wait)
+        if deliver_kill:
+            with pytest.raises(AssertionError, match="scenario failed"):
+                try:
+                    raise AssertionError("scenario failed")
+                finally:
+                    status = _close_owned_pty(pid, descriptor)
+            assert os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL
+            with pytest.raises(ChildProcessError):
+                waitpid(pid, os.WNOHANG)
+        else:
+            # A genuinely live, HUP-resistant child must produce a bounded
+            # failure with its identity, never WNOHANG-as-success.
+            with pytest.raises(
+                AssertionError, match=f"PTY child {pid} was not reaped"
+            ) as error:
+                _close_owned_pty(pid, descriptor, timeout=0.1)
+            assert "identity=" in str(error.value)
+            kill(pid, 0)
+    finally:
+        # Keep the red regression itself safe if teardown violates the contract.
+        if not master_closed:
+            os.close(descriptor)
+        try:
+            pending, _ = waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            pending = pid
+        if pending == 0:
+            # waitpid proved it is still our unreaped child, not a reused PID.
+            kill(pid, signal.SIGKILL)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                if waitpid(pid, os.WNOHANG)[0] == pid:
+                    break
+            except ChildProcessError:
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail(f"Regression child {pid} could not be reaped")
+
+
 def test_invalid_spec_diagnosis_stays_visible_in_recovery_shell(tmp_path: Path) -> None:
     command = tmp_path / "vc-start"
     command.write_text("#!/bin/sh\necho ATTACH_MUST_NOT_RUN\n")
@@ -117,10 +220,7 @@ def test_product_entry_returns_controlling_pty_to_live_shell(
             assert str(log).encode() in output
             assert "exit 2" in log.read_text()
     finally:
-        os.close(descriptor)
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(pid, signal.SIGKILL)
-        os.waitpid(pid, 0)
+        _close_owned_pty(pid, descriptor)
 
 
 @pytest.mark.parametrize("failed_entry", [False, True])
@@ -415,9 +515,7 @@ def test_product_shell_pty_routes_single_line_up_to_atuin_but_not_multiline(
             "Ctrl-R did not reach Atuin",
         )
     finally:
-        os.kill(pid, signal.SIGKILL)
-        os.waitpid(pid, 0)
-        os.close(descriptor)
+        _close_owned_pty(pid, descriptor)
 
 
 def test_product_shell_pty_recalls_history_without_atuin(tmp_path: Path) -> None:
@@ -497,21 +595,19 @@ def test_product_shell_pty_recalls_history_without_atuin(tmp_path: Path) -> None
             "Down did not return from product-shell history selection",
         )
     finally:
-        os.kill(pid, signal.SIGKILL)
-        os.waitpid(pid, 0)
-        os.close(descriptor)
+        _close_owned_pty(pid, descriptor)
 
 
 def test_tab_completes_workspace_option_without_launching_workspace(
     tmp_path: Path,
 ) -> None:
-    product = tmp_path / ".config/vibecrafted/vc-terminal"
-    product.mkdir(parents=True)
-    shutil.copy2(
-        ENTRY.parents[2] / "config/vc-terminal/interactive.zsh",
-        product / "interactive.zsh",
+    product = _stage_product_profile(tmp_path)
+    profile = product / ".zshrc"
+    profile.write_text(
+        profile.read_text(encoding="utf-8")
+        + "[[ -o monitor && -t 0 && -t 1 && -t 2 ]] || exit 90\n"
+        + ': </dev/tty || exit 91\nPROMPT="VC_PROMPT> "\n'
     )
-    (product / ".zshrc").write_text(f'source "{ENTRY}"\nPROMPT="VC_PROMPT> "\n')
     commands = tmp_path / ".local/bin"
     commands.mkdir(parents=True)
     command = commands / "vc-start"
@@ -522,9 +618,16 @@ def test_tab_completes_workspace_option_without_launching_workspace(
     if pid == 0:
         os.chdir(tmp_path)
         os.execve(
-            "/bin/bash",
-            ["/bin/bash", str(ENTRY)],
-            {"HOME": str(tmp_path), "PATH": "/usr/bin:/bin", "TERM": "xterm"},
+            "/bin/zsh",
+            ["/bin/zsh", "-d", "-li"],
+            {
+                "HOME": str(tmp_path),
+                "PATH": "/usr/bin:/bin",
+                "TERM": "xterm",
+                "ZDOTDIR": str(product),
+                "VIBECRAFTED_HOME": str(tmp_path / ".vibecrafted"),
+                "VC_TERMINAL_PLUGIN_PREFIXES": str(tmp_path / "missing-plugins"),
+            },
         )
 
     def wait_for_prompt() -> None:
@@ -539,6 +642,7 @@ def test_tab_completes_workspace_option_without_launching_workspace(
 
     try:
         wait_for_prompt()
+        assert os.tcgetpgrp(descriptor) == pid
         os.write(
             descriptor,
             (
@@ -557,11 +661,7 @@ def test_tab_completes_workspace_option_without_launching_workspace(
         assert captured.read_text().strip() == "vc-start --repo"
         assert not (tmp_path / "WORKSPACE_STARTED").exists()
     finally:
-        # Interactive zsh ignores SIGTERM. Reap only this forked test child,
-        # including on an assertion failure, so the acceptance test is bounded.
-        os.kill(pid, signal.SIGKILL)
-        os.waitpid(pid, 0)
-        os.close(descriptor)
+        _close_owned_pty(pid, descriptor)
 
 
 def _stage_product_profile(tmp_path: Path) -> Path:
