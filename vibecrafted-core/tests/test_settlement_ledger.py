@@ -34,7 +34,7 @@ def _event(
     }[verdict]
     claim_digest = hashlib.sha256(f"{run_id}:{revision}:{verdict}".encode()).hexdigest()
     receipt = TrustReceiptV1.issue(
-        repo_root="/tmp/vibecrafted-ledger-test",
+        repo_root=str(Path(__file__).resolve().parent),
         run_id=run_id,
         commit_sha="a" * 40,
         trust_verdict=trust_verdict,

@@ -95,8 +95,8 @@ def _sid_text(sid: ctypes.c_void_p | int) -> str:
         kernel.LocalFree(text)
 
 
-@lru_cache(maxsize=1)
-def _current_user_sid() -> str:
+@lru_cache(maxsize=2)
+def _token_sid(information_class: int) -> str:
     kernel, security = _api()
     token = wintypes.HANDLE()
     if not security.OpenProcessToken(
@@ -105,13 +105,17 @@ def _current_user_sid() -> str:
         raise ctypes.WinError(ctypes.get_last_error())
     try:
         size = wintypes.DWORD()
-        security.GetTokenInformation(token, 1, None, 0, ctypes.byref(size))
+        security.GetTokenInformation(
+            token, information_class, None, 0, ctypes.byref(size)
+        )
         if not size.value:
             raise ctypes.WinError(ctypes.get_last_error())
         buffer = ctypes.create_string_buffer(size.value)
-        if not security.GetTokenInformation(token, 1, buffer, size, ctypes.byref(size)):
+        if not security.GetTokenInformation(
+            token, information_class, buffer, size, ctypes.byref(size)
+        ):
             raise ctypes.WinError(ctypes.get_last_error())
-        # TOKEN_USER starts with SID_AND_ATTRIBUTES, whose first member is PSID.
+        # TOKEN_USER and TOKEN_OWNER both start with a PSID.
         return _sid_text(ctypes.c_void_p.from_buffer(buffer))
     finally:
         kernel.CloseHandle(token)
@@ -143,14 +147,22 @@ def _validate(handle: int, *, label: str, directory: bool) -> None:
     if result:
         raise ctypes.WinError(result)
     try:
-        current = _current_user_sid()
-        if not owner.value or _sid_text(owner) != current:
+        current = _token_sid(1)
+        default_owner = _token_sid(4)
+        privileged = {"S-1-5-18", "S-1-5-32-544"}  # SYSTEM, Administrators
+        owners = {current}
+        # Elevated administrators create objects owned by their TokenOwner
+        # group. Admit that owner only when the active token selects it; never
+        # accept an arbitrary group owner as a substitute for private state.
+        if default_owner in privileged:
+            owners.add(default_owner)
+        if not owner.value or _sid_text(owner) not in owners:
             raise PermissionError(f"{label} is not owned by current user")
         if not dacl.value:
             raise PermissionError(f"{label} has an unrestricted DACL")
         # ACL's fixed header contains AceCount at byte offset 4.
         count = ctypes.c_uint16.from_address(dacl.value + 4).value
-        trusted = {current, "S-1-5-18", "S-1-5-32-544"}  # user, SYSTEM, Administrators
+        trusted = {current, *privileged}
         for index in range(count):
             ace = ctypes.c_void_p()
             if not security.GetAce(dacl, index, ctypes.byref(ace)):
