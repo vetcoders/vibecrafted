@@ -1780,6 +1780,7 @@ try:
         require(receipt.get("journal") == journal_path and journal.get("receipt") == receipt_path and admission.get("receipt") == receipt_path, "receipt paths do not name this transaction")
     current_identity = signed_identity(dest)
     observed = publication()
+    no_live_capture()
     recovery = None
     if historical:
         evidence = read(historical)
@@ -1836,6 +1837,7 @@ try:
         sys.exit(0)
     if fail == "settlement_authorized":
         raise OSError("injected cleanup failure; payload retained for retry")
+    no_live_capture()
     parent_fd = os.open(str(parent), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         require([os.fstat(parent_fd).st_dev, os.fstat(parent_fd).st_ino] == plan["parent_inode"], "parent changed")

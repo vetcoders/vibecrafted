@@ -23,6 +23,7 @@ plan. Failure returns exit 20; rerunning the exact settlement retries the
 remaining entries, including after partial deletion. A compact immutable
 settlement receipt records `disposed` only after the capture directory is gone.
 `.DS_Store` is host metadata; a symlink or unknown payload is refused.
+Every settlement path checks live open/mapped/cwd/executable/argv capture references before planning and immediately before deletion. A live reference refuses cleanup until its owner releases it; the helper sends no signals.
 Original replacement evidence remains after disposal. Recovery archives the
 original replacement journal before advancing its own journal.
 

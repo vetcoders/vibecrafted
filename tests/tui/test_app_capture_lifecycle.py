@@ -816,3 +816,40 @@ def test_legacy_real_preadoption_failure_keeps_original_journal(lane):
     assert not capture.exists()
     assert not (state / "receipt.json").exists()
     assert (state / "journal.json").read_bytes() == journal
+
+
+@pytest.mark.parametrize("child", ["prior.app", "displaced.app"])
+def test_automatic_settlement_preserves_live_capture_until_owner_releases(lane, child):
+    parent, env = lane
+    app(parent / "Vibecrafted.app", 0)
+    args, state = replace(parent, env, 1)
+    publish(parent, env, 1)
+    capture = parent / ".vc-update-capture-capture-test-00000001"
+    before = {
+        str(p.relative_to(capture)): hashlib.sha256(p.read_bytes()).hexdigest()
+        for p in capture.rglob("*")
+        if p.is_file()
+    }
+    command = [*args, "--mode", "settle"]
+    referenced = capture / child / "Contents/Info.plist"
+    with referenced.open():
+        planned = run([*command, "--plan-only"], env)
+        assert planned.returncode == 20, planned.stdout
+        assert "live mapped/open capture dependency" in planned.stderr
+        assert not (state / "receipt.json.settlement-plan.json").exists()
+    planned = run([*command, "--plan-only"], env)
+    assert planned.returncode == 0, planned.stderr
+    plan = (state / "receipt.json.settlement-plan.json").read_bytes()
+    with referenced.open():
+        refused = run(command, env)
+        assert refused.returncode == 20
+        assert "live mapped/open capture dependency" in refused.stderr
+        assert {
+            str(p.relative_to(capture)): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in capture.rglob("*")
+            if p.is_file()
+        } == before
+        assert (state / "receipt.json.settlement-plan.json").read_bytes() == plan
+    completed = run(command, env)
+    assert completed.returncode == 0, completed.stderr
+    assert not capture.exists()
