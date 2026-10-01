@@ -226,17 +226,27 @@ fn run_views_mark_exactly_the_selected_row_and_list_less_routes_select_nothing()
     let order = order.map(|r| r.run_id.clone()).collect::<Vec<_>>();
     assert_eq!(order.len(), 2);
     assert_eq!(marked(&host, &cfg).len(), 1);
-    assert!(marked(&host, &cfg)[0].contains(&order[0]));
+    assert!(
+        host.lines(&cfg)
+            .iter()
+            .any(|l| l.starts_with("Selected:") && l.contains(&order[0]))
+    );
     let rendered = screen(&host, &cfg);
-    assert!(rendered.contains(&format!("▶ running · codex / workflow · {}", order[0])));
+    assert!(rendered.contains("▶ running"));
     assert!(rendered.contains("g open run"));
     host.move_selection(1);
-    assert!(marked(&host, &cfg)[0].contains(&order[1]));
+    assert!(
+        host.lines(&cfg)
+            .iter()
+            .any(|l| l.starts_with("Selected:") && l.contains(&order[1]))
+    );
     host.move_selection(5);
     assert_eq!(host.selected, 1, "selection clamps at the last row");
     host.apply(HostSnapshot::load(&cfg));
     assert!(
-        marked(&host, &cfg)[0].contains(&order[1]),
+        host.lines(&cfg)
+            .iter()
+            .any(|l| l.starts_with("Selected:") && l.contains(&order[1])),
         "a refresh keeps the selected run by run_id"
     );
     host.navigate(HostRoute::Voc);
@@ -412,4 +422,217 @@ fn host_cli_routes_are_explicit_and_keep_cwd_out_of_the_projection_contract() {
         ])
         .is_err()
     );
+}
+
+#[test]
+fn active_runs_are_grouped_single_rows_with_fresh_attention_and_identity_selection() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = config(tmp.path());
+    let runs = cfg.state_root.join("runs");
+    fs::create_dir_all(&runs).unwrap();
+    write_run(&runs, "template", "running");
+    let mut snapshot = HostSnapshot::load(&cfg);
+    let template = snapshot.runs.active_runs[0].clone();
+    let now = chrono::Utc::now();
+    snapshot.sampled_at = now.to_rfc3339();
+    let run = |id: &str, root: &str, minutes: i64, state: &str, skill: &str| {
+        let mut r = template.clone();
+        r.run_id = id.into();
+        r.root = root.into();
+        r.updated_at = (now - chrono::Duration::minutes(minutes)).to_rfc3339();
+        r.started_at = (now - chrono::Duration::minutes(125)).to_rfc3339();
+        r.state = state.into();
+        r.skill = skill.into();
+        r.health = if state == "running" {
+            "active"
+        } else {
+            "stalled"
+        }
+        .into();
+        r.liveness = "pid_alive".into();
+        r.last_error = format!("error-{id}");
+        r
+    };
+    snapshot.runs.active_runs = vec![
+        run(
+            "v-old",
+            "/fixture/.vibecrafted/worktrees/vetcoders/vibecrafted/2026_1001/red-tests",
+            30,
+            "running",
+            "implement",
+        ),
+        run(
+            "c-live",
+            "/Volumes/work/vetcoders/codescribe/",
+            20,
+            "running",
+            "implement",
+        ),
+        run(
+            "v-new",
+            "/fixture/.vibecrafted/worktrees/vetcoders/vibecrafted/2026_1001/d4-session-id-early",
+            5,
+            "running",
+            "review",
+        ),
+        run(
+            "s-live",
+            "/work/Sentry-Selfhosted",
+            10,
+            "running",
+            "implement",
+        ),
+    ];
+    snapshot.runs.stalled_runs = vec![
+        run(
+            "archive",
+            "/work/old",
+            48 * 60 + 1,
+            "abandoned",
+            "implement",
+        ),
+        run(
+            "fresh",
+            "/work/vc-frame/.worktrees/Q-mic-toggle",
+            48 * 60 - 1,
+            "unknown",
+            "implement",
+        ),
+        run("ancient", "/work/old", 20 * 24 * 60, "unknown", "implement"),
+    ];
+    let before = tree(tmp.path());
+    let mut host = HostDashboard::new(HostRoute::ActiveRuns);
+    host.apply(snapshot);
+    let lines = host.lines(&cfg);
+    let text = lines.join("\n");
+    println!("INITIAL FIXTURE:\n{text}");
+    assert!(text.contains("Active runs 4 · needs attention 1"), "{text}");
+    assert!(text.contains("vibecrafted · 2"));
+    assert!(text.contains("codescribe · 1"));
+    assert!(text.contains("Sentry-Selfhosted · 1"));
+    assert!(text.contains("vc-frame · 1"));
+    assert!(text.contains("+2 archiwalnych (starsze niż 48 h)"));
+    assert!(!text.contains("archive") && !text.contains("ancient"));
+    let rows = lines
+        .iter()
+        .filter(|l| {
+            l.starts_with("  running") || l.starts_with("▶ running") || l.starts_with("  unknown")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 5, "one line per visible run: {text}");
+    assert!(rows[2].contains("d4-session-id-early"));
+    assert!(rows[3].contains("red-tests"), "newest first within repo");
+    for row in &rows {
+        assert!(ratatui::text::Line::from(row.as_str()).width() <= 120);
+        assert!(
+            !row.contains("implement")
+                && !row.contains("pid_alive")
+                && !row.contains("fixture-receipt")
+        );
+        assert_eq!(row.split(" · ").nth(2).unwrap().chars().count(), 26);
+        assert!(row.contains("trwa 2 h 5 min") || row.contains("ostatnio 1 d 23 h temu"));
+    }
+    for (i, id) in ["s-live", "c-live", "v-new", "v-old", "fresh"]
+        .iter()
+        .enumerate()
+    {
+        host.move_selection(if i == 0 { 0 } else { 1 });
+        assert_eq!(marked(&host, &cfg).len(), 1);
+        let selected = host.lines(&cfg).join("\n");
+        assert!(selected.contains(&format!("Selected: {id}")), "{selected}");
+        assert!(selected.contains(&format!("Last error: error-{id}")));
+    }
+    host.move_selection(20);
+    assert_eq!(host.selected, 4, "archive is not a selectable row");
+    let mut snapshot = HostSnapshot::load(&cfg);
+    snapshot.runs.active_runs = host.snapshot.as_ref().unwrap().runs.active_runs.clone();
+    snapshot.runs.stalled_runs = host.snapshot.as_ref().unwrap().runs.stalled_runs.clone();
+    snapshot.runs.active_runs.reverse();
+    host.apply(snapshot);
+    assert!(host.lines(&cfg).join("\n").contains("Selected: fresh"));
+    assert_eq!(host.snapshot.as_ref().unwrap().runs.stalled_runs.len(), 3);
+    assert_eq!(
+        tree(tmp.path()),
+        before,
+        "projection never writes source state"
+    );
+    println!("AFTER FIXTURE:\n{}", host.lines(&cfg).join("\n"));
+}
+
+#[test]
+fn active_run_columns_clip_unicode_and_keep_invalid_times_visible() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = config(tmp.path());
+    let runs = cfg.state_root.join("runs");
+    fs::create_dir_all(&runs).unwrap();
+    write_run(&runs, "unicode", "running");
+    let mut snapshot = HostSnapshot::load(&cfg);
+    let mut r = snapshot.runs.active_runs[0].clone();
+    r.root = format!("/work/repo/.worktrees/{}", "界".repeat(40));
+    r.agent = "agent\nname-with-long-suffix".into();
+    r.updated_at = "invalid".into();
+    r.started_at.clear();
+    r.skill = "implement".into();
+    snapshot.runs.active_runs = vec![r.clone()];
+    r.run_id = "unknown-age".into();
+    snapshot.runs.stalled_runs = vec![r];
+    let mut host = HostDashboard::new(HostRoute::ActiveRuns);
+    host.apply(snapshot);
+    let lines = host.lines(&cfg);
+    let row = marked(&host, &cfg).remove(0);
+    assert!(row.contains('…') && row.contains("czas nieznany"));
+    assert!(ratatui::text::Line::from(row.as_str()).width() <= 120);
+    assert!(!row.contains('\n'));
+    assert!(lines.join("\n").contains("needs attention 1"));
+    let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    term.draw(|f| draw(f, &host, &cfg)).unwrap();
+    let physical_rows = term
+        .backend()
+        .buffer()
+        .content()
+        .chunks(120)
+        .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        physical_rows
+            .iter()
+            .filter(|l| l.contains("czas nieznany"))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn attention_cutoff_is_exact_and_offset_timestamps_share_one_sample_clock() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = config(tmp.path());
+    let runs = cfg.state_root.join("runs");
+    fs::create_dir_all(&runs).unwrap();
+    write_run(&runs, "template", "running");
+    let mut snapshot = HostSnapshot::load(&cfg);
+    let now = chrono::DateTime::parse_from_rfc3339("2026-10-01T02:00:00+02:00").unwrap();
+    snapshot.sampled_at = now.to_rfc3339();
+    let mut boundary = snapshot.runs.active_runs[0].clone();
+    boundary.run_id = "boundary".into();
+    boundary.root = "/work/vibecrafted".into();
+    boundary.state = "abandoned".into();
+    boundary.updated_at = (now - chrono::Duration::hours(48)).to_rfc3339();
+    let mut old = boundary.clone();
+    old.run_id = "older-by-one-second".into();
+    old.updated_at =
+        (now - chrono::Duration::hours(48) - chrono::Duration::seconds(1)).to_rfc3339();
+    snapshot.runs.active_runs.clear();
+    snapshot.runs.stalled_runs = vec![old, boundary];
+    let mut host = HostDashboard::new(HostRoute::ActiveRuns);
+    host.apply(snapshot);
+    let text = host.lines(&cfg).join("\n");
+    assert!(text.contains("needs attention 1"));
+    assert!(text.contains("+1 archiwalnych"));
+    assert!(text.contains("Selected: boundary"));
+    assert!(text.contains("ostatnio 2 d 0 h temu"));
+    // The historical sample is intentional: selection must not re-filter using wall time.
+    host.move_selection(100);
+    assert_eq!(host.selected, 0);
+    host.navigate(HostRoute::Dashboard);
+    assert!(host.lines(&cfg).join("\n").contains("needs attention 1"));
 }
