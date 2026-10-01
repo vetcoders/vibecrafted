@@ -6,9 +6,14 @@
 """fleet_scan.py — fleet config posture scanner for the vc-hello skill.
 
 Reads the known config locations of the agent CLI fleet (Claude, Codex,
-Grok, Kimi), normalizes each into a shared posture shape, and computes the
-fleet consensus (majority per axis, conflicts listed). The `diff` subcommand
-compares one target CLI against that consensus (drift audit, read-only).
+Grok, Kimi, Copilot), normalizes each into a shared posture shape, and
+computes the fleet consensus (majority per axis, conflicts listed). The
+`diff` subcommand compares one target CLI against that consensus (drift
+audit, read-only). The `check` subcommand resolves every hook command to its
+interpreter/script path(s) and fails closed if any points at a missing file
+(see the 2026-10-01 incident: `~/.copilot/hooks/vibecrafted-fleet.json`
+referenced a bridge script that did not exist in any generation, so every
+Copilot hook exited 2 and the harness denied every bash call all night).
 
 Secrets policy: extraction is structural — secret-bearing fields (api_key,
 env blocks, auth files) are never copied into the posture. A defensive
@@ -17,13 +22,16 @@ scrub pass still redacts any residual value that smells like a secret.
 Stdlib only. Usage:
     uv run fleet_scan.py scan --output posture.json
     uv run fleet_scan.py diff --target kimi --output drift.json [--posture posture.json]
+    uv run fleet_scan.py check [--output broken.json]
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import shlex
 import sys
 from collections import Counter
 from datetime import UTC, datetime
@@ -34,7 +42,7 @@ import tomllib
 
 HOME = Path.home()
 
-FLEET = ("claude", "codex", "grok", "kimi")
+FLEET = ("claude", "codex", "grok", "kimi", "copilot")
 
 FULL_AUTO = {"full-auto"}
 TOP_TIER_EFFORT = {"xhigh", "max"}
@@ -69,6 +77,41 @@ def _basename_command(command: str) -> str:
     }:
         parts = parts[1:]
     return Path(parts[0]).name if parts else command.strip()
+
+
+_SHELL_CONTROL_CHARS = set("><|&;")
+
+
+def _expand_token(token: str) -> str:
+    return os.path.expanduser(os.path.expandvars(token))
+
+
+def _extract_script_paths(command: str) -> list[str]:
+    """Pull every interpreter/script path token out of a hook command line.
+
+    Tokenizes with shlex (so quoted "$HOME/..." paths survive), expands
+    $VARS and ~, and stops at the first shell control operator (redirects,
+    pipes, `&&`/`||`/`;`) — nothing past that boundary is part of the
+    invocation being checked for existence. This catches both the direct
+    interpreter+script pair and a script wrapped by hook_bridge.py after its
+    `--` separator (e.g. `python3 hook_bridge.py --to copilot -- bash
+    wrapped.sh` yields both `hook_bridge.py` and `wrapped.sh`).
+    """
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        tokens = command.split()
+
+    paths: list[str] = []
+    for token in tokens:
+        if any(ch in token for ch in _SHELL_CONTROL_CHARS):
+            break
+        if token.startswith("-"):
+            continue
+        expanded = _expand_token(token)
+        if "/" in expanded:
+            paths.append(expanded)
+    return paths
 
 
 def _norm_event(event: str) -> str:
@@ -166,12 +209,12 @@ def scan_claude() -> dict[str, Any]:
     for event, entries in data.get("hooks", {}).items():
         for entry in entries:
             for hook in entry.get("hooks", []):
+                command = hook.get("command", "")
                 hooks.append(
                     {
                         "event": _norm_event(event),
-                        "family": _hook_family(
-                            _basename_command(hook.get("command", ""))
-                        ),
+                        "family": _hook_family(_basename_command(command)),
+                        "command": command,
                     }
                 )
     posture["hooks"] = sorted(
@@ -286,12 +329,49 @@ def scan_kimi() -> dict[str, Any]:
 
     hooks = []
     for hook in data.get("hooks", []):
+        command = hook.get("command", "")
         hooks.append(
             {
                 "event": _norm_event(hook.get("event", "")),
-                "family": _hook_family(_basename_command(hook.get("command", ""))),
+                "family": _hook_family(_basename_command(command)),
+                "command": command,
             }
         )
+    posture["hooks"] = sorted(hooks, key=lambda h: (h["event"], h["family"]))
+    return posture
+
+
+def scan_copilot() -> dict[str, Any]:
+    """Copilot's only known posture carrier today is its hook wiring.
+
+    `~/.copilot/hooks/vibecrafted-fleet.json` is onboarded by vc-hello but
+    carries no permission/effort/theme keys (unlike the other fleet members'
+    config files) — those axes stay None by construction, matching the
+    "missing concepts are None, not invented" contract above.
+    """
+    posture = _empty_posture()
+    config = HOME / ".copilot" / "hooks" / "vibecrafted-fleet.json"
+    if not config.exists():
+        posture["absent"].append(str(config))
+        return posture
+    data = _load_json(config)
+    posture["sources"].append(str(config))
+
+    hooks = []
+    for event, entries in data.get("hooks", {}).items():
+        for entry in entries:
+            command = entry.get("bash", "")
+            paths = _extract_script_paths(command)
+            basename_source = (
+                Path(paths[-1]).name if paths else _basename_command(command)
+            )
+            hooks.append(
+                {
+                    "event": _norm_event(event),
+                    "family": _hook_family(basename_source),
+                    "command": command,
+                }
+            )
     posture["hooks"] = sorted(hooks, key=lambda h: (h["event"], h["family"]))
     return posture
 
@@ -300,6 +380,7 @@ SCANNERS = {
     "claude": scan_claude,
     "codex": scan_codex,
     "grok": scan_grok,
+    "copilot": scan_copilot,
     "kimi": scan_kimi,
 }
 
@@ -337,6 +418,25 @@ def _majority(values: dict[str, Any]) -> dict[str, Any]:
     return {"value": winner, "support": support, "conflicts": conflicts}
 
 
+def _hook_broken_entries(fleet: dict[str, dict[str, Any]]) -> list[dict[str, str]]:
+    """Every (cli, event, path) whose hook command resolves to a dead script.
+
+    Only hooks that carry a raw "command" string can be checked this way;
+    codex's hook trust-state entries (plugin-relative, no literal command
+    line) are skipped rather than guessed at.
+    """
+    broken: list[dict[str, str]] = []
+    for cli, posture in fleet.items():
+        for hook in posture["hooks"]:
+            command = hook.get("command")
+            if not command:
+                continue
+            for path in _extract_script_paths(command):
+                if not Path(path).exists():
+                    broken.append({"cli": cli, "event": hook["event"], "path": path})
+    return sorted(broken, key=lambda b: (b["cli"], b["event"], b["path"]))
+
+
 def compute_consensus(fleet: dict[str, dict[str, Any]]) -> dict[str, Any]:
     consensus: dict[str, Any] = {}
     for axis in ("permission_posture", "effort", "theme", "language", "auto_update"):
@@ -356,11 +456,14 @@ def compute_consensus(fleet: dict[str, dict[str, Any]]) -> dict[str, Any]:
         families = {h["family"] for h in posture["hooks"]}
         for family in families:
             hook_votes.setdefault(family, []).append(cli)
+    broken = _hook_broken_entries(fleet)
     consensus["hooks"] = {
         "shared": sorted(name for name, clis in hook_votes.items() if len(clis) >= 2),
         "per_cli": {
             cli: sorted({h["family"] for h in p["hooks"]}) for cli, p in fleet.items()
         },
+        "broken": broken,
+        "status": "broken" if broken else "ok",
     }
     return consensus
 
@@ -490,6 +593,29 @@ def cmd_diff(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_check(args: argparse.Namespace) -> int:
+    fleet = _fresh_fleet()
+    broken = _hook_broken_entries(fleet)
+    payload = {
+        "generated_at": datetime.now(UTC).isoformat(),
+        "status": "broken" if broken else "ok",
+        "broken": broken,
+    }
+    scrubbed = scrub(payload)
+    if args.output:
+        _write_output(scrubbed, Path(args.output))
+    else:
+        print(json.dumps(scrubbed, indent=2, ensure_ascii=False))
+    if broken:
+        for entry in broken:
+            print(
+                f"BROKEN HOOK PATH: {entry['cli']} {entry['event']} -> {entry['path']} (does not exist)",
+                file=sys.stderr,
+            )
+        return 1
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -515,6 +641,18 @@ def main() -> int:
         "--posture", help="reuse a previous scan output instead of rescanning the fleet"
     )
     diff.set_defaults(func=cmd_diff)
+
+    check = sub.add_parser(
+        "check",
+        help=(
+            "resolve every hook command's interpreter/script path(s) and "
+            "exit!=0 if any points at a missing file"
+        ),
+    )
+    check.add_argument(
+        "--output", help="optional file to write the broken-hooks report into"
+    )
+    check.set_defaults(func=cmd_check)
 
     args = parser.parse_args()
     try:
