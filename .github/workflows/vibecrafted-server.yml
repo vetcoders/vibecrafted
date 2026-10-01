@@ -42,6 +42,12 @@ jobs:
     name: control-core tests
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # Hosted SSR linking overflowed ring's 32-bit .debug_macro relocations
+      # (run 36829545615). CI executes tests; it does not need full debug types.
+      # Keep debug assertions/overflow checks and the complete test selection.
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     defaults:
       run:
         working-directory: vibecrafted-server
