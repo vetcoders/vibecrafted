@@ -769,3 +769,50 @@ def test_legacy_partial_disposal_retries_same_admitted_plan(lane):
     succeeded = run(apply, env)
     assert succeeded.returncode == 0, succeeded.stderr
     assert not list(parent.glob(".vc-update-capture-*"))
+
+
+def test_legacy_real_preadoption_failure_keeps_original_journal(lane):
+    parent, env = lane
+    app(parent / "Vibecrafted.app", 0)
+    source = app(parent.parent / "source.app", 1)
+    state = Path(env["VIBECRAFTED_HOME"]) / "failed-records"
+    state.mkdir()
+    args = [
+        "--source",
+        str(source),
+        "--destination",
+        str(parent / "Vibecrafted.app"),
+        "--receipt",
+        str(state / "receipt.json"),
+        "--journal",
+        str(state / "journal.json"),
+        "--transaction",
+        "capture-test-00000001",
+    ]
+    failed = run([*args, "--fail-after", "captured"], env)
+    assert failed.returncode != 0
+    assert not (state / "receipt.json").exists()
+    capture = parent / ".vc-update-capture-capture-test-00000001"
+    assert {p.name for p in capture.iterdir()} == {"prior.app"}
+    journal = (state / "journal.json").read_bytes()
+    assert json.loads(journal)["phase"] == "captured"
+    publish(parent, env, 0)
+    evidence = legacy_review(parent, env, state, "failed-before-adoption")
+    reviewed = json.loads(evidence.read_text())
+    reviewed["history"]["records"] = [
+        {
+            "path": str(state / "journal.json"),
+            "sha256": hashlib.sha256(journal).hexdigest(),
+        }
+    ]
+    write_json(evidence, reviewed)
+    command = [*args, "--mode", "settle", "--historical-evidence", str(evidence)]
+    planned = run([*command, "--plan-only"], env)
+    assert planned.returncode == 0, planned.stderr
+    applied = run(
+        [*command, "--admit-plan", json.loads(planned.stdout)["plan_sha256"]], env
+    )
+    assert applied.returncode == 0, applied.stderr
+    assert not capture.exists()
+    assert not (state / "receipt.json").exists()
+    assert (state / "journal.json").read_bytes() == journal
