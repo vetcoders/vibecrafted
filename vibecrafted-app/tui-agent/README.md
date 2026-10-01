@@ -176,6 +176,16 @@ break this surface.
 
 ## Run
 
+Host views (`--view host` and `--view host-runs`) reload run history on
+debounced control-plane, runtime, lifecycle, lock, Marbles and workspace
+changes. Unchanged history is reused between notifications. Process liveness
+and time-derived stalls are rechecked within 30 seconds, including when a
+watcher is unavailable; the view displays the run sample timestamp and
+watcher/fallback status. Press `r` for an explicit refresh. Server health,
+runtime identity and live session inventory still refresh every three seconds.
+Input polling remains independent, and unchanged input ticks do not redraw.
+`VOC_REFRESH_TRACE_PATH` records `host_control_plane` reads for private probes.
+
 ```bash
 cargo run -- --state-root "$VIBECRAFTED_HOME/control_plane"
 # optional:

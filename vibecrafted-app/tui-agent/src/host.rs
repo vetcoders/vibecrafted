@@ -9,6 +9,7 @@ use control_core::{
 use crossterm::event::{
     self, Event, KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
+use notify::{Config as NotifyConfig, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Paragraph, Tabs, Wrap},
@@ -18,13 +19,14 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::mpsc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 /// PgUp/PgDn move the viewport a page; one wheel notch moves it a few lines.
 const PAGE_STEP: isize = 8;
 const WHEEL_STEP: isize = 3;
 const ACTIVE_RUNTIME_SCHEMA: &str = "vibecrafted.active-runtime.v1";
+const HOST_STATUS_INTERVAL: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostRoute {
@@ -265,10 +267,27 @@ pub struct HostSnapshot {
     pub server_status: String,
     pub runtime: RuntimeIdentity,
     pub sampled_at: String,
+    pub runs_sampled_at: String,
+    pub refresh_status: String,
 }
 impl HostSnapshot {
     /// The same canonical StateView used by the server and its LIVE feed.
     pub fn load(config: &AppConfig) -> Self {
+        crate::app::trace_expensive_refresh("host_control_plane");
+        let plane = ControlPlane::from_control_plane_home(&config.state_root);
+        Self::with_runs(
+            config,
+            plane.compute_view(chrono::Utc::now()),
+            chrono::Utc::now().to_rfc3339(),
+            "one-shot read".into(),
+        )
+    }
+    fn with_runs(
+        config: &AppConfig,
+        runs: StateView,
+        runs_sampled_at: String,
+        refresh_status: String,
+    ) -> Self {
         let plane = ControlPlane::from_control_plane_home(&config.state_root);
         let (projects, workspace_error) = match plane.load_workspace_projection() {
             Ok(projection) => {
@@ -285,13 +304,15 @@ impl HostSnapshot {
             Err(error) => format!("unavailable · {error}"),
         };
         Self {
-            runs: plane.compute_view(chrono::Utc::now()),
+            runs,
             projects,
             workspace_error,
             server_status,
             // One small pointer file per sample; the reader thread owns this IO.
             runtime: RuntimeIdentity::load(default_runtime_pointer()),
             sampled_at: chrono::Utc::now().to_rfc3339(),
+            runs_sampled_at,
+            refresh_status,
         }
     }
     pub fn live_count(&self) -> usize {
@@ -299,6 +320,104 @@ impl HostSnapshot {
     }
     pub fn workspace_count(&self) -> usize {
         self.projects.iter().map(|p| p.sessions.len()).sum()
+    }
+}
+
+enum HostWake {
+    Changed,
+    WatchError(String),
+    Stop,
+}
+
+/// Host reads include nested runtime/lifecycle receipts and workspace routing.
+/// The full cockpit's narrower watcher omits these, so reuse its projection
+/// classifier but watch the host's complete input set. Accesses, transcripts,
+/// caretaker heartbeats and unrelated artifact writes cannot invalidate runs.
+fn host_projection_change(state_root: &Path, path: &Path) -> bool {
+    if let Ok(relative) = path.strip_prefix(state_root) {
+        let first = relative.components().next().map(|part| part.as_os_str());
+        return relative.as_os_str().is_empty()
+            || relative == Path::new("events.jsonl")
+            || ["runs", "runtime_runs", "lifecycle_runs", "workspaces"]
+                .iter()
+                .any(|name| first == Some(std::ffi::OsStr::new(name)))
+                && (path.extension().is_none()
+                    || path.extension().is_some_and(|ext| ext == "json"));
+    }
+    crate::raw_run_source_roots(state_root)
+        .is_some_and(|(locks, marbles)| path == locks || path == marbles)
+        || crate::is_projection_path(path)
+}
+
+fn host_watcher(
+    state_root: &Path,
+    tx: mpsc::Sender<HostWake>,
+) -> anyhow::Result<RecommendedWatcher> {
+    let root = state_root.to_path_buf();
+    let mut watcher = RecommendedWatcher::new(
+        move |event: notify::Result<notify::Event>| match event {
+            Ok(event)
+                if !matches!(event.kind, EventKind::Access(_))
+                    && event
+                        .paths
+                        .iter()
+                        .any(|path| host_projection_change(&root, path)) =>
+            {
+                let _ = tx.send(HostWake::Changed);
+            }
+            Err(error) => {
+                let _ = tx.send(HostWake::WatchError(error.to_string()));
+            }
+            _ => {}
+        },
+        NotifyConfig::default(),
+    )?;
+    let mut roots = vec![state_root.to_path_buf()];
+    if let Some((locks, marbles)) = crate::raw_run_source_roots(state_root) {
+        roots.extend([locks, marbles]);
+    }
+    let mut registered = std::collections::HashSet::new();
+    for root in roots {
+        // Observe creation when a source directory is absent, without creating it.
+        let existing = root
+            .ancestors()
+            .find(|path| path.is_dir())
+            .ok_or_else(|| anyhow::anyhow!("no existing watch ancestor for {}", root.display()))?;
+        let mode = if existing == root {
+            RecursiveMode::Recursive
+        } else {
+            RecursiveMode::NonRecursive
+        };
+        if registered.insert((existing.to_path_buf(), mode == RecursiveMode::Recursive)) {
+            watcher.watch(existing, mode)?;
+        }
+    }
+    Ok(watcher)
+}
+
+struct HostRunReader {
+    cached: Option<(StateView, String, Instant)>,
+}
+impl HostRunReader {
+    fn snapshot(&mut self, config: &AppConfig, invalidated: bool, status: &str) -> HostSnapshot {
+        let now = Instant::now();
+        // Recheck process liveness and time-derived stalls even without writes;
+        // this is the cockpit's existing recovery bound, not the input cadence.
+        if invalidated
+            || self.cached.as_ref().is_none_or(|(_, _, at)| {
+                now.duration_since(*at) >= crate::WATCHER_FALLBACK_INTERVAL
+            })
+        {
+            crate::app::trace_expensive_refresh("host_control_plane");
+            self.cached = Some((
+                ControlPlane::from_control_plane_home(&config.state_root)
+                    .compute_view(chrono::Utc::now()),
+                chrono::Utc::now().to_rfc3339(),
+                now,
+            ));
+        }
+        let (runs, sampled_at, _) = self.cached.as_ref().expect("initial projection loaded");
+        HostSnapshot::with_runs(config, runs.clone(), sampled_at.clone(), status.into())
     }
 }
 
@@ -485,6 +604,7 @@ impl HostDashboard {
             lines.push("Reading host projections…".into());
             return lines;
         };
+        lines[1] = format!("Run sample: {} · {}", s.runs_sampled_at, s.refresh_status);
         match self.route {
             HostRoute::Dashboard => {
                 lines.extend([
@@ -895,7 +1015,7 @@ pub fn draw(frame: &mut Frame, host: &HostDashboard, config: &AppConfig) {
         .map(|p| format!("Open project: {p}  · Enter confirm · Esc cancel"))
         .unwrap_or_else(|| {
             format!(
-                "{}\n1–6 views · {}o Open project · PgUp/PgDn scroll · q close · LIVE {active}",
+                "{}\n1–6 views · {}o Open project · r refresh · PgUp/PgDn scroll · q close · LIVE {active}",
                 host.notice,
                 host.route.keys()
             )
@@ -985,23 +1105,9 @@ fn run_doctor(deck: &Path) -> DoctorReport {
 /// just by entering a host route.
 pub fn run(config: AppConfig, route: HostRoute) -> anyhow::Result<()> {
     let (snapshot_tx, snapshot_rx) = mpsc::sync_channel(1);
-    let (stop_tx, stop_rx) = mpsc::channel();
+    let (wake_tx, wake_rx) = mpsc::channel();
     let reader_config = config.clone();
-    let reader = std::thread::spawn(move || {
-        loop {
-            if let Err(mpsc::TrySendError::Disconnected(_)) =
-                snapshot_tx.try_send(HostSnapshot::load(&reader_config))
-            {
-                break;
-            }
-            if !matches!(
-                stop_rx.recv_timeout(Duration::from_secs(3)),
-                Err(mpsc::RecvTimeoutError::Timeout)
-            ) {
-                break;
-            }
-        }
-    });
+    let reader_wake = wake_tx.clone();
     let (action_tx, action_rx) = mpsc::channel();
     let mut host = HostDashboard::new(route);
     crossterm::terminal::enable_raw_mode()?;
@@ -1012,19 +1118,87 @@ pub fn run(config: AppConfig, route: HostRoute) -> anyhow::Result<()> {
         event::EnableMouseCapture
     )?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
+    // Only start the reader after terminal setup succeeds. Its watcher owns
+    // a wake sender, so an early terminal error must not leave a reader alive.
+    let reader = std::thread::spawn(move || {
+        let mut source = HostRunReader { cached: None };
+        let mut invalidated = true;
+        let mut watcher = None;
+        let mut watch_status = String::new();
+        loop {
+            if invalidated || watcher.is_none() {
+                match host_watcher(&reader_config.state_root, reader_wake.clone()) {
+                    Ok(active) => {
+                        watcher = Some(active);
+                        watch_status = "watching changes · liveness recheck ≤30 s".into();
+                    }
+                    Err(error) => {
+                        watcher = None;
+                        watch_status = format!("watcher unavailable: {error} · fallback ≤30 s");
+                    }
+                }
+            }
+            if let Err(mpsc::TrySendError::Disconnected(_)) =
+                snapshot_tx.try_send(source.snapshot(&reader_config, invalidated, &watch_status))
+            {
+                break;
+            }
+            invalidated = false;
+            let until_recheck = source.cached.as_ref().map_or(Duration::ZERO, |(_, _, at)| {
+                (*at + crate::WATCHER_FALLBACK_INTERVAL).saturating_duration_since(Instant::now())
+            });
+            match wake_rx.recv_timeout(HOST_STATUS_INTERVAL.min(until_recheck)) {
+                Ok(HostWake::Changed) => {
+                    // Coalesce a write/rename burst, with a fixed deadline so
+                    // continuous writes cannot postpone refresh indefinitely.
+                    let deadline = Instant::now() + crate::CHANGE_DEBOUNCE;
+                    while let Ok(wake) =
+                        wake_rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    {
+                        match wake {
+                            HostWake::Stop => return,
+                            HostWake::WatchError(error) => {
+                                watcher = None;
+                                watch_status =
+                                    format!("watcher unavailable: {error} · fallback ≤30 s");
+                            }
+                            HostWake::Changed => {}
+                        }
+                        if Instant::now() >= deadline {
+                            break;
+                        }
+                    }
+                    invalidated = true;
+                }
+                Ok(HostWake::WatchError(error)) => {
+                    watcher = None;
+                    watch_status = format!("watcher unavailable: {error} · fallback ≤30 s");
+                }
+                Ok(HostWake::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        }
+    });
     let result = (|| -> anyhow::Result<()> {
+        let mut dirty = true;
         loop {
             while let Ok(snapshot) = snapshot_rx.try_recv() {
                 host.apply(snapshot);
+                dirty = true;
             }
             while let Ok(receipt) = action_rx.try_recv() {
                 host.receive(receipt);
+                dirty = true;
             }
-            terminal.draw(|f| draw(f, &host, &config))?;
+            if dirty {
+                terminal.draw(|f| draw(f, &host, &config))?;
+                dirty = false;
+            }
             if !event::poll(config.tick_rate)? {
                 continue;
             }
             let mut action = None;
+            dirty = true;
             match event::read()? {
                 Event::Key(key) if key.kind != event::KeyEventKind::Release => {
                     if key.code == KeyCode::Char('c')
@@ -1054,6 +1228,9 @@ pub fn run(config: AppConfig, route: HostRoute) -> anyhow::Result<()> {
                                 host.navigate(HostRoute::ALL[(host.route.index() + 1) % 6])
                             }
                             KeyCode::Char('o') => host.project_input = Some(String::new()),
+                            KeyCode::Char('r') => {
+                                let _ = wake_tx.send(HostWake::Changed);
+                            }
                             KeyCode::Up => host.move_selection(-1),
                             KeyCode::Down => host.move_selection(1),
                             KeyCode::PageDown => host.scroll(&config, PAGE_STEP),
@@ -1113,7 +1290,7 @@ pub fn run(config: AppConfig, route: HostRoute) -> anyhow::Result<()> {
         }
         Ok(())
     })();
-    let _ = stop_tx.send(());
+    let _ = wake_tx.send(HostWake::Stop);
     drop(snapshot_rx);
     // An in-progress read has a bounded HTTP timeout; never hold the terminal for it.
     if reader.is_finished() {
@@ -1133,6 +1310,82 @@ pub fn run(config: AppConfig, route: HostRoute) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn host_invalidation_includes_nested_receipts_but_excludes_reader_noise() {
+        let root = Path::new("/fixture/control_plane");
+        for path in [
+            "events.jsonl",
+            "runs/run.json",
+            "runs/.archived/run.json",
+            "runtime_runs/run/meta.json",
+            "lifecycle_runs/run/state.json",
+            "workspaces/sessions/owner.json",
+        ] {
+            assert!(host_projection_change(root, &root.join(path)), "{path}");
+        }
+        for path in [
+            "caretaker.json",
+            "runtime_runs/run/transcript.log",
+            "runtime_runs/run/out.tmp",
+            "events.jsonl.tmp",
+        ] {
+            assert!(!host_projection_change(root, &root.join(path)), "{path}");
+        }
+        for path in [
+            "/fixture/locks",
+            "/fixture/marbles",
+            "/fixture/locks/org/repo/run.lock",
+            "/fixture/marbles/run/state.json",
+        ] {
+            assert!(host_projection_change(root, Path::new(path)), "{path}");
+        }
+        assert!(!host_projection_change(
+            root,
+            Path::new("/fixture/artifacts/report.md")
+        ));
+    }
+
+    #[test]
+    fn fallback_rechecks_runs_without_a_filesystem_notification() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("control_plane");
+        std::fs::create_dir_all(root.join("runs")).unwrap();
+        let config = AppConfig {
+            state_root: root.clone(),
+            command_deck: temp.path().join("unused"),
+            repo: temp.path().into(),
+            presentation: crate::launch::Presentation::Headless,
+            tick_rate: Duration::from_millis(50),
+            no_verify_gate: false,
+            server: "http://127.0.0.1:1".into(),
+            view: crate::observe::ConsoleView::Host(HostRoute::Dashboard),
+        };
+        let mut reader = HostRunReader { cached: None };
+        assert!(
+            reader
+                .snapshot(&config, false, "watcher unavailable · fallback ≤30 s")
+                .runs
+                .recent_runs
+                .is_empty()
+        );
+        let now = chrono::Utc::now().to_rfc3339();
+        std::fs::write(root.join("runs/fallback.json"), serde_json::json!({
+            "run_id":"fallback", "state":"completed", "health":"final", "agent":"codex", "skill":"workflow", "mode":"headless", "root":"/fixture/repo", "started_at":now, "updated_at":now,
+            "operator_session":"", "latest_report":"", "latest_transcript":"", "last_error":"", "source":"fixture", "lock_present":false
+        }).to_string()).unwrap();
+        assert!(
+            reader
+                .snapshot(&config, false, "fallback")
+                .runs
+                .recent_runs
+                .is_empty()
+        );
+        reader.cached.as_mut().unwrap().2 -= crate::WATCHER_FALLBACK_INTERVAL;
+        let snapshot = reader.snapshot(&config, false, "watcher unavailable · fallback ≤30 s");
+        assert_eq!(snapshot.runs.recent_runs[0].run_id, "fallback");
+        assert!(snapshot.refresh_status.contains("unavailable"));
+    }
 
     #[test]
     fn refused_project_verb_preserves_the_exact_failure_and_creates_no_projection() {

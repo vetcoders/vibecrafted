@@ -2446,7 +2446,7 @@ impl App {
     }
 }
 
-fn trace_expensive_refresh(kind: &str) {
+pub(crate) fn trace_expensive_refresh(kind: &str) {
     let Some(path) = std::env::var_os("VOC_REFRESH_TRACE_PATH").filter(|value| !value.is_empty())
     else {
         return;
