@@ -145,11 +145,13 @@ def test_version_bump_updates_every_declared_projection(tmp_path: Path) -> None:
     cargo_manifests = (
         tmp_path / "vibecrafted-server" / "web" / "Cargo.toml",
         tmp_path / "vibecrafted-server" / "control-core" / "Cargo.toml",
+        tmp_path / "vibecrafted-server" / "mcp-shim" / "Cargo.toml",
     )
     cargo_locks = {
         tmp_path / "vibecrafted-server" / "Cargo.lock": (
             "control-core",
             "vibecrafted-server-web",
+            "vc-mcp-shim",
         ),
         tmp_path / "vibecrafted-app" / "Cargo.lock": ("control-core",),
     }
@@ -268,6 +270,9 @@ def test_version_check_rejects_stale_readme_and_release_checklist_fixtures(
         "vibecrafted-mcp/vibecrafted_mcp/VERSION",
         "vibecrafted-server/web/Cargo.toml",
         "vibecrafted-server/control-core/Cargo.toml",
+        "vibecrafted-server/mcp-shim/Cargo.toml",
+        "vibecrafted-server/Cargo.lock",
+        "vibecrafted-app/Cargo.lock",
         "vibecrafted-app/shell-agent/app/project.yml",
         "packaging/homebrew/Formula/vibecrafted.rb",
         "packaging/homebrew/Casks/vibecrafted-app.rb",
@@ -316,6 +321,35 @@ def test_version_check_rejects_stale_readme_and_release_checklist_fixtures(
     assert stale_checklist.returncode == 2
     assert "RELEASE_CHECKLIST.md#projection-1=9.9.9" in stale_checklist.stderr
 
+    shutil.copy2(REPO_ROOT / "docs" / "RELEASE_CHECKLIST.md", checklist)
+    shim = tmp_path / "vibecrafted-server" / "mcp-shim" / "Cargo.toml"
+    shim_payload = tomllib.loads(shim.read_text(encoding="utf-8"))
+    shim.write_text(
+        shim.read_text(encoding="utf-8").replace(
+            f'version = "{shim_payload["package"]["version"]}"',
+            'version = "9.9.9"',
+            1,
+        ),
+        encoding="utf-8",
+    )
+    stale_shim = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert stale_shim.returncode == 2
+    assert "mcp-shim/Cargo.toml=9.9.9" in stale_shim.stderr
+
+    shutil.copy2(REPO_ROOT / "vibecrafted-server" / "mcp-shim" / "Cargo.toml", shim)
+    lock = tmp_path / "vibecrafted-server" / "Cargo.lock"
+    lock.write_text(
+        lock.read_text(encoding="utf-8").replace(
+            f'name = "vc-mcp-shim"\nversion = "{version}"',
+            'name = "vc-mcp-shim"\nversion = "9.9.9"',
+            1,
+        ),
+        encoding="utf-8",
+    )
+    stale_lock = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert stale_lock.returncode == 2
+    assert "vc-mcp-shim=9.9.9" in stale_lock.stderr
+
 
 def test_version_bump_rejects_drift_without_partial_writes(tmp_path: Path) -> None:
     version_file = tmp_path / "VERSION"
@@ -330,6 +364,7 @@ def test_version_bump_rejects_drift_without_partial_writes(tmp_path: Path) -> No
     cargo_manifests = (
         tmp_path / "vibecrafted-server" / "web" / "Cargo.toml",
         tmp_path / "vibecrafted-server" / "control-core" / "Cargo.toml",
+        tmp_path / "vibecrafted-server" / "mcp-shim" / "Cargo.toml",
     )
     version_file.write_text("1.4.1\n", encoding="utf-8")
     for index, pyproject in enumerate(pyprojects):

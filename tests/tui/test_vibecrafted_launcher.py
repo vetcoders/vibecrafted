@@ -369,7 +369,9 @@ def _write_trimmed_launcher(script_path: Path) -> None:
 def test_python_resolver_skips_bash_product_launchers(tmp_path: Path) -> None:
     fake_bin = tmp_path / "bin"
     launcher_copy = tmp_path / "vibecrafted-deck"
-    fake_python = fake_bin / "python3"
+    # The development resolver prefers a >=3.11 versioned interpreter before
+    # bare python3; control that candidate rather than depending on the host.
+    fake_python = fake_bin / "python3.13"
     fake_bin.mkdir()
     _write_trimmed_launcher(launcher_copy)
 
@@ -586,6 +588,9 @@ def _write_fake_python3(bin_dir: Path, capture_file: Path) -> None:
         encoding="utf-8",
     )
     script.chmod(0o755)
+    # Match the development resolver's first candidate on both Linux and macOS.
+    # Otherwise a real /usr/bin/python3.12 silently bypasses this capture fake.
+    (bin_dir / "python3.13").symlink_to(script.name)
 
 
 def _write_fake_curl(bin_dir: Path) -> None:

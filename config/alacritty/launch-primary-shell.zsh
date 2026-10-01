@@ -88,7 +88,7 @@ run_product_entry() {
   # An interactive intermediate zsh takes the terminal foreground group. When
   # it exits, the final shell below can no longer read the orphaned PTY (EIO).
   # The command keeps its controlling terminal without an interactive parent.
-  /bin/zsh -lc '"$0" "$@"' "$product_entry" "$@"
+  /bin/zsh -d -lc '"$0" "$@"' "$product_entry" "$@"
   product_entry_status=$?
   # vc-frame owns its own alternate-buffer lifecycle; clean sticky smcup.
   leave_alt_screen
@@ -134,4 +134,7 @@ elif ! $recovery_shell && ! skip_auto_workspace; then
   fi
 fi
 
-exec /bin/zsh -l
+# Keep local ZDOTDIR startup and ZLE, but skip global login/interactive files.
+# Distribution /etc/zshrc may run compinit before our profile, prompting on
+# insecure host completions and consuming the first terminal command.
+exec /bin/zsh -d -l

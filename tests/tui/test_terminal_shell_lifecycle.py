@@ -63,7 +63,10 @@ def test_product_entry_returns_controlling_pty_to_live_shell(
     """Both attach completion and refusal must leave a shell that reads its PTY."""
     product = tmp_path / ".config/vibecrafted/vc-terminal"
     product.mkdir(parents=True)
-    (product / ".zshrc").write_text("print -r -- FALLBACK_READY\n")
+    (product / ".zshrc").write_text(
+        "[[ -o globalrcs ]] && print -r -- GLOBAL_RCS_ENABLED\n"
+        "print -r -- FALLBACK_READY\n"
+    )
     command = tmp_path / "vc-start"
     command.write_text(
         "#!/bin/zsh\n"
@@ -102,6 +105,7 @@ def test_product_entry_returns_controlling_pty_to_live_shell(
         os.write(descriptor, b"ATTACH_INPUT\n")
         read_until(f"ATTACH_EXIT_{entry_status}".encode())
         read_until(b"FALLBACK_READY")
+        assert b"GLOBAL_RCS_ENABLED" not in output
         # Split the marker so terminal echo cannot pass for shell execution.
         os.write(descriptor, b"printf 'SHELL_%s\\n' ALIVE\n")
         read_until(b"SHELL_ALIVE")
@@ -370,7 +374,7 @@ def test_product_shell_pty_routes_single_line_up_to_atuin_but_not_multiline(
         os.chdir(tmp_path)
         os.execve(
             "/bin/zsh",
-            ["/bin/zsh", "-li"],
+            ["/bin/zsh", "-d", "-li"],
             {
                 "HOME": str(tmp_path),
                 "PATH": f"{bin_dir}:/usr/bin:/bin",
@@ -430,7 +434,7 @@ def test_product_shell_pty_recalls_history_without_atuin(tmp_path: Path) -> None
         os.chdir(tmp_path)
         os.execve(
             "/bin/zsh",
-            ["/bin/zsh", "-li"],
+            ["/bin/zsh", "-d", "-li"],
             {
                 "HOME": str(tmp_path),
                 "PATH": "/usr/bin:/bin",

@@ -18,7 +18,10 @@ import struct
 import subprocess
 import termios
 import time
+from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Thread
 
 import pytest
 
@@ -102,7 +105,17 @@ def _write_fixtures(state_root: Path, alpha: Path, beta: Path) -> None:
             "ask-beta", "grok", "unknown", str(beta), None, {"needs_attention": True}
         ),
         _run_json(
-            "headless-1", "codex", "running", str(alpha), None, {"mode": "headless"}
+            "headless-1",
+            "codex",
+            "running",
+            str(alpha),
+            None,
+            {
+                "mode": "headless",
+                "started_at": (
+                    datetime.now(timezone.utc) - timedelta(minutes=1)
+                ).isoformat(),
+            },
         ),
     ]
     for row in snapshots:
@@ -222,6 +235,38 @@ def voc_binary() -> Path:
     return _build_voc()
 
 
+@pytest.fixture
+def transcript_server(tmp_path: Path):
+    """Observe reads the writer's transcript API, rather than local run paths."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            if self.path != "/api/control/runs/work-1/transcript":
+                self.send_error(404)
+                return
+            body = json.dumps(
+                {"body": (tmp_path / "ws-alpha/work-1.log").read_text()}
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *args) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    try:
+        yield server, thread
+    finally:
+        if thread.ident is not None:
+            server.shutdown()
+            thread.join()
+        server.server_close()
+
+
 def _prepare(tmp_path: Path) -> dict[str, str]:
     home = tmp_path / "home"
     home.mkdir()
@@ -250,10 +295,18 @@ def _prepare(tmp_path: Path) -> dict[str, str]:
     return env
 
 
-def test_command_bridge_home_console_pty(voc_binary: Path, tmp_path: Path) -> None:
+def test_command_bridge_home_console_pty(
+    voc_binary: Path,
+    tmp_path: Path,
+    transcript_server: tuple[ThreadingHTTPServer, Thread],
+) -> None:
     env = _prepare(tmp_path)
+    server, thread = transcript_server
+    env["VC_SERVER_URL"] = f"http://127.0.0.1:{server.server_port}"
     launch_side = Path(str(Path(env["VOC_LAUNCH_LOG"])) + ".launches")
     session = VocPty(voc_binary, env, 24, 80)
+    # Fork the PTY child before starting the API thread.
+    thread.start()
     down = b"\x1b[B"
     try:
         first = session.drain(2.0)
@@ -271,7 +324,7 @@ def test_command_bridge_home_console_pty(voc_binary: Path, tmp_path: Path) -> No
         session.send(b"f")
         session.drain(0.4)
 
-        # Global order is band, then agent: work-1 (claude, pane-2) is first.
+        # Global order is band, then date: work-1 (claude, pane-2) is newest.
         started = time.monotonic()
         session.send(b"\r")
         elapsed = None

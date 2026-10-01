@@ -39,14 +39,17 @@ metadata:
 
 <!-- fleet-imperative: v3 -->
 
-> **Invocation for `vc-forensics` (launcher `forensics`)**
+> **Invocation for `vc-forensics` (interactive skill; worker route: `workflow`)**
 >
-> | Path                    | Literal                                       |
-> | ----------------------- | --------------------------------------------- |
-> | 1. User-launched worker | `vibecrafted forensics <agent>`               |
-> | 2. Interactive          | `/vc-forensics` — execute **in this session** |
-> | 3. Agent-Operator       | `vibecrafted forensics <agent>` via dispatch  |
+> | Path                    | Literal                                                                                              |
+> | ----------------------- | ---------------------------------------------------------------------------------------------------- |
+> | 1. User-launched worker | `vibecrafted workflow <agent> --file <brief.md>`; the bounded brief explicitly loads this `SKILL.md` |
+> | 2. Interactive          | `/vc-forensics` — execute **in this session**                                                        |
+> | 3. Agent-Operator       | the existing workflow dispatch route above, within the assigned scope                                |
 >
+> The dedicated `vibecrafted forensics` command is unavailable in the current
+> command deck. Skill presence does not register a launcher. The workflow route
+> keeps its workflow run identity while the brief selects this investigation protocol.
 > Default root is **`$PWD`**.
 
 <!-- /fleet-imperative -->

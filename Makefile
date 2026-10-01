@@ -47,6 +47,8 @@ help:
 	@printf "  make update       \033[2mPull latest + reinstall\033[0m\n"
 	@printf "  make uninstall    \033[2mReverse the install\033[0m\n"
 	@printf "  make test         \033[2mRun the gates\033[0m\n"
+	@printf "  make test-source  \033[2mRun source gates without physical carrier acceptance\033[0m\n"
+	@printf "  make test-product-update-physical \033[2mVerify signed candidate/prior carriers on macOS\033[0m\n"
 	@printf "  make check        \033[2mLint shell scripts\033[0m\n"
 	@printf "  make release      \033[2mBuild, sign, notarize the canonical versioned DMG\033[0m\n"
 	@printf "  make portable     \033[2mBuild the provenance-bound tarball for Linux/WSL2\033[0m\n"
@@ -700,10 +702,27 @@ semgrep:
 
 test: test-keychain-session
 	@if command -v uv >/dev/null 2>&1; then \
-		PYTHONPATH="$(SOURCE)" uv run --with pytest pytest tests/tui -q; \
+		env -u PYTHONPATH uv run --with pytest pytest tests/tui -q --strict-markers $(TEST_PYTEST_ARGS); \
 	else \
-		PYTHONPATH="$(SOURCE)" $(PYTHON) -m pytest tests/tui -q; \
+		env -u PYTHONPATH $(PYTHON) -m pytest tests/tui -q --strict-markers $(TEST_PYTEST_ARGS); \
 	fi
+
+# Hosted source jobs have no signed/notarized product generations. Publication
+# separately requires all ten physical scenarios against authentic carriers.
+.PHONY: test-source test-product-update-physical
+test-source:
+	@$(MAKE) --no-print-directory test TEST_PYTEST_ARGS="-m 'not product_update_physical'"
+
+PRODUCT_UPDATE_ACCEPTANCE_REPORT ?= dist/product-update-acceptance.xml
+test-product-update-physical:
+	@test "$$(uname -s)" = Darwin || { printf '%s\n' 'physical product-update acceptance requires macOS' >&2; exit 1; }
+	@test -n "$${VIBECRAFTED_UPDATE_FIXTURE_ROOT:-}" && test -s "$${VIBECRAFTED_UPDATE_FIXTURE_ROOT}/release-output.json" || { printf '%s\n' 'authentic candidate release fixture is required' >&2; exit 1; }
+	@test -n "$${VIBECRAFTED_UPDATE_PRIOR_FIXTURE_ROOT:-}" && test -s "$${VIBECRAFTED_UPDATE_PRIOR_FIXTURE_ROOT}/release-output.json" || { printf '%s\n' 'authentic prior release fixture is required' >&2; exit 1; }
+	@test -n "$${VIBECRAFTED_UPDATE_PRIOR_SOURCE_REVISION:-}" || { printf '%s\n' 'exact prior source revision is required' >&2; exit 1; }
+	@env -u PYTHONPATH VIBECRAFTED_UPDATE_SOURCE_REVISION="$$(git rev-parse HEAD)" \
+		uv run --project vibecrafted-core --with pytest python -m pytest \
+		tests/tui/test_product_update.py -q --strict-markers \
+		-m product_update_physical --junitxml "$(PRODUCT_UPDATE_ACCEPTANCE_REPORT)"
 
 test-keychain-session:
 	@bash scripts/tests/keychain-session-test.sh

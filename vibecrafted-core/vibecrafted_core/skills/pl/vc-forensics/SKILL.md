@@ -39,14 +39,17 @@ metadata:
 
 <!-- fleet-imperative: v3 -->
 
-> **Wywołanie `vc-forensics` (launcher `forensics`)**
+> **Wywołanie `vc-forensics` (skill interaktywny; trasa workera: `workflow`)**
 >
-> | Ścieżka               | Literał                                        |
-> | --------------------- | ---------------------------------------------- |
-> | 1. Worker uruchamiany | `vibecrafted forensics <agent>`                |
-> | 2. Interaktywna       | `/vc-forensics` — wykonaj **w tej sesji**      |
-> | 3. Agent-Operator     | `vibecrafted forensics <agent>` przez dispatch |
+> | Ścieżka               | Literał                                                                                          |
+> | --------------------- | ------------------------------------------------------------------------------------------------ |
+> | 1. Worker uruchamiany | `vibecrafted workflow <agent> --file <brief.md>`; ograniczony brief jawnie ładuje ten `SKILL.md` |
+> | 2. Interaktywna       | `/vc-forensics` — wykonaj **w tej sesji**                                                        |
+> | 3. Agent-Operator     | istniejąca droga workflow dispatch powyżej, w przydzielonym zakresie                             |
 >
+> Dedykowana komenda `vibecrafted forensics` jest niedostępna w aktualnym command
+> decku. Obecność skilla nie rejestruje launchera. Droga workflow zachowuje
+> tożsamość runu workflow, a brief wybiera ten protokół śledztwa.
 > Domyślny root to **`$PWD`**.
 
 <!-- /fleet-imperative -->
