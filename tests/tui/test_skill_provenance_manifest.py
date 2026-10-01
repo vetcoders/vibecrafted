@@ -457,6 +457,83 @@ def test_generator_check_fails_on_an_unrecorded_skill_md(history_repo: Path) -> 
     assert gen.main(["--repo", str(history_repo), "--check"]) == 0
 
 
+def _repo_with_a_shipped_skill(tmp_path: Path) -> Path:
+    """A repo whose manifest is freshly regenerated and green on `main`,
+    returned with a `cut/sibling` branch checked out — the fleet situation:
+    worktrees share one ref store, so a sibling's commits are visible to
+    `git log --all` from every other worktree."""
+    repo = tmp_path / "repo"
+    store = repo / gen.STORE_RELATIVE
+    (store / "vc-x").mkdir(parents=True)
+    _git(repo.parent, "init", "-q", "--initial-branch=main", str(repo))
+    (store / "vc-x" / "SKILL.md").write_text("shipped\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "ship vc-x")
+    assert gen.main(["--repo", str(repo)]) == 0
+    assert gen.main(["--repo", str(repo), "--check"]) == 0
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "record the regenerated manifest")
+    _git(repo, "checkout", "-q", "-b", "cut/sibling")
+    return repo
+
+
+def test_a_sibling_branch_file_does_not_stale_the_manifest(tmp_path: Path) -> None:
+    """DEFEKT #8: a fleet sibling committing a new file under the store on its
+    own branch must not turn this tree's `--check` red — the manifest proves
+    what THIS tree released, not what a neighbour's branch carries."""
+    repo = _repo_with_a_shipped_skill(tmp_path)
+    store = repo / gen.STORE_RELATIVE
+    (store / "vc-x" / "notes.md").write_text("sibling WIP\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "sibling adds a file on its own branch")
+    _git(repo, "checkout", "-q", "main")
+
+    assert gen.main(["--repo", str(repo), "--check"]) == 0
+
+
+def test_a_sibling_branch_skill_edit_does_not_stale_the_manifest(
+    tmp_path: Path,
+) -> None:
+    """Same hermeticity, one dimension up: the sibling rewrites a SKILL.md and
+    adds a whole new skill. Neither may enter this tree's render."""
+    repo = _repo_with_a_shipped_skill(tmp_path)
+    store = repo / gen.STORE_RELATIVE
+    (store / "vc-x" / "SKILL.md").write_text("sibling rewrite\n", encoding="utf-8")
+    (store / "vc-y").mkdir()
+    (store / "vc-y" / "SKILL.md").write_text(
+        "brand new sibling skill\n", encoding="utf-8"
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "sibling rewrites vc-x and adds vc-y")
+    _git(repo, "checkout", "-q", "main")
+
+    assert gen.main(["--repo", str(repo), "--check"]) == 0
+
+
+def test_a_tagged_release_unreachable_from_head_is_still_proven(
+    tmp_path: Path,
+) -> None:
+    """Hermetic must not mean amnesiac: bytes shipped under a tag are a
+    release even when HEAD never contained them, and dropping them would make
+    a real installed copy unprovable."""
+    repo = _repo_with_a_shipped_skill(tmp_path)
+    store = repo / gen.STORE_RELATIVE
+    (store / "vc-x" / "SKILL.md").write_text(
+        "released from a side line\n", encoding="utf-8"
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "side-line release bytes")
+    _git(repo, "tag", "v9.9-side")
+    _git(repo, "checkout", "-q", "main")
+
+    assert gen.main(["--repo", str(repo)]) == 0
+
+    record = installer.load_skill_provenance(repo / gen.STORE_RELATIVE)["vc-x"]
+    body = b"released from a side line\n"
+    assert hashlib.sha256(body).hexdigest() in record.sha256
+    assert installer._git_blob_id(body) in record.files["SKILL.md"]
+
+
 def test_generator_depends_on_the_standard_library_only() -> None:
     """The generator also runs in release tooling that has no site-packages."""
     tree = ast.parse(
