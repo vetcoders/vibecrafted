@@ -455,7 +455,9 @@ def render_root_help(version: str) -> str:
 
 Usage:
   vibecrafted <command> [args]
-  vibecrafted <skill> <agent> [-p <prompt> | -f <file>]
+  vibecrafted <skill> <agent> [-p <prompt> | -f <file>] [--await]
+  vibecrafted dispatch <agent> "<prompt>" [--skill implement] [--await]
+  vibecrafted dispatch <plan.toml> [--doctor|--dry-run|--resume <run-id>]
 
 Commands:
   init [agent]         Orient an agent in this repo
@@ -628,6 +630,8 @@ def _option_lines(topic: str) -> list[str]:
         "  -p, --prompt <text>            Inline prompt",
         "  -f, --file <path.md>           Input file as prompt context",
         "  --prompt-stdin                 Read prompt from stdin into a private snapshot",
+        "  --await                        Emit receipt immediately, then join and return the run exit code",
+        "                                 With --json: receipt then completion as two JSONL records",
         "  --runtime <terminal|headless>  Presentation (default: headless)",
         "  --repo <path|org/name>         Repository (--root: identical legacy alias)",
         "  --base <ref|SHA|HEAD>          Pinned commit; local HEAD or identity remote HEAD by default",

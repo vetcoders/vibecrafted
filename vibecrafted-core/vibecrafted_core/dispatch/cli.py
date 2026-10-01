@@ -36,7 +36,7 @@ from .worktrees import WorktreeManager, canonical_artifact_root
 # session instructed `vibecrafted dispatch preflight <toml>` / `dispatch launch
 # <toml>`, neither of which exists). Treating such a token as a TOML path
 # yields a misleading "unreadable file" — refuse it loudly with the pilot
-# instead. The canonical surface stays exactly four forms; no aliases.
+# instead. The canonical surface stays four plan forms; the roster-agent adapter below does not admit verbs.
 _HALLUCINATED_VERBS = {
     "check",
     "doctor",
@@ -93,7 +93,8 @@ def _build_parser() -> argparse.ArgumentParser:
     """Build the argument parser for the ``vibecrafted dispatch`` subcommand."""
     parser = argparse.ArgumentParser(
         prog="vibecrafted dispatch",
-        description="Run or validate a vibecrafted.dispatch.v1 TOML plan.",
+        description="Run a TOML plan or launch one roster agent.",
+        epilog='Single agent: vibecrafted dispatch <agent> "<prompt>" [--skill implement] [--await] [launch flags]',
     )
     parser.add_argument("dispatch_file", help="Path to a .dispatch.toml file")
     parser.add_argument(
@@ -136,6 +137,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     if refusal:
         print(refusal, file=sys.stderr)
         return 2
+    from vibecrafted_core import cli as core_cli
+
+    if raw_argv and raw_argv[0] in core_cli.AGENTS and not Path(raw_argv[0]).is_file():
+        alias = argparse.ArgumentParser(
+            prog="vibecrafted dispatch <agent>", add_help=False
+        )
+        alias.add_argument(
+            "--skill",
+            default="implement",
+            choices=[
+                name for name in core_cli.LAUNCHERS if name not in {"paste", "partner"}
+            ],
+        )
+        # The quoted positional prompt is opaque, even if it contains option names.
+        rest = list(raw_argv[1:])
+        prompt_args = []
+        if rest and not rest[0].startswith("-"):
+            prompt_args = ["--prompt=" + rest.pop(0)]
+        options, launch_args = alias.parse_known_args(rest)
+        return core_cli.main([options.skill, raw_argv[0], *prompt_args, *launch_args])
     parser = _build_parser()
     args = parser.parse_args(argv)
     source = Path(args.dispatch_file).expanduser()

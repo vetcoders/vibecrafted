@@ -1172,3 +1172,56 @@ def test_lifecycle_schema_resource_returns_packaged_contract() -> None:
     assert payload["$id"] == "vibecrafted.lifecycle.v1"
     assert payload["properties"]["schema"]["const"] == "vibecrafted.lifecycle.v1"
     assert "worker_report_frontmatter" in payload["$defs"]
+
+
+@pytest.mark.parametrize("exit_code", [0, 9])
+def test_run_launch_await_completion_keeps_receipt_and_verdict(
+    tmp_path, monkeypatch, exit_code
+):
+    from fastmcp import Client
+    from vibecrafted_core import control_plane
+
+    monkeypatch.setattr(server._workflow, "normalize_launch_spec", lambda *a: object())
+    monkeypatch.setattr(
+        server._workflow,
+        "launch_workflow",
+        lambda *a, **k: {
+            "accepted": True,
+            "run_id": "impl-await",
+            "report": "/stub/report.md",
+            "skill": "implement",
+        },
+    )
+
+    def join(run_id, **kwargs):
+        assert run_id == "impl-await"
+        assert os.environ["VIBECRAFTED_HOME"] == str(tmp_path)
+        return {
+            "completed": True,
+            "found": True,
+            "run": {
+                "state": "completed" if exit_code == 0 else "failed",
+                "exit_code": exit_code,
+            },
+        }
+
+    monkeypatch.setattr(control_plane, "await_run", join)
+
+    async def call():
+        async with Client(server.build_server()) as client:
+            return await client.call_tool(
+                "vc_run_launch",
+                {
+                    "agent": "codex",
+                    "skill": "implement",
+                    "prompt": "x",
+                    "home": str(tmp_path),
+                    "await_completion": True,
+                },
+            )
+
+    data = _run(call()).data
+    assert data["run_id"] == "impl-await"
+    assert data["report"] == "/stub/report.md"
+    assert data["completion"]["completed"] is True
+    assert data["exit_code"] == exit_code

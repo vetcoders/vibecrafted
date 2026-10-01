@@ -395,6 +395,12 @@ def _add_launch_parser(sub: argparse._SubParsersAction, name: str) -> None:
     if name == "research":
         run.add_argument("--synthesizer", default="")
         run.add_argument("--synthesizer-model", default="")
+    run.add_argument(
+        "--await",
+        dest="await_completion",
+        action="store_true",
+        help="emit the receipt, then wait for the run and return its result",
+    )
     run.add_argument("--source-dir", default="")
     run.add_argument("--json", action="store_true")
 
@@ -925,7 +931,9 @@ def _print_launch_receipt(payload: dict[str, Any]) -> None:
     print("=====================================================================")
 
 
-def _emit_launch_result(result: dict[str, Any], *, json_mode: bool) -> int:
+def _emit_launch_result(
+    result: dict[str, Any], *, json_mode: bool, await_completion: bool = False
+) -> int:
     """Write exactly one launch receipt to stdout. Never exit 0 on empty stdout.
 
     Diagnostics go to stderr. A run that already mutated control-plane state
@@ -941,9 +949,13 @@ def _emit_launch_result(result: dict[str, Any], *, json_mode: bool) -> int:
             payload = {}
         payload.update(receipt)
         try:
-            text = json.dumps(payload, ensure_ascii=False, indent=2)
+            text = json.dumps(
+                payload, ensure_ascii=False, indent=None if await_completion else 2
+            )
         except (TypeError, ValueError):
-            text = json.dumps(receipt, ensure_ascii=False, indent=2)
+            text = json.dumps(
+                receipt, ensure_ascii=False, indent=None if await_completion else 2
+            )
         if not str(text).strip():
             print("error: launch produced an empty receipt", file=sys.stderr)
             if run_id:
@@ -968,11 +980,29 @@ def _emit_launch_result(result: dict[str, Any], *, json_mode: bool) -> int:
                 file=sys.stderr,
             )
             return _EX_TEMPFAIL if run_id else 1
-        _watch_launch_startup(result)
+        if not await_completion:
+            _watch_launch_startup(result)
     if receipt["accepted"] and not run_id:
         print("error: accepted launch missing run_id", file=sys.stderr)
         return 1
-    return 0 if receipt["accepted"] else 1
+    if not receipt["accepted"]:
+        return 1
+    if await_completion:
+        from .wrappers import (
+            _await_run_forever,
+            _completion_exit_code,
+            _print_completed,
+        )
+
+        completion = _await_run_forever(run_id, heartbeat=not json_mode)
+        if json_mode:
+            print(
+                json.dumps({**completion, "run_id": run_id}, ensure_ascii=False),
+                flush=True,
+            )
+            return _completion_exit_code(completion)
+        return _print_completed(run_id, completion)
+    return 0
 
 
 # Parity contract with the shell launcher's `spawn_watch_startup`
@@ -1187,6 +1217,10 @@ def _continue_launcher_named_session(
         launch_meta={"session_selection": selection},
         source_path=source_path,
     )
+    if args.await_completion:
+        return _emit_launch_result(
+            resume_result, json_mode=bool(args.json), await_completion=True
+        )
     if args.json:
         print(json.dumps(resume_result, ensure_ascii=False, indent=2))
     else:
@@ -2947,7 +2981,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 disclosure = launch_disclosure(exc.decision)
                 if disclosure:
                     result["guard"] = disclosure
-    return _emit_launch_result(result, json_mode=bool(args.json))
+    return _emit_launch_result(
+        result, json_mode=bool(args.json), await_completion=args.await_completion
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover
