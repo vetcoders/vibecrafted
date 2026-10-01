@@ -597,16 +597,18 @@ def test_legacy_partial_delete_resume_preserves_history_and_plan(
     }
 
 
-def test_old_rescue_label_is_never_rewritten(tmp_path, roots, capsys, quiet_census):
-    publish(tmp_path, roots, capsys, 0)
-    snapshot = roots["runtime_home"] / ".installer-backups/rescue/original/pre-rescue"
-    snapshot.mkdir(parents=True)
+def test_old_rescue_label_is_never_rewritten(capsys, reviewed_capture):
+    snapshot, _old, token, original = reviewed_capture
     label = snapshot / "label.json"
-    label.write_bytes(b'{"original_aggregate": "unresolved", "paths": []}')
     before = label.read_bytes()
+    # Keep the authentic label/archive; break one capture's original token
+    # binding, so refusal proves the per-capture guard rather than a missing file.
+    (snapshot / token).rename(snapshot / "unbound-capture")
     code, result = retire(capsys, "--plan", "--legacy-inventory", str(snapshot))
-    assert code == 2 and "per-capture" in result["reason"]
+    assert code == 2
+    assert result["reason"] == "original rescue capture type/closed inventory disagrees"
     assert snapshot.exists() and label.read_bytes() == before
+    assert (snapshot.parent / "original-receipt.json").read_bytes() == original
 
 
 def test_legacy_hundreds_of_leaves_use_bounded_receipt_writes(
@@ -1031,7 +1033,7 @@ def test_lease_plan_and_finish_cli_are_idempotent(tmp_path, roots, capsys):
 
 @pytest.mark.parametrize("module", ["foundation", "iterm2_plugin"])
 def test_proven_legacy_empty_retired_module_is_not_foreign_payload(
-    tmp_path, roots, capsys, module
+    tmp_path, roots, capsys, module, quiet_census
 ):
     old, _ = publish(tmp_path, roots, capsys, 0)
     r = receipt(roots)
@@ -1162,14 +1164,19 @@ def test_linux_argv_and_dependency_paths_pin_even_with_lsof(tmp_path, monkeypatc
     (runtime / "tools/vibecrafted-current").symlink_to(current)
     process = tmp_path / "proc/123"
     process.mkdir(parents=True)
+    (process / "status").write_text(
+        "Uid:\t" + "\t".join([str(os.geteuid())] * 4) + "\nThreads:\t1\n"
+    )
+    (process / "stat").write_text("123 (fixture (worker)) S " + "0 " * 18 + "12345\n")
     (process / "cmdline").write_bytes(
         b"system-python\0" + str(old / "entry.py").encode() + b"\0"
     )
     (process / "environ").write_bytes(
         b"PYTHONPATH=" + str(old).encode() + b"\0TOKEN=must-not-persist\0"
     )
-    (process / "maps").write_text("")
+    (process / "maps").write_text(str(old / "lib/native.so"))
     (process / "fd").mkdir()
+    (process / "fd/3").symlink_to(old / "open-state")
     for leaf in ("exe", "cwd"):
         (process / leaf).symlink_to(tmp_path)
     monkeypatch.setattr(installer.sys, "platform", "linux")
@@ -1195,6 +1202,8 @@ def test_linux_argv_and_dependency_paths_pin_even_with_lsof(tmp_path, monkeypatc
     )
     assert ("process:123:argv", str(old)) in references
     assert ("process:123:environment", str(old)) in references
+    assert ("process:123:maps", str(old)) in references
+    assert ("process:123:open", str(old)) in references
     assert "must-not-persist" not in json.dumps(references)
 
 
@@ -1478,12 +1487,12 @@ def test_reviewed_generation_keeps_pins_and_archives_changed_payload(
         live.pop("install_pending")
         installer._checkpoint_runtime_install_receipt(roots["runtime_home"], live)
     if pin == "current":
-        # Replacing/restoring a selector creates a fresh physical identity. The
-        # old review must remain stale even after its target reference releases.
-        code, _stale = retire(
+        # Linux may reuse the same inode on replacement. Change-time identity
+        # must keep the old review stale after its target reference releases.
+        code, stale = retire(
             capsys, "--legacy-evidence", str(evidence_path), "--admit-plan", digest
         )
-        assert code == 2 and old.exists()
+        assert code == 2 and old.exists() and "admit-plan" in stale["reason"]
         digest = reviewed_plan(capsys, evidence_path)
     code, result = retire(
         capsys, "--legacy-evidence", str(evidence_path), "--admit-plan", digest
@@ -1494,6 +1503,88 @@ def test_reviewed_generation_keeps_pins_and_archives_changed_payload(
         Path(x["archive"]).read_bytes() for x in result["preserved"].values()
     }
     assert installer._runtime_rescue_verify_destination(roots)[0]
+
+
+def test_reviewed_generation_refuses_same_inode_selector_drift(
+    tmp_path, roots, capsys, reviewed_capture
+):
+    _, old, _, _ = reviewed_capture
+    evidence_path, _ = legacy_evidence(tmp_path, capsys, old)
+    digest = reviewed_plan(capsys, evidence_path)
+    pointer = roots["runtime_home"] / "tools/vibecrafted-current"
+    before = pointer.lstat()
+    # A real same-inode change followed by mtime restoration isolates ctime.
+    # This deterministically covers reuse without depending on the allocator.
+    os.utime(
+        pointer,
+        ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000),
+        follow_symlinks=False,
+    )
+    os.utime(
+        pointer, ns=(before.st_atime_ns, before.st_mtime_ns), follow_symlinks=False
+    )
+    after = pointer.lstat()
+    assert (after.st_dev, after.st_ino, after.st_mtime_ns) == (
+        before.st_dev,
+        before.st_ino,
+        before.st_mtime_ns,
+    )
+    assert after.st_ctime_ns != before.st_ctime_ns
+    before_receipt = installer._runtime_receipt_path(roots["runtime_home"]).read_bytes()
+    before_config = installer._runtime_config_digest(roots["product_config"])
+    code, result = retire(
+        capsys, "--legacy-evidence", str(evidence_path), "--admit-plan", digest
+    )
+    assert code == 2 and "admit-plan" in result["reason"] and old.exists()
+    assert (
+        installer._runtime_receipt_path(roots["runtime_home"]).read_bytes()
+        == before_receipt
+    )
+    assert installer._runtime_config_digest(roots["product_config"]) == before_config
+    digest = reviewed_plan(capsys, evidence_path)
+    code, result = retire(
+        capsys, "--legacy-evidence", str(evidence_path), "--admit-plan", digest
+    )
+    assert code == 0 and not old.exists(), result
+    assert {b"changed historical Python bytes", b"unique unproven hook bytes"} <= {
+        Path(x["archive"]).read_bytes() for x in result["preserved"].values()
+    }
+
+
+def test_legacy_guard_refuses_selector_change_during_verification(
+    tmp_path, roots, capsys, monkeypatch, legacy_copy
+):
+    evidence_path, _ = legacy_evidence(tmp_path, capsys, legacy_copy)
+    digest = reviewed_plan(capsys, evidence_path)
+    pointer = roots["runtime_home"] / "tools/vibecrafted-current"
+    real_verify = installer._runtime_rescue_verify_destination
+    before_receipt = installer._runtime_receipt_path(roots["runtime_home"]).read_bytes()
+
+    def race(*args, **kwargs):
+        verified = real_verify(*args, **kwargs)
+        info = pointer.lstat()
+        os.utime(
+            pointer,
+            ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000_000),
+            follow_symlinks=False,
+        )
+        return verified
+
+    monkeypatch.setattr(installer, "_runtime_rescue_verify_destination", race)
+    code, result = retire(
+        capsys, "--legacy-evidence", str(evidence_path), "--admit-plan", digest
+    )
+    assert code == 2 and legacy_copy.exists()
+    assert (
+        result["reason"] == "current publication selector changed during legacy guard"
+    )
+    assert (
+        installer._runtime_receipt_path(roots["runtime_home"]).read_bytes()
+        == before_receipt
+    )
+    assert not list(
+        (roots["runtime_home"] / ".installer-backups/drift").glob("legacy-*")
+    )
 
 
 def test_reviewed_rescue_original_receipt_tamper_after_archive_refuses_resume(
