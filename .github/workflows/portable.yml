@@ -105,7 +105,7 @@ jobs:
         run: make semgrep
       - name: Run installer tests
         timeout-minutes: 90
-        run: make test
+        run: make test-source
       - name: Build marketplace bundle
         run: make bundle
       - name: Install rsync on Linux

@@ -67,7 +67,7 @@ jobs:
         run: make semgrep
 
       - name: Run installer and product tests
-        run: make test
+        run: make test-source
 
       - name: Build the portable release channel
         run: make portable
