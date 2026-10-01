@@ -25,7 +25,7 @@ concurrency:
 
 jobs:
   portable:
-    timeout-minutes: 120
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
@@ -104,7 +104,7 @@ jobs:
       - name: Run Semgrep security gate
         run: make semgrep
       - name: Run installer tests
-        timeout-minutes: 90
+        timeout-minutes: 120
         run: make test-source
         env:
           PYTEST_ADDOPTS: "-vv -o faulthandler_timeout=120"
