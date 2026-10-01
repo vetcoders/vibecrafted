@@ -4,6 +4,7 @@ import asyncio
 import json
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import NoReturn
@@ -1587,3 +1588,67 @@ def test_unparseable_silence_override_does_not_disable_the_bound() -> None:
             os.environ.pop("VIBECRAFTED_SILENCE_TIMEOUT_SECONDS", None)
         else:
             os.environ["VIBECRAFTED_SILENCE_TIMEOUT_SECONDS"] = previous
+
+
+def test_kimi_provider_session_id_lands_in_meta_before_settlement(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A kimi run killed after its first stream event still carries the session id.
+
+    kimi's stream reveals the session id only in the trailing resume hint, so
+    the supervisor adopts it from the on-disk session store while the run is
+    live. Regression: impl-260930-210226-46946 timed out with the session dir
+    on disk from second one and provider_session_id=None in meta, which made
+    `vibecrafted resume` impossible (d4-session-id-early).
+    """
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "home"))
+    provider_home = tmp_path / "providerhome"
+    monkeypatch.setenv("VIBECRAFTED_PROVIDER_STORE_HOME", str(provider_home))
+    root = tmp_path / "worktree"
+    root.mkdir()
+    session_id = "session_deadbeef-1234-4567-89ab-0123456789ab"
+    state = (
+        provider_home
+        / ".kimi-code"
+        / "sessions"
+        / "wd_worktree_00"
+        / session_id
+        / "state.json"
+    )
+    state.parent.mkdir(parents=True)
+    state.write_text(
+        json.dumps(
+            {
+                "id": session_id,
+                "version": 2,
+                "cwd": str(root),
+                "createdAt": int(time.time() * 1000),
+            }
+        )
+    )
+    worker = tmp_path / "worker.py"
+    worker.write_text(
+        "import time\n"
+        'print(\'{\\"role\\":\\"meta\\",\\"type\\":\\"system.version\\",\\"version\\":\\"9.9.9\\"}\', flush=True)\n'
+        "time.sleep(3600)\n"
+    )
+    meta = tmp_path / "run.meta.json"
+
+    handle = asyncio.run(
+        AsyncSupervisor().run(
+            run_id="kimi-early-session",
+            command=[sys.executable, str(worker)],
+            root=root,
+            env={"VIBECRAFTED_AGENT": "kimi"},
+            meta_path=meta,
+            report_path=tmp_path / "report.md",
+            transcript_path=tmp_path / "transcript.log",
+            timeout=15,
+            require_report=False,
+        )
+    )
+
+    assert handle.exit_code != 0  # killed by the wall-clock timeout
+    payload = json.loads(meta.read_text())
+    assert payload["provider_session_id"] == session_id
+    assert payload["provider_session_source"] == "provider_session_store"
