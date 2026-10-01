@@ -200,7 +200,7 @@ _vetcoders_is_source_owner() {
   # The public source carrier deliberately excludes .git. Its regular
   # provenance/build surfaces and framework layout identify the source lane;
   # they do not stamp or admit an immutable Runtime Pack generation.
-  [[ -f "$root/distribution-provenance.json" && ! -L "$root/distribution-provenance.json" \
+  [[ -f "$root/source-provenance.json" && ! -L "$root/source-provenance.json" \
     && -f "$root/Makefile" && ! -L "$root/Makefile" \
     && -f "$root/VERSION" && -f "$root/scripts/vibecrafted" ]] || return 1
   [[ -d "$root/skills" || -d "$root/vibecrafted-core/vibecrafted_core/skills" ]] || return 1

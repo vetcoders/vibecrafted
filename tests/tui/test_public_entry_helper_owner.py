@@ -41,6 +41,8 @@ from pathlib import Path
 
 import pytest
 
+from scripts import distribution_manifest as manifest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DECK = REPO_ROOT / "scripts" / "vibecrafted"
 CORE = "vibecrafted-core/vibecrafted_core"
@@ -592,7 +594,7 @@ def _archive_source_owner(world: dict[str, Path]) -> Path:
     _write(owner / "VERSION", "4.3.2\n", executable=False)
     _write(owner / "Makefile", "# source-carrier build surface\n", executable=False)
     _write(
-        owner / "distribution-provenance.json",
+        owner / manifest.SOURCE_PROVENANCE_FILE,
         json.dumps({"source_revision": "a" * 40}) + "\n",
         executable=False,
     )
@@ -689,9 +691,9 @@ def test_non_source_owner_never_downgrades_selected_generation(
 ) -> None:
     owner = _archive_source_owner(world)
     if damage == "missing-provenance":
-        (owner / "distribution-provenance.json").unlink()
+        (owner / manifest.SOURCE_PROVENANCE_FILE).unlink()
     elif damage == "linked-provenance":
-        provenance = owner / "distribution-provenance.json"
+        provenance = owner / manifest.SOURCE_PROVENANCE_FILE
         external = provenance.rename(world["base"] / "provenance.json")
         provenance.symlink_to(external)
     elif damage == "receipt":
