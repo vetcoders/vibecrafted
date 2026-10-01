@@ -245,6 +245,11 @@ done
 
 log "prepare fake repo and fake agent CLIs"
 git -C "$work_repo" init -q
+# Explicit continuation resolves HEAD to a real baseline commit. This sandbox
+# owns its fixture identity; host signing and hooks are outside the smoke.
+git -C "$work_repo" -c core.hooksPath=/dev/null -c commit.gpgsign=false \
+  -c user.name='Portable smoke' -c user.email='portable@example.invalid' \
+  commit --allow-empty -qm 'Seed portable smoke baseline'
 mkdir -p "$work_repo/.vibecrafted/plans"
 cat > "$work_repo/.vibecrafted/plans/test.md" <<'PLAN'
 # Test plan
