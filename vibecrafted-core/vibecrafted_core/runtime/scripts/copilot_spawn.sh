@@ -16,6 +16,12 @@ EOF_USAGE
 
 mode="implement"
 runtime="headless"
+# Operator BYOK pin: ~/.config/vibecrafted/config.toml [agents.copilot.provider]
+# (Founder decision 2026-09-14: the one config.toml). Only fills vars the
+# environment does not already set, so an explicit export always wins. No
+# section present => prints nothing => today's behavior (Copilot's default
+# model). Never echoed: these are export statements fed straight to eval.
+eval "$(spawn_python_module vibecrafted_core.server_config copilot-provider-env 2>/dev/null || true)"
 model="${COPILOT_MODEL:-}"
 root=""
 plan_file=""

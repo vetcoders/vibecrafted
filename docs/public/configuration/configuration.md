@@ -67,6 +67,40 @@ Use a tailnet/LAN address when remote consumers must reach the observer. The
 LaunchAgent, status receipts, guardian URL, and Slack plist are generated views
 of this table; do not edit them as configuration.
 
+### `[agents.copilot.provider]` — BYOK model pin for the `copilot` agent
+
+The same `config.toml` can pin the `copilot` agent to a Bring-Your-Own-Key
+(BYOK) provider — for example a local Ollama endpoint — instead of Copilot's
+own default model. Absence of this section is the default: `copilot` runs
+unchanged. When present, `base_url` is required; every other key mirrors a
+`copilot help providers` environment variable one-to-one and is translated to
+`COPILOT_PROVIDER_*` / `COPILOT_MODEL` env vars at spawn time, without
+mutating your shell or exporting secrets into any report, transcript, or
+`meta.json`. A var you already exported yourself always wins over the config
+pin.
+
+```toml
+[agents.copilot.provider]
+base_url = "http://localhost:11434/v1"
+model = "kimi-k3:cloud"
+# Optional, mirroring `copilot help providers`:
+# type = "openai"
+# api_key = "..."            # prefer api_key_command for a keychain lookup
+# api_key_command = "..."
+# bearer_token = "..."
+# wire_api = "responses"
+# transport = "http"
+# headers = "X-Foo: bar"
+# model_id = "..."
+# wire_model = "..."
+# max_prompt_tokens = "128000"
+# max_output_tokens = "8192"
+```
+
+This mirrors `ollama launch copilot`'s own interactive BYOK wiring so a
+dispatched `vibecrafted implement copilot ...` headless worker can run
+against the same local model the Founder uses interactively.
+
 The default installer does not source helpers into your host shell. It may add only a guarded `~/.local/bin` `PATH` entry after explicit consent; the full helper profile belongs to the explicit `vc-start` environment.
 
 ## Installed-over-checkout doctrine

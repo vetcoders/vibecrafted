@@ -146,6 +146,23 @@ _PROVIDER_ALLOW: frozenset[str] = frozenset(
         "COPILOT_HOME",
         "COPILOT_MODEL",
         "COPILOT_AUTO_UPDATE",
+        # Copilot CLI BYOK provider (`copilot help providers`): routes the
+        # worker through an operator-chosen OpenAI-compatible endpoint, e.g.
+        # a local Ollama server serving kimi-k3:cloud. COPILOT_PROVIDER_BASE_URL
+        # is the only required var; the rest are optional per-provider tuning.
+        # Listed explicitly, not by prefix, same as every other provider above.
+        "COPILOT_PROVIDER_BASE_URL",
+        "COPILOT_PROVIDER_TYPE",
+        "COPILOT_PROVIDER_API_KEY",
+        "COPILOT_PROVIDER_API_KEY_COMMAND",
+        "COPILOT_PROVIDER_BEARER_TOKEN",
+        "COPILOT_PROVIDER_WIRE_API",
+        "COPILOT_PROVIDER_TRANSPORT",
+        "COPILOT_PROVIDER_HEADERS",
+        "COPILOT_PROVIDER_MODEL_ID",
+        "COPILOT_PROVIDER_WIRE_MODEL",
+        "COPILOT_PROVIDER_MAX_PROMPT_TOKENS",
+        "COPILOT_PROVIDER_MAX_OUTPUT_TOKENS",
     }
 )
 
