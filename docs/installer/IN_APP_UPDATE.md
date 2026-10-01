@@ -223,18 +223,18 @@ These production surfaces do **not** exist yet:
    `scripts/build-vibecrafted-release.sh` writing `dist/release-output.json` +
    `.sig` + DMG + Runtime Pack, verified by
    `python -m vibecrafted_core.product_contract release-output` and the closed
-   tree in `scripts/distribution_manifest.py`. No HTTPS origin, DNS name, or
-   GitHub Releases URL is authorized in this repository. `VCUpdateFeedURL` is
-   therefore omitted from `Info.plist`. AppDelegate owns that Info.plist key
-   (`resolveLiveUpdateChannel`); Policy only validates a caller-supplied
-   HTTPS string (`resolveProductUpdateFeedURL`) and does not invent a
-   production origin. Check for Updates shows the bounded unavailable card —
-   that is the honest product state. Provisioning still required
-   (Founder-authorized, not invented here): an HTTPS URL that serves the
-   exact signed `release-output.json` and `.sig` plus the matching DMG and
-   pack artifacts, then set `VCUpdateFeedURL` to that URL at release
-   packaging time. The bundled `vibecrafted-signing-v1.pub` is already the
-   trust root.
+   tree in `scripts/distribution_manifest.py`. The Founder approved the existing
+   `vetcoders/vibecrafted` GitHub Releases channel on 2026-10-01:
+   `https://github.com/vetcoders/vibecrafted/releases/latest/download/release-output.json`.
+   Canonical App packaging stamps that default as `VCUpdateFeedURL` before
+   signing. AppDelegate reads the signed key (`resolveLiveUpdateChannel`);
+   Policy validates the supplied HTTPS string (`resolveProductUpdateFeedURL`).
+   Existing unprovisioned installs still show the bounded unavailable card.
+   The default is a declaration, not proof that usable assets are published:
+   the exact signed JSON and `.sig`, plus matching DMG and pack assets under
+   their signed relative names, must be available through `latest/download`.
+   Missing/outdated assets remain a channel delivery failure. The bundled
+   `vibecrafted-signing-v1.pub` remains the trust root.
 2. A Founder-signed fixture tuple in this worktree (the private key is not
    present). Acceptance uses the existing signed local e37 / 79001 artifacts
    on the SSD dist / archive paths. Negative signature tests use invalid
@@ -243,6 +243,58 @@ These production surfaces do **not** exist yet:
 Until (1) is provisioned, a normal install cannot download a production update.
 The mechanism, helper, verifier, installer wiring, and fixture seam are in
 source. Production discoverability remains open.
+
+## Explicit channel packaging
+
+Normal canonical App releases use the approved GitHub URL automatically:
+
+```bash
+make release-local RELEASE_FLAGS=--snapshot-donors
+```
+
+For a separately approved channel, existing environment-based packaging inputs
+support an explicit `VIBECRAFTED_UPDATE_FEED_URL` override. An empty override
+fails; it never falls back to the default:
+
+```bash
+VIBECRAFTED_UPDATE_FEED_URL="$approved_feed_url" make release-local RELEASE_FLAGS=--snapshot-donors
+```
+
+The builder rejects HTTP, file/local, credential-bearing and malformed URLs
+before building donors. Public HTTPS admission matches the existing
+`resolveProductUpdateFeedURL` contract; packaging additionally rejects local
+origins and ambiguous spellings. It preserves the selected value exactly,
+including query parameters, and never enables the fixture seam. Validation
+proves syntax and origin shape, not DNS, reachability, hosting or approval of
+an override.
+
+The builder writes `VCUpdateFeedURL` into the unsigned copied App before nested
+signing and product-manifest generation. The existing manifest binds the plist
+hash and the outer signature seals it. After signing, a read-only exact-input
+check writes `build/unified-release/update-channel-receipt.json` with the feed
+and plist hash. This is packaging evidence, not a second release identity.
+The release-output schema, detached RSA signature and bundled public key remain
+the release authority.
+
+For developer App/DMG builds only, explicitly choose
+`RELEASE_FLAGS='--unprovisioned-update-channel'` with `make app` or `make dmg`.
+This omits the feed and preserves the unavailable UI / explicit fixture intent.
+It cannot be combined with a feed or used for `make release-local` / `make
+notarize`. Runtime-Pack-only builds produce no App and need no channel input.
+
+`make notarize` verifies the already signed App matches the approved default
+or the same explicit override before notarization. It never edits the sealed plist;
+changing channels requires a fresh canonical build, sign and notarize. To
+repeat the channel check independently without modifying a bundle:
+
+```bash
+PYTHONPATH=vibecrafted-core scripts/project-python scripts/unified_product_manifest.py update-channel \
+  --app "$packaged_app" --feed-url "$approved_feed_url" --verify-only
+```
+
+Publishing the exact signed JSON/signature and matching relative DMG/pack
+artifacts, building/notarizing the new carrier, and validating the installed
+Check for Updates → Install Update path remain separate delivery steps.
 
 ## Physical acceptance still open (W2 / Founder)
 
