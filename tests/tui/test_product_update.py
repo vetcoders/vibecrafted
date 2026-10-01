@@ -467,17 +467,55 @@ def test_product_update_source_and_physical_gate_routes() -> None:
         workflow = (REPO_ROOT / ".github/workflows" / filename).read_text(
             encoding="utf-8"
         )
-        assert "run: make test-source" in workflow
         assert "run: make test\n" not in workflow
         job_budget = re.search(r"^    timeout-minutes: (\d+)$", workflow, re.MULTILINE)
         installer_budget = re.search(
             r"^      - name: Run installer[^\n]*\n"
             r"        timeout-minutes: (\d+)\n"
-            r"        run: make test-source$",
+            r"        run: (?:make test-source|\|)$",
             workflow,
             re.MULTILINE,
         )
         assert job_budget and installer_budget, f"{filename} must budget the full gate"
+        if filename == "portable.yml":
+            assert 'if [[ "$RUNNER_OS" == Linux ]]; then' in workflow
+            assert "sudo -n /usr/bin/env -i" in workflow
+            assert "/usr/bin/unshare --pid --fork --kill-child --mount-proc" in workflow
+            assert "/usr/bin/setpriv" in workflow
+            assert '--reuid="$test_uid" --regid="$test_gid"' in workflow
+            for option in (
+                "--clear-groups",
+                "--inh-caps=-all",
+                "--ambient-caps=-all",
+                "--bounding-set=-all",
+                "--no-new-privs",
+                "--pdeathsig keep",
+            ):
+                assert option in workflow
+            assert "exec make test-source" in workflow
+            assert re.search(
+                r"^          else\n            make test-source\n",
+                workflow,
+                re.MULTILINE,
+            )
+            assert "sudo -E" not in workflow
+            assert '"${test_env[@]}"' in workflow
+            for key in (
+                "PATH",
+                "HOME",
+                "USER",
+                "LOGNAME",
+                "CI",
+                "GITHUB_ACTIONS",
+                "RUNNER_TEMP",
+                "PYTEST_ADDOPTS",
+            ):
+                assert f'"{key}=' in workflow
+            assert '[[ "$(id -u)" == "$1" && "$(id -g)" == "$2" ]]' in workflow
+            assert '[[ "$$" == 1' in workflow
+            assert '[[ "$value" =~ ^0+$ ]]' in workflow
+        else:
+            assert "run: make test-source" in workflow
         workflow_budgets[filename] = (
             int(job_budget.group(1)),
             int(installer_budget.group(1)),
@@ -485,7 +523,8 @@ def test_product_update_source_and_physical_gate_routes() -> None:
         installer_env = re.search(
             r"^      - name: Run installer[^\n]*\n"
             r"        timeout-minutes: \d+\n"
-            r"        run: make test-source\n"
+            r"        run: (?:make test-source|\|)\n"
+            r"(?:          [^\n]*\n)*"
             r"        env:\n"
             r'          PYTEST_ADDOPTS: "([^"\n]+)"$',
             workflow,

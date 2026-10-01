@@ -105,7 +105,55 @@ jobs:
         run: make semgrep
       - name: Run installer tests
         timeout-minutes: 120
-        run: make test-source
+        run: |
+          set -euo pipefail
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            test_uid="$(id -u)"
+            test_gid="$(id -g)"
+            test_user="$(id -un)"
+            test_pid_ns="$(readlink /proc/self/ns/pid)"
+            [[ "$test_uid" != 0 ]]
+            test_state="$(mktemp -d "$RUNNER_TEMP/vc-installer-tests.XXXXXX")"
+            trap 'rm -rf -- "$test_state"' EXIT
+            test_env=(
+              "PATH=$PATH" "HOME=$HOME" "USER=$test_user" "LOGNAME=$test_user"
+              "CI=${CI:-true}" "GITHUB_ACTIONS=${GITHUB_ACTIONS:-true}"
+              "RUNNER_TEMP=$RUNNER_TEMP" "PYTEST_ADDOPTS=$PYTEST_ADDOPTS"
+              "VIBECRAFTED_HOME=$test_state"
+            )
+            # Keep setup-uv path/mode and the earlier pinned Rust toolchain paths.
+            for key in UV_CACHE_DIR UV_PYTHON_PREFERENCE RUSTUP_HOME CARGO_HOME; do
+              if [[ -n "${!key:-}" ]]; then
+                test_env+=("$key=${!key}")
+              fi
+            done
+            sudo -n /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C \
+              /usr/bin/unshare --pid --fork --kill-child --mount-proc --propagation private \
+              /usr/bin/setpriv --reuid="$test_uid" --regid="$test_gid" --clear-groups \
+              --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
+              --no-new-privs --pdeathsig keep --reset-env \
+              /usr/bin/env -i "${test_env[@]}" /bin/bash -euc '
+                [[ "$(id -u)" == "$1" && "$(id -g)" == "$2" ]]
+                [[ "$$" == 1 && "$(pwd -P)" == "$3" ]]
+                [[ "$(readlink /proc/self/ns/pid)" != "$4" ]]
+                cap_count=0
+                no_new_privs=0
+                while read -r key value; do
+                  case "$key" in
+                    CapInh:|CapPrm:|CapEff:|CapBnd:|CapAmb:)
+                      [[ "$value" =~ ^0+$ ]]
+                      cap_count=$((cap_count + 1))
+                      ;;
+                    NoNewPrivs:) no_new_privs="$value" ;;
+                  esac
+                done < /proc/self/status
+                [[ "$cap_count" == 5 && "$no_new_privs" == 1 ]]
+                printf "installer test namespace uid=%s gid=%s pid=%s\n" "$1" "$2" "$$"
+                exec make test-source
+              ' _ "$test_uid" "$test_gid" "$(pwd -P)" "$test_pid_ns"
+          else
+            make test-source
+          fi
         env:
           PYTEST_ADDOPTS: "-vv -o faulthandler_timeout=120"
       - name: Build marketplace bundle
