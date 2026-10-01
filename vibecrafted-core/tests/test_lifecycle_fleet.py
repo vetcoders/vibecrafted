@@ -34,7 +34,6 @@ from vibecrafted_core.lifecycle_fleet import (
     request_stage_dispatch_stop,
     scheduler_owner_alive,
     scheduler_owner_identity,
-    stage_dispatch_error,
     stage_dispatch_home,
     stage_dispatch_run_id,
     stage_fleet_receipts,
@@ -737,7 +736,13 @@ def test_a_scheduler_that_dies_before_its_children_is_durably_visible(
 
     # Simulate the launching process being gone: only the ledger remains.
     _FLEET_DISPATCH_ERRORS.clear()
-    error = stage_dispatch_error(run_id)
+    # Process exit and the reaper's durable write are separate checkpoints.
+    payload = _await_ledger(
+        store.root / "receipts.json",
+        lambda payload: bool(payload.get("scheduler_error")),
+        timeout=5,
+    )
+    error = str(payload.get("scheduler_error") or "")
     assert "scheduler owner exited" in error
     assert "W0-a" in error and "W0-b" in error and "W0-c" in error
 
@@ -892,9 +897,9 @@ def test_fleet_recovery_command_quotes_space_containing_plan_path() -> None:
 
 # --------------------------------------------------------------- owner boundary
 
-# The only fake in the detached-owner proof is the provider binary itself. The
-# real launcher, worktree geometry, receipt store, verifiers and control code
-# all run for real, in a fresh interpreter, out of this test's reach.
+# The provider binary is bounded. The fixture explicitly admits a red baseline
+# because its verifier measures a report that only the provider can create.
+# The launcher, worktrees, receipt store, verifiers and control code run for real.
 _BOUNDED_PROVIDER = r"""#!/bin/sh
 set -e
 # An optional dwell so a test can catch this cut genuinely in flight.
@@ -922,12 +927,19 @@ from pathlib import Path
 
 from vibecrafted_core.dispatch.doctor import diagnose_file
 from vibecrafted_core.dispatch.receipts import DispatchReceiptStore
-from vibecrafted_core.lifecycle_fleet import _start_detached_dispatch
+import vibecrafted_core.lifecycle_fleet as fleet
+
+# This fixture's future-delivery verifier is intentionally red before launch.
+# Use the CLI's explicit override; keep ordinary baseline refusal unchanged.
+owner_command = fleet.scheduler_owner_command
+def fixture_owner_command(plan, run_id):
+    return [*owner_command(plan, run_id), "--allow-red-baseline"]
+fleet.scheduler_owner_command = fixture_owner_command
 
 plan, repo, run_id = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
 dispatch = diagnose_file(plan).dispatch
 store = DispatchReceiptStore(run_id, dispatch.cuts, repo_root=str(repo), create=True)
-receipt = _start_detached_dispatch(run_id, store, plan_path=plan, repo_root=repo)
+receipt = fleet._start_detached_dispatch(run_id, store, plan_path=plan, repo_root=repo)
 print(json.dumps(receipt), flush=True)
 time.sleep(600)
 """
@@ -1021,6 +1033,7 @@ def test_the_detached_owner_outlives_its_caller_and_settles_the_fleet(
     identity = receipt["scheduler_owner_identity"]
     assert receipt["scheduler_owner_mode"] == "detached-subprocess"
     assert receipt["scheduler_detached"] is True
+    assert receipt["scheduler_owner_command"][-1] == "--allow-red-baseline"
     assert identity["pid"] == owner_pid
     # A detached owner leads its own session; that is what SIGHUP cannot reach.
     assert identity["pgid"] == owner_pid

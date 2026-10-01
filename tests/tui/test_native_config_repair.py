@@ -41,7 +41,7 @@ let healthy = envelope(#"""
 {"schema": "vibecrafted.config-repair.v1", "status": "healthy", "mode": "apply",
  "reason": "", "generation": "4.3.1+g381c6b8b", "repaired": 0, "conflicts": 0,
  "rolled_back": false, "at": "2026-09-08T11:00:00+00:00",
- "files": [{"path": "/Users/o/.config/vibecrafted/vc-frame/config.kdl",
+ "files": [{"path": "/Users/tester/.config/vibecrafted/vc-frame/config.kdl",
             "action": "unchanged", "reason": "", "backup": ""}]}
 """#)
 
@@ -49,11 +49,11 @@ let repairable = envelope(#"""
 {"schema": "vibecrafted.config-repair.v1", "status": "repairable", "mode": "plan",
  "reason": "", "generation": "4.3.1+g381c6b8b", "repaired": 0, "conflicts": 0,
  "rolled_back": false, "at": "2026-09-08T11:00:00+00:00",
- "files": [{"path": "/Users/o/.config/vibecrafted/vc-frame/config.kdl",
+ "files": [{"path": "/Users/tester/.config/vibecrafted/vc-frame/config.kdl",
             "action": "repair",
             "reason": "shipped defaults for the selected generation were never merged into this preference",
             "backup": ""},
-           {"path": "/Users/o/.config/vibecrafted/terminal-policy.toml",
+           {"path": "/Users/tester/.config/vibecrafted/terminal-policy.toml",
             "action": "unchanged", "reason": "", "backup": ""}]}
 """#)
 
@@ -61,9 +61,9 @@ let repaired = envelope(#"""
 {"schema": "vibecrafted.config-repair.v1", "status": "repaired", "mode": "apply",
  "reason": "", "generation": "4.3.1+g381c6b8b", "repaired": 2, "conflicts": 0,
  "rolled_back": true, "at": "2026-09-08T11:00:00+00:00",
- "files": [{"path": "/Users/o/.config/vibecrafted/vc-frame/config.kdl",
+ "files": [{"path": "/Users/tester/.config/vibecrafted/vc-frame/config.kdl",
             "action": "repaired", "reason": "shipped defaults changed", "backup": ""},
-           {"path": "/Users/o/.config/vibecrafted/terminal-policy.toml",
+           {"path": "/Users/tester/.config/vibecrafted/terminal-policy.toml",
             "action": "seeded", "reason": "product preference is missing", "backup": ""}]}
 """#)
 
@@ -72,16 +72,16 @@ let conflict = envelope(#"""
  "reason": "product configuration needs an explicit choice",
  "generation": "4.3.1+g381c6b8b", "repaired": 0, "conflicts": 1,
  "rolled_back": false, "at": "2026-09-08T11:00:00+00:00",
- "files": [{"path": "/Users/o/.config/vibecrafted/vc-frame/config.kdl",
+ "files": [{"path": "/Users/tester/.config/vibecrafted/vc-frame/config.kdl",
             "action": "conflict", "reason": "KDL structure is unbalanced",
-            "backup": "/Users/o/.local/share/vibecrafted/.installer-backups/drift-1/config.kdl"}]}
+            "backup": "/Users/tester/.local/share/vibecrafted/.installer-backups/drift-1/config.kdl"}]}
 """#)
 
 let wrongSchema = envelope(#"{"schema": "vibecrafted.config-repair.v9", "status": "healthy"}"#)
 
 let traceback = """
 Traceback (most recent call last):
-  File "/Users/o/.local/share/vibecrafted/releases/4.3.1/scripts/vetcoders_install.py", line 15677, in _assert
+  File "/Users/tester/.local/share/vibecrafted/releases/4.3.1/scripts/vetcoders_install.py", line 15677, in _assert
     raise ValueError("KDL edit changes nested or structural content")
           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 ValueError: KDL edit changes nested or structural content
@@ -92,7 +92,7 @@ let preferenceConflict = envelope(#"""
  "message": "Your terminal-policy.toml overlaps the new defaults on terminal.shell. The previously verified runtime is still selected.",
  "previous_runtime_available": true, "previous_runtime_version": "9.9.9+a",
  "choices": ["keep-current", "use-incoming"],
- "files": [{"path": "/Users/o/.config/vibecrafted/terminal-policy.toml",
+ "files": [{"path": "/Users/tester/.config/vibecrafted/terminal-policy.toml",
             "reason": "settings conflict with changed shipped defaults: terminal.shell",
             "settings": ["terminal.shell"], "choices": ["keep-current", "use-incoming"],
             "current_sha256": "aa", "incoming_sha256": "bb", "backup": "/backups/policy",
@@ -167,7 +167,7 @@ case "killed":
   emit(detail(outcome))
 case "arguments":
   let installer = URL(fileURLWithPath: "/gen/scripts/vetcoders_install.py")
-  let home = URL(fileURLWithPath: "/Users/o/.local/share/vibecrafted", isDirectory: true)
+  let home = URL(fileURLWithPath: "/Users/tester/.local/share/vibecrafted", isDirectory: true)
   emit(runtimeRepairArguments(installer: installer, runtimeHome: home, plan: true)
     .joined(separator: " "))
   emit(runtimeRepairArguments(installer: installer, runtimeHome: home, plan: false)
@@ -297,11 +297,11 @@ def test_the_plan_invocation_is_read_only_by_construction(policy_binary: Path) -
     plan, apply = _run(policy_binary, "arguments")
     assert plan == (
         "-B /gen/scripts/vetcoders_install.py runtime-repair "
-        "--runtime-home /Users/o/.local/share/vibecrafted --json --plan"
+        "--runtime-home /Users/tester/.local/share/vibecrafted --json --plan"
     )
     assert apply == (
         "-B /gen/scripts/vetcoders_install.py runtime-repair "
-        "--runtime-home /Users/o/.local/share/vibecrafted --json"
+        "--runtime-home /Users/tester/.local/share/vibecrafted --json"
     )
 
 

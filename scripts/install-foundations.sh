@@ -9,7 +9,7 @@ set -euo pipefail
 #   aicx / aicx-mcp       — npm: @loctree/aicx
 #   vc-frame               — required donor BINARY installed by this owner from sibling source
 #   prview                 — GitHub releases: vetcoders/prview-rs (SHA256SUMS-verified)
-#   screenscribe           — PyPI: screenscribe, installed through pipx
+#   screenscribe           — PyPI: screenscribe, installed through uv or pipx
 #
 # Usage:
 #   bash scripts/install-foundations.sh                   # install/validate foundations
@@ -52,7 +52,7 @@ AGENT_MANUAL_INSTALLS=(
   "cursor-agent|Install the Cursor CLI: curl https://cursor.com/install -fsS | bash"
 )
 
-# Script/source resolution (used by the bundled-toolchain attempt).
+# Script/source resolution (used by the optional sandbox installer).
 # Respects VIBECRAFTED_SOURCE when set; otherwise resolves the parent of
 # scripts/install-foundations.sh.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -255,28 +255,8 @@ verify_vcframe_cockpit() {
 }
 
 # ---------------------------------------------------------------------------
-# Bundled-toolchain drop-in
+# Optional local source resolution
 # ---------------------------------------------------------------------------
-# Resolves the per-arch directory where release tarballs ship notarized
-# binaries. Order of precedence:
-#   1. $VIBECRAFTED_BUNDLED_BIN (explicit override — absolute path)
-#   2. $SOURCE_DIR/tools/bin/<os>-<arch>
-#   3. $SOURCE_DIR/tools/bin  (flat fallback for dev / single-arch drops)
-bundled_bin_root() {
-  local os arch
-  if [[ -n "${VIBECRAFTED_BUNDLED_BIN:-}" ]]; then
-    printf '%s\n' "$VIBECRAFTED_BUNDLED_BIN"
-    return
-  fi
-  os="$(detect_os)"
-  arch="$(detect_arch)"
-  if [[ -d "$SOURCE_DIR/tools/bin/${os}-${arch}" ]]; then
-    printf '%s\n' "$SOURCE_DIR/tools/bin/${os}-${arch}"
-    return
-  fi
-  printf '%s\n' "$SOURCE_DIR/tools/bin"
-}
-
 _realpath_quiet() {
   local path="$1"
   if [[ -d "$path" ]]; then
@@ -284,34 +264,6 @@ _realpath_quiet() {
     return
   fi
   return 1
-}
-
-# Attempt 0 for every install_*: copy a drop-in binary from the bundled
-# tarball directory before reaching out to GitHub / cargo / npm.
-# Returns 0 only when the binary copied, chmod+x'd, and actually runs.
-install_from_bundled() {
-  local name="$1"
-  local root
-  root="$(bundled_bin_root)"
-  local src="$root/$name"
-
-  [[ -f "$src" ]] || return 1
-
-  if (( CHECK_ONLY )); then
-    info "Would install $name from bundled tarball ($src)"
-    return 0
-  fi
-
-  ensure_prefix
-  cp "$src" "$PREFIX/$name" || return 1
-  chmod +x "$PREFIX/$name"
-  if ! binary_runs "$name"; then
-    warn "Bundled $name failed to run — falling back to remote sources."
-    rm -f "$PREFIX/$name"
-    return 1
-  fi
-  ok "Installed $name from bundled tarball (notarized): $PREFIX/$name"
-  return 0
 }
 
 ensure_node() {
@@ -396,15 +348,6 @@ install_from_npm() {
   binary_runs "$binary"
 }
 
-ensure_prefix() {
-  mkdir -p "$PREFIX"
-  # Add to PATH for the rest of this script
-  case ":$PATH:" in
-    *":$PREFIX:"*) ;;
-    *) export PATH="$PREFIX:$PATH" ;;
-  esac
-}
-
 install_loctree() {
   loctree_suite_ready() {
     local missing=() bin
@@ -469,8 +412,22 @@ install_screenscribe() {
   fi
 
   if (( CHECK_ONLY )); then
-    info "Would install $SCREENSCRIBE_PACKAGE from PyPI via pipx"
+    info "Would install $SCREENSCRIBE_PACKAGE from PyPI via uv or pipx"
     return 0
+  fi
+
+  if has_cmd uv; then
+    info "Installing $SCREENSCRIBE_PACKAGE from PyPI via uv (Python >= 3.11)..."
+    uv tool install --force --python '>=3.11' \
+      --default-index https://pypi.org/simple "$SCREENSCRIBE_PACKAGE" || {
+      warn "uv failed to install $SCREENSCRIBE_PACKAGE from PyPI."
+      return 1
+    }
+    local tool_bin
+    tool_bin="$(uv tool dir --bin)" || return 1
+    export PATH="$tool_bin:$PATH"
+    binary_runs screenscribe
+    return
   fi
 
   ensure_pipx || return 1
@@ -614,9 +571,6 @@ install_prview() {
     ok "prview already installed: $(command -v prview)"
     return 0
   fi
-
-  # --- Attempt 0: bundled tarball (notarized drop-in) ---
-  install_from_bundled "prview" && return 0
 
   local target asset
   if ! target="$(prview_release_target)"; then

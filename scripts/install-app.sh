@@ -24,15 +24,18 @@ HELPER="$REPO_ROOT/scripts/vc-app-update.sh"
 [[ -f "$HELPER" ]] || { echo "install-app: missing $HELPER" >&2; exit 1; }
 mkdir -p "$STATE_DIR"
 
-TRANSACTION="install-app-$(git -C "$REPO_ROOT" rev-parse --short HEAD)-$(date +%Y%m%d%H%M%S)"
+TRANSACTION="install-app-$(/usr/bin/uuidgen | /usr/bin/tr '[:upper:]' '[:lower:]')"
+TRANSACTION_DIR="$STATE_DIR/transactions/$TRANSACTION"
+mkdir -p "$TRANSACTION_DIR"
 ARGS=(
   --source "$SOURCE_APP"
   --destination "$DESTINATION"
-  --receipt "$STATE_DIR/install-app-receipt.json"
-  --admission "$STATE_DIR/install-app-admission.json"
-  --journal "$STATE_DIR/install-app-journal.json"
+  --receipt "$TRANSACTION_DIR/receipt.json"
+  --admission "$TRANSACTION_DIR/admission.json"
+  --journal "$TRANSACTION_DIR/journal.json"
   --transaction "$TRANSACTION"
   --mode replace
+  --complete
   --relaunch
 )
 
@@ -44,4 +47,20 @@ if PID="$(pgrep -x Vibecrafted | head -1)" && [[ -n "$PID" ]]; then
 fi
 
 bash "$HELPER" "${ARGS[@]}"
-echo "[install-app] receipt: $STATE_DIR/install-app-receipt.json"
+# Latest is an atomic projection; the unique transaction records are authority.
+/usr/bin/python3 - "$STATE_DIR/install-app-latest.json" "$TRANSACTION_DIR/receipt.json" "$TRANSACTION" <<'PY'
+import json, os, sys
+from pathlib import Path
+pointer, receipt, transaction = sys.argv[1:]
+path = Path(pointer)
+for item in [*reversed(path.parents), path]:
+    if item.is_symlink():
+        raise SystemExit("install-app: refusing symlink latest projection")
+temporary = pointer + ".tmp." + str(os.getpid())
+with open(temporary, "x") as handle:
+    json.dump({"transaction": transaction, "receipt": receipt, "settlement": receipt + ".settlement.json"}, handle)
+    handle.flush()
+    os.fsync(handle.fileno())
+os.replace(temporary, pointer)
+PY
+echo "[install-app] settled receipt: $TRANSACTION_DIR/receipt.json.settlement.json"

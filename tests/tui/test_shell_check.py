@@ -15,7 +15,6 @@ def test_tracked_shell_files_cover_repo_level_shell_surfaces() -> None:
     assert "scripts/hooks/pre-push" in tracked
     assert "scripts/vibecrafted" in tracked
     assert "tests/portable/run.sh" in tracked
-    assert "tools/hooks/load-project-context.sh" in tracked
 
 
 def test_shell_for_path_uses_suffix_and_shebang(tmp_path: Path) -> None:

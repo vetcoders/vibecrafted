@@ -605,6 +605,12 @@ def test_bare_resume_admission_retains_original_selection(
         check=True,
     )
     monkeypatch.chdir(tmp_path)
+    for key in (
+        "CODEX_SESSION_ID",
+        "VIBECRAFTED_AGENT_SESSION_ID",
+        "VIBECRAFTED_RUN_ID",
+    ):
+        monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("CODEX_THREAD_ID", "source-native")
     record(workflow.control_plane_home(), "work-source", "source-native", tmp_path)
     command = interactive_workspace_command(

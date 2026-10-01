@@ -2,6 +2,10 @@
 
 ## 1. Install
 
+Find versioned DMG, Runtime Pack, Windows MSI/EXE and portable source assets
+on [GitHub Releases](https://github.com/vetcoders/vibecrafted/releases/latest).
+Each carrier has an adjacent checksum; Runtime Packs also have detached signatures.
+
 **macOS and Linux:**
 
 ```bash

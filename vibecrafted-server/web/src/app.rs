@@ -3424,7 +3424,7 @@ fn save_named_skill(name: &str, text: &str) -> Result<(), ()> {
     save_named_skill_in(&product_skill_roots(), name, text)
 }
 
-#[cfg(feature = "ssr")]
+#[cfg(all(feature = "ssr", not(feature = "hydrate")))]
 fn build_skills_snapshot(open: Option<&str>) -> SkillsSnapshot {
     let files = discover_skill_files(&product_skill_roots());
     let names: Vec<String> = files.iter().map(|file| file.name.clone()).collect();

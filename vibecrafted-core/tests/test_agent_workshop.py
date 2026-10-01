@@ -107,7 +107,7 @@ def test_default_provider_stays_codex_with_kimi_on_the_row() -> None:
     assert picker.agent == workshop.AGENTS.index("codex")
 
 
-def test_provider_row_renders_every_catalog_provider_including_kimi(
+def test_provider_row_renders_every_catalog_provider_including_kimi_and_copilot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workshop = _load()
@@ -139,9 +139,9 @@ def test_provider_row_renders_every_catalog_provider_including_kimi(
     form.draw_launcher()
 
     tokens = [text.strip() for text in drawn if text.strip() in workshop.AGENTS]
-    assert len(workshop.AGENTS) == 7
     assert sorted(tokens) == sorted(workshop.AGENTS)
     assert "kimi" in tokens
+    assert "copilot" in tokens
 
 
 def test_choice_markers_are_unboxed_and_selected_once() -> None:

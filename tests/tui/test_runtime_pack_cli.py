@@ -1468,6 +1468,19 @@ def _preflight_builder_repo(tmp_path: Path) -> tuple[Path, str, Path]:
         REPO_ROOT / "scripts/lib/release-single-flight.sh",
         repo / "scripts/lib/release-single-flight.sh",
     )
+    # App/notarize preflight validates the real Update channel before donor
+    # discovery. Supply its real Python entry point and contract dependencies;
+    # an empty package initializer keeps unrelated core runtime imports out.
+    for name in ("project-python", "unified_product_manifest.py"):
+        shutil.copy2(REPO_ROOT / "scripts" / name, repo / "scripts" / name)
+    contract_dir = repo / "vibecrafted-core/vibecrafted_core"
+    contract_dir.mkdir(parents=True)
+    (contract_dir / "__init__.py").write_text("", encoding="utf-8")
+    for name in ("product_contract.py", "runtime_pack_contract.py"):
+        shutil.copy2(
+            REPO_ROOT / "vibecrafted-core/vibecrafted_core" / name,
+            contract_dir / name,
+        )
     (repo / "VERSION").write_text(f"{VERSION}\n", encoding="utf-8")
     # The builder pins its rustup toolchain and targets as a preflight. A real
     # rustup under this fresh HOME would find no toolchain and try to install
@@ -1608,6 +1621,12 @@ def test_a_failed_preflight_invalidates_the_previous_ready_selection(
             "missing donor directory",
             id="notarize-only",
         ),
+        pytest.param(
+            ("--notarize-only",),
+            {"VIBECRAFTED_UPDATE_FEED_URL": "http://localhost/release-output.json"},
+            "update feed must be an explicit well-formed public HTTPS URL",
+            id="invalid-update-channel",
+        ),
     ),
 )
 def test_a_run_that_builds_no_carrier_leaves_the_selection_untouched(
@@ -1632,6 +1651,28 @@ def test_a_run_that_builds_no_carrier_leaves_the_selection_untouched(
     assert result.returncode != 0
     assert expected in result.stderr, result.stderr
     assert (repo / "build/runtime-pack-selection.json").read_bytes() == before
+
+
+def test_invalid_update_channel_invalidates_a_build_selection(tmp_path: Path) -> None:
+    repo, head, previous = _preflight_builder_repo(tmp_path)
+    previous_bytes = previous.read_bytes()
+
+    result = _run_builder(
+        repo,
+        "--app-only",
+        env={"VIBECRAFTED_UPDATE_FEED_URL": "http://localhost/release-output.json"},
+    )
+
+    assert result.returncode == 1
+    assert (
+        "update feed must be an explicit well-formed public HTTPS URL" in result.stderr
+    )
+    assert "FATAL: invalid explicit Update channel" in result.stderr
+    record = _record(repo)
+    assert record["status"] == "pending"
+    assert record["source_revision"] == head
+    assert "pack" not in record
+    assert previous.read_bytes() == previous_bytes
 
 
 def _selection_shell(script: str, *arguments: str) -> subprocess.CompletedProcess[str]:

@@ -2,10 +2,11 @@
 # Publish the installable Vibecrafted artifacts after a cold verification of the
 # exact bytes downloaded back from a draft GitHub Release.
 #
-# Three carriers, one release, one commit:
+# Six carriers, one release, one commit:
 #   macOS desktop -> the signed, notarized, stapled DMG
 #   macOS CLI     -> the signed binary Runtime Pack embedded in that App
 #   other systems -> the provenance-bound portable source tarball
+#   Windows       -> checksummed MSI/EXE and a signed Windows Runtime Pack
 # Each channel is verified against the bytes GitHub hands back, never against
 # the bytes this machine still has in dist/. The asset allowlist below stays
 # exact: a release that grew an asset nobody named is a release nobody audited.
@@ -109,9 +110,9 @@ test "$(uv run python3 -c 'import json; print(json.load(open("dist/portable-outp
 # Authenticode-unsigned; trust is .sha256 (+ .sig for the Runtime Pack), the
 # same provenance idea as the portable tarball not being Apple-notarized.
 # Never invent a wildcard here — every asset must be named before upload.
-if [[ "$DMG_NAME" =~ ^Vibecrafted_([0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?)-([0-9]{8})-([0-9a-f]+)\.dmg$ ]]; then
-  WINDOWS_DATE="${BASH_REMATCH[2]}"
-  WINDOWS_SHA="${BASH_REMATCH[3]}"
+if [[ "$DMG_NAME" =~ ^Vibecrafted_"$VERSION"-([0-9]{8})-([0-9a-f]{8})\.dmg$ ]]; then
+  WINDOWS_DATE="${BASH_REMATCH[1]}"
+  WINDOWS_SHA="${BASH_REMATCH[2]}"
 else
   die "cannot derive Windows asset stem from DMG name: $DMG_NAME"
 fi
@@ -324,12 +325,12 @@ cat > "$REPORT" <<EOF
 | Vibecrafted.app desktop UI | local process | none | logged-in macOS user | app-owned runtime environment |
 | Runtime Pack install (macOS CLI) | none; same immutable payload as the App | not applicable | invoking user | one receipted runtime/config layout |
 | Portable source install (Linux / WSL2 / explicit source fallback) | none; \`install.sh\` publishes into the user-owned runtime home | not applicable | invoking user | user-owned runtime home, no host config rewrites |
-| vc-server service | typed Vibecrafted settings; default loopback, operator may choose any host:port such as \`100.82.232.70:3025\` | operator-owned for non-loopback exposure | configured service policy | runtime service environment, never host config rewrites |
+| vc-server service | typed Vibecrafted settings; default loopback \`127.0.0.1:3024\`; the Founder chooses any non-loopback bind | Founder-owned for non-loopback exposure | configured service policy | runtime service environment, never host config rewrites |
 | vc-frame web client | disabled unless explicitly configured | operator-owned | vc-frame auth boundary | runtime-only |
 
 ## 3. Deployment mode decision
 
-The shipped topology is one runtime product with three carriers: a signed and notarized macOS desktop DMG, the same signed binary Runtime Pack for macOS CLI users, and one portable source distribution for systems Apple notarization cannot reach. \`Vibecrafted.app\` owns app/DMG/onboarding/update but does not own a second runtime. \`vc-terminal\` is a deterministic embedded terminal substrate and \`vc-frame\` is the embedded session interior. App onboarding and \`make install\` invoke the same receipted installer. Rollback is deterministic uninstall plus installation of the prior carrier; live session state remains separate runtime state.
+The shipped topology is one runtime product with six carriers: a signed and notarized macOS desktop DMG, the same signed binary Runtime Pack for macOS CLI users, a portable source distribution, Windows MSI/EXE installers, and the signed Windows Runtime Pack. \`Vibecrafted.app\` owns app/DMG/onboarding/update but does not own a second runtime. \`vc-terminal\` is a deterministic embedded terminal substrate and \`vc-frame\` is the embedded session interior. App onboarding and \`make install\` invoke the same receipted installer. Rollback is deterministic uninstall plus installation of the prior carrier; live session state remains separate runtime state.
 
 The portable channel is not a second product: it is the same commit, projected through the allowlisted distribution writer, carrying a closed \`source-provenance.json\` whose distribution-tree digest names that commit. It installs through \`install.sh --archive-file\`, which refuses a payload whose provenance does not close. Rollback is re-running the installer from the prior release asset.
 
@@ -390,7 +391,7 @@ bash $PORTABLE_ROOT_NAME/install.sh
 
 ## Sign-off
 
-PASS — the release has exactly five canonically named installable carriers built from one commit: \`$DMG_NAME\` for macOS desktop, \`$RUNTIME_PACK_NAME\` for macOS CLI, \`$PORTABLE_NAME\` as the cross-platform source fallback, plus the Windows MSI/EXE (\`$WINDOWS_MSI_NAME\` / \`$WINDOWS_EXE_NAME\`) and Windows Runtime Pack (\`$WINDOWS_PACK_NAME\`). Windows MSI/EXE are Authenticode-unsigned; trust is provenance (.sha256 / .sig), same idea as the portable tarball not being Apple-notarized. App and CLI consume one Runtime Pack authority; no donor repo owns a competing app, installer or update channel.
+PASS — the release has exactly six canonically named installable carriers built from one commit: \`$DMG_NAME\` for macOS desktop, \`$RUNTIME_PACK_NAME\` for macOS CLI, \`$PORTABLE_NAME\` as the cross-platform source fallback, plus the Windows MSI/EXE (\`$WINDOWS_MSI_NAME\` / \`$WINDOWS_EXE_NAME\`) and Windows Runtime Pack (\`$WINDOWS_PACK_NAME\`). Windows MSI/EXE are Authenticode-unsigned; trust is provenance (.sha256 / .sig), same idea as the portable tarball not being Apple-notarized. App and CLI consume one Runtime Pack authority; no donor repo owns a competing app, installer or update channel.
 EOF
 
 gh release edit "$TAG" --repo "$REPO" --notes-file "$REPORT" --draft=false --latest

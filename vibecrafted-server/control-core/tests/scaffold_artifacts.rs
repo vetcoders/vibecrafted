@@ -888,18 +888,12 @@ fn doctor_r12_ignores_checked_founder_explanation_outside_table() {
     .expect("driver rewrite");
 
     let report = ScaffoldArtifactStore::new(&home)
-        .doctor(
-            "vetcoders",
-            "vibecrafted",
-            "2026_0720",
-            "plan-explanation",
-        )
+        .doctor("vetcoders", "vibecrafted", "2026_0720", "plan-explanation")
         .expect("doctor");
 
     assert!(
         !report.errors.iter().any(|error| {
-            error.code == "reception_matrix"
-                && error.message.contains("acceptance/founder.json")
+            error.code == "reception_matrix" && error.message.contains("acceptance/founder.json")
         }),
         "errors={:?}",
         report.errors

@@ -45,11 +45,10 @@ cp example-settings.json $HOME/.claude/settings.json
 
 ### Tool Augmentation
 
-| Hook                           | Event                | Purpose                       |
-| ------------------------------ | -------------------- | ----------------------------- |
-| `brave-web-search.sh`          | PreToolUse:WebSearch | Custom web search handling    |
-| `intelligent-tool-selector.sh` | PreToolUse           | Smart tool routing            |
-| `load-project-context.sh`      | SessionStart         | Load project-specific context |
+| Hook                           | Event                | Purpose                    |
+| ------------------------------ | -------------------- | -------------------------- |
+| `brave-web-search.sh`          | PreToolUse:WebSearch | Custom web search handling |
+| `intelligent-tool-selector.sh` | PreToolUse           | Smart tool routing         |
 
 ## MCP Servers
 

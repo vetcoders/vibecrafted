@@ -1,6 +1,6 @@
 # Vibecrafted Housekeeping
 
-This is a Vista-style reset surface: categories, plan first, explicit execute,
+This reset surface uses categories, plan first, explicit execute,
 background operation, and durable receipts. It is not a recursive wipe of
 `~/.vibecrafted`.
 

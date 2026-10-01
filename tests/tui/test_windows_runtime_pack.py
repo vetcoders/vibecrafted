@@ -874,9 +874,7 @@ def test_canonical_doctor_roots_follow_localappdata(
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(installer.sys, "platform", "win32")
-    monkeypatch.setattr(
-        "vibecrafted_core.runtime_paths.is_windows", lambda: True
-    )
+    monkeypatch.setattr("vibecrafted_core.runtime_paths.is_windows", lambda: True)
     monkeypatch.setattr(installer, "is_windows", lambda: True)
     monkeypatch.setattr(
         installer,
@@ -933,7 +931,8 @@ def test_runtime_pack_launcher_target_recognizes_windows_cmd(
     )
 
     assert (
-        installer._runtime_pack_launcher_target(launcher, current) == generation.resolve()
+        installer._runtime_pack_launcher_target(launcher, current)
+        == generation.resolve()
     )
 
 
@@ -1019,9 +1018,7 @@ def test_product_config_home_ignores_xdg_on_windows(
     monkeypatch.setenv("LOCALAPPDATA", str(local))
     monkeypatch.setenv("APPDATA", str(roaming))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(roaming))
-    monkeypatch.setattr(
-        "vibecrafted_core.runtime_paths.is_windows", lambda: True
-    )
+    monkeypatch.setattr("vibecrafted_core.runtime_paths.is_windows", lambda: True)
 
     assert vibecrafted_product_config_home() == roaming / "Vibecrafted"
 
@@ -1038,9 +1035,7 @@ def test_vc_frame_user_config_dir_uses_appdata_on_windows(
     monkeypatch.setenv("HOME", str(profile))
     monkeypatch.setenv("APPDATA", str(roaming))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
-    monkeypatch.setattr(
-        "vibecrafted_core.runtime_paths.is_windows", lambda: True
-    )
+    monkeypatch.setattr("vibecrafted_core.runtime_paths.is_windows", lambda: True)
 
     assert vc_frame_user_config_dir() == roaming / "Vibecrafted" / "vc-frame"
     assert (

@@ -24,6 +24,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  ledger-windows:
+    name: Settlement ledger (native Windows)
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+      - name: Verify ledger ownership, recovery and concurrent writers
+        shell: pwsh
+        run: |
+          $env:PYTHONPATH = $null
+          $env:PYTHONHOME = $null
+          # The retention integration also exercises POSIX-only control-plane
+          # event rotation. This gate proves the standalone permanent ledger.
+          uv run --project vibecrafted-core --with pytest python -m pytest vibecrafted-core/tests/test_settlement_ledger.py -q -k "not normal_event_and_snapshot_retention"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
   core-macos:
     runs-on: macos-15
     timeout-minutes: 30

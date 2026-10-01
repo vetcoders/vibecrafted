@@ -51,6 +51,10 @@ HOLD_UNTIL=""
 PRIOR_PACK=""
 PRIOR_GENERATION=""
 INSTALLER_STATUS=""
+COMPLETE=0
+HISTORICAL_EVIDENCE=""
+PLAN_ONLY=0
+ADMIT_PLAN=""
 
 HARNESS=0
 if [[ "${VIBECRAFTED_UPDATE_HELPER_HARNESS:-}" == "1" ]]; then
@@ -58,7 +62,7 @@ if [[ "${VIBECRAFTED_UPDATE_HELPER_HARNESS:-}" == "1" ]]; then
 fi
 
 usage() {
-  echo "usage: vc-app-update --source APP --destination APP --receipt FILE [--admission FILE] [--journal FILE] [--transaction ID] [--mode replace|restore|recover] [--wait-pid PID] [--wait-start LSTART] [--wait-timeout SECONDS] [--relaunch] [--resume] [--expected-identifier ID] [--expected-team TEAM]" >&2
+  echo "usage: vc-app-update --source APP --destination APP --receipt FILE [--admission FILE] [--journal FILE] [--transaction ID] [--mode replace|restore|recover|settle] [--complete] [--historical-evidence FILE] [--plan-only] [--admit-plan SHA256] [--wait-pid PID] [--wait-start LSTART] [--wait-timeout SECONDS] [--relaunch] [--resume] [--expected-identifier ID] [--expected-team TEAM]" >&2
   exit 2
 }
 
@@ -79,6 +83,10 @@ while [[ $# -gt 0 ]]; do
     --wait-timeout) WAIT_TIMEOUT="${2:-}"; shift 2 ;;
     --relaunch) RELAUNCH=1; shift ;;
     --resume) RESUME=1; shift ;;
+    --complete) COMPLETE=1; shift ;;
+    --historical-evidence) HISTORICAL_EVIDENCE="${2:-}"; shift 2 ;;
+    --plan-only) PLAN_ONLY=1; shift ;;
+    --admit-plan) ADMIT_PLAN="${2:-}"; shift 2 ;;
     --expected-identifier) EXPECTED_IDENTIFIER="${2:-}"; shift 2 ;;
     --expected-team) EXPECTED_TEAM="${2:-}"; shift 2 ;;
     --open-bin)
@@ -122,9 +130,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$SOURCE" && -n "$DESTINATION" && -n "$RECEIPT" ]] || usage
-if [[ "$MODE" != "replace" && "$MODE" != "restore" && "$MODE" != "recover" ]]; then
-  echo "mode must be replace, restore, or recover" >&2
+if [[ "$MODE" != "replace" && "$MODE" != "restore" && "$MODE" != "recover" && "$MODE" != "settle" ]]; then
+  echo "mode must be replace, restore, recover, or settle" >&2
   exit 2
+fi
+if [[ "$COMPLETE" -eq 1 && "$MODE" != "replace" ]] || [[ ( -n "$HISTORICAL_EVIDENCE" || -n "$ADMIT_PLAN" || "$PLAN_ONLY" -eq 1 ) && "$MODE" != "settle" ]]; then
+  usage
 fi
 
 # Survive parent UI exit. Do not follow or replace through a symlink.
@@ -508,6 +519,14 @@ write_terminal_receipt() {
     "$(escape_json "$EXPECTED_TEAM")" \
     "$(escape_json "$TRANSACTION")")"
   write_journal "receipt_written" "$detail"
+  if [[ "$MODE" == "replace" ]]; then
+    local registry="${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/vibecrafted-product-update"
+    assert_no_symlink_components "$registry"
+    mkdir -p "$registry"
+    assert_no_symlink_components "$registry/app-capture-latest.json"
+    atomic_write "$registry/app-capture-latest.json" "$(printf '{"transaction":"%s","destination":"%s","receipt":"%s","admission":"%s","journal":"%s"}' \
+      "$(escape_json "$TRANSACTION")" "$(escape_json "$DESTINATION")" "$(escape_json "$RECEIPT")" "$(escape_json "$ADMISSION")" "$(escape_json "$JOURNAL")")"
+  fi
 }
 
 # The terminal receipt is written before open(1). After a successful open,
@@ -786,6 +805,7 @@ for key in (
     "config_pending",
     "uninstall_pending",
     "config_conflicts",
+    "rescue_pending",
 ):
     if receipt_doc.get(key):
         sys.exit(1)
@@ -924,7 +944,7 @@ emit_success_and_exit() {
   write_journal "adopted" "$detail"
   write_terminal_receipt "$detail" "true"
   fail_after_if "receipt"
-  relaunch_destination || true
+  finish_replacement
   exit 0
 }
 
@@ -1110,7 +1130,7 @@ reconcile_resume() {
             if [[ ! -f "$RECEIPT" ]]; then
               write_terminal_receipt "$(terminal_detail)" "true"
             fi
-            relaunch_destination || true
+            finish_replacement
             exit 0
           fi
           echo "replace resume is missing the adopted destination" >&2
@@ -1493,13 +1513,388 @@ restore_previous_tuple() {
   exit 0
 }
 
+# Settlement is part of the mutation owner, under the same durable flock inode.
+# The Python body uses fd-relative, no-follow deletion and a write-ahead inode
+# inventory so an interrupted deletion can be retried without re-inventing
+# authority from a half-deleted signature. It never enumerates captures to own.
+settle_capture() {
+  local runtime_home
+  runtime_home="${VIBECRAFTED_RUNTIME_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted}"
+  without_update_lock_fd /usr/bin/python3 - "$DESTINATION" "$RECEIPT" "$ADMISSION" "$JOURNAL" \
+    "$TRANSACTION" "$runtime_home" "$EXPECTED_IDENTIFIER" "$EXPECTED_TEAM" \
+    "$HISTORICAL_EVIDENCE" "$FAIL_AFTER" "$PLAN_ONLY" "$ADMIT_PLAN" <<'PY'
+import hashlib
+import json
+import os
+import re
+import stat
+import subprocess
+import sys
+from pathlib import Path
+
+dest, receipt_path, admission_path, journal_path, txn, runtime, identifier, team, historical, fail, plan_only, admitted_plan = sys.argv[1:]
+dest, runtime = Path(dest), Path(runtime)
+parent = dest.parent
+capture = parent / (".vc-update-capture-" + txn)
+base = Path(receipt_path)
+plan_path = Path(receipt_path + ".settlement-plan.json")
+result_path = Path(receipt_path + ".settlement.json")
+
+def require(ok, reason):
+    if not ok:
+        raise RuntimeError(reason)
+
+def physical(path):
+    path = Path(path)
+    require(path.is_absolute() and ".." not in path.parts, "noncanonical path")
+    for item in [*reversed(path.parents), path]:
+        require(not item.is_symlink(), "symlink/path replacement: " + str(item))
+    return path
+
+def read(path):
+    physical(path)
+    require(Path(path).is_file(), "missing durable evidence: " + str(path))
+    data = json.loads(Path(path).read_text())
+    require(isinstance(data, dict), "invalid evidence object")
+    return data
+
+def digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+def write_new(path, data):
+    physical(path)
+    encoded = json.dumps(data, sort_keys=True, separators=(",", ":")) + "\n"
+    temp = path.with_name(path.name + ".tmp." + str(os.getpid()))
+    with temp.open("x") as handle:
+        handle.write(encoded)
+        handle.flush()
+        os.fsync(handle.fileno())
+    try:
+        os.link(temp, path)  # immutable, never overwrite an earlier authority
+    finally:
+        temp.unlink()
+    fd = os.open(str(path.parent), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+def inode(path):
+    info = physical(path).lstat()
+    return [info.st_dev, info.st_ino]
+
+def signed_identity(path):
+    physical(path)
+    subprocess.run(["/usr/bin/codesign", "--verify", "--strict", str(path)], check=True, capture_output=True)
+    shown = subprocess.run(["/usr/bin/codesign", "--display", "--verbose=4", str(path)], check=True, capture_output=True, text=True)
+    fields = dict(line.split("=", 1) for line in (shown.stdout + shown.stderr).splitlines() if "=" in line)
+    require(fields.get("Identifier") == identifier and fields.get("TeamIdentifier") == team, "wrong signed App owner")
+    require(bool(re.fullmatch(r"[0-9a-f]+", fields.get("CDHash", ""))), "missing cdhash")
+    return "cdhash:" + fields["CDHash"]
+
+def publication():
+    pointer = read(runtime / "active.json")
+    install = read(runtime / "install-receipt.json")
+    require(pointer.get("schema") == "vibecrafted.active-runtime.v1" and install.get("schema") == "vibecrafted.runtime-install.v1", "wrong publication schema")
+    version = pointer.get("version", "")
+    require(isinstance(version, str) and re.fullmatch(r"[A-Za-z0-9.+_-]+", version) and install.get("version") == version, "mismatched publication")
+    require(not any(install.get(key) for key in ("install_pending", "config_pending", "uninstall_pending", "config_conflicts", "rescue_pending", "foundation_service_pending", "rolled_back_at")), "publication pending or rolled back")
+    require("config_transaction" not in install and install.get("install_phase") not in ("preparing", "ancillary"), "publication unresolved")
+    require(pointer.get("app_root") == str(dest) and install.get("app_root") == str(dest), "publication names another App")
+    generation = physical(runtime / "releases" / version)
+    require(pointer.get("runtime_root") == str(generation), "publication names another runtime root")
+    require(physical(generation / "VERSION").read_text().strip() == version, "runtime VERSION mismatch")
+    product = read(dest / "Contents/Resources/product-manifest.json")
+    manifest = read(generation / "runtime-manifest.json")
+    provenance = read(generation / "runtime-pack-provenance.json")
+    require(product.get("schema") == "io.vetcoders.vibecrafted.product.v1" and manifest.get("schema") == "vibecrafted.runtime-generation.v2", "wrong product/generation schema")
+    revision = product.get("git_sha", "")
+    require(bool(re.fullmatch(r"[0-9a-f]{40}", revision)) and manifest.get("source_revision") == revision and manifest.get("version") == version, "published source is not signed App source")
+    expected = {"vibecrafted": revision}
+    for module in product.get("modules", []):
+        expected[module["module"]] = module["git_sha"]
+    require(provenance.get("schema") == "io.vetcoders.vibecrafted.runtime-pack-provenance.v1" and provenance.get("source_revisions") == expected, "published modules do not match signed App")
+    # The signed carrier's existing read-only destination owner validates
+    # hashes, selectors, native helpers, configuration lineage and launchers.
+    # Do not grow a second partial definition of runtime health here.
+    python = physical(generation / "bin/python3")
+    verifier = physical(dest / "Contents/Resources/runtime/scripts/vetcoders_install.py")
+    environment = os.environ.copy()
+    for key in ("PYTHONPATH", "PYTHONHOME"):
+        environment.pop(key, None)
+    environment.update(PYTHONDONTWRITEBYTECODE="1", PYTHONNOUSERSITE="1")
+    checked = subprocess.run([str(python), "-B", str(verifier), "runtime-resolve", "--runtime-home", str(runtime), "--json"], env=environment, capture_output=True, text=True, timeout=60)
+    require(checked.returncode == 0, "canonical destination verifier refused: " + (checked.stdout + checked.stderr)[-1500:])
+    resolution = json.loads(checked.stdout)
+    require(resolution.get("schema") == "vibecrafted.runtime-resolution.v1" and resolution.get("status") == "ready", "canonical destination is not ready")
+    resolved = resolution.get("runtime") or {}
+    require(resolved.get("root") == str(generation) and resolved.get("app_root") == str(dest), "canonical destination identity disagrees")
+    # Keep the installer's actual observations, rather than minting a success bit.
+    return {"pointer": pointer, "installer_receipt_sha256": digest(install), "source_revisions": expected}
+
+def binding(receipt, admission, journal, transaction, expected_capture):
+    require(receipt.get("schema") == "io.vetcoders.vibecrafted.app-replacement.v1" and receipt.get("replaced") is True and receipt.get("detail") == "replaced", "no successful replacement authority")
+    require(admission.get("schema") == "io.vetcoders.vibecrafted.app-replacement-admission.v1" and admission.get("status") == "ready", "no READY authority")
+    require(journal.get("schema") == "io.vetcoders.vibecrafted.app-update-journal.v1" and journal.get("phase") in ("receipt_written", "relaunched"), "helper operation live, failed or unresolved")
+    recovered_history = bool(historical) and journal.get("operation") in ("restore", "recover")
+    for doc in (receipt, admission, journal):
+        require(doc.get("transaction") == transaction and doc.get("destination") == str(dest) and doc.get("capture") == str(expected_capture), "wrong destination/transaction/capture")
+        operation = journal["operation"] if doc is journal and recovered_history else "replace"
+        require(doc.get("identifier") == identifier and doc.get("team_id") == team and doc.get("mode") == operation and doc.get("operation") == operation, "wrong transaction owner/operation")
+        expected_identity = receipt.get("prior_identity") if doc is journal and recovered_history else receipt.get("source_identity")
+        require(doc.get("source_identity") == expected_identity, "candidate cdhash disagreement")
+    expected_candidate = receipt.get("prior_identity") if recovered_history else receipt.get("source_identity")
+    require(journal.get("parent") == str(parent) and journal.get("candidate_identity") == expected_candidate, "wrong journal binding")
+    require(journal.get("prior_identity") == receipt.get("prior_identity"), "prior cdhash disagreement")
+    require(receipt.get("journal") == admission.get("journal") and (recovered_history or journal.get("receipt") == admission.get("receipt")), "owner paths disagree")
+    return digest({"receipt": receipt, "admission": admission, "journal": journal})
+
+def stamp(info):
+    # Directory mtimes change during deletion; files must keep their bound bytes.
+    result = [info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode), info.st_uid]
+    if not stat.S_ISDIR(info.st_mode):
+        result += [info.st_size, info.st_mtime_ns]
+    return result
+
+def inventory(root):
+    entries = {}
+    def traversal_error(error):
+        raise error
+    for directory, dirs, files in os.walk(root, followlinks=False, onerror=traversal_error):
+        for name in [*dirs, *files]:
+            path = physical(Path(directory) / name)
+            info = path.lstat()
+            require(stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode), "foreign capture entry type")
+            if name == ".DS_Store" and stat.S_ISREG(info.st_mode):
+                continue
+            entries[str(path.relative_to(root))] = stamp(info)
+    return entries
+
+def no_live_capture():
+    # lsof includes mapped images, executable text, cwd and open descriptors.
+    # Check command lines too, before planning and again before applying.
+    opened = subprocess.run(["/usr/sbin/lsof", "-nP", "-Fpn"], capture_output=True, text=True, timeout=60)
+    require(opened.returncode in (0, 1) and not opened.stderr, "cannot establish live capture dependencies")
+    prefix = str(capture) + "/"
+    require(not any(line.startswith("n") and (line[1:] == str(capture) or line[1:].startswith(prefix)) for line in opened.stdout.splitlines()), "live mapped/open capture dependency")
+    processes = subprocess.run(["/bin/ps", "-axo", "pid=,command="], check=True, capture_output=True, text=True, timeout=30)
+    require(str(capture) not in processes.stdout, "live process capture dependency")
+
+def settle_legacy(evidence):
+    require(evidence.get("transaction") == txn and evidence.get("capture") == str(capture) and evidence.get("destination") == str(dest), "wrong reviewed legacy path/transaction")
+    require(evidence.get("identifier") == identifier and evidence.get("team_id") == team and evidence.get("uid") == os.getuid(), "wrong reviewed legacy owner")
+    history = evidence.get("history")
+    require(isinstance(history, dict) and history.get("state") in ("failed-before-adoption", "restored", "missing", "replaced"), "missing honest legacy history")
+    for record in history.get("records", []):
+        require(hashlib.sha256(physical(record["path"]).read_bytes()).hexdigest() == record["sha256"], "legacy historical evidence changed")
+    require(inode(parent) == evidence.get("parent_inode"), "legacy parent inode replaced")
+    require(parent.stat().st_uid == evidence.get("parent_uid"), "legacy parent owner changed")
+    observed = publication()
+    installed = signed_identity(dest)
+    no_live_capture()
+    owner_digest = digest(evidence)
+    if result_path.exists():
+        result = read(result_path)
+        require(result.get("owner_sha256") == owner_digest and result.get("status") == "disposed" and not capture.exists(), "legacy settlement disagrees")
+        return
+    if plan_path.exists():
+        plan = read(plan_path)
+        require(plan.get("schema") == "io.vetcoders.vibecrafted.app-capture-disposal-plan.v1" and plan.get("authority") == "reviewed-legacy-inventory" and plan.get("owner_sha256") == owner_digest and plan.get("destination") == str(dest) and plan.get("capture") == str(capture) and plan.get("transaction") == txn, "wrong legacy disposal plan")
+    else:
+        require(inode(capture) == evidence.get("capture_inode") and capture.stat().st_uid == evidence["uid"], "legacy capture inode/owner replaced")
+        apps = evidence.get("apps")
+        require(isinstance(apps, dict) and bool(apps) and set(apps) <= {"prior.app", "displaced.app", "failed-new.app"}, "invalid reviewed legacy App children")
+        require({p.name for p in capture.iterdir()} - {".DS_Store"} == set(apps), "foreign legacy capture child")
+        for name, identity in apps.items():
+            path = capture / name
+            require(path.stat().st_uid == evidence["uid"] and inode(path) == identity.get("inode") and signed_identity(path) == identity.get("identity"), "legacy captured identity/inode changed")
+        entries = inventory(capture)
+        require(entries == evidence.get("entries"), "reviewed legacy inventory changed")
+        plan = {"schema": "io.vetcoders.vibecrafted.app-capture-disposal-plan.v1", "authority": "reviewed-legacy-inventory", "transaction": txn, "capture": str(capture), "destination": str(dest), "owner_sha256": owner_digest, "capture_inode": evidence["capture_inode"], "parent_inode": evidence["parent_inode"], "entries": entries, "history": history, "publication": observed, "installed_identity": installed}
+        write_new(plan_path, plan)
+    plan_hash = digest(plan)
+    if plan_only == "1":
+        print(json.dumps({"status": "authorized-for-review", "plan": str(plan_path), "plan_sha256": plan_hash}))
+        return
+    require(admitted_plan == plan_hash, "legacy apply requires exact --admit-plan digest")
+    require(plan.get("publication") == observed and plan.get("installed_identity") == installed, "legacy publication changed since plan review")
+    require(publication() == observed and signed_identity(dest) == installed, "legacy publication changed during apply")
+    no_live_capture()
+    if fail == "settlement_authorized":
+        raise OSError("injected legacy cleanup failure")
+    global recovery
+    recovery = True  # exact reviewed children include proven failed-new.app
+    parent_fd = os.open(str(parent), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        require([os.fstat(parent_fd).st_dev, os.fstat(parent_fd).st_ino] == plan["parent_inode"], "legacy parent replaced")
+        if capture.exists():
+            fd = os.open(capture.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+            try:
+                require([os.fstat(fd).st_dev, os.fstat(fd).st_ino] == plan["capture_inode"], "legacy capture replaced")
+                delete_bound(fd, "", plan["entries"])
+            finally:
+                os.close(fd)
+            require(inode(capture) == plan["capture_inode"], "legacy capture replaced before removal")
+            os.rmdir(capture.name, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
+    write_new(result_path, {"schema": "io.vetcoders.vibecrafted.app-capture-settlement.v1", "status": "disposed", "authority": "reviewed-legacy-inventory", "transaction": txn, "capture": str(capture), "destination": str(dest), "installed_identity": installed, "owner_sha256": owner_digest, "plan_sha256": plan_hash, "history": history, "publication": observed})
+
+def delete_bound(fd, prefix, entries):
+    for name in os.listdir(fd):
+        if not prefix:
+            require(name in (("prior.app", "displaced.app", ".DS_Store") + (("failed-new.app",) if recovery else ())), "foreign capture entry")
+        relative = prefix + name
+        # Finder metadata carries no payload or ownership. Still refuse symlinks.
+        info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        if name == ".DS_Store" and stat.S_ISREG(info.st_mode):
+            os.unlink(name, dir_fd=fd)
+            continue
+        require(relative in entries and stamp(info) == entries[relative], "capture path/inode replaced: " + relative)
+        if stat.S_ISDIR(info.st_mode):
+            child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            try:
+                require(stamp(os.fstat(child)) == entries[relative], "capture directory replaced")
+                delete_bound(child, relative + "/", entries)
+            finally:
+                os.close(child)
+            require(stamp(os.stat(name, dir_fd=fd, follow_symlinks=False)) == entries[relative], "capture directory replaced before removal")
+            os.rmdir(name, dir_fd=fd)
+        else:
+            os.unlink(name, dir_fd=fd)
+            if fail == "settlement_deleting":
+                raise OSError("injected partial deletion failure; same inode plan is retryable")
+
+try:
+    physical(dest)
+    physical(capture)
+    if historical:
+        evidence = read(historical)
+        if evidence.get("schema") == "io.vetcoders.vibecrafted.app-capture-legacy-admission.v1":
+            settle_legacy(evidence)
+            sys.exit(0)
+    receipt, admission, journal = read(base), read(admission_path), read(journal_path)
+    owner_digest = binding(receipt, admission, journal, txn, capture)
+    if not historical:
+        require(receipt.get("journal") == journal_path and journal.get("receipt") == receipt_path and admission.get("receipt") == receipt_path, "receipt paths do not name this transaction")
+    current_identity = signed_identity(dest)
+    observed = publication()
+    no_live_capture()
+    recovery = None
+    if historical:
+        evidence = read(historical)
+        require(evidence.get("schema") == "io.vetcoders.vibecrafted.app-capture-history.v1" and evidence.get("transaction") == txn and evidence.get("capture") == str(capture), "wrong historical evidence")
+        # Old singleton records may be archived, but their internal bindings
+        # must remain untouched. Successor settlements form an exact hash chain.
+        cursor = receipt["source_identity"]
+        require(journal.get("operation") == "replace" or bool(evidence.get("recovery_receipt")), "advanced historical journal requires terminal recovery authority")
+        if evidence.get("recovery_receipt"):
+            recovery = read(evidence["recovery_receipt"])
+            recovery_journal = read(evidence["recovery_journal"])
+            require(recovery.get("schema") == "io.vetcoders.vibecrafted.app-replacement.v1" and recovery.get("replaced") is True and recovery.get("operation") in ("restore", "recover"), "historical recovery not completed")
+            require(recovery.get("detail") == ("restored" if recovery["operation"] == "restore" else "recovered"), "historical recovery detail mismatch")
+            require(recovery_journal.get("schema") == "io.vetcoders.vibecrafted.app-update-journal.v1" and recovery_journal.get("phase") in ("receipt_written", "relaunched") and recovery.get("journal") == evidence["recovery_journal"], "historical recovery journal unresolved")
+            require(recovery_journal.get("receipt") == evidence["recovery_receipt"] and recovery_journal.get("operation") == recovery.get("operation"), "historical recovery owner paths disagree")
+            for doc in (recovery, recovery_journal):
+                require(doc.get("transaction") == txn and doc.get("destination") == str(dest) and doc.get("capture") == str(capture) and doc.get("prior_identity") == receipt.get("prior_identity") and doc.get("source_identity") == receipt.get("prior_identity") and doc.get("identifier") == identifier and doc.get("team_id") == team, "wrong historical recovery binding")
+            cursor = receipt["prior_identity"]
+        for successor_path in evidence.get("successor_settlements", []):
+            successor = read(successor_path)
+            require(successor.get("schema") == "io.vetcoders.vibecrafted.app-capture-settlement.v1" and successor.get("status") == "disposed" and successor.get("destination") == str(dest), "unsettled historical successor")
+            require(successor.get("prior_identity") == cursor, "historical chain gap")
+            cursor = successor.get("installed_identity", successor.get("source_identity"))
+        require(cursor == current_identity, "historical chain does not reach installed App")
+        owner = {"capture_inode": evidence.get("capture_inode"), "parent_inode": evidence.get("parent_inode")}
+    else:
+        require(receipt.get("source_identity") == current_identity, "installed cdhash does not match transaction")
+        owner = read(receipt_path + ".capture-owner.json")
+        require(owner.get("schema") == "io.vetcoders.vibecrafted.app-capture-owner.v1" and owner.get("transaction") == txn and owner.get("capture") == str(capture), "wrong capture creation authority")
+    owner = {"capture_inode": owner.get("capture_inode"), "parent_inode": owner.get("parent_inode")}
+    if result_path.exists():
+        result = read(result_path)
+        require(result.get("status") == "disposed" and result.get("owner_sha256") == owner_digest and not capture.exists(), "settlement receipt disagrees with payload")
+        sys.exit(0)
+    if plan_path.exists():
+        plan = read(plan_path)
+        require(plan.get("schema") == "io.vetcoders.vibecrafted.app-capture-disposal-plan.v1" and plan.get("owner_sha256") == owner_digest and plan.get("transaction") == txn and plan.get("capture") == str(capture) and plan.get("destination") == str(dest), "wrong settlement plan")
+    else:
+        require(inode(parent) == owner.get("parent_inode") and inode(capture) == owner.get("capture_inode"), "capture or parent inode replaced")
+        for entry in capture.iterdir():
+            physical(entry)
+            allowed = ("prior.app", "displaced.app", ".DS_Store") + (("failed-new.app",) if recovery else ())
+            require(entry.name in allowed, "foreign capture entry: " + entry.name)
+            if entry.name != ".DS_Store":
+                expected = receipt.get("source_identity") if entry.name == "failed-new.app" else receipt.get("prior_identity")
+                require(signed_identity(entry) == expected, "wrong captured cdhash")
+        require((capture / "prior.app").is_dir() or not receipt.get("prior_identity"), "missing rollback App")
+        plan = {"schema": "io.vetcoders.vibecrafted.app-capture-disposal-plan.v1", "transaction": txn, "capture": str(capture), "destination": str(dest), "owner_sha256": owner_digest, **owner, "entries": inventory(capture), "publication": observed}
+        write_new(plan_path, plan)
+    require(plan.get("capture_inode") == owner.get("capture_inode") and plan.get("parent_inode") == inode(parent), "disposal inode authority changed")
+    require(publication() == observed and signed_identity(dest) == current_identity, "publication changed during settlement")
+    if plan_only == "1":
+        print(json.dumps({"status": "authorized", "transaction": txn, "capture": str(capture), "plan": str(plan_path), "plan_sha256": digest(plan)}))
+        sys.exit(0)
+    if fail == "settlement_authorized":
+        raise OSError("injected cleanup failure; payload retained for retry")
+    no_live_capture()
+    parent_fd = os.open(str(parent), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        require([os.fstat(parent_fd).st_dev, os.fstat(parent_fd).st_ino] == plan["parent_inode"], "parent changed")
+        if capture.exists():
+            fd = os.open(capture.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+            try:
+                require([os.fstat(fd).st_dev, os.fstat(fd).st_ino] == plan["capture_inode"], "capture replaced")
+                delete_bound(fd, "", plan["entries"])
+            finally:
+                os.close(fd)
+            require(inode(capture) == plan["capture_inode"], "capture replaced before removal")
+            os.rmdir(capture.name, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
+    result = {"schema": "io.vetcoders.vibecrafted.app-capture-settlement.v1", "status": "disposed", "transaction": txn, "capture": str(capture), "destination": str(dest), "source_identity": receipt["source_identity"], "installed_identity": current_identity, "prior_identity": receipt.get("prior_identity", ""), "owner_sha256": owner_digest, "plan_sha256": digest(plan), "publication": observed}
+    write_new(result_path, result)
+    print(json.dumps(result, sort_keys=True))
+except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, KeyError) as error:
+    print("capture settlement incomplete (retry with the same transaction): " + str(error), file=sys.stderr)
+    sys.exit(20)
+PY
+}
+
+complete_replacement() {
+  local pack installer
+  pack="$(pack_payload_in_dir "$DESTINATION/Contents/Resources/runtime-pack")" || {
+    echo "replacement incomplete: no unique bundled Runtime Pack; rollback retained" >&2
+    return 20
+  }
+  installer="$DESTINATION/Contents/Resources/runtime-pack/install-runtime-pack.sh"
+  assert_no_symlink_components "$installer"
+  [[ -x "$installer" ]] || { echo "replacement incomplete: bundled installer missing" >&2; return 20; }
+  without_update_lock_fd /bin/bash "$installer" --pack "$pack" --app-root "$DESTINATION" \
+    --terminal-host "$DESTINATION/Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty" \
+    --frame-helper "$DESTINATION/Contents/Helpers/vc-frame" || return "$?"
+}
+
+finish_replacement() {
+  if [[ "$COMPLETE" -eq 1 ]]; then
+    complete_replacement || return "$?"
+    relaunch_destination || return "$?"
+    settle_capture || return "$?"
+  else
+    relaunch_destination || true
+  fi
+}
+
 validate_transaction_id "$TRANSACTION"
 if [[ "$RESUME" -eq 1 && -z "$JOURNAL" ]]; then
   JOURNAL="${RECEIPT}.journal.json"
 fi
 
-[[ -e "$SOURCE" ]] || { echo "source app missing: $SOURCE" >&2; exit 3; }
-SOURCE="$(physical_existing_dir "$SOURCE")"
+if [[ "$MODE" != "settle" ]]; then
+  [[ -e "$SOURCE" ]] || { echo "source app missing: $SOURCE" >&2; exit 3; }
+  SOURCE="$(physical_existing_dir "$SOURCE")"
+fi
 DESTINATION="$(canonical_leaf_path "$DESTINATION")"
 RECEIPT="$(canonical_leaf_path "$RECEIPT")"
 if [[ -n "$ADMISSION" ]]; then
@@ -1544,6 +1939,14 @@ if [[ "$RESUME" -ne 1 && -f "$JOURNAL" ]]; then
   # Fresh restore/recover must compare the original preserved capture identity.
   # A leftover replace journal is the authority; do not hash whatever is live.
   if [[ "$MODE" == "restore" || "$MODE" == "recover" ]]; then
+    original_transaction="$(journal_require transaction)"
+    if [[ -n "$TRANSACTION" && "$TRANSACTION" != "$original_transaction" ]] || \
+      [[ "$(journal_require destination)" != "$DESTINATION" ]] || \
+      [[ "$(journal_require identifier)" != "$EXPECTED_IDENTIFIER" ]] || \
+      [[ "$(journal_require team_id)" != "$EXPECTED_TEAM" ]]; then
+      echo "refusing wrong restore/recover transaction binding" >&2
+      exit 14
+    fi
     PRIOR_IDENTITY="$(journal_get prior_identity || true)"
     SOURCE_IDENTITY="$(journal_get source_identity || true)"
     TRANSACTION="$(journal_get transaction || printf '%s' "$TRANSACTION")"
@@ -1560,6 +1963,33 @@ trap 'release_lock' EXIT
 trap 'exit 143' TERM INT
 acquire_lock
 
+if [[ "$MODE" == "settle" ]]; then
+  settle_capture
+  exit "$?"
+fi
+
+if [[ "$RESUME" -ne 1 && ( "$MODE" == "restore" || "$MODE" == "recover" ) && "$(journal_get mode || true)" == "replace" ]]; then
+  # Recovery advances its journal, but the original replacement binding stays
+  # available forever. Never overwrite the replacement's terminal receipt.
+  [[ "$(journal_require receipt)" != "$RECEIPT" ]] || { echo "recovery requires a distinct receipt path" >&2; exit 14; }
+  assert_no_symlink_components "$JOURNAL.replace.json"
+  without_update_lock_fd /usr/bin/python3 - "$JOURNAL" "$JOURNAL.replace.json" <<'PY'
+import os, sys
+source, archive = sys.argv[1:]
+with open(source, "rb") as handle:
+    payload = handle.read()
+if os.path.exists(archive):
+    with open(archive, "rb") as handle:
+        if handle.read() != payload:
+            raise SystemExit("replacement journal archive disagrees")
+else:
+    with open(archive, "xb") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+PY
+fi
+
 if [[ "$RESUME" -eq 1 ]]; then
   bind_resume_journal
 fi
@@ -1572,6 +2002,12 @@ if [[ "$MODE" == "restore" ]]; then
   restore_previous_tuple
 fi
 
+for record in "$RECEIPT" "$ADMISSION" "$JOURNAL" "$RECEIPT.capture-owner.json"; do
+  [[ ! -e "$record" && ! -L "$record" ]] || { echo "refusing to overwrite transaction evidence: $record" >&2; exit 14; }
+done
+[[ "$RECEIPT" != "$ADMISSION" && "$RECEIPT" != "$JOURNAL" && "$ADMISSION" != "$JOURNAL" ]] || {
+  echo "receipt, admission and journal must be distinct" >&2; exit 14;
+}
 SOURCE_IDENTITY="$(app_identity_token "$SOURCE")" || {
   reject_preflight "source has no durable content identity" 9
 }
@@ -1579,7 +2015,21 @@ if ! verify_signed_app "$SOURCE"; then
   reject_preflight "source failed signed identity check at the mutation boundary" 9
 fi
 
-mkdir -p "$CAPTURE"
+assert_no_symlink_components "$CAPTURE"
+mkdir -m 700 "$CAPTURE" || { echo "capture already exists or cannot be created" >&2; exit 7; }
+without_update_lock_fd /usr/bin/python3 - "$CAPTURE" "$RECEIPT.capture-owner.json" "$TRANSACTION" <<'PY'
+import json, os, sys
+from pathlib import Path
+capture, record, transaction = sys.argv[1:]
+root = Path(capture)
+def inode(path):
+    st = path.lstat()
+    return [st.st_dev, st.st_ino]
+with open(record, "x") as handle:
+    json.dump({"schema": "io.vetcoders.vibecrafted.app-capture-owner.v1", "transaction": transaction, "capture": capture, "capture_inode": inode(root), "parent_inode": inode(root.parent)}, handle)
+    handle.flush()
+    os.fsync(handle.fileno())
+PY
 if ! owned_capture_root "$CAPTURE"; then
   reject_preflight "capture path is not owned by this transaction" 7
 fi
@@ -1724,5 +2174,5 @@ fi
 # previous working tuple. Do not delete it here.
 write_terminal_receipt "$(terminal_detail)" "true"
 fail_after_if "receipt"
-relaunch_destination || true
+finish_replacement
 exit 0

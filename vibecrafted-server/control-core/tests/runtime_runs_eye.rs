@@ -127,11 +127,14 @@ fn read_state_view_surfaces_a_fresh_launching_runtime_run() {
     let view = plane.read_state_view();
 
     assert!(
-        view.active_runs.iter().any(|run| run.run_id == run_id
-            && run.state == "launching"
-            && run.health == "active"),
+        view.active_runs
+            .iter()
+            .any(|run| run.run_id == run_id && run.state == "launching" && run.health == "active"),
         "snapshot view keeps a fresh launching runtime run in Current: {:?}",
-        view.active_runs.iter().map(|run| &run.run_id).collect::<Vec<_>>()
+        view.active_runs
+            .iter()
+            .map(|run| &run.run_id)
+            .collect::<Vec<_>>()
     );
 }
 
