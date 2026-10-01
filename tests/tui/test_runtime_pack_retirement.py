@@ -39,6 +39,15 @@ def quiet_census(monkeypatch):
         return real_run(command, *args, **kwargs)
 
     monkeypatch.setattr(installer.subprocess, "run", run)
+    if sys.platform == "linux":
+        # Match the Darwin enumeration seam, not the production UID/permission
+        # policy. Real-process and subprocess cases do not use this observation.
+        real_iterdir = Path.iterdir
+        monkeypatch.setattr(
+            Path,
+            "iterdir",
+            lambda path: iter(()) if path == Path("/proc") else real_iterdir(path),
+        )
 
 
 def publish(tmp_path, roots, capsys, number):
@@ -104,6 +113,232 @@ def test_ambiguous_provider_configuration_refuses_retirement(
     assert "provider" in json.dumps(result) and "secret invalid" not in json.dumps(
         result
     )
+
+
+def _linux_census_process(tmp_path, roots, monkeypatch, *, uids, state="S"):
+    """Public proc credentials plus actual private files; census itself runs real."""
+    process = tmp_path / "proc/424242"
+    (process / "fd").mkdir(parents=True)
+    (process / "status").write_text(
+        "Uid:\t" + "\t".join(map(str, uids)) + "\nThreads:\t1\n"
+    )
+    # proc stat's starttime is field22; comm may itself contain parentheses.
+    (process / "stat").write_text(
+        "424242 (fixture (worker)) " + state + " " + "0 " * 18 + "12345\n"
+    )
+    generation = roots["runtime_home"] / "releases/9.9.0+r4"
+    generation.mkdir(parents=True)
+    current = roots["runtime_home"] / "tools/vibecrafted-current"
+    current.parent.mkdir()
+    current.symlink_to(generation)
+    (process / "cmdline").write_bytes(str(generation / "bin/python3").encode() + b"\0")
+    (process / "environ").write_bytes(
+        b"PYTHONPATH=" + str(generation / "modules").encode() + b"\0"
+    )
+    (process / "maps").write_text(str(generation / "lib/native.so"))
+    for name, target in (
+        ("exe", generation / "bin/python3"),
+        ("cwd", generation),
+        ("fd/3", generation / "open-file"),
+    ):
+        (process / name).symlink_to(target)
+    real_iterdir = Path.iterdir
+    monkeypatch.setattr(
+        Path,
+        "iterdir",
+        lambda path: iter([process]) if path == Path("/proc") else real_iterdir(path),
+    )
+    monkeypatch.setattr(installer.sys, "platform", "linux")
+    return process, generation
+
+
+@pytest.mark.parametrize("foreign,dead", [(True, False), (False, True)])
+def test_linux_census_ignores_only_bound_foreign_or_dead_tasks(
+    tmp_path, roots, monkeypatch, quiet_census, foreign, dead
+):
+    uid = os.geteuid() + 1 if foreign else os.geteuid()
+    process, _ = _linux_census_process(
+        tmp_path, roots, monkeypatch, uids=[uid] * 4, state="Z" if dead else "S"
+    )
+    real_read = Path.read_bytes
+
+    def private(path):
+        if path == process / "environ":
+            raise PermissionError("private environment must not be inspected")
+        return real_read(path)
+
+    monkeypatch.setattr(Path, "read_bytes", private)
+    references = installer._runtime_retirement_references(roots, {})
+    assert not any(label.startswith("process:424242:") for label, _ in references)
+
+
+@pytest.mark.parametrize("count", ["2", "missing", "ambiguous"])
+def test_linux_dead_group_requires_closed_single_task_proof(
+    tmp_path, roots, monkeypatch, quiet_census, count
+):
+    process, _ = _linux_census_process(
+        tmp_path, roots, monkeypatch, uids=[os.geteuid()] * 4, state="Z"
+    )
+    status = (process / "status").read_text()
+    if count == "missing":
+        status = status.replace("Threads:\t1\n", "")
+    elif count == "ambiguous":
+        status += "Threads:\t1\n"
+    else:
+        status = status.replace("Threads:\t1", "Threads:\t2")
+    (process / "status").write_text(status)
+    with pytest.raises(RuntimeError, match="(thread group|process identity).*424242"):
+        installer._runtime_retirement_references(roots, {})
+
+
+def test_linux_dead_group_rechecks_task_count(
+    tmp_path, roots, monkeypatch, quiet_census
+):
+    process, _ = _linux_census_process(
+        tmp_path, roots, monkeypatch, uids=[os.geteuid()] * 4, state="Z"
+    )
+    real_read = Path.read_text
+    observations = 0
+
+    def grew(path, *args, **kwargs):
+        nonlocal observations
+        text = real_read(path, *args, **kwargs)
+        if path == process / "status":
+            observations += 1
+            if observations > 1:
+                return text.replace("Threads:\t1", "Threads:\t2")
+        return text
+
+    monkeypatch.setattr(Path, "read_text", grew)
+    with pytest.raises(
+        RuntimeError, match="live thread group evidence unavailable.*424242"
+    ):
+        installer._runtime_retirement_references(roots, {})
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+def test_linux_census_unreadable_relevant_task_is_a_safe_residual(
+    tmp_path, roots, monkeypatch, quiet_census, mixed
+):
+    uids = [os.geteuid()] * 4
+    if mixed:
+        uids[1:] = [os.geteuid() + 1] * 3
+    process, _ = _linux_census_process(tmp_path, roots, monkeypatch, uids=uids)
+    real_read = Path.read_bytes
+
+    def private(path):
+        if path == process / "environ":
+            raise PermissionError("secret-bearing source must not appear")
+        return real_read(path)
+
+    monkeypatch.setattr(Path, "read_bytes", private)
+    with pytest.raises(
+        RuntimeError, match="live process evidence unavailable.*424242"
+    ) as caught:
+        installer._runtime_retirement_references(roots, {})
+    assert (
+        "secret-bearing" not in str(caught.value) and caught.value.__suppress_context__
+    )
+
+
+def test_linux_census_keeps_live_pins_and_refuses_pid_reuse(
+    tmp_path, roots, monkeypatch, quiet_census
+):
+    process, generation = _linux_census_process(
+        tmp_path, roots, monkeypatch, uids=[os.geteuid()] * 4
+    )
+    references = installer._runtime_retirement_references(roots, {})
+    assert {
+        label.rsplit(":", 1)[-1]
+        for label, value in references
+        if label.startswith("process:424242:") and value == str(generation)
+    } == {"argv", "environment", "maps", "open"}
+    real_read = Path.read_text
+    observations = 0
+
+    def replaced(path, *args, **kwargs):
+        nonlocal observations
+        text = real_read(path, *args, **kwargs)
+        if path == process / "stat":
+            observations += 1
+            if observations > 1:
+                return text.replace("12345", "67890")
+        return text
+
+    monkeypatch.setattr(Path, "read_text", replaced)
+    with pytest.raises(RuntimeError, match="process identity changed.*424242"):
+        installer._runtime_retirement_references(roots, {})
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux proc dumpability boundary")
+def test_linux_real_nondumpable_user_task_refuses_retirement(tmp_path, roots, capsys):
+    old, _ = publish(tmp_path, roots, capsys, 0)
+    config = Path.home() / ".codex/config.toml"
+    config.parent.mkdir(exist_ok=True)
+    config.write_text(f'pin = "{old}"\n')
+    publish(tmp_path, roots, capsys, 1)
+    publish(tmp_path, roots, capsys, 2)
+    config.write_text('pin = "no generation reference"\n')
+    original = installer._runtime_receipt_path(roots["runtime_home"]).read_bytes()
+    selector = (roots["runtime_home"] / "tools/vibecrafted-current").readlink()
+    owner = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import ctypes,sys; assert ctypes.CDLL(None).prctl(4,0,0,0,0)==0; print('ready',flush=True); sys.stdin.readline()",
+        ],
+        # The fixture knows this task is unrelated; production cannot infer
+        # that from unreadable environment/dependencies, so it must refuse.
+        cwd=tmp_path,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert owner.stdout.readline().strip() == "ready"
+        with pytest.raises(
+            RuntimeError, match=f"live process evidence unavailable.*{owner.pid}"
+        ):
+            installer._runtime_retirement_references(roots, {})
+        code, result = retire(capsys)
+        assert code == 2 and result["status"] == "residual"
+        assert (
+            f"live process evidence unavailable during retirement census: {owner.pid}"
+            in json.dumps(result)
+        )
+        assert old.exists()
+        assert (
+            installer._runtime_receipt_path(roots["runtime_home"]).read_bytes()
+            == original
+        )
+        assert (
+            roots["runtime_home"] / "tools/vibecrafted-current"
+        ).readlink() == selector
+        assert owner.poll() is None
+    finally:
+        owner.communicate("release\n", timeout=10)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux zombie proc boundary")
+def test_linux_real_zombie_holds_no_runtime_reference(roots):
+    generation = roots["runtime_home"] / "releases/9.9.0+r4"
+    generation.mkdir(parents=True)
+    current = roots["runtime_home"] / "tools/vibecrafted-current"
+    current.parent.mkdir()
+    current.symlink_to(generation)
+    pid = os.fork()
+    if pid == 0:
+        os._exit(0)
+    try:
+        process = Path(f"/proc/{pid}")
+        deadline = time.monotonic() + 5
+        while (process / "stat").read_text().rpartition(")")[2].split()[0] != "Z":
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        references = installer._runtime_retirement_references(roots, {})
+        assert not any(label.startswith(f"process:{pid}:") for label, _ in references)
+    finally:
+        os.waitpid(pid, 0)
 
 
 @pytest.mark.parametrize("shape", ["empty", "hidden", "symlink", "nonempty"])
@@ -1401,3 +1636,61 @@ def test_reviewed_disposed_root_replacement_never_claims_completion(
         assert (
             target / "foreign-data"
         ).read_bytes() == b"preserve replacement occupant"
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux", reason="Linux zombie thread-group boundary"
+)
+def test_linux_zombie_leader_with_live_thread_refuses_retirement(
+    tmp_path, roots, capsys
+):
+    old, _ = publish(tmp_path, roots, capsys, 0)
+    config = Path.home() / ".codex/config.toml"
+    config.parent.mkdir(exist_ok=True)
+    config.write_text(f'pin = "{old}"\n')
+    publish(tmp_path, roots, capsys, 1)
+    publish(tmp_path, roots, capsys, 2)
+    config.write_text('pin = "no generation reference"\n')
+    original = installer._runtime_receipt_path(roots["runtime_home"]).read_bytes()
+    selector = (roots["runtime_home"] / "tools/vibecrafted-current").readlink()
+    owner = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import ctypes,sys,threading; t=threading.Thread(target=lambda: (print('ready',flush=True),sys.stdin.readline())); t.start(); ctypes.CDLL(None).pthread_exit(None)",
+        ],
+        cwd=old,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert owner.stdout.readline().strip() == "ready"
+        process = Path(f"/proc/{owner.pid}")
+        deadline = time.monotonic() + 5
+        while (process / "stat").read_text().rpartition(")")[2].split()[0] != "Z":
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        assert "Threads:\t2" in (process / "status").read_text()
+        with pytest.raises(
+            RuntimeError, match=f"live thread group evidence unavailable.*{owner.pid}"
+        ):
+            installer._runtime_retirement_references(roots, {})
+        code, result = retire(capsys)
+        assert code == 2 and result["status"] == "residual"
+        assert (
+            f"live thread group evidence unavailable during retirement census: {owner.pid}"
+            in json.dumps(result)
+        )
+        assert old.exists()
+        assert (
+            installer._runtime_receipt_path(roots["runtime_home"]).read_bytes()
+            == original
+        )
+        assert (
+            roots["runtime_home"] / "tools/vibecrafted-current"
+        ).readlink() == selector
+    finally:
+        owner.communicate("release\n", timeout=10)
+    code, _ = retire(capsys)
+    assert code == 0 and not old.exists()

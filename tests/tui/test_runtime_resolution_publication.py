@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -265,6 +266,132 @@ def test_ready_resolution_uses_generation_host_and_one_physical_config(
     assert not (Path.home().parent / "foreign-config").exists()
 
 
+def _large_settlement_receipt(paths):
+    """Legitimate shared archives for distinct historical leaves, not JSON padding."""
+    receipt_path = installer._runtime_receipt_path(paths["runtime_home"])
+    receipt = json.loads(receipt_path.read_bytes())
+    source = paths["runtime_home"] / ".installer-backups/publication-fixture/preference"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"preserved preference bytes\n")
+    archive = installer._backup_runtime_drift(
+        source,
+        runtime_home=paths["runtime_home"],
+        receipt=receipt,
+        content_addressed=True,
+        checkpoint=False,
+    )
+    # Long nested historical paths keep the fixture small in filesystem nodes
+    # while exercising the same receipt field that grew on the real host.
+    prefix = paths["runtime_home"] / "releases/9.0.0+retired" / ("capture-" + "x" * 180)
+    receipt["drift_backup_history"].update(
+        {str(prefix / f"preference-{index}"): [str(archive)] for index in range(40000)}
+    )
+    raw = (json.dumps(receipt, indent=2) + "\n").encode()
+    assert 16 * 1024 * 1024 < len(raw) < 128 * 1024 * 1024
+    receipt_path.write_bytes(raw)
+    return receipt_path, raw, archive
+
+
+def test_resolution_accepts_large_legitimate_settlement_receipt(installed, capsys):
+    paths, _, result = installed
+    receipt_path, raw, archive = _large_settlement_receipt(paths)
+    before = _snapshot(Path.home())
+    assert (
+        installer.main(
+            ["runtime-resolve", "--runtime-home", str(paths["runtime_home"]), "--json"]
+        )
+        == 0
+    )
+    envelope = json.loads(capsys.readouterr().out)
+    assert (
+        envelope["status"] == "ready" and envelope["runtime"]["root"] == result["root"]
+    )
+    assert receipt_path.read_bytes() == raw
+    assert archive.read_bytes() == b"preserved preference bytes\n"
+    assert _snapshot(Path.home()) == before
+
+
+def test_resolution_still_refuses_oversized_generation_manifest(installed, capsys):
+    paths, _, result = installed
+    manifest = Path(result["root"]) / "runtime-manifest.json"
+    original = manifest.read_bytes()
+    manifest.write_bytes(original + b" " * (16 * 1024 * 1024))
+    envelope = _resolve(paths, capsys, status="unusable")
+    assert "size limit" in envelope["reason"]
+
+
+def test_resolution_receipt_budget_remains_bounded(installed, capsys):
+    paths, _, _ = installed
+    receipt_path = installer._runtime_receipt_path(paths["runtime_home"])
+    # Sparse excess is rejected before allocation or JSON parsing.
+    with receipt_path.open("ab") as handle:
+        handle.truncate(128 * 1024 * 1024 + 1)
+    assert (
+        installer.main(
+            ["runtime-resolve", "--runtime-home", str(paths["runtime_home"]), "--json"]
+        )
+        == 2
+    )
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["runtime"] is None and "size limit" in envelope["reason"]
+    assert receipt_path.stat().st_size == 128 * 1024 * 1024 + 1
+
+
+@pytest.mark.parametrize("alias", ["symlink", "hardlink"])
+def test_resolution_refuses_nonunique_receipt(installed, capsys, alias):
+    paths, _, _ = installed
+    receipt_path = installer._runtime_receipt_path(paths["runtime_home"])
+    saved = receipt_path.with_suffix(".saved")
+    if alias == "symlink":
+        receipt_path.rename(saved)
+        receipt_path.symlink_to(saved)
+    else:
+        os.link(receipt_path, saved)
+    before = _snapshot(Path.home())
+    assert (
+        installer.main(
+            ["runtime-resolve", "--runtime-home", str(paths["runtime_home"]), "--json"]
+        )
+        == 2
+    )
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["runtime"] is None
+    assert _snapshot(Path.home()) == before
+
+
+@pytest.mark.parametrize("replacement", [False, True])
+def test_large_receipt_drift_during_resolution_refuses(
+    installed, capsys, monkeypatch, replacement
+):
+    paths, _, _ = installed
+    receipt_path, raw, _archive = _large_settlement_receipt(paths)
+    real_result = installer._runtime_install_result
+
+    def drift(**kwargs):
+        result = real_result(**kwargs)
+        changed = json.loads(raw)
+        changed["version"] = "9.9.9+changed"
+        changed_raw = json.dumps(changed).encode()
+        if replacement:
+            incoming = receipt_path.with_suffix(".replacement")
+            incoming.write_bytes(changed_raw)
+            incoming.replace(receipt_path)
+        else:
+            receipt_path.write_bytes(changed_raw)
+        return result
+
+    monkeypatch.setattr(installer, "_runtime_install_result", drift)
+    assert (
+        installer.main(
+            ["runtime-resolve", "--runtime-home", str(paths["runtime_home"]), "--json"]
+        )
+        == 2
+    )
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["runtime"] is None
+    assert envelope["reason"] == "runtime identity changed during resolution"
+
+
 def test_runtime_install_projects_quick_cmd_binding_to_active_compact_bar(
     installed, capsys
 ):
@@ -364,12 +491,31 @@ def test_upgrade_preserves_user_kdl_policy_and_exact_theme_bytes(
     theme.write_bytes(user_theme)
     _resolve(paths, capsys, status="ready")
     old_generation = _snapshot(Path(result["root"]))
+    provider = Path.home() / ".codex/config.toml"
+    provider.parent.mkdir(exist_ok=True)
+    provider.write_text(f'pin = "{result["root"]}"\n')
+    provider_before = provider.read_bytes()
     payload_b = seed_runtime_pack(tmp_path / "pack-b", version="9.9.10+b")
     _install(payload_b, capsys)
     assert config.read_bytes() == user_config
     assert policy.read_bytes() == user_policy
     assert theme.read_bytes() == user_theme
     assert _snapshot(Path(result["root"])) == old_generation
+    assert provider.read_bytes() == provider_before
+    assert installer.main(["runtime-repair", "--retire", "--plan", "--json"]) == 0
+    plan = json.loads(capsys.readouterr().out.splitlines()[-1])
+    pinned = next(
+        item for item in plan["generations"] if item["path"] == result["root"]
+    )
+    assert pinned["action"] == "pinned"
+    assert any(reason.startswith("provider-config:") for reason in pinned["reasons"])
+    provider.write_text('pin = "canonical-provider"\n')
+    assert installer.main(["runtime-repair", "--retire", "--json"]) == 0
+    capsys.readouterr()
+    assert not Path(result["root"]).exists()
+    assert config.read_bytes() == user_config
+    assert policy.read_bytes() == user_policy
+    assert theme.read_bytes() == user_theme
     _resolve(paths, capsys, status="ready")
 
 
@@ -720,20 +866,59 @@ def test_user_edit_after_interruption_stops_recovery_before_config_writes(
 
 
 def test_snapshots_survive_two_upgrades_and_uninstall(installed, tmp_path, capsys):
-    paths, _, _ = installed
+    """Unique user history survives; obsolete publication trees may retire."""
+    paths, pack, _ = installed
+    user_extra = paths["product_config"] / "personal-notes.txt"
+    user_extra.write_bytes(b"retain this addition\n")
+    config = paths["product_config"] / "vc-frame/config.kdl"
+    _user_edit(
+        config,
+        b'copy_command "pbcopy"',
+        b'copy_command "pbcopy"\ncopy_on_select true',
+    )
+    historical_user = config.read_bytes()
+    historical_sha = hashlib.sha256(historical_user).hexdigest()
+    incoming = (
+        pack / "vibecrafted-core/vibecrafted_core/config/vc-frame/config.kdl"
+    ).read_text() + "\ncopy_on_select false\n"
     snapshots = {}
-    for version in ("9.9.10+b", "9.9.11+c"):
-        payload = seed_runtime_pack(tmp_path / version, version=version)
-        _install(payload, capsys)
+    for index, version in enumerate(("9.9.10+b", "9.9.11+c")):
+        payload = seed_runtime_pack(
+            tmp_path / version, version=version, frame_config=incoming
+        )
+        if index == 0:
+            conflict = _install_conflict(payload, capsys)
+            hit = next(
+                item
+                for item in conflict.envelope["files"]
+                if item["path"] == str(config)
+            )
+            assert hit["current_sha256"] == historical_sha
+            _install(
+                payload,
+                capsys,
+                resolve_preference="use-incoming",
+                preference_current_sha256=hit["current_sha256"],
+                preference_incoming_sha256=hit["incoming_sha256"],
+                preference_path=str(config),
+            )
+        else:
+            _install(payload, capsys)
+        assert config.read_bytes() != historical_user
+        assert b"copy_on_select false" in config.read_bytes()
+        assert user_extra.read_bytes() == b"retain this addition\n"
         receipt = json.loads(
             (paths["runtime_home"] / installer.RUNTIME_INSTALL_RECEIPT).read_text()
         )
-        history = receipt["drift_backup_history"][str(paths["product_config"])]
+        history = receipt["drift_backup_history"][str(config)]
         for raw in history:
+            assert Path(raw).is_relative_to(
+                paths["runtime_home"] / ".installer-backups/drift"
+            )
+            assert Path(raw).read_bytes() == historical_user
+            assert hashlib.sha256(Path(raw).read_bytes()).hexdigest() == historical_sha
             snapshots.setdefault(raw, _snapshot(Path(raw)))
-    assert len(snapshots) >= 2
-    user_extra = paths["product_config"] / "personal-notes.txt"
-    user_extra.write_text("retain this addition\n")
+    assert snapshots
     assert (
         installer.cmd_runtime_uninstall(Namespace(dry_run=False, emit_result=True)) == 0
     )
@@ -745,6 +930,7 @@ def test_snapshots_survive_two_upgrades_and_uninstall(installed, tmp_path, capsy
     assert len(archives) == 1
     archived = json.loads(archives[0].read_text())
     assert archived["status"] == "removed"
+    assert set(snapshots).issubset(archived["drift_backup_history"][str(config)])
     assert any(
         (Path(raw) / "personal-notes.txt").read_text() == "retain this addition\n"
         for raw in archived["drift_backup_history"][str(paths["product_config"])]

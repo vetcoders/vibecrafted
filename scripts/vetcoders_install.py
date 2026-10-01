@@ -17543,18 +17543,70 @@ def _runtime_retirement_references(
         if sys.platform == "linux":
             # lsof alone misses an interpreted module after its file closes.
             # argv and dependency search paths remain pins even when lsof exists.
+            def linux_identity(process: Path) -> tuple[tuple[Any, ...], str, int]:
+                metadata = process.stat()
+                status = (process / "status").read_text()
+                uid_rows = [
+                    line.split()[1:]
+                    for line in status.splitlines()
+                    if line.startswith("Uid:")
+                ]
+                thread_rows = [
+                    line.split()[1:]
+                    for line in status.splitlines()
+                    if line.startswith("Threads:")
+                ]
+                raw_stat = (process / "stat").read_text()
+                fields = raw_stat.rpartition(")")[2].split()
+                try:
+                    if len(uid_rows) != 1 or len(uid_rows[0]) != 4:
+                        raise ValueError
+                    uids = tuple(int(value) for value in uid_rows[0])
+                    if len(thread_rows) != 1 or len(thread_rows[0]) != 1:
+                        raise ValueError
+                    threads = int(thread_rows[0][0])
+                    if threads < 1:
+                        raise ValueError
+                    birth = int(fields[19])
+                    state = fields[0]
+                    if raw_stat.split(" ", 1)[0] != process.name:
+                        raise ValueError
+                except (ValueError, IndexError):
+                    raise RuntimeError(
+                        f"process identity unavailable during retirement census: {process.name}"
+                    ) from None
+                return (metadata.st_dev, metadata.st_ino, uids, birth), state, threads
+
             for process in Path("/proc").iterdir():
-                if not process.name.isdigit() or process.stat().st_uid != os.geteuid():
+                if not process.name.isdigit():
                     continue
                 try:
+                    identity, state, threads = linux_identity(process)
+                    # proc directory ownership changes with dumpability and is
+                    # not credential evidence. Public status binds all four UIDs.
+                    # A dead leader can still have live threads. Only a stably
+                    # single-task dead group has no userspace owners to retain.
+                    if os.geteuid() not in identity[2] or state in {"Z", "X"}:
+                        after, after_state, after_threads = linux_identity(process)
+                        if identity != after or (
+                            state in {"Z", "X"} and after_state not in {"Z", "X"}
+                        ):
+                            raise RuntimeError(
+                                f"process identity changed during retirement census: {process.name}"
+                            )
+                        if os.geteuid() in identity[2] and (
+                            threads != 1 or after_threads != 1
+                        ):
+                            raise RuntimeError(
+                                f"live thread group evidence unavailable during retirement census: {process.name}"
+                            )
+                        continue
+                    argv = (process / "cmdline").read_bytes()
                     collect(
                         f"process:{process.name}:argv",
                         maintenance_argv(
                             int(process.name),
-                            (process / "cmdline")
-                            .read_bytes()
-                            .decode("utf-8", "surrogateescape")
-                            .split("\0"),
+                            argv.decode("utf-8", "surrogateescape").split("\0"),
                         ),
                     )
                     collect(
@@ -17585,9 +17637,28 @@ def _runtime_retirement_references(
                         process / "cwd",
                         *(process / "fd").iterdir(),
                     ]:
-                        collect(f"process:{process.name}:open", os.readlink(pointer))
+                        try:
+                            collect(
+                                f"process:{process.name}:open", os.readlink(pointer)
+                            )
+                        except FileNotFoundError:
+                            # A closed fd is no longer a live reference. The task
+                            # identity is still checked below before accepting it.
+                            continue
+                    after, _, _ = linux_identity(process)
+                    if identity != after or argv != (process / "cmdline").read_bytes():
+                        raise RuntimeError(
+                            f"process identity changed during retirement census: {process.name}"
+                        )
+                except PermissionError:
+                    raise RuntimeError(
+                        f"live process evidence unavailable during retirement census: {process.name}"
+                    ) from None
                 except FileNotFoundError:
-                    continue
+                    if process.exists():
+                        raise RuntimeError(
+                            f"live process evidence changed during retirement census: {process.name}"
+                        ) from None
     else:
         raise RuntimeError(
             "live dependency census unsupported on this platform; no payload retired"
@@ -24601,7 +24672,11 @@ def cmd_runtime_resolve(args: argparse.Namespace) -> int:
                     "runtime identity is partial; explicit Runtime Pack repair required"
                 )
             active_bytes = _capture_runtime_bound_file(active_path)
-            receipt_bytes = _capture_runtime_bound_file(receipt_path)
+            # Settlement/archive history is a retirement document, not a carrier
+            # manifest. Keep the stable unique-file reader and a finite budget.
+            receipt_bytes = _capture_runtime_bound_file(
+                receipt_path, max_bytes=_RUNTIME_LEGACY_DOCUMENT_MAX_BYTES
+            )
             active = json.loads(active_bytes)
             receipt = _load_runtime_install_receipt(receipt_path)
             if (
@@ -24784,7 +24859,10 @@ def cmd_runtime_resolve(args: argparse.Namespace) -> int:
             )
             if (
                 _capture_runtime_bound_file(active_path) != active_bytes
-                or _capture_runtime_bound_file(receipt_path) != receipt_bytes
+                or _capture_runtime_bound_file(
+                    receipt_path, max_bytes=_RUNTIME_LEGACY_DOCUMENT_MAX_BYTES
+                )
+                != receipt_bytes
                 or current.resolve(strict=True) != generation
             ):
                 raise RuntimeError("runtime identity changed during resolution")
