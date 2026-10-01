@@ -7,6 +7,7 @@ import json
 import shutil
 import subprocess
 import sys
+import tempfile
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -15,12 +16,21 @@ from typing import Any
 
 from vibecrafted_core.workflow import reserve_run_id
 
-from .doctor import diagnose_file
-from .model import BASE_CUT_PREFIX, STATE_VERIFIED, Cut, Dispatch, classify_base
+from .doctor import DoctorError, DoctorReport, DoctorWarning, diagnose_file
+from .model import (
+    BASE_CUT_PREFIX,
+    STATE_VERIFIED,
+    Cut,
+    Dispatch,
+    Matcher,
+    Verify,
+    classify_base,
+)
 from .receipts import DispatchReceiptStore, ReceiptContractError
 from .schema import render_cell_prompt
 from .supervisor import DispatchResult, cleanup_settled_run, run_dispatch
-from .worktrees import canonical_artifact_root
+from .verify import run_verifies
+from .worktrees import WorktreeManager, canonical_artifact_root
 
 # Verbs agents keep inventing for this CLI (observed in the wild: a planning
 # session instructed `vibecrafted dispatch preflight <toml>` / `dispatch launch
@@ -44,7 +54,7 @@ _HALLUCINATED_VERBS = {
 }
 
 _PILOT = """canonical dispatch invocations:
-  vibecrafted dispatch <plan.toml> --doctor            # validate only
+  vibecrafted dispatch <plan.toml> --doctor            # validate and verify baseline
   vibecrafted dispatch <plan.toml> --dry-run [--json]  # render prompts, launch nothing
   vibecrafted dispatch <plan.toml>                     # launch the plan
   vibecrafted dispatch <plan.toml> --resume <run-id>   # resume a recorded run"""
@@ -89,7 +99,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--doctor",
         action="store_true",
-        help="validate only; exits non-zero when the dispatch is unsafe",
+        help="validate and verify the baseline; exits non-zero when the dispatch is unsafe",
+    )
+    parser.add_argument(
+        "--allow-red-baseline",
+        action="store_true",
+        help="allow failed baseline verifiers; record the override and evidence in the tracker",
     )
     parser.add_argument(
         "--dry-run",
@@ -126,14 +141,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     source = Path(args.dispatch_file).expanduser()
 
     report = diagnose_file(source)
-    if args.doctor and not args.dry_run:
-        return _print_doctor(report, json_output=args.json)
     if not report.ok:
         _print_doctor(report, json_output=args.json)
         return 1
     assert report.dispatch is not None
 
     dispatch = _with_runtime_baseline(report.dispatch)
+    report = replace(report, dispatch=dispatch)
+    if not args.dry_run and not args.cleanup_settled:
+        report = _verify_baseline(report, allow_red=args.allow_red_baseline)
+        if not report.ok or args.doctor:
+            return _print_doctor(report, json_output=args.json)
+        assert report.dispatch is not None
+        dispatch = report.dispatch
     if args.cleanup_settled:
         try:
             outcomes = cleanup_settled_run(dispatch, args.cleanup_settled)
@@ -222,7 +242,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _print_doctor(report: Any, *, json_output: bool) -> int:
     """Render a doctor report to stdout (JSON or human-readable) and return its exit code."""
     if json_output:
-        print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+        payload = report.to_dict()
+        if report.dispatch and "verification" in report.dispatch.meta.baseline:
+            payload["baseline"] = report.dispatch.meta.baseline
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         for error in report.errors:
             print(f"{error.path}: {error.message}")
@@ -231,6 +254,109 @@ def _print_doctor(report: Any, *, json_output: bool) -> int:
         if report.ok:
             print("dispatch-doctor: ok")
     return 0 if report.ok else 1
+
+
+def _verify_baseline(report: DoctorReport, *, allow_red: bool) -> DoctorReport:
+    """Run unique verifiers in a disposable detached baseline, before admission.
+
+    Reuse the worker executor's sanitized environment, timeout and matchers.
+    Duplicate commands retain all expectations, but execute only once.
+    """
+    assert report.dispatch is not None
+    dispatch = report.dispatch
+    baseline = dict(dispatch.meta.baseline)
+    head = str(baseline.get("head") or "")
+    commands: dict[str, Verify] = {}
+    for cut in dispatch.cuts:
+        for verify in cut.verify:
+            previous = commands.get(verify.run)
+            expectations = verify.matchers
+            if not any(matcher.kind == "exit_code" for matcher in expectations):
+                expectations = (*expectations, Matcher("exit_code", 0))
+            matchers = tuple(
+                dict.fromkeys((*(previous.matchers if previous else ()), *expectations))
+            )
+            commands[verify.run] = Verify(run=verify.run, matchers=matchers)
+
+    def git(*args: str) -> None:
+        proc = subprocess.run(
+            ["git", "-C", dispatch.meta.repo, *args],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if proc.returncode:
+            raise RuntimeError(f"git {' '.join(args)}: {proc.stderr[-4000:]}")
+
+    checks: list[dict[str, Any]] = []
+    failures: list[DoctorError] = []
+    try:
+        if not head:
+            raise RuntimeError("cannot resolve baseline HEAD")
+        root = WorktreeManager(dispatch.meta.repo).worktree_root
+        root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="baseline-", dir=root) as temporary:
+            checkout = Path(temporary) / "checkout"
+            git("worktree", "add", "--detach", str(checkout), head)
+            try:
+                for verify in commands.values():
+                    print(
+                        f"baseline {head}: verify {verify.run!r}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    # Each command starts pristine, even after generated files
+                    # or source mutations by an earlier verifier.
+                    git("-C", str(checkout), "reset", "--hard", head)
+                    git("-C", str(checkout), "clean", "-fdx")
+                    verdict = run_verifies(
+                        (verify,),
+                        repo=str(checkout),
+                        env={
+                            "VIBECRAFTED_HOME": str(Path(temporary) / "runtime-home"),
+                            "CARGO_TARGET_DIR": str(checkout / "target"),
+                        },
+                    )
+                    evidence = verdict.verifiers[0]
+                    checks.append(evidence.to_dict())
+                    if not evidence.ok:
+                        failures.append(
+                            DoctorError(
+                                "baseline.verify",
+                                f"{verify.run!r} failed on baseline {head} "
+                                f"(exit_code={evidence.exit_code}, {evidence.matcher_result}); "
+                                f"output tail:\n{evidence.evidence[-2000:]}",
+                            )
+                        )
+            finally:
+                git("worktree", "remove", "--force", str(checkout))
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        # An override permits red gates, never missing isolation evidence.
+        return replace(
+            report,
+            ok=False,
+            errors=(*report.errors, DoctorError("baseline", str(exc))),
+        )
+
+    baseline["allow_red_baseline"] = allow_red
+    baseline["verification"] = {"ok": not failures, "checks": checks}
+    dispatch = replace(dispatch, meta=replace(dispatch.meta, baseline=baseline))
+    warnings = (
+        tuple(
+            DoctorWarning(error.path, f"--allow-red-baseline: {error.message}")
+            for error in failures
+        )
+        if allow_red
+        else ()
+    )
+    return replace(
+        report,
+        ok=not failures or allow_red,
+        errors=(*report.errors, *(failures if not allow_red else ())),
+        warnings=(*report.warnings, *warnings),
+        dispatch=dispatch,
+    )
 
 
 def _with_runtime_baseline(dispatch: Dispatch) -> Dispatch:

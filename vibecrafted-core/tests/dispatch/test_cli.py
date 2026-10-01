@@ -74,6 +74,204 @@ def test_cli_doctor_accepts_valid_dispatch(tmp_path: Path, capsys) -> None:
     assert captured.out.strip() == "dispatch-doctor: ok"
 
 
+@pytest.mark.parametrize("mode", [["--doctor"], []])
+def test_red_baseline_refuses_before_dispatch(
+    tmp_path: Path, capsys, monkeypatch, mode: list[str]
+) -> None:
+    plan, _, _ = _dispatch_file(tmp_path)
+    plan.write_text(
+        plan.read_text().replace(
+            'run = "echo ok"', 'run = "echo broken-baseline; exit 7"'
+        )
+    )
+
+    def forbidden_launch(*args, **kwargs):
+        pytest.fail("red baseline must refuse before the supervisor launches")
+
+    monkeypatch.setattr(dispatch_cli, "run_dispatch", forbidden_launch)
+    assert dispatch_cli.main([str(plan), *mode, "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert "echo broken-baseline; exit 7" in payload["errors"][0]["message"]
+    assert "broken-baseline" in payload["errors"][0]["message"]
+
+
+@pytest.mark.parametrize("expected", ["seed", "dirty"])
+def test_baseline_verification_uses_clean_detached_head(
+    tmp_path: Path, capsys, expected: str
+) -> None:
+    plan, _, _ = _dispatch_file(tmp_path)
+    repo = tmp_path / "repo"
+    head = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repo, text=True
+    ).strip()
+    (repo / "README.md").write_text("dirty\n")
+    (repo / "untracked.txt").write_text("preserve me\n")
+    command = "cat README.md; echo mutation > README.md; touch baseline-only.txt"
+    plan.write_text(
+        plan.read_text()
+        .replace('run = "echo ok"', f"run = {json.dumps(command)}")
+        .replace('contains = "ok"', f'contains = "{expected}"')
+    )
+
+    assert dispatch_cli.main([str(plan), "--doctor", "--json"]) == (
+        0 if expected == "seed" else 1
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["baseline"]["head"] == head
+    assert payload["baseline"]["verification"]["ok"] is (expected == "seed")
+    assert (repo / "README.md").read_text() == "dirty\n"
+    assert (repo / "untracked.txt").read_text() == "preserve me\n"
+    assert not (repo / "baseline-only.txt").exists()
+    worktrees = subprocess.check_output(
+        ["git", "worktree", "list", "--porcelain"], cwd=repo, text=True
+    )
+    assert worktrees.count("worktree ") == 1
+
+
+@pytest.mark.parametrize("second_expect", ['contains = "ok"', 'not_contains = "ok"'])
+def test_baseline_deduplicates_commands_and_keeps_every_matcher(
+    tmp_path: Path, capsys, second_expect: str
+) -> None:
+    plan, _, _ = _dispatch_file(tmp_path)
+    marker = tmp_path / "calls.txt"
+    command = f"echo call >> {shlex.quote(str(marker))}; echo ok"
+    plan.write_text(
+        plan.read_text().replace('run = "echo ok"', f"run = {json.dumps(command)}")
+        + f"""
+[[cuts]]
+id = "c2"
+agent = "codex"
+workflow = "implement"
+prompt = "second"
+  [[cuts.verify]]
+  run = {json.dumps(command)}
+  expect = {{ {second_expect} }}
+"""
+    )
+
+    assert dispatch_cli.main([str(plan), "--doctor", "--json"]) == (
+        1 if "not_contains" in second_expect else 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["baseline"]["verification"]["checks"]) == 1
+    assert marker.read_text() == "call\n"
+
+
+def test_doctor_override_keeps_red_evidence(tmp_path: Path, capsys) -> None:
+    plan, _, _ = _dispatch_file(tmp_path)
+    plan.write_text(
+        plan.read_text().replace('run = "echo ok"', 'run = "echo red; exit 7"')
+    )
+    assert (
+        dispatch_cli.main([str(plan), "--doctor", "--allow-red-baseline", "--json"])
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["baseline"]["allow_red_baseline"] is True
+    assert payload["baseline"]["verification"]["ok"] is False
+    assert payload["baseline"]["verification"]["checks"][0]["exit_code"] == 7
+    assert "--allow-red-baseline" in payload["warnings"][0]["message"]
+
+
+def test_duplicate_command_retains_implicit_zero_exit(tmp_path: Path, capsys) -> None:
+    plan, _, _ = _dispatch_file(tmp_path)
+    plan.write_text(
+        plan.read_text().replace('run = "echo ok"', 'run = "echo ok; exit 7"')
+        + """
+[[cuts]]
+id = "negative-probe"
+agent = "codex"
+workflow = "implement"
+prompt = "negative probe"
+  [[cuts.verify]]
+  run = "echo ok; exit 7"
+  expect = { exit_code = 7 }
+"""
+    )
+    assert dispatch_cli.main([str(plan), "--doctor", "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["baseline"]["verification"]["checks"]) == 1
+    assert payload["baseline"]["verification"]["ok"] is False
+
+
+def test_baseline_timeout_refuses_and_removes_checkout(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    plan, _, _ = _dispatch_file(tmp_path)
+    plan.write_text(
+        plan.read_text().replace('run = "echo ok"', 'run = "sleep 0.1; echo ok"')
+    )
+    real_executor = dispatch_cli.run_verifies
+
+    def short_timeout(*args, **kwargs):
+        return real_executor(*args, **kwargs, timeout_s=0.01)
+
+    monkeypatch.setattr(dispatch_cli, "run_verifies", short_timeout)
+    assert dispatch_cli.main([str(plan), "--doctor", "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert (
+        payload["baseline"]["verification"]["checks"][0]["matcher_result"] == "timeout"
+    )
+    worktrees = subprocess.check_output(
+        ["git", "worktree", "list", "--porcelain"], cwd=tmp_path / "repo", text=True
+    )
+    assert worktrees.count("worktree ") == 1
+
+
+def test_baseline_commands_each_start_pristine(tmp_path: Path, capsys) -> None:
+    plan, _, _ = _dispatch_file(tmp_path)
+    plan.write_text(
+        plan.read_text().replace(
+            'run = "echo ok"',
+            'run = "echo dirty > README.md; touch leftover.txt; echo ok"',
+        )
+        + """
+[[cuts]]
+id = "c2"
+agent = "codex"
+workflow = "implement"
+prompt = "second"
+  [[cuts.verify]]
+  run = "test ! -e leftover.txt && cat README.md"
+  expect = { equals = "seed" }
+"""
+    )
+    assert dispatch_cli.main([str(plan), "--doctor", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["baseline"]["verification"]["checks"]) == 2
+
+
+def test_red_baseline_override_cannot_bypass_isolation_failure(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    plan, _, _ = _dispatch_file(tmp_path)
+
+    def no_checkout(*args, **kwargs):
+        raise RuntimeError("isolation unavailable")
+
+    monkeypatch.setattr(dispatch_cli, "WorktreeManager", no_checkout)
+    assert (
+        dispatch_cli.main([str(plan), "--doctor", "--allow-red-baseline", "--json"])
+        == 1
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["errors"][0]["path"] == "baseline"
+
+
+def test_dry_run_does_not_execute_red_baseline(tmp_path: Path, capsys) -> None:
+    plan, _, _ = _dispatch_file(tmp_path)
+    marker = tmp_path / "ran.txt"
+    command = f"touch {shlex.quote(str(marker))}; exit 7"
+    plan.write_text(
+        plan.read_text().replace('run = "echo ok"', f"run = {json.dumps(command)}")
+    )
+    assert dispatch_cli.main([str(plan), "--dry-run", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["dry_run"] is True
+    assert not marker.exists()
+
+
 def test_cli_dry_run_renders_prompts_and_machine_result(
     tmp_path: Path, capsys, monkeypatch
 ) -> None:
@@ -169,7 +367,10 @@ prompt = "next cut"
         supervisor_module, "workflow_cell_launcher", stub_launcher_factory
     )
     expected_green = command == "echo ok"
-    assert root_cli.main(["dispatch", str(dispatch_file), "--json"]) == (
+    # These negative cases exercise worker-time failures after explicit
+    # baseline admission; ordinary red-baseline refusal is covered above.
+    override = [] if expected_green else ["--allow-red-baseline"]
+    assert root_cli.main(["dispatch", str(dispatch_file), "--json", *override]) == (
         0 if expected_green else 1
     )
     payload = json.loads(capsys.readouterr().out)
@@ -185,3 +386,6 @@ prompt = "next cut"
     )
     if not expected_green:
         assert not list((home / "worktrees" / "vetcoders" / "fixture").glob("*/c2"))
+    tracker = Path(payload["artifacts"]["tracker"]).read_text()
+    assert f"- allow_red_baseline: {str(not expected_green).lower()}" in tracker
+    assert '"ok": ' + str(expected_green).lower() in tracker

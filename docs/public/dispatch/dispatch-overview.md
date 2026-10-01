@@ -22,7 +22,7 @@ like `dispatch preflight <plan>` or `dispatch launch <plan>` do not exist and
 are refused with a pointer back to this pilot:
 
 ```bash
-vibecrafted dispatch plan.dispatch.toml --doctor            # validate only
+vibecrafted dispatch plan.dispatch.toml --doctor            # validate and verify baseline
 vibecrafted dispatch plan.dispatch.toml --dry-run [--json]  # render prompts, launch nothing
 vibecrafted dispatch plan.dispatch.toml                     # launch the plan
 vibecrafted dispatch plan.dispatch.toml --resume <run-id>   # resume a recorded run
@@ -30,7 +30,8 @@ vibecrafted dispatch plan.dispatch.toml --resume <run-id>   # resume a recorded 
 
 | Flag                         | Effect                                                                       |
 | ---------------------------- | ---------------------------------------------------------------------------- |
-| `--doctor`                   | Validate only; exit non-zero on dispatch-doctor errors                       |
+| `--doctor`                   | Validate and run baseline verifiers; exit non-zero on errors                 |
+| `--allow-red-baseline`       | Admit failed baseline verifiers with override and evidence in the tracker    |
 | `--dry-run`                  | Render prompts in the canonical artifact plane without launching             |
 | `--json`                     | Machine-readable output                                                      |
 | `--resume <run-id>`          | Reconcile receipts/Git and continue without duplicating live or settled cuts |
@@ -41,6 +42,29 @@ schema, and enforces the policy rules (for example, READ cuts must declare a
 `mutation` policy, and verifier commands must not contain hard-stop commands
 like `git push --force` or `git push origin main`). `--dry-run` then shows you the exact prompt each worker
 would receive — placeholders rendered, briefs inlined, baton attached.
+
+Doctor and real launch both snapshot the repository's current HEAD and run
+the plan's unique `cuts.verify.run` commands in a disposable detached worktree
+under the canonical worktree plane. The Founder's checkout and dirty files
+remain untouched. Each command starts from a clean baseline; identical
+commands run once, with all declared expectations retained. The executor
+uses the same sanitized environment, matchers and ten-minute command timeout
+as worker verification. Progress goes to stderr; `--json` stays machine-readable.
+
+A failed or timed-out baseline verifier refuses admission before any worker
+starts, naming the command, baseline SHA and output tail. `--doctor --json`
+includes the baseline and verifier evidence. An intentional
+`--allow-red-baseline` override permits failed verifiers and records the flag
+and their results in the launch tracker; isolation/setup failures still refuse.
+Use this explicitly when the cut is meant to make a currently red test pass:
+
+```bash
+vibecrafted dispatch plan.dispatch.toml --doctor --allow-red-baseline --json
+vibecrafted dispatch plan.dispatch.toml --allow-red-baseline
+```
+
+`--dry-run` renders without executing baseline verifiers. Cleanup also skips
+this gate so a red baseline cannot prevent removal of settled checkouts.
 
 ## What the supervisor does per cut
 

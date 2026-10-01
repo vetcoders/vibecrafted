@@ -1066,7 +1066,7 @@ cmd_dispatch_help() {
   printf '  dispatch run owns process spawn, transcript capture, artifact validation, and exit status.\n'
   printf '\n'
   printf '%bUsage:%b\n' "$_bold" "$_reset"
-  printf '  vibecrafted dispatch <plan.dispatch.toml> [--doctor|--dry-run|--json|--resume <run-id>]\n'
+  printf '  vibecrafted dispatch <plan.dispatch.toml> [--doctor|--dry-run|--json|--resume <run-id>] [--allow-red-baseline]\n'
   printf '  vibecrafted dispatch run --run-id <id> --root <path> --report <path> --transcript <path> -- <command> [args]\n'
   printf '\n'
   printf '%bExamples:%b\n' "$_bold" "$_reset"
@@ -1075,7 +1075,8 @@ cmd_dispatch_help() {
   printf '  vibecrafted dispatch run --run-id demo --root . --report .vibecrafted/report.md --transcript .vibecrafted/trace.log --json -- bash worker.sh\n'
   printf '\n'
   printf '%bContract:%b\n' "$_bold" "$_reset"
-  printf '  --doctor validates only and exits non-zero on dispatch-doctor errors.\n'
+  printf '  --doctor validates and runs unique verifiers in a clean detached baseline.\n'
+  printf '  Red baseline verifiers block launch; --allow-red-baseline records an explicit override in the tracker.\n'
   printf '  --dry-run renders every worker prompt under reports_dir/dry-run without launching.\n'
   printf '  Full dispatch writes tracker.md and journal.md progressively from launch —\n'
   printf '  watch those for live state; stdout stays silent until the run settles,\n'
