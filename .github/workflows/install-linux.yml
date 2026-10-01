@@ -262,7 +262,7 @@ jobs:
         run: |
           set -eu
           apt-get update
-          # Match the pre-flight: tar + make + python3 + curl + git + ca-certs.
+          # Match the pre-flight: tar + make + python3 + curl + file + ca-certs.
           # bash + coreutils are already present in debian-slim.
           # protobuf-compiler is required by `cargo install aicx` because the
           # transitive `lance-encoding` crate uses `prost-build`, which shells
@@ -276,6 +276,7 @@ jobs:
             build-essential \
             cmake \
             curl \
+            file \
             git \
             libclang-dev \
             libprotobuf-dev \

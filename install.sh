@@ -1308,7 +1308,10 @@ channel_mode=0
 if [[ -z "$archive_url" && -z "$archive_file" && -z "$local_carrier_dir" ]]; then
   channel_mode=1
 fi
-preflight_tools=(tar python3 openssl)
+# Generation-local native entrypoints use file to reject scripts/foreign formats.
+# Bare Debian does not provide it; refuse before download instead of installing
+# a vc-frame wrapper that later misreports its present engine as missing.
+preflight_tools=(tar python3 openssl file)
 if [[ "$channel_mode" == "0" && -z "$runtime_pack_file" && -z "$runtime_pack_url" ]]; then
   preflight_tools+=(make)
 fi
