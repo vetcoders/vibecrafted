@@ -12624,7 +12624,7 @@ def _load_runtime_generation_manifest(
 def _doctor_generation_ignored_bytecode(relative: str) -> bool:
     """Only ignore runtime-emitted ``__pycache__/*.pyc`` additions."""
     path = Path(relative)
-    return path.name.endswith(".pyc") and "__pycache__" in path.parts
+    return path.suffix == ".pyc" and path.parent.name == "__pycache__"
 
 
 def _doctor_generation_ignored_additional(relative: str) -> bool:
@@ -13131,7 +13131,8 @@ def _doctor_generation_integrity_findings() -> list[DoctorFinding]:
     Reuse admission's walker (including its .DS_Store exception and symlink
     refusal). This is content drift detection, not signed release admission or
     an attribution of every difference to a human: installation and Python can
-    also add files. Keep those differences visible, but list source edits first.
+    also add unsealed generation artifacts and bytecode. Ignore those additions
+    while keeping every changed or missing sealed path visible.
     """
     component = "runtime-generation:integrity"
     try:
