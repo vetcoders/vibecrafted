@@ -6398,7 +6398,9 @@ def _darwin_process_parent_pid(pid: int) -> int:
     return int(info.pbi_ppid)
 
 
-def _darwin_process_arguments(pid: int, *, pointer_size: int) -> tuple[str, ...]:
+def _darwin_process_arguments(
+    pid: int, *, pointer_size: int, runtime_references: bool = False
+) -> tuple[str, ...]:
     """Fetch a PID's argv via `sysctl KERN_PROCARGS2`, parsing past the exec path and alignment
     padding; raises ProcessLookupError if the process is gone.
     """
@@ -6487,6 +6489,21 @@ def _darwin_process_arguments(pid: int, *, pointer_size: int) -> tuple[str, ...]
         position = argument_end + 1
     if not arguments or not arguments[0]:
         raise OSError(f"Darwin argv is empty for {pid}")
+    if runtime_references:
+        arguments.append(os.fsdecode(raw[struct.calcsize("=i") : executable_end]))
+        reference_keys = {
+            "VIBECRAFTED_RUNTIME_ROOT",
+            "VIBECRAFTED_ROOT",
+            "VIBECRAFTED_PYTHON",
+            "VIBECRAFTED_VC_FRAME_BIN",
+            "PYTHONPATH",
+            "PATH",
+            "VC_FRAME_CONFIG_DIR",
+        }
+        for entry in raw[position:].split(b"\0"):
+            key, separator, value = entry.partition(b"=")
+            if separator and os.fsdecode(key) in reference_keys:
+                arguments.append(os.fsdecode(value))
     return tuple(arguments)
 
 
@@ -17076,6 +17093,1005 @@ def _runtime_receipt_path(runtime_home: Path) -> Path:
     return runtime_home / RUNTIME_INSTALL_RECEIPT
 
 
+def _runtime_terminal_session_path(path: Path, product: Path) -> bool:
+    """macOS zsh owns its session locks/history; these are never static payload."""
+    return path == product / "vc-terminal/.zsh_sessions" or path.is_relative_to(
+        product / "vc-terminal/.zsh_sessions"
+    )
+
+
+def _reconcile_runtime_receipt_ownership(
+    paths: Mapping[str, Path], receipt: dict[str, Any]
+) -> list[dict[str, str]]:
+    """Correct narrowly proven historical ownership mistakes without touching bytes."""
+    actions: list[dict[str, str]] = []
+    product = paths["product_config"]
+    for raw in list(receipt.get("owned_files", {})):
+        if _runtime_terminal_session_path(Path(raw), product):
+            receipt["owned_files"].pop(raw)
+            actions.append(
+                {
+                    "path": raw,
+                    "reason": "zsh session lifecycle belongs to the Founder shell, not installer static payload",
+                }
+            )
+    for key in ("owned_dirs", "owned_empty_dirs"):
+        kept = []
+        for raw in receipt.get(key, []):
+            path = Path(raw)
+            reason = ""
+            if _runtime_terminal_session_path(path, product):
+                reason = "zsh session directory ownership released; session/history bytes preserved"
+            elif path.parent == paths[
+                "runtime_home"
+            ] / "releases" and path.name != receipt.get("version"):
+                _assert_runtime_physical_path(path)
+                if not _path_present(path) and raw not in receipt.get(
+                    "retirement_pending", {}
+                ):
+                    reason = "historical release payload is absent; obsolete directory claim reconciled"
+            elif (
+                path == product / "terminal-theme.toml"
+                and path.is_file()
+                and not path.is_symlink()
+            ):
+                _validate_runtime_preference(path)
+                reason = "validated user preference is a regular file, not an installer-owned directory"
+            if reason:
+                actions.append({"path": raw, "reason": reason})
+            else:
+                kept.append(raw)
+        receipt[key] = kept
+    if actions:
+        receipt.setdefault("ownership_reconciliation", []).extend(actions)
+    return actions
+
+
+def _runtime_retirement_tree(
+    root: Path, *, pointers: bool = False, hash_files: bool = True
+) -> dict[str, Any]:
+    """Closed inventory through the existing no-follow descriptor owner."""
+    descriptor = _runtime_payload_open_absolute_directory(root, create=False)
+    entries: dict[str, Any] = {}
+    total = 0
+
+    def scan(parent: int, prefix: str) -> None:
+        nonlocal total
+        names = sorted(os.listdir(parent))
+        for name in names:
+            relative = prefix + name
+            before = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            if stat.S_ISLNK(before.st_mode) and pointers:
+                if before.st_uid != os.geteuid():
+                    raise RuntimeError(f"foreign snapshot pointer owner: {relative}")
+                record = [
+                    "symlink",
+                    os.readlink(name, dir_fd=parent),
+                    stat.S_IMODE(before.st_mode),
+                    [before.st_dev, before.st_ino],
+                ]
+            else:
+                child, kind, opened = _runtime_payload_open_entry_at(parent, name)
+                try:
+                    record = [
+                        kind,
+                        "",
+                        stat.S_IMODE(opened.st_mode),
+                        [opened.st_dev, opened.st_ino],
+                    ]
+                    if kind == "directory":
+                        scan(child, relative + "/")
+                    else:
+                        if hash_files:
+                            digest = hashlib.sha256()
+                            offset = 0
+                            while chunk := os.pread(child, 1024 * 1024, offset):
+                                digest.update(chunk)
+                                offset += len(chunk)
+                            record[1] = digest.hexdigest()
+                        record.append(opened.st_size)
+                        total += opened.st_size
+                    if _capture_stat_identity(opened) != _capture_stat_identity(
+                        os.fstat(child)
+                    ):
+                        raise RuntimeError(
+                            f"retirement content changed during inventory: {relative}"
+                        )
+                finally:
+                    os.close(child)
+            after = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            if _capture_stat_identity(before) != _capture_stat_identity(after):
+                raise RuntimeError(f"retirement identity changed: {relative}")
+            entries[relative] = record
+        if names != sorted(os.listdir(parent)):
+            raise RuntimeError("retirement directory changed during inventory")
+
+    try:
+        top = os.fstat(descriptor)
+        scan(descriptor, "")
+        _runtime_payload_assert_directory_current(root, descriptor)
+        return {
+            "identity": [top.st_dev, top.st_ino],
+            "entries": entries,
+            "bytes": total,
+        }
+    finally:
+        os.close(descriptor)
+
+
+def _runtime_retirement_generation(
+    generation: Path, sealed: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
+    """Admit historical ownership through the closed carrier and transformed lineage.
+
+    A receipt path and a version-like name alone never authorize deletion. Host
+    metadata and direct Python bytecode are the same bounded extras doctor admits.
+    Generated Frame files must derive from receipted source, not just live in a
+    conveniently named generated/ directory. No historical code is executed.
+    """
+    proof = _runtime_retirement_tree(generation)
+    manifest, error = _load_runtime_generation_manifest(generation)
+    if manifest is None:
+        raise RuntimeError(error or "missing runtime identity")
+    if (
+        manifest["owner_repo"] != _PACK_OWNER_REPO
+        or manifest["version"] != generation.name
+    ):
+        raise RuntimeError("generation owner/version disagrees with physical identity")
+    errors = _runtime_generation_payload_errors(generation)
+    if errors:
+        raise RuntimeError("generation identity drift: " + "; ".join(errors[:3]))
+    if sealed:
+        if sealed.get("identity") != proof["identity"]:
+            raise RuntimeError("sealed generation root identity drift")
+        expected = sealed.get("entries") or {}
+        for name, record in expected.items():
+            if Path(name).name == ".DS_Store":
+                continue
+            if proof["entries"].get(name) != record:
+                raise RuntimeError(f"sealed generation content/identity drift: {name}")
+        for name in proof["entries"].keys() - expected.keys():
+            if Path(name).name == ".DS_Store":
+                continue
+            if _doctor_generation_ignored_bytecode(name):
+                origin = Path(name).parent.parent / (
+                    Path(name).name.split(".")[0] + ".py"
+                )
+                if origin.as_posix() in expected:
+                    continue
+            if Path(name).name == "__pycache__" and any(
+                Path(child).parent == Path(name).parent and Path(child).suffix == ".py"
+                for child in expected
+            ):
+                continue
+            raise RuntimeError(f"unproven/foreign generation child: {name}")
+        proof["source_revision"] = manifest["source_revision"]
+        proof["manifest_sha256"] = _sha256_path(
+            generation / _RUNTIME_GENERATION_MANIFEST
+        )
+        return proof
+    provenance = _load_runtime_pack_provenance(generation)
+    inventory = (provenance.get("payload") or {}).get("files")
+    if (
+        provenance.get("schema") != _PACK_PROVENANCE_SCHEMA
+        or provenance.get("version") != generation.name
+        or (provenance.get("source_revisions") or {}).get("vibecrafted")
+        != manifest["source_revision"]
+        or not isinstance(inventory, list)
+        or not inventory
+    ):
+        raise RuntimeError("historical generation has no closed Runtime Pack identity")
+    matched, reason = _runtime_rescue_destination_content_matches(
+        generation, {"inventory": inventory}
+    )
+    if not matched:
+        raise RuntimeError(reason)
+    allowed = {str(item["path"]) for item in inventory}
+    allowed.update(manifest["hashes"])
+    allowed.update({_RUNTIME_GENERATION_MANIFEST, RUNTIME_PACK_PROVENANCE_NAME})
+    generated = _RUNTIME_GENERATION_CANONICAL_RUNTIME / "generated/vc-frame"
+    source = Path("vibecrafted-core/vibecrafted_core/config/vc-frame")
+    staging_module = (
+        Path(__file__).resolve().parent.parent
+        / "vibecrafted-core/vibecrafted_core/vc_frame_staging.py"
+    )
+    substitute = runpy.run_path(str(staging_module))["substitute_host_commands"]
+    for relative, record in proof["entries"].items():
+        if record[0] == "directory":
+            # Older distribution copies retained this retired package's empty
+            # container. Admit its zero-byte structural residue only inside an
+            # otherwise fully proven receipted carrier. No general empty-dir
+            # exception: any child (including metadata/pointers) remains foreign.
+            if relative in {
+                "vibecrafted-core/vibecrafted_core/foundation",
+                "vibecrafted-core/vibecrafted_core/iterm2_plugin",
+            } and not any(name.startswith(relative + "/") for name in proof["entries"]):
+                proof.setdefault("retired_empty_modules", []).append(relative)
+                continue
+            if any(name.startswith(relative + "/") for name in allowed):
+                continue
+            path = Path(relative)
+            if path.is_relative_to(generated) and any(
+                name.startswith((source / path.relative_to(generated)).as_posix() + "/")
+                for name in allowed
+            ):
+                continue
+            if path.name == "__pycache__" and any(
+                Path(name).parent == path.parent and Path(name).suffix == ".py"
+                for name in allowed
+            ):
+                continue
+            raise RuntimeError(f"unproven/foreign generation directory: {relative}")
+        if relative in allowed or Path(relative).name == ".DS_Store":
+            continue
+        if _doctor_generation_ignored_bytecode(relative):
+            origin = Path(relative).parent.parent / (
+                Path(relative).name.split(".")[0] + ".py"
+            )
+            if origin.as_posix() in allowed:
+                continue
+        path = Path(relative)
+        if path.is_relative_to(generated):
+            original = source / path.relative_to(generated)
+            if original.as_posix() in allowed:
+                incoming = (generation / path).read_bytes()
+                original_bytes = (generation / original).read_bytes()
+                if incoming == original_bytes:
+                    continue
+                if path.suffix == ".kdl":
+                    text = original_bytes.decode("utf-8")
+                    if any(
+                        incoming == substitute(text, shell, clipboard).encode("utf-8")
+                        for shell in (
+                            "zsh",
+                            "bash",
+                            "/bin/zsh",
+                            "/bin/bash",
+                            "/usr/bin/zsh",
+                            "/usr/bin/bash",
+                        )
+                        for clipboard in (
+                            "pbcopy",
+                            "wl-copy",
+                            "xclip -selection clipboard",
+                            "xsel --clipboard --input",
+                            None,
+                        )
+                    ):
+                        continue
+        raise RuntimeError(f"unproven/foreign generation child: {relative}")
+    proof["source_revision"] = manifest["source_revision"]
+    proof["manifest_sha256"] = _sha256_path(generation / _RUNTIME_GENERATION_MANIFEST)
+    return proof
+
+
+def _runtime_retirement_references(
+    paths: Mapping[str, Path], receipt: Mapping[str, Any]
+) -> list[tuple[str, str]]:
+    """Read live executable/dependency/cwd and durable owner references, without signals.
+
+    Teardown's census excludes installer ancestry and only matches argv[0]. That
+    filter is unsound for retention. lsof covers those ancestors and mapped/open
+    dependencies; stable Darwin argv also covers script arguments. No raw argv,
+    environment or customer session text is persisted in a retirement receipt.
+    """
+    references: list[tuple[str, str]] = []
+    releases = str(paths["runtime_home"] / "releases") + "/"
+    backups = str(paths["runtime_home"] / ".installer-backups") + "/"
+
+    def collect(label: str, value: Any) -> None:
+        if isinstance(value, dict):
+            for child in value.values():
+                collect(label, child)
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                collect(label, child)
+        elif isinstance(value, str):
+            # Persist only the generation root, never the containing command.
+            for match in re.finditer(re.escape(releases) + r"([^/\s\"'<>]+)", value):
+                references.append((label, releases + match.group(1)))
+            for match in re.finditer(re.escape(backups) + r"([^\s\"'<>]+)", value):
+                observed = Path(backups + match.group(1))
+                for candidate in (observed, *observed.parents):
+                    if not candidate.is_relative_to(Path(backups)) or candidate == Path(
+                        backups
+                    ):
+                        break
+                    references.append((label, str(candidate)))
+
+    if sys.platform == "darwin":
+        for pid in _darwin_process_ids():
+            try:
+                birth = _darwin_process_birth(pid)
+                if birth[1] != os.geteuid():
+                    continue
+                argv = _darwin_process_arguments(
+                    pid, pointer_size=birth[2], runtime_references=True
+                )
+                if argv != _darwin_process_arguments(
+                    pid, pointer_size=birth[2], runtime_references=True
+                ) or birth != _darwin_process_birth(pid):
+                    raise RuntimeError(
+                        f"process identity changed during retirement census: {pid}"
+                    )
+                collect(f"process:{pid}:argv", argv)
+            except ProcessLookupError:
+                continue
+    if sys.platform in {"darwin", "linux"}:
+        lsof = shutil.which("lsof")
+        if lsof:
+            observed = subprocess.run(
+                [lsof, "-nP", "-a", "-u", str(os.geteuid()), "-Fpn"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            if observed.returncode not in {0, 1} or (
+                observed.returncode == 1 and observed.stderr.strip()
+            ):
+                raise RuntimeError(
+                    "live dependency census unavailable; retry retirement"
+                )
+            pid = "unknown"
+            for line in observed.stdout.splitlines():
+                if line.startswith("p"):
+                    pid = line[1:]
+                elif line.startswith("n"):
+                    collect(f"process:{pid}:open", line[1:])
+        elif sys.platform == "darwin":
+            raise RuntimeError("lsof dependency census unavailable; retry retirement")
+        if sys.platform == "linux":
+            # lsof alone misses an interpreted module after its file closes.
+            # argv and dependency search paths remain pins even when lsof exists.
+            for process in Path("/proc").iterdir():
+                if not process.name.isdigit() or process.stat().st_uid != os.geteuid():
+                    continue
+                try:
+                    collect(
+                        f"process:{process.name}:argv",
+                        (process / "cmdline")
+                        .read_bytes()
+                        .decode("utf-8", "surrogateescape")
+                        .split("\0"),
+                    )
+                    collect(
+                        f"process:{process.name}:environment",
+                        [
+                            value.split("=", 1)[1]
+                            for value in (process / "environ")
+                            .read_bytes()
+                            .decode("utf-8", "surrogateescape")
+                            .split("\0")
+                            if value.partition("=")[0]
+                            in {
+                                "PATH",
+                                "PYTHONPATH",
+                                "VIBECRAFTED_ROOT",
+                                "VIBECRAFTED_RUNTIME_ROOT",
+                                "VIBECRAFTED_PYTHON",
+                                "VIBECRAFTED_VC_FRAME_BIN",
+                            }
+                            and "=" in value
+                        ],
+                    )
+                    collect(
+                        f"process:{process.name}:maps", (process / "maps").read_text()
+                    )
+                    for pointer in [
+                        process / "exe",
+                        process / "cwd",
+                        *(process / "fd").iterdir(),
+                    ]:
+                        collect(f"process:{process.name}:open", os.readlink(pointer))
+                except FileNotFoundError:
+                    continue
+    else:
+        raise RuntimeError(
+            "live dependency census unsupported on this platform; no payload retired"
+        )
+
+    collect(
+        "active-selector",
+        (paths["runtime_home"] / "tools/vibecrafted-current")
+        .resolve(strict=True)
+        .as_posix(),
+    )
+    collect("receipt-selector", receipt.get("owned_symlinks", {}))
+    for key in ("config_transaction", "rescue_pending", "config_pending"):
+        pending = receipt.get(key) or {}
+        if isinstance(pending, dict):
+            collect(
+                "pending-transaction",
+                {
+                    name: value
+                    for name, value in pending.items()
+                    if name != "previous_receipt"
+                },
+            )
+            binding = pending.get("binding") or {}
+            if binding.get("version"):
+                references.append(
+                    ("pending-target", releases + str(binding["version"]))
+                )
+    # Installed LaunchAgent definitions are future executable/dependency owners.
+    for directory in (
+        Path.home() / "Library/LaunchAgents",
+        Path("/Library/LaunchAgents"),
+        Path("/Library/LaunchDaemons"),
+    ):
+        if not directory.exists():
+            continue
+        for plist in directory.glob("*.plist"):
+            if plist.stat().st_uid != os.geteuid():
+                continue
+            collect(f"launchagent:{plist.name}", plistlib.loads(plist.read_bytes()))
+    for app in {
+        Path("/Applications/Vibecrafted.app"),
+        Path.home() / "Applications/Vibecrafted.app",
+        *([Path(receipt["app_root"])] if receipt.get("app_root") else []),
+    }:
+        plist = app / "Contents/Info.plist"
+        if plist.is_file():
+            collect("installed-app-binding", plistlib.loads(plist.read_bytes()))
+    for raw in receipt.get("owned_files", {}):
+        path = Path(raw)
+        if path.parent == paths["launcher_home"] and path.is_file():
+            collect("launcher-binding:" + path.name, path.read_text(errors="replace"))
+    for pointer in ("pending-handoff.json", "recovery.json"):
+        path = paths["crafted_home"] / "product-update" / pointer
+        if path.exists():
+            collect("pending-update:" + pointer, json.loads(path.read_text()))
+    # Only live session/supervisor metadata is meaningful, not archived transcripts.
+    for directory in (
+        paths["crafted_home"] / "control_plane",
+        paths["crafted_home"] / "run",
+    ):
+        if not directory.exists():
+            continue
+        for path in directory.glob("**/*.json"):
+            if path.is_symlink():
+                raise RuntimeError(
+                    "aliased session/supervisor reference; retirement refused"
+                )
+            document = json.loads(path.read_text())
+            owner_state = (
+                document.get("status", document.get("state"))
+                if isinstance(document, dict)
+                else None
+            )
+            if isinstance(owner_state, str) and owner_state in {
+                "active",
+                "running",
+                "pending",
+                "starting",
+                "stalled",
+            }:
+                collect("active-owner:" + path.name, document)
+    return sorted(set(references))
+
+
+def _runtime_retirement_recovery_copies(
+    paths: Mapping[str, Path], receipt: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    """Settle captured rescue payload only after a later verified publication.
+
+    The archived original receipt and digest survive; snapshot names/mtime are
+    not authority. Incomplete/foreign evidence gets an exact residual. A pending
+    journal is protected by the outer publication guard.
+    """
+    root = paths["runtime_home"] / ".installer-backups/rescue"
+    if not root.exists():
+        return []
+    _assert_runtime_physical_path(root)
+    entries: list[dict[str, Any]] = []
+    for attempt in sorted(root.iterdir()):
+        if attempt.name in {"current-journal.json", ".DS_Store"}:
+            continue
+        snapshot = attempt / "pre-rescue"
+        if not _path_present(snapshot):
+            continue
+        entry: dict[str, Any] = {
+            "path": str(snapshot),
+            "action": "retire",
+            "reasons": [],
+        }
+        try:
+            _assert_runtime_physical_path(attempt)
+            archive = attempt / "original-receipt.json"
+            digest_file = attempt / "original-receipt.sha256"
+            original_raw = _capture_runtime_bound_file(archive)
+            original = json.loads(original_raw)
+            if (
+                original.get("schema") != RUNTIME_INSTALL_SCHEMA
+                or original.get("roots") != receipt.get("roots")
+                or hashlib.sha256(original_raw).hexdigest()
+                != digest_file.read_text().strip()
+            ):
+                raise RuntimeError(
+                    "rescue archive ownership/digest differs from install roots"
+                )
+            label = json.loads(_capture_runtime_bound_file(snapshot / "label.json"))
+            expected_children = {"label.json"}
+            for captured in label.get("paths", []):
+                raw = str(captured.get("path") or "")
+                token = hashlib.sha256(raw.encode()).hexdigest()[:20]
+                if captured.get("rel") != token:
+                    raise RuntimeError(
+                        "snapshot entry is not bound to its captured path"
+                    )
+                if not (
+                    _runtime_owned_path_is_managed(Path(raw), paths)
+                    or _runtime_rescue_shell_path_allowed(Path(raw))
+                ):
+                    raise RuntimeError("snapshot captures an unowned path")
+                if captured.get("kind") != "absent":
+                    expected_children.add(token)
+            observed_children = {
+                child.name for child in snapshot.iterdir() if child.name != ".DS_Store"
+            }
+            if observed_children != expected_children:
+                raise RuntimeError("snapshot has foreign/missing children")
+            _runtime_rescue_validate_snapshot_evidence(snapshot, label)
+            proof = _runtime_retirement_tree(snapshot, pointers=True)
+            proof["pointers"] = True
+            proof["archived_receipt_sha256"] = hashlib.sha256(original_raw).hexdigest()
+            entry["proof"] = proof
+        except (OSError, RuntimeError, ValueError, TypeError, KeyError) as exc:
+            entry.update(action="residual", reasons=[str(exc)])
+        entries.append(entry)
+    return entries
+
+
+def _runtime_retirement_plan(
+    paths: Mapping[str, Path], receipt: Mapping[str, Any]
+) -> dict[str, Any]:
+    plan: dict[str, Any] = {
+        "schema": "vibecrafted.runtime-retirement.v1",
+        "status": "ready",
+        "generations": [],
+        "copies": [],
+        "residuals": [],
+    }
+    if any(
+        receipt.get(key)
+        for key in (
+            "install_pending",
+            "rescue_pending",
+            "config_transaction",
+            "config_pending",
+            "uninstall_pending",
+            "foundation_service_pending",
+        )
+    ):
+        plan.update(
+            status="pending",
+            reason="publication/recovery is pending; usable recovery retained",
+        )
+    references = _runtime_retirement_references(paths, receipt)
+    rollback = receipt.get("retirement_rollback") or {}
+    if rollback.get("generation"):
+        references.append(("single-healthy-rollback", rollback["generation"]))
+    releases = paths["runtime_home"] / "releases"
+    owned = set(receipt.get("owned_dirs", []))
+    for generation in sorted(releases.iterdir()):
+        if generation.name == ".DS_Store":
+            continue
+        entry: dict[str, Any] = {
+            "path": str(generation),
+            "action": "retire",
+            "reasons": [],
+        }
+        entry["reasons"] = sorted(
+            {label for label, value in references if value == str(generation)}
+        )
+        if entry["reasons"]:
+            entry["action"] = "pinned"
+        else:
+            try:
+                if str(generation) not in owned:
+                    raise RuntimeError(
+                        "unreceipted release; ownership is not inferred from its name"
+                    )
+                _assert_runtime_physical_path(generation)
+                entry["proof"] = _runtime_retirement_generation(
+                    generation,
+                    receipt.get("retirement_generations", {}).get(str(generation)),
+                )
+            except (OSError, RuntimeError, ValueError, KeyError, UnicodeError) as exc:
+                entry.update(action="residual", reasons=[str(exc)])
+                plan["residuals"].append({"path": str(generation), "reason": str(exc)})
+        plan["generations"].append(entry)
+    for raw, proof in receipt.get("retirement_copies", {}).items():
+        path = Path(raw)
+        entry = {"path": raw, "action": "retire", "proof": proof, "reasons": []}
+        if plan["status"] == "pending":
+            entry.update(action="pinned", reasons=["pending publication/recovery"])
+        elif raw == rollback.get("publication"):
+            entry.update(action="pinned", reasons=["single-healthy-rollback-config"])
+        elif not _path_present(path):
+            entry["action"] = "absent"
+        plan["copies"].append(entry)
+    backup_root = paths["runtime_home"] / ".installer-backups"
+    for publication in sorted(backup_root.glob("publication-*")):
+        if str(publication) in receipt.get("retirement_copies", {}):
+            continue
+        reason = "legacy publication copy lacks a closed preimage/postimage inventory; historical backup path alone is not deletion authority"
+        plan["copies"].append(
+            {"path": str(publication), "action": "residual", "reasons": [reason]}
+        )
+        plan["residuals"].append({"path": str(publication), "reason": reason})
+    known_copies = {entry["path"] for entry in plan["copies"]}
+    recovery_entries = []
+    if plan["status"] == "pending":
+        rescue_root = paths["runtime_home"] / ".installer-backups/rescue"
+        if rescue_root.exists():
+            recovery_entries = [
+                {
+                    "path": str(attempt / "pre-rescue"),
+                    "action": "pinned",
+                    "reasons": [
+                        "pending publication/recovery; completed-snapshot admission deferred"
+                    ],
+                }
+                for attempt in rescue_root.iterdir()
+                if (attempt / "pre-rescue").exists()
+            ]
+    else:
+        recovery_entries = _runtime_retirement_recovery_copies(paths, receipt)
+    for entry in recovery_entries:
+        if entry["path"] in known_copies:
+            continue
+        plan["copies"].append(entry)
+        if entry["action"] == "residual":
+            plan["residuals"].append(
+                {"path": entry["path"], "reason": "; ".join(entry["reasons"])}
+            )
+    for entry in plan["copies"]:
+        reasons = sorted(
+            {label for label, value in references if value == entry["path"]}
+        )
+        if reasons and entry["action"] in {"retire", "absent"}:
+            entry.update(action="pinned", reasons=reasons)
+    return plan
+
+
+def _runtime_retirement_delete(path: Path, proof: Mapping[str, Any]) -> None:
+    """Unlink through directory descriptors, rechecking each closed entry.
+
+    Partial deletion may resume only as a subset of this durable intent. A
+    symlink replacement never redirects traversal; foreign children stop it.
+    """
+    if not shutil.rmtree.avoids_symlink_attacks:
+        raise RuntimeError("descriptor-safe directory deletion unavailable")
+    # The plan already hashed the closed inventory. Preflight every path/type/
+    # inode/mode/size before any unlink, then hash each file once at its final
+    # fd-relative deletion boundary. Avoid two redundant whole-payload reads.
+    observed = _runtime_retirement_tree(
+        path, pointers=bool(proof.get("pointers")), hash_files=False
+    )
+    if observed["identity"] != proof["identity"]:
+        raise RuntimeError("retirement root identity drift")
+    expected = proof["entries"]
+    for name, record in observed["entries"].items():
+        wanted = expected.get(name)
+        if wanted is None or (
+            [record[0], *record[2:]] != [wanted[0], *wanted[2:]]
+            or (record[0] != "file" and record[1] != wanted[1])
+        ):
+            raise RuntimeError(
+                "foreign child or metadata/identity drift before retirement"
+            )
+    if not proof.get("deleting") and observed["entries"].keys() != expected.keys():
+        raise RuntimeError("retirement inventory changed before deletion")
+    descriptor = _runtime_payload_open_absolute_directory(path, create=False)
+
+    def delete_children(parent: int, prefix: str) -> None:
+        for name in sorted(os.listdir(parent)):
+            relative = prefix + name
+            record = expected.get(relative)
+            metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            if (
+                record is None
+                or [metadata.st_dev, metadata.st_ino] != record[3]
+                or stat.S_IMODE(metadata.st_mode) != record[2]
+                or metadata.st_uid != os.geteuid()
+            ):
+                raise RuntimeError("foreign child appeared during retirement")
+            if record[0] == "directory":
+                child = os.open(
+                    name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent
+                )
+                try:
+                    if [os.fstat(child).st_dev, os.fstat(child).st_ino] != record[3]:
+                        raise RuntimeError(
+                            "directory identity changed during retirement"
+                        )
+                    delete_children(child, relative + "/")
+                finally:
+                    os.close(child)
+                os.rmdir(name, dir_fd=parent)
+            else:
+                if record[0] == "symlink":
+                    if (
+                        not stat.S_ISLNK(metadata.st_mode)
+                        or os.readlink(name, dir_fd=parent) != record[1]
+                    ):
+                        raise RuntimeError("snapshot pointer changed during retirement")
+                else:
+                    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                        raise RuntimeError("file type changed during retirement")
+                    file_descriptor = os.open(
+                        name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent
+                    )
+                    try:
+                        before = os.fstat(file_descriptor)
+                        digest = hashlib.sha256()
+                        with os.fdopen(file_descriptor, "rb", closefd=False) as handle:
+                            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                                digest.update(chunk)
+                        after = os.fstat(file_descriptor)
+                        current = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                        if (
+                            [before.st_dev, before.st_ino] != record[3]
+                            or before.st_uid != os.geteuid()
+                            or before.st_nlink != 1
+                            or stat.S_IMODE(before.st_mode) != record[2]
+                            or _capture_stat_identity(before)
+                            != _capture_stat_identity(after)
+                            or _capture_stat_identity(after)
+                            != _capture_stat_identity(current)
+                            or digest.hexdigest() != record[1]
+                        ):
+                            raise RuntimeError("file content changed during retirement")
+                    finally:
+                        os.close(file_descriptor)
+                os.unlink(name, dir_fd=parent)
+
+    try:
+        if [os.fstat(descriptor).st_dev, os.fstat(descriptor).st_ino] != proof[
+            "identity"
+        ]:
+            raise RuntimeError("retirement root changed before descriptor admission")
+        delete_children(descriptor, "")
+    finally:
+        os.close(descriptor)
+    parent = _runtime_payload_open_absolute_directory(path.parent, create=False)
+    try:
+        metadata = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+        if [metadata.st_dev, metadata.st_ino] != proof["identity"]:
+            raise RuntimeError("retirement root changed before final removal")
+        os.rmdir(path.name, dir_fd=parent)
+        os.fsync(parent)
+    finally:
+        os.close(parent)
+
+
+def _finish_runtime_retirement(
+    paths: Mapping[str, Path], receipt: dict[str, Any]
+) -> dict[str, Any]:
+    """Cleanup failure is a retryable residual, never a failed publication rollback."""
+    try:
+        return _finish_runtime_retirement_locked(paths, receipt)
+    except (
+        OSError,
+        RuntimeError,
+        ValueError,
+        TypeError,
+        KeyError,
+        subprocess.SubprocessError,
+        ExpatError,
+    ) as exc:
+        return {
+            "schema": "vibecrafted.runtime-retirement.v1",
+            "status": "residual",
+            "deleted_bytes": 0,
+            "deleted": [],
+            "residuals": [
+                {"path": str(paths["runtime_home"]), "reason": str(exc), "retry": True}
+            ],
+        }
+
+
+def _finish_runtime_retirement_locked(
+    paths: Mapping[str, Path], receipt: dict[str, Any]
+) -> dict[str, Any]:
+    """Publication finish under the existing lease; no service teardown or restart."""
+    try:
+        plan = _runtime_retirement_plan(paths, receipt)
+    except (
+        OSError,
+        RuntimeError,
+        ValueError,
+        TypeError,
+        KeyError,
+        subprocess.SubprocessError,
+        ExpatError,
+    ) as exc:
+        return {
+            "schema": "vibecrafted.runtime-retirement.v1",
+            "status": "residual",
+            "deleted_bytes": 0,
+            "deleted": [],
+            "residuals": [
+                {"path": str(paths["runtime_home"]), "reason": str(exc), "retry": True}
+            ],
+        }
+    result: dict[str, Any] = {
+        "schema": plan["schema"],
+        "status": plan["status"],
+        "deleted_bytes": 0,
+        "deleted": [],
+        "residuals": list(plan["residuals"]),
+    }
+    if plan["status"] == "pending":
+        result["reason"] = plan["reason"]
+        return result
+    runtime_home = paths["runtime_home"]
+    # Crash after rmdir but before receipt reconciliation: close only a durable
+    # deleting intent's absent historical directory claim before strict doctor.
+    # Never let an already completed retirement make the selected runtime look
+    # damaged, and never release a current/rollback claim through this path.
+    reconciled = False
+    for raw, proof in receipt.get("retirement_pending", {}).items():
+        path = Path(raw)
+        if (
+            proof.get("deleting")
+            and path.parent == runtime_home / "releases"
+            and path.name != receipt.get("version")
+            and raw != (receipt.get("retirement_rollback") or {}).get("generation")
+            and raw in receipt.get("owned_dirs", [])
+            and not _path_present(path)
+        ):
+            _assert_runtime_physical_path(path)
+            receipt["owned_dirs"].remove(raw)
+            reconciled = True
+    if reconciled:
+        _checkpoint_runtime_install_receipt(runtime_home, receipt)
+    verified, reason = _runtime_rescue_verify_destination(paths)
+    if not verified:
+        result.update(
+            status="residual", reason="current publication is not verified: " + reason
+        )
+        return result
+    records = runtime_home / ".installer-backups/retirement"
+    descriptor = _runtime_payload_open_absolute_directory(records, create=True)
+    os.close(descriptor)
+    pending = receipt.setdefault("retirement_pending", {})
+    # Durable in-progress intents are independently resumable after partial rmdir.
+    entries = {
+        entry["path"]: entry for entry in [*plan["generations"], *plan["copies"]]
+    }
+    for entry in plan["copies"]:
+        if entry["action"] == "retire" and entry["path"] not in receipt.get(
+            "retirement_copies", {}
+        ):
+            receipt.setdefault("retirement_copies", {})[entry["path"]] = entry["proof"]
+    _checkpoint_runtime_install_receipt(runtime_home, receipt)
+    for raw, proof in pending.items():
+        if raw in entries and entries[raw]["action"] == "pinned":
+            continue
+        result["residuals"] = [
+            residual for residual in result["residuals"] if residual["path"] != raw
+        ]
+        entries[raw] = {"path": raw, "action": "retire", "proof": proof}
+    for raw, entry in entries.items():
+        if entry["action"] not in {"retire", "absent"}:
+            continue
+        path = Path(raw)
+        try:
+            allowed_generation = path.parent == runtime_home / "releases" and (
+                raw in receipt.get("owned_dirs", [])
+                or raw in receipt.get("retirement_pending", {})
+            )
+            allowed_copy = raw in receipt.get(
+                "retirement_copies", {}
+            ) and path.is_relative_to(runtime_home / ".installer-backups")
+            if not (allowed_generation or allowed_copy):
+                raise RuntimeError("retirement intent escapes its receipted namespace")
+            _assert_runtime_physical_path(path)
+            live = _load_runtime_install_receipt(_runtime_receipt_path(runtime_home))
+            if live.get("version") != receipt.get("version") or any(
+                live.get(key)
+                for key in (
+                    "install_pending",
+                    "rescue_pending",
+                    "config_transaction",
+                    "config_pending",
+                    "uninstall_pending",
+                    "foundation_service_pending",
+                )
+            ):
+                raise RuntimeError(
+                    "publication identity changed before retirement; retry"
+                )
+            pins = _runtime_retirement_references(paths, live)
+            if any(value == raw for _, value in pins):
+                continue
+            if raw in {
+                (receipt.get("retirement_rollback") or {}).get("generation"),
+                (receipt.get("retirement_rollback") or {}).get("publication"),
+            }:
+                continue
+            proof = dict(entry["proof"])
+            event = records / (hashlib.sha256(raw.encode()).hexdigest() + ".json")
+            if _path_present(path):
+                # Persist a resumable intent, but retain the original admission
+                # mode for this first deletion's complete-inventory preflight.
+                intent = dict(proof, deleting=True)
+                pending[raw] = intent
+                _checkpoint_runtime_install_receipt(runtime_home, receipt)
+                _atomic_json_file(
+                    event,
+                    {
+                        "schema": plan["schema"],
+                        "path": raw,
+                        "phase": "deleting",
+                        "proof": intent,
+                    },
+                )
+                if any(
+                    value == raw
+                    for _, value in _runtime_retirement_references(paths, live)
+                ):
+                    continue
+                _runtime_retirement_delete(path, proof)
+            # Remove stale directory ownership in the same atomic receipt write
+            # as completing the intent; doctor must never call retirement damage.
+            receipt["owned_dirs"] = [
+                owned for owned in receipt.get("owned_dirs", []) if owned != raw
+            ]
+            rollback_receipt = (receipt.get("retirement_rollback") or {}).get("receipt")
+            if isinstance(rollback_receipt, dict):
+                rollback_receipt["owned_dirs"] = [
+                    owned
+                    for owned in rollback_receipt.get("owned_dirs", [])
+                    if owned != raw
+                ]
+            for destination, backups in list(
+                receipt.get("drift_backup_history", {}).items()
+            ):
+                kept = [
+                    backup
+                    for backup in backups
+                    if not Path(backup).is_relative_to(path)
+                ]
+                if kept:
+                    receipt["drift_backup_history"][destination] = kept
+                else:
+                    receipt["drift_backup_history"].pop(destination)
+            receipt.get("retirement_copies", {}).pop(raw, None)
+            receipt.get("retirement_generations", {}).pop(raw, None)
+            pending.pop(raw, None)
+            _checkpoint_runtime_install_receipt(runtime_home, receipt)
+            compact = {
+                "schema": plan["schema"],
+                "path": raw,
+                "phase": "retired",
+                "source_revision": proof.get("source_revision", ""),
+                "inventory_sha256": _canonical_digest(proof),
+                "bytes": proof["bytes"],
+                "current_version": receipt["version"],
+                "archived_receipt_sha256": proof.get("archived_receipt_sha256", ""),
+            }
+            _atomic_json_file(event, compact)
+            result["deleted"].append(compact)
+            result["deleted_bytes"] += proof["bytes"]
+        except (OSError, RuntimeError, ValueError, KeyError) as exc:
+            result["residuals"].append({"path": raw, "reason": str(exc), "retry": True})
+    result["status"] = "residual" if result["residuals"] else "settled"
+    if (
+        result["deleted"]
+        or result["residuals"]
+        or (receipt.get("retirement_last_result") or {}).get("status") != "settled"
+    ):
+        # Healthy repeat is a byte-for-byte receipt no-op. Keep the last actual
+        # settlement receipt instead of replacing its deletion attribution.
+        receipt["retirement_last_result"] = result
+    _checkpoint_runtime_install_receipt(runtime_home, receipt)
+    return result
+
+
 def _sha256_path(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -21774,6 +22790,13 @@ def _runtime_rescue_apply(args: argparse.Namespace, paths: Mapping[str, Path]) -
             print(json.dumps(envelope, sort_keys=True))
             return 2
         if journal_matches:
+            if disk_journal.get("phase") == RUNTIME_RESCUE_PHASE_VERIFICATION:
+                # Publication already happened. Re-enter its bound finish phase;
+                # never capture/republish the same generation merely to discharge
+                # a verification residual in historical receipt ownership.
+                return _runtime_rescue_finish(
+                    envelope, paths, receipt_path, disk_journal, 0
+                )
             envelope["capacity"] = _runtime_rescue_capacity_preflight(
                 paths, Path(args.payload_root), live, include_snapshot=False
             )
@@ -21841,6 +22864,9 @@ def _runtime_rescue_apply(args: argparse.Namespace, paths: Mapping[str, Path]) -
             )
             if matched:
                 verified, verify_reason = _runtime_rescue_verify_destination(paths)
+                retirement = (
+                    _finish_runtime_retirement(paths, live) if verified else None
+                )
                 envelope.update(
                     status="rescued" if verified else "residual",
                     reason=(
@@ -21851,6 +22877,7 @@ def _runtime_rescue_apply(args: argparse.Namespace, paths: Mapping[str, Path]) -
                     healthy_restorepoint=verified,
                     missing_history=[],
                     repair_actions=plan["repair_actions"],
+                    retirement=retirement,
                 )
                 print(json.dumps(envelope, sort_keys=True))
                 return 0 if verified else 2
@@ -22046,6 +23073,9 @@ def _runtime_rescue_finish(
     shell_residuals = _runtime_rescue_apply_shell_stanzas(
         list((journal.get("shell") or {}).get("stanzas") or [])
     )
+    receipt = _load_runtime_install_receipt(receipt_path) or {}
+    if _reconcile_runtime_receipt_ownership(paths, receipt):
+        _checkpoint_runtime_install_receipt(paths["runtime_home"], receipt)
     expected_pending = _runtime_rescue_pending_record_from_journal(journal)
     verified, verify_reason = _runtime_rescue_verify_destination(
         paths, expected_pending=expected_pending
@@ -22106,6 +23136,7 @@ def _runtime_rescue_finish(
     _runtime_rescue_persist_journal_phase(
         paths, journal, RUNTIME_RESCUE_PHASE_COMPLETED
     )
+    retirement = _finish_runtime_retirement(paths, receipt)
     generation = (paths["runtime_home"] / "tools/vibecrafted-current").resolve(
         strict=True
     )
@@ -22120,6 +23151,7 @@ def _runtime_rescue_finish(
         healthy_restorepoint=True,
         runtime=result,
         residuals=[],
+        retirement=retirement,
     )
     print(json.dumps(envelope, sort_keys=True))
     return 0
@@ -22134,6 +23166,7 @@ def _stage_runtime_product_config(
     previous: Mapping[str, Any],
 ) -> None:
     """Build the complete physical postimage before touching effective config."""
+    _reconcile_runtime_receipt_ownership(paths, receipt)
     product = paths["product_config"]
     _assert_runtime_physical_path(product)
     _assert_runtime_tree_has_no_symlinks(product)
@@ -22283,7 +23316,13 @@ def _stage_runtime_product_config(
         if not subtree.exists():
             continue
         for entry in subtree.rglob("*"):
-            if entry.is_file() and entry.name != ".DS_Store":
+            if (
+                entry.is_file()
+                and entry.name != ".DS_Store"
+                and not _runtime_terminal_session_path(
+                    product / entry.relative_to(staged), product
+                )
+            ):
                 receipt["owned_files"][str(product / entry.relative_to(staged))] = (
                     _sha256_path(entry)
                 )
@@ -22479,6 +23518,40 @@ def _publish_runtime_config_transaction(
     for index, (destination, source) in enumerate(replacements):
         _assert_runtime_physical_path(destination, leaf_symlink=True)
         before = staging_root / f"before-{index}"
+        # Completed publication trees are temporary recovery, while a human's
+        # divergent managed leaf belongs to the existing durable drift archive.
+        # Save only overwritten divergent leaves, not another whole config tree.
+        for raw, digest in previous.get("owned_files", {}).items():
+            leaf = Path(raw)
+            if leaf != destination and not leaf.is_relative_to(destination):
+                continue
+            postimage = (
+                source
+                if leaf == destination
+                else source / leaf.relative_to(destination)
+            )
+            if (
+                leaf.is_file()
+                and not leaf.is_symlink()
+                and _sha256_path(leaf) != digest
+                and (
+                    not postimage.is_file()
+                    or _sha256_path(postimage) != _sha256_path(leaf)
+                )
+                and not _runtime_terminal_session_path(leaf, paths["product_config"])
+            ):
+                _backup_runtime_drift(
+                    leaf, runtime_home=paths["runtime_home"], receipt=receipt
+                )
+        old_target = previous.get("owned_symlinks", {}).get(str(destination))
+        if (
+            old_target
+            and destination.is_symlink()
+            and str(destination.readlink()) != old_target
+        ):
+            _backup_runtime_drift(
+                destination, runtime_home=paths["runtime_home"], receipt=receipt
+            )
         if _path_present(destination):
             _copy_path_to_backup(destination, before)
         entry = {
@@ -23790,6 +24863,8 @@ def cmd_runtime_repair(args: argparse.Namespace) -> int:
     launch after it. `--plan` is read-only by construction — it reaches the
     decision through the side-effect-free reconciler and stops there.
     """
+    if getattr(args, "retire", False):
+        return _cmd_runtime_retirement_finish(args)
     plan_only = bool(getattr(args, "plan", False))
     envelope: dict[str, Any] = {
         "schema": CONFIG_REPAIR_SCHEMA,
@@ -23977,6 +25052,66 @@ def cmd_runtime_repair(args: argparse.Namespace) -> int:
     return 2 if envelope["status"] in {"unusable", "conflict"} else 0
 
 
+def _cmd_runtime_retirement_finish(args: argparse.Namespace) -> int:
+    """Retry the publication owner's finish, also usable after App adoption."""
+    paths = _runtime_install_paths(getattr(args, "runtime_home", None))
+    current = paths["runtime_home"] / "tools/vibecrafted-current"
+    plan_only = bool(getattr(args, "plan", False))
+    descriptor: int | None = None
+    try:
+        for path in paths.values():
+            _assert_runtime_physical_path(path)
+        _assert_runtime_physical_path(current, leaf_symlink=True)
+        if plan_only:
+            lock = _tools_install_lease_path(current)
+            _assert_runtime_physical_path(lock)
+            descriptor = os.open(lock, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            _validate_tools_lease_descriptor(descriptor, lock)
+            fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            result = _runtime_retirement_plan(
+                paths,
+                _load_runtime_install_receipt(
+                    _runtime_receipt_path(paths["runtime_home"])
+                ),
+            )
+            for entry in [*result["generations"], *result["copies"]]:
+                proof = entry.pop("proof", None)
+                if proof:
+                    entry.update(
+                        bytes=proof["bytes"], inventory_sha256=_canonical_digest(proof)
+                    )
+        else:
+            with (
+                _tools_install_lease(
+                    current, operation="runtime-retirement-finish"
+                ) as lease,
+                _inherited_tools_install_lease(lease),
+            ):
+                receipt = _load_runtime_install_receipt(
+                    _runtime_receipt_path(paths["runtime_home"])
+                )
+                result = _finish_runtime_retirement(paths, receipt)
+    except (
+        OSError,
+        RuntimeError,
+        ValueError,
+        KeyError,
+        TypeError,
+        subprocess.SubprocessError,
+    ) as exc:
+        result = {
+            "schema": "vibecrafted.runtime-retirement.v1",
+            "status": "residual",
+            "reason": str(exc),
+            "deleted_bytes": 0,
+        }
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    print(json.dumps(result, sort_keys=True))
+    return 0 if result["status"] in {"ready", "settled"} else 2
+
+
 def _runtime_repair_status(entries: Sequence[Mapping[str, str]]) -> str:
     """One word for what a plan found, before anything is written."""
     if any(entry["action"] == "conflict" for entry in entries):
@@ -24150,6 +25285,9 @@ def _install_runtime_pack(
         raise RuntimeError(
             "legacy partial config publication requires explicit backup recovery before install"
         )
+    previous_healthy = False
+    if previous and previous.get("version") != version and not rescue_record:
+        previous_healthy, _ = _runtime_rescue_verify_destination(paths)
     previous_created = previous.get("roots_created", {})
     root_created = {
         name: bool(previous_created.get(name)) or not path.exists()
@@ -24184,6 +25322,19 @@ def _install_runtime_pack(
         "foundation_service_pending": json.loads(
             json.dumps(previous.get("foundation_service_pending", {}))
         ),
+        "retirement_copies": json.loads(
+            json.dumps(previous.get("retirement_copies", {}))
+        ),
+        "retirement_pending": json.loads(
+            json.dumps(previous.get("retirement_pending", {}))
+        ),
+        "retirement_rollback": json.loads(
+            json.dumps(previous.get("retirement_rollback", {}))
+        ),
+        "retirement_generations": json.loads(
+            json.dumps(previous.get("retirement_generations", {}))
+        ),
+        "ownership_reconciliation": list(previous.get("ownership_reconciliation", [])),
     }
     if rescue_record:
         receipt["rescue_pending"] = json.loads(json.dumps(dict(rescue_record)))
@@ -24219,7 +25370,8 @@ def _install_runtime_pack(
         receipt["owned_dirs"].append(str(generation))
         _checkpoint_runtime_install_receipt(runtime_home, receipt)
 
-    if not generation.exists():
+    generation_created = not generation.exists()
+    if generation_created:
         staging = Path(tempfile.mkdtemp(prefix=f".{version}.staging-", dir=releases))
         try:
             shutil.rmtree(staging)
@@ -24265,6 +25417,19 @@ def _install_runtime_pack(
         raise RuntimeError(
             "Runtime Pack generation is invalid: " + "; ".join(payload_errors)
         )
+    if generation_created:
+        # Capture the fresh physical postimage while this publisher owns it.
+        # Historical empty/generated directories cannot be retroactively claimed
+        # from file-only pack inventories. Future generations have exact evidence.
+        try:
+            receipt["retirement_generations"][str(generation)] = (
+                _runtime_retirement_tree(generation)
+            )
+        except (OSError, RuntimeError) as exc:
+            receipt["retirement_registration_residuals"] = [
+                {"path": str(generation), "reason": str(exc)}
+            ]
+        _checkpoint_runtime_install_receipt(runtime_home, receipt)
 
     generation_terminal_entry = _runtime_bin_file(generation, "vc-terminal")
     if sys.platform == "win32":
@@ -24471,6 +25636,27 @@ def _install_runtime_pack(
         staging_root,
         product_before,
     )
+    try:
+        copy_proof = _runtime_retirement_tree(staging_root, pointers=True)
+        copy_proof["pointers"] = True
+        receipt["retirement_copies"][str(staging_root)] = copy_proof
+        if previous_healthy:
+            receipt["retirement_rollback"] = {
+                "generation": str(runtime_home / "releases" / previous["version"]),
+                "publication": str(staging_root),
+                "receipt": {
+                    key: value
+                    for key, value in previous.items()
+                    if not key.startswith("retirement_")
+                },
+                "verified_before_publication": True,
+            }
+    except (OSError, RuntimeError, ValueError) as exc:
+        # This is post-publication attribution/cleanup, not authority to undo
+        # the selected runtime. The finish owner reports this exact residual.
+        receipt["retirement_registration_residuals"] = [
+            {"path": str(staging_root), "reason": str(exc)}
+        ]
     # The selected runtime/config transaction is complete. Existing foreign-tool
     # reclamation and service reconciliation run afterward, with install_pending
     # still set. A retry of this phase keeps the now-current default lineage.
@@ -24501,6 +25687,8 @@ def _install_runtime_pack(
     result["tools_current"] = str(current_link)
     result["skills"] = str(len(skill_names))
     result["runtime_views"] = ",".join(runtime_views)
+    if not rescue_record:
+        result["retirement"] = _finish_runtime_retirement(paths, receipt)
     if emit_result:
         print(json.dumps(result, sort_keys=True))
     return 0
@@ -25253,6 +26441,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Report the reconciliation plan without writing anything",
     )
     p_runtime_repair.add_argument("--json", action="store_true")
+    p_runtime_repair.add_argument(
+        "--retire",
+        action="store_true",
+        help="Finish verified publication retirement (with --plan: read-only classification)",
+    )
 
     p_terminal_check = sub.add_parser(
         "terminal-shell-check",

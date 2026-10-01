@@ -509,7 +509,11 @@ def test_interrupted_publish_then_retry_recovers_when_evidence_token_collides(
     assert second_archive.is_file()
     assert second_archive != first_archive
     assert first_archive.is_file()
-    assert first_snapshot.is_dir()
+    assert not first_snapshot.exists()
+    assert any(
+        item["path"] == str(first_snapshot) and item["phase"] == "retired"
+        for item in second["retirement"]["deleted"]
+    )
     rescue_root = paths["runtime_home"] / ".installer-backups" / "rescue"
     tokens = {
         path.name
@@ -625,9 +629,13 @@ def test_repeat_apply_converges_and_keeps_healthy_restorepoint_after_verify(
     code, first = _apply(payload, capsys, plan["plan_digest"])
     assert code == 0
     snapshot = Path(first["pre_rescue_snapshot"]["path"])
-    label = json.loads((snapshot / "label.json").read_text(encoding="utf-8"))
-    assert label["label"] == "damaged-pre-rescue"
-    assert label["healthy_restorepoint"] is False
+    assert not snapshot.exists()
+    retired = next(
+        item for item in first["retirement"]["deleted"] if item["path"] == str(snapshot)
+    )
+    assert retired["phase"] == "retired"
+    assert retired["archived_receipt_sha256"]
+    assert Path(first["archived_receipt"]["path"]).is_file()
     receipt = _load_receipt(paths)
     assert receipt["rescue"]["healthy_restorepoint"] is True
     assert receipt["rescue"]["verified"] is True
@@ -1717,7 +1725,10 @@ def test_prepublication_failure_preserves_post_rescue_user_file(
     )
     assert user_file.read_bytes() == user_bytes
     assert _receipt(paths).read_bytes() == receipt_before
-    assert snapshot.is_dir()
+    assert not snapshot.exists()
+    assert any(
+        item["path"] == str(snapshot) for item in result["retirement"]["deleted"]
+    )
     assert archive.is_file()
     historical = json.loads(journal_path.read_text(encoding="utf-8"))
     assert historical.get("phase") == installer.RUNTIME_RESCUE_PHASE_COMPLETED

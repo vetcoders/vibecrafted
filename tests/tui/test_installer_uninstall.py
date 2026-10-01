@@ -1274,11 +1274,12 @@ def test_runtime_pack_reinstall_reclaims_drifted_managed_paths(
         (runtime_home / installer.RUNTIME_INSTALL_RECEIPT).read_text(encoding="utf-8")
     )
     history = receipt["drift_backup_history"]
-    product = home / ".config/vibecrafted"
+    # Retention preserves the overwritten human leaf in the existing drift
+    # archive, rather than retaining the whole completed publication tree.
     assert any(
-        (Path(raw) / "vc-terminal/vc-terminal.toml").read_text() == drifted_entry
-        for raw in history[str(product)]
-        if (Path(raw) / "vc-terminal/vc-terminal.toml").is_file()
+        Path(raw).read_text() == drifted_entry
+        for raw in history[str(terminal_entry)]
+        if Path(raw).is_file()
     )
     assert any(
         Path(raw).is_symlink()

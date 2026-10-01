@@ -505,6 +505,39 @@ prior notarized release; runtime rollback is the pointer move described above.
 See [Update and rollback](public/getting-started/update.md) for the pointer
 mechanics in detail.
 
+### Runtime Pack publication retirement
+
+Successful Runtime Pack publication automatically retires obsolete owned release
+payloads under `releases/` and completed publication/rescue copies. It preserves
+the current generation, live executable/dependency/session/service references,
+pending recovery and one verified previous generation with its configuration
+preimage. It never signals a process to make a generation disposable. The older
+`tools/vibecrafted-generation-*` namespace has a separate owner.
+
+Retirement requires receipt ownership, physical containment and closed content
+identity; foreign children, pointers and identity drift produce exact residuals.
+Missing historical release claims and mistakenly tracked zsh session files are
+reconciled in the receipt; shell session/history bytes remain intact. Deletion
+intents support retry after partial removal, and compact attribution receipts
+remain in `.installer-backups/retirement/`. Original rescue receipts survive
+after their completed snapshot payload is retired. Overwritten human edits stay
+as individual files/pointers in the existing drift archive; retirement does not
+retain an entire publication copy to preserve those edits.
+
+The existing installer owner can inspect or retry its publication finish:
+
+```bash
+python3 -B scripts/vetcoders_install.py runtime-repair --retire --plan --json
+python3 -B scripts/vetcoders_install.py runtime-repair --retire --json
+```
+
+The plan is read-only. Apply rechecks pins and identity under the publication
+lease and requires a verified current installation. A pending/failed publication
+retains recovery; cleanup errors report residual/retry without rolling back a
+successful publication. macOS uses stable process identity and open/mapped file
+references; Linux uses open-file references or its process filesystem. Unsupported census platforms
+retain payload and report the missing evidence rather than infer safety.
+
 ### Uninstall
 
 ```bash
