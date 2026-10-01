@@ -9,6 +9,7 @@ import os
 import pwd
 import re
 import secrets
+import shlex
 import shutil
 import signal
 import stat
@@ -461,6 +462,7 @@ def test_product_update_source_and_physical_gate_routes() -> None:
     assert "--strict-markers" in makefile
     assert "VIBECRAFTED_UPDATE_PRIOR_FIXTURE_ROOT" in makefile
     workflow_budgets: dict[str, tuple[int, int]] = {}
+    workflow_observation: dict[str, tuple[str, ...]] = {}
     for filename in ("portable.yml", "release.yml", "gate-rehearsal.yml"):
         workflow = (REPO_ROOT / ".github/workflows" / filename).read_text(
             encoding="utf-8"
@@ -480,8 +482,32 @@ def test_product_update_source_and_physical_gate_routes() -> None:
             int(job_budget.group(1)),
             int(installer_budget.group(1)),
         )
+        installer_env = re.search(
+            r"^      - name: Run installer[^\n]*\n"
+            r"        timeout-minutes: \d+\n"
+            r"        run: make test-source\n"
+            r"        env:\n"
+            r'          PYTEST_ADDOPTS: "([^"\n]+)"$',
+            workflow,
+            re.MULTILINE,
+        )
+        assert installer_env, f"{filename} needs step-local test observation"
+        options = tuple(shlex.split(installer_env.group(1)))
+        verbosity = sum(len(opt) - 1 for opt in options if re.fullmatch(r"-v+", opt))
+        assert verbosity - 1 >= 1, "make's -q must still print each node and status"
+        assert options[1] == "-o"
+        fault_timeout = re.fullmatch(r"faulthandler_timeout=(\d+)", options[2])
+        assert fault_timeout, "use pytest's built-in stuck-test stack dump"
+        assert 0 < int(fault_timeout.group(1)) < int(installer_budget.group(1)) * 60
+        assert len(options) == 3, "observation must not alter test selection or exits"
+        workflow_observation[filename] = options
     assert workflow_budgets["gate-rehearsal.yml"] == workflow_budgets["release.yml"]
     assert workflow_budgets["portable.yml"] == workflow_budgets["release.yml"]
+    assert (
+        workflow_observation["gate-rehearsal.yml"]
+        == workflow_observation["release.yml"]
+    )
+    assert workflow_observation["portable.yml"] == workflow_observation["release.yml"]
     job_minutes, installer_minutes = workflow_budgets["release.yml"]
     assert job_minutes > installer_minutes > 0, "other release gates need time to run"
     publisher = (REPO_ROOT / "scripts/publish-vibecrafted-release.sh").read_text(
