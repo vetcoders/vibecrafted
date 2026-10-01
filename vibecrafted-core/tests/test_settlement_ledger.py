@@ -534,3 +534,37 @@ def test_v2_emission_is_fail_closed_before_transient_event(
     with pytest.raises(OSError, match="ledger unavailable"):
         emit_settlement_event(event)
     assert transient_calls == []
+
+
+def test_tail_repair_without_posix_pread(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Native Windows lacks pread; recovery must still preserve the hash chain."""
+    monkeypatch.delattr(os, "pread", raising=False)
+    original = _event(run_id="run-portable-tail", revision=1, verdict="failed", tui="x")
+    settlement_ledger._append_settlement_fact(original)
+    path = settlement_ledger.settlement_ledger_path()
+    with path.open("ab") as stream:
+        stream.write(b'{"interrupted":')
+    duplicate = settlement_ledger._append_settlement_fact(original)
+    assert duplicate.appended is False
+    snapshot = settlement_ledger.read_settlement_ledger()
+    assert snapshot["integrity"]["valid"] is True
+    assert snapshot["counts"]["historical_transitions"]["total"] == 1
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows ACL")
+@pytest.mark.parametrize("target", ["home", "ledger", "lock"])
+def test_windows_ledger_rejects_other_user_write_access(target: str) -> None:
+    settlement_ledger.initialize_settlement_ledger()
+    path = settlement_ledger.settlement_ledger_path()
+    selected = {
+        "home": path.parent,
+        "ledger": path,
+        "lock": path.with_name(".settlement_ledger.lock"),
+    }[target]
+    subprocess.run(
+        ["icacls", str(selected), "/grant", "*S-1-1-0:(W)"],
+        check=True,
+        capture_output=True,
+    )
+    with pytest.raises(PermissionError, match="writable by another principal"):
+        settlement_ledger.read_settlement_ledger()
