@@ -161,6 +161,16 @@ def packaged_generation(tmp_path_factory: pytest.TempPathFactory) -> Path:
     # generation from the provider-boundary bootstrap scrub. Copy the binary
     # so this packaged-layout fixture retains its real invocation identity.
     shutil.copy2(raw, gen / "python" / "bin" / RAW_INTERPRETER)
+    # Standalone CPython discovers its prefix from these adjacent landmarks.
+    # Copying only the executable falls back to its build prefix (/install)
+    # and fails before payload execution. Carry stdlib, including lib-dynload,
+    # while third-party wheels remain private to the bootstrap's python-site.
+    stdlib = Path(sysconfig.get_path("stdlib"))
+    shutil.copytree(
+        stdlib,
+        gen / "python" / sys.platlibdir / RAW_INTERPRETER,
+        ignore=shutil.ignore_patterns("site-packages", "__pycache__", "*.pyc"),
+    )
     _write(gen / "bin" / "python3", PACKAGED_BOOTSTRAP)
     shutil.copytree(
         CORE_PACKAGE,
@@ -326,6 +336,41 @@ def test_packaged_raw_interpreter_keeps_generation_identity(
     assert Path(probe.stdout.strip()).parent == raw.parent, probe
     assert probe.returncode != 0, probe
     assert "ModuleNotFoundError: No module named 'vibecrafted_core'" in probe.stderr
+
+
+def test_packaged_raw_interpreter_carries_stdlib(
+    tmp_path: Path, packaged_generation: Path
+) -> None:
+    raw = packaged_generation / "python" / "bin" / RAW_INTERPRETER
+    probe = subprocess.run(
+        [
+            str(raw),
+            "-c",
+            (
+                "import encodings, json, ssl, sqlite3, sys, zlib; "
+                "print(json.dumps([sys.prefix, encodings.__file__]))"
+            ),
+        ],
+        cwd=tmp_path,
+        env={"HOME": str(tmp_path), "PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=15,
+    )
+    assert probe.returncode == 0, probe
+    prefix, encoding = map(Path, json.loads(probe.stdout))
+    carried = packaged_generation / "python" / sys.platlibdir / RAW_INTERPRETER
+    assert (carried / "encodings" / "__init__.py").is_file()
+    assert (carried / "os.py").is_file()
+    assert not (carried / "site-packages").exists()
+    # Framework builds bind their prefix to the linked Python.framework;
+    # standalone builds must discover the materialized generation itself.
+    if sysconfig.get_config_var("PYTHONFRAMEWORK"):
+        assert prefix.resolve() == Path(sys.base_prefix).resolve()
+    else:
+        assert prefix.resolve() == (packaged_generation / "python").resolve()
+        assert encoding.resolve().is_relative_to(carried.resolve())
 
 
 @pytest.mark.parametrize("restore_fixture_path", [True, False])
