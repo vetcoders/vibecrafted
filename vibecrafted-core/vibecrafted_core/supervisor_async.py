@@ -29,6 +29,7 @@ from .control_plane import (
 from .env_allowlist import dispatcher_identity, filter_headless_worker_env
 from .events import append_event
 from .failure_attribution import attribute_failure
+from .harness_usage import kimi_session_id_from_store
 from .lifecycle import EventKind, RunState
 from .model_overrides import _model_override_receipt
 from .process_control import process_identity_receipt
@@ -90,6 +91,12 @@ def _default_silence_timeout() -> float:
 def _utc_now() -> datetime:
     """Current UTC-aware datetime."""
     return datetime.now(timezone.utc)
+
+
+def _provider_store_home() -> Path:
+    """User home holding provider session stores; overridable for hermetic tests."""
+    override = str(os.environ.get("VIBECRAFTED_PROVIDER_STORE_HOME") or "").strip()
+    return Path(override).expanduser() if override else Path.home()
 
 
 def transcript_human_path(transcript_path: Path | None) -> Path | None:
@@ -200,7 +207,10 @@ def _run_telemetry(handle: AsyncRunHandle) -> RunTelemetry:
             handle.transcript_path, handle.exit_code, agent=handle.agent
         )
     if handle.stream_session_id:
-        candidate, candidate_source = handle.stream_session_id, "provider_stream"
+        candidate, candidate_source = (
+            handle.stream_session_id,
+            handle.stream_session_source,
+        )
     else:
         candidate, candidate_source = handle.agent_session_id, "launch_contract"
     handle.telemetry = build_run_telemetry(
@@ -441,6 +451,9 @@ class AsyncRunHandle:
     cost_source: str | None = None
     # Session id the provider stream itself reported (vs. the launch contract's).
     stream_session_id: str = ""
+    # Where stream_session_id came from: the stream, or the provider's
+    # on-disk session store adopted while the run was live.
+    stream_session_source: str = "provider_stream"
     # Parent/fork session ids from meta that the provider id must never equal.
     parent_sessions: dict[str, str] = field(default_factory=dict)
     telemetry: RunTelemetry | None = None
@@ -1000,6 +1013,7 @@ class AsyncSupervisor:
                             f"no worker output for {silent_for:.0f}s"
                             f" (bound {silence_bound:.0f}s)"
                         )
+                    self._adopt_provider_session_identity(handle)
                     if handle.process.returncode is None:
                         handle.heartbeat_monotonic = time.monotonic()
                         await self._emit(
@@ -1025,6 +1039,7 @@ class AsyncSupervisor:
                 if human_path is not None and display_text:
                     with human_path.open("ab") as human:
                         human.write(display_text.encode("utf-8"))
+                self._adopt_provider_session_identity(handle)
                 previous_agent_session_id = handle.agent_session_id
                 previous_stream_session_id = handle.stream_session_id
                 self._sync_stream_summary(handle, parser)
@@ -1216,6 +1231,32 @@ class AsyncSupervisor:
         handle.cost_source = parser.cost_source
         handle.resume_command = parser.resume_command(handle.root)
 
+    def _adopt_provider_session_identity(self, handle: AsyncRunHandle) -> None:
+        """Adopt a session id the provider revealed on disk before its stream does.
+
+        kimi's stream only carries the session id in the trailing
+        ``session.resume_hint`` event, so a run killed before settlement
+        historically froze meta.json with ``provider_session_id: None`` and
+        ``vibecrafted resume`` was impossible. The provider's session store
+        pins the id at spawn; adopt it into the live meta.json as soon as it
+        appears (observed 2026-09-30: run impl-260930-210226-46946 timed out
+        with ``session_0c31a2fe`` on disk from second one, meta id None).
+        """
+        if handle.stream_session_id:
+            return
+        discovered = ""
+        if handle.agent == "kimi":
+            discovered = kimi_session_id_from_store(
+                handle.root,
+                handle.started_at,
+                home=_provider_store_home(),
+            )
+        if not discovered:
+            return
+        handle.stream_session_id = discovered
+        handle.stream_session_source = "provider_session_store"
+        self._publish_stream_session_identity(handle)
+
     def _publish_stream_session_identity(self, handle: AsyncRunHandle) -> None:
         """Publish a provider-reported child identity while its run is live.
 
@@ -1240,7 +1281,7 @@ class AsyncSupervisor:
                     parent_fields.setdefault(key, value)
             resolved, source = resolve_provider_session_id(
                 handle.stream_session_id,
-                source="provider_stream",
+                source=handle.stream_session_source,
                 parents=parent_session_ids({}, extra=parent_fields),
             )
             if not isinstance(resolved, str):

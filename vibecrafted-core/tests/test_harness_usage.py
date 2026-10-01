@@ -696,3 +696,50 @@ def test_legacy_grok_stream_input_is_fresh_not_the_native_prompt_total():
     )
     assert result.cost.amount == 1.006041
     assert result.usage is usage
+
+
+def kimi_store(home, session_id, cwd, created_ms):
+    state = {
+        "id": session_id,
+        "version": 2,
+        "cwd": str(cwd),
+        "createdAt": created_ms,
+        "updatedAt": created_ms,
+    }
+    target = (
+        home / ".kimi-code" / "sessions" / "wd_cut_deadbeef" / session_id / "state.json"
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(state))
+    return target
+
+
+def test_kimi_session_id_from_store_matches_root_and_start_window(tmp_path):
+    root = tmp_path / "worktree"
+    root.mkdir()
+    start_ms = int(dt.datetime.fromisoformat(START).timestamp() * 1000)
+    kimi_store(tmp_path, "session_live", root, start_ms + 500)
+    # A same-root session pinned before the run started is a previous run's.
+    kimi_store(tmp_path, "session_stale", root, start_ms - 60_000)
+    assert h.kimi_session_id_from_store(root, START, home=tmp_path) == "session_live"
+
+
+def test_kimi_session_id_from_store_ignores_other_roots(tmp_path):
+    root = tmp_path / "worktree"
+    other = tmp_path / "elsewhere"
+    root.mkdir()
+    other.mkdir()
+    start_ms = int(dt.datetime.fromisoformat(START).timestamp() * 1000)
+    kimi_store(tmp_path, "session_other", other, start_ms + 500)
+    assert h.kimi_session_id_from_store(root, START, home=tmp_path) == ""
+
+
+def test_kimi_session_id_from_store_prefers_earliest_after_start(tmp_path):
+    root = tmp_path / "worktree"
+    root.mkdir()
+    start_ms = int(dt.datetime.fromisoformat(START).timestamp() * 1000)
+    # A younger same-root session belongs to a later run; the run that started
+    # first owns the earliest session created at/after its start.
+    kimi_store(tmp_path, "session_first", root, start_ms + 500)
+    kimi_store(tmp_path, "session_second", root, start_ms + 90_000)
+    assert h.kimi_session_id_from_store(root, START, home=tmp_path) == "session_first"

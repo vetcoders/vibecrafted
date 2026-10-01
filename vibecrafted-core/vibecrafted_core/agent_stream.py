@@ -1018,7 +1018,9 @@ class AgentStreamParser:
         and/or ``tool_calls`` (OpenAI-shaped ``function`` blocks), ``tool``
         carries one tool result, ``meta`` carries ``system.version`` (stream
         head), ``turn.step.retrying`` (provider retries) and
-        ``session.resume_hint`` (stream tail — the only session-id carrier).
+        ``session.resume_hint`` (stream tail — the stream's only session-id
+        carrier; live runs adopt the id earlier from the kimi session store
+        via ``supervisor_async._adopt_provider_session_identity``).
         Goal runs close with a ``goal.summary`` object. The stream reports no
         usage and no model field, and thinking never reaches the JSONL
         (kimi docs), so the pane shows text, tool tags and the closing

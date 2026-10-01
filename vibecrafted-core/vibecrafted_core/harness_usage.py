@@ -407,6 +407,53 @@ def _gemini(home: Path, session: str, start: float, end: float) -> HarnessUsage 
     return collector.result()
 
 
+#: Clock-skew allowance when matching a session store entry to a run start.
+_SESSION_START_SKEW_SECONDS = 5.0
+
+
+def kimi_session_id_from_store(
+    root: object, started_at: object, *, home: Path | None = None
+) -> str:
+    """The session id kimi pinned on disk at spawn, or "" when not revealed yet.
+
+    kimi's stream only carries the session id in the trailing
+    ``session.resume_hint`` event, so a run that dies early never emits it.
+    The session store is written at spawn instead:
+    ``~/.kimi-code/sessions/*/session_*/state.json`` pins ``id``, ``cwd`` and
+    ``createdAt``. Match the store entry for this run's root created at/after
+    the run start; with several matches the earliest one is this run's own
+    session (later same-root entries belong to younger runs).
+    """
+    start = epoch(started_at)
+    if start is None:
+        return ""
+    home = home or Path.home()
+    root_text = str(root)
+    root_real = os.path.realpath(root_text)
+    best: tuple[float, str] | None = None
+    for state_path in sorted(
+        (home / ".kimi-code" / "sessions").glob("*/session_*/state.json")
+    ):
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(state, dict):
+            continue
+        cwd = str(state.get("cwd") or "")
+        if cwd != root_text and os.path.realpath(cwd) != root_real:
+            continue
+        created = epoch(state.get("createdAt"))
+        session_id = str(state.get("id") or "").strip()
+        if created is None or not session_id:
+            continue
+        if created < start - _SESSION_START_SKEW_SECONDS:
+            continue
+        if best is None or created < best[0]:
+            best = (created, session_id)
+    return best[1] if best else ""
+
+
 def resolve_harness_usage(
     *,
     agent: str,
