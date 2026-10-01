@@ -36,7 +36,7 @@ if [ ! -d "$$stable_root/vibecrafted-core" ]; then \
 fi
 endef
 
-.PHONY: help help-dev vibecrafted app dmg dmg-signed release-local notarize release runtime-pack release-prereqs portable publish-release release-rehearsal gui-install wizard wizard-dev check skills-check layouts-check test test-core test-skills test-install test-parity test-vc-frame test-iterm2-migrate test-memex test-aicx-sync test-hammerspoon test-keychain-session dispatch-test unified-product-contract-gate exact-release-contract-gate release-version-gate payload-hygiene install install-source install-auto install-all install-python-tools install-bundle-tools install-tools install-tools-held install-vendored-binaries install-app install-app-dev install-dev install-app-binaries install-hammerspoon skills helpers setup-dev dry-run doctor review-map formatting-tree list update uninstall restore migrate migrate-dry init-hooks seed-commit-msg-hooks bundle bundle-check foundations foundations-check semgrep version version-show version-bump bump-patch bump-minor bump-major iterm-plugin iterm-plugin-refresh iterm-plugin-show iterm-plugin-uninstall iterm-plugin-migrate demo demo-full checkout-format-only commit-safe test-race-protection skill-new server server-build build-server-release server-check server-test install-server install-server-payload install-server-service reconcile-server-service server-smoke
+.PHONY: help help-dev vibecrafted app dmg dmg-signed release-local notarize release runtime-pack release-prereqs portable publish-release release-rehearsal gui-install wizard wizard-dev check skills-check layouts-check deck-mirror-check test test-core test-skills test-install test-parity test-vc-frame test-iterm2-migrate test-memex test-aicx-sync test-hammerspoon test-keychain-session dispatch-test unified-product-contract-gate exact-release-contract-gate release-version-gate payload-hygiene install install-source install-auto install-all install-python-tools install-bundle-tools install-tools install-tools-held install-vendored-binaries install-app install-app-dev install-dev install-app-binaries install-hammerspoon skills helpers setup-dev dry-run doctor review-map formatting-tree list update uninstall restore migrate migrate-dry init-hooks seed-commit-msg-hooks bundle bundle-check foundations foundations-check semgrep version version-show version-bump bump-patch bump-minor bump-major iterm-plugin iterm-plugin-refresh iterm-plugin-show iterm-plugin-uninstall iterm-plugin-migrate demo demo-full checkout-format-only commit-safe test-race-protection skill-new server server-build build-server-release server-check server-test install-server install-server-payload install-server-service reconcile-server-service server-smoke
 
 help:
 	@printf "\n"
@@ -770,7 +770,10 @@ skills-check:
 layouts-check:
 	@$(PYTHON) scripts/check-layout-contract.py $(if $(filter 1,$(UPDATE)),--update,)
 
-check: skills-check layouts-check
+deck-mirror-check:
+	@bash scripts/check-deck-mirror.sh
+
+check: skills-check layouts-check deck-mirror-check
 	@$(PYTHON) scripts/check_shell.py
 	@echo "Check complete."
 
