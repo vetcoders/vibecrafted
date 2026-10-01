@@ -86,8 +86,8 @@ def test_linux_builder_uses_pinned_public_inputs_for_arm64_and_x64() -> None:
         "WORKDIR /src/vibecrafted"
     )
     assert "69616218470b2ad053617efb9e7027b1518ea38918d933c2791e113d99cec507" in builder
-    assert "d6685ead9018ad89411291d6198476666e48b0f8" in assembler
-    assert "7ab84069c9b7994ce0b705ccedd708aa3a35dcb6" in assembler
+    assert "c5bb229673401742bf22d05e2caa17337e3e20de" in assembler
+    assert "5436995ed643def9e827c0f9ceed7378d4613d6f" in assembler
     assert "git clone" not in assembler
     assert "VIBECRAFTED_SOURCE_OWNER_REPO" in assembler
     assert 'export VIBECRAFTED_SOURCE_REVISION="$source_revision"' in assembler

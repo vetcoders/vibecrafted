@@ -16,8 +16,8 @@
 
 The public donor repositories supply source, not separate app, DMG, MSI,
 installer or update channels. Tag builds use the same immutable donor commits
-as the Linux and Windows builders: vc-frame `7ab84069c9b7994ce0b705ccedd708aa3a35dcb6`
-and vc-terminal `d6685ead9018ad89411291d6198476666e48b0f8`. The public source
+as the Linux and Windows builders: vc-frame `5436995ed643def9e827c0f9ceed7378d4613d6f`
+and vc-terminal `c5bb229673401742bf22d05e2caa17337e3e20de`. The public source
 archive digests are pinned in those builders. Manual DMG rehearsals may select
 different donor refs; their signed receipts record the actual revisions.
 

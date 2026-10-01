@@ -31,11 +31,11 @@ on:
       frame_ref:
         description: vc-frame immutable donor revision
         required: false
-        default: 7ab84069c9b7994ce0b705ccedd708aa3a35dcb6
+        default: 5436995ed643def9e827c0f9ceed7378d4613d6f
       terminal_ref:
         description: vc-terminal immutable donor revision
         required: false
-        default: d6685ead9018ad89411291d6198476666e48b0f8
+        default: c5bb229673401742bf22d05e2caa17337e3e20de
       notarize:
         description: submit to Apple notary (false = sign only)
         type: boolean
@@ -94,14 +94,14 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: vetcoders/vc-frame
-          ref: ${{ inputs.frame_ref || '7ab84069c9b7994ce0b705ccedd708aa3a35dcb6' }}
+          ref: ${{ inputs.frame_ref || '5436995ed643def9e827c0f9ceed7378d4613d6f' }}
           path: vc-frame
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: vetcoders/vc-terminal
-          ref: ${{ inputs.terminal_ref || 'd6685ead9018ad89411291d6198476666e48b0f8' }}
+          ref: ${{ inputs.terminal_ref || 'c5bb229673401742bf22d05e2caa17337e3e20de' }}
           path: vc-terminal
           fetch-depth: 0
           persist-credentials: false
