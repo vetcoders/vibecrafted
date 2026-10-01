@@ -6,8 +6,21 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CHANNEL = REPO_ROOT / "scripts" / "lib" / "xcode-channel.sh"
+
+
+@pytest.fixture(autouse=True)
+def _darwin_platform(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exercise the macOS branch through a test-owned platform probe."""
+    fake_bin = tmp_path / "platform-bin"
+    fake_bin.mkdir()
+    uname = fake_bin / "uname"
+    uname.write_text("#!/bin/sh\nprintf 'Darwin\\n'\n", encoding="utf-8")
+    uname.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
 
 
 def _run(
@@ -96,3 +109,25 @@ def test_report_channel_tolerates_missing_developer_dir(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert "Xcode: none (not required for install)" in result.stdout
     assert "no usable Xcode developer dir" not in result.stderr
+
+
+@pytest.mark.parametrize("function", ["require_stable", "report_channel"])
+def test_non_darwin_skips_xcode_even_with_beta_selected(function: str) -> None:
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                'uname() { printf "Linux\\n"; }; '
+                'xcode-select() { echo "unexpected Xcode probe" >&2; return 99; }; '
+                "export DEVELOPER_DIR=/missing/Xcode-beta.app/Contents/Developer; "
+                f'. "{CHANNEL}"; vibecrafted_xcode_{function}'
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert result.stderr == ""

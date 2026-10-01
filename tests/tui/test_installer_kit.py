@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import platform
@@ -12,7 +13,7 @@ from pathlib import Path
 
 import pytest
 from _runtime_pack_fixture import seed_runtime_pack
-from vibecrafted_core.runtime_pack_contract import write_provenance
+from vibecrafted_core.runtime_pack_contract import LINUX_EXECUTABLES, write_provenance
 
 from tests.tui.test_runtime_pack_rescue import _seal_runtime_pack_for_admission
 from tests.tui.test_runtime_pack_rescue_wrapper import _sign_payload_archive
@@ -136,6 +137,48 @@ def test_detached_kit_installs_signed_pack(tmp_path: Path, key_mode: str) -> Non
     payload = seed_runtime_pack(tmp_path / "payload", version="9.9.9+kit")
     _seal_runtime_pack_for_admission(payload)
     arch = "arm64" if platform.machine() in ("arm64", "aarch64") else "x64"
+    if platform.system() == "Linux":
+        # The Linux carrier has a closed inventory in addition to provenance.
+        # These are disposable installer fixtures, not executable/build proof.
+        executables = []
+        for name in sorted(LINUX_EXECUTABLES):
+            executable = payload / "bin" / name
+            if not executable.exists():
+                executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                executable.chmod(0o755)
+            executables.append(
+                {
+                    "name": name,
+                    "path": f"bin/{name}",
+                    "sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
+                    "version_argv": ["--version"],
+                    "version_output": "installer test fixture",
+                    "source_url": "https://example.invalid/installer-fixture",
+                    "source_revision": "b" * 40,
+                    "source_archive_sha256": "a" * 64,
+                    "target": (
+                        "aarch64-unknown-linux-gnu"
+                        if arch == "arm64"
+                        else "x86_64-unknown-linux-gnu"
+                    ),
+                    "license": "test fixture",
+                }
+            )
+        (payload / "runtime-inventory.json").write_text(
+            json.dumps(
+                {
+                    "schema": "io.vetcoders.vibecrafted.runtime-inventory.v1",
+                    "platform": f"linux-{arch}",
+                    "architecture": arch,
+                    "executables": executables,
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
     carrier = "Vibecrafted_RuntimePack_rescue-fixture.tar.gz"
     write_provenance(
         payload,

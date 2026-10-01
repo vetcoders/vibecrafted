@@ -26,6 +26,9 @@ def _run_sourced(tmp_path: Path, body: str) -> subprocess.CompletedProcess[str]:
     script.write_text(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
+        # LaunchAgent cases select their platform explicitly on every host.
+        # The non-Darwin case below overrides this function inside its body.
+        "uname() { printf 'Darwin\\n'; }\n"
         f'source "{WRAPPER}"\n'
         f'export HOME="{home}"\n'
         f"{body}\n",

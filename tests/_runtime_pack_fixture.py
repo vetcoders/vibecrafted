@@ -138,7 +138,11 @@ def seed_runtime_pack(
         target.write_text("#!/bin/sh\nexit 0\n")
         target.chmod(0o755)
     python = payload / "bin/python3"
-    python.write_text(f'#!/bin/sh\nexec {installer.shlex_quote(sys.executable)} "$@"\n')
+    # Match the shipped Python door: verification must not add bytecode to the
+    # signed payload it is checking, even when the caller scrubs PYTHON* env.
+    python.write_text(
+        f'#!/bin/sh\nexec {installer.shlex_quote(sys.executable)} -B "$@"\n'
+    )
     python.chmod(0o755)
     skills = payload / "vibecrafted-core/vibecrafted_core/skills"
     for name in ("vc-audit", "vc-implement"):

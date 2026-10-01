@@ -352,18 +352,29 @@ def test_killed_owner_releases_kernel_lock_without_deleting_inode(
     repo, _head = _stage_repo(tmp_path)
     stage = tmp_path / "stage-killed"
     holder = _start_driver(repo, stage, "--runtime-pack-only")
-    _wait_for(stage / "locked")
     lock = repo / "build/release.lock"
-    assert lock.is_file()
-    holder.kill()
-    holder.wait(timeout=5)
-    successor_stage = tmp_path / "stage-after-kill"
-    successor = _start_driver(repo, successor_stage, "--runtime-pack-only")
-    _wait_for(successor_stage / "locked")
-    (successor_stage / "continue").write_text("1\n", encoding="utf-8")
-    done = _finish(successor)
+    successor: subprocess.Popen[str] | None = None
+    try:
+        # `locked` precedes snapshot creation. Killing there races a git child
+        # that correctly inherits and retains the descriptor after its owner
+        # dies. Wait for the completed setup, then drain inherited pipe owners
+        # as well as the shell before asserting that the kernel lock is free.
+        _wait_for_or_report(holder, stage / "snapshot")
+        inode = lock.stat().st_ino
+        holder.kill()
+        holder.communicate(timeout=5)
+        assert holder.returncode == -signal.SIGKILL
+        successor_stage = tmp_path / "stage-after-kill"
+        successor = _start_driver(repo, successor_stage, "--runtime-pack-only")
+        _wait_for_or_report(successor, successor_stage / "snapshot")
+        (successor_stage / "continue").write_text("1\n", encoding="utf-8")
+        done = _finish(successor)
+    finally:
+        _reap_own_child(holder)
+        _reap_own_child(successor)
     assert done.returncode == 0, done.stderr
     assert lock.is_file()
+    assert lock.stat().st_ino == inode
 
 
 def test_notarize_only_takes_the_lock_and_leaves_selection(

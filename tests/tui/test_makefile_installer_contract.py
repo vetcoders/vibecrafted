@@ -1852,6 +1852,7 @@ def _make_runtime_pack(repo: Path) -> subprocess.CompletedProcess[str]:
             "--no-print-directory",
             "runtime-pack",
             "RELEASE_SCRIPT=mock-builder.sh",
+            "LINUX_RUNTIME_PACK_SCRIPT=mock-builder.sh",
         ],
         cwd=repo,
         capture_output=True,
