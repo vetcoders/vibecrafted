@@ -51,10 +51,10 @@ if command -v g++ >/dev/null 2>&1; then
 fi
 
 version="$(tr -d '[:space:]' < "$repo_root/VERSION")"
-terminal_revision="d6685ead9018ad89411291d6198476666e48b0f8"
-terminal_archive_sha256="3cd6670c4a80c589b945ed1b45c1f033c80745ceb34d3466e9476a1c3eeb0f71"
-frame_revision="7ab84069c9b7994ce0b705ccedd708aa3a35dcb6"
-frame_archive_sha256="55851e094b91d3b41712edcdc66d69f97da5859118395fee497bb104714b125c"
+terminal_revision="c5bb229673401742bf22d05e2caa17337e3e20de"
+terminal_archive_sha256="d61c3b1dab39b33c5494d77f118f0a2cc1fb5a3173d9f66aac3dd6af19cd0835"
+frame_revision="5436995ed643def9e827c0f9ceed7378d4613d6f"
+frame_archive_sha256="bee9fe63b89e273d888f93ea6e9803af0d26f37668e0ef6eebe1254217738312"
 work="$(mktemp -d "${TMPDIR:-/tmp}/vibecrafted-linux-arm64.XXXXXX")"
 trap 'rm -rf -- "$work"' EXIT INT TERM HUP
 payload="$work/payload"
