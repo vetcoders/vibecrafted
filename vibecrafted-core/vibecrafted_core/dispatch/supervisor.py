@@ -237,10 +237,21 @@ def workflow_cell_launcher(
                 "base": cut.baseline_sha,
                 "runtime": "headless",
                 "model": cut.model,
+                "effort": cut.effort,
                 "runtime_class": runtime_class,
             },
             base_dir,
         )
+        model_source = cut.model_source if cut.model else spec.model_source
+        if cut.model and model_source in {
+            "cli",
+            "plan_frontmatter",
+            "provider_default",
+        }:
+            model_source = "plan"
+        effort_source = cut.effort_source if cut.effort else spec.effort_source
+        if cut.effort and effort_source == "provider_default":
+            effort_source = "plan"
         spec = replace(
             spec,
             prompt=prompt,
@@ -248,7 +259,8 @@ def workflow_cell_launcher(
             source_path=cut.brief,
             source_digest=cut.source_digest
             or hashlib.sha256(source.encode("utf-8")).hexdigest(),
-            model_source=cut.model_source,
+            model_source=model_source,
+            effort_source=effort_source,
             runtime_class=runtime_class,
             # The dispatcher already owns this cut's prepared checkout (root IS
             # the worktree); worktree=False stops launch_workflow from cutting
@@ -1211,7 +1223,11 @@ class DispatchSupervisor:
             runtime="headless",
             root=root,
             model=cut.model,
-            model_source=cut.model_source,
+            model_source="plan"
+            if cut.model_source in {"cli", "plan_frontmatter"}
+            else cut.model_source,
+            effort=cut.effort,
+            effort_source=cut.effort_source,
             baseline_sha=cut.baseline_sha,
             # Durable declaration first (D1); the transient-branch fallback
             # only covers pre-stamp cuts from legacy receipts.

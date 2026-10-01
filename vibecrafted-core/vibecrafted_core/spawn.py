@@ -34,6 +34,7 @@ from .control_plane import (
     normalize_run_root,
     sync_state,
 )
+from .effort_overrides import _with_effort_override
 from .env_allowlist import dispatcher_identity, filter_headless_worker_env
 from .events import append_event
 from .execution_controls import PERMISSION_POLICIES, ExecutionControls
@@ -1623,6 +1624,7 @@ def interactive_workspace_command(
         _prepare_launch_worktree,
         _source_prompt,
         _write_prompt_file,
+        launch_selection_receipt,
         normalize_launch_spec,
         reserve_run_id,
     )
@@ -1775,9 +1777,7 @@ def interactive_workspace_command(
         "runtime_class": spec.runtime_class,
         "presentation": "visible",
         "requires_pty": True,
-        "model_requested": spec.model,
-        "model_effective": spec.model,
-        "model_source": selected_model_source or spec.model_source,
+        **launch_selection_receipt(spec),
         "source_snapshot": str(source_path),
         "source_digest": spec.source_digest,
         "source_path": source_file,
@@ -1791,6 +1791,12 @@ def interactive_workspace_command(
         "session_selection": session_selection or {},
         **worktree_receipt,
     }
+    if selected_model_source:
+        admission["model_source"] = (
+            "plan"
+            if selected_model_source == "plan_frontmatter"
+            else selected_model_source
+        )
     bound_parent, bound_native = disjoint_session_identities(
         parent_session_id=parent_session_id,
         native_child_session_id=native_session,
@@ -1817,7 +1823,9 @@ def interactive_workspace_command(
     )
     _project_interactive_snapshot(run_id)
     print(
-        f"run_id: {run_id}  model: {spec.model or 'provider_default'}  model_source: {spec.model_source}",
+        f"run_id: {run_id}  model: {spec.model or 'provider_default'}  "
+        f"model_source: {admission['model_source']}  "
+        f"effort: {spec.effort or 'provider_default'}  effort_source: {spec.effort_source}",
         file=sys.stderr,
     )
     interpreter, bootstraps = interactive_launch_interpreter()
@@ -2401,8 +2409,12 @@ def launch_interactive_workspace(
         else:
             raise ValueError(f"interactive native resume unsupported for {provider}")
         provider_session_id = native_session
-    command = _with_model_override(
-        provider, command, str(admission.get("model_requested") or "")
+    command = _with_effort_override(
+        provider,
+        _with_model_override(
+            provider, command, str(admission.get("model_requested") or "")
+        ),
+        str(admission.get("effort_requested") or ""),
     )
     resolved = _resolve_agent_command(provider, command, child_env)
     capability = resolve_provider_usage_capability(provider, executable=resolved[0])
@@ -2523,8 +2535,12 @@ def launch_interactive_workspace(
             # idle; do not send the shell's synthetic /vc-fork skill marker.
             resume_command.pop()
         resume_command[1:1] = ["resume", child_id]
-        resume_command = _with_model_override(
-            provider, resume_command, str(admission.get("model_requested") or "")
+        resume_command = _with_effort_override(
+            provider,
+            _with_model_override(
+                provider, resume_command, str(admission.get("model_requested") or "")
+            ),
+            str(admission.get("effort_requested") or ""),
         )
         resolved = [resolved[0], *resume_command[1:]]
         resolved.extend(["--cd", launch.effective_root])

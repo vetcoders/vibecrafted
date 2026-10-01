@@ -67,6 +67,45 @@ Use a tailnet/LAN address when remote consumers must reach the observer. The
 LaunchAgent, status receipts, guardian URL, and Slack plist are generated views
 of this table; do not edit them as configuration.
 
+### `[agents.<agent>]` — fleet model and effort defaults
+
+Set dispatch and launch defaults independently of the provider CLI's interactive
+configuration. Each agent table accepts optional `model` and `effort` strings:
+
+```toml
+[agents.codex]
+model = "gpt-6.1-sol"
+effort = "low"
+
+[agents.claude]
+model = "sonnet"
+```
+
+Model precedence is CLI `--model` or dispatch `cut.model`, then brief frontmatter,
+then `[agents.<agent>].model`, then `provider_default`. Effort precedence is CLI
+`--effort` or dispatch `cut.effort`, then `[agents.<agent>].effort`, then the
+provider default. Dispatch TOML accepts `effort` beside `model` in each `[[cuts]]`.
+A resumed model stays pinned to its previous selection unless explicitly changed.
+
+Launch receipts record `model_requested`, `model_effective`, `model_source`,
+`effort_requested`, `effort_effective`, and `effort_source`. Sources are `cli`,
+`plan`, `config.toml`, or `provider_default` (`resume_previous` for a preserved
+resume pin). An unpinned Codex receipt may also show `provider_config_model` and
+`provider_config_effort`, read from `$CODEX_HOME/config.toml` or
+`~/.codex/config.toml`. These are observations of CLI settings, not proof of the
+effective model; other config keys never enter the receipt.
+
+Effort uses the existing provider adapter: Codex receives
+`-c model_reasoning_effort=<value>`; Claude, Agy and Junie receive `--effort`;
+Grok and Copilot receive `--reasoning-effort`. Provider catalogs define valid
+level names. Cursor and Kimi have no supported effort flag and receive a
+receipted skip with an empty `effort_effective`.
+
+A present but invalid agent table (including misspelled keys, non-string or
+empty pins) stops admission with an error, even when an explicit pin overrides
+it. Fix or remove the table before retrying. Copilot also permits its existing
+`provider` subtable below.
+
 ### `[agents.copilot.provider]` — BYOK model pin for the `copilot` agent
 
 The same `config.toml` can pin the `copilot` agent to a Bring-Your-Own-Key
