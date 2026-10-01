@@ -376,19 +376,31 @@ def _lifecycle_main(workflow_id: str, argv: Sequence[str] | None = None) -> int:
     return lifecycle_main(workflow_id, args)
 
 
+def _single_stage_main(skill: str, argv: Sequence[str] | None = None) -> int:
+    """Use the public launch parser for single-stage console aliases.
+
+    The supervised wrapper consumes sandbox flags and always awaits; direct
+    aliases must preserve the deck's provider controls, JSON and optional await.
+    Lifecycle orchestration remains a separate entrypoint.
+    """
+    from .cli import main
+
+    return main([skill, *(sys.argv[1:] if argv is None else argv)])
+
+
 def audit_main(argv: Sequence[str] | None = None) -> int:
-    """CLI entry for `vibecrafted audit` (lifecycle manifest `vc-audit`)."""
-    return _lifecycle_main("vc-audit", argv)
+    """CLI entry for `vc-audit` / `vibecrafted audit`."""
+    return _single_stage_main("audit", argv)
 
 
 def dou_main(argv: Sequence[str] | None = None) -> int:
-    """CLI entry for `vibecrafted dou` (lifecycle manifest `vc-dou`)."""
-    return _lifecycle_main("vc-dou", argv)
+    """CLI entry for `vc-dou` / `vibecrafted dou`."""
+    return _single_stage_main("dou", argv)
 
 
 def hydrate_main(argv: Sequence[str] | None = None) -> int:
-    """CLI entry for `vibecrafted hydrate` (lifecycle manifest `vc-hydrate`)."""
-    return _lifecycle_main("vc-hydrate", argv)
+    """CLI entry for `vc-hydrate` / `vibecrafted hydrate`."""
+    return _single_stage_main("hydrate", argv)
 
 
 def marbles_main(argv: Sequence[str] | None = None) -> int:
@@ -472,13 +484,13 @@ def partner_main(argv: Sequence[str] | None = None) -> int:
 
 
 def release_main(argv: Sequence[str] | None = None) -> int:
-    """CLI entry for `vibecrafted release` (lifecycle manifest `vc-release`)."""
-    return _lifecycle_main("vc-release", argv)
+    """CLI entry for `vc-release` / `vibecrafted release`."""
+    return _single_stage_main("release", argv)
 
 
 def workflow_main(argv: Sequence[str] | None = None) -> int:
-    """CLI entry for `vibecrafted workflow` (lifecycle manifest `vc-workflow`)."""
-    return _lifecycle_main("vc-workflow", argv)
+    """CLI entry for `vc-workflow` / `vibecrafted workflow`."""
+    return _single_stage_main("workflow", argv)
 
 
 def trust_main(argv: Sequence[str] | None = None) -> int:

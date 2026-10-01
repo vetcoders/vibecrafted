@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import runpy
 import shlex
 import shutil
 import subprocess
@@ -35,6 +36,236 @@ LONG_PROMPT = (
 )
 
 STAMPED_GENERATION_VERSION = "4.3.0+g1234567"
+
+# These console entries used a lifecycle parser although the public deck
+# admits them as one skill launch. ship and the convergence loops are distinct.
+SINGLE_STAGE_ALIASES = ("release", "workflow", "audit", "dou", "hydrate")
+
+
+@pytest.fixture
+def single_stage_probe(tmp_path: Path):
+    """Run shipped entrypoints, replacing only the process-admission boundary."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "fixture",
+        ],
+        check=True,
+    )
+    baseline = subprocess.check_output(
+        ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
+    ).strip()
+    capture = tmp_path / "admission.json"
+    prompt = tmp_path / "mission.md"
+    prompt.write_text(LONG_PROMPT, encoding="utf-8")
+    bindir = tmp_path / "bin"
+    renderer = runpy.run_path(
+        str(REPO_ROOT / "scripts/render-python-entrypoint-launchers.py")
+    )
+    renderer["render_launchers"](REPO_ROOT / "vibecrafted-core/pyproject.toml", bindir)
+    python = bindir / "python3"
+    python.write_text(
+        f"#!{sys.executable}\n"
+        + f"import sys\nsys.path.insert(0, {str(REPO_ROOT / 'vibecrafted-core')!r})\n"
+        + """
+import json, os
+from dataclasses import asdict
+from pathlib import Path
+from vibecrafted_core import cli, control_plane, lifecycle_runner, wrappers
+def forbidden(*a, **k):
+    raise AssertionError("alias must reach canonical admission without launching a provider")
+def admit(spec, source):
+    Path(os.environ['ALIAS_CAPTURE']).write_text(json.dumps(asdict(spec)))
+    return dict(accepted=True, run_id='alias-stub', agent=spec.agent,
+                skill=spec.skill, root=spec.root, status='launching')
+cli.launch_workflow = admit
+cli._watch_launch_startup = lambda *a, **k: None
+lifecycle_runner.run_lifecycle = forbidden
+wrappers._call_dispatcher = forbidden
+wrappers.Supervisor = forbidden
+control_plane.await_run = lambda *a, **k: dict(completed=True, worker_alive=False,
+    run=dict(state='failed', exit_code=7))
+args = sys.argv[1:]
+if args[:2] == ['-m', 'vibecrafted_core.cli']:
+    raise SystemExit(cli.main(args[2:]))
+if args and args[0] == '-c':
+    sys.argv = ['-c', *args[2:]]
+    exec(compile(args[1], '<console-entry>', 'exec'))
+else:
+    os.execv(sys.executable, [sys.executable, *args])
+""",
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith(("VIBECRAFTED_", "VC_FRAME", "ZELLIJ", "CODEX_"))
+        and k not in {"PYTHONPATH", "PYTHONHOME"}
+    }
+    env.update(
+        HOME=str(tmp_path),
+        ZDOTDIR=str(tmp_path),
+        VIBECRAFTED_HOME=str(tmp_path / "vc-home"),
+        VIBECRAFTED_ROOT=str(REPO_ROOT),
+        VIBECRAFTED_PYTHON=str(python),
+        VIBECRAFTED_DECK_BIN=str(DECK),
+        ALIAS_CAPTURE=str(capture),
+    )
+    dispatch = (
+        REPO_ROOT / "vibecrafted-core/vibecrafted_core/runtime/shell/lib/dispatch.sh"
+    )
+
+    def run(surface, skill, args, *, stdin=None):
+        capture.unlink(missing_ok=True)
+        if surface == "console":
+            command = [str(bindir / f"vc-{skill}"), *args]
+        elif surface == "python":
+            command = [str(bindir / "vibecrafted"), skill, *args]
+        elif surface == "deck":
+            command = ["bash", str(DECK), skill, *args]
+        else:
+            command = [
+                "zsh",
+                "-f",
+                "-c",
+                'source "$1"; shift; "$@"',
+                "alias-probe",
+                str(dispatch),
+                f"vc-{skill}",
+                *args,
+            ]
+        result = subprocess.run(
+            command,
+            cwd=root,
+            env=env,
+            input=stdin,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=15,
+        )
+        spec = json.loads(capture.read_text()) if capture.exists() else None
+        return result, spec
+
+    return SimpleNamespace(run=run, root=root, baseline=baseline, prompt=prompt)
+
+
+@pytest.mark.parametrize("skill", SINGLE_STAGE_ALIASES)
+@pytest.mark.parametrize("runtime", ["visible", "terminal", "headless"])
+def test_single_stage_aliases_share_real_admission(single_stage_probe, skill, runtime):
+    probe = single_stage_probe
+    args = [
+        "codex",
+        "--model",
+        "gpt-6.1-sol",
+        "--worktree",
+        "true",
+        "--runtime",
+        runtime,
+        "--repo",
+        str(probe.root),
+        "--base",
+        probe.baseline,
+        "--file",
+        str(probe.prompt),
+        "--json",
+    ]
+    results = [
+        probe.run(surface, skill, args)
+        for surface in ("console", "python", "deck", "shell")
+    ]
+    for result, spec in results:
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout)["accepted"] is True
+        assert spec["skill"] == skill and spec["model"] == "gpt-6.1-sol"
+        assert spec["runtime"] == runtime and spec["worktree"] is True
+        assert spec["root"] == spec["repo_requested"] == str(probe.root)
+        assert spec["base"] == spec["baseline_sha"] == probe.baseline
+        assert spec["runtime_class"] == "local-worktrees"
+        assert spec["file"] == str(probe.prompt)
+    assert all(spec == results[0][1] for _, spec in results)
+
+
+@pytest.mark.parametrize("skill", SINGLE_STAGE_ALIASES)
+@pytest.mark.parametrize(
+    "controls",
+    [
+        [],
+        ["--permissions", "read-only", "--sandbox", "true"],
+        ["--permissions", "bypass", "--sandbox", "false"],
+    ],
+)
+def test_single_stage_aliases_preserve_controls_stdin_and_await(
+    single_stage_probe, skill, controls
+):
+    probe = single_stage_probe
+    args = [
+        "codex",
+        "--root",
+        str(probe.root),
+        "--worktree=false",
+        "--runtime",
+        "headless",
+        "--prompt-stdin",
+        "--await",
+        "--json",
+        *controls,
+    ]
+    results = [
+        probe.run(surface, skill, args, stdin=LONG_PROMPT)
+        for surface in ("console", "python", "deck", "shell")
+    ]
+    for result, spec in results:
+        assert result.returncode == 7, result.stderr
+        receipt, completion = map(json.loads, result.stdout.splitlines())
+        assert receipt["accepted"] and completion["run"]["exit_code"] == 7
+        assert spec["prompt"] == LONG_PROMPT and spec["file"] == ""
+        assert spec["worktree"] is False and spec["runtime_class"] == "living-tree"
+        assert spec["permissions"] == (controls[1] if controls else "")
+        assert spec["sandbox"] is (controls[-1] == "true" if controls else None)
+    assert all(spec == results[0][1] for _, spec in results)
+
+
+@pytest.mark.parametrize("skill", SINGLE_STAGE_ALIASES)
+@pytest.mark.parametrize(
+    "bad_args",
+    [
+        ["--runtime", "invented"],
+        ["--worktree", "perhaps"],
+        ["--permissions", "invented"],
+        ["--sandbox", "perhaps"],
+        ["--execution-runtime", "cloud"],
+        ["--unknown-flag"],
+        ["--worktree", "true", "--execution-runtime", "living-tree"],
+    ],
+)
+def test_single_stage_aliases_refuse_before_admission(
+    single_stage_probe, skill, bad_args
+):
+    probe = single_stage_probe
+    args = ["codex", "--file", str(probe.prompt), "--json", *bad_args]
+    results = [
+        probe.run(surface, skill, args)
+        for surface in ("console", "python", "deck", "shell")
+    ]
+    for result, spec in results:
+        assert result.returncode == 2, result.stderr
+        assert spec is None
+        assert result.stdout == ""
+    assert all(result.stderr == results[0][0].stderr for result, _ in results)
 
 
 def _run_deck(
