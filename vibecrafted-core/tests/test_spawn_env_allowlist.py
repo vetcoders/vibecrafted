@@ -62,6 +62,46 @@ def test_allowlist_blocks_dispatcher_bus_and_passes_contract() -> None:
     assert child["VIBECRAFTED_SESSION_ID"] == _SESSION_ID
 
 
+def test_allowlist_passes_copilot_byok_provider_vars() -> None:
+    """COPILOT_PROVIDER_* (copilot's BYOK provider, e.g. kimi-k3:cloud via a
+    local Ollama endpoint) must survive the headless allowlist gate, same as
+    every other provider's explicit auth/config vars."""
+    source = _dispatcher_env()
+    source.update(
+        {
+            "COPILOT_MODEL": "kimi-k3:cloud",
+            "COPILOT_PROVIDER_BASE_URL": "http://localhost:11434/v1",
+            "COPILOT_PROVIDER_TYPE": "openai",
+            "COPILOT_PROVIDER_API_KEY": "",
+            "COPILOT_PROVIDER_API_KEY_COMMAND": "op read secret",
+            "COPILOT_PROVIDER_BEARER_TOKEN": "bearer-secret",
+            "COPILOT_PROVIDER_WIRE_API": "responses",
+            "COPILOT_PROVIDER_TRANSPORT": "http",
+            "COPILOT_PROVIDER_HEADERS": "Authorization: Bearer xyz",
+            "COPILOT_PROVIDER_MODEL_ID": "kimi-k3-id",
+            "COPILOT_PROVIDER_WIRE_MODEL": "kimi-k3-wire",
+            "COPILOT_PROVIDER_MAX_PROMPT_TOKENS": "128000",
+            "COPILOT_PROVIDER_MAX_OUTPUT_TOKENS": "8192",
+        }
+    )
+
+    child = filter_headless_worker_env(source)
+
+    assert child["COPILOT_MODEL"] == "kimi-k3:cloud"
+    assert child["COPILOT_PROVIDER_BASE_URL"] == "http://localhost:11434/v1"
+    assert child["COPILOT_PROVIDER_TYPE"] == "openai"
+    assert child["COPILOT_PROVIDER_API_KEY"] == ""
+    assert child["COPILOT_PROVIDER_API_KEY_COMMAND"] == "op read secret"
+    assert child["COPILOT_PROVIDER_BEARER_TOKEN"] == "bearer-secret"
+    assert child["COPILOT_PROVIDER_WIRE_API"] == "responses"
+    assert child["COPILOT_PROVIDER_TRANSPORT"] == "http"
+    assert child["COPILOT_PROVIDER_HEADERS"] == "Authorization: Bearer xyz"
+    assert child["COPILOT_PROVIDER_MODEL_ID"] == "kimi-k3-id"
+    assert child["COPILOT_PROVIDER_WIRE_MODEL"] == "kimi-k3-wire"
+    assert child["COPILOT_PROVIDER_MAX_PROMPT_TOKENS"] == "128000"
+    assert child["COPILOT_PROVIDER_MAX_OUTPUT_TOKENS"] == "8192"
+
+
 def test_interactive_fresh_child_keeps_dispatcher_bus() -> None:
     """Interactive continuity scrub is not the headless allowlist."""
     policy = resolve_continuity_policy("fresh", provider="claude", env={})

@@ -16,6 +16,29 @@ EOF_USAGE
 
 mode="implement"
 runtime="headless"
+# Operator BYOK pin: ~/.config/vibecrafted/config.toml [agents.copilot.provider]
+# (Founder decision 2026-09-14: the one config.toml). Only fills vars the
+# environment does not already set, so an explicit export always wins. No
+# section present => empty stdout, exit 0 => today's behavior (Copilot's
+# default model). Never echoed: these are export statements fed straight to
+# eval. A *present but invalid* table must never fall back to that same
+# silent default (2026-09-30 research.yaml class of bug) -- distinguish the
+# two by the module's exit code, not by empty stdout, and hard-fail instead
+# of guessing.
+_copilot_provider_env_rc=0
+_copilot_provider_env_err="$(mktemp)"
+# stderr never reaches eval: only the module's stdout is shell code.
+_copilot_provider_env_out="$(spawn_python_module vibecrafted_core.server_config copilot-provider-env 2>"$_copilot_provider_env_err")" ||
+  _copilot_provider_env_rc=$?
+if (( _copilot_provider_env_rc != 0 )); then
+  _copilot_provider_env_msg="$(cat "$_copilot_provider_env_err")"
+  rm -f "$_copilot_provider_env_err"
+  spawn_die "Invalid [agents.copilot.provider] config in ~/.config/vibecrafted/config.toml (or \$XDG_CONFIG_HOME/vibecrafted/config.toml): ${_copilot_provider_env_msg}
+Fix the table or remove it entirely, then retry. Copilot was not started."
+fi
+rm -f "$_copilot_provider_env_err"
+eval "$_copilot_provider_env_out"
+unset _copilot_provider_env_rc _copilot_provider_env_out _copilot_provider_env_err
 model="${COPILOT_MODEL:-}"
 root=""
 plan_file=""

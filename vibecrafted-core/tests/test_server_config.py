@@ -5,9 +5,12 @@ from pathlib import Path
 
 import pytest
 from vibecrafted_core.server_config import (
+    CopilotProviderConfig,
     HousekeepingConfig,
     ServerConfig,
     ServerConfigError,
+    copilot_provider_env_lines,
+    load_copilot_provider_config,
     load_housekeeping_config,
     load_server_config,
     load_tool_destinations,
@@ -244,3 +247,146 @@ def test_housekeeping_config_rejects_invalid_contract(
 
     with pytest.raises(ServerConfigError, match=message):
         load_housekeeping_config(path)
+
+
+def test_copilot_provider_config_defaults_unconfigured_when_file_is_absent(
+    tmp_path: Path,
+) -> None:
+    config = load_copilot_provider_config(tmp_path / "missing.toml")
+
+    assert config == CopilotProviderConfig()
+    assert config.configured is False
+    assert config.env() == {}
+
+
+def test_copilot_provider_config_is_the_ollama_byok_example(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        "[agents.copilot.provider]\n"
+        'base_url = "http://localhost:11434/v1"\n'
+        'model = "kimi-k3:cloud"\n',
+        encoding="utf-8",
+    )
+
+    config = load_copilot_provider_config(path)
+
+    assert config.configured is True
+    assert config.base_url == "http://localhost:11434/v1"
+    assert config.model == "kimi-k3:cloud"
+    assert config.env() == {
+        "COPILOT_PROVIDER_BASE_URL": "http://localhost:11434/v1",
+        "COPILOT_MODEL": "kimi-k3:cloud",
+    }
+
+
+def test_copilot_provider_config_is_independent_of_the_server_table(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        "[server]\nport = 3025\n\n"
+        "[agents.copilot.provider]\n"
+        'base_url = "http://localhost:11434/v1"\n',
+        encoding="utf-8",
+    )
+
+    assert load_copilot_provider_config(path).configured is True
+    assert load_server_config(path).port == 3025
+
+
+def test_copilot_provider_config_renders_every_documented_field(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        "[agents.copilot.provider]\n"
+        'base_url = "https://example.test/v1"\n'
+        'model = "custom-model"\n'
+        'type = "openai"\n'
+        'wire_api = "responses"\n'
+        'transport = "http"\n'
+        'api_key = "sk-secret"\n'
+        'api_key_command = "op read secret"\n'
+        'bearer_token = "bearer-secret"\n'
+        'headers = "Authorization: Bearer xyz"\n'
+        'model_id = "custom-model-id"\n'
+        'wire_model = "custom-wire-model"\n'
+        "max_prompt_tokens = 128000\n"
+        "max_output_tokens = 8192\n",
+        encoding="utf-8",
+    )
+
+    config = load_copilot_provider_config(path)
+
+    assert config.env() == {
+        "COPILOT_PROVIDER_BASE_URL": "https://example.test/v1",
+        "COPILOT_MODEL": "custom-model",
+        "COPILOT_PROVIDER_TYPE": "openai",
+        "COPILOT_PROVIDER_WIRE_API": "responses",
+        "COPILOT_PROVIDER_TRANSPORT": "http",
+        "COPILOT_PROVIDER_API_KEY": "sk-secret",
+        "COPILOT_PROVIDER_API_KEY_COMMAND": "op read secret",
+        "COPILOT_PROVIDER_BEARER_TOKEN": "bearer-secret",
+        "COPILOT_PROVIDER_HEADERS": "Authorization: Bearer xyz",
+        "COPILOT_PROVIDER_MODEL_ID": "custom-model-id",
+        "COPILOT_PROVIDER_WIRE_MODEL": "custom-wire-model",
+        "COPILOT_PROVIDER_MAX_PROMPT_TOKENS": "128000",
+        "COPILOT_PROVIDER_MAX_OUTPUT_TOKENS": "8192",
+    }
+
+
+@pytest.mark.parametrize(
+    "body, message",
+    [
+        (
+            '[agents.copilot.provider]\nmodel = "kimi-k3:cloud"\n',
+            "base_url is required",
+        ),
+        (
+            '[agents.copilot.provider]\nbase_url = "http://x/v1"\nbogus = 1\n',
+            r"unsupported \[agents.copilot.provider\] key",
+        ),
+        (
+            "[agents.copilot.provider]\nbase_url = 1\n",
+            "base_url must be a string",
+        ),
+        (
+            (
+                '[agents.copilot.provider]\nbase_url = "http://x/v1"\n'
+                "max_prompt_tokens = true\n"
+            ),
+            "max_prompt_tokens must be a string or integer",
+        ),
+        (
+            "[agents.copilot]\nprovider = 1\n",
+            r"\[agents.copilot.provider\] must be a TOML table",
+        ),
+        ("[agents]\ncopilot = 1\n", r"\[agents.copilot\] must be a TOML table"),
+        ("agents = 1\n", r"\[agents\] must be a TOML table"),
+    ],
+)
+def test_copilot_provider_config_rejects_invalid_contract(
+    tmp_path: Path, body: str, message: str
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(body, encoding="utf-8")
+
+    with pytest.raises(ServerConfigError, match=message):
+        load_copilot_provider_config(path)
+
+
+def test_copilot_provider_env_lines_let_explicit_export_win(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COPILOT_PROVIDER_BASE_URL", "http://operator-override/v1")
+    config = CopilotProviderConfig(
+        base_url="http://localhost:11434/v1", model="kimi-k3:cloud"
+    )
+
+    lines = copilot_provider_env_lines(config)
+
+    assert lines == ["export COPILOT_MODEL=kimi-k3:cloud"]
+
+
+def test_copilot_provider_env_lines_empty_when_unconfigured() -> None:
+    assert copilot_provider_env_lines(CopilotProviderConfig()) == []
