@@ -17219,6 +17219,12 @@ def _runtime_retirement_tree(
         os.close(descriptor)
 
 
+_RUNTIME_RETIREMENT_EMPTY_CANARY = frozenset(
+    "vibecrafted-core/vibecrafted_core/skills/pl/vc-canary/" + leaf
+    for leaf in ("plugins", "scripts")
+)
+
+
 def _runtime_retirement_generation(
     generation: Path, sealed: Mapping[str, Any] | None = None
 ) -> dict[str, Any]:
@@ -17251,6 +17257,12 @@ def _runtime_retirement_generation(
             if proof["entries"].get(name) != record:
                 raise RuntimeError(f"sealed generation content/identity drift: {name}")
         for name in proof["entries"].keys() - expected.keys():
+            if (
+                name in _RUNTIME_RETIREMENT_EMPTY_CANARY
+                and proof["entries"][name][0] == "directory"
+                and not any(child.startswith(name + "/") for child in proof["entries"])
+            ):
+                continue
             if Path(name).name == ".DS_Store":
                 continue
             if _doctor_generation_ignored_bytecode(name):
@@ -17305,6 +17317,7 @@ def _runtime_retirement_generation(
             if relative in {
                 "vibecrafted-core/vibecrafted_core/foundation",
                 "vibecrafted-core/vibecrafted_core/iterm2_plugin",
+                *_RUNTIME_RETIREMENT_EMPTY_CANARY,
             } and not any(name.startswith(relative + "/") for name in proof["entries"]):
                 proof.setdefault("retired_empty_modules", []).append(relative)
                 continue
@@ -17365,8 +17378,60 @@ def _runtime_retirement_generation(
     return proof
 
 
+def _runtime_retirement_provider_configs() -> list[tuple[str, Any]]:
+    """Canonical provider references, parsed without exposing configuration values.
+
+    Missing configuration is normal. Aliases, duplicate JSON keys, unreadable or
+    malformed documents make the census uncertain and refuse disposal.
+    """
+    import tomllib
+
+    def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        document: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in document:
+                raise ValueError("ambiguous duplicate key")
+            document[key] = value
+        return document
+
+    result = []
+    for relative in (
+        ".codex/config.toml",
+        ".claude.json",
+        ".claude/settings.json",
+        ".gemini/settings.json",
+        ".cursor/mcp.json",
+        "Library/Application Support/Claude/claude_desktop_config.json",
+    ):
+        path = Path.home() / relative
+        if not _path_present(path):
+            continue
+        label = "provider-config:" + hashlib.sha256(str(path).encode()).hexdigest()
+        try:
+            _assert_runtime_physical_path(path)
+            raw = _capture_runtime_bound_file(path)
+            text = raw.decode("utf-8")
+            document = (
+                tomllib.loads(text)
+                if path.suffix == ".toml"
+                else json.loads(text, object_pairs_hook=unique)
+            )
+            if not isinstance(document, dict):
+                raise TypeError("configuration is not an object")
+        except (OSError, RuntimeError, ValueError, TypeError, UnicodeError):
+            # Parser exceptions may include secret-bearing source fragments.
+            raise RuntimeError(
+                f"{label}: provider configuration census uncertain"
+            ) from None
+        result.append((label, document))
+    return result
+
+
 def _runtime_retirement_references(
-    paths: Mapping[str, Path], receipt: Mapping[str, Any]
+    paths: Mapping[str, Path],
+    receipt: Mapping[str, Any],
+    *,
+    maintenance_target: Path | None = None,
 ) -> list[tuple[str, str]]:
     """Read live executable/dependency/cwd and durable owner references, without signals.
 
@@ -17379,14 +17444,43 @@ def _runtime_retirement_references(
     releases = str(paths["runtime_home"] / "releases") + "/"
     backups = str(paths["runtime_home"] / ".installer-backups") + "/"
 
+    def maintenance_argv(pid: int, argv: Sequence[str]) -> Sequence[str]:
+        if pid != os.getpid() or maintenance_target is None:
+            return argv
+        # Suppress only this validated CLI's exact inventory operand, not the
+        # process, interpreter, ancestry, or its real open/cwd/mapped references.
+        try:
+            index = argv.index("--legacy-inventory")
+        except ValueError:
+            return argv
+        if (
+            index + 1 >= len(argv)
+            or argv[index + 1] != str(maintenance_target)
+            or "runtime-repair" not in argv
+            or "--retire" not in argv
+            or "--plan" not in argv
+            or not any(
+                Path(value).resolve() == Path(__file__).resolve()
+                for value in argv[:index]
+            )
+        ):
+            return argv
+        return [*argv[: index + 1], *argv[index + 2 :]]
+
     def collect(label: str, value: Any) -> None:
         if isinstance(value, dict):
-            for child in value.values():
+            for key, child in value.items():
+                collect(label, key)
                 collect(label, child)
         elif isinstance(value, (list, tuple)):
             for child in value:
                 collect(label, child)
         elif isinstance(value, str):
+            value = (
+                value.replace("${HOME}/", str(Path.home()) + "/")
+                .replace("$HOME/", str(Path.home()) + "/")
+                .replace("~/", str(Path.home()) + "/")
+            )
             # Persist only the generation root, never the containing command.
             for match in re.finditer(re.escape(releases) + r"([^/\s\"'<>]+)", value):
                 references.append((label, releases + match.group(1)))
@@ -17398,6 +17492,9 @@ def _runtime_retirement_references(
                     ):
                         break
                     references.append((label, str(candidate)))
+
+    for label, document in _runtime_retirement_provider_configs():
+        collect(label, document)
 
     if sys.platform == "darwin":
         for pid in _darwin_process_ids():
@@ -17414,7 +17511,7 @@ def _runtime_retirement_references(
                     raise RuntimeError(
                         f"process identity changed during retirement census: {pid}"
                     )
-                collect(f"process:{pid}:argv", argv)
+                collect(f"process:{pid}:argv", maintenance_argv(pid, argv))
             except ProcessLookupError:
                 continue
     if sys.platform in {"darwin", "linux"}:
@@ -17450,10 +17547,13 @@ def _runtime_retirement_references(
                 try:
                     collect(
                         f"process:{process.name}:argv",
-                        (process / "cmdline")
-                        .read_bytes()
-                        .decode("utf-8", "surrogateescape")
-                        .split("\0"),
+                        maintenance_argv(
+                            int(process.name),
+                            (process / "cmdline")
+                            .read_bytes()
+                            .decode("utf-8", "surrogateescape")
+                            .split("\0"),
+                        ),
                     )
                     collect(
                         f"process:{process.name}:environment",
@@ -17867,6 +17967,18 @@ def _runtime_retirement_delete(path: Path, proof: Mapping[str, Any]) -> None:
         os.close(parent)
 
 
+def _runtime_retirement_forget_copy_history(
+    receipt: dict[str, Any], path: Path
+) -> None:
+    """Release disposed temporary capture references, retaining durable leaf archives."""
+    for destination, backups in list(receipt.get("drift_backup_history", {}).items()):
+        kept = [backup for backup in backups if not Path(backup).is_relative_to(path)]
+        if kept:
+            receipt["drift_backup_history"][destination] = kept
+        else:
+            receipt["drift_backup_history"].pop(destination)
+
+
 def _finish_runtime_retirement(
     paths: Mapping[str, Path], receipt: dict[str, Any]
 ) -> dict[str, Any]:
@@ -18048,18 +18160,7 @@ def _finish_runtime_retirement_locked(
                     for owned in rollback_receipt.get("owned_dirs", [])
                     if owned != raw
                 ]
-            for destination, backups in list(
-                receipt.get("drift_backup_history", {}).items()
-            ):
-                kept = [
-                    backup
-                    for backup in backups
-                    if not Path(backup).is_relative_to(path)
-                ]
-                if kept:
-                    receipt["drift_backup_history"][destination] = kept
-                else:
-                    receipt["drift_backup_history"].pop(destination)
+            _runtime_retirement_forget_copy_history(receipt, path)
             receipt.get("retirement_copies", {}).pop(raw, None)
             receipt.get("retirement_generations", {}).pop(raw, None)
             pending.pop(raw, None)
@@ -18285,6 +18386,8 @@ def _backup_runtime_drift(
     runtime_home: Path,
     receipt: dict[str, Any],
     reason: str = "managed path diverged since install",
+    content_addressed: bool = False,
+    checkpoint: bool = True,
 ) -> Path:
     """Preserve an operator-diverged managed path before the installer reclaims it.
 
@@ -18293,6 +18396,45 @@ def _backup_runtime_drift(
     collision tree: `backups` carries over between installs and would
     early-return, silently dropping the operator's newest divergent copy.
     """
+    if content_addressed:
+        # Legacy retirement preserves individual leaves, never a recursive copy
+        # of a payload. Deduplicate bytes across historical publication copies.
+        _assert_runtime_physical_path(destination, leaf_symlink=True)
+        if destination.is_symlink():
+            before = destination.lstat()
+            raw = os.readlink(destination).encode("utf-8", "surrogateescape")
+            if _capture_stat_identity(before) != _capture_stat_identity(
+                destination.lstat()
+            ):
+                raise RuntimeError("preserved pointer changed during capture")
+            kind = "pointer"
+        else:
+            raw = _capture_runtime_bound_file(destination)
+            kind = "file"
+        digest = hashlib.sha256(raw).hexdigest()
+        backup = runtime_home / ".installer-backups/drift" / f"legacy-{kind}-{digest}"
+        descriptor = _runtime_payload_open_absolute_directory(
+            backup.parent, create=True
+        )
+        os.close(descriptor)
+        if _path_present(backup):
+            if (
+                hashlib.sha256(_capture_runtime_bound_file(backup)).hexdigest()
+                != digest
+            ):
+                raise RuntimeError("legacy preservation archive digest drift")
+        else:
+            _atomic_bytes_file(backup, raw, mode=0o600)
+        if hashlib.sha256(_capture_runtime_bound_file(backup)).hexdigest() != digest:
+            raise RuntimeError("legacy preservation bytes were not durably verified")
+        history = receipt.setdefault("drift_backup_history", {}).setdefault(
+            str(destination), []
+        )
+        if str(backup) not in history:
+            history.append(str(backup))
+        if checkpoint:
+            _checkpoint_runtime_install_receipt(runtime_home, receipt)
+        return backup
     token = hashlib.sha256(str(destination).encode("utf-8")).hexdigest()[:20]
     marker = (
         _sha256_path(destination)[:12]
@@ -20284,7 +20426,10 @@ def _runtime_backup_entries(receipt: Mapping[str, Any]) -> Iterator[tuple[str, s
 
 
 def _validate_runtime_backup_receipts(
-    receipt: Mapping[str, Any], paths: Mapping[str, Path]
+    receipt: Mapping[str, Any],
+    paths: Mapping[str, Path],
+    *,
+    retiring_copy: Path | None = None,
 ) -> None:
     backup_root = paths["runtime_home"] / ".installer-backups"
     _assert_runtime_physical_path(backup_root)
@@ -20301,6 +20446,14 @@ def _validate_runtime_backup_receipts(
         _assert_runtime_physical_path(backup, leaf_symlink=True)
         if not _receipt_backup_path_is_allowed(backup, backup_root):
             raise RuntimeError(f"receipt backup path escapes backup root: {backup}")
+        if (
+            retiring_copy is not None
+            and backup.is_relative_to(retiring_copy)
+            and not _path_present(backup)
+        ):
+            # Only the retirement owner passes its authenticated durable deleting
+            # intent here. Every other missing recovery snapshot still refuses.
+            continue
         backup.lstat()  # A missing receipted snapshot is never successful recovery.
 
 
@@ -22222,6 +22375,7 @@ def _runtime_rescue_verify_destination(
     paths: Mapping[str, Path],
     *,
     expected_pending: Mapping[str, Any] | None = None,
+    retiring_copy: Path | None = None,
 ) -> tuple[bool, str]:
     """Complete destination verification. A receipt is not a healthy shell.
 
@@ -22245,7 +22399,7 @@ def _runtime_rescue_verify_destination(
         )
         if pending_reason:
             return False, pending_reason
-        _validate_runtime_backup_receipts(receipt, paths)
+        _validate_runtime_backup_receipts(receipt, paths, retiring_copy=retiring_copy)
         current = runtime_home / "tools/vibecrafted-current"
         _assert_runtime_physical_path(current, leaf_symlink=True)
         if not current.is_symlink():
@@ -24872,6 +25026,16 @@ def cmd_runtime_repair(args: argparse.Namespace) -> int:
     launch after it. `--plan` is read-only by construction — it reaches the
     decision through the side-effect-free reconciler and stops there.
     """
+    if any(
+        getattr(args, key, None)
+        for key in ("legacy_evidence", "legacy_inventory", "admit_plan")
+    ) and not getattr(args, "retire", False):
+        print(
+            json.dumps(
+                {"status": "residual", "reason": "legacy options require --retire"}
+            )
+        )
+        return 2
     if getattr(args, "retire", False):
         return _cmd_runtime_retirement_finish(args)
     plan_only = bool(getattr(args, "plan", False))
@@ -25061,6 +25225,454 @@ def cmd_runtime_repair(args: argparse.Namespace) -> int:
     return 2 if envelope["status"] in {"unusable", "conflict"} else 0
 
 
+_RUNTIME_LEGACY_ADMISSION_SCHEMA = "vibecrafted.runtime-retirement-legacy.v1"
+
+
+def _runtime_retirement_legacy_guard(
+    paths: Mapping[str, Path],
+    receipt: Mapping[str, Any],
+    target: Path,
+    *,
+    retiring_copy: Path | None = None,
+) -> dict[str, Any]:
+    """Price one exact copy against a healthy publication and fresh references."""
+    runtime = paths["runtime_home"]
+    if any(
+        receipt.get(key)
+        for key in (
+            "install_pending",
+            "rescue_pending",
+            "config_transaction",
+            "config_pending",
+            "uninstall_pending",
+            "foundation_service_pending",
+        )
+    ):
+        raise RuntimeError("legacy retirement refused: pending publication/recovery")
+    # Rescue captures contain large generation trees alongside state. The old
+    # aggregate label cannot classify unknown leaves. Do not bless a new tree
+    # digest as its old preimage, or copy the entire payload to call it preserved.
+    if target.is_relative_to(runtime / ".installer-backups/rescue"):
+        raise RuntimeError(
+            "legacy rescue residual: per-capture owned-payload and preservation proof "
+            "required; original label/aggregate remains unchanged"
+        )
+    if (
+        not target.is_absolute()
+        or str(target) != os.path.normpath(str(target))
+        or target.parent != runtime / ".installer-backups"
+        or not target.name.startswith("publication-")
+        or target.name == "publication-"
+    ):
+        raise RuntimeError(
+            "legacy retirement target escapes publication-copy namespace"
+        )
+    _assert_runtime_physical_path(target)
+    rollback = receipt.get("retirement_rollback") or {}
+    if str(target) in {rollback.get("generation"), rollback.get("publication")}:
+        raise RuntimeError("legacy retirement target is the healthy rollback")
+    pins = [
+        label
+        for label, value in _runtime_retirement_references(
+            paths, receipt, maintenance_target=target
+        )
+        if value == str(target)
+    ]
+    if pins:
+        raise RuntimeError(
+            "legacy retirement target is referenced by a live/pending owner: "
+            + ", ".join(sorted(set(pins)))
+        )
+    verified, reason = (
+        _runtime_rescue_verify_destination(paths, retiring_copy=retiring_copy)
+        if retiring_copy
+        else _runtime_rescue_verify_destination(paths)
+    )
+    if not verified:
+        raise RuntimeError("current publication is not verified: " + reason)
+    current = runtime / "tools/vibecrafted-current"
+    generation = current.resolve(strict=True)
+    return {
+        "roots": receipt["roots"],
+        "version": receipt["version"],
+        "generation": str(generation),
+        "generation_manifest_sha256": _sha256_path(
+            generation / _RUNTIME_GENERATION_MANIFEST
+        ),
+        "generation_identity": [generation.stat().st_dev, generation.stat().st_ino],
+        "selector_identity": [current.lstat().st_dev, current.lstat().st_ino],
+        "active_sha256": _sha256_path(runtime / "active.json"),
+        "configuration_digest": _runtime_config_digest(paths["product_config"]),
+        "selector": str(current.readlink()),
+    }
+
+
+def _runtime_retirement_legacy_roles(
+    paths: Mapping[str, Path],
+    target: Path,
+    proof: Mapping[str, Any],
+    originals: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Authenticate every top-level capture against existing receipt roles.
+
+    Descendants of a bound config capture may include unknown human leaves;
+    every leaf is preserved, including pointers as opaque link-target bytes.
+    Unknown/unbound top-level entries have no invented destination mapping.
+    """
+    candidates: dict[str, set[tuple[str, str]]] = {}
+
+    def bind(name: str, role: str, destination: str) -> None:
+        path = Path(destination)
+        if not _runtime_owned_path_is_managed(path, paths):
+            raise RuntimeError("legacy role destination escapes managed namespace")
+        candidates.setdefault(name, set()).add((role, destination))
+
+    for original in originals:
+        if original.get("schema") != RUNTIME_INSTALL_SCHEMA or original.get(
+            "roots"
+        ) != {name: str(path) for name, path in paths.items()}:
+            raise RuntimeError(
+                "original receipt/root binding disagrees with publication"
+            )
+        for destination, backups in original.get("drift_backup_history", {}).items():
+            for raw in backups:
+                backup = Path(raw)
+                if backup.parent == target:
+                    if re.fullmatch(r"before-[0-9]+", backup.name) is None:
+                        raise RuntimeError("original backup capture role is malformed")
+                    bind(backup.name, "preimage", destination)
+        for kind, mapping in (("file", "owned_files"), ("link", "owned_symlinks")):
+            for destination in original.get(mapping, {}):
+                token = hashlib.sha256(destination.encode()).hexdigest()
+                bind(f"{kind}-{token}", "postimage", destination)
+    bind("product-config", "postimage", str(paths["product_config"]))
+    bind("active.json", "postimage", str(paths["runtime_home"] / "active.json"))
+    bind(
+        "current", "postimage", str(paths["runtime_home"] / "tools/vibecrafted-current")
+    )
+    roles = {}
+    for name in proof["entries"]:
+        if "/" in name:
+            continue
+        if name == ".DS_Store":
+            if proof["entries"][name][0] != "file":
+                raise RuntimeError("legacy host metadata must be a regular file")
+            continue
+        matches = candidates.get(name, set())
+        if len(matches) != 1:
+            raise RuntimeError(f"unknown or ambiguous legacy capture role: {name}")
+        role, destination = next(iter(matches))
+        record = proof["entries"][name]
+        if record[0] == "symlink":
+            pointer = Path(record[1])
+            if not pointer.is_absolute() or not _runtime_owned_path_is_managed(
+                pointer, paths
+            ):
+                raise RuntimeError("legacy pointer topology escapes managed namespace")
+        roles[name] = {"role": role, "destination": destination}
+    if not any(role["role"] == "preimage" for role in roles.values()):
+        raise RuntimeError("legacy copy has no original receipt-bound capture")
+    return roles
+
+
+def _runtime_retirement_legacy_inventory(
+    paths: Mapping[str, Path], receipt: Mapping[str, Any], target: Path
+) -> dict[str, Any]:
+    _runtime_retirement_legacy_guard(paths, receipt, target)
+    proof = _runtime_retirement_tree(target, pointers=True)
+    parent = target.parent.stat()
+    record_path = _runtime_receipt_path(paths["runtime_home"])
+    return {
+        "schema": _RUNTIME_LEGACY_ADMISSION_SCHEMA,
+        "path": str(target),
+        "parent_identity": [parent.st_dev, parent.st_ino],
+        "proof": dict(proof, pointers=True),
+        "roles": _runtime_retirement_legacy_roles(paths, target, proof, [receipt]),
+        "history": {
+            "state": "missing",
+            "records": [
+                {"path": str(record_path), "sha256": _sha256_path(record_path)}
+            ],
+        },
+        "leaves": {
+            name: "preserve"
+            for name, record in proof["entries"].items()
+            if record[0] != "directory" and Path(name).name != ".DS_Store"
+        },
+    }
+
+
+def _runtime_retirement_legacy(
+    paths: Mapping[str, Path],
+    receipt: dict[str, Any],
+    evidence_path: Path,
+    *,
+    plan_only: bool,
+    admitted: str | None,
+) -> dict[str, Any]:
+    """Explicit review, existing lease/archive/deletion owner, original history intact."""
+    _assert_runtime_physical_path(evidence_path)
+    raw = _capture_runtime_bound_file(evidence_path)
+    evidence = json.loads(raw)
+    if evidence.get("schema") != _RUNTIME_LEGACY_ADMISSION_SCHEMA:
+        raise RuntimeError("unsupported legacy admission schema")
+    target = Path(evidence["path"])
+    if evidence_path.is_relative_to(target):
+        raise RuntimeError("legacy evidence must live outside the disposable copy")
+    evidence_digest = hashlib.sha256(raw).hexdigest()
+    records = paths["runtime_home"] / ".installer-backups/retirement"
+    prefix = records / ("legacy-" + evidence_digest)
+    plan_path = prefix.with_suffix(".plan.json")
+    state_path = prefix.with_suffix(".state.json")
+    compact_path = prefix.with_suffix(".receipt.json")
+    saved = (
+        json.loads(_capture_runtime_bound_file(plan_path))
+        if _path_present(plan_path)
+        else None
+    )
+    state = (
+        json.loads(_capture_runtime_bound_file(state_path))
+        if _path_present(state_path)
+        else {}
+    )
+    if state and (
+        not saved
+        or state.get("plan_sha256") != _canonical_digest(saved)
+        or state.get("phase") not in {"preserving", "deleting"}
+    ):
+        raise RuntimeError("legacy deletion state is not bound to immutable plan")
+    history = evidence["history"]
+    if history.get("state") not in {
+        "failed",
+        "restored",
+        "missing",
+        "published",
+    } or not history.get("records"):
+        raise RuntimeError("legacy admission requires honest original history/records")
+    originals = []
+    original_bytes = []
+    for record in history["records"]:
+        if re.fullmatch(r"[0-9a-f]{64}", str(record.get("sha256", ""))) is None:
+            raise RuntimeError("legacy original receipt requires an exact SHA256")
+        original_path = Path(record["path"])
+        canonical_receipt = _runtime_receipt_path(paths["runtime_home"])
+        rescue_root = paths["runtime_home"] / ".installer-backups/rescue"
+        archived_original = (
+            original_path.name == "original-receipt.json"
+            and original_path.parent.parent == rescue_root
+        )
+        if original_path != canonical_receipt and not archived_original:
+            raise RuntimeError(
+                "legacy original record is not a canonical receipt/archive"
+            )
+        if (
+            archived_original
+            and _capture_runtime_bound_file(original_path.with_suffix(".sha256"))
+            .decode("ascii")
+            .strip()
+            != record["sha256"]
+        ):
+            raise RuntimeError(
+                "legacy original rescue archive digest binding disagrees"
+            )
+        if original_path.is_relative_to(target):
+            raise RuntimeError("original receipt must survive outside disposable copy")
+        archive = records / ("legacy-original-" + str(record["sha256"]) + ".json")
+        # The current receipt advances when leaves are archived. Its exact
+        # reviewed bytes were saved before that first mutation, not reconstructed.
+        source = archive if saved and _path_present(archive) else original_path
+        _assert_runtime_physical_path(source)
+        original_raw = _capture_runtime_bound_file(source)
+        if hashlib.sha256(original_raw).hexdigest() != record["sha256"]:
+            raise RuntimeError("original receipt raw-byte digest drift")
+        originals.append(json.loads(original_raw))
+        original_bytes.append((archive, original_raw))
+    proof = evidence["proof"]
+    if proof.get("pointers") is not True:
+        raise RuntimeError("legacy closed inventory requires explicit pointer evidence")
+    for name in proof["entries"]:
+        if (
+            not name
+            or Path(name).is_absolute()
+            or ".." in Path(name).parts
+            or name != Path(name).as_posix()
+        ):
+            raise RuntimeError(
+                "legacy inventory has noncanonical/escaping relative path"
+            )
+        if Path(name).name == ".DS_Store" and proof["entries"][name][0] != "file":
+            raise RuntimeError("legacy host metadata must be a regular file")
+    roles = _runtime_retirement_legacy_roles(paths, target, proof, originals)
+    if evidence["roles"] != roles:
+        raise RuntimeError("legacy roles disagree with original receipt bindings")
+    leaves = {
+        name: "preserve"
+        for name, record in proof["entries"].items()
+        if record[0] != "directory" and Path(name).name != ".DS_Store"
+    }
+    if evidence["leaves"] != leaves:
+        raise RuntimeError(
+            "every legacy state/config/unknown leaf requires preservation"
+        )
+    retiring_copy = target if state.get("phase") == "deleting" else None
+    # This exception is reached only after authenticated original roles and the
+    # immutable plan/state binding; it releases missing temporary backup leaves,
+    # never current payload/config checks or unrelated recovery snapshots.
+    binding = _runtime_retirement_legacy_guard(
+        paths, receipt, target, retiring_copy=retiring_copy
+    )
+    parent = target.parent.stat()
+    if [parent.st_dev, parent.st_ino] != evidence["parent_identity"]:
+        raise RuntimeError("legacy physical parent identity drift")
+    plan = {
+        "schema": _RUNTIME_LEGACY_ADMISSION_SCHEMA,
+        "authority": "reviewed-legacy-inventory",
+        "path": str(target),
+        "parent_identity": evidence["parent_identity"],
+        "evidence_sha256": evidence_digest,
+        "publication": binding,
+        "proof": proof,
+        "roles": roles,
+        "history": history,
+        "leaves": leaves,
+        "original_aggregate_preimage": "unavailable; observed inventory is not original preimage",
+    }
+    digest = _canonical_digest(plan)
+    if saved and saved != plan:
+        raise RuntimeError(
+            "legacy immutable plan/publication drift; obtain a new review"
+        )
+    if not plan_only and (not admitted or admitted != digest):
+        raise RuntimeError(
+            "legacy retirement requires exact reviewed --admit-plan digest"
+        )
+    if _path_present(compact_path):
+        compact = json.loads(_capture_runtime_bound_file(compact_path))
+        if compact.get("plan_sha256") != digest or _path_present(target):
+            raise RuntimeError("legacy settlement receipt disagrees with filesystem")
+        return dict(compact, status="settled")
+    observed = (
+        _runtime_retirement_tree(target, pointers=True)
+        if _path_present(target)
+        else {"identity": proof["identity"], "entries": {}, "bytes": 0}
+    )
+    if observed["identity"] != proof["identity"]:
+        raise RuntimeError("legacy physical root identity drift")
+    if state.get("phase") != "deleting" and observed != {
+        key: proof[key] for key in ("identity", "entries", "bytes")
+    }:
+        raise RuntimeError("legacy exact leaf inventory/hash drift")
+    if any(
+        proof["entries"].get(name) != record
+        for name, record in observed["entries"].items()
+    ):
+        raise RuntimeError("legacy remaining leaf identity/hash drift")
+    if plan_only:
+        return {
+            "schema": plan["schema"],
+            "status": "ready",
+            "plan_sha256": digest,
+            "plan": plan,
+        }
+    descriptor = _runtime_payload_open_absolute_directory(records, create=True)
+    os.close(descriptor)
+    for archive, original_raw in original_bytes:
+        if not _path_present(archive):
+            _atomic_bytes_file(archive, original_raw, mode=0o600)
+        if _capture_runtime_bound_file(archive) != original_raw:
+            raise RuntimeError("legacy original receipt archive drift")
+    if not saved:
+        _atomic_json_file(plan_path, plan)
+    preserved = state.get("preserved", {})
+    for name in leaves:
+        record = proof["entries"][name]
+        wanted = (
+            record[1]
+            if record[0] == "file"
+            else hashlib.sha256(
+                record[1].encode("utf-8", "surrogateescape")
+            ).hexdigest()
+        )
+        if name in preserved:
+            backup = Path(preserved[name]["archive"])
+            expected_archive = (
+                paths["runtime_home"]
+                / ".installer-backups/drift"
+                / (f"legacy-{'file' if record[0] == 'file' else 'pointer'}-{wanted}")
+            )
+            if backup != expected_archive or preserved[name]["sha256"] != wanted:
+                raise RuntimeError(
+                    "legacy preservation receipt escapes digest/namespace binding"
+                )
+            if (
+                hashlib.sha256(_capture_runtime_bound_file(backup)).hexdigest()
+                != preserved[name]["sha256"]
+            ):
+                raise RuntimeError("legacy preserved bytes drift before disposal")
+            continue
+        if name not in observed["entries"]:
+            raise RuntimeError("legacy leaf disappeared before preservation receipt")
+        backup = _backup_runtime_drift(
+            target / name,
+            runtime_home=paths["runtime_home"],
+            receipt=receipt,
+            content_addressed=True,
+            checkpoint=False,
+        )
+        wanted = (
+            record[1]
+            if record[0] == "file"
+            else hashlib.sha256(
+                record[1].encode("utf-8", "surrogateescape")
+            ).hexdigest()
+        )
+        if hashlib.sha256(_capture_runtime_bound_file(backup)).hexdigest() != wanted:
+            raise RuntimeError("legacy preserved leaf differs from reviewed bytes")
+        preserved[name] = {
+            "archive": str(backup),
+            "sha256": wanted,
+            "kind": record[0],
+            "mode": record[2],
+        }
+    # Archives are individually durable and content-addressed. A crash before
+    # this bounded checkpoint simply verifies/reuses them with no payload loss.
+    # No per-leaf rewrite of the full install receipt or growing state document.
+    _checkpoint_runtime_install_receipt(paths["runtime_home"], receipt)
+    # Reprice publication, references, and physical parent after preservation.
+    live = _load_runtime_install_receipt(_runtime_receipt_path(paths["runtime_home"]))
+    fresh_parent = target.parent.stat()
+    if (
+        _runtime_retirement_legacy_guard(
+            paths, live, target, retiring_copy=retiring_copy
+        )
+        != binding
+        or [fresh_parent.st_dev, fresh_parent.st_ino] != evidence["parent_identity"]
+    ):
+        raise RuntimeError("legacy publication/parent changed before disposal")
+    deleting = state.get("phase") == "deleting"
+    _atomic_json_file(
+        state_path, {"phase": "deleting", "plan_sha256": digest, "preserved": preserved}
+    )
+    if _path_present(target):
+        _runtime_retirement_delete(target, dict(proof, deleting=deleting))
+    _runtime_retirement_forget_copy_history(receipt, target)
+    _checkpoint_runtime_install_receipt(paths["runtime_home"], receipt)
+    compact = {
+        "schema": plan["schema"],
+        "phase": "retired",
+        "authority": plan["authority"],
+        "path": str(target),
+        "plan_sha256": digest,
+        "inventory_sha256": _canonical_digest(proof),
+        "history": history,
+        "original_aggregate_preimage": plan["original_aggregate_preimage"],
+        "preserved": preserved,
+        "bytes": proof["bytes"],
+    }
+    _atomic_json_file(compact_path, compact)
+    return dict(compact, status="settled")
+
+
 def _cmd_runtime_retirement_finish(args: argparse.Namespace) -> int:
     """Retry the publication owner's finish, also usable after App adoption."""
     paths = _runtime_install_paths(getattr(args, "runtime_home", None))
@@ -25068,6 +25680,15 @@ def _cmd_runtime_retirement_finish(args: argparse.Namespace) -> int:
     plan_only = bool(getattr(args, "plan", False))
     descriptor: int | None = None
     try:
+        evidence = getattr(args, "legacy_evidence", None)
+        inventory = getattr(args, "legacy_inventory", None)
+        admitted = getattr(args, "admit_plan", None)
+        if (inventory and (not plan_only or evidence or admitted)) or (
+            admitted and (not evidence or plan_only)
+        ):
+            raise RuntimeError(
+                "inventory requires --plan alone; --admit-plan requires apply with --legacy-evidence"
+            )
         for path in paths.values():
             _assert_runtime_physical_path(path)
         _assert_runtime_physical_path(current, leaf_symlink=True)
@@ -25077,13 +25698,23 @@ def _cmd_runtime_retirement_finish(args: argparse.Namespace) -> int:
             descriptor = os.open(lock, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
             _validate_tools_lease_descriptor(descriptor, lock)
             fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
-            result = _runtime_retirement_plan(
-                paths,
-                _load_runtime_install_receipt(
-                    _runtime_receipt_path(paths["runtime_home"])
-                ),
+            receipt = _load_runtime_install_receipt(
+                _runtime_receipt_path(paths["runtime_home"])
             )
-            for entry in [*result["generations"], *result["copies"]]:
+            if inventory:
+                result = {
+                    "status": "ready",
+                    "evidence": _runtime_retirement_legacy_inventory(
+                        paths, receipt, Path(inventory)
+                    ),
+                }
+            elif evidence:
+                result = _runtime_retirement_legacy(
+                    paths, receipt, Path(evidence), plan_only=True, admitted=None
+                )
+            else:
+                result = _runtime_retirement_plan(paths, receipt)
+            for entry in [*result.get("generations", []), *result.get("copies", [])]:
                 proof = entry.pop("proof", None)
                 if proof:
                     entry.update(
@@ -25099,7 +25730,17 @@ def _cmd_runtime_retirement_finish(args: argparse.Namespace) -> int:
                 receipt = _load_runtime_install_receipt(
                     _runtime_receipt_path(paths["runtime_home"])
                 )
-                result = _finish_runtime_retirement(paths, receipt)
+                result = (
+                    _runtime_retirement_legacy(
+                        paths,
+                        receipt,
+                        Path(evidence),
+                        plan_only=False,
+                        admitted=admitted,
+                    )
+                    if evidence
+                    else _finish_runtime_retirement(paths, receipt)
+                )
     except (
         OSError,
         RuntimeError,
@@ -26454,6 +27095,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--retire",
         action="store_true",
         help="Finish verified publication retirement (with --plan: read-only classification)",
+    )
+    p_runtime_repair.add_argument(
+        "--legacy-inventory",
+        metavar="ABSOLUTE_PATH",
+        help="With --retire --plan: read one exact receipt-bound legacy publication copy",
+    )
+    p_runtime_repair.add_argument(
+        "--legacy-evidence",
+        metavar="FILE",
+        help="Explicit original roles, history and closed inventory for one legacy copy",
+    )
+    p_runtime_repair.add_argument(
+        "--admit-plan",
+        metavar="SHA256",
+        help="Apply only the exact reviewed legacy retirement plan digest",
     )
 
     p_terminal_check = sub.add_parser(

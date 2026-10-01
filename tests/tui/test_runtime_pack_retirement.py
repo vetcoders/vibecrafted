@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -24,6 +27,20 @@ def roots(tmp_path, monkeypatch):
     return _runtime_roots.__wrapped__(tmp_path, monkeypatch)
 
 
+@pytest.fixture
+def quiet_census(monkeypatch):
+    """Exercise owner pin policy against deterministic observation seams."""
+    real_run = installer.subprocess.run
+    monkeypatch.setattr(installer, "_darwin_process_ids", list)
+
+    def run(command, *args, **kwargs):
+        if isinstance(command, list) and Path(command[0]).name == "lsof":
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return real_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(installer.subprocess, "run", run)
+
+
 def publish(tmp_path, roots, capsys, number):
     payload = seed_runtime_pack(tmp_path / f"pack-{number}", version=f"9.9.{number}+r4")
     _seal_runtime_pack_for_admission(payload)
@@ -36,6 +53,487 @@ def receipt(roots):
     return installer._load_runtime_install_receipt(
         installer._runtime_receipt_path(roots["runtime_home"])
     )
+
+
+def retire(capsys, *options):
+    code = installer.main(["runtime-repair", "--retire", "--json", *options])
+    return code, json.loads(capsys.readouterr().out.splitlines()[-1])
+
+
+def test_provider_configuration_pins_until_dependent_repair(
+    tmp_path, roots, capsys, quiet_census
+):
+    old, _ = publish(tmp_path, roots, capsys, 0)
+    config = Path.home() / ".codex/config.toml"
+    config.parent.mkdir(exist_ok=True)
+    config.write_text(f'skill = "{old}/skills/vc-test"\ncredential = "never-print"\n')
+    original = config.read_bytes()
+    publish(tmp_path, roots, capsys, 1)
+    publish(tmp_path, roots, capsys, 2)
+    assert old.exists() and config.read_bytes() == original
+    code, plan = retire(capsys, "--plan")
+    entry = next(x for x in plan["generations"] if x["path"] == str(old))
+    assert code == 0 and entry["action"] == "pinned"
+    assert any("provider-config:" in reason for reason in entry["reasons"])
+    assert "never-print" not in json.dumps(plan)
+    config.write_text(
+        'skill = "canonical-provider-skill"\ncredential = "never-print"\n'
+    )
+    code, _ = retire(capsys)
+    assert code == 0 and not old.exists()
+
+
+@pytest.mark.parametrize("shape", ["malformed", "symlink", "directory", "duplicate"])
+def test_ambiguous_provider_configuration_refuses_retirement(
+    tmp_path, roots, capsys, shape, quiet_census
+):
+    old, _ = publish(tmp_path, roots, capsys, 0)
+    publish(tmp_path, roots, capsys, 1)
+    config = Path.home() / ".cursor/mcp.json"
+    config.parent.mkdir()
+    if shape == "symlink":
+        foreign = tmp_path / "foreign.json"
+        foreign.write_text("{}")
+        config.symlink_to(foreign)
+    elif shape == "directory":
+        config.mkdir()
+    else:
+        config.write_text('{"x":1,"x":2}' if shape == "duplicate" else "secret invalid")
+    code, result = retire(capsys)
+    assert code == 2 and old.exists()
+    assert "provider" in json.dumps(result) and "secret invalid" not in json.dumps(
+        result
+    )
+
+
+@pytest.mark.parametrize("shape", ["empty", "hidden", "symlink", "nonempty"])
+def test_exact_canary_empty_leaves_only(tmp_path, roots, capsys, shape, quiet_census):
+    payload = seed_runtime_pack(tmp_path / "historical-canary", version="9.9.0+r4")
+    base_relative = Path("vibecrafted-core/vibecrafted_core/skills/pl/vc-canary")
+    owned = payload / base_relative / "SKILL.md"
+    owned.parent.mkdir(parents=True, exist_ok=True)
+    owned.write_text("fixture canary")
+    _seal_runtime_pack_for_admission(payload)
+    assert installer.cmd_runtime_install(_ns(payload)) == 0
+    old = Path(json.loads(capsys.readouterr().out.splitlines()[-1])["root"])
+    r = receipt(roots)
+    # The historical carrier did not seal empty directories, unlike new installs.
+    r["retirement_generations"].pop(str(old))
+    installer._checkpoint_runtime_install_receipt(roots["runtime_home"], r)
+    base = old / base_relative
+    for leaf in ("plugins", "scripts"):
+        (base / leaf).mkdir()
+    if shape == "hidden":
+        (base / "plugins/.DS_Store").write_bytes(b"hidden child")
+    elif shape == "nonempty":
+        (base / "scripts/private").write_bytes(b"keep")
+    elif shape == "symlink":
+        (base / "scripts").rmdir()
+        (base / "scripts").symlink_to(tmp_path, target_is_directory=True)
+    publish(tmp_path, roots, capsys, 1)
+    publish(tmp_path, roots, capsys, 2)
+    assert old.exists() == (shape != "empty")
+
+
+@pytest.fixture
+def legacy_copy(tmp_path, roots, capsys, monkeypatch, quiet_census):
+    publish(tmp_path, roots, capsys, 0)
+    preferences = roots["product_config"] / "private-preferences.toml"
+    preferences.write_bytes(b"unique human preference bytes")
+    history = roots["product_config"] / "vc-terminal/.zsh_history"
+    history.write_bytes(b"unique shell history bytes")
+    sessions = roots["product_config"] / "vc-terminal/.zsh_sessions"
+    sessions.mkdir(exist_ok=True)
+    (sessions / "founder.session").write_bytes(b"unique session bytes")
+    original_delete = installer._runtime_retirement_delete
+
+    def retain_copies(path, proof):
+        if path.name.startswith("publication-"):
+            raise OSError("fixture retains original legacy copy")
+        return original_delete(path, proof)
+
+    monkeypatch.setattr(installer, "_runtime_retirement_delete", retain_copies)
+    publish(tmp_path, roots, capsys, 1)
+    target = Path(receipt(roots)["retirement_rollback"]["publication"])
+    publish(tmp_path, roots, capsys, 2)
+    r = receipt(roots)
+    r["retirement_copies"].pop(str(target), None)
+    r["retirement_pending"].pop(str(target), None)
+    installer._checkpoint_runtime_install_receipt(roots["runtime_home"], r)
+    monkeypatch.setattr(installer, "_runtime_retirement_delete", original_delete)
+    return target
+
+
+def legacy_evidence(tmp_path, capsys, target, *, state="missing"):
+    code, result = retire(capsys, "--plan", "--legacy-inventory", str(target))
+    assert code == 0, result
+    evidence = result["evidence"]
+    evidence["history"]["state"] = state
+    path = tmp_path / "legacy-evidence.json"
+    path.write_text(json.dumps(evidence))
+    return path, evidence
+
+
+def reviewed_plan(capsys, evidence):
+    code, plan = retire(capsys, "--plan", "--legacy-evidence", str(evidence))
+    assert code == 0, plan
+    return plan["plan_sha256"]
+
+
+def test_legacy_cli_review_preserves_unique_history_bytes_once(
+    tmp_path, roots, capsys, legacy_copy
+):
+    original_receipt = installer._runtime_receipt_path(
+        roots["runtime_home"]
+    ).read_bytes()
+    evidence_path, evidence = legacy_evidence(
+        tmp_path, capsys, legacy_copy, state="failed"
+    )
+    digest = reviewed_plan(capsys, evidence_path)
+    assert (
+        installer._runtime_receipt_path(roots["runtime_home"]).read_bytes()
+        == original_receipt
+    )
+    assert not list(
+        (roots["runtime_home"] / ".installer-backups/drift").glob("legacy-*")
+    )
+    for wrong in (None, "0" * 64):
+        options = ["--legacy-evidence", str(evidence_path)]
+        if wrong:
+            options += ["--admit-plan", wrong]
+        code, result = retire(capsys, *options)
+        assert code == 2 and legacy_copy.exists()
+        assert "admit-plan" in result["reason"]
+    before_settings = installer._runtime_config_digest(roots["product_config"])
+    code, result = retire(
+        capsys, "--legacy-evidence", str(evidence_path), "--admit-plan", digest
+    )
+    assert code == 0, result
+    assert not legacy_copy.exists()
+    assert (
+        result["history"] == evidence["history"]
+        and result["history"]["state"] == "failed"
+    )
+    assert result["authority"] == "reviewed-legacy-inventory"
+    assert "unavailable" in result["original_aggregate_preimage"]
+    assert "replaced" not in result
+    archived = {
+        Path(item["archive"]).read_bytes() for item in result["preserved"].values()
+    }
+    assert {
+        b"unique human preference bytes",
+        b"unique shell history bytes",
+        b"unique session bytes",
+    } <= archived
+    assert len({item["archive"] for item in result["preserved"].values()}) == len(
+        archived
+    )
+    assert installer._runtime_config_digest(roots["product_config"]) == before_settings
+    assert installer._runtime_rescue_verify_destination(roots)[0]
+    records = roots["runtime_home"] / ".installer-backups/retirement"
+    plan_file = next(records.glob("legacy-*.plan.json"))
+    compact = next(records.glob("legacy-*.receipt.json"))
+    assert "entries" not in json.loads(compact.read_text())
+    plan_before = plan_file.read_bytes()
+    receipts_before = compact.read_bytes()
+    archives_before = sorted(
+        p.name
+        for p in (roots["runtime_home"] / ".installer-backups/drift").glob("legacy-*")
+    )
+    code, again = retire(
+        capsys, "--legacy-evidence", str(evidence_path), "--admit-plan", digest
+    )
+    assert code == 0 and again == result
+    assert (
+        plan_file.read_bytes() == plan_before
+        and compact.read_bytes() == receipts_before
+    )
+    assert (
+        sorted(
+            p.name
+            for p in (roots["runtime_home"] / ".installer-backups/drift").glob(
+                "legacy-*"
+            )
+        )
+        == archives_before
+    )
+
+
+@pytest.mark.parametrize(
+    "drift", ["leaf", "parent", "roles", "unknown", "topology", "outside"]
+)
+def test_legacy_closed_inventory_roles_and_topology_refuse(
+    tmp_path, roots, capsys, legacy_copy, drift
+):
+    evidence_path, evidence = legacy_evidence(tmp_path, capsys, legacy_copy)
+    digest = reviewed_plan(capsys, evidence_path)
+    if drift == "leaf":
+        name = next(
+            name
+            for name, record in evidence["proof"]["entries"].items()
+            if record[0] == "file"
+        )
+        (legacy_copy / name).write_bytes(b"late unknown bytes")
+    elif drift == "parent":
+        evidence["parent_identity"][1] += 1
+    elif drift == "roles":
+        name = next(iter(evidence["roles"]))
+        evidence["roles"][name]["destination"] = str(tmp_path / "foreign")
+    elif drift == "unknown":
+        (legacy_copy / "unbound-leaf").write_bytes(b"no invented role")
+    elif drift == "topology":
+        pointer = legacy_copy / "current"
+        pointer.unlink(missing_ok=True)
+        pointer.symlink_to(tmp_path)
+    else:
+        evidence["path"] = str(tmp_path)
+    evidence_path.write_text(json.dumps(evidence))
+    code, result = retire(
+        capsys, "--legacy-evidence", str(evidence_path), "--admit-plan", digest
+    )
+    assert code == 2 and legacy_copy.exists(), result
+    assert not list(
+        (roots["runtime_home"] / ".installer-backups/drift").glob("legacy-*")
+    )
+
+
+@pytest.mark.parametrize("pin", ["pending", "rollback", "live", "current"])
+def test_legacy_pins_refuse_even_with_reviewed_digest(
+    tmp_path, roots, capsys, legacy_copy, monkeypatch, pin
+):
+    evidence_path, _evidence = legacy_evidence(tmp_path, capsys, legacy_copy)
+    digest = reviewed_plan(capsys, evidence_path)
+    r = receipt(roots)
+    if pin == "pending":
+        r["rescue_pending"] = {"snapshot": str(legacy_copy)}
+    elif pin == "rollback":
+        r["retirement_rollback"]["publication"] = str(legacy_copy)
+    elif pin == "live":
+        original = installer._runtime_retirement_references
+        monkeypatch.setattr(
+            installer,
+            "_runtime_retirement_references",
+            lambda *a, **k: [*original(*a, **k), ("process:owner", str(legacy_copy))],
+        )
+    else:
+        pointer = roots["runtime_home"] / "tools/vibecrafted-current"
+        pointer.unlink()
+        pointer.symlink_to(legacy_copy)
+    installer._checkpoint_runtime_install_receipt(roots["runtime_home"], r)
+    code, result = retire(
+        capsys, "--legacy-evidence", str(evidence_path), "--admit-plan", digest
+    )
+    assert code == 2 and legacy_copy.exists(), result
+
+
+@pytest.mark.parametrize("crash", ["partial", "after-rmdir"])
+def test_legacy_partial_delete_resume_preserves_history_and_plan(
+    tmp_path, roots, capsys, legacy_copy, monkeypatch, crash
+):
+    evidence_path, evidence = legacy_evidence(
+        tmp_path, capsys, legacy_copy, state="restored"
+    )
+    digest = reviewed_plan(capsys, evidence_path)
+    real = installer._runtime_retirement_delete
+
+    def fail(path, proof):
+        if crash == "partial":
+            name = next(
+                name for name, record in proof["entries"].items() if record[0] == "file"
+            )
+            (path / name).unlink()
+        else:
+            real(path, proof)
+        raise OSError("fixture crash")
+
+    monkeypatch.setattr(installer, "_runtime_retirement_delete", fail)
+    code, result = retire(
+        capsys, "--legacy-evidence", str(evidence_path), "--admit-plan", digest
+    )
+    assert code == 2 and "fixture crash" in result["reason"]
+    monkeypatch.setattr(installer, "_runtime_retirement_delete", real)
+    code, result = retire(
+        capsys, "--legacy-evidence", str(evidence_path), "--admit-plan", digest
+    )
+    assert code == 0 and not legacy_copy.exists(), result
+    assert result["history"] == evidence["history"]
+    assert {b"unique human preference bytes", b"unique shell history bytes"} <= {
+        Path(item["archive"]).read_bytes() for item in result["preserved"].values()
+    }
+
+
+def test_old_rescue_label_is_never_rewritten(tmp_path, roots, capsys, quiet_census):
+    publish(tmp_path, roots, capsys, 0)
+    snapshot = roots["runtime_home"] / ".installer-backups/rescue/original/pre-rescue"
+    snapshot.mkdir(parents=True)
+    label = snapshot / "label.json"
+    label.write_bytes(b'{"original_aggregate": "unresolved", "paths": []}')
+    before = label.read_bytes()
+    code, result = retire(capsys, "--plan", "--legacy-inventory", str(snapshot))
+    assert code == 2 and "per-capture" in result["reason"]
+    assert snapshot.exists() and label.read_bytes() == before
+
+
+def test_legacy_hundreds_of_leaves_use_bounded_receipt_writes(
+    tmp_path, roots, capsys, legacy_copy, monkeypatch
+):
+    r = receipt(roots)
+    capture = next(
+        Path(backup)
+        for backup in r["drift_backup_history"][str(roots["product_config"])]
+        if Path(backup).parent == legacy_copy
+    )
+    for number in range(512):
+        (capture / f"historical-{number}").write_bytes(
+            f"distinct-{number % 10}".encode()
+        )
+    evidence_path, _ = legacy_evidence(tmp_path, capsys, legacy_copy)
+    digest = reviewed_plan(capsys, evidence_path)
+    checkpoints = []
+    writes = []
+    real_checkpoint = installer._checkpoint_runtime_install_receipt
+    real_json = installer._atomic_json_file
+
+    def checkpoint(runtime, receipt):
+        checkpoints.append(1)
+        return real_checkpoint(runtime, receipt)
+
+    def write(path, document):
+        writes.append((path, len(json.dumps(document).encode())))
+        return real_json(path, document)
+
+    monkeypatch.setattr(installer, "_checkpoint_runtime_install_receipt", checkpoint)
+    monkeypatch.setattr(installer, "_atomic_json_file", write)
+    started = time.monotonic()
+    code, result = retire(
+        capsys, "--legacy-evidence", str(evidence_path), "--admit-plan", digest
+    )
+    elapsed = time.monotonic() - started
+    assert code == 0 and not legacy_copy.exists(), result
+    assert len(result["preserved"]) >= 512
+    assert len(checkpoints) <= 2 and len(writes) <= 5
+    archives = list(
+        (roots["runtime_home"] / ".installer-backups/drift").glob("legacy-file-*")
+    )
+    for number in range(10):
+        assert (
+            sum(path.read_bytes() == f"distinct-{number}".encode() for path in archives)
+            == 1
+        )
+    with capsys.disabled():
+        print(
+            json.dumps(
+                {
+                    "legacy_scale_leaves": len(result["preserved"]),
+                    "receipt_checkpoints": len(checkpoints),
+                    "json_writes": len(writes),
+                    "json_bytes_written": sum(size for _, size in writes),
+                    "seconds": elapsed,
+                }
+            )
+        )
+
+
+def test_legacy_archive_interruption_retries_without_payload_loss(
+    tmp_path, roots, capsys, legacy_copy, monkeypatch
+):
+    evidence_path, _ = legacy_evidence(tmp_path, capsys, legacy_copy)
+    digest = reviewed_plan(capsys, evidence_path)
+    real = installer._backup_runtime_drift
+    calls = 0
+
+    def fail(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise OSError("fixture archive interruption")
+        return real(*args, **kwargs)
+
+    original = installer._runtime_receipt_path(roots["runtime_home"]).read_bytes()
+    monkeypatch.setattr(installer, "_backup_runtime_drift", fail)
+    code, result = retire(
+        capsys, "--legacy-evidence", str(evidence_path), "--admit-plan", digest
+    )
+    assert (
+        code == 2
+        and legacy_copy.exists()
+        and "archive interruption" in result["reason"]
+    )
+    assert (
+        installer._runtime_receipt_path(roots["runtime_home"]).read_bytes() == original
+    )
+    monkeypatch.setattr(installer, "_backup_runtime_drift", real)
+    code, result = retire(
+        capsys, "--legacy-evidence", str(evidence_path), "--admit-plan", digest
+    )
+    assert code == 0 and not legacy_copy.exists(), result
+
+
+def test_legacy_review_is_stale_after_current_configuration_changes(
+    tmp_path, roots, capsys, legacy_copy
+):
+    evidence_path, _ = legacy_evidence(tmp_path, capsys, legacy_copy)
+    digest = reviewed_plan(capsys, evidence_path)
+    (roots["product_config"] / "later-human-preference").write_bytes(
+        b"later preference"
+    )
+    code, result = retire(
+        capsys, "--legacy-evidence", str(evidence_path), "--admit-plan", digest
+    )
+    assert code == 2 and legacy_copy.exists() and "admit-plan" in result["reason"]
+
+
+def test_legacy_real_subprocess_cli_excludes_only_own_inventory_operand(
+    tmp_path, roots, capsys, legacy_copy
+):
+    source = str(Path(installer.__file__).resolve())
+
+    def cli(*options):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                source,
+                "runtime-repair",
+                "--runtime-home",
+                str(roots["runtime_home"]),
+                "--retire",
+                "--json",
+                *options,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=90,
+            check=False,
+            env={
+                key: value
+                for key, value in os.environ.items()
+                if key not in {"PYTHONPATH", "PYTHONHOME"}
+            },
+        )
+        return result.returncode, json.loads(result.stdout.splitlines()[-1])
+
+    code, result = cli("--plan", "--legacy-inventory", str(legacy_copy))
+    assert code == 0, result
+    evidence = tmp_path / "subprocess-evidence.json"
+    evidence.write_text(json.dumps(result["evidence"]))
+    code, result = cli("--plan", "--legacy-evidence", str(evidence))
+    assert code == 0, result
+    digest = result["plan_sha256"]
+    # An independent real owner pins the same copy through cwd. No signals are
+    # sent by retirement; this test owns and releases its own fixture process.
+    owner = subprocess.Popen(
+        ["/bin/sleep", "120"], cwd=legacy_copy, start_new_session=True
+    )
+    try:
+        code, result = cli("--legacy-evidence", str(evidence), "--admit-plan", digest)
+        assert code == 2 and "process:" in result["reason"], result
+        assert legacy_copy.exists() and owner.poll() is None
+    finally:
+        owner.terminate()
+        owner.wait(timeout=5)
+    code, result = cli("--legacy-evidence", str(evidence), "--admit-plan", digest)
+    assert code == 0 and not legacy_copy.exists(), result
 
 
 def payload_bytes(roots):
