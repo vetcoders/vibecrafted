@@ -153,6 +153,37 @@ struct NativeInstallerProcessTests {
     try require(!callback, "failed spawn retained a reader or completion callback")
   }
 
+  static func testResolverTimeoutThenRecovery(_ root: URL) throws {
+    let script = root.appendingPathComponent("resolver.sh")
+    try writeExecutable(script, "#!/bin/bash\nwhile true; do :; done\n")
+    var first: BoundedProcessResult?
+    try NativeInstallerProcess.run(process(script), timeout: 0.1, label: "resolver fixture",
+      onTimeout: { _ in }) { first = $0 }
+    try wait { first != nil }
+    try require(first!.timedOut, "resolver did not time out")
+    let failed: RuntimeResolution<String> = decodeRuntimeResolution(stdout: first!.stdout,
+      stderr: first!.stderr, terminationStatus: first!.terminationStatus,
+      clean: first!.clean && !first!.timedOut)
+    let identity = RuntimeIdentityFingerprint(home: root.path, pointer: nil, receipt: nil)
+    let cached = RuntimeResolutionCache(fingerprint: identity, value: failed,
+      expires: runtimeResolutionCacheLifetime(failed, consecutiveFailures: 1))
+    try require(!cached.reusable(for: identity, now: 5), "unchanged identity stranded timeout")
+    try writeExecutable(script, """
+      #!/bin/bash
+      printf '%s' '{"schema":"vibecrafted.runtime-resolution.v1","status":"ready","runtime":"recovered"}'
+      """)
+    var second: BoundedProcessResult?
+    try NativeInstallerProcess.run(process(script), timeout: 1, label: "resolver recovery",
+      onTimeout: { _ in }) { second = $0 }
+    try wait { second != nil }
+    let recovered: RuntimeResolution<String> = decodeRuntimeResolution(stdout: second!.stdout,
+      stderr: second!.stderr, terminationStatus: second!.terminationStatus,
+      clean: second!.clean && !second!.timedOut)
+    guard case .ready("recovered") = recovered else {
+      throw Failure(message: "retry did not recover with unchanged installation identity")
+    }
+  }
+
   static func main() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -161,6 +192,7 @@ struct NativeInstallerProcessTests {
     try testTimeoutWaitsForOwnedChildSettlement(root)
     try testRetainedPipeDescriptorCompletesWithinGrace(root)
     try testSpawnFailureDoesNotDeliverLateCallback()
+    try testResolverTimeoutThenRecovery(root)
     print("NativeInstallerProcessTests passed")
   }
 }

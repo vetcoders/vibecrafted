@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 from argparse import Namespace
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -308,6 +309,184 @@ def test_resolution_accepts_large_legitimate_settlement_receipt(installed, capsy
     )
     assert receipt_path.read_bytes() == raw
     assert archive.read_bytes() == b"preserved preference bytes\n"
+    assert _snapshot(Path.home()) == before
+
+
+def test_startup_does_not_walk_recovery_history(installed, capsys, monkeypatch):
+    paths, _, _ = installed
+    receipt_path, raw, archive = _large_settlement_receipt(paths)
+    historical = json.loads(raw)["drift_backup_history"]
+    original = Path.lstat
+    touched = []
+
+    def observed(path, *args, **kwargs):
+        if str(path) in historical or path == archive:
+            touched.append(path)
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", observed)
+    assert (
+        installer.cmd_runtime_resolve(
+            Namespace(runtime_home=str(paths["runtime_home"]))
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["status"] == "ready"
+    assert touched == []
+    assert receipt_path.read_bytes() == raw
+    # Recovery still checks its entire archive, including a missing last leaf.
+    archive.unlink()
+    with pytest.raises(FileNotFoundError):
+        installer._validate_runtime_backup_receipts(json.loads(raw), paths)
+
+
+def test_backup_validation_bounds_shared_ancestor_and_archive_work(roots, monkeypatch):
+    archive = roots["runtime_home"] / ".installer-backups/drift/opaque"
+    archive.parent.mkdir(parents=True)
+    archive.write_bytes(b"recovery")
+    history = {
+        str(roots["product_config"] / "old" / f"leaf-{index}"): [str(archive)]
+        for index in range(1000)
+    }
+    original = Path.lstat
+    calls = []
+
+    def observed(path, *args, **kwargs):
+        if path == archive or path == archive.parent:
+            calls.append(path)
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", observed)
+    installer._validate_runtime_backup_receipts(
+        {"drift_backup_history": history}, roots
+    )
+    assert len(calls) < 12
+
+
+@pytest.mark.parametrize("kind", ["file", "pointer"])
+def test_archived_leaf_cannot_authorize_a_later_restore_ancestor(roots, kind):
+    archive = roots["runtime_home"] / ".installer-backups/drift/leaf"
+    archive.parent.mkdir(parents=True)
+    if kind == "pointer":
+        archive.symlink_to(roots["product_config"])
+    else:
+        archive.write_bytes(b"opaque recovery leaf")
+    other = archive.with_name("other")
+    other.write_bytes(b"other recovery leaf")
+    receipt = {
+        "backups": {
+            str(roots["product_config"] / "first"): str(archive),
+            str(archive / "child"): str(other),
+        }
+    }
+    with pytest.raises(RuntimeError, match="(aliased|not a directory)"):
+        installer._validate_runtime_backup_receipts(receipt, roots)
+
+
+def test_missing_restore_ancestor_cannot_authorize_a_later_archive(roots):
+    archive = roots["runtime_home"] / ".installer-backups/drift/leaf"
+    archive.parent.mkdir(parents=True)
+    archive.write_bytes(b"recovery leaf")
+    missing = archive.with_name("missing")
+    receipt = {
+        "backups": {
+            str(missing / "child"): str(archive),
+            str(roots["product_config"] / "second"): str(missing),
+        }
+    }
+    with pytest.raises(FileNotFoundError):
+        installer._validate_runtime_backup_receipts(receipt, roots)
+
+
+@pytest.mark.parametrize("kind", ["file", "directory", "pointer"])
+def test_identical_drift_reclaims_reuse_one_verified_snapshot(roots, kind):
+    destination = roots["product_config"] / "divergent"
+    destination.parent.mkdir(parents=True)
+    if kind == "file":
+        destination.write_bytes(b"personal bytes")
+    elif kind == "directory":
+        destination.mkdir()
+        (destination / "preference").write_bytes(b"personal bytes")
+    else:
+        destination.symlink_to("personal-target")
+    receipt = {}
+    backups = [
+        installer._backup_runtime_drift(
+            destination, runtime_home=roots["runtime_home"], receipt=receipt
+        )
+        for _ in range(3)
+    ]
+    assert len(set(backups)) == 1
+    assert receipt["drift_backup_history"][str(destination)] == [str(backups[0])]
+    assert installer._runtime_config_digest(
+        backups[0]
+    ) == installer._runtime_config_digest(destination)
+
+
+def test_reused_drift_snapshot_refuses_changed_archive(roots):
+    destination = roots["product_config"] / "divergent"
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(b"personal bytes")
+    receipt = {}
+    backup = installer._backup_runtime_drift(
+        destination, runtime_home=roots["runtime_home"], receipt=receipt
+    )
+    backup.write_bytes(b"corruption")
+    with pytest.raises(RuntimeError, match="snapshot/source changed"):
+        installer._backup_runtime_drift(
+            destination, runtime_home=roots["runtime_home"], receipt=receipt
+        )
+    assert destination.read_bytes() == b"personal bytes"
+
+
+def test_repeated_install_and_upgrade_keep_bounded_recovery_history(
+    installed, tmp_path, capsys
+):
+    paths, payload, _ = installed
+    config = paths["product_config"] / "starship.toml"
+    config.write_text("add_newline = false\n")
+    for _ in range(3):
+        _install(payload, capsys)
+    upgraded = seed_runtime_pack(tmp_path / "upgrade", version="9.9.9+b")
+    _install(upgraded, capsys)
+    receipt_path = installer._runtime_receipt_path(paths["runtime_home"])
+    first = json.loads(receipt_path.read_bytes())
+    history_size = sum(map(len, first["drift_backup_history"].values()))
+    for _ in range(3):
+        _install(upgraded, capsys)
+    last = json.loads(receipt_path.read_bytes())
+    assert sum(map(len, last["drift_backup_history"].values())) <= history_size
+    assert len(last["retirement_copies"]) <= len(first["retirement_copies"])
+    assert config.read_text() == "add_newline = false\n"
+    assert last["retirement_rollback"]["generation"].endswith("9.9.9+a")
+    assert last["retirement_rollback"] == first["retirement_rollback"]
+
+
+def test_parallel_resolvers_are_read_only_and_agree(installed, capsys):
+    paths, _, result = installed
+    before = _snapshot(Path.home())
+    command = [
+        sys.executable,
+        "-B",
+        str(REPO_ROOT / "scripts/vetcoders_install.py"),
+        "runtime-resolve",
+        "--runtime-home",
+        str(paths["runtime_home"]),
+        "--json",
+    ]
+
+    def invoke(_):
+        completed = subprocess.run(
+            command, capture_output=True, text=True, timeout=20, check=True
+        )
+        return json.loads(completed.stdout)
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        answers = list(pool.map(invoke, range(8)))
+    assert all(
+        answer["status"] == "ready" and answer["runtime"]["root"] == result["root"]
+        for answer in answers
+    )
     assert _snapshot(Path.home()) == before
 
 

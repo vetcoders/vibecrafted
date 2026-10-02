@@ -176,6 +176,25 @@ let action: ServerLifecycleAction?
 let ready: Bool
 
 switch scenario {
+case "resolution-cache":
+  let now: TimeInterval = 100
+  let fingerprint = RuntimeIdentityFingerprint(home: "/runtime", pointer: nil, receipt: nil)
+  let failure: RuntimeResolution<String> = .unusable("timeout")
+  let cache = RuntimeResolutionCache(fingerprint: fingerprint, value: failure,
+    expires: now + runtimeResolutionCacheLifetime(failure, consecutiveFailures: 1))
+  precondition(cache.reusable(for: fingerprint, now: now + 4))
+  precondition(!cache.reusable(for: fingerprint, now: now + 5))
+  precondition(runtimeResolutionCacheLifetime(failure, consecutiveFailures: 100) == 60)
+  let ready: RuntimeResolution<String> = .ready("new-generation")
+  let recovered = RuntimeResolutionCache(fingerprint: fingerprint, value: ready,
+    expires: now + 30)
+  precondition(!recovered.reusable(for: fingerprint, now: now + 30))
+  let replacement = RuntimeIdentityFingerprint(home: "/runtime", pointer: nil, receipt: nil,
+    selector: FileStamp(size: 12, modified: Date(), inode: 2))
+  precondition(!recovered.reusable(for: replacement, now: now))
+  precondition(runtimeResolveDelivery(invoked: fingerprint, observed: replacement, attempt: 0) == .reresolve)
+  print("timeout retried; recovery, expiry, selector replacement and drift delivery passed")
+  exit(0)
 case "healthy":
   caretaker = healthyEnvelope
   action = nil
@@ -289,6 +308,40 @@ def _run_policy(binary: Path, scenario: str) -> list[str]:
         capture_output=True,
         text=True,
     ).stdout.splitlines()
+
+
+def test_resolver_cache_recovers_without_publication_or_permanent_failure(
+    policy_binary,
+):
+    assert _run_policy(policy_binary, "resolution-cache") == [
+        "timeout retried; recovery, expiry, selector replacement and drift delivery passed"
+    ]
+
+
+def test_native_resolver_process_timeout_and_recovery(tmp_path):
+    compiler = shutil.which("swiftc")
+    if compiler is None:
+        pytest.skip("swiftc is required for the native resolver contract")
+    shell = REPO_ROOT / "vibecrafted-app/shell-agent"
+    binary = tmp_path / "native-resolver-recovery"
+    subprocess.run(
+        [
+            compiler,
+            "-swift-version",
+            "6",
+            str(POLICY),
+            str(shell / "app/Vibecrafted/NativeInstallerProcess.swift"),
+            str(shell / "tests/NativeInstallerProcessTests.swift"),
+            "-o",
+            str(binary),
+        ],
+        check=True,
+        timeout=90,
+    )
+    completed = subprocess.run(
+        [str(binary)], capture_output=True, text=True, timeout=30, check=True
+    )
+    assert "NativeInstallerProcessTests passed" in completed.stdout
 
 
 def test_server_menu_renders_the_caretaker_verdict_verbatim(

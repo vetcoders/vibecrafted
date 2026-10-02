@@ -163,7 +163,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   /// and actions carrying an older epoch are dropped, so a late answer for a
   /// previous generation can never repopulate live controls.
   private var runtimeResolveEpoch: UInt64 = 0
-  private var cachedResolution: (fingerprint: RuntimeIdentityFingerprint, value: RuntimeContract)?
+  private var cachedResolution: RuntimeResolutionCache<CanonicalRuntimeInstall>?
+  private var runtimeResolveFailures = 0
   /// Why there is no usable runtime, rendered where the generation would be.
   private var runtimeResolutionFailure: String?
   /// A non-fatal note about the shared service, rendered under the runtime line.
@@ -970,7 +971,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   ) {
     let runtimeHome = currentRuntimeHome()
     let fingerprint = identityFingerprint(runtimeHome: runtimeHome)
-    if !forceRefresh, let cached = cachedResolution, cached.fingerprint == fingerprint {
+    if runtimeResolveProcess != nil {
+      runtimeResolveWaiters.append(completion)
+      return
+    }
+    if !forceRefresh, let cached = cachedResolution,
+      cached.reusable(for: fingerprint, now: ProcessInfo.processInfo.systemUptime) {
       completion(cached.value)
       return
     }
@@ -991,11 +997,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     switch runtimeResolverBootstrap(runtimeHome: runtimeHome, probe: .live) {
     case .absent(let reason):
       let resolution: RuntimeContract = .absent(reason)
-      cachedResolution = (fingerprint, resolution)
+      cacheResolution(resolution, fingerprint: fingerprint)
       deliverResolution(resolution)
     case .unusable(let reason):
       let resolution: RuntimeContract = .unusable(reason)
-      cachedResolution = (fingerprint, resolution)
+      cacheResolution(resolution, fingerprint: fingerprint)
       deliverResolution(resolution)
     case .ask(let python, let installer):
       let process = Process()
@@ -1019,8 +1025,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
               stdout: result.stdout,
               stderr: result.stderr,
               terminationStatus: result.terminationStatus,
-              clean: result.clean)
-            self.cachedResolution = (fingerprint, resolution)
+              clean: result.clean && !result.timedOut)
+            self.cacheResolution(resolution, fingerprint: fingerprint)
             self.deliverResolution(resolution)
           case .reresolve:
             lifecycleLog(
@@ -1040,7 +1046,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
         runtimeResolveProcess = nil
         let resolution: RuntimeContract = .unusable(
           "the runtime resolver could not be started: \(error.localizedDescription)")
-        cachedResolution = (fingerprint, resolution)
+        cacheResolution(resolution, fingerprint: fingerprint)
         deliverResolution(resolution)
       }
     }
@@ -1065,22 +1071,34 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     }
   }
 
+  private func cacheResolution(_ resolution: RuntimeContract, fingerprint: RuntimeIdentityFingerprint) {
+    if cachedResolution?.fingerprint != fingerprint { runtimeResolveFailures = 0 }
+    switch resolution {
+    case .unusable: runtimeResolveFailures = min(5, runtimeResolveFailures + 1)
+    case .ready, .absent: runtimeResolveFailures = 0
+    }
+    cachedResolution = RuntimeResolutionCache(fingerprint: fingerprint, value: resolution,
+      expires: ProcessInfo.processInfo.systemUptime
+        + runtimeResolutionCacheLifetime(resolution, consecutiveFailures: runtimeResolveFailures))
+  }
+
   private func identityFingerprint(runtimeHome: URL) -> RuntimeIdentityFingerprint {
     RuntimeIdentityFingerprint(
       home: runtimeHome.path,
       pointer: fileStamp(activeRuntimePointerURL(runtimeHome: runtimeHome)),
-      receipt: fileStamp(runtimeInstallReceiptURL(runtimeHome: runtimeHome)))
+      receipt: fileStamp(runtimeInstallReceiptURL(runtimeHome: runtimeHome)),
+      selector: fileStamp(runtimeHome.appendingPathComponent("tools/vibecrafted-current")))
   }
 
   private func fileStamp(_ url: URL) -> FileStamp? {
-    guard
-      let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
-      let size = attributes[.size] as? Int,
-      let modified = attributes[.modificationDate] as? Date
-    else {
-      return nil
-    }
-    return FileStamp(size: size, modified: modified)
+    var metadata = stat()
+    guard lstat(url.path, &metadata) == 0 else { return nil }
+    return FileStamp(size: Int(metadata.st_size),
+      modified: Date(timeIntervalSince1970: Double(metadata.st_mtimespec.tv_sec)
+        + Double(metadata.st_mtimespec.tv_nsec) / 1_000_000_000),
+      device: UInt64(metadata.st_dev), inode: UInt64(metadata.st_ino),
+      changed: Date(timeIntervalSince1970: Double(metadata.st_ctimespec.tv_sec)
+        + Double(metadata.st_ctimespec.tv_nsec) / 1_000_000_000))
   }
 
   /// The one place runtime truth changes.
@@ -1114,7 +1132,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       discardRuntimeTruth(failure: nil, log: "no installed runtime (\(reason))")
       return nil
     case .unusable(let reason):
-      discardRuntimeTruth(failure: reason, log: "installed runtime is unusable: \(reason)")
+      discardRuntimeTruth(failure: reason, log: "runtime inspection refused: \(reason)")
       return nil
     }
   }
@@ -1126,7 +1144,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   /// control, so the actions go quiet and the reason is rendered in their place.
   private func discardRuntimeTruth(failure: String?, log: String) {
     let hadRuntime = canonicalInstall != nil
-    runtimeResolveEpoch &+= 1
+    let changed = hadRuntime || runtimeResolutionFailure != failure
+    if changed { runtimeResolveEpoch &+= 1 }
     canonicalInstall = nil
     canonicalRuntimeEnvironment = nil
     lastCaretakerData = nil
@@ -1134,7 +1153,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     runtimeAdvisory = nil
     runtimeResolutionFailure = failure
     model.refreshEndpoint(caretakerData: nil, runtimeReady: false)
-    if hadRuntime || failure != nil {
+    if changed {
       lifecycleLog(log)
     }
   }
@@ -1639,7 +1658,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   /// to call from any completion handler.
   private func renderServerStatus() {
     if canonicalInstall == nil, let reason = runtimeResolutionFailure {
-      model.block(reason: reason)
+      model.block(reason: "Runtime inspection unavailable: \(reason). VC Server availability is unknown; inspection will retry automatically.")
     } else {
       model.refreshEndpoint(caretakerData: lastCaretakerData, runtimeReady: canonicalInstall != nil)
     }
@@ -1678,7 +1697,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     case .connecting: statusLine = "Status: Connecting…"
     case .online: statusLine = "Status: Ready"
     case .recovering: statusLine = "Status: Recovering…"
-    case .blocked: statusLine = "Status: Unavailable"
+    case .blocked: statusLine = runtimeResolutionFailure == nil
+      ? "Status: Unavailable" : "Status: Runtime inspection unavailable"
     }
     var utilities: Set<StatusItemAction> = []
     if canonicalInstall != nil {
@@ -1691,7 +1711,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     switch presentation.phase {
     case .bootstrapping, .connecting: health = .checking
     case .online: health = state.health
-    case .recovering, .blocked: health = .failed
+    case .recovering, .blocked: health = runtimeResolutionFailure == nil ? .failed : .neutral
     }
     tray?.update(StatusItemPresentation(
       health: health,

@@ -18488,11 +18488,19 @@ def _runtime_launcher_body(
     return "\n".join(lines) + "\n"
 
 
-def _load_runtime_install_receipt(path: Path) -> dict[str, Any]:
+def _load_runtime_install_receipt(
+    path: Path, *, raw: bytes | None = None
+) -> dict[str, Any]:
     if not path.is_file():
         return {}
     try:
-        receipt = json.loads(path.read_text(encoding="utf-8"))
+        receipt = json.loads(
+            raw
+            if raw is not None
+            else _capture_runtime_bound_file(
+                path, max_bytes=_RUNTIME_LEGACY_DOCUMENT_MAX_BYTES
+            )
+        )
     except (OSError, json.JSONDecodeError) as exc:
         raise RuntimeError(
             f"cannot read runtime install receipt {path}: {exc}"
@@ -18567,8 +18575,8 @@ def _backup_runtime_drift(
 ) -> Path:
     """Preserve an operator-diverged managed path before the installer reclaims it.
 
-    File drift backups are content-addressed; trees and symlinks get unique
-    snapshots. They live apart from the `original`
+    Drift backups are content-addressed, including trees and opaque pointers.
+    Identical reclaims reuse a verified snapshot. They live apart from the `original`
     collision tree: `backups` carries over between installs and would
     early-return, silently dropping the operator's newest divergent copy.
     """
@@ -18677,20 +18685,22 @@ def _backup_runtime_drift(
             _checkpoint_runtime_install_receipt(runtime_home, receipt)
         return backup
     token = hashlib.sha256(str(destination).encode("utf-8")).hexdigest()[:20]
-    marker = (
-        _sha256_path(destination)[:12]
-        if not destination.is_symlink() and destination.is_file()
-        else os.urandom(6).hex()
-    )
-    backup = (
-        runtime_home
-        / ".installer-backups"
-        / "drift"
-        / f"{token}-{marker}-{destination.name}"
-    )
+    _assert_runtime_physical_path(destination, leaf_symlink=True)
+    marker = _runtime_config_digest(destination)
+    if marker is None:
+        raise RuntimeError(f"drift source is missing: {destination}")
+    backup = runtime_home / ".installer-backups" / "drift" / f"{token}-{marker}"
+    _assert_runtime_physical_path(backup, leaf_symlink=True)
     if not _path_present(backup):
         backup.parent.mkdir(parents=True, exist_ok=True)
         _copy_path_to_backup(destination, backup)
+    if (
+        _runtime_config_digest(destination) != marker
+        or _runtime_config_digest(backup) != marker
+    ):
+        raise RuntimeError("drift snapshot/source changed during preservation")
+    _sync_runtime_config_path(backup)
+    _fsync_directory(backup.parent)
     history = receipt.setdefault("drift_backup_history", {}).setdefault(
         str(destination), []
     )
@@ -20666,9 +20676,22 @@ def _sync_runtime_config_path(path: Path) -> None:
 
 def _runtime_backup_entries(receipt: Mapping[str, Any]) -> Iterator[tuple[str, str]]:
     for key in ("backups", "drift_backups"):
-        yield from receipt.get(key, {}).items()
-    for destination, backups in receipt.get("drift_backup_history", {}).items():
+        mapping = receipt.get(key, {})
+        if not isinstance(mapping, dict):
+            raise TypeError(f"invalid receipt {key} mapping")
+        for destination, backup in mapping.items():
+            if not isinstance(destination, str) or not isinstance(backup, str):
+                raise TypeError(f"invalid receipt {key} entry")
+            yield destination, backup
+    history = receipt.get("drift_backup_history", {})
+    if not isinstance(history, dict):
+        raise TypeError("invalid receipt drift_backup_history mapping")
+    for destination, backups in history.items():
+        if not isinstance(destination, str) or not isinstance(backups, list):
+            raise TypeError("invalid receipt drift_backup_history entry")
         for backup in backups:
+            if not isinstance(backup, str):
+                raise TypeError("invalid receipt historical backup path")
             yield destination, backup
 
 
@@ -20677,15 +20700,22 @@ def _validate_runtime_backup_receipts(
     paths: Mapping[str, Path],
     *,
     retiring_copy: Path | None = None,
+    include_history: bool = True,
 ) -> None:
+    """Recovery admission, with invocation-local physical topology observations.
+
+    A settled historical archive does not authorize execution of the selected
+    generation. Startup validates the live collision/drift map; install,
+    restore, rescue and retirement retain full historical admission. Nothing
+    is removed or silently repaired by a read.
+    """
     backup_root = paths["runtime_home"] / ".installer-backups"
     _assert_runtime_physical_path(backup_root)
     managed_roots = _receipt_managed_roots(paths)
     projection_roots = _runtime_projection_roots()
-    # Reuse only root canonicalization within this validation. Every destination
-    # and backup still gets its physical ancestor walk and leaf existence check.
-    # Recheck the roots before accepting so a changed alias cannot authorize a
-    # later entry through an earlier positive result. No cross-invocation cache.
+    # No observation survives this call. Shared ancestors and shared archives
+    # are checked once and rechecked before admission. The no-alias invariant
+    # permits lexical containment instead of repeated realpath for each leaf.
     resolved_roots = {
         root: root.resolve(strict=False)
         for root in (*managed_roots, *projection_roots, backup_root)
@@ -20694,16 +20724,58 @@ def _validate_runtime_backup_receipts(
         resolved_roots[root] for root in (*managed_roots, *projection_roots)
     )
     resolved_backup_root = resolved_roots[backup_root]
-    for destination_raw, backup_raw in _runtime_backup_entries(receipt):
+    observations: dict[Path, tuple[int, ...] | None] = {}
+
+    def observe(path: Path) -> os.stat_result | None:
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            observations[path] = None
+            return None
+        observations[path] = _runtime_payload_stat_signature(metadata)
+        return metadata
+
+    def directory(path: Path) -> None:
+        if path in observations:
+            before = observations[path]
+            if before is not None:
+                if stat.S_ISLNK(before[2]):
+                    raise RuntimeError(f"runtime path is aliased: {path}")
+                if not stat.S_ISDIR(before[2]):
+                    raise RuntimeError(f"runtime ancestor is not a directory: {path}")
+            return
+        if path.parent != path:
+            directory(path.parent)
+        metadata = observe(path)
+        if metadata is not None:
+            if stat.S_ISLNK(metadata.st_mode) or _is_owned_pointer(path):
+                raise RuntimeError(f"runtime path is aliased: {path}")
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise RuntimeError(f"runtime ancestor is not a directory: {path}")
+            # Parent identity/topology matters; unrelated children changing a
+            # shared /tmp or HOME directory cannot invalidate a read.
+            observations[path] = _runtime_payload_stat_signature(metadata)[:4]
+
+    entries = (
+        receipt
+        if include_history
+        else {
+            key: receipt[key] for key in ("backups", "drift_backups") if key in receipt
+        }
+    )
+    for destination_raw, backup_raw in _runtime_backup_entries(entries):
         destination, backup = Path(destination_raw), Path(backup_raw)
-        canonical = _canonical_path_preserving_final_symlink(destination)
-        if not any(_is_subpath(canonical, root) for root in allowed_destinations):
+        for path in (destination, backup):
+            if not path.is_absolute() or Path(os.path.abspath(path)) != path:
+                raise RuntimeError(
+                    f"runtime path must be normalized and absolute: {path}"
+                )
+            directory(path.parent)
+        if not any(_is_subpath(destination, root) for root in allowed_destinations):
             raise RuntimeError(
                 f"receipt restore path escapes managed roots: {destination}"
             )
-        _assert_runtime_physical_path(destination, leaf_symlink=True)
-        _assert_runtime_physical_path(backup, leaf_symlink=True)
-        if not _is_subpath(backup.parent.resolve(strict=False), resolved_backup_root):
+        if not _is_subpath(backup.parent, resolved_backup_root):
             raise RuntimeError(f"receipt backup path escapes backup root: {backup}")
         if (
             retiring_copy is not None
@@ -20713,11 +20785,25 @@ def _validate_runtime_backup_receipts(
             # Only the retirement owner passes its authenticated durable deleting
             # intent here. Every other missing recovery snapshot still refuses.
             continue
-        backup.lstat()  # A missing receipted snapshot is never successful recovery.
+        if backup not in observations:
+            observe(backup)
+        if observations[backup] is None:
+            raise FileNotFoundError(f"receipted recovery snapshot is missing: {backup}")
     for root, resolved in resolved_roots.items():
         if root.resolve(strict=False) != resolved:
             raise RuntimeError(
                 f"receipt managed root changed during validation: {root}"
+            )
+    for path, before in observations.items():
+        try:
+            after = _runtime_payload_stat_signature(path.lstat())
+            if before is not None:
+                after = after[: len(before)]
+        except FileNotFoundError:
+            after = None
+        if before != after:
+            raise RuntimeError(
+                f"receipt physical path changed during validation: {path}"
             )
 
 
@@ -24708,7 +24794,7 @@ def cmd_runtime_resolve(args: argparse.Namespace) -> int:
                 receipt_path, max_bytes=_RUNTIME_LEGACY_DOCUMENT_MAX_BYTES
             )
             active = json.loads(active_bytes)
-            receipt = _load_runtime_install_receipt(receipt_path)
+            receipt = _load_runtime_install_receipt(receipt_path, raw=receipt_bytes)
             if (
                 not isinstance(active, dict)
                 or active.get("schema") != "vibecrafted.active-runtime.v1"
@@ -24754,7 +24840,7 @@ def cmd_runtime_resolve(args: argparse.Namespace) -> int:
                 raise RuntimeError("runtime selectors disagree")
             if active.get("app_root", "") != receipt.get("app_root", ""):
                 raise RuntimeError("runtime carrier identities disagree")
-            _validate_runtime_backup_receipts(receipt, paths)
+            _validate_runtime_backup_receipts(receipt, paths, include_history=False)
             errors = _runtime_generation_payload_errors(generation)
             if errors:
                 raise RuntimeError(

@@ -748,6 +748,7 @@ struct RuntimeIdentityFingerprint: Equatable {
   let home: String
   let pointer: FileStamp?
   let receipt: FileStamp?
+  var selector: FileStamp? = nil
 }
 
 /// Size and modification time of one identity document, or nil when there is
@@ -755,6 +756,33 @@ struct RuntimeIdentityFingerprint: Equatable {
 struct FileStamp: Equatable {
   let size: Int
   let modified: Date
+  var device: UInt64? = nil
+  var inode: UInt64? = nil
+  var changed: Date? = nil
+}
+
+/// Identity changes invalidate immediately. Positive answers are periodically
+/// revalidated for payload/config drift; failed inspections retry with bounded
+/// backoff even when publication documents remain unchanged. The clock is
+/// monotonic, so wall-clock adjustments cannot strand a timeout in the cache.
+struct RuntimeResolutionCache<Runtime> {
+  let fingerprint: RuntimeIdentityFingerprint
+  let value: RuntimeResolution<Runtime>
+  let expires: TimeInterval
+
+  func reusable(for observed: RuntimeIdentityFingerprint, now: TimeInterval) -> Bool {
+    fingerprint == observed && now < expires
+  }
+}
+
+func runtimeResolutionCacheLifetime<Runtime>(
+  _ resolution: RuntimeResolution<Runtime>, consecutiveFailures: Int
+) -> TimeInterval {
+  switch resolution {
+  case .ready: return 30
+  case .absent: return 5
+  case .unusable: return min(60, 5 * pow(2, Double(min(4, max(0, consecutiveFailures - 1)))))
+  }
 }
 
 /// What may be done with an answer that has just come back from the owner.
