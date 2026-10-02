@@ -483,8 +483,16 @@ def test_successful_launch_opens_destination_tab_and_keeps_workshop(
     assert "--near-current-pane" not in pane
     assert "new-pane" not in pane
     assert "--floating" not in pane
-    title = f"codex · partner · {tmp_path.name}"
+    title = f"codex · partner · {tmp_path.name} · init-controlled-test"
     assert pane[pane.index("--name") + 1] == title
+    assert [
+        "vc-frame",
+        "--session",
+        "vibecrafted",
+        "action",
+        "go-to-tab-name",
+        title,
+    ] in calls
     command = pane[pane.index("--") + 1 :]
     assert command[:3] == ["vibecrafted", "init", "codex"]
     assert command[command.index("--root") + 1] == str(tmp_path)

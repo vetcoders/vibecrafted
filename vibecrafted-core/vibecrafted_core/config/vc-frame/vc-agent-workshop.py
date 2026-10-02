@@ -2018,10 +2018,14 @@ class Workshop:
             self.launch_run_id = str(admission["run_id"])
             self.launch_status = "prepared"
             self.launch_destination = destination
-            self.launch_title = title
+            # Names are Frame's navigation target. Two intentional runs in
+            # one project must not make Return open the older Agent's tab.
+            self.launch_title = f"{title} · {self.launch_run_id}"
             self.launch_agent = AGENTS[self.agent]
             effective_root = Path(str(admission["effective_worker_root"]))
-            pane = launch_pane_argv(title, effective_root, argv, session=destination)
+            pane = launch_pane_argv(
+                self.launch_title, effective_root, argv, session=destination
+            )
         except (OSError, ValueError) as exc:
             self.error = str(exc)
             return
