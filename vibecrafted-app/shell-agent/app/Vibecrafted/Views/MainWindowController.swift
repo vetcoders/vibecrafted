@@ -58,20 +58,43 @@ enum CommandDeckWindowFactory {
       visibleFrame.width > 0, visibleFrame.height > 0
     else { return }
     // Visibility wins over the usual minimum on a small display.
-    window.minSize = NSSize(
+    let minimum = NSSize(
       width: min(800, visibleFrame.width), height: min(600, visibleFrame.height))
+    if window.minSize != minimum { window.minSize = minimum }
     let frame = fittedFrame(window.frame, in: visibleFrame)
     if frame != window.frame { window.setFrame(frame, display: false) }
   }
 
   static func mount<Root: View>(_ root: Root, in window: NSWindow) {
-    let hosting = NSHostingView(rootView: root)
+    let hosting = CommandDeckHostingView(rootView: root)
+    // The window factory owns minimum/saved geometry. SwiftUI's default
+    // minSize/intrinsicContentSize publication can grow an ordered window
+    // beyond its screen when the ready shell and inspector finish mounting.
+    hosting.sizingOptions = []
     // The SwiftUI `.toolbar` becomes the window's toolbar. Title stays native
     // so the tab bar shows the window title the controller sets.
     hosting.sceneBridgingOptions = [.toolbars]
     window.contentView = hosting
     window.layoutIfNeeded()
     fitToVisibleFrame(window)
+  }
+}
+
+/// AppKit lays out the bridged toolbar and split columns after mount returns.
+/// Keep geometry with the same window owner at that actual layout boundary.
+@MainActor
+private final class CommandDeckHostingView<Content: View>: NSHostingView<Content> {
+  private var fitQueued = false
+
+  override func layout() {
+    super.layout()
+    guard !fitQueued else { return }
+    fitQueued = true
+    DispatchQueue.main.async { [weak self] in
+      guard let self else { return }
+      self.fitQueued = false
+      if let window = self.window { CommandDeckWindowFactory.fitToVisibleFrame(window) }
+    }
   }
 }
 
@@ -89,13 +112,14 @@ final class MainWindowController: NSWindowController, CommandDeckNavigationHandl
   private var dashboardPath = "/"
 
   init(
+    frameAutosaveName: String? = "VibecraftedCommandDeck",
     model: AppModel, session: WebConsoleSession, actions: any CommandDeckActionHandling,
     openExternally: @escaping @MainActor (URL) -> Void = { NSWorkspace.shared.open($0) }
   ) {
     self.session = session
     self.openExternally = openExternally
     let window = CommandDeckWindowFactory.makeWindow(
-      title: "Vibecrafted", frameAutosaveName: "VibecraftedCommandDeck")
+      title: "Vibecrafted", frameAutosaveName: frameAutosaveName)
     super.init(window: window)
     CommandDeckWindowFactory.mount(
       CommandDeckRootView(

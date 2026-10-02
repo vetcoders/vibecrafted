@@ -148,7 +148,8 @@ struct CommandDeckView<Canvas: View>: View {
 
   var body: some View {
     CommandDeckShell(
-      phase: presentation.phase, openPath: openPath, frameOrigin: frameOrigin,
+      phase: presentation.phase, navigation: navigation,
+      openPath: openPath, frameOrigin: frameOrigin,
       presentFrame: presentFrame, restoreFrame: restoreFrame
     ) {
       CommandDeckCanvasStage(

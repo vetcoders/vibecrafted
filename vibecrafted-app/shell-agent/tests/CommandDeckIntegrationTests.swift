@@ -30,6 +30,118 @@ struct CommandDeckIntegrationTests {
     }
   }
 
+  /// Traverse mounted AppKit views and any exposed accessibility children.
+  /// SwiftUI hosts its inspector in a distinct native split-view column.
+  static func accessibilityNodes(_ root: NSObject) -> [NSObject] {
+    var visited = Set<ObjectIdentifier>()
+    var nodes: [NSObject] = []
+    func visit(_ node: NSObject) {
+      guard visited.insert(ObjectIdentifier(node)).inserted else { return }
+      nodes.append(node)
+      if node.responds(to: NSSelectorFromString("accessibilityChildren")),
+        let children = node.value(forKey: "accessibilityChildren") as? [NSObject] {
+        children.forEach(visit)
+      }
+      if let view = node as? NSView { view.subviews.forEach(visit) }
+    }
+    visit(root)
+    return nodes
+  }
+
+  static func inspectorContract(_ endpoint: URL) async throws {
+    let resolver = RuntimeEndpointResolver { _ in
+      ServerNavigationState(server: endpoint, workspaces: endpoint, unavailableReason: nil)
+    }
+    let model = AppModel(endpointResolver: resolver)
+    let session = WebConsoleSession(websiteDataStore: .nonPersistent())
+    model.endpointDidChange = { session.apply(endpoint: $0) }
+    session.events.stateDidChange = { model.receiveWebState($0) }
+    model.refreshEndpoint(caretakerData: nil, runtimeReady: true)
+    let autosaveName = "CommandDeckShown-\(UUID().uuidString)"
+    let saved = CommandDeckWindowFactory.makeWindow(title: "Saved geometry fixture", frameAutosaveName: nil)
+    guard let screen = saved.screen ?? NSScreen.main else { throw Failure(message: "No fixture screen") }
+    let visible = screen.visibleFrame
+    saved.setFrame(NSRect(x: visible.maxX - 1545, y: visible.minY - 28,
+      width: min(1545, visible.width), height: visible.height + 28), display: false)
+    saved.saveFrame(usingName: autosaveName)
+    saved.close()
+    defer { NSWindow.removeFrame(usingName: autosaveName) }
+    let controller = MainWindowController(frameAutosaveName: autosaveName, model: model, session: session, actions: Actions())
+    controller.showWindow(nil)
+    defer { controller.close() }
+    guard let window = controller.window else { throw Failure(message: "Inspector window missing") }
+    try await waitFor { model.presentation.exposesCanvas }
+    func inspector() -> NSView? {
+      accessibilityNodes(window.contentView!).compactMap { $0 as? NSView }.first {
+        guard String(describing: type(of: $0)).contains("InspectorStyleContext"),
+          !$0.isHiddenOrHasHiddenAncestor else { return false }
+        var child = $0
+        while let parent = child.superview {
+          if let split = parent as? NSSplitView, split.isSubviewCollapsed(child) { return false }
+          child = parent
+        }
+        return window.contentView!.bounds.intersects(window.contentView!.convert($0.bounds, from: $0))
+      }
+    }
+    func toggle() -> NSToolbarItem? {
+      window.toolbar?.items.first { $0.label.contains("Inspector") }
+    }
+    try await waitFor { inspector() != nil && toggle() != nil }
+    try await Task.sleep(for: .milliseconds(300))
+    FileHandle.standardError.write(Data("SHOWN frame=\(window.frame) visible=\(visible) min=\(window.minSize)\n".utf8))
+    try require(visible.contains(window.frame), "Shown ready shell escaped the visible screen after toolbar/inspector mounting: \(window.frame), visible \(visible)")
+    for size in [NSSize(width: 1200, height: 800), NSSize(width: 800, height: 600)] {
+      window.setContentSize(size)
+      try await tick()
+      try require(inspector() != nil && toggle() != nil, "Inspector or discovery button missing at \(size)")
+      try require(session.webView.bounds.width > 200 && session.webView.bounds.height > 200,
+        "Inspector squeezed the document out of the window at \(size): \(session.webView.bounds)")
+      let webRect = window.contentView!.convert(session.webView.bounds, from: session.webView)
+      try require(window.contentView!.bounds.contains(webRect),
+        "Ready web document escapes the window content at \(size): \(webRect)")
+      try require(visible.contains(window.frame), "Resized ready shell escaped the screen")
+    }
+    // A valid user-sized saved frame survives the mounted native chrome.
+    let userFrame = NSRect(x: floor(visible.midX - 500), y: floor(visible.midY - 350), width: 1000, height: 700)
+    window.setFrame(userFrame, display: false)
+    window.saveFrame(usingName: autosaveName)
+    try await Task.sleep(for: .milliseconds(300))
+    try require(window.frame == userFrame, "Mounted layout replaced a valid user-sized frame: \(window.frame), requested \(userFrame)")
+    print("Witness: shown ready shell fits the full outer frame and web viewport; valid user geometry retained")
+    // The existing menu transport invokes the shell's toggle action. The
+    // bridged toolbar title must follow the same real mounted pane.
+    NotificationCenter.default.post(name: .commandDeckToggleInspector, object: nil)
+    try await waitFor { inspector() == nil }
+    try await waitFor { toggle()?.label == "Show Inspector" }
+    try await Task.sleep(for: .milliseconds(300))
+    NotificationCenter.default.post(name: .commandDeckToggleInspector, object: nil)
+    try await waitFor { inspector() != nil }
+    try await waitFor { toggle()?.label == "Hide Inspector" }
+    controller.openWorkspacePath("/usage")
+    try await waitFor { session.navigation.currentURL?.path == "/usage" }
+    try await waitFor { inspector() == nil }
+    NotificationCenter.default.post(name: .commandDeckToggleInspector, object: nil)
+    try await tick()
+    try require(inspector() == nil, "Costs & usage exposed an empty run inspector")
+    controller.openWorkspacePath("/runs")
+    try await waitFor { session.navigation.currentURL?.path == "/runs" }
+    try await waitFor { inspector() != nil }
+    // Web navigation bypasses the sidebar; eligibility must follow the actual page.
+    try await evaluate("location.href = '/projects'", in: session.webView)
+    try await waitFor { session.navigation.currentURL?.path == "/projects" }
+    try await waitFor { inspector() == nil }
+    try await evaluate("location.href = '/'", in: session.webView)
+    try await waitFor { session.navigation.currentURL?.path == "/" }
+    try await waitFor { inspector() != nil }
+    NotificationCenter.default.post(name: .commandDeckToggleInspector, object: nil)
+    try await waitFor { inspector() == nil }
+    controller.openWorkspacePath("/runs")
+    try await waitFor { session.navigation.currentURL?.path == "/runs" }
+    try await tick()
+    try require(inspector() == nil, "Route navigation discarded the user's closed inspector preference")
+    print("Witness: existing native inspector defaults open, toolbar and menu toggle it, actual routes govern eligibility, window preference survives navigation at 800×600 and 1200×800")
+  }
+
   static func windowGeometryContract() throws {
     let fresh = CommandDeckWindowFactory.makeWindow(title: "Geometry fixture", frameAutosaveName: nil)
     defer { fresh.close() }
@@ -474,7 +586,7 @@ struct CommandDeckIntegrationTests {
       downloadDestinationProvider: { _, _, _ in nil })
     session.apply(endpoint: endpoint)
     let frameURL = URL(string: "http://127.0.0.1:9/")!
-    let controller = MainWindowController(model: model, session: session, actions: Actions())
+    let controller = MainWindowController(frameAutosaveName: nil, model: model, session: session, actions: Actions())
     controller.frameWebURL = { frameURL }
     controller.openWorkspacePath("/frame")
     guard case .runtime = session.scope else {
@@ -600,7 +712,7 @@ struct CommandDeckIntegrationTests {
     try require(downloaded.count == 2, "Cancelled download wrote a file")
     print("Witness: server download bytes, blob download bytes and blob cancellation")
     let actions = Actions()
-    let controller = MainWindowController(model: model, session: session, actions: actions)
+    let controller = MainWindowController(frameAutosaveName: nil, model: model, session: session, actions: actions)
     let window = controller.window
     controller.close()
     controller.showWindow(nil)
@@ -739,7 +851,7 @@ struct CommandDeckIntegrationTests {
     console.events.navigationBlocked = { _, reason in blocked.append(reason) }
     console.events.openExternally = { externals.append($0) }
     let actions = Actions()
-    let controller = MainWindowController(model: model, session: console, actions: actions,
+    let controller = MainWindowController(frameAutosaveName: nil, model: model, session: console, actions: actions,
       openExternally: { externals.append($0) })
     controller.showWindow(nil)
     let consoleView = console.webView
@@ -978,7 +1090,7 @@ struct CommandDeckIntegrationTests {
     console.events.openInTab = { opened.append(($0, $1)) }
     console.events.openExternally = { externals.append($0) }
     let actions = Actions()
-    let controller = MainWindowController(model: model, session: console, actions: actions,
+    let controller = MainWindowController(frameAutosaveName: nil, model: model, session: console, actions: actions,
       openExternally: { externals.append($0) })
     controller.showWindow(nil)
     let consoleView = console.webView
@@ -1266,6 +1378,7 @@ struct CommandDeckIntegrationTests {
     try tabPolicyContract(endpoint)
     try destinationContract(endpoint)
     try frameProjectionContract(endpoint)
+    try await inspectorContract(endpoint)
     try await webContract(endpoint)
     try await inlineScriptSuccessContract(endpoint)
     try await firstLoadTimeoutContract(endpoint, reconnectEndpoint: reconnectEndpoint)

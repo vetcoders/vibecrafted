@@ -14,6 +14,7 @@ extension Notification.Name {
 /// to reuse, so this is not written to disk.
 struct CommandDeckShell<Workspace: View>: View {
   let phase: CommandDeckPhase
+  var navigation: WebTabNavigation?
   var openPath: ((String) -> Void)?
   var frameOrigin: (() -> URL?)?
   var presentFrame: (() -> Bool)?
@@ -22,13 +23,36 @@ struct CommandDeckShell<Workspace: View>: View {
 
   @State private var selection: CommandDeckDestination? = .overview
   @State private var columnVisibility = NavigationSplitViewVisibility.all
-  @State private var inspectorPresented = false
+  @State private var inspectorPresented = true
   @State private var projectingFrame = false
   @State private var sidebarBeforeProjection: NavigationSplitViewVisibility?
   @State private var inspectorBeforeProjection = false
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   var body: some View {
+    inspectedShell
+    .background(BrowserToolbarStripper())
+    .animation(reduceMotion ? nil : .easeInOut(duration: CommandDeckMetrics.motionDuration), value: columnVisibility)
+    .animation(reduceMotion ? nil : .easeInOut(duration: CommandDeckMetrics.motionDuration), value: inspectorPresented)
+    .animation(reduceMotion ? nil : .easeInOut(duration: CommandDeckMetrics.motionDuration), value: projectingFrame)
+    .onChange(of: selection) { _, destination in
+      guard !projectingFrame, let destination, currentPath != destination.path else { return }
+      openPath?(destination.path)
+    }
+    .onChange(of: currentPath, initial: true) { _, path in
+      if let destination = CommandDeckDestination.allCases.first(where: { $0.path == path }) {
+        selection = destination
+      }
+    }
+    .onReceive(NotificationCenter.default.publisher(for: .commandDeckToggleSidebar)) { _ in
+      toggleSidebar()
+    }
+    .onReceive(NotificationCenter.default.publisher(for: .commandDeckToggleInspector)) { _ in
+      toggleInspector()
+    }
+  }
+
+  private var navigationShell: some View {
     NavigationSplitView(columnVisibility: $columnVisibility) {
       CommandDeckSidebar(selection: $selection, phase: phase)
         .navigationSplitViewColumnWidth(min: 180, ideal: 220, max: 280)
@@ -53,28 +77,35 @@ struct CommandDeckShell<Workspace: View>: View {
       // The document owns its title; the native toolbar owns window actions.
       .navigationTitle("Vibecrafted")
       .toolbarRole(.editor)
+      .toolbar {
+        ToolbarItem(placement: .primaryAction) {
+          Button(inspectorPresented && inspectorAvailable ? "Hide Inspector" : "Show Inspector", systemImage: "sidebar.right", action: toggleInspector)
+            .labelStyle(.titleAndIcon)
+            .disabled(!inspectorAvailable)
+            .help("Show or hide the run document (⌥⌘I). Available on Overview and Runs.")
+            .accessibilityIdentifier("command-deck-inspector-toggle")
+        }
+      }
 
     }
-    .inspector(isPresented: runInspectorPresented) {
-      CommandDeckInspector(phase: phase)
-        .inspectorColumnWidth(min: 240, ideal: 320, max: 480)
-    }
-    .background(BrowserToolbarStripper())
-    .animation(reduceMotion ? nil : .easeInOut(duration: CommandDeckMetrics.motionDuration), value: columnVisibility)
-    .animation(reduceMotion ? nil : .easeInOut(duration: CommandDeckMetrics.motionDuration), value: inspectorPresented)
-    .animation(reduceMotion ? nil : .easeInOut(duration: CommandDeckMetrics.motionDuration), value: projectingFrame)
-    .onChange(of: selection) { _, destination in
-      if destination?.showsRunDocument != true {
-        inspectorPresented = false
+  }
+
+  /// Remove the native modifier on routes without a run document. Keeping
+  /// it mounted with a derived false binding lets AppKit retain an obsolete
+  /// column while navigation rebuilds the split. The persistent web session
+  /// owns the canvas across these native remounts.
+  @ViewBuilder
+  private var inspectedShell: some View {
+    if inspectorAvailable {
+      navigationShell.inspector(isPresented: Binding(
+        get: { inspectorPresented },
+        set: { if inspectorAvailable { inspectorPresented = $0 } }
+      )) {
+        CommandDeckInspector(phase: phase, openPath: openPath)
+          .inspectorColumnWidth(min: 240, ideal: 260, max: 480)
       }
-      guard !projectingFrame, let destination else { return }
-      openPath?(destination.path)
-    }
-    .onReceive(NotificationCenter.default.publisher(for: .commandDeckToggleSidebar)) { _ in
-      toggleSidebar()
-    }
-    .onReceive(NotificationCenter.default.publisher(for: .commandDeckToggleInspector)) { _ in
-      toggleInspector()
+    } else {
+      navigationShell
     }
   }
 
@@ -104,17 +135,21 @@ struct CommandDeckShell<Workspace: View>: View {
   }
 
   private func toggleInspector() {
-    guard !projectingFrame, selection?.showsRunDocument == true else { return }
+    guard inspectorAvailable else { return }
     inspectorPresented.toggle()
   }
 
-  /// Projects and Costs are not run lists. The empty document stays closed.
-  private var runInspectorPresented: Binding<Bool> {
-    Binding(
-      get: { inspectorPresented && selection?.showsRunDocument == true },
-      set: { inspectorPresented = $0 }
-    )
+  private var currentPath: String? { navigation?.currentURL?.path }
+
+  /// Web cards, history and sidebar navigation share the destination policy.
+  /// Hiding on other routes preserves the window's open/closed preference.
+  private var inspectorAvailable: Bool {
+    guard !projectingFrame else { return false }
+    guard let currentPath else { return selection?.showsRunDocument == true }
+    return currentPath.hasPrefix("/run/")
+      || CommandDeckDestination.allCases.first(where: { $0.path == currentPath })?.showsRunDocument == true
   }
+
 }
 
 /// Thin bar above the projected web view. The way back stays in this window.

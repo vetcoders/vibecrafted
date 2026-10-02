@@ -1807,9 +1807,74 @@ pub fn ConsolePage() -> impl IntoView {
 }
 
 fn console_dashboard(dashboard: DashboardData) -> impl IntoView {
+    let projects_count = dashboard.workspaces.len();
+    let recent_count = dashboard.recent_runs.len();
     let live = operator_active_runs(dashboard.active_runs);
     let runs_live = live.len();
     let live_workspace_count = dashboard.live_frame_sessions.len();
+    let count = |status: &str, value: usize| {
+        if status == "unavailable" || status.is_empty() {
+            "Unknown".to_string()
+        } else {
+            value.to_string()
+        }
+    };
+    let runs_count_label = count(&dashboard.control_status, runs_live);
+    let statistics = [
+        (
+            "Live runs",
+            count(&dashboard.control_status, runs_live),
+            "Active runs in the current projection",
+        ),
+        (
+            "Live workspaces",
+            count(&dashboard.workspace_status, live_workspace_count),
+            "Frame sessions running at the last reading",
+        ),
+        (
+            "Retained projects",
+            count(&dashboard.workspace_status, projects_count),
+            "Projects in the retained workspace catalog",
+        ),
+        (
+            "Recent run records",
+            count(&dashboard.control_status, recent_count),
+            "Records in the bounded recent-run projection, not a lifetime total",
+        ),
+    ];
+    let routes = [
+        ("/runs", "Runs", "Live work and retained reports"),
+        ("/projects", "Projects", "Open or rejoin a workspace"),
+        (
+            "/usage",
+            "Costs & usage",
+            "Known readings · missing usage stays unknown",
+        ),
+        ("/skills", "Skills", "Browse and edit your tools"),
+        ("/artifacts", "Artifacts", "Plans, briefs and checkpoints"),
+        (
+            "/structure",
+            "Code intelligence",
+            "Explore the repository map",
+        ),
+        (
+            "/history",
+            "History & context",
+            "Recover intent and decisions",
+        ),
+        (
+            "/settings",
+            "Settings & config",
+            "Runtime and tool configuration",
+        ),
+        (
+            "/diagnostics",
+            "Diagnostics",
+            "Read health and available checks",
+        ),
+        ("/help", "Help & docs", "Find the next practical step"),
+        ("/about", "About", "Version and product identity"),
+    ];
     let welcome = overview_welcome_line(&dashboard.server_status).to_string();
     let selected_root = dashboard
         .workspaces
@@ -1832,9 +1897,32 @@ fn console_dashboard(dashboard: DashboardData) -> impl IntoView {
                     <p id="overview-status" class="overview-status" role="status">{welcome}</p>
                     <a class="server-console-link server-console-link-primary overview-open-project" href="/projects">"Open project"</a>
                 </header>
+                <dl class="overview-stats" aria-label="Statistics" title=format!("Projection: {}", dashboard.generated_at)>
+                    {statistics.into_iter().map(|(label, value, scope)| view! {
+                        <div title=scope><dt>{label}</dt><dd>{value}</dd></div>
+                    }).collect_view()}
+                </dl>
+                <section class="overview-health" aria-label="Health">
+                    <div class="control-panel-head"><h2>"Health"</h2><a class="server-console-link" href="/diagnostics">"Diagnostics"</a></div>
+                    <dl class="overview-health-readings">
+                        <div><dt>"Server"</dt><dd id="overview-server-health">"Reading readiness…"</dd></div>
+                        <div><dt>"Runtime"</dt><dd id="overview-runtime-health">"Not published"</dd></div>
+                        <div><dt>"Generation"</dt><dd id="overview-generation">"Not published"</dd></div>
+                    </dl>
+                </section>
                 <div class="overview-dashboard">
+                    <section class="control-panel overview-navigation" aria-label="Explore">
+                        <div class="control-panel-head"><h2>"Explore"</h2></div>
+                        <nav class="overview-region overview-routes" aria-label="Overview destinations" tabindex="0">
+                            {routes.into_iter().map(|(href, title, detail)| view! {
+                                <a class="overview-route-card" href=href><strong>{title}<span aria-hidden="true">"↗"</span></strong><span>{detail}</span></a>
+                            }).collect_view()}
+                        </nav>
+                    </section>
+                    <div class="overview-activity">
                     <section class="control-panel overview-live" aria-label="Live runs">
-                        <div class="control-panel-head"><h2>"Live runs"</h2><span>{runs_live}</span></div>
+                        <div class="control-panel-head"><h2>"Live runs"</h2><span>{runs_count_label}</span></div>
+                        <div class="overview-region" tabindex="0">
                         {if runs_unavailable {
                             view! { <p class="control-empty control-error">{format!("Runs unavailable: {}", dashboard.control_error)}</p> }.into_any()
                         } else if runs_live == 0 {
@@ -1851,10 +1939,12 @@ fn console_dashboard(dashboard: DashboardData) -> impl IntoView {
                                 }
                             }).collect_view().into_any()
                         }}
+                        </div>
                         <a class="server-console-link" href="/runs">"View runs"</a>
                     </section>
                     <section class="control-panel overview-projects" aria-label="Recent projects">
                         <div class="control-panel-head"><h2>"Recent projects"</h2></div>
+                        <div class="overview-region" tabindex="0">
                         {projects_unavailable.then(|| view! { <p class="control-empty control-error">{format!("Projects unavailable: {}", dashboard.workspace_error)}</p> })}
                         {(projects_empty && !projects_unavailable).then(|| view! { <p class="control-empty">"No recent projects. Choose a project folder with Open project."</p> })}
                         {projects.into_iter().map(|project| {
@@ -1867,16 +1957,9 @@ fn console_dashboard(dashboard: DashboardData) -> impl IntoView {
                                 </a>
                             }
                         }).collect_view()}
+                        </div>
                     </section>
-                    <section class="control-panel overview-health" aria-label="Health">
-                        <div class="control-panel-head"><h2>"Health"</h2><a class="server-console-link" href="/diagnostics">"Diagnostics"</a></div>
-                        <dl class="overview-health-readings">
-                            <div><dt>"Server"</dt><dd id="overview-server-health">"Reading readiness…"</dd></div>
-                            <div><dt>"Runtime health"</dt><dd id="overview-runtime-health">"Not published"</dd></div>
-                            <div><dt>"Runtime generation"</dt><dd id="overview-generation">"Not published"</dd></div>
-                            <div><dt>"Doctor"</dt><dd>"Not published — open Diagnostics for available checks."</dd></div>
-                        </dl>
-                    </section>
+                    </div>
                 </div>
                 <script inner_html=overview_health_script()></script>
             </div>
@@ -1887,34 +1970,36 @@ fn console_dashboard(dashboard: DashboardData) -> impl IntoView {
 /// Only reads existing projections. No diagnostic command runs on render.
 fn overview_health_script() -> &'static str {
     r#"(() => {
-  const host = document.querySelector('.overview-dashboard');
+  const host = document.querySelector('.overview-desk');
   if (!host) return;
-  const put = (id, value) => { const node = document.getElementById(id); if (node) node.textContent = value; };
+  const put = (id, value) => { const node = document.getElementById(id); if (node) { node.textContent = value; node.title = value; } };
   const read = async (url) => {
     const response = await fetch(url, {cache: 'no-store', signal: AbortSignal.timeout(5000)});
     if (!response.ok) throw new Error('HTTP ' + response.status);
     return response.json();
   };
-  let firstReading = true;
   const refresh = async () => {
     if (!host.isConnected) return;
     // The canonical state endpoint refreshes the server's read-only cache.
     // SSR alone deliberately returns the latest cached projection.
     await read('/api/control/state').catch(() => {});
-    if (!firstReading) {
+    {
       try {
         const response = await fetch('/', {cache: 'no-store', signal: AbortSignal.timeout(5000)});
         if (!response.ok) throw new Error('Overview unavailable');
         const page = new DOMParser().parseFromString(await response.text(), 'text/html');
-        for (const selector of ['.overview-live', '.overview-projects']) {
+        for (const selector of ['.overview-stats', '.overview-live', '.overview-projects']) {
           const fresh = page.querySelector(selector);
           const current = host.querySelector(selector);
-          if (fresh && current) current.replaceWith(fresh);
+          if (fresh && current) {
+            const positions = [...current.querySelectorAll('.overview-region')].map(node => node.scrollTop);
+            current.replaceWith(fresh);
+            fresh.querySelectorAll('.overview-region').forEach((node, index) => { node.scrollTop = positions[index] || 0; });
+          }
         }
-        put('overview-status', 'View refreshed');
+        put('overview-status', page.getElementById('overview-status')?.textContent || 'View refreshed');
       } catch (_) { put('overview-status', 'Refresh unavailable — showing the last reading'); }
     }
-    firstReading = false;
     await Promise.all([
       read('/api/health').then(h => put('overview-server-health', `${h.status} · ${h.version}`))
         .catch(() => put('overview-server-health', 'Unavailable — readiness could not be read')),
@@ -4580,6 +4665,112 @@ pub(crate) mod tests {
     use crate::control::api::{control_routes_for, state_payload};
     use crate::scaffold::api::project_shelf;
     use crate::theme::provide_theme_context;
+
+    /// Fixture HTML is the real SSR view and production CSS; the browser
+    /// contract uses it without borrowing the Founder's running server.
+    #[test]
+    fn overview_navigation_hub() {
+        let owner = Owner::new();
+        let cases = owner.with(|| {
+            leptos_meta::provide_meta_context();
+            provide_theme_context();
+            let populated = DashboardData {
+                server_status: "healthy".into(),
+                control_status: "available".into(),
+                workspace_status: "available".into(),
+                generated_at: "2026-10-02T12:00:00Z".into(),
+                active_runs: (0..8)
+                    .map(|i| DashboardRun {
+                        run_id: format!("fixture-run-{i}-with-a-long-descriptive-name"),
+                        state: "running".into(),
+                        health: "active".into(),
+                        agent: "codex".into(),
+                        skill: "justdo".into(),
+                        updated_at: "2026-10-02T12:00:00Z".into(),
+                        ..DashboardRun::default()
+                    })
+                    .collect(),
+                recent_runs: vec![DashboardRun::default(); 3],
+                live_frame_sessions: vec![super::DashboardFrameSession::default(); 2],
+                workspaces: (0..9)
+                    .map(|i| super::DashboardWorkspace {
+                        workspace_id: format!("fixture-project-{i}"),
+                        title: format!("Project {i}"),
+                        root: format!("/fixture/a-long-repository-name/{i}"),
+                        updated_at: "2026-10-02T12:00:00Z".into(),
+                        ..super::DashboardWorkspace::default()
+                    })
+                    .collect(),
+                ..DashboardData::default()
+            };
+            let full = console_dashboard(populated).to_html();
+            let empty = console_dashboard(DashboardData {
+                control_status: "not_initialized".into(),
+                workspace_status: "not_initialized".into(),
+                ..DashboardData::default()
+            })
+            .to_html();
+            let unavailable = console_dashboard(DashboardData {
+                control_status: "unavailable".into(),
+                control_error: "fixture projection failed".into(),
+                workspace_status: "unavailable".into(),
+                workspace_error: "fixture catalog failed".into(),
+                ..DashboardData::default()
+            })
+            .to_html();
+            [
+                ("full", full),
+                ("empty", empty),
+                ("unavailable", unavailable),
+            ]
+        });
+        let full = &cases[0].1;
+        let navigation = full
+            .split("aria-label=\"Overview destinations\"")
+            .nth(1)
+            .expect("Overview navigation")
+            .split("</nav>")
+            .next()
+            .expect("navigation content");
+        assert_eq!(navigation.matches("overview-route-card").count(), 11);
+        for route in [
+            "runs",
+            "projects",
+            "usage",
+            "skills",
+            "artifacts",
+            "structure",
+            "history",
+            "settings",
+            "diagnostics",
+            "help",
+            "about",
+        ] {
+            assert!(
+                navigation.contains(&format!("href=\"/{route}\"")),
+                "missing Overview door {route}"
+            );
+        }
+        assert!(full.contains("Retained projects"));
+        assert!(full.contains("Recent run records"));
+        assert!(!full.contains("usage-chart-heat"));
+        assert!(!full.contains("overview-inspector"));
+        assert!(cases[2].1.contains("Unknown"));
+        assert!(cases[2].1.contains("fixture projection failed"));
+        if let Ok(directory) = std::env::var("VC_OVERVIEW_FIXTURE_DIR") {
+            let directory = PathBuf::from(directory);
+            fs::create_dir_all(&directory).expect("fixture directory");
+            let styles = format!(
+                "{}\n{}\n{}",
+                include_str!("../styles/tokens.css"),
+                include_str!("../styles/fonts.css"),
+                include_str!("../styles/main.css")
+            );
+            for (name, html) in cases {
+                fs::write(directory.join(format!("{name}.html")), format!("<!doctype html><html><head><meta charset=\"utf-8\"><style>{styles}</style></head><body>{html}</body></html>")).expect("SSR fixture");
+            }
+        }
+    }
 
     fn temp_home() -> PathBuf {
         static NEXT_ID: AtomicU64 = AtomicU64::new(0);
