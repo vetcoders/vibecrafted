@@ -54,6 +54,32 @@ def _run_installer(
     )
 
 
+@pytest.fixture(params=["public-defaults", "private-overrides"])
+def channel_env(tmp_path: Path, request) -> dict[str, str]:
+    if request.param == "public-defaults":
+        return {}
+    npm_config = tmp_path / "private.npmrc"
+    npm_config.write_text("@loctree:registry=https://npm.example.invalid/\n")
+    uv_config = tmp_path / "uv.toml"
+    uv_config.write_text('[[index]]\nurl = "https://uv.example.invalid/simple"\n')
+    pip_config = tmp_path / "pip.conf"
+    pip_config.write_text(
+        "[global]\nextra-index-url=https://pip.example.invalid/simple\n"
+    )
+    return {
+        "NPM_CONFIG_REGISTRY": "https://npm.example.invalid/",
+        "NPM_CONFIG_USERCONFIG": str(npm_config),
+        "UV_CONFIG_FILE": str(uv_config),
+        "UV_INDEX": "https://uv.example.invalid/simple",
+        "UV_EXTRA_INDEX_URL": "https://uv-extra.example.invalid/simple",
+        "UV_FIND_LINKS": "https://uv-wheels.example.invalid/",
+        "PIP_CONFIG_FILE": str(pip_config),
+        "PIP_INDEX_URL": "https://pip.example.invalid/simple",
+        "PIP_EXTRA_INDEX_URL": "https://pip-extra.example.invalid/simple",
+        "PIP_FIND_LINKS": "https://pip-wheels.example.invalid/",
+    }
+
+
 # --- the pack carries none of them -------------------------------------------
 
 
@@ -185,7 +211,9 @@ def _fake_node_and_npm(fake_bin: Path, prefix: Path, capture: Path) -> None:
     prefix.mkdir(parents=True, exist_ok=True)
 
 
-def test_loctree_and_aicx_install_from_npm_when_missing(tmp_path: Path) -> None:
+def test_loctree_and_aicx_install_from_npm_when_missing(
+    tmp_path: Path, channel_env: dict[str, str]
+) -> None:
     fake_bin = tmp_path / "bin"
     npm_bin = tmp_path / "npm-prefix/bin"
     capture = tmp_path / "npm-args.txt"
@@ -200,12 +228,16 @@ def test_loctree_and_aicx_install_from_npm_when_missing(tmp_path: Path) -> None:
         NPM_CAPTURE=str(capture),
         NPM_PREFIX_BIN=str(npm_bin),
         REQUIRE_FOUNDATIONS="1",
+        **channel_env,
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
     calls = capture.read_text(encoding="utf-8").splitlines()
-    assert "install -g @loctree/loctree" in calls
-    assert "install -g @loctree/aicx" in calls
+    for package in ("@loctree/loctree", "@loctree/aicx"):
+        assert (
+            f"install -g {package} --registry=https://registry.npmjs.org "
+            "--@loctree:registry=https://registry.npmjs.org"
+        ) in calls
 
 
 def test_a_working_foundation_is_left_exactly_as_the_user_installed_it(
@@ -341,6 +373,7 @@ def test_prview_never_overwrites_another_install_in_the_launcher_bin(
 
 def test_screenscribe_uses_uv_with_compatible_python_and_external_bin(
     tmp_path: Path,
+    channel_env: dict[str, str],
 ) -> None:
     fake_bin = tmp_path / "bin"
     capture = tmp_path / "uv-args.txt"
@@ -353,6 +386,10 @@ def test_screenscribe_uses_uv_with_compatible_python_and_external_bin(
         'if [ "$1 $2" = "tool dir" ]; then\n'
         '  dirname "$SCREENSCRIBE_BIN"\n'
         'elif [ "$1 $2" = "tool install" ]; then\n'
+        '  test "${UV_NO_CONFIG-}" = 1 || exit 13\n'
+        '  test "${PIP_CONFIG_FILE-}" = /dev/null || exit 14\n'
+        '  test "${PIP_INDEX_URL-}" = https://pypi.org/simple || exit 15\n'
+        '  test -z "${UV_INDEX-}${UV_EXTRA_INDEX_URL-}${UV_FIND_LINKS-}${PIP_EXTRA_INDEX_URL-}${PIP_FIND_LINKS-}" || exit 16\n'
         '  printf "%s\\n" "$@" > "$UV_CAPTURE"\n'
         '  printf "#!/bin/sh\\nexit 0\\n" > "$SCREENSCRIBE_BIN"\n'
         '  chmod +x "$SCREENSCRIBE_BIN"\n'
@@ -365,17 +402,21 @@ def test_screenscribe_uses_uv_with_compatible_python_and_external_bin(
         REQUIRE_FOUNDATIONS="1",
         UV_CAPTURE=str(capture),
         SCREENSCRIBE_BIN=str(screenscribe),
+        **channel_env,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     args = capture.read_text().splitlines()
     assert args[:2] == ["tool", "install"]
     assert args[args.index("--python") + 1] == ">=3.11"
     assert args[args.index("--default-index") + 1] == "https://pypi.org/simple"
+    assert "--no-config" in args
     assert args[-1] == "screenscribe"
     assert screenscribe.exists()
 
 
-def test_screenscribe_installs_from_pypi_through_pipx(tmp_path: Path) -> None:
+def test_screenscribe_installs_from_pypi_through_pipx(
+    tmp_path: Path, channel_env: dict[str, str]
+) -> None:
     fake_bin = tmp_path / "bin"
     capture = tmp_path / "pipx-args.txt"
     screenscribe = fake_bin / "screenscribe"
@@ -383,6 +424,10 @@ def test_screenscribe_installs_from_pypi_through_pipx(tmp_path: Path) -> None:
         fake_bin / "pipx",
         "#!/bin/sh\n"
         "set -eu\n"
+        '  test "${UV_NO_CONFIG-}" = 1 || exit 13\n'
+        '  test "${PIP_CONFIG_FILE-}" = /dev/null || exit 14\n'
+        '  test "${PIP_INDEX_URL-}" = https://pypi.org/simple || exit 15\n'
+        '  test -z "${UV_INDEX-}${UV_EXTRA_INDEX_URL-}${UV_FIND_LINKS-}${PIP_EXTRA_INDEX_URL-}${PIP_FIND_LINKS-}" || exit 16\n'
         'printf "%s\\n" "$@" > "$PIPX_CAPTURE"\n'
         "printf '#!/bin/sh\\nexit 0\\n' > \"$SCREENSCRIBE_BIN\"\n"
         'chmod +x "$SCREENSCRIBE_BIN"\n',
@@ -393,13 +438,17 @@ def test_screenscribe_installs_from_pypi_through_pipx(tmp_path: Path) -> None:
         "screenscribe",
         path=[fake_bin],
         PIPX_CAPTURE=str(capture),
+        REQUIRE_FOUNDATIONS="1",
         SCREENSCRIBE_BIN=str(screenscribe),
+        **channel_env,
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert capture.read_text(encoding="utf-8").splitlines() == [
         "install",
         "--force",
+        "--index-url",
+        "https://pypi.org/simple",
         "screenscribe",
     ]
 
