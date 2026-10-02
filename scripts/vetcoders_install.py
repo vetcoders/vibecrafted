@@ -16301,6 +16301,7 @@ def _uninstall_control_state(
     try:
         # The origin is restricted above to credential-free HTTP(S); urllib is
         # retained to avoid adding a host-installer dependency.
+        # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
         with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except (
@@ -20679,18 +20680,30 @@ def _validate_runtime_backup_receipts(
 ) -> None:
     backup_root = paths["runtime_home"] / ".installer-backups"
     _assert_runtime_physical_path(backup_root)
+    managed_roots = _receipt_managed_roots(paths)
+    projection_roots = _runtime_projection_roots()
+    # Reuse only root canonicalization within this validation. Every destination
+    # and backup still gets its physical ancestor walk and leaf existence check.
+    # Recheck the roots before accepting so a changed alias cannot authorize a
+    # later entry through an earlier positive result. No cross-invocation cache.
+    resolved_roots = {
+        root: root.resolve(strict=False)
+        for root in (*managed_roots, *projection_roots, backup_root)
+    }
+    allowed_destinations = tuple(
+        resolved_roots[root] for root in (*managed_roots, *projection_roots)
+    )
+    resolved_backup_root = resolved_roots[backup_root]
     for destination_raw, backup_raw in _runtime_backup_entries(receipt):
         destination, backup = Path(destination_raw), Path(backup_raw)
-        if not (
-            _receipt_path_is_allowed(destination, paths)
-            or _receipt_projection_path_is_allowed(destination)
-        ):
+        canonical = _canonical_path_preserving_final_symlink(destination)
+        if not any(_is_subpath(canonical, root) for root in allowed_destinations):
             raise RuntimeError(
                 f"receipt restore path escapes managed roots: {destination}"
             )
         _assert_runtime_physical_path(destination, leaf_symlink=True)
         _assert_runtime_physical_path(backup, leaf_symlink=True)
-        if not _receipt_backup_path_is_allowed(backup, backup_root):
+        if not _is_subpath(backup.parent.resolve(strict=False), resolved_backup_root):
             raise RuntimeError(f"receipt backup path escapes backup root: {backup}")
         if (
             retiring_copy is not None
@@ -20701,6 +20714,11 @@ def _validate_runtime_backup_receipts(
             # intent here. Every other missing recovery snapshot still refuses.
             continue
         backup.lstat()  # A missing receipted snapshot is never successful recovery.
+    for root, resolved in resolved_roots.items():
+        if root.resolve(strict=False) != resolved:
+            raise RuntimeError(
+                f"receipt managed root changed during validation: {root}"
+            )
 
 
 def _sha256_bytes(data: bytes) -> str:
@@ -27090,7 +27108,7 @@ def _refuse_runtime_pack_downgrade(
     )
 
 
-def _receipt_path_is_allowed(path: Path, roots: Mapping[str, Path]) -> bool:
+def _receipt_managed_roots(roots: Mapping[str, Path]) -> tuple[Path, ...]:
     allowed = [
         roots["runtime_home"],
         roots["product_config"],
@@ -27105,6 +27123,11 @@ def _receipt_path_is_allowed(path: Path, roots: Mapping[str, Path]) -> bool:
                 _vc_frame_socket_dir(),
             ]
         )
+    return tuple(allowed)
+
+
+def _receipt_path_is_allowed(path: Path, roots: Mapping[str, Path]) -> bool:
+    allowed = _receipt_managed_roots(roots)
     # Preserve the final component so a receipt cannot make an outside path
     # appear managed merely by pointing its symlink into an allowed root.
     resolved = _canonical_path_preserving_final_symlink(path)

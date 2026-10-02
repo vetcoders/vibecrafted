@@ -311,6 +311,115 @@ def test_resolution_accepts_large_legitimate_settlement_receipt(installed, capsy
     assert _snapshot(Path.home()) == before
 
 
+def test_backup_history_resolves_stable_roots_in_bounded_work(roots, monkeypatch):
+    backup_root = roots["runtime_home"] / ".installer-backups"
+    backup_root.mkdir(parents=True)
+    archive = backup_root / "drift/archive"
+    archive.parent.mkdir()
+    archive.write_bytes(b"preserved")
+    projection = installer._runtime_projection_roots()[0]
+    history = {
+        str(projection / f"historical-{index}" / "preference"): [str(archive)]
+        for index in range(300)
+    }
+    stable_roots = {
+        backup_root,
+        *roots.values(),
+        *installer._runtime_projection_roots(),
+    }
+    calls = []
+    resolve = Path.resolve
+
+    def counted(path, *args, **kwargs):
+        if path in stable_roots:
+            calls.append(path)
+        return resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", counted)
+    installer._validate_runtime_backup_receipts(
+        {"drift_backup_history": history}, roots
+    )
+    # Filesystem leaf checks may scale with history; resolving the same managed
+    # root must not. Count work rather than relying on host timing thresholds.
+    assert len(calls) <= 4 * len(stable_roots)
+    assert archive.read_bytes() == b"preserved"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "destination-escape",
+        "destination-alias",
+        "backup-escape",
+        "backup-alias",
+        "missing",
+    ],
+)
+def test_backup_history_refuses_invalid_tail_after_valid_entries(roots, mutation):
+    backup_root = roots["runtime_home"] / ".installer-backups"
+    backup_root.mkdir(parents=True)
+    archive = backup_root / "archive"
+    archive.write_bytes(b"preserved")
+    destination = roots["product_config"] / "historical/preference"
+    destination.parent.mkdir(parents=True)
+    foreign = Path.home() / "foreign"
+    foreign.mkdir()
+    foreign_file = foreign / "archive"
+    foreign_file.write_bytes(b"foreign")
+    bad_destination, bad_backup = destination, archive
+    if mutation == "destination-escape":
+        bad_destination = foreign / "preference"
+    elif mutation == "destination-alias":
+        alias = destination.parent / "alias"
+        alias.symlink_to(destination.parent, target_is_directory=True)
+        bad_destination = alias / "preference"
+    elif mutation == "backup-escape":
+        bad_backup = foreign_file
+    elif mutation == "backup-alias":
+        alias = backup_root / "alias"
+        alias.symlink_to(backup_root, target_is_directory=True)
+        bad_backup = alias / "archive"
+    else:
+        bad_backup = backup_root / "missing"
+    receipt = {
+        "backups": {str(destination): str(archive)},
+        "drift_backup_history": {
+            str(bad_destination): [str(archive)] * 30 + [str(bad_backup)]
+        },
+    }
+    with pytest.raises((RuntimeError, FileNotFoundError)):
+        installer._validate_runtime_backup_receipts(receipt, roots)
+    assert archive.read_bytes() == b"preserved"
+    assert foreign_file.read_bytes() == b"foreign"
+
+
+def test_backup_validation_rechecks_roots_and_keeps_leaf_checks(roots, monkeypatch):
+    backup_root = roots["runtime_home"] / ".installer-backups"
+    backup_root.mkdir(parents=True)
+    archive = backup_root / "opaque"
+    archive.symlink_to(Path.home() / "missing-original-target")
+    destination = roots["product_config"] / "historical/preference"
+    receipt = {"backups": {str(destination): str(archive)}}
+    # Collision backups preserve opaque symlink leaves, including dangling ones.
+    installer._validate_runtime_backup_receipts(receipt, roots)
+    real_entries = installer._runtime_backup_entries
+
+    def drifting_entries(payload):
+        yield from real_entries(payload)
+        projection = installer._runtime_projection_roots()[0]
+        projection.parent.mkdir(parents=True, exist_ok=True)
+        projection.symlink_to(backup_root, target_is_directory=True)
+
+    monkeypatch.setattr(installer, "_runtime_backup_entries", drifting_entries)
+    with pytest.raises(RuntimeError, match="root changed during validation"):
+        installer._validate_runtime_backup_receipts(receipt, roots)
+    monkeypatch.setattr(installer, "_runtime_backup_entries", real_entries)
+    archive.unlink()
+    # Positive observations from an earlier invocation never admit a missing leaf.
+    with pytest.raises(FileNotFoundError):
+        installer._validate_runtime_backup_receipts(receipt, roots)
+
+
 def test_resolution_still_refuses_oversized_generation_manifest(installed, capsys):
     paths, _, result = installed
     manifest = Path(result["root"]) / "runtime-manifest.json"
