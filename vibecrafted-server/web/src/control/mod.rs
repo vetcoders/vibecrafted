@@ -155,6 +155,7 @@ pub mod api {
                 get(await_run_observation),
             )
             .route("/api/control/runs/{run_id}/transcript", get(transcript))
+            .route("/api/control/runs/{run_id}/report", get(report))
             .route("/api/control/transcripts", get(transcripts))
             .route("/api/control/runs/{run_id}", get(run))
             .route("/api/control/lifecycle", get(lifecycle))
@@ -315,6 +316,28 @@ pub mod api {
         q: Option<String>,
         offset: Option<usize>,
         limit: Option<usize>,
+    }
+
+    async fn report(
+        Extension(plane): Extension<ControlPlane>,
+        Path(run_id): Path<String>,
+    ) -> impl IntoResponse {
+        if !is_safe_run_id(&run_id) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "invalid run id"})),
+            )
+                .into_response();
+        }
+        let preview = crate::run_detail::load_run_report(&plane, &run_id);
+        (
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(json!({
+                "run_id": run_id, "body": preview.body,
+                "available": preview.available, "truncated": preview.truncated,
+            })),
+        )
+            .into_response()
     }
 
     /// Host-wide human-transcript search. Derived runs are scanned newest-first;

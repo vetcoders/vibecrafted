@@ -54,6 +54,77 @@ pub(crate) struct TranscriptPreview {
     pub(crate) truncated: bool,
 }
 
+/// Read the report named by the existing run owner, never a caller-supplied
+/// path. Only canonical artifacts are exposed; text remains bounded and inert.
+#[cfg(feature = "ssr")]
+pub(crate) fn load_run_report(
+    plane: &control_core::ControlPlane,
+    run_id: &str,
+) -> TranscriptPreview {
+    use std::fs;
+    use std::io::Read;
+    const LIMIT: u64 = 1024 * 1024;
+    let read = || -> Option<TranscriptPreview> {
+        if !is_safe_run_id(run_id) {
+            return None;
+        }
+        let run = plane.lookup_run(run_id)?;
+        let path = std::path::PathBuf::from(run.latest_report);
+        if !path.is_absolute() || path.extension().and_then(|s| s.to_str()) != Some("md") {
+            return None;
+        }
+        let artifact_home = plane.control_plane_home().parent()?.join("artifacts");
+        if !path.starts_with(&artifact_home) {
+            return None;
+        }
+        let root = fs::canonicalize(&artifact_home).ok()?;
+        let canonical = fs::canonicalize(&path).ok()?;
+        if !canonical.starts_with(&root) {
+            return None;
+        }
+        // Refuse symlink aliases even when their destination is in artifacts.
+        for ancestor in path
+            .ancestors()
+            .take_while(|p| p.starts_with(&artifact_home))
+        {
+            if fs::symlink_metadata(ancestor)
+                .ok()?
+                .file_type()
+                .is_symlink()
+            {
+                return None;
+            }
+        }
+        let file = fs::File::open(&path).ok()?;
+        let meta = file.metadata().ok()?;
+        if !meta.is_file() {
+            return None;
+        }
+        // Re-check after open, before reading. A renamed directory or symlink
+        // race must not turn a canonical artifact request into an outside read.
+        let actual_path = fs::canonicalize(&path).ok()?;
+        if !actual_path.starts_with(&root) {
+            return None;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let actual = fs::metadata(&actual_path).ok()?;
+            if meta.dev() != actual.dev() || meta.ino() != actual.ino() {
+                return None;
+            }
+        }
+        let mut bytes = Vec::new();
+        file.take(LIMIT).read_to_end(&mut bytes).ok()?;
+        Some(TranscriptPreview {
+            body: String::from_utf8_lossy(&bytes).into_owned(),
+            available: true,
+            truncated: meta.len() > LIMIT,
+        })
+    };
+    read().unwrap_or_default()
+}
+
 /// Flat, render-ready projection of [`control_core::RunStatus`]. Strings stay
 /// empty (not "unknown") when the snapshot omitted a field.
 #[derive(Clone, Default)]
@@ -995,6 +1066,16 @@ mod tests {
         );
 
         let html = render(&home, "impl-260809-120000-1");
+        if let Ok(directory) = std::env::var("VC_USAGE_FIXTURE_DIR") {
+            let styles = format!(
+                "{}\n{}\n{}",
+                crate::chrome::STYLE_TOKENS,
+                crate::chrome::STYLE_FONTS,
+                crate::chrome::STYLE_MAIN
+            );
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(std::path::Path::new(&directory).join("run-detail.html"), format!("<!doctype html><html><head><style>{styles}</style></head><body>{html}<script>{}</script></body></html>", crate::chrome::operator_desk_script())).unwrap();
+        }
 
         assert!(html.contains("impl-260809-120000-1"));
         assert!(html.contains("settle:f"));

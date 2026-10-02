@@ -366,7 +366,7 @@ fn ratio_bar(value: &Value, key: &'static str) -> Option<QuotaBar> {
         .and_then(Value::as_f64)
         .filter(|n| n.is_finite() && *n >= 0.0);
     let text = match ratio {
-        Some(ratio) => format!("{:.0}%", ratio.clamp(0.0, 1.0) * 100.0),
+        Some(ratio) => format!("{:.0}% used", ratio.clamp(0.0, 1.0) * 100.0),
         None => "—".to_string(),
     };
     let label = match key {

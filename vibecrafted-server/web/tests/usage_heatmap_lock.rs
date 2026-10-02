@@ -67,6 +67,58 @@ fn usage_heatmap_lock() {
     );
 }
 
+// These fixtures execute native SSR components, while hydrate imports are wasm-only.
+#[cfg(not(feature = "hydrate"))]
+#[test]
+fn usage_analytics_and_shared_studio_fixtures() {
+    use vibecrafted_server_web::app::*;
+    let owner = Owner::new();
+    let pages = owner.with(|| {
+        leptos_meta::provide_meta_context();
+        provide_theme_context();
+        vec![
+            ("usage", UsagePage().to_html()),
+            ("console", ConsolePage().to_html()),
+            ("workspaces", WorkspacesPage().to_html()),
+            ("sessions", SessionsPage().to_html()),
+            ("agents", AgentManagerPage().to_html()),
+            ("lifecycle", LifecyclePage().to_html()),
+            ("activity", ActivityPage().to_html()),
+            ("aicx", AicxPage().to_html()),
+            ("frame", FramePage().to_html()),
+            ("guide", GuidePage().to_html()),
+            ("runs", RunsPage().to_html()),
+            ("projects", ProjectsPage().to_html()),
+            ("history", HistoryPage().to_html()),
+            ("skills", SkillsPage().to_html()),
+            ("settings", SettingsPage().to_html()),
+            ("diagnostics", DiagnosticsPage().to_html()),
+            ("help", HelpPage().to_html()),
+            ("about", AboutPage().to_html()),
+            ("structure", StructurePage().to_html()),
+            ("transcripts", TranscriptsPage().to_html()),
+        ]
+    });
+    let usage = &pages[0].1;
+    assert!(usage.contains("usage-measurement"));
+    assert!(usage.contains("data-usage-view=\"attention\""));
+    assert!(usage.contains("/api/control/runs/"));
+    assert!(usage.contains("cost_by_source") || usage.contains("costKey"));
+    if let Ok(directory) = std::env::var("VC_USAGE_FIXTURE_DIR") {
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let styles = format!(
+            "{}\n{}\n{}",
+            include_str!("../styles/tokens.css"),
+            include_str!("../styles/fonts.css"),
+            include_str!("../styles/main.css")
+        );
+        for (name, html) in pages {
+            std::fs::write(directory.join(format!("{name}.html")), format!("<!doctype html><html><head><meta charset=\"utf-8\"><style>{styles}</style></head><body>{html}<script>{}</script></body></html>", vibecrafted_server_web::chrome::operator_desk_script())).unwrap();
+        }
+    }
+}
+
 fn element_with_id(html: &str, id: &str) -> String {
     let needle = format!("id=\"{id}\"");
     let id_at = html

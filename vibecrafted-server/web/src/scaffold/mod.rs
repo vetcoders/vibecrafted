@@ -907,6 +907,7 @@ pub mod api {
         let total = workspace.artifacts.len();
         let canvas = format!(
             r#"<div class="review-shell" data-first-artifact="{}">
+  <div class="review-pane-toolbar" role="toolbar" aria-label="Studio panels"><button type="button" data-review-pane="navigation">Artifacts</button><button type="button" data-review-pane="document">Document</button><button type="button" data-review-pane="inspector">Inspector</button></div>
   <nav class="review-sidebar" aria-label="Scaffold artifacts">
     <div class="review-sidebar-head">
       <div class="brand">Artifact index</div>
@@ -2049,6 +2050,20 @@ pub mod api {
 (function () {
   var shell = document.querySelector(".review-shell");
   if (!shell) return;
+  shell.dataset.reviewPane = "document";
+  function showPane(name) {
+    shell.dataset.reviewPane = name;
+    shell.querySelectorAll("[data-review-pane]").forEach(function (button) {
+      button.setAttribute("aria-pressed", String(button.dataset.reviewPane === name));
+    });
+  }
+  shell.querySelectorAll("[data-review-pane]").forEach(function (button) {
+    button.addEventListener("click", function () { showPane(button.dataset.reviewPane); });
+  });
+  new ResizeObserver(function () {
+    shell.classList.toggle("is-compact", shell.clientWidth < 1000);
+  }).observe(shell);
+  showPane("document");
 
   var tabs = Array.prototype.slice.call(document.querySelectorAll(".tabs .tab"));
   var panels = Array.prototype.slice.call(document.querySelectorAll(".artifact-panel"));
@@ -2128,6 +2143,7 @@ pub mod api {
       return;
     }
 
+    if (shell.classList.contains("is-compact")) showPane("document");
     panels.forEach(function (p) {
       var on = p.id === panel.id;
       p.classList.toggle("is-active", on);
@@ -2532,11 +2548,6 @@ button.md-status.md-status-done .md-status-glyph{color:var(--status-success)}
   .blocked-plan-grid{grid-template-columns:1fr}
   .plan-toolbar{align-items:stretch;flex-direction:column}
   .blocked-plan-head{align-items:start;flex-direction:column}
-  .review-shell{grid-template-columns:1fr;grid-template-rows:auto minmax(60vh,1fr) auto;height:auto;min-height:100%;overflow:visible}
-  .review-sidebar{position:relative;height:auto;max-height:40vh;border-right:0;border-bottom:1px solid var(--line)}
-  .review-workspace{height:auto;min-height:60vh;border-right:0}
-  .review-inspector{height:auto;border-top:1px solid var(--line)}
-  .artifact-panel.is-active{min-height:50vh}
   .review-statusbar .stat-plan{margin-left:0}
 }
 /* Zinc restyle layer (kept after the base rules so it wins). */
@@ -2550,14 +2561,27 @@ button.md-status.md-status-done .md-status-glyph{color:var(--status-success)}
 .plan-library{height:100%;min-height:0;background:var(--bg)}
 .plan-card:hover,.plan-card:focus-visible{transform:none;border-color:var(--line);background:var(--panel-lift)}
 @media(max-width:820px){
-  .server-route-document{height:auto;min-height:100%}
-  .review-shell{height:auto;min-height:100%}
-  .review-sidebar{height:auto;max-height:none}
-  .tabs{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(190px,72vw);overflow-x:auto;overflow-y:hidden;padding:0 0 5px}
-  .review-workspace{min-height:64vh}
-  .review-inspector{height:auto}
   .plan-index-head{flex-direction:column}
 }
+/* Compact studio chooses one reachable panel; content retains its own scroll. */
+.server-route-document:has(.review-shell,.plan-library,.blocked-plan-shell){overflow:hidden}
+.review-pane-toolbar{display:none}
+.review-shell.is-compact{grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr);min-height:0;height:100%}
+.review-shell.is-compact .review-pane-toolbar{display:flex;gap:8px;padding:6px;border-bottom:1px solid var(--line)}
+.review-pane-toolbar button{margin:0;padding:6px 10px;font:13px var(--font-body)}
+.review-pane-toolbar button[aria-pressed=true]{border-color:var(--text)}
+.review-shell.is-compact>:not(.review-pane-toolbar){min-height:0;height:100%;max-height:none}
+.review-shell.is-compact[data-review-pane=document]>.review-sidebar,
+.review-shell.is-compact[data-review-pane=document]>.review-inspector,
+.review-shell.is-compact[data-review-pane=navigation]>.review-workspace,
+.review-shell.is-compact[data-review-pane=navigation]>.review-inspector,
+.review-shell.is-compact[data-review-pane=inspector]>.review-sidebar,
+.review-shell.is-compact[data-review-pane=inspector]>.review-workspace{display:none}
+.plan-library{overflow:hidden}
+.plan-library>.plan-field{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain}
+.plan-library>.plan-index-head,.plan-library>.plan-toolbar{flex:0 0 auto}
+.blocked-plan-shell{display:flex;flex-direction:column;height:100%;min-height:0;overflow:hidden;padding-bottom:16px}
+.blocked-plan-grid{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain}
 @media(max-width:620px){
   .plan-index-stats{gap:8px 14px}
   .plan-card{grid-template-columns:2.25rem minmax(0,1fr) auto}
@@ -2738,6 +2762,16 @@ button.md-status.md-status-done .md-status-glyph{color:var(--status-success)}
         #[test]
         fn editor_ships_single_document_studio_shell() {
             let html = render_editor(&fixture());
+            assert!(html.contains("data-review-pane=\"inspector\""));
+            assert!(!html.contains("min-height:64vh"));
+            if let Ok(directory) = std::env::var("VC_USAGE_FIXTURE_DIR") {
+                std::fs::create_dir_all(&directory).unwrap();
+                std::fs::write(
+                    std::path::Path::new(&directory).join("scaffold.html"),
+                    &html,
+                )
+                .unwrap();
+            }
             // GlyphPulse / unicode-puzzles-portal shape: left nav, canvas, right
             // inspector, bottom stats — never a 30m scroll of every artifact.
             assert!(

@@ -2808,8 +2808,9 @@ html[data-native-shell] [data-inspector-toggle] {
   grid-row: 2;
   min-width: 0;
   min-height: 0;
-  overflow: auto;
-  scroll-behavior: smooth;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 .server-mobile-nav {
@@ -2817,9 +2818,46 @@ html[data-native-shell] [data-inspector-toggle] {
 }
 
 .server-console-shell {
-  min-height: 100%;
+  min-height: 0;
+  height: 100%;
   padding: 20px clamp(16px, 2.6vw, 32px) 32px;
   background: transparent;
+}
+
+/* Fixed application studio; scrolling belongs to an active document or list. */
+.server-route-document {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.server-console-shell.route-studio {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  gap: 10px;
+}
+.route-studio > :not(.route-studio-panel) {
+  flex: 0 0 auto;
+}
+.route-studio > .route-studio-panel {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  width: 100%;
+}
+.route-studio-panel[hidden] {
+  display: none !important;
+}
+.route-panel-toolbar {
+  display: flex;
+  gap: 10px;
+}
+.route-panel-toolbar select {
+  max-width: 100%;
+  min-height: 32px;
 }
 
 .server-console-shell h1,
@@ -4151,4 +4189,354 @@ html[data-native-shell] .overview-open-project {
   .overview-route-card {
     padding: 8px;
   }
+}
+
+/* Usage is one analysis plus its evidence list, within the window. */
+.server-console-shell.usage-dashboard {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  gap: 6px;
+  padding: 10px 14px;
+  container-type: inline-size;
+}
+.usage-dashboard > [hidden],
+.usage-dashboard [data-usage-doc-panel][hidden] {
+  display: none !important;
+}
+.usage-dashboard .usage-toolbar {
+  display: block;
+  order: 0;
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0;
+  gap: 6px;
+}
+.usage-toolbar-title h1 {
+  font-size: 20px;
+}
+.usage-toolbar-title p {
+  margin: 0;
+  font-size: 12px;
+}
+.usage-filter-bar {
+  display: grid;
+  width: 100%;
+  grid-template-columns: repeat(auto-fit, minmax(105px, 1fr));
+  gap: 4px 8px;
+}
+.usage-filter-bar label {
+  min-width: 0;
+}
+.usage-filter-bar :is(input, select, button) {
+  min-width: 0;
+  width: 100%;
+  min-height: 28px;
+  font-size: 12px;
+}
+.usage-summary-grid {
+  display: grid;
+  order: 1;
+  margin: 0;
+  padding: 4px 0;
+  flex: 0 0 auto;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 6px;
+}
+.usage-summary-grid > div {
+  padding: 4px;
+  min-width: 0;
+}
+.usage-summary-grid dt {
+  font-size: 12px;
+}
+.usage-summary-grid dd {
+  font-size: 16px;
+}
+.usage-summary-grid .usage-summary-cost {
+  grid-column: span 2;
+}
+.usage-summary-cost dd {
+  font-size: 12px;
+  max-height: 48px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+}
+.usage-analysis-tabs {
+  order: 2;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+.usage-dashboard button {
+  color: var(--text-primary);
+  background: var(--surface-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font: inherit;
+}
+.usage-dashboard button[aria-pressed="true"],
+.usage-dashboard button[aria-selected="true"] {
+  border-color: var(--text-primary);
+  background: var(--surface-elevated);
+}
+.usage-dashboard > [data-usage-panel] {
+  order: 3;
+  flex: 0 0 170px;
+  min-height: 0;
+  max-height: 28%;
+  overflow: auto;
+  margin: 0;
+  overscroll-behavior: contain;
+}
+.usage-charts {
+  display: grid;
+  grid-template-columns: minmax(95px, 0.4fr) minmax(0, 1fr) minmax(0, 1.3fr);
+  gap: 10px;
+  padding: 0;
+}
+.usage-hero {
+  align-self: center;
+}
+.usage-hero-figure {
+  font-size: 24px;
+}
+.usage-hero-caption {
+  font-size: 12px;
+}
+.usage-chart {
+  min-width: 0;
+  margin: 0;
+}
+.usage-chart svg {
+  height: 100px;
+  width: 100%;
+}
+.usage-chart circle:focus {
+  stroke: var(--status-warning);
+  stroke-width: 3;
+}
+.usage-chart-plot select {
+  max-width: 100%;
+  width: 100%;
+  min-height: 28px;
+  font: inherit;
+}
+.usage-calendar {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: start;
+  gap: 3px;
+  max-height: 120px;
+  overflow: auto;
+}
+.usage-calendar button {
+  font-size: 12px;
+}
+.usage-breakdown {
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+}
+.usage-breakdown-switch {
+  display: flex;
+  flex-wrap: wrap;
+  flex: 0 0 auto;
+  padding: 0;
+}
+.usage-breakdown .usage-dimension-list {
+  min-height: 0;
+  flex: 1;
+}
+.usage-dimension-list {
+  max-height: none;
+}
+.usage-dimension-row {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px !important;
+  line-height: 1.5;
+}
+#usage-comparison {
+  font-size: 12px;
+  line-height: 1.4;
+  margin-bottom: 6px;
+}
+#usage-signals {
+  display: grid;
+  gap: 6px;
+}
+#usage-signals button {
+  text-align: left;
+  line-height: 1.4;
+}
+#usage-selection {
+  order: 4;
+  flex: 0 0 auto;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  max-height: 36px;
+  overflow: auto;
+}
+.usage-dashboard .usage-split {
+  order: 5;
+  flex: 1 1 0;
+  min-height: 90px;
+  grid-template-columns: minmax(0, 1fr);
+  overflow: hidden;
+}
+.usage-dashboard .usage-split:has(.overview-inspector:not([hidden])) {
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 42%);
+}
+.usage-dashboard .usage-runs-panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+}
+.usage-runs-head {
+  flex: 0 0 auto;
+  margin: 0;
+}
+.usage-dashboard .usage-table-scroll {
+  min-height: 0;
+  flex: 1 1 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.usage-runs-table {
+  min-width: 640px;
+}
+.usage-runs-table th {
+  position: sticky;
+  top: 0;
+  background: var(--surface-card);
+}
+.usage-runs-table :is(th, td) {
+  font-size: 12px;
+  padding: 6px;
+}
+.usage-runs-table tr.is-selected {
+  background: var(--surface-elevated);
+}
+.usage-pagination {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+}
+.usage-footnote {
+  max-height: 38px;
+  overflow: auto;
+  flex: 0 0 auto;
+  font-size: 12px;
+  margin: 0;
+}
+.usage-dashboard .overview-inspector:not([hidden]) {
+  display: flex !important;
+}
+.usage-dashboard .overview-inspector[hidden] {
+  display: none !important;
+}
+.usage-dashboard .doc-tabs {
+  flex-wrap: wrap;
+  padding: 2px;
+  flex: 0 0 auto;
+}
+.usage-dashboard .doc-sheet {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  padding: 8px;
+}
+#usage-measurement {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 12px/1.5 var(--font-mono);
+}
+#usage-hover {
+  order: 6;
+  min-height: 28px;
+  max-height: 60px;
+  flex: 0 0 auto;
+  overflow: auto;
+  overscroll-behavior: contain;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  line-height: 1.5;
+}
+@container (max-width: 850px) {
+  .usage-dashboard .usage-split:has(.overview-inspector:not([hidden])) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .usage-split:has(.overview-inspector:not([hidden])) .usage-runs-panel {
+    display: none;
+  }
+}
+@media (max-height: 760px) {
+  .usage-dashboard > [data-usage-panel] {
+    flex-basis: 110px;
+  }
+  .usage-chart svg {
+    height: 65px;
+  }
+  .usage-summary-grid dd {
+    font-size: 14px;
+  }
+  .usage-toolbar-title {
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+  }
+  .usage-hero-figure {
+    font-size: 20px;
+  }
+  #usage-hover {
+    max-height: 42px;
+  }
+}
+
+/* Skills has its own document editor rather than route-page-shell. */
+.skills-room {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  padding: 16px;
+  gap: 10px;
+}
+.skills-room h1,
+.skills-back {
+  flex: 0 0 auto;
+}
+.skills-room .skills-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.skills-room .doc-pane,
+.skills-room .doc-sheet,
+.skills-editor {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.skills-document {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  resize: none;
+  overflow: auto;
+  font: 13px/1.5 var(--font-mono);
+}
+.skills-editor button {
+  flex: 0 0 auto;
 }

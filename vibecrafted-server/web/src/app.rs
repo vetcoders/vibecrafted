@@ -934,7 +934,7 @@ pub fn UsagePage() -> impl IntoView {
             <div class="server-console-shell route-page-shell usage-dashboard" data-usage-dashboard>
                 <header class="usage-toolbar">
                     <div class="usage-toolbar-title">
-                        <h1>"Cost & usage"</h1>
+                        <h1>"Costs & usage"</h1>
                         <p id="usage-status" role="status">"Loading canonical telemetry…"</p>
                     </div>
                     <form id="usage-filter-form" class="usage-filter-bar" aria-label="Usage filters">
@@ -942,32 +942,47 @@ pub fn UsagePage() -> impl IntoView {
                             <option value="24h">"24 hours"</option>
                             <option value="7d">"7 days"</option>
                             <option value="30d">"30 days"</option>
-                            <option value="all">"All recorded"</option>
+                            <option value="all">"All recorded"</option><option value="custom">"Custom UTC"</option>
                         </select></label>
                         <label><span>"Provider"</span><input id="usage-provider" name="provider" maxlength="128" placeholder="all" /></label>
                         <label><span>"Agent"</span><input id="usage-agent" name="agent" maxlength="128" placeholder="all" /></label>
                         <label><span>"Model"</span><input id="usage-model" name="model" maxlength="128" placeholder="all" /></label>
+                        <label><span>"Project root"</span><input id="usage-project" name="project" placeholder="all recorded roots" list="usage-project-options" /></label>
+                        <datalist id="usage-project-options"></datalist>
+                        <label><span>"Task / skill"</span><input id="usage-task" name="task" placeholder="all" list="usage-task-options" /></label><datalist id="usage-task-options"></datalist>
+                        <label><span>"Swarm parent"</span><input id="usage-parent" name="parent" placeholder="recorded parent id" /></label>
+                        <label><span>"Outcome"</span><select id="usage-outcome" name="outcome"><option value="">"All recorded"</option><option value="failed">"Process failed"</option><option value="completed">"Process completed"</option><option value="settled">"Has settlement"</option><option value="unknown">"Settlement unknown"</option></select></label>
+                        <label><span>"From UTC"</span><input id="usage-from" name="from" type="datetime-local" /></label>
+                        <label><span>"Until UTC (exclusive)"</span><input id="usage-to" name="to" type="datetime-local" /></label>
                         <button type="submit" class="server-console-link server-console-link-primary">"Apply"</button>
+                        <button type="button" id="usage-refresh">"Refresh evidence"</button>
                     </form>
                 </header>
-                <section class="quota-board" aria-label="Live agent quota" data-quota-board>
+                <nav class="usage-analysis-tabs" aria-label="Active analysis">
+                    <button type="button" data-usage-view="time" aria-pressed="true">"Timeline"</button>
+                    <button type="button" data-usage-view="dimensions" aria-pressed="false">"Compare groups"</button>
+                    <button type="button" data-usage-view="attention" aria-pressed="false">"Attention"</button>
+                    <button type="button" data-usage-view="quota" aria-pressed="false">"Subscription quota"</button>
+                    <button type="button" id="usage-clear-selection">"Clear selection"</button>
+                </nav>
+                <section hidden data-usage-panel="quota" class="quota-board" aria-label="Live agent quota" data-quota-board>
                     <div class="control-panel-head">
                         <h2>"Live quota"</h2>
                         <span id="quota-status">"local monitors"</span>
                     </div>
                     <div id="quota-agents" class="quota-agents"></div>
-                    <p class="control-plane-meta">"agy-monitor and kimi-monitor. Prices are api-equiv, not a bill. A missing file stays quiet."</p>
+                    <p class="control-plane-meta">"Monitor snapshots describe subscription limits separately from run consumption. Bars retain their provider labels (used / remaining); missing quota is unknown. API-equivalent prices are estimates, not a bill."</p>
                     <script inner_html=quota_dashboard_script()></script>
                 </section>
                 <dl class="usage-summary-grid" aria-label="Usage totals">
                     <div class="usage-attention"><dt>"Failed"</dt><dd id="usage-total-failed">"—"</dd></div>
                     <div class="usage-attention"><dt>"Cost unknowns"</dt><dd id="usage-total-cost-unknown">"—"</dd></div>
                     <div class="usage-attention"><dt>"Token unknowns"</dt><dd id="usage-total-token-unknown">"—"</dd></div>
-                    <div class="usage-summary-cost"><dt>"Cost by unit"</dt><dd id="usage-total-cost">"—"</dd></div>
+                    <div class="usage-summary-cost"><dt>"Cost by source / unit"</dt><dd id="usage-total-cost">"—"</dd></div>
                     <div><dt>"Runs"</dt><dd id="usage-total-runs">"—"</dd></div>
                     <div><dt>"Known tokens"</dt><dd id="usage-total-tokens">"—"</dd></div>
                 </dl>
-                <section class="usage-charts" aria-label="Usage over time">
+                <section data-usage-panel="time" class="usage-charts" aria-label="Usage over time">
                     <div class="usage-hero">
                         <p class="usage-hero-kicker">"Known tokens"</p>
                         <p class="usage-hero-figure" id="usage-hero-tokens">"—"</p>
@@ -982,53 +997,58 @@ pub fn UsagePage() -> impl IntoView {
                         <div class="usage-chart-plot" id="usage-chart-cost-plot"></div>
                     </figure>
                 </section>
-                <section class="usage-breakdown" aria-label="Usage dimensions">
-                    <div class="usage-breakdown-switch" role="tablist" aria-label="Breakdown">
+                <section hidden data-usage-panel="dimensions" class="usage-breakdown" aria-label="Usage dimensions">
+                    <div id="usage-comparison" role="status"></div><div class="usage-breakdown-switch" role="tablist" aria-label="Breakdown">
                         <button type="button" role="tab" aria-selected="true" data-usage-dim="providers">"Providers"</button>
                         <button type="button" role="tab" aria-selected="false" data-usage-dim="agents">"Agents"</button>
                         <button type="button" role="tab" aria-selected="false" data-usage-dim="models">"Models"</button>
+                        <button type="button" role="tab" aria-selected="false" data-usage-dim="parents">"Swarms"</button><button type="button" role="tab" aria-selected="false" data-usage-dim="tasks">"Tasks"</button>
                     </div>
                     <div id="usage-providers" class="usage-dimension-list is-active" role="tabpanel"></div>
                     <div id="usage-agents" class="usage-dimension-list" role="tabpanel" hidden></div>
-                    <div id="usage-models" class="usage-dimension-list" role="tabpanel" hidden></div>
+                    <div id="usage-models" class="usage-dimension-list" role="tabpanel" hidden></div><div id="usage-parents" class="usage-dimension-list" role="tabpanel" hidden></div><div id="usage-tasks" class="usage-dimension-list" role="tabpanel" hidden></div>
                 </section>
+                <section hidden data-usage-panel="attention" class="usage-attention-panel" aria-label="Attention rules"><p>"Signals request review. Volume alone does not prove waste. Select a rule to inspect its exact records."</p><div id="usage-signals"></div></section>
+                <p id="usage-selection" role="status">"All matching records"</p>
                 <div class="usage-split">
                 <section class="usage-runs-panel" aria-label="Recent usage runs">
-                    <div class="usage-runs-head"><h2>"Recent runs"</h2><span id="usage-run-count">"0"</span></div>
+                    <div class="usage-runs-head"><h2>"Evidence records"</h2><span id="usage-run-count">"0"</span></div>
                     <div class="usage-table-scroll">
                         <table class="usage-runs-table">
-                            <thead><tr><th>"Run"</th><th>"Provider / agent"</th><th>"Model"</th><th>"Tokens"</th><th>"Cost"</th><th>"State"</th></tr></thead>
+                            <thead><tr><th>"Run"</th><th>"Provider / agent"</th><th>"Model"</th><th>"Tokens"</th><th>"Cost"</th><th>"Result / duration"</th></tr></thead>
                             <tbody id="usage-runs-body"></tbody>
                         </table>
                     </div>
                     <p id="usage-empty" class="control-empty" hidden>"No canonical runtime runs match this window and filter."</p>
+                    <div class="usage-pagination"><button type="button" id="usage-previous">"Previous"</button><span id="usage-page"></span><button type="button" id="usage-next">"Next"</button></div>
                     <p class="usage-footnote"><span id="usage-schema">"vibecrafted.usage-report.v1"</span><span id="usage-generated"></span><span>"Unknowns stay visible. Currencies are never combined. This projection is not a bill."</span></p>
                 </section>
                 <aside class="overview-inspector doc-pane" id="overview-inspector" aria-label="Run document" hidden>
-                    <div class="doc-tabs" role="tablist" aria-label="Document">
-                        <button type="button" data-doc-tab="transcript" class="is-active">"Transcript"</button>
-                        <button type="button" data-doc-tab="report">"Report"</button>
-                        <button type="button" data-doc-tab="structure">"Structure"</button>
-                    </div>
-                    <article class="doc-sheet" data-doc-panel="transcript">
+                    <div class="doc-tabs" role="tablist" aria-label="Document"><button type="button" data-usage-doc="usage" class="is-active">"Measurement"</button>
+                        <button type="button" data-usage-doc="transcript">"Transcript"</button>
+                        <button type="button" data-usage-doc="report">"Report"</button>
+                        <button type="button" data-usage-doc="structure">"Structure"</button>
+                    <button type="button" id="usage-close-inspector">"Close"</button></div>
+                    <article class="doc-sheet" data-usage-doc-panel="usage"><pre id="usage-measurement"></pre><a id="usage-run-detail" href="/runs">"Run details & controls"</a></article>
+                    <article class="doc-sheet" hidden data-usage-doc-panel="transcript">
                         <p class="doc-kicker">"Run"</p>
                         <h2 data-inspector-id>"Nothing selected"</h2>
                         <p class="doc-meta" data-inspector-meta>"Select a run."</p>
                         <pre class="inspector-tail" data-inspector-tail>"Select a run."</pre>
                     </article>
-                    <article class="doc-sheet" data-doc-panel="report" hidden>
+                    <article class="doc-sheet" data-usage-doc-panel="report" hidden>
                         <p class="doc-kicker">"Report"</p>
-                        <p data-inspector-report>"No report on a usage row."</p>
+                        <pre class="inspector-tail" data-inspector-report>"Select a report."</pre>
                         <p class="control-run-error" data-inspector-error hidden></p>
                     </article>
-                    <article class="doc-sheet" data-doc-panel="structure" hidden>
+                    <article class="doc-sheet" data-usage-doc-panel="structure" hidden>
                         <p class="doc-kicker">"Path"</p>
                         <p data-inspector-root>"Select a run."</p>
                         <a class="doc-path" data-inspector-open href="/structure">"Open structure"</a>
                     </article>
                 </aside>
                 </div>
-                <script inner_html=usage_dashboard_script()></script>
+                <p id="usage-hover" role="status" aria-live="polite"></p><script inner_html=usage_dashboard_script()></script>
             </div>
         </ServerFrame>
     }
@@ -1079,11 +1099,12 @@ fn quota_dashboard_script() -> &'static str {
       track.dataset.level = bar.level || 'unknown';
       const fill = document.createElement('div');
       fill.className = 'quota-fill';
+      fill.hidden = typeof bar.ratio !== 'number';
       const ratio = typeof bar.ratio === 'number' ? Math.max(0, Math.min(1, bar.ratio)) : 0;
       fill.style.setProperty('--ratio', String(ratio));
       track.append(fill);
       const text = document.createElement('span');
-      text.textContent = bar.text || '';
+      text.textContent = bar.text || 'unknown';
       row.append(label, track, text);
       bars.append(row);
     }
@@ -1098,6 +1119,7 @@ fn quota_dashboard_script() -> &'static str {
   const render = (payload) => {
     host.replaceChildren();
     for (const agent of payload.agents || []) host.append(card(agent));
+    if (!(payload.agents || []).length) { const note = document.createElement('p'); note.textContent = 'Subscription quota unknown: no monitor snapshots available.'; host.append(note); }
     status.textContent = payload.generated_at ? 'Updated ' + payload.generated_at : 'local monitors';
   };
   const load = async () => {
@@ -1116,371 +1138,7 @@ fn quota_dashboard_script() -> &'static str {
 }
 
 fn usage_dashboard_script() -> &'static str {
-    r#"(() => {
-  const root = document.querySelector('[data-usage-dashboard]');
-  if (!root) return;
-  const form = document.getElementById('usage-filter-form');
-  const status = document.getElementById('usage-status');
-  const body = document.getElementById('usage-runs-body');
-  const empty = document.getElementById('usage-empty');
-  const byId = (id) => document.getElementById(id);
-  const number = new Intl.NumberFormat();
-  const params = new URLSearchParams(location.search);
-  for (const key of ['window', 'provider', 'agent', 'model']) {
-    const field = byId('usage-' + key);
-    if (field && params.has(key)) field.value = params.get(key);
-  }
-  const unknown = (value) => value && typeof value === 'object' && value.value === 'unknown';
-  const label = (value) => unknown(value) || value === null || value === '' || value === undefined ? 'unknown' : String(value);
-  const reason = (value) => unknown(value) && value.reason ? value.reason : '';
-  const costText = (cost) => {
-    if (!cost || unknown(cost.amount)) return 'unknown';
-    return label(cost.amount) + ' ' + (cost.unit || cost.currency || 'USD');
-  };
-  const costsText = (values) => {
-    const entries = Object.entries(values || {});
-    return entries.length ? entries.map(([unit, amount]) => label(amount) + ' ' + unit).join(' · ') : 'none known';
-  };
-  const tokensKnownText = (totals) => {
-    const runs = Number(totals && totals.runs) || 0;
-    const unknown = Number(totals && totals.runs_tokens_unknown) || 0;
-    if (!runs) return '—';
-    if (unknown === runs) return 'missing';
-    return number.format(totals.tokens_total_known);
-  };
-  const set = (id, value) => { const node = byId(id); if (node) node.textContent = value; };
-  const renderDimensions = (id, values) => {
-    const target = byId(id);
-    target.replaceChildren();
-    if (!values || !values.length) {
-      const p = document.createElement('p'); p.className = 'control-empty'; p.textContent = 'No measured runs.'; target.append(p); return;
-    }
-    for (const item of values) {
-      const row = document.createElement('div'); row.className = 'usage-dimension-row';
-      const failed = item.runs_failed || 0;
-      const tokenUnknown = item.runs_tokens_unknown || 0;
-      const costUnknown = item.runs_cost_unknown || 0;
-      if (failed || tokenUnknown || costUnknown) row.classList.add('needs-attention');
-      const name = document.createElement('strong'); name.textContent = item.name;
-      const runs = document.createElement('span'); runs.textContent = number.format(item.runs || 0);
-      const fail = document.createElement('span'); fail.textContent = number.format(failed); if (failed) fail.className = 'is-signal';
-      const tokens = document.createElement('span'); tokens.textContent = tokensKnownText(item);
-      const unk = document.createElement('span'); unk.textContent = number.format(tokenUnknown + costUnknown); if (tokenUnknown || costUnknown) unk.className = 'is-signal';
-      const cost = document.createElement('span'); cost.textContent = costsText(item.cost_by_unit);
-      row.append(name, runs, fail, tokens, unk, cost); target.append(row);
-    }
-  };
-  const showDimension = (name) => {
-    for (const key of ['providers', 'agents', 'models']) {
-      const list = byId('usage-' + key);
-      const on = key === name;
-      if (list) list.hidden = !on;
-      if (list) list.classList.toggle('is-active', on);
-    }
-    root.querySelectorAll('[data-usage-dim]').forEach((button) => {
-      const on = button.getAttribute('data-usage-dim') === name;
-      button.classList.toggle('is-active', on);
-      button.setAttribute('aria-selected', on ? 'true' : 'false');
-    });
-  };
-  root.querySelectorAll('[data-usage-dim]').forEach((button) => {
-    button.addEventListener('click', () => showDimension(button.getAttribute('data-usage-dim')));
-  });
-  const render = (report) => {
-    const totals = report.totals || {};
-    set('usage-total-runs', number.format(totals.runs || 0));
-    set('usage-total-failed', number.format(totals.runs_failed || 0));
-    set('usage-total-tokens', tokensKnownText(totals));
-    set('usage-total-token-unknown', number.format(totals.runs_tokens_unknown || 0));
-    set('usage-total-cost', costsText(totals.cost_by_unit));
-    set('usage-total-cost-unknown', number.format(totals.runs_cost_unknown || 0));
-    renderDimensions('usage-providers', report.dimensions && report.dimensions.providers);
-    renderDimensions('usage-agents', report.dimensions && report.dimensions.agents);
-    renderDimensions('usage-models', report.dimensions && report.dimensions.models);
-    body.replaceChildren();
-    const runs = report.runs || [];
-    for (const run of runs) {
-      const tr = document.createElement('tr');
-      tr.setAttribute('data-run-id', run.run_id || '');
-      tr.setAttribute('data-href', '/run/' + encodeURIComponent(run.run_id || ''));
-      tr.setAttribute('data-transcript-url', '/api/control/runs/' + encodeURIComponent(run.run_id || '') + '/transcript');
-      tr.setAttribute('data-meta', label(run.provider) + ' / ' + label(run.agent) + ' · ' + label(run.model) + ' · ' + (run.status || ''));
-      const runCell = document.createElement('td');
-      const link = document.createElement('a'); link.href = '/run/' + encodeURIComponent(run.run_id); link.textContent = run.run_id; link.className = 'control-run-open';
-      const stamp = document.createElement('small'); stamp.textContent = run.recorded_at || ''; runCell.append(link, stamp);
-      const identity = document.createElement('td'); identity.textContent = label(run.provider) + ' / ' + label(run.agent);
-      const model = document.createElement('td'); model.textContent = label(run.model); if (reason(run.model)) model.title = reason(run.model);
-      const tokens = document.createElement('td'); tokens.textContent = label(run.tokens && run.tokens.tokens_total); if (run.tokens && reason(run.tokens.tokens_total)) tokens.title = reason(run.tokens.tokens_total);
-      const cost = document.createElement('td'); cost.textContent = costText(run.cost); if (run.cost && reason(run.cost.amount)) cost.title = reason(run.cost.amount);
-      const state = document.createElement('td'); state.textContent = run.failure_kind ? run.status + ' · ' + run.failure_kind : run.status;
-      if (run.failure) state.title = run.failure;
-      if (run.failure_kind || (run.status && run.status !== 'completed' && run.status !== 'ok')) tr.className = 'is-attention';
-      if (unknown(run.tokens && run.tokens.tokens_total) || (run.cost && unknown(run.cost.amount))) tr.classList.add('is-unknown');
-      tr.append(runCell, identity, model, tokens, cost, state); body.append(tr);
-    }
-    empty.hidden = runs.length !== 0;
-    set('usage-run-count', String(runs.length));
-    const first = body.querySelector('tr[data-run-id]');
-    if (first) first.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    set('usage-schema', report.schema || 'unknown schema');
-    set('usage-generated', report.generated_at ? 'Generated ' + report.generated_at : '');
-    status.textContent = runs.length ? 'Live read-only projection · ' + runs.length + ' matching run(s)' : 'Live read-only projection · empty window';
-    drawCharts(report);
-  };
-  const knownAmount = (cost) => {
-    if (!cost || unknown(cost.amount)) return null;
-    const amount = Number(cost.amount);
-    return Number.isFinite(amount) ? amount : null;
-  };
-  const stampOf = (run) => {
-    const ms = Date.parse(run.recorded_at || '');
-    return Number.isFinite(ms) ? ms : null;
-  };
-  const grainFor = (since) => since === '24h' ? 'hour' : 'day';
-  const bucketStart = (ms, grain) => {
-    const date = new Date(ms);
-    if (grain === 'hour') date.setUTCMinutes(0, 0, 0);
-    else date.setUTCHours(0, 0, 0, 0);
-    return date.getTime();
-  };
-  const stepMs = (grain) => grain === 'hour' ? 3600000 : 86400000;
-  const axisLabel = (ms, grain) => {
-    const date = new Date(ms);
-    const hh = String(date.getUTCHours()).padStart(2, '0');
-    const dd = String(date.getUTCDate()).padStart(2, '0');
-    const mo = String(date.getUTCMonth() + 1).padStart(2, '0');
-    return grain === 'hour' ? dd + ' ' + hh + ':00' : mo + '-' + dd;
-  };
-  const bucketSeries = (rows, since, pick) => {
-    const grain = grainFor(since);
-    const points = [];
-    for (const run of rows) {
-      const ms = stampOf(run);
-      const value = pick(run);
-      if (ms == null || value == null) continue;
-      points.push({ ms, value });
-    }
-    if (!points.length) return null;
-    let min = bucketStart(points[0].ms, grain);
-    let max = min;
-    for (const point of points) {
-      const at = bucketStart(point.ms, grain);
-      if (at < min) min = at;
-      if (at > max) max = at;
-    }
-    const width = stepMs(grain);
-    const buckets = [];
-    for (let at = min; at <= max; at += width) buckets.push({ t: at, value: 0, measured: false });
-    const index = new Map(buckets.map((bucket, i) => [bucket.t, i]));
-    for (const point of points) {
-      const slot = index.get(bucketStart(point.ms, grain));
-      if (slot != null) {
-        buckets[slot].value += point.value;
-        buckets[slot].measured = true;
-      }
-    }
-    return { grain, buckets };
-  };
-  const paintChart = (plotId, titleId, caption, built, color) => {
-    const host = byId(plotId);
-    const title = byId(titleId);
-    if (title) title.textContent = caption;
-    if (!host) return;
-    host.replaceChildren();
-    const measured = built ? built.buckets.filter((bucket) => bucket.measured) : [];
-    if (!built || !measured.length) {
-      const note = document.createElement('p');
-      note.className = 'usage-chart-empty';
-      note.textContent = 'No measured points in this window.';
-      host.append(note);
-      return;
-    }
-    const w = 640;
-    const h = 148;
-    const pad = 10;
-    const peak = Math.max(...measured.map((bucket) => bucket.value));
-    const scale = peak > 0 ? peak : 1;
-    const n = built.buckets.length;
-    const xAt = (i) => n === 1 ? w / 2 : pad + (i / (n - 1)) * (w - pad * 2);
-    const yAt = (value) => h - pad - (value / scale) * (h - pad * 2);
-    const coords = [];
-    let firstMeasured = 0;
-    let lastMeasured = 0;
-    built.buckets.forEach((bucket, i) => {
-      if (!bucket.measured) return;
-      if (!coords.length) firstMeasured = i;
-      lastMeasured = i;
-      coords.push(xAt(i).toFixed(1) + ',' + yAt(bucket.value).toFixed(1));
-    });
-    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
-    svg.setAttribute('role', 'img');
-    const area = document.createElementNS(svg.namespaceURI, 'polygon');
-    area.setAttribute('points', xAt(firstMeasured).toFixed(1) + ',' + (h - pad) + ' ' + coords.join(' ') + ' ' + xAt(lastMeasured).toFixed(1) + ',' + (h - pad));
-    area.setAttribute('fill', color);
-    area.setAttribute('fill-opacity', '0.16');
-    const line = document.createElementNS(svg.namespaceURI, 'polyline');
-    line.setAttribute('points', coords.join(' '));
-    line.setAttribute('fill', 'none');
-    line.setAttribute('stroke', color);
-    line.setAttribute('stroke-width', '1.5');
-    svg.append(area, line);
-    host.append(svg);
-    const axis = document.createElement('p');
-    axis.className = 'usage-chart-axis';
-    const first = built.buckets[0];
-    const last = built.buckets[built.buckets.length - 1];
-    axis.textContent = axisLabel(first.t, built.grain) + '  ·  ' + axisLabel(last.t, built.grain);
-    host.append(axis);
-  };
-  const dayStart = (ms) => {
-    const date = new Date(ms);
-    return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
-  };
-  const windowDays = (since, generated, rows) => {
-    const end = dayStart(Date.parse(generated) || Date.now());
-    let start = end;
-    if (since === '7d') start = end - 6 * 86400000;
-    else if (since === '30d') start = end - 29 * 86400000;
-    else if (since !== '24h') {
-      let earliest = end;
-      for (const run of rows) {
-        const ms = stampOf(run);
-        if (ms != null) earliest = Math.min(earliest, dayStart(ms));
-      }
-      start = Math.max(earliest, end - 370 * 86400000);
-    }
-    const days = [];
-    for (let at = start; at <= end; at += 86400000) days.push(at);
-    return days;
-  };
-  const paintHeat = (rows, since, generated) => {
-    const host = byId('usage-chart-heat-plot');
-    const title = byId('usage-chart-heat-title');
-    const windowName = since || 'window';
-    if (title) title.textContent = 'Days · ' + windowName;
-    if (!host) return;
-    host.replaceChildren();
-    const days = windowDays(since, generated, rows);
-    const counts = new Map(days.map((day) => [day, 0]));
-    for (const run of rows) {
-      const ms = stampOf(run);
-      if (ms == null) continue;
-      const day = dayStart(ms);
-      if (counts.has(day)) counts.set(day, counts.get(day) + 1);
-    }
-    const light = document.documentElement.dataset.theme === 'light';
-    const emptyFill = light ? '#d5d5d5' : '#242424';
-    const active = light ? '#2f6b32' : '#90a959';
-    const max = Math.max(1, ...counts.values());
-    const cell = 11;
-    const gap = 3;
-    const labelH = 14;
-    const cols = [];
-    let column = [];
-    for (const day of days) {
-      const weekday = new Date(day).getUTCDay();
-      if (weekday === 0 && column.length) { cols.push(column); column = []; }
-      column.push(day);
-    }
-    if (column.length) cols.push(column);
-    const w = Math.max(cols.length, 1) * (cell + gap);
-    const h = labelH + 7 * (cell + gap);
-    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
-    svg.setAttribute('role', 'img');
-    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    let lastMonth = -1;
-    cols.forEach((week, col) => {
-      const first = new Date(week[0]);
-      if (first.getUTCDate() <= 7 && first.getUTCMonth() !== lastMonth) {
-        lastMonth = first.getUTCMonth();
-        const label = document.createElementNS(svg.namespaceURI, 'text');
-        label.setAttribute('x', String(col * (cell + gap)));
-        label.setAttribute('y', '9');
-        label.setAttribute('fill', light ? '#6b6b6b' : '#6b6b6b');
-        label.setAttribute('font-size', '9');
-        label.textContent = months[lastMonth];
-        svg.append(label);
-      }
-      week.forEach((day) => {
-        const count = counts.get(day) || 0;
-        const rect = document.createElementNS(svg.namespaceURI, 'rect');
-        const row = new Date(day).getUTCDay();
-        rect.setAttribute('x', String(col * (cell + gap)));
-        rect.setAttribute('y', String(labelH + row * (cell + gap)));
-        rect.setAttribute('width', String(cell));
-        rect.setAttribute('height', String(cell));
-        rect.setAttribute('rx', '2');
-        if (count === 0) rect.setAttribute('fill', emptyFill);
-        else {
-          rect.setAttribute('fill', active);
-          rect.setAttribute('fill-opacity', String(0.35 + 0.65 * (count / max)));
-        }
-        const stamp = new Date(day).toISOString().slice(0, 10);
-        rect.setAttribute('title', stamp + ' · ' + count);
-        svg.append(rect);
-      });
-    });
-    host.append(svg);
-  };
-  const drawCharts = (report) => {
-    const rows = report.runs || [];
-    const totals = report.totals || {};
-    const since = (report.filter && report.filter.since) || '';
-    const windowName = since || 'window';
-    set('usage-hero-tokens', tokensKnownText(totals));
-    const runs = Number(totals.runs) || 0;
-    const tokenUnknown = Number(totals.runs_tokens_unknown) || 0;
-    let caption = windowName + ' · ' + number.format(tokenUnknown) + ' token totals missing';
-    if (!runs) caption = windowName + ' · no runs';
-    else if (tokenUnknown === runs) caption = number.format(tokenUnknown) + ' runs · token totals not recorded';
-    set('usage-hero-caption', caption);
-    paintHeat(rows, since, report.generated_at || '');
-    const byUnit = new Map();
-    for (const run of rows) {
-      const amount = knownAmount(run.cost);
-      if (amount == null) continue;
-      const unit = (run.cost && (run.cost.unit || run.cost.currency)) || 'USD';
-      const list = byUnit.get(unit) || [];
-      list.push(run);
-      byUnit.set(unit, list);
-    }
-    let bestUnit = '';
-    let bestSum = -1;
-    let bestRows = [];
-    for (const [unit, list] of byUnit) {
-      const sum = list.reduce((total, run) => total + knownAmount(run.cost), 0);
-      if (sum > bestSum) { bestSum = sum; bestUnit = unit; bestRows = list; }
-    }
-    const costBuilt = bestRows.length ? bucketSeries(bestRows, since, (run) => knownAmount(run.cost)) : null;
-    paintChart(
-      'usage-chart-cost-plot',
-      'usage-chart-cost-title',
-      bestUnit ? 'Cost · ' + bestUnit + ' · ' + windowName : 'Cost · ' + windowName,
-      costBuilt,
-      '#6a9fb5'
-    );
-  };
-  const load = async () => {
-    status.textContent = 'Loading canonical telemetry…';
-    const query = new URLSearchParams(new FormData(form));
-    for (const [key, value] of [...query.entries()]) if (!String(value).trim()) query.delete(key);
-    try {
-      const response = await fetch('/api/usage?' + query.toString(), { credentials: 'same-origin', cache: 'no-store' });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || ('HTTP ' + response.status));
-      history.replaceState(null, '', '/usage?' + query.toString());
-      render(payload);
-    } catch (error) {
-      status.textContent = 'Usage telemetry unavailable: ' + error.message;
-      empty.hidden = false;
-      empty.textContent = 'The canonical usage projection could not be read.';
-    }
-  };
-  form.addEventListener('submit', (event) => { event.preventDefault(); load(); });
-  load();
-})();"#
+    include_str!("usage.js")
 }
 
 /// Client behaviour of the AICX search page. Injected through `inner_html`
@@ -5607,17 +5265,17 @@ pub(crate) mod tests {
         assert!(aicx.contains("/api/aicx/search"));
         assert!(aicx.contains("location.search"));
         assert!(aicx.contains("Search AICX"));
-        assert!(usage.contains("Cost &amp; usage"));
+        assert!(usage.contains("Costs &amp; usage"));
         assert!(usage.contains("id=\"usage-filter-form\""));
         assert!(usage.contains("/api/usage?"));
         assert!(usage.contains("data-quota-board"));
         assert!(usage.contains("/api/usage/quota"));
         assert!(usage.contains("Live quota"));
-        assert!(usage.contains("api-equiv"));
+        assert!(usage.contains("API-equivalent"));
         assert!(usage.contains("vibecrafted.usage-report.v1"));
         assert!(usage.contains("No canonical runtime runs match this window and filter."));
-        assert!(usage.contains("token totals not recorded"));
-        assert!(usage.contains("return 'missing'"));
+        assert!(usage.contains("unknown totals"));
+        assert!(usage.contains("totals.tokenUnknown"));
         assert!(!usage.contains("tokens_total_known || 0"));
         assert!(usage.contains("This projection is not a bill."));
         assert!(usage.contains("id=\"usage-chart-cost\""));

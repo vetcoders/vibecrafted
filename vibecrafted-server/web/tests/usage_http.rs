@@ -140,6 +140,45 @@ async fn usage_api_projects_filters_totals_and_validation() {
 }
 
 #[tokio::test]
+async fn report_evidence_is_bound_to_the_run_and_canonical_artifacts() {
+    let home = TestHome::new();
+    let artifacts = home.0.join("artifacts/reports");
+    fs::create_dir_all(&artifacts).unwrap();
+    let report = artifacts.join("run-usd.md");
+    fs::write(&report, "# Verified artifact\nRecord-specific evidence").unwrap();
+    let path = home.0.join("control_plane/runtime_runs/run-usd/meta.json");
+    let mut meta: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    meta["report"] = json!(report);
+    fs::write(&path, serde_json::to_vec(&meta).unwrap()).unwrap();
+    let (status, cache, preview) = get(&home.0, "/api/control/runs/run-usd/report").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cache, "no-store");
+    assert_eq!(preview["available"], true);
+    assert_eq!(preview["run_id"], "run-usd");
+    assert!(
+        preview["body"]
+            .as_str()
+            .unwrap()
+            .contains("Record-specific evidence")
+    );
+    meta["report"] = json!(home.0.join("outside.md"));
+    fs::write(home.0.join("outside.md"), "private").unwrap();
+    fs::write(&path, serde_json::to_vec(&meta).unwrap()).unwrap();
+    let (_, _, preview) = get(&home.0, "/api/control/runs/run-usd/report").await;
+    assert_eq!(preview["available"], false);
+    assert_eq!(preview["body"], "");
+    #[cfg(unix)]
+    {
+        let alias = artifacts.join("alias.md");
+        std::os::unix::fs::symlink(&report, &alias).unwrap();
+        meta["report"] = json!(alias);
+        fs::write(&path, serde_json::to_vec(&meta).unwrap()).unwrap();
+        let (_, _, preview) = get(&home.0, "/api/control/runs/run-usd/report").await;
+        assert_eq!(preview["available"], false);
+    }
+}
+
+#[tokio::test]
 async fn quota_dashboard_reads_monitor_snapshots_and_stays_quiet_when_absent() {
     let home = TestHome::new();
     let ts = std::time::SystemTime::now()
@@ -185,7 +224,7 @@ async fn quota_dashboard_reads_monitor_snapshots_and_stays_quiet_when_absent() {
     assert_eq!(agents[1]["status"], "blocked");
     assert_eq!(agents[1]["bars"][0]["label"], "5h");
     assert_eq!(agents[1]["bars"][0]["level"], "blocked");
-    assert_eq!(agents[1]["bars"][1]["text"], "41%");
+    assert_eq!(agents[1]["bars"][1]["text"], "41% used");
 
     unsafe {
         std::env::set_var("VIBECRAFTED_AGY_QUOTA_JSON", "/nonexistent/agy-quota.json");

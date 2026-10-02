@@ -43,6 +43,8 @@ pub struct UsageReport {
     pub runs: Vec<UsageRun>,
     pub totals: UsageTotals,
     pub dimensions: UsageDimensions,
+    #[serde(default)]
+    pub coverage: Value,
     #[serde(default, rename = "unpricedModels")]
     pub unpriced_models: Vec<String>,
 }
@@ -73,6 +75,26 @@ pub struct UsageRun {
     pub failure: Option<String>,
     pub provider_session_id: Value,
     pub telemetry_source: String,
+    #[serde(default)]
+    pub root: String,
+    #[serde(default)]
+    pub task: String,
+    #[serde(default)]
+    pub parent_run_id: String,
+    #[serde(default)]
+    pub started_at: String,
+    #[serde(default)]
+    pub duration_s: Option<f64>,
+    #[serde(default)]
+    pub settlement_verdict: String,
+    #[serde(default)]
+    pub settlement_reason: String,
+    #[serde(default)]
+    pub report_path: String,
+    #[serde(default)]
+    pub signals: Vec<String>,
+    #[serde(default)]
+    pub duplicate_of: Option<String>,
     #[serde(default, rename = "unpricedModels")]
     pub unpriced_models: Vec<String>,
 }
@@ -110,6 +132,12 @@ pub struct UsageTotals {
     pub runs_tokens_unknown: usize,
     pub cost_by_unit: BTreeMap<String, f64>,
     pub runs_cost_unknown: usize,
+    /// Source labels are kept verbatim: estimates and provider reports are
+    /// different measurements, even when they both use USD.
+    #[serde(default)]
+    pub cost_by_source_unit: BTreeMap<String, BTreeMap<String, f64>>,
+    #[serde(default)]
+    pub duplicates_excluded: usize,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -138,18 +166,27 @@ impl ControlPlane {
     pub fn usage_report(&self, now: DateTime<Utc>, filter: UsageFilter) -> UsageReport {
         let runtime_runs = self.control_plane_home().join("runtime_runs");
         let cutoff = filter.since.map(|duration| now - duration);
-        let mut runs = fs::read_dir(&runtime_runs)
+        let inventory = fs::read_dir(&runtime_runs);
+        let inventory_available = inventory.is_ok();
+        let entries = inventory
             .ok()
             .into_iter()
             .flatten()
             .filter_map(Result::ok)
+            .collect::<Vec<_>>();
+        let metadata_records_seen = entries.len();
+        let readable = entries
+            .into_iter()
             .filter_map(|entry| read_usage_run(&entry.path()))
+            .collect::<Vec<_>>();
+        let metadata_records_read = readable.len();
+        let mut runs = readable
+            .into_iter()
             .filter(|run| {
                 cutoff.is_none_or(|cutoff| {
                     parse_timestamp(&run.recorded_at).is_some_and(|stamp| stamp >= cutoff)
                 })
             })
-            .filter(|run| matches_filter(run, &filter))
             .collect::<Vec<_>>();
         runs.sort_by(|left, right| {
             right
@@ -158,6 +195,10 @@ impl ControlPlane {
                 .then_with(|| left.run_id.cmp(&right.run_id))
         });
         recover_lazy_transcripts(&runtime_runs, &mut runs);
+        annotate_usage(&mut runs, now);
+        // Recovery can discover a model. Filter the recovered projection,
+        // rather than discarding unknown metadata before its owner resolves it.
+        runs.retain(|run| matches_filter(run, &filter));
 
         let totals = totals(&runs);
         let dimensions = UsageDimensions {
@@ -166,6 +207,16 @@ impl ControlPlane {
             models: dimensions(&runs, |run| display_value(&run.model)),
         };
         UsageReport {
+            coverage: json!({
+                "source": "control_plane/runtime_runs/*/meta.json + canonical telemetry recovery",
+                "inventory_available": inventory_available,
+                "metadata_records_seen": metadata_records_seen,
+                "metadata_records_read": metadata_records_read,
+                "metadata_records_unreadable": metadata_records_seen.saturating_sub(metadata_records_read),
+                "time_allocation": "whole run assigned to completion or latest update; within-run event timing not projected",
+                "billing_evidence": "not available in this projection",
+                "acceptance_evidence": "recorded settlement only; use run proof/admission for accepted delivery",
+            }),
             schema: USAGE_REPORT_SCHEMA.to_string(),
             generated_at: now.to_rfc3339(),
             filter: UsageReportFilter {
@@ -212,6 +263,8 @@ fn read_usage_run(run_dir: &Path) -> Option<UsageRun> {
     }
     let recorded_at = text(object, "completed_at")
         .or_else(|| text(object, "updated_at"))
+        .or_else(|| text(object, "started_at"))
+        .or_else(|| text(object, "created_at"))
         .and_then(|stamp| parse_timestamp(stamp).map(|parsed| parsed.to_rfc3339()))?;
 
     let usage = object.get("usage").and_then(Value::as_object);
@@ -231,6 +284,22 @@ fn read_usage_run(run_dir: &Path) -> Option<UsageRun> {
     );
 
     Some(UsageRun {
+        root: text(object, "root").unwrap_or("").to_string(),
+        task: text(object, "skill").unwrap_or("").to_string(),
+        parent_run_id: text(object, "parent_run_id").unwrap_or("").to_string(),
+        started_at: text(object, "started_at")
+            .or_else(|| text(object, "created_at"))
+            .unwrap_or("")
+            .to_string(),
+        duration_s: object
+            .get("duration_s")
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite() && *value >= 0.0),
+        settlement_verdict: text(object, "settlement_verdict").unwrap_or("").to_string(),
+        settlement_reason: text(object, "settlement_reason").unwrap_or("").to_string(),
+        report_path: text(object, "report").unwrap_or("").to_string(),
+        signals: Vec::new(),
+        duplicate_of: None,
         unpriced_models: object
             .get("unpricedModels")
             .and_then(Value::as_array)
@@ -271,6 +340,14 @@ fn read_usage_run(run_dir: &Path) -> Option<UsageRun> {
 
 fn usage_from(block: Option<&Map<String, Value>>) -> UsageTokens {
     let missing = unknown("provider emitted no usage events");
+    let count = |key: &str, fallback: Value| match block.and_then(|value| value.get(key)) {
+        Some(value) if value.as_u64().is_some_and(|n| n <= 9_007_199_254_740_991) => value.clone(),
+        Some(value) if value.get("value").and_then(Value::as_str) == Some("unknown") => {
+            value.clone()
+        }
+        Some(_) => unknown("invalid token count: expected a nonnegative safe integer"),
+        None => fallback,
+    };
     UsageTokens {
         semantics: [
             "counting_version",
@@ -284,6 +361,15 @@ fn usage_from(block: Option<&Map<String, Value>>) -> UsageTokens {
                 .and_then(|value| value.get(key))
                 .map(|value| (key.to_string(), value.clone()))
         })
+        .chain(std::iter::once((
+            "events_recorded".into(),
+            json!(
+                block
+                    .and_then(|value| value.get("events"))
+                    .and_then(Value::as_u64)
+                    .is_some()
+            ),
+        )))
         .collect(),
         schema: block
             .and_then(|value| text(value, "schema"))
@@ -301,26 +387,14 @@ fn usage_from(block: Option<&Map<String, Value>>) -> UsageTokens {
             .and_then(|value| value.get("events"))
             .and_then(Value::as_u64)
             .unwrap_or(0),
-        tokens_input: block
-            .and_then(|value| value.get("tokens_input"))
-            .cloned()
-            .unwrap_or_else(|| missing.clone()),
-        tokens_cached_input: block
-            .and_then(|value| value.get("tokens_cached_input"))
-            .cloned()
-            .unwrap_or_else(|| missing.clone()),
-        tokens_cache_write: block
-            .and_then(|value| value.get("tokens_cache_write"))
-            .cloned()
-            .unwrap_or_else(|| unknown("provider stream carried no cache-write field")),
-        tokens_output: block
-            .and_then(|value| value.get("tokens_output"))
-            .cloned()
-            .unwrap_or_else(|| missing.clone()),
-        tokens_total: block
-            .and_then(|value| value.get("tokens_total"))
-            .cloned()
-            .unwrap_or(missing),
+        tokens_input: count("tokens_input", missing.clone()),
+        tokens_cached_input: count("tokens_cached_input", missing.clone()),
+        tokens_cache_write: count(
+            "tokens_cache_write",
+            unknown("provider stream carried no cache-write field"),
+        ),
+        tokens_output: count("tokens_output", missing.clone()),
+        tokens_total: count("tokens_total", missing),
     }
 }
 
@@ -357,6 +431,102 @@ fn field_matches(value: &Value, expected: Option<&str>) -> bool {
     })
 }
 
+/// Shared session ids are evidence of possible overlap, not proof of waste.
+/// Only an identical attributable interval and identical measurements can be
+/// excluded. Distinct resume windows and parent/child runs remain additive.
+fn annotate_usage(runs: &mut [UsageRun], now: DateTime<Utc>) {
+    let mut sessions: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
+    for (index, run) in runs.iter_mut().enumerate() {
+        if let Some(session) = run.provider_session_id.as_str().filter(|s| !s.is_empty()) {
+            sessions
+                .entry((display_value(&run.provider), session.to_string()))
+                .or_default()
+                .push(index);
+        }
+        let start = parse_timestamp(&run.started_at);
+        let end = parse_timestamp(&run.recorded_at);
+        if run.duration_s.is_none() {
+            run.duration_s = start.zip(end).and_then(|(start, end)| {
+                let seconds = (end - start).num_milliseconds() as f64 / 1000.0;
+                (seconds >= 0.0).then_some(seconds)
+            });
+        }
+        if run
+            .tokens
+            .tokens_total
+            .as_u64()
+            .is_some_and(|total| total >= 100_000_000)
+        {
+            run.signals.push(
+                "large_usage: >=100M recorded tokens; volume alone does not prove a loop".into(),
+            );
+        }
+        if !matches!(
+            run.status.as_str(),
+            "completed" | "failed" | "blocked" | "cancelled" | "ok"
+        ) {
+            if end.is_some_and(|end| now - end > Duration::minutes(15)) {
+                run.signals.push("stale: nonterminal metadata has not updated for 15 minutes; verify liveness in run details".into());
+            }
+            if start.is_some_and(|start| now - start > Duration::hours(2)) {
+                run.signals.push(
+                    "long_run: nonterminal run older than 2 hours; inspect before intervening"
+                        .into(),
+                );
+            }
+        }
+        if start.zip(end).is_some_and(|(start, end)| start > end)
+            || end.is_some_and(|end| end > now)
+        {
+            run.signals
+                .push("invalid_time: recorded interval is reversed or in the future".into());
+        }
+    }
+    for indices in sessions.values().filter(|indices| indices.len() > 1) {
+        for (position, &index) in indices.iter().enumerate() {
+            let duplicate = indices[..position].iter().copied().find(|&other| {
+                let a = &runs[index];
+                let b = &runs[other];
+                !a.started_at.is_empty()
+                    && parse_timestamp(&a.started_at) == parse_timestamp(&b.started_at)
+                    && parse_timestamp(&a.started_at).is_some()
+                    && a.recorded_at == b.recorded_at
+                    && a.tokens == b.tokens
+                    && a.cost == b.cost
+                    && a.model == b.model
+                    && a.agent == b.agent
+                    && a.tokens.tokens_total.as_u64().is_some()
+            });
+            if let Some(other) = duplicate {
+                runs[index].duplicate_of = Some(runs[other].run_id.clone());
+                runs[index].signals.push("duplicate: identical provider session, interval and measurements; counted once".into());
+            } else {
+                let overlaps =
+                    indices
+                        .iter()
+                        .copied()
+                        .filter(|&other| other != index)
+                        .any(|other| {
+                            let a = &runs[index];
+                            let b = &runs[other];
+                            match (
+                                parse_timestamp(&a.started_at),
+                                parse_timestamp(&a.recorded_at),
+                                parse_timestamp(&b.started_at),
+                                parse_timestamp(&b.recorded_at),
+                            ) {
+                                (Some(a0), Some(a1), Some(b0), Some(b1)) => a0 < b1 && b0 < a1,
+                                _ => true,
+                            }
+                        });
+                if overlaps {
+                    runs[index].signals.push("shared_session: overlapping or unknown resume intervals; totals may overlap and need event-level review".into());
+                }
+            }
+        }
+    }
+}
+
 fn totals(runs: &[UsageRun]) -> UsageTotals {
     let mut result = UsageTotals {
         runs: runs.len(),
@@ -367,20 +537,36 @@ fn totals(runs: &[UsageRun]) -> UsageTotals {
         ..UsageTotals::default()
     };
     for run in runs {
+        if run.duplicate_of.is_some() {
+            result.duplicates_excluded += 1;
+            continue;
+        }
         if let Some(total) = run.tokens.tokens_total.as_u64() {
             result.tokens_total_known = result.tokens_total_known.saturating_add(total);
         } else {
             result.runs_tokens_unknown += 1;
         }
-        if let Some(amount) = run.cost.amount.as_f64() {
+        if let Some(amount) = run
+            .cost
+            .amount
+            .as_f64()
+            .filter(|amount| amount.is_finite() && *amount >= 0.0)
+        {
             let unit = run
                 .cost
                 .unit
                 .as_deref()
                 .or(run.cost.currency.as_deref())
-                .unwrap_or("USD");
+                .unwrap_or("unknown");
             let sum = result.cost_by_unit.entry(unit.to_string()).or_default();
             *sum = round_six(*sum + amount);
+            let source_sum = result
+                .cost_by_source_unit
+                .entry(run.cost.source.clone())
+                .or_default()
+                .entry(unit.to_string())
+                .or_default();
+            *source_sum = round_six(*source_sum + amount);
         } else {
             result.runs_cost_unknown += 1;
         }

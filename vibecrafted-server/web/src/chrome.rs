@@ -274,6 +274,48 @@ pub fn operator_head_script() -> &'static str {
 #[cfg(feature = "ssr")]
 pub fn operator_desk_script() -> &'static str {
     r#"(() => {
+  // Shared routes show one active canvas. Keep their forms, lists and actions
+  // intact; only the selected content panel scrolls, never the route shell.
+  const ensureRouteStudio = () => {
+  const route = document.querySelector('.route-page-shell:not(.usage-dashboard), .run-detail-shell');
+  if (route && !route.classList.contains('route-studio')) {
+    const panels = Array.from(route.children).filter(node => node.matches('section:not(.route-page-header):not(.run-detail-header):not(.server-console-hero), .control-panel, .server-console-grid, .overview-desk-body, form'));
+    route.classList.add('route-studio');
+    if (panels.length) {
+      const toolbar = document.createElement('nav');
+      toolbar.className = 'route-panel-toolbar'; toolbar.setAttribute('aria-label', 'Active document');
+      const selector = document.createElement('select'); selector.setAttribute('aria-label', 'Active panel');
+      panels.forEach((panel, index) => {
+        panel.classList.add('route-studio-panel');
+        const option = document.createElement('option'); option.value = String(index);
+        option.textContent = panel.getAttribute('aria-label') || panel.querySelector('h2, h3')?.textContent || ('Panel ' + (index + 1));
+        selector.append(option);
+      });
+      const choose = index => {
+        panels.forEach((panel, i) => { panel.hidden = i !== index; });
+        selector.value = String(index);
+      };
+      selector.addEventListener('change', () => {
+        choose(Number(selector.value));
+        const url = new URL(location.href); url.searchParams.set('panel', selector.value); history.replaceState(null, '', url);
+      });
+      toolbar.append(selector); route.insertBefore(toolbar, panels[0]);
+      const initial = Number(new URLSearchParams(location.search).get('panel')) || 0;
+      choose(Math.max(0, Math.min(panels.length - 1, initial)));
+      route.addEventListener('click', event => {
+        const link = event.target.closest('a[href]');
+        if (!link || !link.hash || link.origin !== location.origin || link.pathname !== location.pathname) return;
+        let target;
+        try { target = document.getElementById(decodeURIComponent(link.hash.slice(1))); } catch (_) { return; }
+        const index = panels.findIndex(panel => panel === target || panel.contains(target));
+        if (index >= 0) { event.preventDefault(); choose(index); const url = new URL(location.href); url.hash = link.hash; url.searchParams.set('panel', String(index)); history.replaceState(null, '', url); target.scrollIntoView({ block: 'nearest' }); }
+      });
+    }
+  }
+  };
+  ensureRouteStudio();
+  const routeMain = document.querySelector('.server-route-main');
+  if (routeMain) new MutationObserver(ensureRouteStudio).observe(routeMain, { childList: true });
   const revealWorkspace = () => {
     let id;
     try { id = decodeURIComponent(location.hash.slice(1)); } catch (_) { return; }

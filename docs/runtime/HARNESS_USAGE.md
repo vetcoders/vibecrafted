@@ -86,3 +86,56 @@ Source tests cover process exit through supervisor settlement and the existing
 Rust dashboard projection. Installation/admission remains an integrator action.
 No test result or read-only historical projection proves the installed desktop
 runtime uses this branch. No existing run metadata is rewritten by this change.
+
+## Costs & usage analysis
+
+`control-core::ControlPlane::usage_report` reads the same canonical run metadata
+and uses the existing Python telemetry recovery. The HTTP handler performs this
+work outside the async executor. The dashboard filters the resulting projection
+by recorded project root, skill, parent run, provider, agent, model and process
+outcome or recorded settlement. These are recorded relationships; a skill is
+not a reconstructed task prompt and a parent run is not an inferred swarm.
+
+A finite period uses UTC `[from, to)` boundaries. Historical consumption is
+assigned to the run completion or latest metadata update, not spread across
+unavailable within-run timestamps. The preceding equal period respects the same
+filters. Model and parent groups compare source-separated cost, recorded
+seconds and recorded settlements. Successful exits, worker reports and recorded
+settlements do not establish accepted delivery, revision count or quality.
+
+Costs are grouped by both source and unit. Provider-reported USD, API-equivalent
+estimated USD and provider credits remain separate. Missing amounts or units
+remain unknown; measured zero is displayed explicitly. Inventory coverage and
+missing measurements accompany the refresh timestamp. Monitor quota bars show
+`usedRatio` as **used**, independently of consumption and billing.
+
+Only identical provider session, attributable interval, model, agent, token and
+cost records are excluded as replays. Excluded rows stay inspectable. Disjoint
+resume windows remain additive; overlapping or unrecorded windows receive an
+inspection signal. The native parser still owns cumulative-event, retry and
+fork/session attribution. Large usage alone is not classified as waste.
+
+Hover or keyboard focus shows a docked value, period, components, source and
+completeness. Click, Shift-click or chart range selection narrows the evidence
+list to precisely those records. Each row opens its measurement, bounded report
+and transcript, plus existing run controls. Report previews are inert text from
+run-owned canonical artifacts, with symlinks and escaping paths rejected. URL
+state retains filters, selection, page and inspector context across navigation.
+
+The app keeps fixed chrome and selects one analysis or document. Lists,
+reports and transcripts scroll internally. Scaffold selects Artifacts,
+Document or Inspector when its available canvas cannot fit three columns.
+
+Interaction acceptance uses production SSR, CSS and JavaScript without screen
+capture or an added browser dependency:
+
+```sh
+VC_USAGE_FIXTURE_DIR="$PWD/.vibecrafted/usage-fixtures" cargo test \
+  --manifest-path vibecrafted-server/Cargo.toml -p vibecrafted-server-web \
+  --features ssr --lib --test usage_heatmap_lock --test usage_http
+node vibecrafted-server/web/tests/acceptance/usage_browser.mjs \
+  .vibecrafted/usage-fixtures .vibecrafted/usage-browser.json
+```
+
+The synthetic interaction fixture contains 5000 records. This is a browser
+acceptance surface, not installed desktop admission or a billing reconciliation.

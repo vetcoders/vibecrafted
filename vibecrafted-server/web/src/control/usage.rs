@@ -53,17 +53,23 @@ pub async fn usage(
         )
             .into_response());
     }
-    let report = plane.usage_report(
-        Utc::now(),
-        UsageFilter {
-            since,
-            since_label: window.to_string(),
-            provider: provider.expect("validated provider"),
-            agent: agent.expect("validated agent"),
-            model: model.expect("validated model"),
-        },
-    );
-    no_store(Json(report).into_response())
+    let filter = UsageFilter {
+        since,
+        since_label: window.to_string(),
+        provider: provider.expect("validated provider"),
+        agent: agent.expect("validated agent"),
+        model: model.expect("validated model"),
+    };
+    match tokio::task::spawn_blocking(move || plane.usage_report(Utc::now(), filter)).await {
+        Ok(report) => no_store(Json(report).into_response()),
+        Err(_) => no_store(
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": "usage projection unavailable"})),
+            )
+                .into_response(),
+        ),
+    }
 }
 
 fn no_store(mut response: Response) -> Response {
