@@ -31,11 +31,37 @@ enum CommandDeckWindowFactory {
     // restitch the Command Deck.
     window.isRestorable = false
     window.restorationClass = nil
+    var restored = false
     if let frameAutosaveName {
       window.setFrameAutosaveName(frameAutosaveName)
+      restored = window.setFrameUsingName(frameAutosaveName)
     }
-    window.center()
+    if !restored { window.center() }
+    fitToVisibleFrame(window)
     return window
+  }
+
+  /// Fit the complete titled frame, including native toolbar chrome. A
+  /// saved frame may belong to a larger display or a different Dock position.
+  static func fittedFrame(_ frame: NSRect, in visibleFrame: NSRect) -> NSRect {
+    guard visibleFrame.width > 0, visibleFrame.height > 0 else { return frame }
+    let width = min(frame.width, visibleFrame.width)
+    let height = min(frame.height, visibleFrame.height)
+    return NSRect(
+      x: min(max(frame.minX, visibleFrame.minX), visibleFrame.maxX - width),
+      y: min(max(frame.minY, visibleFrame.minY), visibleFrame.maxY - height),
+      width: width, height: height)
+  }
+
+  static func fitToVisibleFrame(_ window: NSWindow, in visibleFrame: NSRect? = nil) {
+    guard let visibleFrame = visibleFrame ?? (window.screen ?? NSScreen.main)?.visibleFrame,
+      visibleFrame.width > 0, visibleFrame.height > 0
+    else { return }
+    // Visibility wins over the usual minimum on a small display.
+    window.minSize = NSSize(
+      width: min(800, visibleFrame.width), height: min(600, visibleFrame.height))
+    let frame = fittedFrame(window.frame, in: visibleFrame)
+    if frame != window.frame { window.setFrame(frame, display: false) }
   }
 
   static func mount<Root: View>(_ root: Root, in window: NSWindow) {
@@ -44,6 +70,8 @@ enum CommandDeckWindowFactory {
     // so the tab bar shows the window title the controller sets.
     hosting.sceneBridgingOptions = [.toolbars]
     window.contentView = hosting
+    window.layoutIfNeeded()
+    fitToVisibleFrame(window)
   }
 }
 
