@@ -524,7 +524,23 @@ after their completed snapshot payload is retired. Overwritten human edits stay
 as individual files/pointers in the existing drift archive; retirement does not
 retain an entire publication copy to preserve those edits.
 
-The existing installer owner can inspect or retry its publication finish:
+Inspect or retry the existing publication owner's cleanup without rebuilding,
+reinstalling or restarting the server:
+
+```bash
+make runtime-cleanup-plan
+make runtime-cleanup
+```
+
+An isolated installation can be selected explicitly with
+`RUNTIME_HOME=/absolute/path` on either target. The plan lists each generation
+and copy as `retire`, `pinned` or `residual`, with its reasons. A pinned release
+is still needed by a live process, provider configuration, pending worker or
+rollback; cleanup never kills its owner. Settle that owner through its normal
+lifecycle, then repeat the plan. A residual requires repair of its specific
+ownership/content evidence, not manual deletion of a version-named directory.
+
+Both targets call the existing installer owner directly:
 
 ```bash
 python3 -B scripts/vetcoders_install.py runtime-repair --retire --plan --json

@@ -69,6 +69,43 @@ def retire(capsys, *options):
     return code, json.loads(capsys.readouterr().out.splitlines()[-1])
 
 
+@pytest.mark.parametrize(
+    ("target", "plan", "runtime_home", "owner_exit"),
+    [
+        ("runtime-cleanup-plan", True, None, 0),
+        ("runtime-cleanup", False, "runtime home with spaces", 0),
+        ("runtime-cleanup", False, None, 2),
+    ],
+)
+def test_make_runtime_cleanup_reaches_existing_owner(
+    tmp_path, target, plan, runtime_home, owner_exit
+):
+    """The public route preserves plan/apply and the owner's refusal exit."""
+    recorder = tmp_path / "owner-argv.json"
+    interpreter = tmp_path / "python-owner"
+    interpreter.write_text(
+        f"#!{sys.executable}\n"
+        "import json, pathlib, sys\n"
+        f"pathlib.Path({str(recorder)!r}).write_text(json.dumps(sys.argv[1:]))\n"
+        f"raise SystemExit({owner_exit})\n"
+    )
+    interpreter.chmod(0o755)
+    repo = Path(installer.__file__).resolve().parents[1]
+    command = ["make", "--no-print-directory", target, f"PYTHON={interpreter}"]
+    if runtime_home:
+        command.append(f"RUNTIME_HOME={tmp_path / runtime_home}")
+    result = subprocess.run(
+        command, cwd=repo, capture_output=True, text=True, check=False
+    )
+    assert result.returncode == (0 if owner_exit == 0 else 2), result.stderr
+    expected = ["scripts/vetcoders_install.py", "runtime-repair", "--retire", "--json"]
+    if plan:
+        expected.append("--plan")
+    if runtime_home:
+        expected.extend(["--runtime-home", str(tmp_path / runtime_home)])
+    assert json.loads(recorder.read_text()) == expected
+
+
 def test_provider_configuration_pins_until_dependent_repair(
     tmp_path, roots, capsys, quiet_census
 ):
