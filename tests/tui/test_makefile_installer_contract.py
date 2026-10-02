@@ -16,6 +16,53 @@ from scripts import vetcoders_install as installer
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.mark.parametrize("failure", ["fetch", "merge"])
+def test_update_refresh_failure_prevents_install(tmp_path: Path, failure: str) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    shutil.copy2(REPO_ROOT / "Makefile", repo / "Makefile")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    git = fake_bin / "git"
+    git.write_text(
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        "  rev-parse) echo main ;;\n"
+        '  fetch|merge) [ "$1" != "$FAIL_OPERATION" ] || exit 67 ;;\n'
+        "esac\n",
+        encoding="utf-8",
+    )
+    git.chmod(0o755)
+    installer_script = repo / "installer.py"
+    installed = repo / "installed"
+    installer_script.write_text(
+        "from pathlib import Path\nPath('installed').write_text('unexpected install')\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [
+            "make",
+            "--no-print-directory",
+            "update",
+            "BRANCH=main",
+            f"PYTHON={sys.executable}",
+            f"INSTALLER={installer_script}",
+        ],
+        cwd=repo,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "FAIL_OPERATION": failure,
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+    assert result.returncode != 0, result.stdout
+    assert not installed.exists()
+
+
 def test_granular_installer_resolves_the_distribution_root(tmp_path: Path) -> None:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()

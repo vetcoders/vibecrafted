@@ -761,12 +761,13 @@ test-install:
 # already on $(BRANCH); on any other branch the tree is left untouched and
 # the install runs from the current checkout as-is.
 update:
-	@if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then \
+	@set -eu; \
+	if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then \
 		current="$$(git rev-parse --abbrev-ref HEAD)"; \
 		if [ "$$current" = "$(BRANCH)" ]; then \
 			printf "Git repo on $(BRANCH) — fast-forwarding from origin/$(BRANCH)...\n"; \
 			git fetch origin; \
-			git merge --ff-only "origin/$(BRANCH)" || printf "No fast-forward possible — tree left as-is.\n"; \
+			git merge --ff-only "origin/$(BRANCH)" || { printf "No fast-forward possible — update stopped before installation.\n" >&2; exit 1; }; \
 		else \
 			printf "Repo is on '%s', not '$(BRANCH)' — tree untouched; installing from the current checkout.\n" "$$current"; \
 		fi; \

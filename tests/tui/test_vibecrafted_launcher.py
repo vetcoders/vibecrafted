@@ -1631,6 +1631,79 @@ def test_update_web_fallback_aborts_on_install_sh_sha256_mismatch(
     assert "SHA256 mismatch for install.sh" in (result.stdout + result.stderr)
 
 
+@pytest.mark.parametrize("route", ["make", "bootstrap", "remote"])
+@pytest.mark.parametrize("installer_status", [0, 73])
+def test_update_preserves_generation_payload_and_reports_only_installer_result(
+    tmp_path: Path, route: str, installer_status: int
+) -> None:
+    repo = tmp_path / "source"
+    (repo / "scripts").mkdir(parents=True)
+    wrapper = repo / "scripts/vibecrafted"
+    _write_owned_launcher(wrapper)
+    (repo / "VERSION").write_text("1.2.3\n", encoding="utf-8")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_fake_curl(fake_bin)
+    generation = tmp_path / "tools/vibecrafted-current"
+    (generation / "scripts").mkdir(parents=True)
+    sentinels = [
+        generation / "scripts" / name for name in ("vibecraft", "vc-implement")
+    ]
+    for path in sentinels:
+        path.write_text("generation-owned bytes\n", encoding="utf-8")
+    install_body = (
+        "#!/bin/bash\n"
+        'printf "4.5.6\\n" > "$UPDATED_VERSION_FILE"\n'
+        'exit "$INSTALLER_STATUS"\n'
+    )
+    if route == "make":
+        (repo / "Makefile").write_text("update:\n", encoding="utf-8")
+        make = fake_bin / "make"
+        make.write_text(install_body, encoding="utf-8")
+        make.chmod(0o755)
+    elif route == "bootstrap":
+        (generation / "install.sh").write_text(install_body, encoding="utf-8")
+    routes = {
+        "https://vibecrafted.io/channel/main.json": json.dumps(
+            {
+                "version": "4.5.6",
+                "archive_url": "https://downloads.example/source.tar.gz",
+            }
+        ),
+        "https://downloads.example/install.sh": install_body,
+        "https://downloads.example/SHA256SUMS": (
+            f"{hashlib.sha256(install_body.encode()).hexdigest()}  install.sh\n"
+        ),
+    }
+    result = subprocess.run(
+        ["bash", str(wrapper), "update", "--force"],
+        cwd=repo,
+        env={
+            **os.environ,
+            "HOME": str(tmp_path / "home"),
+            "VIBECRAFTED_TOOLS_HOME": str(generation.parent),
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "FAKE_CURL_ROUTES": json.dumps(routes),
+            "INSTALLER_STATUS": str(installer_status),
+            "UPDATED_VERSION_FILE": str(generation / "VERSION"),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+    assert (result.returncode == 0) is (installer_status == 0), result.stderr
+    for path in sentinels:
+        assert path.read_text(encoding="utf-8") == "generation-owned bytes\n"
+    assert "Updated:" not in result.stdout
+    assert "Installed:" not in result.stdout
+    if installer_status == 0:
+        assert "Installer completed" in result.stdout
+        assert "acceptance pending" in result.stdout
+    else:
+        assert "Installer completed" not in result.stdout
+
+
 def test_installed_launcher_gui_uses_python_control_plane_surface(
     tmp_path: Path,
 ) -> None:
