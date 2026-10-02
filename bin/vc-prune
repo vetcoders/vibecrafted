@@ -29,6 +29,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "vibecrafted-core"))
 
-from vibecrafted_core.wrappers import supervised_skill_main
+from vibecrafted_core.wrappers import prune_main
 
-raise SystemExit(supervised_skill_main("prune"))
+raise SystemExit(prune_main())

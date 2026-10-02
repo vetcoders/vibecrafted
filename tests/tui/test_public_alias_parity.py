@@ -96,7 +96,7 @@ def single_stage_probe(tmp_path: Path):
         f"#!{sys.executable}\n"
         + f"import sys\nsys.path.insert(0, {str(REPO_ROOT / 'vibecrafted-core')!r})\n"
         + """
-import json, os
+import json, os, runpy
 from dataclasses import asdict
 from pathlib import Path
 from vibecrafted_core import cli, control_plane, lifecycle_runner, wrappers
@@ -119,6 +119,11 @@ if args[:2] == ['-m', 'vibecrafted_core.cli']:
 if args and args[0] == '-c':
     sys.argv = ['-c', *args[2:]]
     exec(compile(args[1], '<console-entry>', 'exec'))
+elif args and Path(args[0]).resolve().parent == Path(os.environ['VIBECRAFTED_ROOT']) / 'bin':
+    # Execute the tracked polyglot launcher after its real sh interpreter
+    # prelude. Keep the admission stub in this interpreter, never a provider.
+    sys.argv = args
+    runpy.run_path(args[0], run_name='__main__')
 else:
     os.execv(sys.executable, [sys.executable, *args])
 """,
@@ -148,6 +153,8 @@ else:
         capture.unlink(missing_ok=True)
         if surface == "console":
             command = [str(bindir / f"vc-{skill}"), *args]
+        elif surface == "tracked":
+            command = [str(REPO_ROOT / "bin" / f"vc-{skill}"), *args]
         elif surface == "python":
             command = [str(bindir / "vibecrafted"), skill, *args]
         elif surface == "deck":
@@ -201,7 +208,7 @@ def test_single_stage_aliases_share_real_admission(single_stage_probe, skill, ru
     ]
     results = [
         probe.run(surface, skill, args)
-        for surface in ("console", "python", "deck", "shell")
+        for surface in ("tracked", "console", "python", "deck", "shell")
     ]
     for result, spec in results:
         assert result.returncode == 0, result.stderr
@@ -242,7 +249,7 @@ def test_single_stage_aliases_preserve_controls_stdin_and_await(
     ]
     results = [
         probe.run(surface, skill, args, stdin=LONG_PROMPT)
-        for surface in ("console", "python", "deck", "shell")
+        for surface in ("tracked", "console", "python", "deck", "shell")
     ]
     for result, spec in results:
         assert result.returncode == 7, result.stderr
@@ -275,7 +282,7 @@ def test_single_stage_aliases_refuse_before_admission(
     args = ["codex", "--file", str(probe.prompt), "--json", *bad_args]
     results = [
         probe.run(surface, skill, args)
-        for surface in ("console", "python", "deck", "shell")
+        for surface in ("tracked", "console", "python", "deck", "shell")
     ]
     for result, spec in results:
         assert result.returncode == 2, result.stderr
