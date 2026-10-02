@@ -103,6 +103,8 @@ jobs:
           echo "UV_PYTHON_PREFERENCE=only-managed" >> "$GITHUB_ENV"
       - name: Run Semgrep security gate
         run: make semgrep
+      - name: Verify VOC against the exact source core
+        run: make voc-core-contract-gate
       - name: Run installer tests
         timeout-minutes: 120
         run: |

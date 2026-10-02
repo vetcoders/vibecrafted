@@ -15,7 +15,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use tempfile::{TempDir, tempdir};
+use tempfile::{tempdir, TempDir};
 use voc::catalog::{CatalogState, LauncherCatalog};
 use voc::launch::{
     Admission, Confirmation, Environment, LaunchOutcome, LaunchReceipt, LauncherRun,
@@ -822,13 +822,16 @@ fn dirs_home() -> PathBuf {
 
 /// Opt-in exact-source cross-language gate; no fixture substitutes for core output.
 #[test]
+// This test requires VC_TEST_REAL_DECK and a prepared core Python. The Rust-only runner cannot
+// provision a selected runtime; portable CI runs make voc-core-contract-gate to exercise this
+// exact-source path after explicitly preparing the checkout interpreter.
 #[ignore = "requires VC_TEST_REAL_DECK and a prepared source Python"]
 fn real_selected_generation_catalog_reaches_voc() {
     let deck = std::path::PathBuf::from(std::env::var_os("VC_TEST_REAL_DECK").unwrap());
     let catalog = LauncherCatalog::load(&deck, &std::collections::BTreeMap::new()).unwrap();
     assert_eq!(
         catalog.agents,
-        vec!["agy", "claude", "codex", "cursor", "grok", "junie", "kimi", "copilot"]
+        vec!["agy", "claude", "codex", "copilot", "cursor", "grok", "junie", "kimi"]
     );
     let codex = catalog.provider("codex").unwrap();
     assert!(codex.model_override.supported);
@@ -846,14 +849,24 @@ fn real_selected_generation_catalog_reaches_voc() {
 /// Only the provider is a fixture. Catalog, declaration, shell, core, durable
 /// receipt and VOC's admission audit all execute their real implementations.
 #[test]
+// This test requires VC_TEST_REAL_DECK and a prepared core Python. The Rust-only runner cannot
+// provision a selected runtime; portable CI runs make voc-core-contract-gate to exercise this
+// exact-source path after explicitly preparing the checkout interpreter.
 #[ignore = "requires VC_TEST_REAL_DECK and a prepared source Python"]
 fn real_deck_receipt_confirms_voc_declaration() {
     let deck = PathBuf::from(std::env::var_os("VC_TEST_REAL_DECK").unwrap());
     let dir = tempdir().unwrap();
     let repo = dir.path().join("private repo with spaces");
     fs::create_dir(&repo).unwrap();
+    let repo = fs::canonicalize(repo).unwrap();
     for args in [
         vec!["init", "-q"],
+        vec![
+            "remote",
+            "add",
+            "origin",
+            "https://forge.example.invalid/fixture/private-repo.git",
+        ],
         vec![
             "-c",
             "user.name=Fixture",
@@ -865,15 +878,13 @@ fn real_deck_receipt_confirms_voc_declaration() {
             "baseline",
         ],
     ] {
-        assert!(
-            std::process::Command::new("git")
-                .arg("-C")
-                .arg(&repo)
-                .args(args)
-                .status()
-                .unwrap()
-                .success()
-        );
+        assert!(std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
     }
     let baseline = std::process::Command::new("git")
         .arg("-C")
@@ -901,6 +912,8 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':1,'output_toke
         format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()).into(),
     );
     let home = dir.path().join("vc");
+    fs::create_dir(&home).unwrap();
+    let home = fs::canonicalize(home).unwrap();
     env.insert(
         "VIBECRAFTED_HOME".to_string(),
         home.clone().into_os_string(),
@@ -923,7 +936,9 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':1,'output_toke
         LauncherRun::Completed { output, .. } => {
             assert!(
                 output.status.success(),
-                "{}",
+                "status={} stdout={} stderr={}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
             serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
