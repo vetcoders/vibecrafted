@@ -70,11 +70,15 @@ log "OS: $( . /etc/os-release 2>/dev/null && echo "$PRETTY_NAME" ) · user: $(wh
 # ── Stage 1: base packages ──────────────────────────────────────────────────
 log "Stage 1/8: base system packages"
 $SUDO apt-get update -qq || warn "apt-get update had warnings"
-$SUDO apt-get install -y --no-install-recommends \
+if $SUDO apt-get install -y --no-install-recommends \
   ca-certificates curl wget git build-essential pkg-config libssl-dev \
   python3 python3-venv python3-dev python3-pip pipx \
   jq ripgrep unzip xz-utils tar zsh openssh-client locales procps iproute2 \
-  >/dev/null 2>&1 && ok "base deps installed" || warn "some base deps failed"
+  >/dev/null 2>&1; then
+  ok "base deps installed"
+else
+  warn "some base deps failed"
+fi
 python3 -m pipx ensurepath >/dev/null 2>&1 || true
 
 # ── Stage 2: uv (Python env owner) ──────────────────────────────────────────
@@ -83,7 +87,11 @@ if command -v uv >/dev/null 2>&1; then ok "uv present: $(uv --version)"
 else
   if [ -n "$SUDO" ]; then curl -LsSf https://astral.sh/uv/install.sh | $SUDO env UV_INSTALL_DIR=/usr/local/bin sh >/dev/null 2>&1
   else curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1; fi
-  command -v uv >/dev/null 2>&1 && ok "uv installed: $(uv --version)" || warn "uv install failed"
+  if command -v uv >/dev/null 2>&1; then
+    ok "uv installed: $(uv --version)"
+  else
+    warn "uv install failed"
+  fi
 fi
 
 # ── Stage 3: Node 22 (official static) + corepack ───────────────────────────
@@ -108,7 +116,11 @@ if command -v cargo >/dev/null 2>&1; then ok "cargo present: $(cargo --version)"
 else
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --no-modify-path >/dev/null 2>&1
   [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
-  command -v cargo >/dev/null 2>&1 && ok "rust installed: $(cargo --version)" || warn "rust install failed"
+  if command -v cargo >/dev/null 2>&1; then
+    ok "rust installed: $(cargo --version)"
+  else
+    warn "rust install failed"
+  fi
 fi
 
 # ── Stage 5: public foundations (loctree, aicx, prview, screenscribe) ───────
@@ -116,8 +128,16 @@ log "Stage 5/8: foundations from public channels"
 if command -v npm >/dev/null 2>&1; then
   $SUDO env PATH="$PATH" npm install -g loctree @loctree/aicx >/dev/null 2>&1 \
     || npm install -g loctree @loctree/aicx >/dev/null 2>&1 || warn "npm loctree/@loctree/aicx failed"
-  command -v loct  >/dev/null 2>&1 && ok "loct:  $(loct --version 2>&1 | head -1)"  || warn "loct not on PATH"
-  command -v aicx  >/dev/null 2>&1 && ok "aicx:  $(aicx --version 2>&1 | head -1)"  || warn "aicx not on PATH"
+  if command -v loct >/dev/null 2>&1; then
+    ok "loct:  $(loct --version 2>&1 | head -1)"
+  else
+    warn "loct not on PATH"
+  fi
+  if command -v aicx >/dev/null 2>&1; then
+    ok "aicx:  $(aicx --version 2>&1 | head -1)"
+  else
+    warn "aicx not on PATH"
+  fi
 else warn "npm missing — cannot install loctree/aicx"; fi
 
 # prview ships prebuilt on GitHub releases (vetcoders/prview-rs); crates.io is a fallback.
@@ -150,16 +170,29 @@ else
   fi
   if [ "$pv_ok" -ne 1 ]; then
     if command -v cargo >/dev/null 2>&1; then
-      cargo install prview >/dev/null 2>&1 && ok "prview installed (crates.io fallback)" || warn "prview install failed (GH releases + cargo)"
+      if cargo install prview >/dev/null 2>&1; then
+        ok "prview installed (crates.io fallback)"
+      else
+        warn "prview install failed (GH releases + cargo)"
+      fi
     else warn "prview: no release asset for $(uname -m) and cargo missing"; fi
   fi
 fi
 
 if command -v pipx >/dev/null 2>&1; then
-  command -v screenscribe >/dev/null 2>&1 && ok "screenscribe present" \
-    || { pipx install screenscribe >/dev/null 2>&1 && ok "screenscribe installed from PyPI" || warn "pipx install screenscribe failed"; }
+  if command -v screenscribe >/dev/null 2>&1; then
+    ok "screenscribe present"
+  elif pipx install screenscribe >/dev/null 2>&1; then
+    ok "screenscribe installed from PyPI"
+  else
+    warn "pipx install screenscribe failed"
+  fi
 elif command -v uv >/dev/null 2>&1; then
-  uv tool install screenscribe >/dev/null 2>&1 && ok "screenscribe installed (uv tool)" || warn "screenscribe install failed"
+  if uv tool install screenscribe >/dev/null 2>&1; then
+    ok "screenscribe installed (uv tool)"
+  else
+    warn "screenscribe install failed"
+  fi
 fi
 
 # ── Stage 6: vibecrafted runtime (public installer) ─────────────────────────
@@ -189,9 +222,11 @@ else
         for s in "$VC_SRC"/.venv/bin/vibecrafted "$VC_SRC"/.venv/bin/vibecrafted-* "$VC_SRC"/.venv/bin/vc-*; do
           [ -x "$s" ] && ln -sf "$s" "$HOME/.local/bin/$(basename "$s")"
         done
-        command -v vibecrafted >/dev/null 2>&1 \
-          && ok "vibecrafted (source dev lane): $(vibecrafted --version 2>&1 | head -1)" \
-          || warn "vibecrafted CLI still not on PATH"
+        if command -v vibecrafted >/dev/null 2>&1; then
+          ok "vibecrafted (source dev lane): $(vibecrafted --version 2>&1 | head -1)"
+        else
+          warn "vibecrafted CLI still not on PATH"
+        fi
       else warn "vibecrafted console script not found after uv sync"; fi
     fi
   else warn "vibecrafted not installed and uv missing"; fi
@@ -219,9 +254,13 @@ fi
 # ── Stage 8: XFCE desktop + xrdp (RDP :3389) ────────────────────────────────
 if [ "$DO_RDP" -eq 1 ]; then
   log "Stage 8/8: XFCE desktop + xrdp (RDP on :3389)"
-  $SUDO apt-get install -y --no-install-recommends \
+  if $SUDO apt-get install -y --no-install-recommends \
     xfce4 xfce4-terminal dbus dbus-x11 xorgxrdp xrdp x11-xserver-utils \
-    >/dev/null 2>&1 && ok "xfce4 + xrdp installed" || warn "xfce4/xrdp install had problems"
+    >/dev/null 2>&1; then
+    ok "xfce4 + xrdp installed"
+  else
+    warn "xfce4/xrdp install had problems"
+  fi
 
   # RDP needs a login user with a password. root RDP is refused by many clients;
   # a dedicated user is the safe default.
@@ -262,8 +301,11 @@ if [ "$DO_RDP" -eq 1 ]; then
     if $SUDO ss -ltn 2>/dev/null | grep -q ':3389'; then bound=1; break; fi
     sleep 1
   done
-  [ "$bound" -eq 1 ] && ok "xrdp is listening on :3389" \
-    || warn "xrdp not listening on :3389 — check /var/log/xrdp*.log"
+  if [ "$bound" -eq 1 ]; then
+    ok "xrdp is listening on :3389"
+  else
+    warn "xrdp not listening on :3389 — check /var/log/xrdp*.log"
+  fi
 else
   log "Stage 8/8: desktop/RDP skipped (--no-rdp / --minimal)"
 fi

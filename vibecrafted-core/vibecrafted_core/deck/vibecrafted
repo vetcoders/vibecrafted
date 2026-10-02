@@ -6145,38 +6145,16 @@ _run_remote_install_fallback() {
   return "$status"
 }
 
-_post_update_cleanup() {
-  # Remove known stale files that may survive across version transitions.
-  local tools_dir="${crafted_tools:-$HOME/.local/share/vibecrafted/tools/vibecrafted-current}"
-  local stale_candidates=(
-    "$tools_dir/scripts/vibecraft"
-    "$tools_dir/scripts/vc-implement"
-  )
-  local removed=0
-  for f in "${stale_candidates[@]}"; do
-    if [[ -e "$f" ]]; then
-      rm -f "$f"
-      (( removed++ ))
-    fi
-  done
-  if (( removed )); then
-    printf '  %bCleaned %d stale file(s) from previous install.%b\n' "$_dim" "$removed" "$_reset"
-  fi
-}
-
 _post_update_banner() {
-  local old_ver="$1"
-  local new_ver
-  new_ver="$(_version)"
-  _post_update_cleanup
-  if [[ "$new_ver" != "$old_ver" ]]; then
-    printf '\n  %bUpdated:%b %s -> %b%s%b\n' "$_bold" "$_reset" "$old_ver" "$_green" "$new_ver" "$_reset"
-  fi
-  printf '  Run %bvibecrafted doctor%b to verify the update.\n\n' "$_cyan" "$_reset"
+  # The running deck may still belong to the prior generation. Only the
+  # installer owns publication and cleanup; do not mutate or infer version
+  # acceptance from this process after it returns.
+  printf '\n  Installer completed; installed runtime acceptance pending.\n'
+  printf '  Run %bvibecrafted doctor%b and %bvibecrafted receipt%b to inspect the installed runtime.\n\n' "$_cyan" "$_reset" "$_cyan" "$_reset"
 }
 
 cmd_update() {
-  local makefile="" repo_source="" installed_ver="" channel_ref="main"
+  local makefile="" repo_source="" launcher_ver="" channel_ref="main"
   local force=0
   local _u_arg=""
   while (( $# )); do
@@ -6208,9 +6186,9 @@ cmd_update() {
   done
   repo_source="$(_repo_source_root 2>/dev/null || true)"
 
-  installed_ver="$(_version)"
+  launcher_ver="$(_version)"
   printf '\n%b⚒  Vibecrafted Update%b\n' "$_bold$_copper" "$_reset"
-  printf '  Installed: %b%s%b\n' "$_cyan" "$installed_ver" "$_reset"
+  printf '  Launcher: %b%s%b\n' "$_cyan" "$launcher_ver" "$_reset"
 
   # Try to show available version from channel manifest.
   local channel_info="" available_ver="" available_url=""
@@ -6219,14 +6197,12 @@ cmd_update() {
     available_url="${channel_info#* }"
     if [[ -n "$available_ver" ]]; then
       printf '  Available: %b%s%b\n' "$_green" "$available_ver" "$_reset"
-      if [[ "$installed_ver" == "$available_ver" ]] && (( ! force )); then
-        printf '  %b(up to date — use --force to reinstall)%b\n\n' "$_dim" "$_reset"
+      if [[ "$launcher_ver" == "$available_ver" ]] && (( ! force )); then
+        printf '  %b(channel version matches launcher; installation acceptance pending — use --force to reinstall)%b\n\n' "$_dim" "$_reset"
         return 0
       fi
     fi
   fi
-
-  local update_status=0
 
   for candidate in \
     "${repo_source:+$repo_source/Makefile}" \
@@ -6236,10 +6212,9 @@ cmd_update() {
   done
 
   if [[ -n "$makefile" ]]; then
-    make -C "$(dirname "$makefile")" update BRANCH="$channel_ref"
-    update_status=$?
-    _post_update_banner "$installed_ver"
-    return "$update_status"
+    make -C "$(dirname "$makefile")" update BRANCH="$channel_ref" || return $?
+    _post_update_banner
+    return 0
   fi
 
   # No Makefile found — attempt direct tarball update via install.sh.
@@ -6252,10 +6227,9 @@ cmd_update() {
 
   if [[ -n "$install_sh" ]]; then
     printf '  Tarball install detected — running install.sh --ref %s\n\n' "$channel_ref"
-    bash "$install_sh" --ref "$channel_ref"
-    update_status=$?
-    _post_update_banner "$installed_ver"
-    return "$update_status"
+    bash "$install_sh" --ref "$channel_ref" || return $?
+    _post_update_banner
+    return 0
   fi
 
   # Last resort: fetch install.sh from the web.
@@ -6265,12 +6239,9 @@ cmd_update() {
   fi
 
   printf '  No local install surface found — fetching install.sh from %s\n\n' "$remote_install_url" >&2
-  if ! _run_remote_install_fallback "$remote_install_url" "$channel_ref"; then
-    return 1
-  fi
-  update_status=0
-  _post_update_banner "$installed_ver"
-  return "$update_status"
+  _run_remote_install_fallback "$remote_install_url" "$channel_ref" || return $?
+  _post_update_banner
+  return 0
 }
 
 cmd_agents() {
