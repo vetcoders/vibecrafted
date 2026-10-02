@@ -1593,7 +1593,7 @@ struct HistoryMemory {
 }
 
 impl HistoryMemory {
-    #[cfg(test)]
+    #[cfg(all(test, feature = "ssr"))]
     fn hit(kind: &str, session_id: &str) -> Self {
         Self {
             session_id: session_id.to_string(),
@@ -2438,6 +2438,7 @@ pub fn AgentManagerPage() -> impl IntoView {
 
 /// Plan id already written into a recorded report path
 /// (`.../<org>/<repo>/<day>/plans/<plan_id>/...`). No id, no door.
+#[cfg(feature = "ssr")]
 fn plan_from_report_path(path: &str) -> (String, String) {
     let parts: Vec<&str> = path
         .split(['/', '\\'])
@@ -2989,6 +2990,7 @@ pub fn GuidePage() -> impl IntoView {
     }
 }
 
+#[cfg(any(feature = "ssr", feature = "hydrate"))]
 const PROJECTS_EMBED_ID: &str = "vc-projects-canvas";
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -3413,6 +3415,7 @@ fn encode_skills_embed(snapshot: &SkillsSnapshot) -> String {
 }
 
 /// Directory names `discover_skills` already accepts. Anything else is not a skill.
+#[cfg(feature = "ssr")]
 fn skill_dir_name_ok(name: &str) -> bool {
     (name.starts_with("vc-") || name.starts_with("vetcoders-"))
         && name
@@ -3420,6 +3423,7 @@ fn skill_dir_name_ok(name: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
 }
 
+#[cfg(feature = "ssr")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SkillFile {
     name: String,
