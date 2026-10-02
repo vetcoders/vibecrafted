@@ -106,6 +106,8 @@ vibecrafted doctor      # audits the installed generation
 vibecrafted --version   # version + build provenance
 ```
 
-If `doctor` is green and the `+g<sha>` matches the release you intended,
-you are running what you think you are running — which is the entire point
-of the convention.
+A matching `+g<sha>` identifies the launcher build. `doctor` and the delivery
+receipt establish only the install/runtime surfaces they actually verify.
+A signed release, an installed generation and a running App or service process
+are separate observations: verify the installed App identity, signature and
+launch before claiming that the desktop product runs that release.
