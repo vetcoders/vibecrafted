@@ -833,7 +833,7 @@ def _print_human(result: dict[str, Any]) -> None:
         print("claim already released")
 
 
-if __name__ == "__main__":  # pragma: no cover
+if __name__ == "__main__":
     raise SystemExit(claims_cli_main())
 
 

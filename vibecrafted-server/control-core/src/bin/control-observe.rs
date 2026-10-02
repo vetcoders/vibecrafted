@@ -15,7 +15,7 @@ use serde_json::json;
 
 fn main() -> ExitCode {
     // argv values select local inputs; they never establish executable trust.
-    let arguments = std::env::args_os().skip(1).collect::<Vec<_>>(); // nosemgrep: rust.lang.security.args-os.args-os
+    let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     let mut home: Option<PathBuf> = None;
     let mut run_id = String::new();
     let mut index = 0usize;

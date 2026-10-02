@@ -231,7 +231,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             manage_worktrees=True,
             resume=bool(args.resume),
         )
-    except Exception as exc:  # noqa: BLE001 - detached owners need durable failure truth
+    # The detached scheduler crosses worker callbacks; any exception must be persisted to its
+    # existing receipt before the owner process exits and its caller disappears.
+    except Exception as exc:  # noqa: BLE001
         # A parent-side reaper disappears when the initiating terminal/App
         # exits.  The owner itself therefore records the failure in the ledger
         # that a fresh lifecycle observer already projects, rather than relying
@@ -519,5 +521,5 @@ def _git(repo: str, args: list[str]) -> str:
     return proc.stdout.strip() if proc.returncode == 0 else ""
 
 
-if __name__ == "__main__":  # pragma: no cover
+if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))

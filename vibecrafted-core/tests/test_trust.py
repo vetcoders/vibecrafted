@@ -1318,7 +1318,7 @@ def test_journal_reader_reports_concurrent_partial_append_as_retryable(
     def append_unrelated() -> None:
         try:
             trust._append_jsonl(journal, {"record": "unrelated"})
-        except (OSError, AssertionError) as exc:  # pragma: no cover
+        except (OSError, AssertionError) as exc:
             writer_errors.append(exc)
 
     writer = threading.Thread(target=append_unrelated)

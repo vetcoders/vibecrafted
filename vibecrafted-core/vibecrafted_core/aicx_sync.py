@@ -246,7 +246,7 @@ class ConflictTie:
     remote: AicxChunk
     reason: str
 
-    def __bool__(self) -> bool:  # pragma: no cover — sentinel truthiness
+    def __bool__(self) -> bool:  # sentinel truthiness
         """Always True, so ``if tie:`` reads naturally as "yes, there's a tie"."""
         return True
 

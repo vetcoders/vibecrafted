@@ -1855,7 +1855,9 @@ class _OwnedFrameSandbox:
         """
         try:
             self._teardown()
-        except Exception as error:  # noqa: BLE001 - teardown must not mask a failure
+        # Physical Frame teardown calls multiple external commands; any teardown exception is
+        # retained in teardown_errors so it cannot replace the original test failure.
+        except Exception as error:  # noqa: BLE001
             self.teardown_errors.append(f"teardown raised {error!r}")
 
     def _teardown(self) -> None:

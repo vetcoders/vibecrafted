@@ -427,6 +427,8 @@ fi
 # handlers, so a trap-only function reads as uncalled (SC2329). The e37
 # installer ended in `exec` and never reached that edge; this one must
 # capture the installer status, so the trap is the call site.
+# This cleanup function is registered through a signal/EXIT trap; static call reachability cannot
+# see its runtime invocation, which releases the installer-owned resources.
 # shellcheck disable=SC2329,SC2317
 cleanup() {
   local status=$?
@@ -457,6 +459,8 @@ cleanup() {
 }
 # Called by the TERM/INT/HUP traps installed below; see the SC2329 note on
 # cleanup for why ShellCheck cannot see a trap-only call site here.
+# This cleanup function is registered through a signal/EXIT trap; static call reachability cannot
+# see its runtime invocation, which releases the installer-owned resources.
 # shellcheck disable=SC2329,SC2317
 terminate_installer_child() {
   local signal="$1"

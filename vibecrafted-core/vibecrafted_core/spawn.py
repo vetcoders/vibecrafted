@@ -219,7 +219,9 @@ def _workspace_identity_for_prompt(
             root=root, env={}, create_if_missing=True
         )
         return str(identity.workspace_id)
-    except Exception:  # noqa: BLE001 - unknown is honest; launch still proceeds
+    # Workspace identity resolution crosses store helpers; unexpected faults must yield unknown
+    # identity instead of blocking launch or attributing a fabricated workspace.
+    except Exception:  # noqa: BLE001
         return ""
 
 
@@ -4785,7 +4787,9 @@ def write_meta(
 
         identity = resolve_run_workspace_identity(root=root, create_if_missing=True)
         payload.update(identity.to_meta_fields())
-    except Exception as exc:  # noqa: BLE001 — meta write must not fail closed on catalog
+    # Catalog metadata identity is advisory at this boundary; any resolver exception must retain the
+    # original catalog and debug diagnostic instead of aborting its write.
+    except Exception as exc:  # noqa: BLE001
         import logging
 
         logging.getLogger(__name__).debug(
@@ -5619,7 +5623,9 @@ class Supervisor:
                 on_event=on_event,
             )
             handle.exit_code = result.exit_code
-        except Exception as exc:  # noqa: BLE001  # pragma: no cover - defensive event path
+        # Sandbox implementations are injected; any execution exception must emit spawn-failed and
+        # exit_code=1 before callbacks can observe a false successful execution.
+        except Exception as exc:  # noqa: BLE001
             handle.exit_code = 1
             self._emit(
                 "spawn-failed",
@@ -6045,5 +6051,5 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 2
 
 
-if __name__ == "__main__":  # pragma: no cover - CLI entry point.
+if __name__ == "__main__":  # CLI entry point.
     raise SystemExit(main())

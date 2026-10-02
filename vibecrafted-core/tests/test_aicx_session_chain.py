@@ -92,7 +92,7 @@ class MemoryChain(SessionChain):
         return SessionListResult(
             sessions=list(self._sessions),
             project_filter=project,
-            empty_kind=self._empty_kind,  # type: ignore[arg-type]
+            empty_kind=self._empty_kind,
             scanned=self._scanned,
             matched=len(self._sessions),
             warnings=list(self._warnings),

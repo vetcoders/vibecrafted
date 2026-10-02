@@ -534,7 +534,9 @@ class AsyncSupervisor:
             merged_env.update(workspace_identity.to_env())
             session_id = workspace_identity.vibecrafted_session_id
             merged_env["VIBECRAFTED_SESSION_ID"] = session_id
-        except Exception:  # noqa: BLE001, S110 — supervisor launch remains fail-open.
+        # Workspace identity projection is advisory to launch; any resolver exception must preserve
+        # the existing environment without inventing a session identity or blocking launch.
+        except Exception:  # noqa: BLE001, S110
             pass
         merged_env["VIBECRAFTED_RUN_ID"] = run_id
         merged_env["SPAWN_RUN_ID"] = run_id

@@ -80,6 +80,8 @@ async fn drain_events(
 ) -> Result<()> {
     // events_path is the framework's own control-plane events.jsonl (derived from
     // the control_plane config dir), never attacker-controlled input.
+    // The bridge derives events_path from its configured control-plane directory and fixed
+    // events.jsonl name; this internal reader does not accept an HTTP path parameter.
     let read_events = tokio::fs::read(events_path); // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path
     let bytes = match read_events.await {
         Ok(bytes) => bytes,
@@ -177,6 +179,8 @@ fn touches_events_jsonl(event: &Event, events_path: &Path) -> bool {
 
 async fn read_cursor(path: &Path) -> Result<Cursor> {
     // path is the hash-derived internal cursor file (cursor_path_for), never user input.
+    // read_cursor receives only the hash-derived cursor_path_for result inside the control plane;
+    // arbitrary user-request paths are not part of this private helper contract.
     let bytes = tokio::fs::read(path).await?; // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path
     serde_json::from_slice(&bytes).context("decode jsonl bridge cursor")
 }

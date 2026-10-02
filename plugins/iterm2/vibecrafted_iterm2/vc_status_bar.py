@@ -21,8 +21,8 @@ from typing import Any
 
 try:
     import iterm2
-except ImportError:  # pragma: no cover - sandbox path
-    iterm2 = None  # type: ignore[assignment]
+except ImportError:  # sandbox path
+    iterm2 = None
 
 from . import STATUS_BAR_COMPONENT_ID
 
@@ -64,7 +64,9 @@ class VcStatusBarState:
             result = self._refresh()
             if hasattr(result, "__await__"):
                 await result
-        except Exception:  # pragma: no cover - best-effort path  # noqa: BLE001
+        # The injected redraw coroutine can raise arbitrary plugin errors after a pane unmount;
+        # refreshing the status bar must preserve the live session and log the failure.
+        except Exception:  # noqa: BLE001
             _LOG.debug("status bar refresh failed", exc_info=True)
 
 
@@ -91,10 +93,10 @@ async def register_status_bar(connection: Any, state: VcStatusBarState) -> Any:
     Returns the underlying component handle so callers (typically the
     event tail) can keep a reference and trigger refreshes.
     """
-    if iterm2 is None:  # pragma: no cover - sandbox guard
+    if iterm2 is None:  # sandbox guard
         raise RuntimeError("iterm2 package unavailable")
 
-    component = iterm2.StatusBarComponent(  # type: ignore[attr-defined]
+    component = iterm2.StatusBarComponent(
         short_description="vibecrafted",
         detailed_description="Live vibecrafted spawn activity",
         knobs=[],
@@ -103,14 +105,14 @@ async def register_status_bar(connection: Any, state: VcStatusBarState) -> Any:
         identifier=STATUS_BAR_COMPONENT_ID,
     )
 
-    @iterm2.StatusBarRPC  # type: ignore[attr-defined]
+    @iterm2.StatusBarRPC
     async def coroutine(
         knobs: dict[str, Any],
     ) -> str:
         """Status bar RPC callback: current rendered label for this component."""
         return state.render()
 
-    @iterm2.RPC  # type: ignore[attr-defined]
+    @iterm2.RPC
     async def on_click(session_id: str) -> None:
         """Status bar click handler: open the last completed run's transcript."""
         opened = _open_transcript(state)
@@ -120,8 +122,8 @@ async def register_status_bar(connection: Any, state: VcStatusBarState) -> Any:
                 state.last_completion or "<none>",
             )
 
-    state._refresh = coroutine.async_redraw  # type: ignore[attr-defined]
-    await component.async_register(  # type: ignore[attr-defined]
+    state._refresh = coroutine.async_redraw
+    await component.async_register(
         connection,
         coroutine,
         onclick=on_click,

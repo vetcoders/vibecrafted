@@ -40,7 +40,7 @@ def test_supervised_skill_main_routes_runtime_launch_through_dispatcher(
     )
 
     class FailingSupervisor:
-        def __init__(self) -> None:  # pragma: no cover - would fail before branch body
+        def __init__(self) -> None:  # would fail before branch body
             raise AssertionError("normal runtime launches must use dispatcher")
 
     def fake_call(

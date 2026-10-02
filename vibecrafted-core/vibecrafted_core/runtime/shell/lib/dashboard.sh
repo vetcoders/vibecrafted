@@ -16,7 +16,9 @@ _vetcoders_dashboard_layout_name() {
     research|vc-research) printf 'research\n' ;;
     *)
       echo "Unknown dashboard layout: $requested" >&2
-      # shellcheck disable=SC2154 # sourced from core.sh by the facade.
+      # The sourced facade/parser initializes this shared result before the consuming function runs;
+      # assigning a local default here would mask missing ownership initialization.
+      # shellcheck disable=SC2154
       echo "Available layouts: ${_vetcoders_known_dashboard_layouts[*]}" >&2
       return 1
       ;;

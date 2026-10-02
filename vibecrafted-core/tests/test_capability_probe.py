@@ -543,7 +543,7 @@ def test_probe_gemini_is_evidence_only_and_executes_nothing(
 ) -> None:
     _pin_fake_cli_dir(monkeypatch, tmp_path)
 
-    def _never(cmd: Sequence[str]) -> CliProbe:  # pragma: no cover - guard
+    def _never(cmd: Sequence[str]) -> CliProbe:  # guard
         pytest.fail(f"gemini probe must never execute, got {cmd}")
 
     result = continuity.probe("gemini", runner=_never)

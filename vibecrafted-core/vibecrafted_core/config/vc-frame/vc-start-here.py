@@ -65,7 +65,7 @@ def _generation_python_candidates() -> list[str]:
 def ensure_generation_python() -> None:
     """Re-exec a generation interpreter when host python3 lacks vibecrafted_core."""
     try:
-        import vibecrafted_core  # noqa: F401
+        __import__("vibecrafted_core")
     except ImportError:
         pass
     else:

@@ -248,7 +248,9 @@ spawn_build_runtime_prompt() {
   # Strip existing frontmatter (so we don't have double) and append the plan
   spawn_append_prompt_body "$source_file" "$runtime_file"
 
-  # shellcheck disable=SC2129  # separate sections; the next heredoc needs a quoted delimiter
+  # These appended sections use different quoted/unquoted heredoc delimiters; retaining separate
+  # redirections preserves their different expansion contracts.
+  # shellcheck disable=SC2129
   cat >> "$runtime_file" <<EOF_LABEL
 ---
 ## VC Agents Worker Charter

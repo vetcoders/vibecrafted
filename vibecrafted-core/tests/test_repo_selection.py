@@ -169,7 +169,7 @@ def test_add_repo_arguments_keeps_both_destinations(tmp_path: Path) -> None:
     ],
 )
 def test_parse_worktree_flag_words(value: object, expected: bool) -> None:
-    assert parse_worktree_flag(value) is expected  # type: ignore[arg-type]
+    assert parse_worktree_flag(value) is expected
 
 
 def test_parse_worktree_flag_rejects_garbage() -> None:

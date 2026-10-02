@@ -476,6 +476,8 @@ class InstallerIntroApp(App):
         try:
             widget = self.query_one("#content-container > Static", Static)
             widget.update(text)
+        # A Textual widget can unmount during an asynchronous refresh; renderer-specific exceptions
+        # here must leave the installer worker and its results intact.
         except Exception as _update_exc:  # noqa: BLE001
             _ = _update_exc  # widget may be unmounted mid-refresh
 
@@ -626,6 +628,8 @@ class InstallerIntroApp(App):
                     exit_code = rc
                     err = f"Phase {phase.label} failed with exit {rc}"
                     break
+            # Install phases execute external processes and UI callbacks; any phase exception must
+            # reach _finish_install as exit -1 and its reason rather than strand a running UI.
             except Exception as exc:  # noqa: BLE001
                 exit_code = -1
                 err = str(exc)

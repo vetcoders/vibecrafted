@@ -100,11 +100,15 @@ if [[ -n "$codesign_identity" ]]; then
   [[ "$platform" == "darwin-arm64" ]] \
     || die "--codesign-identity is valid only for a Darwin Runtime Pack"
   # The static linter cannot see that the sourced helper consumes these globals.
+  # This sourced helper publishes a caller-visible result or status; its consumer lives outside this
+  # file, so deleting the binding would break the shared helper contract.
   # shellcheck disable=SC2034
   SIGNING_IDENTITY="$codesign_identity"
   CODESIGN_KEYCHAIN_ARGS=()
   if [[ -n "$codesign_keychain" ]]; then
-    # shellcheck disable=SC2034  # consumed by the sourced macho-signing helper
+    # This sourced helper publishes a caller-visible result or status; its consumer lives outside
+    # this file, so deleting the binding would break the shared helper contract.
+    # shellcheck disable=SC2034
     CODESIGN_KEYCHAIN_ARGS=(--keychain "$codesign_keychain")
   fi
   sign_macho_tree "$root" || die "could not sign final Runtime Pack Mach-O payload"

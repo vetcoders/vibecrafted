@@ -545,7 +545,7 @@ def _default_runner(timeout: float) -> Runner:
             return CliProbe(ok=False, returncode=None, stderr="not found")
         except subprocess.TimeoutExpired:
             return CliProbe(ok=False, returncode=None, stderr="timeout")
-        except OSError as exc:  # pragma: no cover - defensive
+        except OSError as exc:  # defensive
             return CliProbe(ok=False, returncode=None, stderr=str(exc))
         return CliProbe(
             ok=completed.returncode == 0,

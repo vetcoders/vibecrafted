@@ -732,6 +732,8 @@ acquire_lock() {
 # models this script's final `exit 0` as an edge that skips EXIT handlers,
 # so a trap-only function reads as uncalled (SC2329). The trap is the call;
 # the descriptor must stay open until the transaction ends.
+# This cleanup function is registered through a signal/EXIT trap; static call reachability cannot
+# see its runtime invocation, which releases the installer-owned resources.
 # shellcheck disable=SC2329,SC2317
 release_lock() {
   # Close only this process's descriptor. Never unlink held or the lock dir:
@@ -755,17 +757,23 @@ observe_tuple() {
   fi
   if [[ -d "$PREPARED" && ! -L "$PREPARED" ]]; then
     PREPARED_PRESENT=1
-    # shellcheck disable=SC2034  # bound in 0e14be00 for resume identity; nothing compares it yet (prune report, VERIFY-FIRST)
+    # Resume binds this historical transaction field but does not compare it yet; retain the
+    # evidence for VERIFY-FIRST rather than remove part of the recovery receipt contract.
+    # shellcheck disable=SC2034
     PREPARED_IDENTITY="$(app_identity_token "$PREPARED" || true)"
   fi
   if [[ -d "$DISPLACED" && ! -L "$DISPLACED" ]]; then
     DISPLACED_PRESENT=1
-    # shellcheck disable=SC2034  # bound in 0e14be00 for resume identity; nothing compares it yet (prune report, VERIFY-FIRST)
+    # Resume binds this historical transaction field but does not compare it yet; retain the
+    # evidence for VERIFY-FIRST rather than remove part of the recovery receipt contract.
+    # shellcheck disable=SC2034
     DISPLACED_IDENTITY="$(app_identity_token "$DISPLACED" || true)"
   fi
   if [[ -d "$PRIOR" && ! -L "$PRIOR" ]]; then
     PRIOR_PRESENT=1
-    # shellcheck disable=SC2034  # bound in 0e14be00 for resume identity; nothing compares it yet (prune report, VERIFY-FIRST)
+    # Resume binds this historical transaction field but does not compare it yet; retain the
+    # evidence for VERIFY-FIRST rather than remove part of the recovery receipt contract.
+    # shellcheck disable=SC2034
     PRIOR_LIVE_IDENTITY="$(app_identity_token "$PRIOR" || true)"
   fi
   if [[ -d "$FAILED_NEW" && ! -L "$FAILED_NEW" ]]; then

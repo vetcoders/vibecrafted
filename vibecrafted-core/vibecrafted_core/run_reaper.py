@@ -357,7 +357,9 @@ def build_process_table(
         # validation then refuses a legitimate stop with
         # process_identity_mismatch.
         proc = runner(["ps", "-A", "-ww", "-o", "pid=,ppid=,pgid=,command="])
-    except Exception:  # noqa: BLE001 - no process table means nothing to reap, never a crash
+    # The process-table runner is injected; any runner exception must yield no candidates so failed
+    # evidence collection never authorizes process cleanup.
+    except Exception:  # noqa: BLE001
         return ()
     if getattr(proc, "returncode", 1) != 0:
         return ()
@@ -393,7 +395,9 @@ def build_env_index(runner: Callable[..., Any] | None = None) -> dict[int, str]:
     runner = _default_runner if runner is None else runner
     try:
         proc = runner(["ps", "axeww"])
-    except Exception:  # noqa: BLE001 - no ps output means no environment evidence, never a crash
+    # The environment-evidence runner is injected; any runner exception must return no environment
+    # evidence instead of permitting recovery from assumed identity.
+    except Exception:  # noqa: BLE001
         return {}
     if getattr(proc, "returncode", 1) != 0:
         return {}
@@ -768,7 +772,9 @@ def sweep_orphaned_locks(
                 result["removed"].append(f"{lock_path}:{reason}")
             except (OSError, ValueError):
                 result["kept"].append(str(lock_path))
-    except Exception as error:  # noqa: BLE001 - a janitor never fails its caller.
+    # Lock cleanup crosses filesystem and process evidence helpers; any unexpected failure must be
+    # returned in result.error rather than take down the invoking runtime.
+    except Exception as error:  # noqa: BLE001
         result["error"] = [f"{type(error).__name__}: {error}"]
     return result
 
@@ -806,7 +812,9 @@ def quarantine_legacy_runs(
     if runs is None:
         try:
             run_list: list[dict[str, Any]] = _terminal_run_snapshots()
-        except Exception as exc:  # pragma: no cover - defensive  # noqa: BLE001 - a corrupt snapshot store is reported, not raised
+        # Snapshot readers can fail in decoding or store initialization; every exception must be
+        # appended to parse_errors before quarantine stops without mutation.
+        except Exception as exc:  # noqa: BLE001
             result.parse_errors.append(f"load_snapshots:{exc}")
             return result
     else:
@@ -814,7 +822,9 @@ def quarantine_legacy_runs(
         for raw in runs:
             try:
                 run_list.append(dict(raw))
-            except Exception as exc:  # noqa: BLE001 - one malformed row is recorded; the rest still coerce
+            # Injected run rows can fail during mapping coercion; each failure must be recorded in
+            # parse_errors while remaining rows continue through independent validation.
+            except Exception as exc:  # noqa: BLE001
                 result.parse_errors.append(f"coerce:{exc}")
 
     proc_table = () if table is None else table
@@ -883,6 +893,8 @@ def quarantine_legacy_runs(
                 persist(run_id, payload)
             result.marked_legacy.append(run_id)
             result.changed += 1
+        # Each quarantine operation crosses evolving store helpers; an exception must be recorded
+        # against that run without crashing doctor or admitting unvalidated quarantine.
         except Exception as exc:  # noqa: BLE001
             # Quarantine variants, never crash the doctor path.
             rid = str(run.get("run_id") or "?")
@@ -923,6 +935,8 @@ def reap_terminal_runs(
         receipts = execute_reap(plan, grace=grace_seconds(env))
         _record_receipts(receipts)
         return plan
+    # Preflight reaping crosses process and receipt helpers; any unexpected failure must return
+    # should_run=False and skip_reason=error, preserving the live parent operation.
     except Exception:  # noqa: BLE001
         # A garbage collector may never take down the thing it is cleaning up after.
         return ReapPlan(should_run=False, skip_reason="error")
@@ -962,5 +976,5 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-if __name__ == "__main__":  # pragma: no cover - CLI entry point.
+if __name__ == "__main__":  # CLI entry point.
     raise SystemExit(main())

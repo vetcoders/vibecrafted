@@ -17,7 +17,7 @@ die() {
 require() { command -v "$1" >/dev/null 2>&1 || die "$1 is required"; }
 
 RELEASE_TOOLCHAIN_CONTRACT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/release-toolchain-contract.sh"
-# shellcheck disable=SC1090 # resolved from this script's canonical directory
+# resolved from this script's canonical directory
 . "$RELEASE_TOOLCHAIN_CONTRACT"
 
 MODE="release"
@@ -1054,7 +1054,9 @@ materialize_runtime_payload() {
   find "$runtime" -type f -name '*.pyc' -delete
   find "$runtime" -depth -type d -name __pycache__ -empty -delete
   find "$runtime" -type f -name '.DS_Store' -delete
-  # shellcheck disable=SC2016  # writes a launcher; runtime_root expands in the generated script
+  # This value is literal source or output for a later shell, awk, or Xcode evaluator; expanding its
+  # dollar expressions in the producing shell would change the emitted contract.
+  # shellcheck disable=SC2016
   printf '%s\n' \
     '#!/bin/bash' \
     'set -euo pipefail' \
@@ -1218,6 +1220,8 @@ build_product() {
   # command substitution: it must reach xcodebuild verbatim, so the single
   # quotes are the point. The prefix maps beside it ARE expanded, which is why
   # each setting is spliced from a quoted and an unquoted half.
+  # This value is literal source or output for a later shell, awk, or Xcode evaluator; expanding its
+  # dollar expressions in the producing shell would change the emitted contract.
   # shellcheck disable=SC2016
   xcodebuild \
     -project "$SOURCE_ROOT/vibecrafted-app/shell-agent/app/Vibecrafted.xcodeproj" \

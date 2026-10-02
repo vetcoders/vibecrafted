@@ -238,7 +238,9 @@ for rcfile in "$home_dir/.zshrc" "$home_dir/.bashrc"; do
   if grep -Fq 'vc-skills' "$rcfile"; then
     die "rcfile $rcfile still sources vc-skills (retired host-shell contract)"
   fi
-  # shellcheck disable=SC2016  # literal $HOME is the rc line's actual text
+  # This value is literal source or output for a later shell, awk, or Xcode evaluator; expanding its
+  # dollar expressions in the producing shell would change the emitted contract.
+  # shellcheck disable=SC2016
   grep -Fq '$HOME/.local/bin' "$rcfile" && rc_found=1
 done
 (( rc_found )) || die "No rcfile carries the PATH-only launcher guard"
@@ -469,12 +471,16 @@ assert_contains "$resume_prompt_capture" 'resume smoke'
 rm -f "$fake_bin/codex.resume-capture"
 
 log "helper bash smoke"
-# shellcheck disable=SC2016  # expansion belongs to the child shell
+# This value is literal source or output for a later shell, awk, or Xcode evaluator; expanding its
+# dollar expressions in the producing shell would change the emitted contract.
+# shellcheck disable=SC2016
 env HOME="$home_dir" XDG_CONFIG_HOME="$config_dir" PATH="$home_dir/.local/bin:$fake_bin:$PATH" \
   bash -c 'source "${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/shell/vc-skills.sh"; command -v codex-implement >/dev/null && command -v claude-implement >/dev/null && command -v agy-implement >/dev/null && command -v vc-marbles >/dev/null && command -v skills-sync >/dev/null && echo helper-ok' \
   | grep -Fq 'helper-ok' || die 'bash helper layer not loaded'
 log "skill helper telemetry smoke"
-# shellcheck disable=SC2016  # expansion belongs to the child shell
+# This value is literal source or output for a later shell, awk, or Xcode evaluator; expanding its
+# dollar expressions in the producing shell would change the emitted contract.
+# shellcheck disable=SC2016
 skill_output="$(
   env HOME="$home_dir" XDG_CONFIG_HOME="$config_dir" PATH="$fake_bin:$PATH" VETCODERS_SPAWN_RUNTIME=headless \
     bash -c 'cd "$1"; source "${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/shell/vc-skills.sh"; codex-marbles --count 1 --prompt "telemetry smoke"' _ "$work_repo"
@@ -497,7 +503,9 @@ assert_no_perception_watcher "$work_repo"
 # If zsh is available, also smoke test zsh loading of the same shim
 if command -v zsh >/dev/null 2>&1; then
   log "helper zsh smoke (bonus)"
-  # shellcheck disable=SC2016  # expansion belongs to the child shell
+  # This value is literal source or output for a later shell, awk, or Xcode evaluator; expanding its
+  # dollar expressions in the producing shell would change the emitted contract.
+  # shellcheck disable=SC2016
   env HOME="$home_dir" XDG_CONFIG_HOME="$config_dir" PATH="$home_dir/.local/bin:$fake_bin:$PATH" \
     zsh -c 'source "${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/shell/vc-skills.sh"; command -v codex-implement >/dev/null && command -v claude-implement >/dev/null && command -v agy-implement >/dev/null && command -v vc-marbles >/dev/null && command -v skills-sync >/dev/null && echo helper-ok' \
     | grep -Fq 'helper-ok' || die 'zsh helper layer not loaded'
@@ -523,13 +531,19 @@ sync_output="$(env HOME="$home_dir" XDG_CONFIG_HOME="$config_dir" PATH="$fake_bi
 grep -q "Syncing skills from" <<<"$sync_output" || die "Sync dry-run failed to start"
 grep -q '^  rsync ' <<<"$sync_output" || die "Sync dry-run didn't print planned rsync commands"
 ! grep -q '^rsync ' <<<"$sync_output" || die "Sync dry-run executed rsync instead of printing it"
-# shellcheck disable=SC2016 # matching literal $HOME in sync output, not expanding
+# This value is literal source or output for a later shell, awk, or Xcode evaluator; expanding its
+# dollar expressions in the producing shell would change the emitted contract.
+# shellcheck disable=SC2016
 grep -q '\$HOME/.local/share/vibecrafted/tools/vibecrafted-current/vibecrafted-core/vibecrafted_core/skills' <<<"$sync_output" || die "Sync dry-run didn't target the package-owned canonical skill store"
-# shellcheck disable=SC2016 # matching literal $HOME in sync output, not expanding
+# This value is literal source or output for a later shell, awk, or Xcode evaluator; expanding its
+# dollar expressions in the producing shell would change the emitted contract.
+# shellcheck disable=SC2016
 ! grep -q '\$HOME/.vibecrafted/skills' <<<"$sync_output" || die "Sync dry-run still targets the legacy state-home skill store"
 
 log "docs truth checks"
-# shellcheck disable=SC2016 # backticks are literal content we're matching, not command substitution
+# This value is literal source or output for a later shell, awk, or Xcode evaluator; expanding its
+# dollar expressions in the producing shell would change the emitted contract.
+# shellcheck disable=SC2016
 assert_not_contains "$repo_root/vibecrafted-core/vibecrafted_core/skills/vc-followup/SKILL.md" 'Use canonical Terminal spawn (`osascript`)'
 assert_not_contains "$repo_root/vibecrafted-core/vibecrafted_core/skills/vc-workflow/SKILL.md" 'osascript preferred'
 assert_not_contains "$repo_root/docs/FRONTIER.md" 'vetcoders.zsh'

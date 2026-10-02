@@ -252,7 +252,9 @@ _vetcoders_skill() {
   # given (see below). Without that, set -u must not trip on the band check at
   # dispatch time — an empty band falls through to a normal polarize dispatch.
   local prompt prism_payload="" prism_command="" prism_band="" prism_score="" memo_file=""
-  # shellcheck disable=SC2154  # _vetcoders_contract_* are set by _vetcoders_parse_contract (prompts.sh) first
+  # The sourced facade/parser initializes this shared result before the consuming function runs;
+  # assigning a local default here would mask missing ownership initialization.
+  # shellcheck disable=SC2154
   if [[ "$skill" == "polarize" && -n "$_vetcoders_contract_task" ]]; then
     prism_payload="$(_vetcoders_write_polarize_prism_payload "$root" "$run_id" "$_vetcoders_contract_task" "$_vetcoders_contract_no_aicx")" || return 1
     prism_command="$(_vetcoders_polarize_prism_command_text "$root" "$_vetcoders_contract_task" "$_vetcoders_contract_no_aicx")"

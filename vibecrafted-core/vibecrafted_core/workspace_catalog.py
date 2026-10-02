@@ -501,7 +501,9 @@ def compute_build_id(root: str | Path | None = None) -> BuildId:
             from . import __version__ as installed_version
 
             package_version = installed_version
-        except Exception:  # noqa: BLE001 — version is advisory only
+        # Installed-version discovery crosses metadata backends; every exception must project
+        # unknown rather than remove the catalog or claim an installed version.
+        except Exception:  # noqa: BLE001
             package_version = "unknown"
     return BuildId(
         git_commit=git_commit,

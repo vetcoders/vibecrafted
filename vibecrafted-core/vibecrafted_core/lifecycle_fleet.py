@@ -27,7 +27,7 @@ from .process_control import process_identity_receipt, validate_process_identity
 from .runtime_paths import vibecrafted_home
 from .workflows.model import WorkflowStage
 
-if TYPE_CHECKING:  # pragma: no cover - typing only, avoids an import cycle at runtime
+if TYPE_CHECKING:  # typing only, avoids an import cycle at runtime
     from .dispatch.model import Dispatch
     from .dispatch.supervisor import CellLauncher
 
@@ -560,7 +560,9 @@ def _start_background_dispatch(run_id: str, run: Callable[[], None]) -> None:
     def target() -> None:
         try:
             run()
-        except Exception as exc:  # noqa: BLE001 - recorded, never swallowed silently
+        # The scheduler runs in a detached thread and may raise any callback error; every exception
+        # must be persisted as stage dispatch failure so queued cuts do not appear live forever.
+        except Exception as exc:  # noqa: BLE001
             message = f"{type(exc).__name__}: {exc}"
             with _FLEET_DISPATCH_LOCK:
                 _FLEET_DISPATCH_ERRORS[run_id] = message
@@ -707,7 +709,9 @@ def _reap_detached_owner(run_id: str, proc: Any, log_path: Path) -> None:
                 f"scheduler owner exited {code} leaving {', '.join(unstarted)} "
                 f"unstarted; see {log_path}",
             )
-    except Exception:  # noqa: BLE001 - a note about a failure is never a second one
+    # Failure-note publication is secondary to an existing scheduler failure; any note exception
+    # must preserve that primary failure instead of replacing it.
+    except Exception:  # noqa: BLE001
         return
 
 
@@ -722,7 +726,9 @@ def scheduler_owner_identity(dispatch_run_id: str) -> tuple[dict[str, Any], int]
     """The persisted owner identity receipt and pid for one dispatch run."""
     try:
         payload = _receipt_store_for(dispatch_run_id).read()
-    except Exception:  # noqa: BLE001 - a missing ledger owns nothing
+    # Reading an existing owner receipt can fail in its parser or store; every exception must return
+    # no owner, preventing a signal based on absent identity evidence.
+    except Exception:  # noqa: BLE001
         return {}, 0
     receipt = payload.get("scheduler_owner_identity")
     return (
@@ -825,7 +831,9 @@ def record_stage_dispatch_failure(dispatch_run_id: str, message: str) -> None:
             scheduler_error=str(message),
             scheduler_error_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         )
-    except Exception:  # noqa: BLE001 - original scheduler failure is primary
+    # Persisting scheduler failure may itself fail before ledger creation; any secondary store error
+    # must preserve the original caller exception and claim no cut ownership.
+    except Exception:  # noqa: BLE001
         # No ledger means the dispatch never reached the point of owning cuts;
         # the caller still holds the exception.
         return
@@ -851,7 +859,9 @@ def request_stage_dispatch_stop(
         payload = store.request_stop(
             scheduler_stop_requested_at=stamp,
         )
-    except Exception as exc:  # noqa: BLE001 - interrupt must report refusal honestly
+    # A stop request crosses the durable receipt store; every exception must return accepted=False
+    # and fenced=False with the refusal reason before signaling an owner.
+    except Exception as exc:  # noqa: BLE001
         return {
             "accepted": False,
             "fenced": False,
@@ -918,7 +928,9 @@ def _record_stop_probe(store: Any, result: dict[str, Any]) -> None:
             scheduler_stop_signalled=bool(result.get("owner_signalled")),
             scheduler_stop_signal_error=str(result.get("owner_signal_error") or ""),
         )
-    except Exception:  # noqa: BLE001 - the fence itself is already durable
+    # The stop fence is already durable before signal-result projection; a projection failure must
+    # not turn that completed fence into an unfenced claim.
+    except Exception:  # noqa: BLE001
         return
 
 

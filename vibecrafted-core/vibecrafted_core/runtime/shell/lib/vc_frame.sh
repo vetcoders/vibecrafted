@@ -474,7 +474,9 @@ _vetcoders_declaration_escalate_if_needed() {
   _vetcoders_rewrite_contract_root_argv "${_vetcoders_contract_root:-}" "$@"
   # A bare declaration has no public argv. Bash 3.2 with `set -u` treats an
   # empty array expansion as unbound, so never expand the vector when empty.
-  # shellcheck disable=SC2154  # the rewritten vector is the parser's global (prompts.sh)
+  # The sourced facade/parser initializes this shared result before the consuming function runs;
+  # assigning a local default here would mask missing ownership initialization.
+  # shellcheck disable=SC2154
   if ((${#_vetcoders_contract_argv[@]})); then
     _vetcoders_open_public_entry_in_vc_terminal "$project_root" "$verb" "$tool" \
       "${_vetcoders_contract_argv[@]}" || return 1

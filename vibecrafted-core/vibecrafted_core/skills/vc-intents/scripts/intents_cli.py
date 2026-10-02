@@ -375,7 +375,9 @@ def cmd_verify_quotes(a: argparse.Namespace) -> None:
             continue
         try:
             data = read_json(path)
-        except Exception as e:  # noqa: BLE001 — the report needs the reason, whatever it is
+        # Shard readers cross versioned JSON helpers; any exception must become a shard-specific
+        # UNPARSEABLE problem while other shards remain independently inspectable.
+        except Exception as e:  # noqa: BLE001
             problems.append((shard, "-", f"UNPARSEABLE: {e}"))
             continue
         if isinstance(data, dict):

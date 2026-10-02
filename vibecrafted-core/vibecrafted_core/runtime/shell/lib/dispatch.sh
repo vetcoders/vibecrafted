@@ -766,7 +766,9 @@ repo-full() {
     printf "%-24s ahead:%-4s behind:%-4s sha:%s\n" "$ref" "$ahead" "$behind" "$sha"
   }
 
-  # shellcheck disable=SC2016 # expressions in awk are intentional
+  # This value is literal source or output for a later shell, awk, or Xcode evaluator; expanding its
+  # dollar expressions in the producing shell would change the emitted contract.
+  # shellcheck disable=SC2016
   _repo_full_human_awk='
     function human(x) {
       split("B KB MB GB TB", u, " ");
@@ -911,7 +913,9 @@ vc-start() {
   # One parser, one owner: the create-only workspace contract in dashboard.sh
   # (root → name → live inventory → exclusive create → enter / VC Terminal).
   _vetcoders_start_prepare_arguments "$@" || return $?
-  # shellcheck disable=SC2154  # set by _vetcoders_start_prepare_arguments (dashboard.sh) just above
+  # The sourced facade/parser initializes this shared result before the consuming function runs;
+  # assigning a local default here would mask missing ownership initialization.
+  # shellcheck disable=SC2154
   _vetcoders_start_entry "${_vetcoders_start_frame_argv[@]}"
 }
 

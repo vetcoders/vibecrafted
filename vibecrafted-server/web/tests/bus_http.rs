@@ -14,8 +14,9 @@ use std::fs;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 use std::time::Duration;
+use tokio::sync::Mutex;
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
@@ -268,8 +269,8 @@ fn json_body(bytes: &[u8]) -> Value {
     serde_json::from_slice(bytes).expect("json")
 }
 
-fn hold_env() -> (std::sync::MutexGuard<'static, ()>, EnvRestore) {
-    let lock = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+async fn hold_env() -> (tokio::sync::MutexGuard<'static, ()>, EnvRestore) {
+    let lock = env_lock().lock().await;
     let restore = EnvRestore::capture(&[
         "PATH",
         "VC_BUS_FAKE_LOG",
@@ -284,7 +285,7 @@ fn hold_env() -> (std::sync::MutexGuard<'static, ()>, EnvRestore) {
 
 #[tokio::test]
 async fn post_envelope_returns_store_receipt_and_keeps_text_out_of_argv() {
-    let (_lock, _env) = hold_env();
+    let (_lock, _env) = hold_env().await;
     let fake = install_fake("post");
     let app = router(TOKEN);
     let (status, body) = post(
@@ -322,7 +323,7 @@ async fn post_envelope_returns_store_receipt_and_keeps_text_out_of_argv() {
 
 #[tokio::test]
 async fn exit_one_receipt_is_returned_with_store_state() {
-    let (_lock, _env) = hold_env();
+    let (_lock, _env) = hold_env().await;
     let _fake = install_fake("exit1");
     set_env("VC_BUS_FAKE_STATE", "retryable_failure");
     set_env("VC_BUS_FAKE_EXIT", "1");
@@ -343,7 +344,7 @@ async fn exit_one_receipt_is_returned_with_store_state() {
 
 #[tokio::test]
 async fn mcp_vc_message_send_matches_the_http_receipt() {
-    let (_lock, _env) = hold_env();
+    let (_lock, _env) = hold_env().await;
     let fake = install_fake("mcp-send");
     let app = router(TOKEN);
     let (status, body) = post(
@@ -410,7 +411,7 @@ async fn mcp_vc_message_send_matches_the_http_receipt() {
 
 #[tokio::test]
 async fn vc_message_status_returns_receipt_and_unknown_id_is_typed() {
-    let (_lock, _env) = hold_env();
+    let (_lock, _env) = hold_env().await;
     let fake = install_fake("status");
     let app = router(TOKEN);
     let (status, body) = post(
@@ -479,7 +480,7 @@ async fn vc_message_status_returns_receipt_and_unknown_id_is_typed() {
 
 #[tokio::test]
 async fn vc_message_reply_addresses_the_receipt_run() {
-    let (_lock, _env) = hold_env();
+    let (_lock, _env) = hold_env().await;
     let fake = install_fake("reply");
     let app = router(TOKEN);
     let mut reply = envelope("decoy-run", NEEDLE, REPLY_ID);
@@ -533,7 +534,7 @@ async fn vc_message_reply_addresses_the_receipt_run() {
 
 #[tokio::test]
 async fn reply_context_mismatch_does_not_send() {
-    let (_lock, _env) = hold_env();
+    let (_lock, _env) = hold_env().await;
     let fake = install_fake("mismatch");
     set_env(
         "VC_BUS_FAKE_TEXT",
@@ -573,7 +574,7 @@ async fn reply_context_mismatch_does_not_send() {
 
 #[tokio::test]
 async fn bearer_missing_or_wrong_is_401_and_bad_origin_is_403() {
-    let (_lock, _env) = hold_env();
+    let (_lock, _env) = hold_env().await;
     let fake = install_fake("auth");
     let app = router(TOKEN);
     let body = envelope(TARGET_RUN, NEEDLE, ENVELOPE_ID).to_string();
@@ -626,7 +627,7 @@ async fn bearer_missing_or_wrong_is_401_and_bad_origin_is_403() {
 
 #[tokio::test]
 async fn invalid_envelope_does_not_spawn_the_store() {
-    let (_lock, _env) = hold_env();
+    let (_lock, _env) = hold_env().await;
     let fake = install_fake("invalid");
     let app = router(TOKEN);
     let mut bad = envelope(TARGET_RUN, NEEDLE, ENVELOPE_ID);

@@ -876,7 +876,9 @@ if (( exit_code == 0 )) && (( !CHECK_ONLY )); then
     *":$LAUNCHER_PREFIX:"*) ;;
     *)
       printf '\n\033[33mAdd to your shell profile:\033[0m\n'
-      # shellcheck disable=SC2016 # $PATH is literal output for the user
+      # This value is literal source or output for a later shell, awk, or Xcode evaluator; expanding
+      # its dollar expressions in the producing shell would change the emitted contract.
+      # shellcheck disable=SC2016
       printf '  export PATH="%s:$PATH"\n\n' "$LAUNCHER_PREFIX"
       ;;
   esac

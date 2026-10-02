@@ -2700,6 +2700,8 @@ fn artifact_lines(path: &Path, run_root: Option<&str>) -> anyhow::Result<Vec<Str
     if path.is_dir() {
         let mut rows = Vec::new();
         // `safe_artifact_path` canonicalizes this path and constrains it to the selected run root.
+        // safe_artifact_path canonicalizes and confines the artifact to the selected run root
+        // before directory listing; the UI must retain that admission check before reading.
         let entries = fs::read_dir(&path)?; // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path
         for entry in entries {
             let entry = entry?;
@@ -2714,6 +2716,8 @@ fn artifact_lines(path: &Path, run_root: Option<&str>) -> anyhow::Result<Vec<Str
         return Ok(rows);
     }
     // `safe_artifact_path` canonicalizes this path and constrains it to the selected run root.
+    // safe_artifact_path canonicalizes and confines the artifact to the selected run root before
+    // file reading; the UI must retain that admission check before reading.
     let text = fs::read_to_string(&path)?; // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path
     let rendered = if path
         .file_name()

@@ -56,7 +56,7 @@ def _load_product_contract() -> ModuleType:
     raw = _capture_sibling_source(source)
     module_name = "vibecrafted_core._installed_product_contract"
     spec = spec_from_loader(module_name, loader=None, origin=str(source))
-    if spec is None:  # pragma: no cover - a concrete source path always yields a spec.
+    if spec is None:  # a concrete source path always yields a spec.
         raise RuntimeError("cannot create installed product contract module")
     module = module_from_spec(spec)
     module.__file__ = str(source)
@@ -65,7 +65,12 @@ def _load_product_contract() -> ModuleType:
     try:
         # `raw` is the bounded O_NOFOLLOW snapshot of the fixed, manifest-bound sibling;
         # compiling it directly is intentional so adjacent stale bytecode cannot win.
-        exec(  # noqa: S102  # nosemgrep: python.lang.security.audit.exec-detected.exec-detected
+        # The fixed manifest-bound sibling is read as a bounded O_NOFOLLOW snapshot; compile those
+        # approved bytes directly to prevent adjacent stale bytecode from winning.
+        # This executes the bounded O_NOFOLLOW snapshot of the fixed manifest-bound sibling; direct
+        # compilation prevents stale adjacent bytecode from overriding the approved source bytes.
+        # nosemgrep: python.lang.security.audit.exec-detected.exec-detected
+        exec(  # noqa: S102
             compile(raw, str(source), "exec"), module.__dict__
         )
     except Exception:
@@ -122,5 +127,5 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-if __name__ == "__main__":  # pragma: no cover
+if __name__ == "__main__":
     raise SystemExit(main())

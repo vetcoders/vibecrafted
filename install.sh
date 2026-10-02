@@ -58,7 +58,9 @@ die() {
 
 # Last-resort net: any exit that is neither a success, a named refusal nor the
 # candidate installer's own verdict still says that the bootstrap stopped.
-# shellcheck disable=SC2317,SC2329  # invoked via EXIT trap (older shellcheck: SC2317, newer: SC2329)
+# This cleanup function is registered through a signal/EXIT trap; static call reachability cannot
+# see its runtime invocation, which releases the installer-owned resources.
+# shellcheck disable=SC2317,SC2329
 on_bootstrap_exit() {
   local status=$?
   if [[ "$status" != "0" && "$bootstrap_error_reported" == "0" \

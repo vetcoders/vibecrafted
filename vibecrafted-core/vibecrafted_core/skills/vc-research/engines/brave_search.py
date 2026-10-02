@@ -43,6 +43,10 @@ def search(query: str, count: int = 8, lang: str | None = None) -> dict:
 
     path = f"{API_PATH}?{urllib.parse.urlencode(params)}"
     # TLS verification is enforced via the explicit default SSL context below.
+
+    # The fixed Brave HTTPS endpoint receives an explicit verified TLS context from
+    # build_tls_context on supported Python versions; the legacy pre-3.4.3 default-context risk is
+    # inapplicable.
     # nosemgrep: python.lang.security.audit.httpsconnection-detected.httpsconnection-detected
     conn = http.client.HTTPSConnection(
         API_HOST, timeout=15, context=build_tls_context()
@@ -60,7 +64,9 @@ def search(query: str, count: int = 8, lang: str | None = None) -> dict:
         if resp.status >= 400:
             return {"error": f"HTTP {resp.status}: {resp.reason}"}
         return json.loads(body)
-    except Exception as e:  # noqa: BLE001 - network or JSON failure is returned to the research lane as data
+    # The research transport crosses HTTP and decoding helpers; every exception must return an error
+    # payload, and finally must close the connection.
+    except Exception as e:  # noqa: BLE001
         return {"error": str(e)}
     finally:
         conn.close()

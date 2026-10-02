@@ -50,5 +50,5 @@ def test_validate_remote_url_rejects_file_scheme() -> None:
         chat_cli.validate_remote_url("file:///etc/passwd")
     except ValueError as exc:
         assert "http(s)" in str(exc)
-    else:  # pragma: no cover - explicit failure branch for readability
+    else:  # explicit failure branch for readability
         raise AssertionError("file:// URL should be rejected")

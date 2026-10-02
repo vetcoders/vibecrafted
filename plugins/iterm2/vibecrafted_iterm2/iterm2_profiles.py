@@ -362,7 +362,7 @@ def migrate_from_experimental(
     if backup:
         backup_path.write_text(legacy_text, encoding="utf-8")
     else:
-        backup_path = None  # type: ignore[assignment]
+        backup_path = None
 
     legacy_path.unlink()
 

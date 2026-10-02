@@ -524,7 +524,9 @@ runtime_pack_selection_publish() {
 #   1 — no record at all (callers may keep their legacy single-archive path)
 #   2 — a record exists but cannot be honoured; the caller MUST fail visibly
 #       rather than fall back to some other archive on disk
-# shellcheck disable=SC2034  # RUNTIME_PACK_SELECTION_* are this function's outputs, read by install-runtime-pack.sh after sourcing
+# This sourced helper publishes a caller-visible result or status; its consumer lives outside this
+# file, so deleting the binding would break the shared helper contract.
+# shellcheck disable=SC2034
 runtime_pack_selection_read() {
   local repo_root="$1" expected_platform="$2" expected_architecture="$3"
   local file actual_digest actual_size

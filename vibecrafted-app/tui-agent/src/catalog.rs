@@ -153,6 +153,8 @@ impl LauncherCatalog {
         // `deck` is the operator's configured command deck (a path from --command-deck
         // or the resolved default), and every argument below is a fixed literal. No
         // shell is involved and no caller-supplied string reaches argv.
+        // deck is the locally configured executable owner; this command uses fixed
+        // capabilities/--json argv without a shell, so remote text cannot become shell syntax.
         let mut command = Command::new(deck); // nosemgrep: rust.actix.command-injection.rust-actix-command-injection.rust-actix-command-injection
         command.args(["capabilities", "--json"]).envs(env);
         let what = format!("{} capabilities --json", deck.display());
@@ -290,7 +292,9 @@ mod tests {
         let catalog = LauncherCatalog::parse(FIXTURE.as_bytes()).unwrap();
         assert_eq!(
             catalog.agents,
-            vec!["agy", "claude", "codex", "cursor", "grok", "junie", "kimi", "copilot"]
+            vec![
+                "agy", "claude", "codex", "cursor", "grok", "junie", "kimi", "copilot"
+            ]
         );
         assert!(catalog.provider("claude").unwrap().model_override.supported);
         assert!(!catalog.provider("junie").unwrap().model_override.supported);

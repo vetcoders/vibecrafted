@@ -73,7 +73,7 @@ def ensure_generation_python() -> None:
     ``bin/python3``; the uv tool venv does.
     """
     try:
-        import vibecrafted_core  # noqa: F401
+        __import__("vibecrafted_core")
     except ImportError:
         pass
     else:

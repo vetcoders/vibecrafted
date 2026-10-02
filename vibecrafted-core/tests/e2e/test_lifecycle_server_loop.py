@@ -17,6 +17,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+import pytest
 from vibecrafted_core.events import append_event
 from vibecrafted_core.lifecycle_runner import (
     LifecycleRunner,
@@ -33,6 +34,14 @@ from vibecrafted_core.run_triage import (
 FIXTURES = Path(__file__).parent / "fixtures"
 STUB_WORKER = FIXTURES / "stub_worker.py"
 AXIS_KEYS = ("execution_state", "proof_state", "delivery_state")
+
+# These clients observe the temporary HTTP server. File/FTP handlers cannot
+# provide live server evidence and must never turn a local file into a response.
+HTTP_OPENER = urllib.request.OpenerDirector()
+HTTP_OPENER.add_handler(urllib.request.UnknownHandler())
+HTTP_OPENER.add_handler(urllib.request.HTTPHandler())
+HTTP_OPENER.add_handler(urllib.request.HTTPDefaultErrorHandler())
+HTTP_OPENER.add_handler(urllib.request.HTTPErrorProcessor())
 
 
 # ---------------------------------------------------------------------------
@@ -164,7 +173,7 @@ def _make_awaiter() -> Any:
 
 
 def _http_json(url: str, *, timeout: float = 5.0) -> dict[str, Any]:
-    with urllib.request.urlopen(url, timeout=timeout) as resp:
+    with HTTP_OPENER.open(url, timeout=timeout) as resp:
         assert resp.status == 200, (url, resp.status)
         return json.loads(resp.read().decode("utf-8"))
 
@@ -189,7 +198,7 @@ def _collect_sse(
     req = urllib.request.Request(url, headers={"Accept": "text/event-stream"})
     deadline = time.time() + timeout
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with HTTP_OPENER.open(req, timeout=timeout) as resp:
             while not stop_event.is_set() and time.time() < deadline:
                 # Prefer read1: return whatever is available without waiting for n.
                 if hasattr(resp, "read1"):
@@ -200,8 +209,17 @@ def _collect_sse(
                     time.sleep(0.02)
                     continue
                 collected.append(chunk.decode("utf-8", errors="replace"))
-    except Exception as exc:  # noqa: BLE001 — surface in assertion via collected
+    # The SSE reader runs in a background test thread; any socket or decoder exception must be
+    # appended as __SSE_ERROR__ for the main-thread assertions to inspect.
+    except Exception as exc:  # noqa: BLE001
         collected.append(f"\n__SSE_ERROR__:{type(exc).__name__}:{exc}\n")
+
+
+def test_http_proof_rejects_file_responses(tmp_path: Path) -> None:
+    payload = tmp_path / "local-response.json"
+    payload.write_text('{"status":"ok"}', encoding="utf-8")
+    with pytest.raises(urllib.error.URLError, match="unknown url type"):
+        _http_json(payload.as_uri())
 
 
 def _sse_events_for_run(raw: str, run_id: str) -> list[dict[str, Any]]:
@@ -266,7 +284,7 @@ def _run_mini_lifecycle(
     import vibecrafted_core.lifecycle_runner as lr
 
     original = lr.load_context_atlas
-    lr.load_context_atlas = lambda *_a, **_k: monkey_atlas  # type: ignore[assignment]
+    lr.load_context_atlas = lambda *_a, **_k: monkey_atlas
     try:
         runner = LifecycleRunner(
             launcher=_make_stub_launcher(
@@ -288,7 +306,7 @@ def _run_mini_lifecycle(
             )
         )
     finally:
-        lr.load_context_atlas = original  # type: ignore[assignment]
+        lr.load_context_atlas = original
     return state
 
 

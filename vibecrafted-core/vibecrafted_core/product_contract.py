@@ -665,7 +665,7 @@ def _macho_code_sha256(path: Path) -> str:
         magic, cpu_type, _, file_type, ncmds, sizeofcmds, _, _ = struct.unpack_from(
             "<IiiIIIII", data, 0
         )
-    except struct.error as exc:  # pragma: no cover - guarded by the size check.
+    except struct.error as exc:  # guarded by the size check.
         _fail(E_PROOF, f"outer Mach-O header is malformed: {exc}")
     if magic != _MH_MAGIC_64 or cpu_type != _CPU_TYPE_ARM64 or file_type != _MH_EXECUTE:
         _fail(
@@ -2827,7 +2827,7 @@ def _validate_runtime_generation_manifest(
     fingerprint = _expect_sha256(
         manifest["source_fingerprint"], field=f"{field}.source_fingerprint"
     )
-    if not fingerprint:  # pragma: no cover - _expect_sha256 either returns or fails.
+    if not fingerprint:  # _expect_sha256 either returns or fails.
         _fail(E_TRANSACTION, f"{field} runtime source fingerprint is missing")
     owner_repo = _expect_string(manifest["owner_repo"], field=f"{field}.owner_repo")
     if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", owner_repo) is None:
@@ -3020,7 +3020,7 @@ def verify_installed_runtime_generation(
         if relative == "VERSION":
             version_raw = captured.raw
 
-    if version_raw is None:  # pragma: no cover - guaranteed by the closed inventory.
+    if version_raw is None:  # guaranteed by the closed inventory.
         _fail(E_MISSING, "installed generation VERSION is missing")
     try:
         installed_version = version_raw.decode("utf-8").strip()
@@ -4385,7 +4385,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             verify_installed_runtime_generation(
                 args.path, expected_entrypoint=args.expected_entrypoint
             )
-        else:  # pragma: no cover - argparse owns the command set.
+        else:  # argparse owns the command set.
             _fail(E_SCHEMA, f"unsupported command: {args.command}")
     except ProductContractError as exc:
         print(f"VCPC{exc.code:03d}: {exc}", file=sys.stderr)

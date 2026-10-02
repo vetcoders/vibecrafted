@@ -225,39 +225,45 @@ fn fixture() -> Fixture {
 
     write_run(
         &control_plane,
-        "run-alpha",
-        "codex",
-        None,
-        "/work/alpha",
-        WORKSPACE_ALPHA,
-        INSTANCE_ALPHA,
-        "Alpha Place",
-        SESSION_ALPHA,
-        "frame-alpha",
+        RunFixture {
+            run_id: "run-alpha",
+            agent: "codex",
+            provider_session_id: None,
+            root: "/work/alpha",
+            workspace_id: WORKSPACE_ALPHA,
+            workspace_instance_id: INSTANCE_ALPHA,
+            workspace_display_label: "Alpha Place",
+            workspace_session_id: SESSION_ALPHA,
+            worker_host_session: "frame-alpha",
+        },
     );
     write_run(
         &control_plane,
-        "run-wrong",
-        "claude",
-        Some("provider-wrong"),
-        "/work/alpha",
-        WORKSPACE_ALPHA,
-        INSTANCE_ALPHA,
-        "Alpha Place",
-        SESSION_ALPHA,
-        "frame-wrong",
+        RunFixture {
+            run_id: "run-wrong",
+            agent: "claude",
+            provider_session_id: Some("provider-wrong"),
+            root: "/work/alpha",
+            workspace_id: WORKSPACE_ALPHA,
+            workspace_instance_id: INSTANCE_ALPHA,
+            workspace_display_label: "Alpha Place",
+            workspace_session_id: SESSION_ALPHA,
+            worker_host_session: "frame-wrong",
+        },
     );
     write_run(
         &control_plane,
-        "run-missing",
-        "kimi",
-        Some("provider-missing"),
-        "/work/beta",
-        WORKSPACE_BETA,
-        INSTANCE_BETA,
-        "Beta Place",
-        SESSION_MISSING,
-        "frame-missing",
+        RunFixture {
+            run_id: "run-missing",
+            agent: "kimi",
+            provider_session_id: Some("provider-missing"),
+            root: "/work/beta",
+            workspace_id: WORKSPACE_BETA,
+            workspace_instance_id: INSTANCE_BETA,
+            workspace_display_label: "Beta Place",
+            workspace_session_id: SESSION_MISSING,
+            worker_host_session: "frame-missing",
+        },
     );
 
     let fake_frame = home.path().join("fake-vc-frame");
@@ -331,19 +337,30 @@ fn write_session(
     .expect("session record");
 }
 
-#[allow(clippy::too_many_arguments)]
-fn write_run(
-    control_plane: &Path,
-    run_id: &str,
-    agent: &str,
-    provider_session_id: Option<&str>,
-    root: &str,
-    workspace_id: &str,
-    workspace_instance_id: &str,
-    workspace_display_label: &str,
-    workspace_session_id: &str,
-    worker_host_session: &str,
-) {
+struct RunFixture<'a> {
+    run_id: &'a str,
+    agent: &'a str,
+    provider_session_id: Option<&'a str>,
+    root: &'a str,
+    workspace_id: &'a str,
+    workspace_instance_id: &'a str,
+    workspace_display_label: &'a str,
+    workspace_session_id: &'a str,
+    worker_host_session: &'a str,
+}
+
+fn write_run(control_plane: &Path, fixture: RunFixture<'_>) {
+    let RunFixture {
+        run_id,
+        agent,
+        provider_session_id,
+        root,
+        workspace_id,
+        workspace_instance_id,
+        workspace_display_label,
+        workspace_session_id,
+        worker_host_session,
+    } = fixture;
     let run = control_plane.join("runtime_runs").join(run_id);
     fs::create_dir(&run).expect("runtime run");
     let mut payload = json!({

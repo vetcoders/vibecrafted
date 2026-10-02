@@ -91,7 +91,6 @@ class RunSignalServer:
         self._dropped_clients = 0
 
     def start(self) -> RunSignalServer:
-        # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
         # A socket directory needs execute permission; owner-only rwx is the
         # least privilege that still lets this user connect and unlink.
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -110,9 +109,10 @@ class RunSignalServer:
             directory_flags |= os.O_NOFOLLOW
         directory_fd = os.open(self.path.parent, directory_flags)
         try:
-            os.fchmod(  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
-                directory_fd, 0o700
-            )
+            # The owned socket directory is opened with O_NOFOLLOW after type/owner checks; owner-
+            # only 0700 is required to connect and unlink, without granting group/other access.
+            # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
+            os.fchmod(directory_fd, 0o700)
         finally:
             os.close(directory_fd)
         self._acquire_owner_lock()

@@ -977,7 +977,7 @@ def test_carrier_digest_rejects_every_payload_tree_mutation(
         target.unlink()
     elif mutation == "empty-directory":
         (source / "scripts" / "new-empty-directory").mkdir()
-    else:  # pragma: no cover - parametrization owns the closed set.
+    else:  # parametrization owns the closed set.
         raise AssertionError(mutation)
 
     with pytest.raises(manifest.ManifestError, match="payload digest"):
@@ -1479,7 +1479,7 @@ def test_archive_rejects_every_included_git_drift_shape(
             _git(source, "add", relative)
     elif mutation == "deleted":
         path.unlink()
-    else:  # pragma: no cover - parametrization owns the closed mutation set.
+    else:  # parametrization owns the closed mutation set.
         raise AssertionError(mutation)
 
     with pytest.raises(manifest.ManifestError, match="included path") as exc_info:
@@ -1704,7 +1704,7 @@ def test_copy_time_destination_swap_is_rejected_before_carrier(
         elif mutation == "type":
             destination_path.unlink()
             destination_path.symlink_to("../VERSION")
-        else:  # pragma: no cover - parametrization owns the mutation set.
+        else:  # parametrization owns the mutation set.
             raise AssertionError(mutation)
         swapped = True
 

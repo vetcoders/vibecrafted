@@ -131,7 +131,7 @@ def test_windows_clone_without_symlink_support_keeps_entrypoints_runnable(
     assert "Usage: install.sh" in help_run.stdout
 
     zsh = shutil.which("zsh")
-    if zsh is None:  # pragma: no cover - zsh is present on macOS and CI
+    if zsh is None:  # zsh is present on macOS and CI
         pytest.skip("zsh is not available on this host")
     shim = clone / "vibecrafted-core/vibecrafted_core/runtime/shell/vetcoders.zsh"
     assert shim.is_file() and not shim.is_symlink()

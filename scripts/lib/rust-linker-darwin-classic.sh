@@ -8,7 +8,7 @@ set -euo pipefail
 # Without ld-classic (CLT 27) the contract selects the measured Xcode pair and
 # the shim links with that clang unchanged.
 contract="${VIBECRAFTED_RELEASE_TOOLCHAIN_CONTRACT:-$(dirname "${BASH_SOURCE[0]}")/release-toolchain-contract.sh}"
-# shellcheck disable=SC1090 # runtime-selected contract; release pins its path
+# runtime-selected contract; release pins its path
 . "$contract"
 vibecrafted_release_verify_darwin_linker
 

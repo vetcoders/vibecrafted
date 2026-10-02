@@ -375,7 +375,7 @@ def test_installed_runtime_manifest_rejects_noncanonical_manifest(
         source_payload = manifest["source_payload"]
         assert isinstance(source_payload, dict)
         source_payload["entry_count"] = 0
-    else:  # pragma: no cover - closed parametrization above.
+    else:  # closed parametrization above.
         raise AssertionError(f"unknown mutation: {mutation}")
     _write_runtime_manifest(generation, manifest)
 
@@ -412,7 +412,7 @@ def test_installed_runtime_manifest_rejects_noncanonical_source_provenance(
             provenance["source_revision"] = "f" * 40
         elif mutation == "payload_mismatch":
             provenance["payload"]["tree_sha256"] = "f" * 64
-        else:  # pragma: no cover
+        else:
             raise AssertionError(mutation)
         provenance_path.write_text(json.dumps(provenance), encoding="utf-8")
 

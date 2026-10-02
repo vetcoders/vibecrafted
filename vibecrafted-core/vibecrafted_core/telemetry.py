@@ -442,7 +442,14 @@ def resolve_cost(
             source="unknown",
         )
     counts = (usage.tokens_input, usage.tokens_cached_input, usage.tokens_output)
-    tokens_in, cached, out = (int(value) for value in counts)  # type: ignore[arg-type]
+    tokens_in, cached, out = counts
+    if (
+        isinstance(tokens_in, Unknown)
+        or isinstance(cached, Unknown)
+        or isinstance(out, Unknown)
+    ):
+        return CostRecord(amount=Unknown(reason=NO_COST_REASON), source="unknown")
+    tokens_in, cached, out = int(tokens_in), int(cached), int(out)
     return CostRecord(
         amount=_priced(price, tokens_in, cached, out),
         source=f"estimated:{price.source}",

@@ -19,7 +19,7 @@ from pathlib import Path
 
 try:
     _vetcoders_install = importlib.import_module("vetcoders_install")
-except ModuleNotFoundError:  # pragma: no cover - import path depends on entrypoint
+except ModuleNotFoundError:  # import path depends on entrypoint
     _vetcoders_install = importlib.import_module("scripts.vetcoders_install")
 
 discover_skills = _vetcoders_install.discover_skills

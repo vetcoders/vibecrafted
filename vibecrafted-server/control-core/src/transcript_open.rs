@@ -35,7 +35,7 @@ pub fn open_provider_transcript(path: &Path) -> io::Result<File> {
             );
         }
         error
-    })?; // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path
+    })?;
     let meta = file.metadata()?;
     #[cfg(windows)]
     {

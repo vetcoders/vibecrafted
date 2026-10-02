@@ -284,7 +284,7 @@ def delete_candidate(root: Path, raw: str) -> tuple[bool, str]:
 
 def execute_plan(root: Path, plan: dict[str, object]) -> dict[str, object]:
     outcomes: list[dict[str, object]] = []
-    for item in plan["items"]:  # type: ignore[index]
+    for item in plan["items"]:
         if not item["eligible"]:
             continue
         ok, result = delete_candidate(root, str(item["path"]))

@@ -7,7 +7,9 @@ import os
 import threading
 import time
 from datetime import datetime, timezone
+from importlib import import_module
 from pathlib import Path
+from types import ModuleType
 from typing import Any, Self
 
 from vibecrafted_core.control_plane import control_plane_home
@@ -16,9 +18,9 @@ from vibecrafted_core.delivery.store import atomic_write_json
 from .model import SCHEDULER_STATES, Cut
 
 try:  # POSIX is the production scheduler substrate; keep importability elsewhere.
-    import fcntl
-except ImportError:  # pragma: no cover - non-POSIX development hosts
-    fcntl = None  # type: ignore[assignment]
+    fcntl: ModuleType | None = import_module("fcntl")
+except ImportError:  # non-POSIX development hosts
+    fcntl = None
 
 
 class ReceiptContractError(RuntimeError):

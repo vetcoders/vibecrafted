@@ -462,7 +462,7 @@ def _tools_lease_worker(
             ready.set()
             time.sleep(hold_seconds)
             events.put((label, "leaving", time.monotonic()))
-    except (OSError, ValueError) as exc:  # pragma: no cover - asserted by parent
+    except (OSError, ValueError) as exc:  # asserted by parent
         events.put((label, "error", repr(exc)))
         ready.set()
 
@@ -5911,7 +5911,7 @@ def test_secure_walkaround_launcher_rejects_carrier_manifest_lineage_drift(
             carrier["source_revision"] = "f" * 40
         elif mutation == "payload":
             carrier["payload"]["tree_sha256"] = "f" * 64
-        else:  # pragma: no cover
+        else:
             raise AssertionError(mutation)
         carrier_path.write_text(
             json.dumps(carrier, ensure_ascii=True, sort_keys=True, indent=2) + "\n",

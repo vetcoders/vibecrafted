@@ -99,7 +99,9 @@ qtranscript="$(spawn_shell_quote "$SPAWN_TRANSCRIPT")"
 qlast_message="$(spawn_shell_quote "${SPAWN_TRANSCRIPT%.log}.last-message.md")"
 qmodel="$(spawn_shell_quote "$model")"
 
-# shellcheck disable=SC2016  # hook source is expanded by the launcher when the hook runs
+# This value is literal source or output for a later shell, awk, or Xcode evaluator; expanding its
+# dollar expressions in the producing shell would change the emitted contract.
+# shellcheck disable=SC2016
 agy_success_hook='
   if [[ ! -s "$report" ]]; then
     spawn_write_frontmatter "$report" "$SPAWN_AGENT" "unknown" "completed"
@@ -112,7 +114,9 @@ ${transcript%.log}.last-message.md
 TXT
   fi'
 
-# shellcheck disable=SC2016  # hook source is expanded by the launcher when the hook runs
+# This value is literal source or output for a later shell, awk, or Xcode evaluator; expanding its
+# dollar expressions in the producing shell would change the emitted contract.
+# shellcheck disable=SC2016
 agy_failure_hook='
   if [[ ! -s "$report" ]]; then
     spawn_write_frontmatter "$report" "$SPAWN_AGENT" "unknown" "failed"
@@ -132,6 +136,8 @@ if [[ -n "$model" ]]; then
   model_flag="--model $qmodel"
 else
   # Expanded by the launcher at run time, on purpose (SPAWN_MODEL is exported there).
+  # This value is literal source or output for a later shell, awk, or Xcode evaluator; expanding its
+  # dollar expressions in the producing shell would change the emitted contract.
   # shellcheck disable=SC2016
   model_flag='${SPAWN_MODEL:+--model "$SPAWN_MODEL"}'
 fi
