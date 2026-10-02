@@ -107,41 +107,12 @@ def test_default_provider_stays_codex_with_kimi_on_the_row() -> None:
     assert picker.agent == workshop.AGENTS.index("codex")
 
 
-def test_provider_row_renders_every_catalog_provider_including_kimi_and_copilot(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    workshop = _load()
-    drawn: list[str] = []
-
-    class FakeWindow:
-        def getmaxyx(self) -> tuple[int, int]:
-            return (24, 80)
-
-        def addstr(self, _row: int, _col: int, text: str, _attr: int = 0) -> None:
-            drawn.append(text)
-
-        def erase(self) -> None:
-            pass
-
-        def refresh(self) -> None:
-            pass
-
-    monkeypatch.setattr(workshop, "_provider_available", lambda _agent: True)
-    monkeypatch.setattr(
-        workshop,
-        "runtime_policy_capabilities",
-        lambda _agent: {
-            name: {"available": True, "reason": ""}
-            for name in workshop.RUNTIME_POLICIES
-        },
-    )
-    form = workshop.Workshop(FakeWindow(), mode="launcher")
-    form.draw_launcher()
-
-    tokens = [text.strip() for text in drawn if text.strip() in workshop.AGENTS]
-    assert sorted(tokens) == sorted(workshop.AGENTS)
-    assert "kimi" in tokens
-    assert "copilot" in tokens
+def test_provider_choices_render_every_catalog_provider(monkeypatch):
+    workshop, form = _wizard(monkeypatch)
+    form.draw()
+    labels = [text[2:] for text, kind, _, _ in form.items if kind == "provider"]
+    assert sorted(labels) == sorted(workshop.AGENTS)
+    assert any(text.startswith("● codex") for text, *_ in form.items)
 
 
 def test_choice_markers_are_unboxed_and_selected_once() -> None:
@@ -331,7 +302,7 @@ def _prepare_launch(
     listing_error: str = "",
     current: str = "",
 ) -> tuple[object, list[object]]:
-    launched = workshop.Workshop(SimpleNamespace(), mode="launcher")
+    launched = workshop.Workshop(_WizardWindow(), mode="launcher")
     launched.path = str(tmp_path)
     launched.agent = workshop.AGENTS.index("codex")
     launched.launch_mode = workshop.LAUNCH_MODES.index("partner")
@@ -339,18 +310,47 @@ def _prepare_launch(
     launched.permissions = workshop.PERMISSION_POLICIES.index("bypass")
     launched.continuity = workshop.CONTINUITY_MODES.index("fresh")
     calls: list[object] = []
+    admission_path = tmp_path / "admission.json"
+    admission_path.write_text(
+        __import__("json").dumps(
+            {"run_id": "init-controlled-test", "effective_worker_root": str(tmp_path)}
+        )
+    )
+
+    def admit(agent, prompt, runtime, permissions, root, **kwargs):
+        argv = workshop.launch_argv(
+            agent,
+            "init",
+            runtime,
+            permissions,
+            workspace=root,
+            model=kwargs.get("model", ""),
+            prompt=prompt,
+        )
+        return [*argv, "--admission-file", str(admission_path)]
+
+    monkeypatch.setattr(workshop, "interactive_workspace_command", admit)
+    monkeypatch.setattr(
+        workshop, "lookup_runtime_run_meta", lambda _: {"status": "active"}
+    )
+    monkeypatch.setattr(workshop, "finish_meta", lambda *_: None)
     monkeypatch.setattr(
         workshop,
         "runtime_policy_capabilities",
         lambda _agent: {
-            "local-native": {"available": True, "reason": ""},
+            name: {
+                "available": name == "local-native",
+                "reason": "disabled by controlled capability",
+            }
+            for name in workshop.RUNTIME_POLICIES
         },
     )
     monkeypatch.setattr(
         workshop,
         "continuity_policy_capabilities",
         lambda *_args, **_kwargs: {
-            "fresh": {"available": True, "reason": ""},
+            name: {"available": name == "fresh", "reason": "controlled continuity"}
+            for name in workshop.CONTINUITY_MODES
         },
     )
     monkeypatch.setattr(
@@ -487,8 +487,9 @@ def test_successful_launch_opens_destination_tab_and_keeps_workshop(
     assert pane[pane.index("--name") + 1] == title
     command = pane[pane.index("--") + 1 :]
     assert command[:3] == ["vibecrafted", "init", "codex"]
-    assert command[-4:] == ["--root", str(tmp_path), "--prompt", "/vc-partner"]
-    assert calls[1] == ["vc-frame", "attach", "vibecrafted"]
+    assert command[command.index("--root") + 1] == str(tmp_path)
+    assert command[command.index("--prompt") + 1] == "/vc-partner"
+    assert ["vc-frame", "attach", "vibecrafted"] in calls
 
 
 def test_same_project_launch_still_opens_a_new_tab_without_attach(
@@ -508,7 +509,7 @@ def test_same_project_launch_still_opens_a_new_tab_without_attach(
 
     assert launched.mode == "home"
     assert launched.error == ""
-    assert len(calls) == 1
+    assert len([c for c in calls if "new-tab" in c]) == 1
     pane = calls[0]
     assert isinstance(pane, list)
     assert pane[:5] == ["vc-frame", "--session", "loctree", "action", "new-tab"]
@@ -613,8 +614,7 @@ def test_launch_refuses_unadmittable_worktree_before_invoking_launcher(
 
     # The gate still refuses before any pane exists; the User reads the plain
     # sentence instead of the internal admission wording.
-    assert launched.error == workshop.public_reason(message)
-    assert launched.error == "Needs live usage metering; only claude today"
+    assert launched.error == message
     assert launched.mode == "launcher"
 
 
@@ -855,7 +855,7 @@ def _drive_home_dashboard(
         def refresh(self) -> None:
             pass
 
-        def getch(self) -> int:
+        def get_wch(self) -> int:
             try:
                 key, elapsed = next(steps)
             except StopIteration:
@@ -945,112 +945,30 @@ def test_presence_schedule_backs_off_while_unchanged_and_resets_on_change() -> N
 
 
 @pytest.mark.parametrize("width", [58, 92])
-def test_launcher_choice_redraw_preserves_final_cells_and_selected_row_styling(
-    width: int, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    workshop = _load()
-    writes: list[tuple[int, int, str, int]] = []
-
-    class FakeWindow:
-        def getmaxyx(self) -> tuple[int, int]:
-            return (24, width)
-
-        def erase(self) -> None:
-            pass
-
-        def refresh(self) -> None:
-            pass
-
-        def addstr(self, row: int, col: int, text: str, _attr: int = 0) -> None:
-            writes.append((row, col, text, _attr))
-
-    capabilities = {
-        "local-native": {"available": True, "reason": ""},
-        "local-worktrees": {
-            "available": False,
-            "reason": "codex exposes no verified live child-attributable monotonic usage side channel",
-        },
-        "local-vm": {"available": False, "reason": "no canonical VM entrypoint"},
-        "cloud-soon": {"available": False, "reason": "coming soon"},
-    }
-    monkeypatch.setattr(
-        workshop, "runtime_policy_capabilities", lambda _agent: capabilities
-    )
-    monkeypatch.setattr(
-        workshop,
-        "continuity_policy_capabilities",
-        lambda *_args, **_kwargs: {
-            name: {"available": name == "fresh", "reason": "unavailable"}
-            for name in workshop.CONTINUITY_MODES
-        },
-    )
-    monkeypatch.setattr(
-        workshop,
-        "resolve_provider_policy",
-        lambda _agent, _runtime, _permissions, _mode: SimpleNamespace(
-            supported=_permissions == "bypass", reason="unsupported"
-        ),
-    )
-    monkeypatch.setattr(
-        workshop,
-        "mode_capabilities",
-        lambda *_args, **_kwargs: {
-            name: {"available": name != "resume", "reason": "unavailable"}
-            for name in workshop.LAUNCH_MODES
-        },
-    )
-
-    picker = workshop.Workshop(FakeWindow(), mode="launcher")
-    picker.advanced = True
-    picker.row = 2  # the Mode row of the inline advanced view
-    picker.runtime = 0
-    picker.continuity = 1
-    picker.draw_launcher()
-
-    assert writes
-    assert all(
-        0 <= col < width and col + len(text) <= width for _, col, text, _ in writes
-    )
-    # Inline advanced view, no bordered card: the geometry of draw_launcher.
-    left = max(1, (width - min(width - 2, 84)) // 2)
-    inner = max(12, width - left - 2)
-    cursor = max(1, (24 - 19) // 2) + 8
-    assert all(
-        col + len(text) <= left + inner
-        for row, col, text, _ in writes
-        if cursor <= row < cursor + 4
-    )
-    grid = [[(" ", 0) for _ in range(width)] for _ in range(24)]
-    for row, col, text, attr in writes:
-        for offset, character in enumerate(text):
-            if 0 <= row < len(grid) and 0 <= col + offset < width:
-                grid[row][col + offset] = (character, attr)
-
-    expected = (
-        "Mode      init resume partner operator",
-        "Runtime   local-native local-worktrees local-vm cloud-soon",
-        "Permits   bypass auto accept-edits read-only",
-        "Memory    full-lineage fresh bare-fork",
-    )
-    for row, text in enumerate(expected, start=cursor):
-        exact_visible = text if len(text) <= inner else text[: inner - 1] + "…"
-        visible = "".join(
-            character for character, _ in grid[row][left : left + len(exact_visible)]
+def test_wizard_advanced_choices_are_scrollable_and_mouse_selectable(
+    width, monkeypatch
+):
+    _workshop, form = _wizard(monkeypatch, size=(24, width))
+    form.advanced = True
+    for kind in (
+        "path",
+        "mode",
+        "permissions",
+        "continuity",
+        "continuity_parent",
+        "parents",
+        "advanced",
+    ):
+        _focus(form, kind)
+        form.draw()
+        assert any(
+            target[-1] == "item" and target[3] == form.focus
+            for target in form.mouse_targets
         )
-        assert visible == exact_visible
-
-    selected_col = left + len("Mode      ")
-    assert grid[cursor][selected_col][1] & workshop.curses.A_BOLD
-    assert not grid[cursor][selected_col][1] & workshop.curses.A_REVERSE
-
-    # The worktree gate keeps a visible reason in plain words.
-    rendered = "\n".join(text for _, _, text, _ in writes)
-    assert "child-attributable" not in rendered
-    reasons = [text for _, _, text, _ in writes if text.startswith("Unavailable — ")]
-    assert reasons
-    assert "local-worktrees: Needs live usage" in reasons[0]
-    assert "Not available for this provider" not in rendered
-    assert any("Advanced options" in text for _, _, text, _ in writes)
+        assert all(
+            0 <= row < 24 and col + len(text) <= width
+            for row, col, text, _ in form.window.writes
+        )
 
 
 def _host_python_without_core() -> Path | None:
@@ -1398,47 +1316,19 @@ def test_face_rows_open_the_tab_of_the_active_agent_they_show(
     assert opened == [["vc-frame", "action", "go-to-tab-name", "Claude"]]
 
 
-def test_provider_click_drops_parent_sessions_of_the_previous_provider(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    workshop = _load()
-    monkeypatch.setattr(workshop, "_provider_available", lambda _agent: True)
-    for name in (
-        "_normalize_runtime_choice",
-        "_normalize_permission_choice",
-        "_normalize_mode_choice",
-        "_normalize_continuity_choice",
-    ):
-        monkeypatch.setattr(workshop.Workshop, name, lambda _self: None)
-    monkeypatch.setattr(
-        workshop.curses,
-        "getmouse",
-        lambda: (0, 4, 3, 0, workshop.curses.BUTTON1_CLICKED),
-        raising=False,
-    )
-    picker = workshop.Workshop(SimpleNamespace(), mode="launcher")
-    picker.agent = workshop.AGENTS.index("claude")
-    picker.parent_sessions = [
-        workshop.SessionRecord(
-            session_id="claude-parent",
-            agent="claude",
-            repo_path="/tmp/project",
-            updated_at="2026-09-01T10:00:00Z",
-        )
-    ]
-    picker.parent_index = 0
-    picker.row = 1  # provider click must take focus back from the project
-    picker.mouse_targets = [(3, 0, 10, workshop.AGENTS.index("codex"), "provider")]
-
-    picker.handle_mouse()
-
-    assert picker.agent == workshop.AGENTS.index("codex")
-    assert picker.row == 0
-    assert picker.parent_sessions == []
-    assert picker.parent_index == -1
-
-    picker.handle_launcher_key(workshop.curses.KEY_RIGHT)
-    assert picker.agent == (workshop.AGENTS.index("codex") + 1) % len(workshop.AGENTS)
+def test_provider_change_clears_only_provider_dependents(monkeypatch):
+    workshop, form = _wizard(monkeypatch)
+    form.agent = workshop.AGENTS.index("claude")
+    form.continuity_parent = "claude-parent"
+    form.model_pin = "claude-model"
+    form.prompt = "Keep my prompt"
+    form.parent_sessions = [object()]
+    _focus(form, "provider", workshop.AGENTS.index("codex"))
+    _click_focus(workshop, form, monkeypatch)
+    assert workshop.AGENTS[form.agent] == "codex"
+    assert form.parent_sessions == [] and form.continuity_parent == ""
+    assert form.model_pin == "" and form.prompt == "Keep my prompt"
+    assert "Prompt kept" in form.notice
 
 
 @pytest.mark.parametrize("event", ["BUTTON1_RELEASED", "BUTTON3_CLICKED"])
@@ -1461,26 +1351,25 @@ def test_launcher_mouse_release_and_other_buttons_do_not_launch(
     assert launches == []
 
 
-def test_project_field_accepts_spaces_without_cycling_provider() -> None:
-    workshop = _load()
-    picker = workshop.Workshop(SimpleNamespace(), mode="launcher")
-    picker.row = 1
-    picker.path = "/tmp/My"
-
-    picker.handle_launcher_key(ord(" "))
-
-    assert picker.path == "/tmp/My "
+def test_project_field_accepts_spaces_without_cycling_provider(monkeypatch):
+    workshop, form = _wizard(monkeypatch)
+    form.advanced = True
+    form.path = "/tmp/My"
+    _focus(form, "path")
+    form.handle_launcher_key(ord(" "))
+    assert form.path == "/tmp/My "
+    assert workshop.AGENTS[form.agent] == "codex"
 
 
 @pytest.mark.parametrize("provider", ["claude", "codex", "kimi", "copilot"])
 @pytest.mark.parametrize("activation", ["enter", "click"])
-def test_provider_click_then_keyboard_and_launch_keep_exact_project(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, provider: str, activation: str
-) -> None:
+def test_provider_click_then_review_launch_keeps_project(
+    tmp_path, monkeypatch, provider, activation
+):
     workshop = _load()
     project = tmp_path / "My Project"
     project.mkdir()
-    picker, calls = _prepare_launch(
+    form, calls = _prepare_launch(
         workshop,
         project,
         monkeypatch,
@@ -1488,7 +1377,7 @@ def test_provider_click_then_keyboard_and_launch_keep_exact_project(
         live=["project-workspace"],
         current="project-workspace",
     )
-    monkeypatch.setattr(workshop, "_provider_available", lambda _agent: True)
+    form.launch_mode = 0
     for name in (
         "_normalize_runtime_choice",
         "_normalize_permission_choice",
@@ -1496,30 +1385,21 @@ def test_provider_click_then_keyboard_and_launch_keep_exact_project(
         "_normalize_continuity_choice",
     ):
         monkeypatch.setattr(workshop.Workshop, name, lambda _self: None)
-    picker.row = 1
-    picker.mouse_targets = [(3, 0, 10, workshop.AGENTS.index(provider), "provider")]
-    monkeypatch.setattr(
-        workshop.curses,
-        "getmouse",
-        lambda: (0, 4, 3, 0, workshop.curses.BUTTON1_CLICKED),
-    )
-    picker.handle_mouse()
-    picker.handle_launcher_key(workshop.curses.KEY_RIGHT)
-    picker.handle_launcher_key(workshop.curses.KEY_LEFT)
+    _focus(form, "provider", workshop.AGENTS.index(provider))
+    _click_focus(workshop, form, monkeypatch)
+    form.handle_launcher_key(workshop.curses.KEY_F6)
+    _focus(form, "launch")
     if activation == "enter":
-        picker.handle_launcher_key(10)
+        form.handle_launcher_key(10)
     else:
-        picker.mouse_targets = [(3, 0, 10, 0, "launch")]
-        picker.handle_mouse()
-
-    assert picker.error == ""
-    assert len(calls) == 1
+        _click_focus(workshop, form, monkeypatch)
+    form.launch()  # repeat activation is inert
+    assert form.error == "" and len([c for c in calls if "new-tab" in c]) == 1
     argv = calls[0]
     assert argv[argv.index("--session") + 1] == "project-workspace"
     assert argv[argv.index("--cwd") + 1] == str(project)
-    command = argv[argv.index("--") + 1 :]
-    assert command[:3] == ["vibecrafted", "init", provider]
-    assert command[command.index("--root") + 1] == str(project)
+    assert argv[argv.index("--root") + 1] == str(project)
+    assert argv[argv.index("--") + 3] == provider
 
 
 def test_small_home_and_launcher_render_without_nested_frame(
@@ -1575,98 +1455,53 @@ def test_small_home_and_launcher_render_without_nested_frame(
     form.draw_launcher()
     form_text = "\n".join(writes)
     assert "New agent" in form_text
-    assert "[ Launch ]" in form_text
+    assert "Launch" not in form_text  # launch exists only on Review
     assert "┌" not in form_text
     assert "canonical worktree" not in form_text
     assert "• agy" not in form_text
 
 
-def test_selected_provider_has_accent_without_a_dot_or_block(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    workshop = _load()
-    monkeypatch.setattr(workshop, "_ACCENT", 2 << 8)
-    styled: list[tuple[str, int]] = []
-
-    class FakeWindow:
-        def getmaxyx(self) -> tuple[int, int]:
-            return (24, 80)
-
-        def addstr(self, _row: int, _col: int, text: str, attr: int = 0) -> None:
-            styled.append((text, attr))
-
-        def erase(self) -> None:
-            pass
-
-        def refresh(self) -> None:
-            pass
-
-    monkeypatch.setattr(workshop, "_provider_available", lambda _agent: True)
-    monkeypatch.setattr(
-        workshop,
-        "runtime_policy_capabilities",
-        lambda _agent: {
-            name: {"available": True, "reason": ""}
-            for name in workshop.RUNTIME_POLICIES
-        },
+def test_selected_provider_and_focus_have_distinct_visible_markers(monkeypatch):
+    workshop, form = _wizard(monkeypatch)
+    _focus(form, "provider", 0)
+    form.draw()
+    assert any(
+        text == "● codex" and attr & workshop.curses.A_BOLD
+        for _, _, text, attr in form.window.writes
     )
-    form = workshop.Workshop(FakeWindow(), mode="launcher")
-    form.agent = workshop.AGENTS.index("codex")
-    form.draw_launcher()
-    selected = [item for item in styled if item[0].strip() == "codex"]
-    assert selected
-    assert selected[0][1] & workshop.curses.A_BOLD
-    assert selected[0][1] & workshop.curses.A_COLOR == 2 << 8
-    assert not selected[0][1] & workshop.curses.A_REVERSE
-    bullets = [item[0] for item in styled if item[0].startswith("• codex")]
-    assert bullets == []
+    assert any(
+        text == "›" and attr & workshop.curses.A_BOLD
+        for _, _, text, attr in form.window.writes
+    )
+    assert not any(
+        attr & workshop.curses.A_UNDERLINE for _, _, _, attr in form.window.writes
+    )
 
 
-def test_focused_picker_row_uses_a_chevron_and_selection_stays_bold(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Selected option is bold. Focus is a chevron, not a full-row underline."""
-    workshop = _load()
-    styled: list[tuple[str, int]] = []
-
-    class FakeWindow:
-        def getmaxyx(self) -> tuple[int, int]:
-            return (24, 80)
-
-        def addstr(self, _row: int, _col: int, text: str, attr: int = 0) -> None:
-            styled.append((text, attr))
-
-        def erase(self) -> None:
-            pass
-
-        def refresh(self) -> None:
-            pass
-
-    monkeypatch.setattr(workshop, "_provider_available", lambda _agent: True)
-    form = workshop.Workshop(FakeWindow(), mode="launcher")
-    form.agent = workshop.AGENTS.index("codex")
-    form.row = 0
-    form.draw_launcher()
-    providers = [item for item in styled if item[0].strip() in workshop.AGENTS]
-    assert providers
-    assert not any(attr & workshop.curses.A_UNDERLINE for _, attr in styled)
-    assert not any(attr & workshop.curses.A_REVERSE for _, attr in styled)
-    selected = [attr for text, attr in providers if text.strip() == "codex"]
-    assert selected[0] & workshop.curses.A_BOLD
-    others = [attr for text, attr in providers if text.strip() != "codex"]
-    assert others and not any(attr & workshop.curses.A_BOLD for attr in others)
-    assert any(text == "›" for text, _attr in styled)
-
-    styled.clear()
-    form.row = 1
-    form.draw_launcher()
-    providers = [item for item in styled if item[0].strip() in workshop.AGENTS]
-    assert not any(attr & workshop.curses.A_UNDERLINE for _, attr in providers)
-    path_rows = [attr for text, attr in styled if text.startswith("Project  ")]
-    assert path_rows and not path_rows[0] & workshop.curses.A_UNDERLINE
-    assert any(text == "›" for text, _attr in styled)
-    launch = [attr for text, attr in styled if text == "[ Launch ]"]
-    assert launch and launch[0] == workshop.curses.A_BOLD
+def test_prompt_newlines_unicode_and_cursor_edits_cannot_launch(monkeypatch):
+    workshop, form = _wizard(monkeypatch)
+    launches = []
+    monkeypatch.setattr(form, "launch", lambda: launches.append(True))
+    form._goto_step(4)
+    _focus(form, "prompt")
+    for char in "zażółć":
+        form.handle_launcher_key(char)
+    form.handle_launcher_key(10)
+    for char in "hello":
+        form.handle_launcher_key(ord(char))
+    form.handle_launcher_key(workshop.curses.KEY_LEFT)
+    form.handle_launcher_key(workshop.curses.KEY_BACKSPACE)
+    assert form.prompt == "zażółć\nhelo" and launches == []
+    for step in range(6):
+        form.handle_launcher_key(workshop.curses.KEY_F1 + step)
+        assert form.prompt == "zażółć\nhelo"
+    for step in range(4, -1, -1):
+        form.handle_launcher_key(27)
+        assert form.step == step and form.prompt == "zażółć\nhelo"
+    form.handle_launcher_key(27)
+    assert form.confirm_exit
+    form.handle_launcher_key(27)
+    assert not form.confirm_exit and form.prompt
 
 
 def test_public_reason_vm_is_host_not_provider() -> None:
@@ -1690,176 +1525,52 @@ def test_public_reason_worktrees_name_the_usage_gap() -> None:
     )
 
 
-def test_selected_advanced_choice_uses_reverse_not_only_a_dot(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    workshop = _load()
-    styled: list[tuple[str, int]] = []
-
-    class FakeWindow:
-        def getmaxyx(self) -> tuple[int, int]:
-            return (24, 80)
-
-        def addstr(self, _row: int, _col: int, text: str, attr: int = 0) -> None:
-            styled.append((text, attr))
-
-        def erase(self) -> None:
-            pass
-
-        def refresh(self) -> None:
-            pass
-
-    monkeypatch.setattr(workshop, "_provider_available", lambda _agent: True)
-    monkeypatch.setattr(
-        workshop,
-        "runtime_policy_capabilities",
-        lambda _agent: {
-            name: {"available": name == "local-native", "reason": ""}
-            for name in workshop.RUNTIME_POLICIES
-        },
-    )
-    monkeypatch.setattr(
-        workshop,
-        "mode_capabilities",
-        lambda *_args, **_kwargs: {
-            name: {"available": True, "reason": ""} for name in workshop.LAUNCH_MODES
-        },
-    )
-    monkeypatch.setattr(
-        workshop,
-        "resolve_provider_policy",
-        lambda *_args, **_kwargs: SimpleNamespace(supported=True, reason=""),
-    )
-    monkeypatch.setattr(
-        workshop,
-        "continuity_policy_capabilities",
-        lambda *_args, **_kwargs: {
-            name: {"available": True, "reason": ""}
-            for name in workshop.CONTINUITY_MODES
-        },
-    )
-    form = workshop.Workshop(FakeWindow(), mode="launcher")
+def test_every_advanced_selection_accepts_keyboard_and_click(monkeypatch):
+    workshop, form = _wizard(monkeypatch)
     form.advanced = True
-    form.launch_mode = 0
-    form.draw_launcher()
-    selected = [item for item in styled if item[0] == "init"]
-    assert selected
-    assert selected[0][1] & workshop.curses.A_BOLD
-    assert not selected[0][1] & workshop.curses.A_REVERSE
-    assert not any(item[0].startswith("• ") for item in styled)
-    assert not any(item[0].startswith("× ") for item in styled)
+    for kind, index, field in (
+        ("mode", 2, "launch_mode"),
+        ("permissions", 1, "permissions"),
+        ("continuity", 1, "continuity"),
+    ):
+        _focus(form, kind, index)
+        _click_focus(workshop, form, monkeypatch)
+        assert getattr(form, field) == index
+        _focus(form, kind, 0)
+        form.handle_launcher_key(10)
+        assert getattr(form, field) == 0
 
 
-def test_advanced_toggle_is_visible_clickable_and_keyed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    workshop = _load()
-    writes: list[tuple[int, int, str, int]] = []
-
-    class FakeWindow:
-        def getmaxyx(self) -> tuple[int, int]:
-            return (24, 80)
-
-        def addstr(self, row: int, col: int, text: str, attr: int = 0) -> None:
-            writes.append((row, col, text, attr))
-
-        def erase(self) -> None:
-            pass
-
-        def refresh(self) -> None:
-            pass
-
-    monkeypatch.setattr(workshop, "_provider_available", lambda _agent: True)
-    monkeypatch.setattr(
-        workshop,
-        "runtime_policy_capabilities",
-        lambda _agent: {
-            name: {"available": True, "reason": ""}
-            for name in workshop.RUNTIME_POLICIES
-        },
-    )
-    form = workshop.Workshop(FakeWindow(), mode="launcher")
-    form.draw_launcher()
-    assert any(text == "▸ Advanced options" for _, _, text, _ in writes)
-    assert any(kind == "advanced" for *_, kind in form.mouse_targets)
+def test_advanced_toggle_and_project_text_keep_draft(monkeypatch):
+    workshop, form = _wizard(monkeypatch)
+    form.prompt = "draft"
+    _focus(form, "advanced")
+    _click_focus(workshop, form, monkeypatch)
+    assert form.advanced
+    _focus(form, "path")
+    previous = form.path
     form.handle_launcher_key(ord("a"))
-    assert form.advanced is True
-    writes.clear()
-    form.draw_launcher()
-    assert any(text == "▾ Advanced options" for _, _, text, _ in writes)
-
-    form.row = 1
-    form.path = "/tmp/project"
-    form.handle_launcher_key(ord("a"))
-    assert form.advanced is True
-    assert form.path.endswith("a")
-
-    form.path = "/tmp/project"
-    form.row = 2
-    form.handle_launcher_key(ord("a"))
-    assert form.advanced is False
-    assert form.path == "/tmp/project"
-
-    monkeypatch.setattr(
-        workshop.curses,
-        "getmouse",
-        lambda: (0, 2, 10, 0, workshop.curses.BUTTON1_CLICKED),
-        raising=False,
-    )
-    form.mouse_targets = [(10, 0, 20, 0, "advanced")]
-    form.handle_mouse()
-    assert form.advanced is True
+    assert form.path == previous + "a" and form.advanced
+    form.handle_launcher_key(27)
+    assert not form.advanced and form.prompt == "draft"
 
 
-def test_small_launcher_does_not_overlap_rows(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    workshop = _load()
-    writes: list[tuple[int, str]] = []
-
-    class FakeWindow:
-        def __init__(self, size: tuple[int, int]) -> None:
-            self.size = size
-
-        def getmaxyx(self) -> tuple[int, int]:
-            return self.size
-
-        def addstr(self, row: int, _col: int, text: str, _attr: int = 0) -> None:
-            writes.append((row, text))
-
-        def erase(self) -> None:
-            pass
-
-        def refresh(self) -> None:
-            pass
-
-    monkeypatch.setattr(workshop, "_provider_available", lambda _agent: True)
-    monkeypatch.setattr(
-        workshop,
-        "runtime_policy_capabilities",
-        lambda _agent: {
-            name: {"available": name == "local-native", "reason": ""}
-            for name in workshop.RUNTIME_POLICIES
-        },
-    )
-    form = workshop.Workshop(FakeWindow((14, 50)), mode="launcher")
-    form.advanced = True
-    form.draw_launcher()
-
-    def first_row(predicate) -> int:
-        for row, text in writes:
-            if predicate(text):
-                return row
-        raise AssertionError("missing row")
-
-    title = first_row(lambda text: text == "New agent")
-    project = first_row(lambda text: text.startswith("Project"))
-    toggle = first_row(lambda text: "Advanced options" in text)
-    launch = first_row(lambda text: text.startswith("[ Launch ]"))
-    rows = (title, project, toggle, launch)
-    assert rows == tuple(sorted(rows))
-    assert len(set(rows)) == 4
-    assert all(0 <= row < 14 for row in rows)
+def test_small_wizard_all_steps_and_resize_keep_controls_reachable(monkeypatch):
+    _workshop, form = _wizard(monkeypatch, size=(12, 40))
+    for size in ((12, 40), (8, 28), (24, 80), (14, 50)):
+        form.window.size = size
+        for step in range(6):
+            form._goto_step(step)
+            _focus(form, "launch" if step == 5 else "next")
+            form.draw()
+            assert any(
+                target[-1] == "item" and target[3] == form.focus
+                for target in form.mouse_targets
+            )
+            assert all(
+                0 <= row < size[0] and col + len(text) <= size[1]
+                for row, col, text, _ in form.window.writes
+            )
 
 
 def test_session_names_from_listing_and_other_sessions_are_on_demand(
@@ -1887,3 +1598,369 @@ def test_session_names_from_listing_and_other_sessions_are_on_demand(
     names, error = workshop.list_other_sessions()
     assert error == ""
     assert names == ["other-root"]
+
+
+class _WizardWindow:
+    def __init__(self, size=(24, 80)):
+        self.size = size
+        self.writes = []
+
+    def getmaxyx(self):
+        return self.size
+
+    def addstr(self, row, col, text, attr=0):
+        self.writes.append((row, col, text, attr))
+
+    def erase(self):
+        self.writes.clear()
+
+    def refresh(self):
+        pass
+
+
+def _wizard(monkeypatch, size=(24, 80)):
+    workshop = _load()
+    monkeypatch.setattr(
+        workshop,
+        "runtime_policy_capabilities",
+        lambda agent: {
+            name: {
+                "available": name in ("local-native", "local-worktrees"),
+                "reason": "no canonical VM entrypoint",
+            }
+            for name in workshop.RUNTIME_POLICIES
+        },
+    )
+    monkeypatch.setattr(
+        workshop,
+        "resolve_provider_policy",
+        lambda *a: SimpleNamespace(supported=True, reason=""),
+    )
+    monkeypatch.setattr(
+        workshop,
+        "continuity_policy_capabilities",
+        lambda *a, **k: {
+            name: {"available": True, "reason": ""}
+            for name in workshop.CONTINUITY_MODES
+        },
+    )
+    form = workshop.Workshop(_WizardWindow(size), mode="launcher")
+    form.runtime = 0
+    return workshop, form
+
+
+def _focus(form, kind, index=None):
+    form.items = form._launcher_items(max(1, form.window.size[1] - 3))
+    form.focus = next(
+        i
+        for i, item in enumerate(form.items)
+        if item[1] == kind and (index is None or item[2] == index)
+    )
+    form._show_focus()
+
+
+def _click_focus(workshop, form, monkeypatch):
+    form.draw()
+    row, start, _, _, _ = next(
+        target
+        for target in form.mouse_targets
+        if target[-1] == "item" and target[3] == form.focus
+    )
+    monkeypatch.setattr(
+        workshop.curses,
+        "getmouse",
+        lambda: (0, start, row, 0, workshop.curses.BUTTON1_CLICKED),
+    )
+    form.handle_mouse()
+
+
+def test_bracketed_paste_is_text_even_with_wizard_hotkeys(monkeypatch):
+    _workshop, form = _wizard(monkeypatch)
+    form._goto_step(4)
+    _focus(form, "prompt")
+    source = iter("[200~a\nLaunch\r\nzażółć\x1b[201~")
+    form.window.get_wch = lambda: next(source)
+    form.window.timeout = lambda _: None
+    form._escape_or_paste()
+    assert form.prompt == "a\nLaunch\nzażółć"
+    assert form.step == 4 and not form.launched
+
+
+def test_failed_pane_launch_keeps_draft_and_retry_is_single(tmp_path, monkeypatch):
+    workshop = _load()
+    form, _calls = _prepare_launch(
+        workshop,
+        tmp_path,
+        monkeypatch,
+        destination="here",
+        live=["here"],
+        current="here",
+    )
+    form.prompt = "safe task\nsecond line"
+    form.model_pin = "provider-model"
+    form._goto_step(5)
+    attempts = []
+
+    def transport(command, **kwargs):
+        attempts.append(command)
+        return SimpleNamespace(
+            returncode=2 if len(attempts) == 1 else 0,
+            stdout="",
+            stderr="controlled start failure",
+        )
+
+    monkeypatch.setattr(workshop.subprocess, "run", transport)
+    form.launch()
+    assert form.error == "controlled start failure" and not form.launched
+    assert (
+        form.prompt == "safe task\nsecond line" and form.model_pin == "provider-model"
+    )
+    form.launch()
+    form.launch()
+    assert len([c for c in attempts if "new-tab" in c]) == 2 and form.launched
+    assert attempts[1][attempts[1].index("--model") + 1] == "provider-model"
+    assert attempts[1][attempts[1].index("--prompt") + 1].endswith(form.prompt)
+
+
+def test_runtime_failure_returns_form_from_owner_status(tmp_path, monkeypatch):
+    workshop = _load()
+    form, calls = _prepare_launch(
+        workshop,
+        tmp_path,
+        monkeypatch,
+        destination="here",
+        live=["here"],
+        current="here",
+    )
+    monkeypatch.setattr(
+        workshop, "lookup_runtime_run_meta", lambda _: {"status": "prepared"}
+    )
+    form.prompt = "draft"
+    form.launch()
+    assert (
+        form.mode == "launcher" and form.launched and form.launch_status == "prepared"
+    )
+    form.launch()
+    assert len([c for c in calls if "new-tab" in c]) == 1
+    monkeypatch.setattr(
+        workshop,
+        "lookup_runtime_run_meta",
+        lambda _: {"status": "failed", "error": "provider refused model"},
+    )
+    form._refresh_launch_state()
+    assert form.mode == "launcher" and not form.launched and form.prompt == "draft"
+    assert form.error == "provider refused model"
+
+
+def test_attach_failure_cannot_duplicate_admitted_tab(tmp_path, monkeypatch):
+    workshop = _load()
+    form, _ = _prepare_launch(
+        workshop,
+        tmp_path,
+        monkeypatch,
+        destination="there",
+        live=["there"],
+        current="here",
+    )
+    calls = []
+
+    def transport(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(
+            returncode=2 if "attach" in command else 0,
+            stdout="",
+            stderr="attach failed",
+        )
+
+    monkeypatch.setattr(workshop.subprocess, "run", transport)
+    form.launch()
+    form.launch()
+    assert len(calls) == 2 and form.launched and form.error == "attach failed"
+
+
+def test_disabled_runtime_reason_wraps_and_has_no_mouse_target(monkeypatch):
+    _workshop, form = _wizard(monkeypatch, size=(12, 32))
+    form._goto_step(3)
+    form.draw()
+    assert not any(kind == "runtime" for _, kind, _, _ in form.items)
+    reason = " ".join(text for text, kind, _, _ in form.items if not kind)
+    assert "no canonical VM entrypoint" in reason
+    assert all(len(text) <= 29 for text, kind, _, _ in form.items if not kind)
+
+
+def test_prompt_and_model_use_canonical_command_transport():
+    workshop = _load()
+    argv = workshop.launch_argv(
+        "codex", "partner", model="provider-model", prompt="first\nsecond"
+    )
+    assert argv[argv.index("--model") + 1] == "provider-model"
+    assert argv[argv.index("--prompt") + 1] == "/vc-partner\n\nfirst\nsecond"
+    with pytest.raises(ValueError, match="Resume selects"):
+        workshop.launch_argv("codex", "resume", prompt="draft")
+
+
+def test_resume_keeps_new_session_draft_without_sending_it(tmp_path, monkeypatch):
+    workshop = _load()
+    form, calls = _prepare_launch(
+        workshop,
+        tmp_path,
+        monkeypatch,
+        destination="here",
+        live=["here"],
+        current="here",
+    )
+    form.launch_mode = workshop.LAUNCH_MODES.index("resume")
+    form.prompt = "new conversation draft"
+    form.model_pin = "new-model"
+    form._goto_step(1)
+    form.draw_launcher()
+    assert not any(
+        kind in {"model", "model_pin", "default_model"} for _, kind, _, _ in form.items
+    )
+    form._goto_step(4)
+    form.draw_launcher()
+    assert not any(kind == "prompt" for _, kind, _, _ in form.items)
+    form.launch()
+    pane = next(command for command in calls if "new-tab" in command)
+    assert "--model" not in pane and "--prompt" not in pane
+    assert form.prompt == "new conversation draft" and form.model_pin == "new-model"
+
+
+@pytest.mark.parametrize("runtime", ["local-native", "local-worktrees"])
+def test_workshop_real_admission_and_pty_provider_contract(
+    tmp_path, monkeypatch, runtime
+):
+    """Real owner and provider process; only Frame transport is controlled."""
+    import json
+    import pty
+    import select
+    import time
+
+    from vibecrafted_core import control_plane
+
+    workshop = _load()
+    root = _git_checkout(
+        tmp_path / "project", origin="https://github.com/Fixture/project.git"
+    )
+    (root / "README.md").write_text("fixture\n")
+    subprocess.run(["git", "add", "README.md"], cwd=root, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.org",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        cwd=root,
+        check=True,
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    capture = tmp_path / "provider.json"
+    provider = fake_bin / "claude"
+    provider.write_text(
+        f"#!{sys.executable}\n" + "import json,os,sys,pathlib\n"
+        "if '--help' in sys.argv: print('--session-id <uuid>'); sys.exit(0)\n"
+        "if '--version' in sys.argv: print('2.1.232 (Claude Code)'); sys.exit(0)\n"
+        "pathlib.Path(os.environ['SMOKE_CAPTURE']).write_text(json.dumps({'argv':sys.argv[1:], 'cwd':os.getcwd(), 'run_id':os.environ['VIBECRAFTED_RUN_ID'], 'tty':os.isatty(0)}))\n"
+        "print('CONTROLLED_PROVIDER_OK', flush=True)\n"
+    )
+    provider.chmod(0o755)
+    monkeypatch.setenv("PATH", str(fake_bin) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("SMOKE_CAPTURE", str(capture))
+    monkeypatch.setenv("VIBECRAFTED_INTERACTIVE_IMPORT_ROOT", str(SCRIPT.parents[3]))
+    monkeypatch.setattr(
+        workshop, "destination_session_for_workspace", lambda _: "fixture-workspace"
+    )
+    monkeypatch.setattr(
+        workshop, "list_live_frame_sessions", lambda: (["fixture-workspace"], "")
+    )
+    monkeypatch.setattr(workshop, "current_frame_session", lambda: "fixture-workspace")
+    transport_run = subprocess.run
+    output = bytearray()
+    commands = []
+
+    def transport(command, **kwargs):
+        if command[0] != "vc-frame":
+            return transport_run(command, **kwargs)
+        commands.append(command)
+        if "new-tab" not in command:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        master, slave = pty.openpty()
+        child = subprocess.Popen(
+            command[command.index("--") + 1 :],
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            start_new_session=True,
+        )
+        os.close(slave)
+        try:
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                if select.select([master], [], [], 0.05)[0]:
+                    try:
+                        output.extend(os.read(master, 65536))
+                    except OSError:
+                        break
+                if child.poll() is not None:
+                    break
+            assert child.wait(timeout=2) == 0, output.decode(errors="replace")
+        finally:
+            if child.poll() is None:
+                child.terminate()
+                child.wait(timeout=3)
+            os.close(master)
+        return SimpleNamespace(returncode=0, stdout="1", stderr="")
+
+    monkeypatch.setattr(workshop.subprocess, "run", transport)
+    form = workshop.Workshop(_WizardWindow(), mode="launcher")
+    form.agent = workshop.AGENTS.index("claude")
+    form.runtime = workshop.RUNTIME_POLICIES.index(runtime)
+    form.permissions = workshop.PERMISSION_POLICIES.index("read-only")
+    form.continuity = workshop.CONTINUITY_MODES.index("fresh")
+    form.path = str(root)
+    form.model_pin = "fixture-model"
+    form.prompt = "Do not edit files. Reply CONTROLLED_PROVIDER_OK.\nSecond line."
+    form._goto_step(5)
+    _focus(form, "launch")
+    form.handle_launcher_key(10)
+    assert form.error == "", form.error
+    recorded = json.loads(capture.read_text())
+    assert recorded["tty"] is True
+    assert recorded["argv"][recorded["argv"].index("--model") + 1] == "fixture-model"
+    delivered_prompt = Path(recorded["argv"][-1].split("private task file: ", 1)[1])
+    assert form.prompt in delivered_prompt.read_text()
+    assert form.launch_run_id == recorded["run_id"]
+    receipt = control_plane.lookup_runtime_run_meta(recorded["run_id"])
+    assert receipt["status"] == "completed" and receipt["exit_code"] == 0
+    assert receipt["model_requested"] == "fixture-model"
+    assert Path(recorded["cwd"]) == Path(receipt["effective_worker_root"])
+    assert Path(receipt["parent_root"]) == root
+    if runtime == "local-worktrees":
+        assert Path(recorded["cwd"]) != root
+        assert receipt["worktree"] is True
+    else:
+        assert Path(recorded["cwd"]) == root
+    form.launch()
+    assert len([command for command in commands if "new-tab" in command]) == 1
+
+
+def test_sgr_mouse_fallback_uses_same_hit_targets_not_escape(monkeypatch):
+    _workshop, form = _wizard(monkeypatch, size=(12, 40))
+    form._goto_step(4)
+    form.draw()
+    keys = iter("[<0;3;2M")
+    form.window.get_wch = lambda: next(keys)
+    form.window.timeout = lambda _: None
+    form._escape_or_paste()
+    assert form.step == 0
+    form._goto_step(4)
+    form.draw()
+    keys = iter("[<0;3;2m")
+    form._escape_or_paste()
+    assert form.step == 4

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -24,6 +26,38 @@ MODEL_OVERRIDE_FLAG_ALIASES: dict[str, tuple[str, ...]] = {
     "grok": ("--model", "-m"),
     "kimi": ("--model", "-m"),
 }
+
+
+def provider_model_choices(agent: str) -> dict[str, object]:
+    """Project provider-owned local discovery; never maintain a model registry.
+
+    Codex publishes its selectable model inventory in models_cache.json. Other
+    adapters currently expose only a pin flag, so advertise no invented list.
+    A cached inventory is discovery, not authorization or launch acceptance.
+    """
+    choices: list[str] = []
+    if agent == "codex":
+        path = (
+            Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+            / "models_cache.json"
+        )
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            for model in payload.get("models", []):
+                if not isinstance(model, dict) or model.get("visibility") != "list":
+                    continue
+                slug = model.get("slug")
+                if isinstance(slug, str) and slug.strip() and slug not in choices:
+                    choices.append(slug)
+        except (OSError, ValueError, AttributeError, TypeError):
+            pass
+    return {
+        "choices": choices,
+        "source": "provider_cache" if choices else "provider_default_only",
+        "reason": ""
+        if choices
+        else "Provider does not publish a local model inventory; use its default or an explicit pin.",
+    }
 
 
 def _model_override_receipt(

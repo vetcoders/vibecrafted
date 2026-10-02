@@ -555,3 +555,36 @@ def test_kimi_model_metacharacters_reach_fake_cli_as_one_value(
     ]
     assert not shell_payload_marker.exists()
     assert not command_substitution_marker.exists()
+
+
+def test_provider_model_choices_use_only_visible_provider_cache(tmp_path, monkeypatch):
+    from vibecrafted_core.model_overrides import provider_model_choices
+
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    (tmp_path / "models_cache.json").write_text(
+        json.dumps(
+            {
+                "models": [
+                    {"slug": "advertised", "visibility": "list"},
+                    {"slug": "internal-review", "visibility": "hide"},
+                    {"slug": "advertised", "visibility": "list"},
+                    "malformed",
+                ]
+            }
+        )
+    )
+    result = provider_model_choices("codex")
+    assert result["choices"] == ["advertised"]
+    assert result["source"] == "provider_cache"
+    assert provider_model_choices("claude")["choices"] == []
+
+
+def test_provider_model_cache_corruption_preserves_provider_default(
+    tmp_path, monkeypatch
+):
+    from vibecrafted_core.model_overrides import provider_model_choices
+
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    (tmp_path / "models_cache.json").write_text("not json")
+    assert provider_model_choices("codex")["choices"] == []
+    assert provider_model_choices("codex")["reason"]

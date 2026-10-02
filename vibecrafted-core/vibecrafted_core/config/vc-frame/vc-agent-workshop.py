@@ -15,6 +15,7 @@ import os
 import shutil
 import subprocess
 import sys
+import textwrap
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -110,12 +111,19 @@ from vibecrafted_core.aicx_session_chain import (
     SessionRecord,
     project_filter_for_root,
 )
+from vibecrafted_core.control_plane import lookup_runtime_run_meta
+from vibecrafted_core.model_overrides import (
+    MODEL_OVERRIDE_FLAGS,
+    provider_model_choices,
+)
 from vibecrafted_core.spawn import (
     CONTINUITY_MODES,
     OPERATOR_POLICIES,
     PERMISSION_POLICIES,
     RUNTIME_POLICIES,
     continuity_policy_capabilities,
+    finish_meta,
+    interactive_workspace_command,
     resolve_operator_agent_policy,
     resolve_provider_policy,
     runtime_policy_capabilities,
@@ -166,6 +174,8 @@ def launch_argv(
     continuity: str = "fresh",
     continuity_parent: str = "",
     workspace: str | os.PathLike[str] = "",
+    model: str = "",
+    prompt: str = "",
 ) -> list[str]:
     """Return the one canonical interactive command for a launcher choice."""
     if agent not in AGENTS:
@@ -212,8 +222,15 @@ def launch_argv(
             command.extend(["--parent-session", continuity_parent])
         elif continuity == "full-lineage" and continuity_parent:
             command.extend(["--continuity-parent", continuity_parent])
-        if mode in MODE_PROMPTS:
-            command.extend(["--prompt", MODE_PROMPTS[mode]])
+        if model:
+            if agent not in MODEL_OVERRIDE_FLAGS or any(c in model for c in "\r\n\x00"):
+                raise ValueError("This provider cannot accept that model pin")
+            command.extend(["--model", model])
+        effective_prompt = "\n\n".join(
+            filter(None, (MODE_PROMPTS.get(mode, ""), prompt))
+        )
+        if effective_prompt:
+            command.extend(["--prompt", effective_prompt])
         return command
     if runtime != "local-native":
         raise ValueError(
@@ -222,6 +239,10 @@ def launch_argv(
     command = ["vibecrafted", "resume", agent]
     if root:
         command.extend(["--root", root])
+    if model or prompt:
+        raise ValueError(
+            "Resume selects its model and input in the provider session; choose init to send a new prompt"
+        )
     return command
 
 
@@ -296,6 +317,7 @@ def launch_pane_argv(
         title,
         "--cwd",
         str(workspace),
+        "--no-focus",
         "--",
         *command,
     ]
@@ -748,41 +770,6 @@ def _safe_addstr(
         pass
 
 
-def _dim_unavailable_choices(
-    window: curses.window,
-    row: int,
-    col: int,
-    choices: tuple[str, ...],
-    available: tuple[bool, ...],
-    selected: int,
-    end_col: int,
-    base: int = 0,
-) -> None:
-    """Paint unavailable tokens dim and the selected token bold in the accent color.
-
-    Focus is a chevron beside the row,
-    never an underline or strike through the glyphs, and never a reverse-video
-    block.
-    """
-    tokens = _choice_tokens(choices, selected=selected, available=available)
-    # The base line clips the *whole* token sequence.  Slice that same rendered
-    # sequence before applying token attributes so a trailing disabled token
-    # cannot overwrite its ellipsis or drift relative to the selected token.
-    visible = _clip(" ".join(tokens), end_col - col)
-    offset = 0
-    for index, (token, enabled) in enumerate(zip(tokens, available, strict=True)):
-        fragment = visible[offset : offset + len(token)]
-        if not fragment:
-            break
-        if not enabled:
-            _safe_addstr(window, row, col + offset, fragment, curses.A_DIM | base)
-        elif index == selected:
-            _safe_addstr(
-                window, row, col + offset, fragment, curses.A_BOLD | _ACCENT | base
-            )
-        offset += len(token) + 1
-
-
 def _choice_tokens(
     choices: tuple[str, ...],
     *,
@@ -792,19 +779,6 @@ def _choice_tokens(
     """Bare option labels. The selected one is painted bold; unavailable is dim."""
     _ = (selected, available)
     return tuple(choices)
-
-
-def _paint_row_focus(window: curses.window, row: int, col: int, focused: bool) -> int:
-    """Chevron in the gutter. Option glyphs stay unmarked and unshifted."""
-    if col > 0:
-        _safe_addstr(
-            window,
-            row,
-            col - 1,
-            "›" if focused else " ",
-            curses.A_BOLD if focused else 0,
-        )
-    return col
 
 
 def _provider_available(agent: str) -> bool:
@@ -818,6 +792,7 @@ class Workshop:
         self.mode = mode
         self.standalone_launcher = mode == "launcher"
         self.home_choice = 0
+        self.face_choice = 0
         self.row = 0
         self.agent = 2  # codex is the least surprising neutral default here
         self.launch_mode = 0
@@ -828,7 +803,26 @@ class Workshop:
         self.parent_sessions: list[SessionRecord] = []
         self.parent_index = -1
         self.parent_error = ""
-        self.path = str(Path.cwd())
+        self.path = str(
+            Path(os.environ.get("VIBECRAFTED_WORKSPACE_ROOT") or Path.cwd()).resolve()
+        )
+        self.step = 0
+        self.focus = 0
+        self.scroll = 0
+        self.prompt = ""
+        self.model_pin = ""
+        self.text_cursors: dict[str, int] = {}
+        self.confirm_exit = False
+        self.dirty = False
+        self.launched = False
+        self.launch_run_id = ""
+        self.launch_status = ""
+        self.launch_destination = ""
+        self.launch_title = ""
+        self.launch_agent = ""
+        self.launching = False
+        self.notice = ""
+        self.items: list[tuple[str, str, int, bool]] = []
         self.error = ""
         self.mouse_targets: list[tuple[int, int, int, int, str]] = []
         self.presence_schedule = PresenceSchedule()
@@ -865,7 +859,15 @@ class Workshop:
         self.configure()
         while True:
             self.draw()
-            key = self.window.getch()
+            try:
+                key = self.window.get_wch()
+            except curses.error:
+                continue
+            if isinstance(key, str):
+                if key == "\x1b":
+                    self._escape_or_paste()
+                    continue
+                key = ord(key) if ord(key) < 128 else key
             if key == -1:
                 continue
             if key == curses.KEY_MOUSE:
@@ -882,6 +884,7 @@ class Workshop:
     def draw(self) -> None:
         self.window.erase()
         self.mouse_targets.clear()
+        self._refresh_launch_state()
         if self.mode == "home":
             self.draw_home()
         else:
@@ -960,7 +963,15 @@ class Workshop:
                     tab = self.face_records[offset].tab
                 suffix = f"  [{tab}]" if tab and tab.casefold() != "agents" else ""
                 line = f"  {face}{suffix}"
-                _safe_addstr(self.window, list_row + offset, left, line)
+                _safe_addstr(
+                    self.window,
+                    list_row + offset,
+                    left,
+                    line,
+                    curses.A_BOLD | _ACCENT
+                    if self.home_choice == -1 and self.face_choice == offset
+                    else 0,
+                )
                 self.mouse_targets.append(
                     (
                         list_row + offset,
@@ -1027,196 +1038,557 @@ class Workshop:
             else "n New agent · v Voc · o other sessions · click a row to open its tab"
         )
         _safe_addstr(self.window, height - 2, left, hint, curses.A_DIM)
+        if self.notice:
+            _safe_addstr(self.window, height - 1, left, self.notice, curses.A_DIM)
         if self.error:
             _safe_addstr(self.window, height - 1, left, self.error, curses.A_BOLD)
 
-    def _draw_providers(self, row: int, col: int, width: int) -> None:
-        x = _paint_row_focus(self.window, row, col, self.row == 0)
-        for index, name in enumerate(AGENTS):
-            token = f" {name} "
-            if x + len(token) >= col + width:
-                row += 1
-                x = col
-            available = _provider_available(name)
-            if index == self.agent and available:
-                attr = curses.A_BOLD | _ACCENT
-            elif available:
-                attr = 0
+    STEPS = ("Agent", "Model", "Isolation", "Runtime", "Prompt", "Review")
+    STEP_HELP = (
+        "Choose an installed provider. Dim choices explain what is missing.",
+        "Provider default, or an exact model ID. The provider validates the pin.",
+        "Choose who shares the checkout. Execution location is a separate step.",
+        "Choose where the Agent executes. VM/cloud require an admitted entrypoint.",
+        "Enter inserts a newline. Tab leaves the editor. Launch is on Review.",
+        "Review the effective request. Click any step or press F1–F6 to edit it.",
+    )
+
+    def _launcher_items(self, width: int) -> list[tuple[str, str, int, bool]]:
+        """One scrollable document, shared by paint, focus and mouse hit testing."""
+        items: list[tuple[str, str, int, bool]] = []
+
+        def note(text: str) -> None:
+            for line in textwrap.wrap(text, max(1, width - 2)) or [""]:
+                items.append((line, "", 0, False))
+
+        def choice(
+            text: str,
+            kind: str,
+            index: int,
+            selected: bool,
+            enabled: bool = True,
+            reason: str = "",
+        ) -> None:
+            mark = "●" if selected else "○"
+            items.append((f"{mark} {text}", kind if enabled else "", index, enabled))
+            if not enabled:
+                note(f"Unavailable: {reason}. Use an enabled choice below or go back.")
+
+        def editor(label: str, field: str) -> None:
+            value = getattr(self, field)
+            note(label)
+            cursor = min(self.text_cursors.get(field, len(value)), len(value))
+            # Keep source offsets through wrapping, newlines and blank lines.
+            offset = 0
+            for line in value.split("\n"):
+                chunks = [
+                    line[i : i + max(1, width - 3)]
+                    for i in range(0, len(line), max(1, width - 3))
+                ] or [""]
+                for chunk in chunks:
+                    end = offset + len(chunk)
+                    marker = "│" if offset <= cursor <= end else " "
+                    shown = chunk
+                    if offset <= cursor <= end:
+                        at = cursor - offset
+                        shown = chunk[:at] + marker + chunk[at:]
+                    items.append((shown or "│", field, offset, True))
+                    offset = end
+                offset += 1
+
+        note(self.STEP_HELP[self.step])
+        if self.error:
+            note("Cannot launch: " + self.error)
+        provider = AGENTS[self.agent]
+        resuming = LAUNCH_MODES[self.launch_mode] == "resume"
+        caps = runtime_policy_capabilities(provider)
+        runtime = RUNTIME_POLICIES[self.runtime]
+        permits = PERMISSION_POLICIES[self.permissions]
+        if self.confirm_exit:
+            note("Keep your draft? Leaving discards the choices and prompt.")
+            items.extend(
+                (
+                    ("[ Keep editing ]", "keep", 0, True),
+                    ("[ Discard and leave ]", "discard", 0, True),
+                )
+            )
+            return items
+        if self.advanced:
+            note("Advanced settings · scroll to see all choices")
+            editor("Project folder", "path")
+            modes = mode_capabilities(provider, runtime, permits)
+            note("Start mode")
+            for i, name in enumerate(LAUNCH_MODES):
+                choice(
+                    name,
+                    "mode",
+                    i,
+                    i == self.launch_mode,
+                    bool(modes[name]["available"]),
+                    str(modes[name]["reason"]),
+                )
+            note("Permissions")
+            for i, name in enumerate(PERMISSION_POLICIES):
+                decision = resolve_provider_policy(
+                    provider, runtime, name, "interactive"
+                )
+                choice(
+                    name,
+                    "permissions",
+                    i,
+                    i == self.permissions,
+                    decision.supported,
+                    decision.reason,
+                )
+            note(
+                "Memory / continuation · full-lineage inherits context; fresh starts clean; bare-fork uses the selected parent"
+            )
+            memory = continuity_policy_capabilities(
+                provider, root=self.path, explicit_parent=self.continuity_parent
+            )
+            for i, name in enumerate(CONTINUITY_MODES):
+                choice(
+                    name,
+                    "continuity",
+                    i,
+                    i == self.continuity,
+                    bool(memory[name]["available"]),
+                    str(memory[name]["reason"]),
+                )
+            editor("Parent provider session ID", "continuity_parent")
+            items.append(("[ Read project parent sessions ]", "parents", 0, True))
+            for i, parent in enumerate(self.parent_sessions):
+                choice(
+                    parent.session_id,
+                    "parent",
+                    i,
+                    parent.session_id == self.continuity_parent,
+                )
+            if self.parent_error:
+                note(self.parent_error)
+        elif self.step == 0:
+            for i, agent in enumerate(AGENTS):
+                capability = runtime_policy_capabilities(agent)["local-native"]
+                choice(
+                    agent,
+                    "provider",
+                    i,
+                    i == self.agent,
+                    bool(capability["available"]),
+                    str(capability["reason"]),
+                )
+        elif self.step == 1 and resuming:
+            note(
+                "Resume inherits the provider session's model. Your model draft is kept for a new session; switch to init in Advanced to edit it."
+            )
+        elif self.step == 1:
+            choice("Provider default", "default_model", 0, not self.model_pin)
+            models = provider_model_choices(provider)
+            for i, model in enumerate(models["choices"]):
+                choice(str(model), "model", i, model == self.model_pin)
+            if models["choices"]:
+                note(
+                    "Choices from the provider's local cache. Availability is confirmed by the provider at launch."
+                )
             else:
-                attr = curses.A_DIM
-            _safe_addstr(self.window, row, x, token, attr)
-            self.mouse_targets.append((row, x, x + len(token), index, "provider"))
-            x += len(token) + 1
+                note(str(models["reason"]))
+            if provider in MODEL_OVERRIDE_FLAGS:
+                editor("Exact model ID (optional override)", "model_pin")
+            else:
+                note("This provider adapter cannot pass a model pin.")
+        elif self.step == 2:
+            for i, name in enumerate(RUNTIME_POLICIES[:2]):
+                choice(
+                    "Shared checkout" if i == 0 else "Separate worktree",
+                    "isolation",
+                    i,
+                    self.runtime == i,
+                    bool(caps[name]["available"]),
+                    str(caps[name]["reason"]),
+                )
+                note(RUNTIME_HELP[name][0])
+        elif self.step == 3:
+            choice("This Mac / local native", "native", self.runtime, True)
+            note(
+                "Runs in "
+                + (
+                    "the shared checkout."
+                    if self.runtime == 0
+                    else "a separate worktree on this Mac."
+                )
+            )
+            for i, name in enumerate(RUNTIME_POLICIES[2:], start=2):
+                choice(
+                    "Local VM" if i == 2 else "Cloud",
+                    "runtime",
+                    i,
+                    self.runtime == i,
+                    bool(caps[name]["available"]),
+                    str(caps[name]["reason"]),
+                )
+        elif self.step == 4 and resuming:
+            note(
+                "Resume opens the existing provider conversation. Your prompt draft is kept for a new session; switch to init in Advanced to send it."
+            )
+        elif self.step == 4:
+            editor("Prompt · multiline paste supported", "prompt")
+        else:
+            for i, text in enumerate(
+                (
+                    provider,
+                    "inherited from provider session"
+                    if resuming
+                    else self.model_pin or "provider default (resolved at launch)",
+                    "shared checkout" if self.runtime == 0 else "separate worktree",
+                    runtime,
+                    "existing conversation (draft retained)"
+                    if resuming
+                    else self.prompt or "(no initial prompt)",
+                )
+            ):
+                items.append((f"[ Edit {self.STEPS[i]} ]", "step", i, True))
+                note(text)
+            note(f"Project: {self.path}")
+            note(
+                f"Mode: {LAUNCH_MODES[self.launch_mode]} · Permissions: {permits} · Memory: {CONTINUITY_MODES[self.continuity]}"
+            )
+            note(
+                "Usage: unmetered, User-observed"
+                if self.runtime == 0
+                else "Usage: safe measured quota"
+            )
+            note(
+                "This is a User-observed interactive session. Provider lifecycle belongs to the existing runtime."
+            )
+        if self.notice:
+            note(self.notice)
+        if self.launched:
+            items.append(("[ Show Agent tab ]", "show_agent", 0, True))
+        if self.advanced:
+            items.append(("[ Return to step ]", "advanced", 0, True))
+        else:
+            items.append(("▸ Advanced options", "advanced", 0, True))
+            if self.step:
+                items.append(("[ Back ]", "back", 0, True))
+            items.append(
+                (
+                    "[ Launch ]" if self.step == 5 else "[ Next ]",
+                    "launch" if self.step == 5 else "next",
+                    0,
+                    not self.launched,
+                )
+            )
+            items.append(("[ Leave ]", "leave", 0, True))
+        return items
 
     def draw_launcher(self) -> None:
         height, width = self.window.getmaxyx()
-        compact = height < 16 or width < 52
-        left = 1 if compact else max(1, (width - min(width - 2, 84)) // 2)
-        top = 0 if compact else max(1, (height - (19 if self.advanced else 11)) // 2)
-        inner = max(12, width - left - 2)
-        _safe_addstr(self.window, top, left, "New agent", curses.A_BOLD)
+        left = 1
+        inner = max(1, width - 3)
         _safe_addstr(
             self.window,
-            top + 1,
-            left,
-            "Choose a provider, then Launch.",
-            curses.A_DIM,
-        )
-        self._draw_providers(top + 3, left, inner)
-        path_row = top + 5
-        path_col = _paint_row_focus(self.window, path_row, left, self.row == 1)
-        _safe_addstr(
-            self.window,
-            path_row,
-            path_col,
-            _clip(f"Project  {self.path}", inner),
             0,
+            left,
+            f"New agent · {self.STEPS[self.step]}",
+            curses.A_BOLD | _ACCENT,
         )
-        toggle = "▾ Advanced options" if self.advanced else "▸ Advanced options"
-        toggle_row = path_row + 2
-        _safe_addstr(self.window, toggle_row, left, _clip(toggle, inner), curses.A_BOLD)
-        self.mouse_targets.append(
-            (toggle_row, left, left + min(len(toggle), inner), 0, "advanced")
-        )
-        cursor = toggle_row + 1
-        if self.advanced and not compact:
-            provider = AGENTS[self.agent]
-            capabilities = runtime_policy_capabilities(provider)
-            runtime_available = tuple(
-                bool(capabilities[name]["available"]) for name in RUNTIME_POLICIES
-            )
-            permission_available = tuple(
-                resolve_provider_policy(
-                    provider, RUNTIME_POLICIES[self.runtime], name, "interactive"
-                ).supported
-                for name in PERMISSION_POLICIES
-            )
-            mode_caps = mode_capabilities(
-                provider,
-                RUNTIME_POLICIES[self.runtime],
-                PERMISSION_POLICIES[self.permissions],
-            )
-            mode_available = tuple(
-                bool(mode_caps[name]["available"]) for name in LAUNCH_MODES
-            )
-            continuity_caps = continuity_policy_capabilities(
-                provider,
-                root=self.path,
-                explicit_parent=self.continuity_parent,
-            )
-            continuity_available = tuple(
-                bool(continuity_caps[name]["available"]) for name in CONTINUITY_MODES
-            )
-            advanced_rows = (
-                (
-                    "Mode      ",
-                    LAUNCH_MODES,
-                    self.launch_mode,
-                    mode_available,
-                ),
-                (
-                    "Runtime   ",
-                    RUNTIME_POLICIES,
-                    self.runtime,
-                    runtime_available,
-                ),
-                (
-                    "Permits   ",
-                    PERMISSION_POLICIES,
-                    self.permissions,
-                    permission_available,
-                ),
-                (
-                    "Memory    ",
-                    CONTINUITY_MODES,
-                    self.continuity,
-                    continuity_available,
-                ),
-            )
-            for offset, (label, choices, selected, available) in enumerate(
-                advanced_rows
-            ):
-                line = label + " ".join(
-                    _choice_tokens(choices, selected=selected, available=available)
-                )
-                focused = self.row == offset + 2
-                text_col = _paint_row_focus(self.window, cursor + offset, left, focused)
-                _safe_addstr(
-                    self.window,
-                    cursor + offset,
-                    text_col,
-                    _clip(line, inner),
-                    0,
-                )
-                _dim_unavailable_choices(
-                    self.window,
-                    cursor + offset,
-                    text_col + len(label),
-                    choices,
-                    available,
-                    selected,
-                    text_col + inner,
-                    base=0,
-                )
-            parent_col = _paint_row_focus(self.window, cursor + 4, left, self.row == 6)
+        # Breadcrumbs are always reachable by F1–F6, even below 40 columns.
+        y, x = 1, left
+        for i, name in enumerate(self.STEPS):
+            token = f"{i + 1} {name}  "
+            if x + len(token) > width - 1:
+                y, x = y + 1, left
             _safe_addstr(
                 self.window,
-                cursor + 4,
-                parent_col,
-                _clip(f"Parent    {self.continuity_parent or '(none)'}", inner),
-                0,
+                y,
+                x,
+                token,
+                curses.A_BOLD | _ACCENT if i == self.step else curses.A_DIM,
             )
-            runtime_help = RUNTIME_HELP[RUNTIME_POLICIES[self.runtime]]
-            help_text = public_reason(runtime_help[0]) or runtime_help[0]
-            _safe_addstr(
-                self.window, cursor + 5, left, _clip(help_text, inner), curses.A_DIM
+            self.mouse_targets.append((y, x, min(width, x + len(token)), i, "step"))
+            x += len(token)
+        start = y + 1
+        self.items = self._launcher_items(inner)
+        selectable = [i for i, item in enumerate(self.items) if item[3] and item[1]]
+        if self.focus not in selectable:
+            self.focus = selectable[0] if selectable else 0
+        budget = max(1, height - start - 2)
+        self.scroll = max(0, min(self.scroll, max(0, len(self.items) - budget)))
+        for offset, (text, kind, index, enabled) in enumerate(
+            self.items[self.scroll : self.scroll + budget]
+        ):
+            row = start + offset
+            if row >= height - 2:
+                break
+            focused = self.scroll + offset == self.focus
+            attr = (
+                (curses.A_BOLD | _ACCENT)
+                if focused or text.startswith("●")
+                else (0 if enabled else curses.A_DIM)
             )
-            if runtime_help[1]:
-                _safe_addstr(
-                    self.window,
-                    cursor + 6,
-                    left,
-                    _clip(runtime_help[1], inner),
-                    curses.A_DIM,
+            _safe_addstr(self.window, row, 0, "›" if focused else " ", attr)
+            _safe_addstr(self.window, row, left, text, attr)
+            if kind and enabled:
+                self.mouse_targets.append(
+                    (
+                        row,
+                        left,
+                        min(width, left + max(1, len(text))),
+                        self.scroll + offset,
+                        "item",
+                    )
                 )
-            # Disabled choices keep a visible reason in plain words.  The
-            # admission gates themselves live in spawn; only wording is public.
-            unavailable = [
-                f"{name}: {public_reason(str(caps[name]['reason'])) or 'Not available'}"
-                for names, caps in (
-                    (RUNTIME_POLICIES, capabilities),
-                    (LAUNCH_MODES, mode_caps),
-                    (CONTINUITY_MODES, continuity_caps),
-                )
-                for name in names
-                if not caps[name]["available"]
-            ]
-            if unavailable:
-                _safe_addstr(
-                    self.window,
-                    cursor + 7,
-                    left,
-                    _clip("Unavailable — " + " · ".join(unavailable), inner),
-                    curses.A_DIM,
-                )
-            cursor += 9
-        launch_label = "[ Launch ]"
-        launch_attr = curses.A_BOLD
-        _safe_addstr(self.window, cursor, left, launch_label, launch_attr)
-        self.mouse_targets.append((cursor, left, left + len(launch_label), 0, "launch"))
-        hint = (
-            "Enter launch  Esc back"
-            if compact
-            else "←/→ provider · type to edit project · a advanced · Enter launch · Esc back"
-        )
+        hint = "Tab focus · Enter select · Esc back · F1–F6 step · wheel scroll"
         _safe_addstr(self.window, height - 2, left, hint, curses.A_DIM)
-        if self.error:
-            _safe_addstr(
-                self.window, height - 1, left, public_reason(self.error) or self.error
-            )
+        help_text = self.STEP_HELP[self.step]
+        _safe_addstr(self.window, height - 1, left, help_text, curses.A_DIM)
+
+    def _show_focus(self) -> None:
+        height, width = self.window.getmaxyx()
+        header = 2 + (
+            sum(len(f"{i + 1} {n}  ") for i, n in enumerate(self.STEPS))
+            // max(1, width - 2)
+        )
+        budget = max(1, height - header - 3)
+        if self.focus < self.scroll:
+            self.scroll = self.focus
+        elif self.focus >= self.scroll + budget:
+            self.scroll = self.focus - budget + 1
+
+    def _goto_step(self, step: int) -> None:
+        self.step = max(0, min(step, len(self.STEPS) - 1))
+        self.advanced = False
+        self.focus = self.scroll = 0
+        self.confirm_exit = False
+
+    def _leave(self) -> None:
+        if self.dirty and not self.confirm_exit:
+            self.confirm_exit = True
+            self.focus = self.scroll = 0
+            return
+        if self.standalone_launcher:
+            raise SystemExit(0)
+        self.mode = "home"
+
+    def _activate_item(self, item: tuple[str, str, int, bool]) -> None:
+        _, kind, index, enabled = item
+        if not enabled:
+            return
+        if kind == "provider":
+            self._select_agent(index)
+        elif kind in {"isolation", "runtime"}:
+            self.runtime = index
+            self._normalize_permission_choice()
+            self._normalize_mode_choice()
+        elif kind == "native":
+            pass
+        elif kind == "model":
+            choices = provider_model_choices(AGENTS[self.agent])["choices"]
+            if index < len(choices):
+                self.model_pin = str(choices[index])
+                self.text_cursors.pop("model_pin", None)
+        elif kind == "default_model":
+            self.model_pin = ""
+            self.text_cursors.pop("model_pin", None)
+        elif kind == "mode":
+            self.launch_mode = index
+        elif kind == "permissions":
+            self.permissions = index
+            self._normalize_mode_choice()
+        elif kind == "continuity":
+            self.continuity = index
+        elif kind == "parent":
+            self.continuity_parent = self.parent_sessions[index].session_id
+        elif kind == "parents":
+            self._refresh_parent_sessions()
+        elif kind == "advanced":
+            self.advanced = not self.advanced
+            self.focus = self.scroll = 0
+        elif kind == "next":
+            self._goto_step(self.step + 1)
+        elif kind == "back":
+            self._goto_step(self.step - 1)
+        elif kind == "step":
+            self._goto_step(index)
+        elif kind == "show_agent":
+            self._open_launched_tab()
+        elif kind == "launch":
+            self.launch()
+        elif kind == "leave":
+            self._leave()
+        elif kind == "keep":
+            self.confirm_exit = False
+            self.focus = self.scroll = 0
+        elif kind == "discard":
+            self.dirty = False
+            self.prompt = self.model_pin = self.continuity_parent = ""
+            self._leave()
+        if kind in {
+            "provider",
+            "isolation",
+            "runtime",
+            "default_model",
+            "model",
+            "mode",
+            "permissions",
+            "continuity",
+            "parent",
+        }:
+            self.dirty = True
+
+    def _edit_text(self, field: str, key: int | str) -> None:
+        value = getattr(self, field)
+        cursor = min(self.text_cursors.get(field, len(value)), len(value))
+        if isinstance(key, str):
+            if not key.isprintable():
+                return
+            value = value[:cursor] + key + value[cursor:]
+            cursor += len(key)
+        elif key == curses.KEY_LEFT:
+            cursor = max(0, cursor - 1)
+        elif key == curses.KEY_RIGHT:
+            cursor = min(len(value), cursor + 1)
+        elif key == curses.KEY_HOME:
+            cursor = value.rfind("\n", 0, cursor) + 1
+        elif key == curses.KEY_END:
+            end = value.find("\n", cursor)
+            cursor = len(value) if end < 0 else end
+        elif key in (curses.KEY_UP, curses.KEY_DOWN) and field == "prompt":
+            start = value.rfind("\n", 0, cursor) + 1
+            column = cursor - start
+            if key == curses.KEY_UP:
+                end = max(0, start - 1)
+                beginning = value.rfind("\n", 0, end) + 1
+            else:
+                end = value.find("\n", cursor)
+                beginning = len(value) if end < 0 else end + 1
+                end = value.find("\n", beginning)
+                if end < 0:
+                    end = len(value)
+            cursor = min(end, beginning + column)
+        elif key in (curses.KEY_BACKSPACE, 127, 8):
+            if cursor:
+                value = value[: cursor - 1] + value[cursor:]
+                cursor -= 1
+        elif key == curses.KEY_DC:
+            value = value[:cursor] + value[cursor + 1 :]
+        elif key in (10, 13, curses.KEY_ENTER):
+            if field != "prompt":
+                self._move_focus(1)
+                return
+            value = value[:cursor] + "\n" + value[cursor:]
+            cursor += 1
+        elif 32 <= key < 127:
+            value = value[:cursor] + chr(key) + value[cursor:]
+            cursor += 1
+        else:
+            return
+        changed = value != getattr(self, field)
+        setattr(self, field, value)
+        self.text_cursors[field] = cursor
+        if changed:
+            self.dirty = True
+            if field == "path":
+                self.parent_sessions = []
+                self.parent_index = -1
+                if self.continuity_parent:
+                    self.continuity_parent = ""
+                    self.notice = "Project changed: parent session cleared. Prompt and model kept."
+                self._normalize_continuity_choice()
+        if field == "prompt":
+            self.items = self._launcher_items(max(1, self.window.getmaxyx()[1] - 3))
+            for i, (_, kind, start, _) in enumerate(self.items):
+                if kind == field and start <= cursor:
+                    self.focus = i
+            self._show_focus()
+
+    def _move_focus(self, delta: int) -> None:
+        self.items = self._launcher_items(max(1, self.window.getmaxyx()[1] - 3))
+        # Multiline prompt is one keyboard control, even though every line is clickable.
+        selectable = []
+        fields: set[str] = set()
+        for i, (_, kind, _, enabled) in enumerate(self.items):
+            if enabled and kind:
+                if kind in {"prompt", "model_pin", "path", "continuity_parent"}:
+                    if kind in fields:
+                        continue
+                    fields.add(kind)
+                selectable.append(i)
+        origin = max(
+            (i for i, value in enumerate(selectable) if value <= self.focus), default=0
+        )
+        self.focus = selectable[(origin + delta) % len(selectable)] if selectable else 0
+        self._show_focus()
+
+    def _escape_or_paste(self) -> None:
+        """Decode bracketed paste as text, never as wizard commands."""
+        self.window.timeout(30)
+        sequence = ""
+        try:
+            for _ in range(64):
+                key = self.window.get_wch()
+                if not isinstance(key, str):
+                    break
+                sequence += key
+                if sequence.startswith("[<"):
+                    if sequence.endswith(("M", "m")):
+                        break
+                elif len(sequence) >= 5:
+                    break
+        except curses.error:
+            pass
+        finally:
+            self.window.timeout(500)
+        # macOS ncurses may know only X10 mouse input even though Frame/xterm
+        # sends SGR. Decode that transport into the same hit-testing owner.
+        if sequence.startswith("[<") and sequence.endswith(("M", "m")):
+            try:
+                button, x, y = (int(value) for value in sequence[2:-1].split(";"))
+            except ValueError:
+                return
+            if sequence.endswith("m") or button & 32:
+                return
+            if button == 64:
+                state = getattr(curses, "BUTTON4_PRESSED", 0)
+            elif button == 65:
+                state = getattr(curses, "BUTTON5_PRESSED", 0)
+            elif button == 0:
+                state = curses.BUTTON1_PRESSED
+            else:
+                return
+            self._dispatch_mouse(x - 1, y - 1, state)
+            return
+        if sequence == "[200~":
+            pasted = ""
+            while not pasted.endswith("\x1b[201~"):
+                try:
+                    key = self.window.get_wch()
+                except curses.error:
+                    continue
+                if isinstance(key, str):
+                    pasted += key
+            self.items = self._launcher_items(max(1, self.window.getmaxyx()[1] - 3))
+            if self.focus < len(self.items):
+                field = self.items[self.focus][1]
+                if field in {"prompt", "model_pin", "path", "continuity_parent"}:
+                    payload = pasted[:-6].replace("\r\n", "\n").replace("\r", "\n")
+                    if field != "prompt":
+                        payload = payload.replace("\n", " ")
+                    for char in payload:
+                        if char == "\n" or char.isprintable():
+                            self._edit_text(field, 10 if char == "\n" else char)
+            return
+        if not sequence and self.mode != "home":
+            self.handle_launcher_key(27)
 
     def handle_home_key(self, key: int) -> None:
-        if key in (curses.KEY_LEFT, ord("h")):
+        if key in (curses.KEY_UP, curses.KEY_DOWN) and self.face_records:
+            self.home_choice = -1
+            delta = -1 if key == curses.KEY_UP else 1
+            self.face_choice = (self.face_choice + delta) % len(self.face_records)
+        elif key in (ord("r"), ord("R")) and self.launch_title:
+            self._open_launched_tab()
+        elif key in (curses.KEY_LEFT, ord("h")):
             self.home_choice = (self.home_choice - 1) % 2
         elif key in (curses.KEY_RIGHT, ord("l"), ord("\t")):
             self.home_choice = (self.home_choice + 1) % 2
@@ -1227,102 +1599,86 @@ class Workshop:
         elif key in (ord("o"), ord("O")):
             self._toggle_other_sessions()
         elif key in (10, 13, curses.KEY_ENTER):
-            if self.show_other and self.other_sessions:
+            if self.home_choice == -1 and self.face_records:
+                self._focus_face(self.face_choice)
+            elif self.show_other and self.other_sessions:
                 self._attach_session(self.other_sessions[0])
             else:
                 (self.open_launcher, self.open_voc)[self.home_choice]()
 
-    def handle_launcher_key(self, key: int) -> None:
-        self.error = ""
+    def handle_launcher_key(self, key: int | str) -> None:
+        if isinstance(key, str):
+            self.items = self._launcher_items(max(1, self.window.getmaxyx()[1] - 3))
+            field = self.items[self.focus][1] if self.focus < len(self.items) else ""
+            if field in {"prompt", "model_pin", "path", "continuity_parent"}:
+                self._edit_text(field, key)
+            return
+        if curses.KEY_F1 <= key <= curses.KEY_F6 and not self.confirm_exit:
+            self._goto_step(key - curses.KEY_F1)
+            return
         if key == 27:
-            if self.standalone_launcher:
-                raise SystemExit(0)
-            self.mode = "home"
+            if self.confirm_exit:
+                self.confirm_exit = False
+            elif self.advanced:
+                self.advanced = False
+                self.focus = self.scroll = 0
+            elif self.step:
+                self._goto_step(self.step - 1)
+            else:
+                self._leave()
             return
-        editing_parent = self.advanced and self.row == 6
-        editing_path = self.row == 1
-        if key in (ord("a"), ord("A")) and not editing_path and not editing_parent:
+        self.items = self._launcher_items(max(1, self.window.getmaxyx()[1] - 3))
+        if key in (9, curses.KEY_BTAB):
+            self._move_focus(-1 if key == curses.KEY_BTAB else 1)
+            return
+        field = self.items[self.focus][1] if self.focus < len(self.items) else ""
+        if field in {"prompt", "model_pin", "path", "continuity_parent"}:
+            self._edit_text(field, key)
+        elif key in (curses.KEY_UP, curses.KEY_LEFT):
+            self._move_focus(-1)
+        elif key in (curses.KEY_DOWN, curses.KEY_RIGHT):
+            self._move_focus(1)
+        elif key == curses.KEY_NPAGE:
+            self.scroll += max(1, self.window.getmaxyx()[0] - 6)
+        elif key == curses.KEY_PPAGE:
+            self.scroll = max(0, self.scroll - max(1, self.window.getmaxyx()[0] - 6))
+        elif key in (10, 13, curses.KEY_ENTER, 32) and self.focus < len(self.items):
+            self._activate_item(self.items[self.focus])
+        elif key in (ord("a"), ord("A")):
             self.advanced = not self.advanced
-            if not self.advanced:
-                self.row = min(self.row, 1)
-            return
-        rows = 7 if self.advanced else 2
-        if key == curses.KEY_UP:
-            self.row = (self.row - 1) % rows
-            return
-        if key in (curses.KEY_DOWN, ord("\t")):
-            self.row = (self.row + 1) % rows
-            return
-        if key in (curses.KEY_LEFT, curses.KEY_RIGHT) or (
-            key == ord(" ") and not editing_path and not editing_parent
-        ):
-            delta = -1 if key == curses.KEY_LEFT else 1
-            if self.row == 0:
-                self._cycle_agent(delta)
-            elif self.advanced and self.row == 2:
-                self._cycle_mode(delta)
-            elif self.advanced and self.row == 3:
-                self._cycle_runtime(delta)
-            elif self.advanced and self.row == 4:
-                self._cycle_permissions(delta)
-            elif self.advanced and self.row == 5:
-                self._cycle_continuity(delta)
-            elif self.advanced and self.row == 6:
-                self._cycle_parent(delta)
-            return
-        if key in (10, 13, curses.KEY_ENTER):
-            self.launch()
-            return
-        editing_parent = self.advanced and self.row == 6
-        editing_path = self.row == 1
-        if editing_path or editing_parent:
-            if key in (curses.KEY_BACKSPACE, 127, 8):
-                if editing_parent:
-                    self.continuity_parent = self.continuity_parent[:-1]
-                    self.parent_index = -1
-                else:
-                    self.path = self.path[:-1]
-                    self.parent_sessions = []
-                    self.parent_index = -1
-            elif 32 <= key <= 126:
-                if editing_parent:
-                    self.continuity_parent += chr(key)
-                    self.parent_index = -1
-                else:
-                    self.path += chr(key)
-                    self.parent_sessions = []
-                    self.parent_index = -1
-
-    def _cycle_agent(self, delta: int) -> None:
-        index = self.agent
-        for _ in AGENTS:
-            index = (index + delta) % len(AGENTS)
-            if _provider_available(AGENTS[index]):
-                self._select_agent(index)
-                return
-        self.error = "No provider is available"
+            self.focus = self.scroll = 0
 
     def _select_agent(self, index: int) -> None:
         """Switch provider by key or click; parent sessions belong to the old one."""
+        if index == self.agent:
+            return
+        before = (self.runtime, self.permissions, self.launch_mode, self.continuity)
         self.agent = index
+        self.model_pin = ""
+        self.continuity_parent = ""
+        self.text_cursors.pop("model_pin", None)
         self._normalize_runtime_choice()
         self._normalize_permission_choice()
         self._normalize_mode_choice()
         self._normalize_continuity_choice()
         self.parent_sessions = []
         self.parent_index = -1
-
-    def _cycle_mode(self, delta: int) -> None:
-        capabilities = mode_capabilities(
-            AGENTS[self.agent],
-            RUNTIME_POLICIES[self.runtime],
-            PERMISSION_POLICIES[self.permissions],
-        )
-        for _ in LAUNCH_MODES:
-            self.launch_mode = (self.launch_mode + delta) % len(LAUNCH_MODES)
-            if capabilities[LAUNCH_MODES[self.launch_mode]]["available"]:
-                return
-        self.error = "No start mode is available for this provider"
+        after = (self.runtime, self.permissions, self.launch_mode, self.continuity)
+        changed = [
+            name
+            for name, old, new in zip(
+                ("isolation", "permissions", "start mode", "memory"),
+                before,
+                after,
+                strict=True,
+            )
+            if old != new
+        ]
+        self.notice = "Provider changed: model pin and parent cleared. Prompt kept."
+        if changed:
+            self.notice += (
+                " Unsupported selections adjusted: " + ", ".join(changed) + "."
+            )
 
     def _refresh_parent_sessions(self) -> None:
         self.parent_sessions, self.parent_error = parent_session_choices(
@@ -1343,29 +1699,6 @@ class Workshop:
         ) % len(self.parent_sessions)
         self.continuity_parent = self.parent_sessions[self.parent_index].session_id
         self._normalize_continuity_choice()
-
-    def _cycle_runtime(self, delta: int) -> None:
-        capabilities = runtime_policy_capabilities(AGENTS[self.agent])
-        for _ in RUNTIME_POLICIES:
-            self.runtime = (self.runtime + delta) % len(RUNTIME_POLICIES)
-            name = RUNTIME_POLICIES[self.runtime]
-            if capabilities[name]["available"]:
-                self._normalize_permission_choice()
-                self._normalize_mode_choice()
-                return
-        self.error = "No runtime is available for this provider"
-
-    def _cycle_permissions(self, delta: int) -> None:
-        provider = AGENTS[self.agent]
-        runtime = RUNTIME_POLICIES[self.runtime]
-        for _ in PERMISSION_POLICIES:
-            self.permissions = (self.permissions + delta) % len(PERMISSION_POLICIES)
-            if resolve_provider_policy(
-                provider, runtime, PERMISSION_POLICIES[self.permissions], "interactive"
-            ).supported:
-                self._normalize_mode_choice()
-                return
-        self.error = "No permission policy is available for this provider"
 
     def _normalize_runtime_choice(self) -> None:
         capabilities = runtime_policy_capabilities(AGENTS[self.agent])
@@ -1403,32 +1736,32 @@ class Workshop:
                 self.launch_mode = index
                 return
 
-    def _cycle_continuity(self, delta: int) -> None:
-        capabilities = continuity_policy_capabilities(
-            AGENTS[self.agent], root=self.path, explicit_parent=self.continuity_parent
-        )
-        for _ in CONTINUITY_MODES:
-            self.continuity = (self.continuity + delta) % len(CONTINUITY_MODES)
-            if capabilities[CONTINUITY_MODES[self.continuity]]["available"]:
-                return
-        self.error = "No memory option is available"
-
     def _normalize_continuity_choice(self) -> None:
         capabilities = continuity_policy_capabilities(
             AGENTS[self.agent], root=self.path, explicit_parent=self.continuity_parent
         )
-        if capabilities["full-lineage"]["available"]:
-            self.continuity = CONTINUITY_MODES.index("full-lineage")
-        else:
-            self.continuity = CONTINUITY_MODES.index("fresh")
+        if capabilities[CONTINUITY_MODES[self.continuity]]["available"]:
+            return
+        self.continuity = CONTINUITY_MODES.index("fresh")
+        self.notice = "Selected memory is unavailable here; using fresh. Prompt kept."
 
     def handle_mouse(self) -> None:
         try:
             _, x, y, _, state = curses.getmouse()
         except curses.error:
             return
+        self._dispatch_mouse(x, y, state)
+
+    def _dispatch_mouse(self, x: int, y: int, state: int) -> None:
         # Release, hover and secondary buttons are not a second activation.
         # ncurses reports either a press or a combined click for button one.
+        if self.mode != "home":
+            if state & getattr(curses, "BUTTON4_PRESSED", 0):
+                self.scroll = max(0, self.scroll - 3)
+                return
+            if state & getattr(curses, "BUTTON5_PRESSED", 0):
+                self.scroll += 3
+                return
         activation = curses.BUTTON1_PRESSED | curses.BUTTON1_CLICKED
         if not state & activation:
             return
@@ -1436,6 +1769,21 @@ class Workshop:
         for row, start, end, index, kind in self.mouse_targets:
             if y != row or not (start <= x < end):
                 continue
+            if kind == "step":
+                if not self.confirm_exit:
+                    self._goto_step(index)
+                return
+            if kind == "item":
+                self.focus = index
+                item = self.items[index]
+                field = item[1]
+                if field in {"prompt", "model_pin", "path", "continuity_parent"}:
+                    self.text_cursors[field] = min(
+                        len(getattr(self, field)), item[2] + max(0, x - start)
+                    )
+                else:
+                    self._activate_item(item)
+                return
             if kind == "home":
                 self.home_choice = index
                 (self.open_launcher, self.open_voc)[index]()
@@ -1463,7 +1811,9 @@ class Workshop:
         """Inline compose view in this pane. Never spawn a nested floating form."""
         self.mode = "launcher"
         self.row = 0
-        self.advanced = False
+        self._goto_step(0)
+        self.launched = False
+        self.launch_run_id = ""
         self.error = ""
 
     def open_voc(self) -> None:
@@ -1527,7 +1877,72 @@ class Workshop:
             ).strip()
 
     def launch(self) -> None:
+        if self.launching or self.launched:
+            return
+        self.launching = True
+        self.error = ""
         try:
+            self._launch()
+        finally:
+            self.launching = False
+            if self.error:
+                self.scroll = self.focus = 0
+
+    def _open_launched_tab(self) -> None:
+        if not self.launch_title or not self.launch_destination:
+            return
+        try:
+            result = subprocess.run(
+                [
+                    "vc-frame",
+                    "--session",
+                    self.launch_destination,
+                    "action",
+                    "go-to-tab-name",
+                    self.launch_title,
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError as exc:
+            self.error = str(exc)
+            return
+        if result.returncode:
+            self.error = (
+                result.stderr or result.stdout or "Agent tab unavailable"
+            ).strip()
+
+    def _refresh_launch_state(self) -> None:
+        if not self.launch_run_id:
+            return
+        record = lookup_runtime_run_meta(self.launch_run_id)
+        if not record:
+            self.notice = (
+                "Launch status unavailable. Check Voc before starting another Agent."
+            )
+            return
+        status = str(record.get("status") or record.get("state") or "unknown")
+        self.launch_status = status
+        self.notice = f"{self.launch_agent} · {status} · {self.launch_run_id}. r opens Agent; Agents / Voc returns."
+        if status in {"failed", "rejected", "cancelled"}:
+            self.error = str(
+                record.get("error") or record.get("terminal_reason") or status
+            )
+            self.mode = "launcher"
+            self.launched = False
+            self.launch_run_id = ""
+            self.dirty = True
+            self._goto_step(5)
+        elif status in {"active", "running", "completed"} and self.mode == "launcher":
+            self._open_launched_tab()
+            self.mode = "home"
+            self.presence_schedule.last_at = None
+            self.presence_schedule.request()
+
+    def _launch(self) -> None:
+        try:
+            resuming = LAUNCH_MODES[self.launch_mode] == "resume"
             workspace = normalized_workspace(self.path)
             runtime_name = RUNTIME_POLICIES[self.runtime]
             capability = runtime_policy_capabilities(AGENTS[self.agent])[runtime_name]
@@ -1549,9 +1964,11 @@ class Workshop:
                 continuity=continuity_name,
                 continuity_parent=self.continuity_parent,
                 workspace=workspace,
+                model="" if resuming else self.model_pin,
+                prompt="" if resuming else self.prompt,
             )
         except ValueError as exc:
-            self.error = public_reason(str(exc)) or str(exc)
+            self.error = str(exc)
             return
         executable = shutil.which(argv[0])
         if executable is None:
@@ -1564,7 +1981,7 @@ class Workshop:
         try:
             destination = destination_session_for_workspace(workspace)
         except ValueError as exc:
-            self.error = public_reason(str(exc)) or str(exc)
+            self.error = str(exc)
             return
         live, listing_error = list_live_frame_sessions()
         if listing_error:
@@ -1572,20 +1989,63 @@ class Workshop:
             return
         try:
             require_live_destination(destination, live)
-            pane = launch_pane_argv(title, workspace, argv, session=destination)
-        except ValueError as exc:
-            self.error = public_reason(str(exc)) or str(exc)
+            mode = LAUNCH_MODES[self.launch_mode]
+            effective_prompt = "\n\n".join(
+                filter(
+                    None, (MODE_PROMPTS.get(mode, ""), "" if resuming else self.prompt)
+                )
+            )
+            argv = interactive_workspace_command(
+                AGENTS[self.agent],
+                effective_prompt,
+                runtime_name,
+                PERMISSION_POLICIES[self.permissions],
+                workspace,
+                token_budget="unmetered" if runtime_name == "local-native" else "safe",
+                continuity=continuity_name,
+                parent_session_id=self.continuity_parent
+                if continuity_name == "bare-fork"
+                else "",
+                parent_lineage_id=self.continuity_parent
+                if continuity_name == "full-lineage"
+                else "",
+                model="" if resuming else self.model_pin,
+                skill=mode,
+                resume_last=mode == "resume",
+            )
+            admission_path = Path(argv[argv.index("--admission-file") + 1])
+            admission = json.loads(admission_path.read_text(encoding="utf-8"))
+            self.launch_run_id = str(admission["run_id"])
+            self.launch_status = "prepared"
+            self.launch_destination = destination
+            self.launch_title = title
+            self.launch_agent = AGENTS[self.agent]
+            effective_root = Path(str(admission["effective_worker_root"]))
+            pane = launch_pane_argv(title, effective_root, argv, session=destination)
+        except (OSError, ValueError) as exc:
+            self.error = str(exc)
             return
         try:
             result = subprocess.run(pane, check=False, capture_output=True, text=True)
-        except FileNotFoundError:
-            self.error = "vc-frame is not available in this Runtime Pack"
+        except OSError as exc:
+            finish_meta(str(admission_path.parent / "meta.json"), "failed", 2)
+            self.launch_run_id = ""
+            self.error = f"Cannot open Agent tab: {exc}"
             return
         if result.returncode != 0:
+            finish_meta(
+                str(admission_path.parent / "meta.json"), "failed", result.returncode
+            )
+            self.launch_run_id = ""
             self.error = (
                 result.stderr or result.stdout or "cannot open a tab for that Agent"
             ).strip()
             return
+        # Tab admission is irreversible from this draft even if subsequent
+        # attach fails. Retry may navigate, but must not spawn another child.
+        self.launched = True
+        self.dirty = False
+        self.notice = f"Opening in {destination}; runtime admission pending. Return via Agents / Voc."
         current = current_frame_session()
         if current != destination:
             try:
@@ -1605,9 +2065,7 @@ class Workshop:
                     or f"Agent opened in {destination}, but that session could not be shown"
                 ).strip()
                 return
-        self.mode = "home"
-        self.presence_schedule.last_at = None
-        self.presence_schedule.request()
+        self._refresh_launch_state()
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -1618,10 +2076,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    # Frame and xterm-compatible hosts bracket multiline paste. Keep Enter
+    # inside the text editor even when pasted input contains wizard hotkeys.
+    sys.stdout.write("\x1b[?2004h")
+    sys.stdout.flush()
     try:
         curses.wrapper(lambda window: Workshop(window, mode=args.mode).run())
     except KeyboardInterrupt:
         return 130
+    finally:
+        sys.stdout.write("\x1b[?2004l")
+        sys.stdout.flush()
     return 0
 
 

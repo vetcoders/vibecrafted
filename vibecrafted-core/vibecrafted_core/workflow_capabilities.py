@@ -28,7 +28,7 @@ from .execution_controls import (
     default_permissions,
     resolve_execution_controls,
 )
-from .model_overrides import MODEL_OVERRIDE_FLAGS
+from .model_overrides import MODEL_OVERRIDE_FLAGS, provider_model_choices
 from .research_config import (
     DEFAULT_RESEARCH_AGENTS,
     SUPPORTED_RESEARCH_AGENTS,
@@ -147,6 +147,7 @@ def provider_capabilities_payload() -> dict[str, dict[str, Any]]:
             if executable
             else f"{agent_cli_name(agent)} executable not found",
             "model_override": {
+                **provider_model_choices(agent),
                 "supported": agent in MODEL_OVERRIDE_FLAGS,
                 "flag": MODEL_OVERRIDE_FLAGS.get(agent, ""),
                 "reason": (
