@@ -41,7 +41,8 @@ services:
       - codex:/root/.codex
       - gemini:/root/.gemini
       - kimi:/root/.kimi
-      - vetcoders-config:/root/.config/vetcoders
+      # Keep the existing volume identity while persisting the canonical config.
+      - vetcoders-config:/root/.config/vibecrafted
       # Tailscale node identity (kept across restarts).
       - tailscale-state:/var/lib/tailscale
 

@@ -339,8 +339,16 @@ install_from_npm() {
     return 1
   }
 
+  local npm_args=(install -g "$package")
+  case "$package" in
+    "$LOCTREE_NPM_PACKAGE"|"$AICX_NPM_PACKAGE")
+      # An ambient or scoped registry must not redirect public foundations.
+      npm_args+=(--registry=https://registry.npmjs.org
+        --@loctree:registry=https://registry.npmjs.org)
+      ;;
+  esac
   info "Installing $package via npm..."
-  npm install -g "$package" 2>&1 | tail -3 || {
+  npm "${npm_args[@]}" 2>&1 | tail -3 || {
     warn "npm install $package failed."
     return 1
   }
@@ -396,7 +404,7 @@ ensure_pipx() {
 
   if has_cmd python3 && python3 -m pip --version >/dev/null 2>&1; then
     info "Installing pipx into the user Python environment..."
-    python3 -m pip install --user pipx 2>&1 | tail -3 || true
+    _public_pypi python3 -m pip install --user pipx 2>&1 | tail -3 || true
     export PATH="$HOME/.local/bin:$PATH"
     has_cmd pipx && return 0
   fi
@@ -404,6 +412,15 @@ ensure_pipx() {
   warn "pipx is required to install ScreenScribe."
   return 1
 }
+
+_public_pypi() (
+  # Scope channel isolation to the command; retain the Founder's settings.
+  unset UV_INDEX UV_EXTRA_INDEX_URL UV_INDEX_URL UV_DEFAULT_INDEX UV_FIND_LINKS
+  unset UV_CONFIG_FILE UV_NO_INDEX PIP_EXTRA_INDEX_URL PIP_FIND_LINKS PIP_NO_INDEX
+  export UV_NO_CONFIG=1 PIP_CONFIG_FILE=/dev/null
+  export PIP_INDEX_URL=https://pypi.org/simple
+  "$@"
+)
 
 install_screenscribe() {
   if binary_runs screenscribe; then
@@ -418,13 +435,13 @@ install_screenscribe() {
 
   if has_cmd uv; then
     info "Installing $SCREENSCRIBE_PACKAGE from PyPI via uv (Python >= 3.11)..."
-    uv tool install --force --python '>=3.11' \
+    _public_pypi uv tool install --no-config --force --python '>=3.11' \
       --default-index https://pypi.org/simple "$SCREENSCRIBE_PACKAGE" || {
       warn "uv failed to install $SCREENSCRIBE_PACKAGE from PyPI."
       return 1
     }
     local tool_bin
-    tool_bin="$(uv tool dir --bin)" || return 1
+    tool_bin="$(_public_pypi uv tool dir --bin)" || return 1
     export PATH="$tool_bin:$PATH"
     binary_runs screenscribe
     return
@@ -432,7 +449,7 @@ install_screenscribe() {
 
   ensure_pipx || return 1
   info "Installing $SCREENSCRIBE_PACKAGE from PyPI via pipx..."
-  pipx install --force "$SCREENSCRIBE_PACKAGE" || {
+  _public_pypi pipx install --force --index-url https://pypi.org/simple "$SCREENSCRIBE_PACKAGE" || {
     warn "pipx failed to install $SCREENSCRIBE_PACKAGE."
     warn "ScreenScribe needs Python >= 3.11; pipx uses its default interpreter unless told otherwise:"
     warn "  pipx install --python python3.12 $SCREENSCRIBE_PACKAGE"
