@@ -354,13 +354,13 @@ def agents_main(argv: Sequence[str] | None = None) -> int:
 def followup_main(argv: Sequence[str] | None = None) -> int:
     # One path with `vibecrafted followup` (lifecycle stages live under `ship`).
     """CLI entry for `vibecrafted followup`."""
-    return supervised_skill_main("followup", argv)
+    return _single_stage_main("followup", argv)
 
 
 def implement_main(argv: Sequence[str] | None = None) -> int:
     # One path with `vibecrafted implement` / shell `vc-implement`.
     """CLI entry for `vibecrafted implement`."""
-    return supervised_skill_main("implement", argv)
+    return _single_stage_main("implement", argv)
 
 
 def _lifecycle_main(workflow_id: str, argv: Sequence[str] | None = None) -> int:
@@ -429,13 +429,13 @@ def polarize_main(argv: Sequence[str] | None = None) -> int:
 
 def prune_main(argv: Sequence[str] | None = None) -> int:
     """CLI entry for `vibecrafted prune`."""
-    return supervised_skill_main("prune", argv)
+    return _single_stage_main("prune", argv)
 
 
 def review_main(argv: Sequence[str] | None = None) -> int:
     # One path with `vibecrafted review` (lifecycle stages live under `ship`).
     """CLI entry for `vibecrafted review`."""
-    return supervised_skill_main("review", argv)
+    return _single_stage_main("review", argv)
 
 
 def scaffold_main(argv: Sequence[str] | None = None) -> int:
@@ -444,27 +444,27 @@ def scaffold_main(argv: Sequence[str] | None = None) -> int:
     # delivery is the cli + dispatcher path. Use `vibecrafted ship` for staged
     # lifecycle orchestration, not a private second scaffold parser.
     """CLI entry for `vibecrafted scaffold`."""
-    return supervised_skill_main("scaffold", argv)
+    return _single_stage_main("scaffold", argv)
 
 
 def decorate_main(argv: Sequence[str] | None = None) -> int:
     """CLI entry for `vibecrafted decorate`."""
-    return supervised_skill_main("decorate", argv)
+    return _single_stage_main("decorate", argv)
 
 
 def delegate_main(argv: Sequence[str] | None = None) -> int:
     """CLI entry for `vibecrafted delegate`."""
-    return supervised_skill_main("delegate", argv)
+    return _single_stage_main("delegate", argv)
 
 
 def intents_main(argv: Sequence[str] | None = None) -> int:
     """CLI entry for `vibecrafted intents`."""
-    return supervised_skill_main("intents", argv)
+    return _single_stage_main("intents", argv)
 
 
 def ownership_main(argv: Sequence[str] | None = None) -> int:
     """CLI entry for `vibecrafted ownership`."""
-    return supervised_skill_main("ownership", argv)
+    return _single_stage_main("ownership", argv)
 
 
 def partner_main(argv: Sequence[str] | None = None) -> int:

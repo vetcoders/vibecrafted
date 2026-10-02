@@ -37,9 +37,25 @@ LONG_PROMPT = (
 
 STAMPED_GENERATION_VERSION = "4.3.0+g1234567"
 
-# These console entries used a lifecycle parser although the public deck
-# admits them as one skill launch. ship and the convergence loops are distinct.
-SINGLE_STAGE_ALIASES = ("release", "workflow", "audit", "dou", "hydrate")
+# Every single-stage console alias shares canonical launch admission.
+# Neither a lifecycle parser nor an outer dispatcher may wrap that admission.
+# ship and the convergence loops remain distinct.
+SINGLE_STAGE_ALIASES = (
+    "release",
+    "workflow",
+    "audit",
+    "dou",
+    "hydrate",
+    "prune",
+    "review",
+    "scaffold",
+    "implement",
+    "followup",
+    "decorate",
+    "delegate",
+    "intents",
+    "ownership",
+)
 
 
 @pytest.fixture
