@@ -18,9 +18,10 @@ def test_local_path_hint_stops_before_terminal_padding() -> None:
     hint = next(hint for hint in config["hints"]["enabled"] if not hint["hyperlinks"])
     pattern = re.compile(hint["regex"])
     for path in ("/tmp/report.md", "~/My Project/report.md:12:3", "./My Report.md"):
-        match = pattern.search(path + " " * 120)
-        assert match is not None
-        assert match.group() == path
+        for suffix in (" " * 120, " " * 120 + "status"):
+            match = pattern.search(path + suffix)
+            assert match is not None
+            assert match.group() == path
 
 
 def _run_theme(

@@ -78,8 +78,9 @@ post_processing = true
 persist = false
 mouse = { enabled = true, mods = "Command" }
 binding = { key = "P", mods = "Control|Shift" }
-# Spaces may belong to a path, but padding after its last character does not.
-regex = '(~|\.\.?|[A-Za-z0-9._@%+=,-]+)?(/[A-Za-z0-9._@%+=,~: -]*[A-Za-z0-9._@%+=,~:-])+'
+# Single spaces may join path words; blank runs separate terminal columns.
+# Paths with arbitrary whitespace should carry explicit OSC-8 metadata.
+regex = '(~|\.\.?|[A-Za-z0-9._@%+=,-]+)?(/[A-Za-z0-9._@%+=,~:-]+( [A-Za-z0-9._@%+=,~:-]+)*)+'
 
 
 # Polish diacritics on either Option key, while keeping Option as Alt/Meta.
