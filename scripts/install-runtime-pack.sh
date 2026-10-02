@@ -369,8 +369,10 @@ reconcile_server_service() {
     printf 'install-runtime-pack: LaunchAgent is installed but the vibecrafted launcher is unavailable; run "vibecrafted server service reconcile" once the launcher is restored\n' >&2
     return 0
   fi
-  printf 'install-runtime-pack: reconciling installed LaunchAgent with the published runtime...\n'
-  if ! (cd / && env -u PYTHONPATH VIBECRAFTED_SERVICE_MUTATION_LOCK_TIMEOUT="${VIBECRAFTED_SERVICE_MUTATION_LOCK_TIMEOUT:-120}" "$launcher" server service reconcile); then
+  # The App decodes the wrapper's complete stdout as the installer JSON result.
+  # Keep the service owner's human diagnostics on stderr, including success.
+  printf 'install-runtime-pack: reconciling installed LaunchAgent with the published runtime...\n' >&2
+  if ! (cd / && env -u PYTHONPATH VIBECRAFTED_SERVICE_MUTATION_LOCK_TIMEOUT="${VIBECRAFTED_SERVICE_MUTATION_LOCK_TIMEOUT:-120}" "$launcher" server service reconcile) >&2; then
     printf 'install-runtime-pack: the runtime is published but the installed service did not reconcile; run "vibecrafted server service reconcile" to converge it\n' >&2
     return 1
   fi

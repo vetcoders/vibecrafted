@@ -9,6 +9,7 @@ reconcile` whenever the service is opted in (plist present).
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 import subprocess
@@ -76,7 +77,7 @@ def test_install_reconciles_installed_service(tmp_path: Path) -> None:
         "reconcile_server_service\n",
     )
     assert result.returncode == 0, (result.stdout, result.stderr)
-    assert "reconciling installed LaunchAgent" in result.stdout
+    assert "reconciling installed LaunchAgent" in result.stderr
     assert calls.read_text(encoding="utf-8").splitlines() == [
         "server service reconcile"
     ]
@@ -119,6 +120,33 @@ def test_reconcile_queues_behind_concurrent_install_with_bounded_wait(
     )
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert capture.read_text(encoding="utf-8") == "7\n"
+
+
+def test_service_reconcile_preserves_the_installers_json_stdout(tmp_path: Path) -> None:
+    """The native App decodes the entire wrapper stdout as one JSON result."""
+    bin_dir, calls = _write_launcher_stub(tmp_path)
+    launcher = bin_dir / "vibecrafted"
+    launcher.write_text(
+        launcher.read_text().replace(
+            "exit 0\n",
+            "printf 'LaunchAgent already current; verified service is active\\n'\nexit 0\n",
+        ),
+        encoding="utf-8",
+    )
+    payload = {"runtime_root": "/verified/generation"}
+    result = _run_sourced(
+        tmp_path,
+        f'export VIBECRAFTED_LAUNCHER_BIN="{bin_dir}"\n'
+        f'mkdir -p "$HOME/Library/LaunchAgents"\n'
+        f'touch "$HOME/{PLIST_RELATIVE}"\n'
+        f"printf '%s\\n' '{json.dumps(payload)}'\n"
+        "reconcile_server_service\n",
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert json.loads(result.stdout) == payload
+    assert "reconciling installed LaunchAgent" in result.stderr
+    assert "verified service is active" in result.stderr
+    assert calls.read_text().splitlines() == ["server service reconcile"]
 
 
 def test_install_without_launchagent_is_a_noop(tmp_path: Path) -> None:

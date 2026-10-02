@@ -122,6 +122,11 @@ Inspection failure means server availability is unknown; service liveness is
 reported separately by the caretaker. Repeating the same refusal does not emit
 the same lifecycle error every five seconds.
 
+The App decodes Runtime Pack installation stdout as one JSON result. Post-install
+service reconciliation keeps all diagnostics, including its success message, on
+stderr. Publishing a generation and reconciling its service therefore cannot turn
+a valid install result into an invalid native response.
+
 ## Host shell boundary
 
 The default installer does not source Vibecrafted helpers into the host shell.
