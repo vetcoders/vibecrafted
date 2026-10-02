@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SwiftUI
 import WebKit
 
 /// W3-only executable harness. All network traffic targets the fixture passed
@@ -27,6 +28,94 @@ struct CommandDeckIntegrationTests {
       if Date() > deadline { throw Failure(message: "Fixture navigation timed out at line \(line)") }
       try await Task.sleep(for: .milliseconds(25))
     }
+  }
+
+  static func windowGeometryContract() throws {
+    let fresh = CommandDeckWindowFactory.makeWindow(title: "Geometry fixture", frameAutosaveName: nil)
+    defer { fresh.close() }
+    guard let screen = fresh.screen ?? NSScreen.main else {
+      throw Failure(message: "No screen for AppKit geometry contract")
+    }
+    try require(screen.visibleFrame.contains(fresh.frame),
+      "Fresh Command Deck extends beyond its screen's visible frame: \(fresh.frame)")
+
+    let name = "CommandDeckGeometry-\(UUID().uuidString)"
+    defer { NSWindow.removeFrame(usingName: name) }
+    let saved = NSWindow(contentRect: .zero,
+      styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+    saved.isReleasedWhenClosed = false
+    defer { saved.close() }
+    let oversized = NSRect(x: screen.visibleFrame.minX, y: screen.visibleFrame.minY,
+      width: screen.visibleFrame.width + 400, height: screen.visibleFrame.height + 400)
+    saved.setFrame(oversized, display: false)
+    saved.saveFrame(usingName: name)
+    let restored = CommandDeckWindowFactory.makeWindow(title: "Restored fixture", frameAutosaveName: name)
+    defer { restored.close() }
+    try require(screen.visibleFrame.contains(restored.frame),
+      "Restored oversized Command Deck extends beyond visible frame: \(restored.frame)")
+
+    // Keep both the size and position of an already valid user frame.
+    let userWidth = min(950, screen.visibleFrame.width)
+    let userHeight = min(700, screen.visibleFrame.height)
+    let userFrame = NSRect(
+      x: screen.visibleFrame.minX + min(70, screen.visibleFrame.width - userWidth),
+      y: screen.visibleFrame.minY + min(50, screen.visibleFrame.height - userHeight),
+      width: userWidth, height: userHeight)
+    saved.setFrame(userFrame, display: false)
+    saved.saveFrame(usingName: name)
+    let userSized = CommandDeckWindowFactory.makeWindow(title: "User-sized fixture", frameAutosaveName: name)
+    defer { userSized.close() }
+    try require(userSized.frame == userFrame, "Valid saved geometry was resized or recentered")
+
+    // Mount at the visible boundary: native toolbar bridging can change the
+    // titled frame after makeWindow. It must still fit after layout.
+    fresh.setFrame(screen.visibleFrame, display: false)
+    CommandDeckWindowFactory.mount(
+      Text("Geometry fixture").toolbar { Button("Fixture") {} }, in: fresh)
+    try require(fresh.toolbar != nil, "Geometry fixture did not mount a native toolbar")
+    try require(screen.visibleFrame.contains(fresh.frame), "Mounted toolbar escaped visible frame")
+
+    let cases: [(String, NSRect, NSRect, NSRect)] = [
+      ("Dock and menu exclusion",
+        NSRect(x: 42, y: 70, width: 1398, height: 800),
+        NSRect(x: 0, y: 0, width: 1440, height: 900),
+        NSRect(x: 42, y: 70, width: 1398, height: 800)),
+      ("positive monitor origin",
+        NSRect(x: 1920, y: 80, width: 1024, height: 700),
+        NSRect(x: 2500, y: 600, width: 900, height: 650),
+        NSRect(x: 2044, y: 130, width: 900, height: 650)),
+      ("negative monitor origin",
+        NSRect(x: -1920, y: -900, width: 1400, height: 820),
+        NSRect(x: -2400, y: -1200, width: 1000, height: 700),
+        NSRect(x: -1920, y: -900, width: 1000, height: 700)),
+      ("screen below ordinary minimum",
+        NSRect(x: 10, y: 40, width: 640, height: 480),
+        NSRect(x: 0, y: 0, width: 1200, height: 822),
+        NSRect(x: 10, y: 40, width: 640, height: 480)),
+      ("valid user frame",
+        NSRect(x: 42, y: 70, width: 1398, height: 800),
+        NSRect(x: 100, y: 100, width: 950, height: 700),
+        NSRect(x: 100, y: 100, width: 950, height: 700)),
+      ("disconnected display",
+        NSRect(x: 42, y: 0, width: 2006, height: 1121),
+        NSRect(x: 5000, y: 3000, width: 950, height: 700),
+        NSRect(x: 1098, y: 421, width: 950, height: 700)),
+    ]
+    for (label, visible, input, expected) in cases {
+      try require(CommandDeckWindowFactory.fittedFrame(input, in: visible) == expected,
+        "Incorrect complete-frame geometry: \(label)")
+      try require(CommandDeckWindowFactory.fittedFrame(expected, in: visible) == expected,
+        "Fitting twice changed geometry: \(label)")
+      // Actual NSWindow sizing must honor the same geometry, including when
+      // the screen is smaller than the usual 800x600 frame minimum.
+      saved.minSize = .zero
+      saved.setFrame(input, display: false)
+      CommandDeckWindowFactory.fitToVisibleFrame(saved, in: visible)
+      try require(saved.frame == expected, "AppKit frame did not fit: \(label): \(saved.frame)")
+      try require(saved.minSize == NSSize(width: min(800, visible.width), height: min(600, visible.height)),
+        "AppKit minimum prevents visible-frame fit: \(label)")
+    }
+    print("CommandDeck window geometry passed")
   }
 
   static func stateContract(_ endpoint: URL) throws {
@@ -1161,6 +1250,8 @@ struct CommandDeckIntegrationTests {
 
   static func main() async throws {
     _ = NSApplication.shared
+    try windowGeometryContract()
+    if CommandLine.arguments.dropFirst().first == "--geometry" { return }
     let endpoint = URL(string: CommandLine.arguments[1])!
     let reconnectEndpoint = URL(string: CommandLine.arguments[2])!
     try require(endpoint.scheme == "http" && endpoint.host == "127.0.0.1" && endpoint.port != nil,

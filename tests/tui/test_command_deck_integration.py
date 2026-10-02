@@ -209,6 +209,25 @@ def test_native_typed_actions_and_terminal_contract(tmp_path: Path) -> None:
     assert "NativeCommandRecoveryTests passed" in result.stdout
 
 
+def test_native_window_geometry(tmp_path: Path) -> None:
+    sources = sorted((APP / "CommandDeck").glob("*.swift"))
+    sources += [
+        APP / "ServerMenuPolicy.swift",
+        APP / "LifecycleLog.swift",
+        APP / "Views/MainWindowController.swift",
+        SHELL / "tests/CommandDeckIntegrationTests.swift",
+    ]
+    binary = _compile(tmp_path, "command-deck-geometry", sources)
+    result = subprocess.run(
+        [str(binary), "--geometry"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+    assert "CommandDeck window geometry passed" in result.stdout
+
+
 def test_native_session_state_routes_and_reopen(tmp_path: Path) -> None:
     sources = sorted((APP / "CommandDeck").glob("*.swift"))
     sources += [
