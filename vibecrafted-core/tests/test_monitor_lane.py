@@ -70,7 +70,11 @@ def test_replay_does_not_lose_or_duplicate_across_restart(
     assert injected[0].message_id != missed[0].message_id
     assert (
         message_control.inspect_message(injected[0].message_id)["delivery_state"]
-        == "agent_acknowledged"
+        == "context_injected"
+    )
+    assert (
+        message_control.inspect_message(injected[0].message_id)["agent_ack_state"]
+        == "unobserved"
     )
 
     stub_again = _Stdin()
@@ -279,22 +283,23 @@ def test_unreadable_cursor_is_not_reset(
     assert cursor.read_text(encoding="utf-8") == "{"
 
 
-def test_ack_failure_does_not_reinject(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize("cursor_kind", ["current", "legacy", "crash"])
+def test_injection_stamp_failure_does_not_reinject_or_ack(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cursor_kind: str
 ) -> None:
     home = _home(monkeypatch, tmp_path)
     _run(home, "run-1")
     item = message_control.send_message(run_id="run-1", text="once")
-    real_ack = message_control.acknowledge_message
+    real_stamp = message_control.mark_context_injected
     calls = {"n": 0}
 
-    def flaky(message_id: str, **kwargs):
+    def flaky(message_id: str, nonce: str):
         calls["n"] += 1
         if calls["n"] == 1:
-            raise message_control.MessageControlError("ack_failed")
-        return real_ack(message_id, **kwargs)
+            raise message_control.MessageControlError("stamp_failed")
+        return real_stamp(message_id, nonce)
 
-    monkeypatch.setattr(message_control, "acknowledge_message", flaky)
+    monkeypatch.setattr(message_control, "mark_context_injected", flaky)
     first = _Stdin()
     with monitor_lane.RunFollower("run-1", stdin=first, pid=os.getpid()) as follower:
         handed = follower.poll()
@@ -305,6 +310,14 @@ def test_ack_failure_does_not_reinject(
         == "inbox_pending"
     )
 
+    cursor = home / "control_plane/runtime_runs/run-1/monitor-lane/lease.json"
+    saved = json.loads(cursor.read_text())
+    if cursor_kind == "legacy":
+        saved["needs_ack"] = saved.pop("needs_stamp")
+    elif cursor_kind == "crash":
+        saved.pop("needs_stamp")
+    cursor.write_text(json.dumps(saved))
+
     second = _Stdin()
     with monitor_lane.RunFollower("run-1", stdin=second, pid=os.getpid()) as follower:
         assert follower.poll() == []
@@ -312,8 +325,16 @@ def test_ack_failure_does_not_reinject(
     assert calls["n"] == 2
     assert (
         message_control.inspect_message(item["message_id"])["delivery_state"]
-        == "agent_acknowledged"
+        == "context_injected"
     )
+    assert (
+        message_control.inspect_message(item["message_id"])["agent_ack_state"]
+        == "unobserved"
+    )
+    acknowledged = message_control.acknowledge_message(
+        item["message_id"], run_id="run-1"
+    )
+    assert acknowledged["delivery_state"] == "agent_acknowledged"
 
 
 def test_run_nonce_is_stable_and_store_shaped() -> None:

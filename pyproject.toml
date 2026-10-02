@@ -22,6 +22,8 @@ dev = [
 extend-exclude = ["*.md"]
 
 [tool.ruff.lint.per-file-ignores]
+# The workshop admits/re-execs the generation interpreter before core imports.
+"vibecrafted-core/vibecrafted_core/config/vc-frame/vc-agent-workshop.py" = ["E402"]
 # tests whose imports legitimately follow a sys.path setup.
 "tests/agent_dispatch_test.py" = ["E402"]
 "tests/tui/test_installer_branding.py" = ["E402"]

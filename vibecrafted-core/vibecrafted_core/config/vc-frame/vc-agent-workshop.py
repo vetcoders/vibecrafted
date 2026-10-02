@@ -711,16 +711,19 @@ class PresenceSchedule:
 # vc-frame / alacritty theme in both modes.
 _PAPER_PAIR = 1
 _PAPER = 0
+_ACCENT = 0
 
 
 def bind_terminal_paper(window: curses.window) -> int:
     """Paint with the host terminal paper; never ANSI black."""
-    global _PAPER
+    global _PAPER, _ACCENT
     curses.use_default_colors()
     curses.init_pair(_PAPER_PAIR, -1, -1)
     _PAPER = curses.color_pair(_PAPER_PAIR)
     window.bkgd(" ", _PAPER)
     window.bkgdset(" ", _PAPER)
+    curses.init_pair(2, curses.COLOR_CYAN, -1)
+    _ACCENT = curses.color_pair(2)
     return _PAPER
 
 
@@ -739,7 +742,8 @@ def _safe_addstr(
     if row < 0 or row >= height or col < 0 or col >= width:
         return
     try:
-        window.addstr(row, col, _clip(text, width - col), attr | _PAPER)
+        color = 0 if attr & curses.A_COLOR else _PAPER
+        window.addstr(row, col, _clip(text, width - col), attr | color)
     except curses.error:
         pass
 
@@ -754,9 +758,9 @@ def _dim_unavailable_choices(
     end_col: int,
     base: int = 0,
 ) -> None:
-    """Paint unavailable tokens dim and the selected token bold.
+    """Paint unavailable tokens dim and the selected token bold in the accent color.
 
-    The selected option is bold letters. Focus is a chevron beside the row,
+    Focus is a chevron beside the row,
     never an underline or strike through the glyphs, and never a reverse-video
     block.
     """
@@ -773,7 +777,9 @@ def _dim_unavailable_choices(
         if not enabled:
             _safe_addstr(window, row, col + offset, fragment, curses.A_DIM | base)
         elif index == selected:
-            _safe_addstr(window, row, col + offset, fragment, curses.A_BOLD | base)
+            _safe_addstr(
+                window, row, col + offset, fragment, curses.A_BOLD | _ACCENT | base
+            )
         offset += len(token) + 1
 
 
@@ -1033,7 +1039,7 @@ class Workshop:
                 x = col
             available = _provider_available(name)
             if index == self.agent and available:
-                attr = curses.A_BOLD
+                attr = curses.A_BOLD | _ACCENT
             elif available:
                 attr = 0
             else:
@@ -1247,7 +1253,9 @@ class Workshop:
         if key in (curses.KEY_DOWN, ord("\t")):
             self.row = (self.row + 1) % rows
             return
-        if key in (curses.KEY_LEFT, curses.KEY_RIGHT, ord(" ")):
+        if key in (curses.KEY_LEFT, curses.KEY_RIGHT) or (
+            key == ord(" ") and not editing_path and not editing_parent
+        ):
             delta = -1 if key == curses.KEY_LEFT else 1
             if self.row == 0:
                 self._cycle_agent(delta)
@@ -1419,11 +1427,10 @@ class Workshop:
             _, x, y, _, state = curses.getmouse()
         except curses.error:
             return
-        if not state:
-            return
-        # Pointer motion reports arrive continuously while hovering; only a
-        # button event is User intent worth a pane-state probe or a click.
-        if not state & ~curses.REPORT_MOUSE_POSITION:
+        # Release, hover and secondary buttons are not a second activation.
+        # ncurses reports either a press or a combined click for button one.
+        activation = curses.BUTTON1_PRESSED | curses.BUTTON1_CLICKED
+        if not state & activation:
             return
         self.presence_schedule.request()
         for row, start, end, index, kind in self.mouse_targets:
@@ -1437,6 +1444,7 @@ class Workshop:
                 self._focus_face(index)
                 return
             if kind == "provider":
+                self.row = 0
                 if _provider_available(AGENTS[index]):
                     self._select_agent(index)
                 else:

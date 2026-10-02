@@ -3,11 +3,11 @@
 The MCP lane (server tool-result glue) delivers on the next tool call. This
 module is the other lane: a follower that watches one run's
 ``message_control`` inbox and, when the harness actually has a push channel,
-writes one injection and then ACKs. It does not mark ``context_injected`` —
-that state belongs to the MCP lane.
+writes one injection and records ``context_injected`` with the same nonce as
+the MCP lane. Only the recipient may ACK; a stdin handoff is not a read receipt.
 
 The follower keeps the Codescribe bus-demux shape (exclusive lease, durable
-cursor, replay of what was already handed off, ACK only after the handoff)
+cursor, replay of what was already handed off, explicit recipient ACK)
 but the inbox is a directory of receipts, not a byte log. The cursor is the
 set of message ids already handed to the harness. It only grows. A restart
 replays by omission: those ids are not injected again, and an id that is
@@ -363,7 +363,7 @@ class RunFollower:
         self._lock_fd: int | None = None
         self._injected: list[str] = []
         self._skipped: list[str] = []
-        self._needs_ack: list[str] = []
+        self._needs_stamp: list[str] = []
         self._deferred: set[str] = set()
         self._closed = False
         self._held_local = False
@@ -396,7 +396,7 @@ class RunFollower:
         self._require_open()
         delivered: list[Delivery] = []
         with run_mutation_locks(control_plane_home(), run_id=self.run_id):
-            self._retry_acks()
+            self._retry_stamps()
             rows = message_control.pending_messages(run_id=self.run_id)
             for record in rows:
                 message_id = str(record.get("message_id") or "")
@@ -439,10 +439,12 @@ class RunFollower:
             return Delivery(message_id, provider, level, False, reason)
         self._remember_injected(message_id)
         try:
-            message_control.acknowledge_message(message_id, run_id=self.run_id)
-            self._forget_ack(message_id)
+            message_control.mark_context_injected(
+                message_id, run_delivery_nonce(self.run_id)
+            )
+            self._forget_stamp(message_id)
         except message_control.MessageControlError:
-            self._remember_ack(message_id)
+            self._remember_stamp(message_id)
         return Delivery(message_id, provider, level, True, reason)
 
     def _push(self, record: Mapping[str, Any]) -> tuple[str, bool, str]:
@@ -469,30 +471,34 @@ class RunFollower:
         )
         return push_claude_stdin(self.stdin, self.pid, payload)
 
-    def _retry_acks(self) -> None:
-        for message_id in list(self._needs_ack):
+    def _retry_stamps(self) -> None:
+        for message_id in list(self._needs_stamp):
             try:
                 current = message_control.inspect_message(message_id)
             except message_control.MessageControlError:
                 continue
             if current is None:
-                self._forget_ack(message_id)
+                self._forget_stamp(message_id)
                 continue
             state = str(current.get("delivery_state") or "")
-            if state == "agent_acknowledged":
-                self._forget_ack(message_id)
+            if state in _TERMINAL_STATES:
+                self._forget_stamp(message_id)
                 continue
-            if state not in {"inbox_pending", "context_injected"}:
+            if state != "inbox_pending":
                 continue
             try:
-                message_control.acknowledge_message(message_id, run_id=self.run_id)
+                message_control.mark_context_injected(
+                    message_id, run_delivery_nonce(self.run_id)
+                )
             except message_control.MessageControlError:
                 continue
-            self._forget_ack(message_id)
+            self._forget_stamp(message_id)
 
     def _remember_injected(self, message_id: str) -> None:
         if message_id not in self._injected:
             self._injected.append(message_id)
+        if message_id not in self._needs_stamp:
+            self._needs_stamp.append(message_id)
         self._persist(active=True)
 
     def _remember_skipped(self, message_id: str) -> None:
@@ -500,14 +506,16 @@ class RunFollower:
             self._skipped.append(message_id)
         self._persist(active=True)
 
-    def _remember_ack(self, message_id: str) -> None:
-        if message_id not in self._needs_ack:
-            self._needs_ack.append(message_id)
+    def _remember_stamp(self, message_id: str) -> None:
+        if message_id not in self._needs_stamp:
+            self._needs_stamp.append(message_id)
         self._persist(active=True)
 
-    def _forget_ack(self, message_id: str) -> None:
-        if message_id in self._needs_ack:
-            self._needs_ack = [item for item in self._needs_ack if item != message_id]
+    def _forget_stamp(self, message_id: str) -> None:
+        if message_id in self._needs_stamp:
+            self._needs_stamp = [
+                item for item in self._needs_stamp if item != message_id
+            ]
             self._persist(active=True)
 
     def _acquire(self) -> None:
@@ -540,7 +548,15 @@ class RunFollower:
                     )
                 self._injected = _id_list(previous.get("injected"), label="injected")
                 self._skipped = _id_list(previous.get("skipped"), label="skipped")
-                self._needs_ack = _id_list(previous.get("needs_ack"), label="needs_ack")
+                # Old cursors called a transport handoff an ACK. Preserve their
+                # pending ids, but reconcile injection stamps, never recipient ACK.
+                pending = previous.get("needs_stamp", previous.get("needs_ack"))
+                self._needs_stamp = _id_list(pending, label="needs_stamp")
+                # Also repair a crash after persisting the handed-off cursor but
+                # before the receipt stamp. No stdin write is repeated.
+                self._needs_stamp = list(
+                    dict.fromkeys([*self._needs_stamp, *self._injected])
+                )
             self._persist(active=True)
         except BaseException:
             self._release_lock()
@@ -556,7 +572,7 @@ class RunFollower:
                 "provider": self.provider,
                 "injected": list(self._injected),
                 "skipped": list(self._skipped),
-                "needs_ack": list(self._needs_ack),
+                "needs_stamp": list(self._needs_stamp),
                 "active": active,
                 "pid": os.getpid(),
                 "heartbeat_unix": time.time(),

@@ -174,6 +174,8 @@ def test_bind_terminal_paper_uses_default_colors_not_ansi_black() -> None:
         def color_pair(self, pair: int) -> int:
             return 256 * pair
 
+        COLOR_CYAN = 6
+
     class FakeWindow:
         def bkgd(self, ch: str, attr: int) -> None:
             calls.append(("bkgd", ch, attr))
@@ -193,6 +195,20 @@ def test_bind_terminal_paper_uses_default_colors_not_ansi_black() -> None:
     assert ("pair", 1, -1, -1) in calls
     assert ("bkgd", " ", 256) in calls
     assert ("bkgdset", " ", 256) in calls
+    assert ("pair", 2, 6, -1) in calls
+    assert workshop._ACCENT == 512
+
+
+def test_safe_addstr_preserves_the_selected_color_pair() -> None:
+    workshop = _load()
+    writes = []
+    window = SimpleNamespace(
+        getmaxyx=lambda: (24, 80),
+        addstr=lambda row, col, text, attr: writes.append(attr),
+    )
+    workshop._PAPER = 256
+    workshop._safe_addstr(window, 0, 0, "codex", 512 | workshop.curses.A_BOLD)
+    assert writes[0] & workshop.curses.A_COLOR == 512
 
 
 def test_interactive_mode_matrix_is_complete_and_fails_closed() -> None:
@@ -1411,13 +1427,99 @@ def test_provider_click_drops_parent_sessions_of_the_previous_provider(
         )
     ]
     picker.parent_index = 0
+    picker.row = 1  # provider click must take focus back from the project
     picker.mouse_targets = [(3, 0, 10, workshop.AGENTS.index("codex"), "provider")]
 
     picker.handle_mouse()
 
     assert picker.agent == workshop.AGENTS.index("codex")
+    assert picker.row == 0
     assert picker.parent_sessions == []
     assert picker.parent_index == -1
+
+    picker.handle_launcher_key(workshop.curses.KEY_RIGHT)
+    assert picker.agent == (workshop.AGENTS.index("codex") + 1) % len(workshop.AGENTS)
+
+
+@pytest.mark.parametrize("event", ["BUTTON1_RELEASED", "BUTTON3_CLICKED"])
+def test_launcher_mouse_release_and_other_buttons_do_not_launch(
+    monkeypatch: pytest.MonkeyPatch, event: str
+) -> None:
+    workshop = _load()
+    picker = workshop.Workshop(SimpleNamespace(), mode="launcher")
+    picker.mouse_targets = [(3, 0, 10, 0, "launch")]
+    monkeypatch.setattr(
+        workshop.curses,
+        "getmouse",
+        lambda: (0, 4, 3, 0, getattr(workshop.curses, event)),
+    )
+    launches = []
+    monkeypatch.setattr(picker, "launch", lambda: launches.append(True))
+
+    picker.handle_mouse()
+
+    assert launches == []
+
+
+def test_project_field_accepts_spaces_without_cycling_provider() -> None:
+    workshop = _load()
+    picker = workshop.Workshop(SimpleNamespace(), mode="launcher")
+    picker.row = 1
+    picker.path = "/tmp/My"
+
+    picker.handle_launcher_key(ord(" "))
+
+    assert picker.path == "/tmp/My "
+
+
+@pytest.mark.parametrize("provider", ["claude", "codex", "kimi", "copilot"])
+@pytest.mark.parametrize("activation", ["enter", "click"])
+def test_provider_click_then_keyboard_and_launch_keep_exact_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, provider: str, activation: str
+) -> None:
+    workshop = _load()
+    project = tmp_path / "My Project"
+    project.mkdir()
+    picker, calls = _prepare_launch(
+        workshop,
+        project,
+        monkeypatch,
+        destination="project-workspace",
+        live=["project-workspace"],
+        current="project-workspace",
+    )
+    monkeypatch.setattr(workshop, "_provider_available", lambda _agent: True)
+    for name in (
+        "_normalize_runtime_choice",
+        "_normalize_permission_choice",
+        "_normalize_mode_choice",
+        "_normalize_continuity_choice",
+    ):
+        monkeypatch.setattr(workshop.Workshop, name, lambda _self: None)
+    picker.row = 1
+    picker.mouse_targets = [(3, 0, 10, workshop.AGENTS.index(provider), "provider")]
+    monkeypatch.setattr(
+        workshop.curses,
+        "getmouse",
+        lambda: (0, 4, 3, 0, workshop.curses.BUTTON1_CLICKED),
+    )
+    picker.handle_mouse()
+    picker.handle_launcher_key(workshop.curses.KEY_RIGHT)
+    picker.handle_launcher_key(workshop.curses.KEY_LEFT)
+    if activation == "enter":
+        picker.handle_launcher_key(10)
+    else:
+        picker.mouse_targets = [(3, 0, 10, 0, "launch")]
+        picker.handle_mouse()
+
+    assert picker.error == ""
+    assert len(calls) == 1
+    argv = calls[0]
+    assert argv[argv.index("--session") + 1] == "project-workspace"
+    assert argv[argv.index("--cwd") + 1] == str(project)
+    command = argv[argv.index("--") + 1 :]
+    assert command[:3] == ["vibecrafted", "init", provider]
+    assert command[command.index("--root") + 1] == str(project)
 
 
 def test_small_home_and_launcher_render_without_nested_frame(
@@ -1479,10 +1581,11 @@ def test_small_home_and_launcher_render_without_nested_frame(
     assert "• agy" not in form_text
 
 
-def test_selected_provider_is_bold_only_not_a_dot_or_block(
+def test_selected_provider_has_accent_without_a_dot_or_block(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workshop = _load()
+    monkeypatch.setattr(workshop, "_ACCENT", 2 << 8)
     styled: list[tuple[str, int]] = []
 
     class FakeWindow:
@@ -1513,6 +1616,7 @@ def test_selected_provider_is_bold_only_not_a_dot_or_block(
     selected = [item for item in styled if item[0].strip() == "codex"]
     assert selected
     assert selected[0][1] & workshop.curses.A_BOLD
+    assert selected[0][1] & workshop.curses.A_COLOR == 2 << 8
     assert not selected[0][1] & workshop.curses.A_REVERSE
     bullets = [item[0] for item in styled if item[0].startswith("• codex")]
     assert bullets == []
