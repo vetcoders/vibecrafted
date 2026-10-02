@@ -586,7 +586,7 @@ def test_repo_version_file_exists_and_is_non_empty() -> None:
         "VIBECRAFTED_RUN_NO_UV_E2E=1 to opt in."
     ),
 )
-def test_make_install_no_uv_e2e(tmp_path: Path) -> None:  # pragma: no cover
+def test_make_install_no_uv_e2e(tmp_path: Path) -> None:
     env = _build_no_uv_env(tmp_path, fake_uv=False)
     result = subprocess.run(
         ["make", "install"],

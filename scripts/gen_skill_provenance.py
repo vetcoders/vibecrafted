@@ -381,7 +381,10 @@ def _git_blob_id(data: bytes) -> str:
     """The git blob id of `data`, computed without git."""
     # A git blob id IS sha1 over that header — an identifier in git's format,
     # not a signature of ours. See the twin in scripts/vetcoders_install.py.
-    return hashlib.sha1(  # nosemgrep: python.lang.security.insecure-hash-algorithms.insecure-hash-algorithm-sha1
+    # Git blob identity requires SHA-1 over the blob header and bytes; usedforsecurity=False is
+    # explicit, and this identifier is not a signature or authentication decision.
+    # nosemgrep: python.lang.security.insecure-hash-algorithms.insecure-hash-algorithm-sha1
+    return hashlib.sha1(
         b"blob %d\0" % len(data) + data, usedforsecurity=False
     ).hexdigest()
 

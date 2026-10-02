@@ -223,7 +223,7 @@ def __getattr__(name: str) -> Any:
         import vibecrafted_core.supervisor_async
 
         module = vibecrafted_core.supervisor_async
-    else:  # pragma: no cover - _LAZY_EXPORTS is the whitelist.
+    else:  # _LAZY_EXPORTS is the whitelist.
         raise AttributeError(f"module {__name__!r} has no lazy module for {name!r}")
 
     value = getattr(module, name)

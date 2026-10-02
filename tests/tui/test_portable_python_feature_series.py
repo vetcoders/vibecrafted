@@ -60,7 +60,7 @@ def test_pin_is_current_stable_cpython_feature_series() -> None:
     assert pin["tag"] == "20260901"
     assert pin["flavor"] == "install_only"
     assert "3.12" not in str(pin["cpython"])
-    artifacts = {item["platform"]: item for item in pin["artifacts"]}  # type: ignore[index]
+    artifacts = {item["platform"]: item for item in pin["artifacts"]}
     for platform in ("darwin-arm64", "darwin-x86_64", "linux-arm64", "linux-x64"):
         item = artifacts[platform]
         assert "3.14.7" in item["archive"]
@@ -110,7 +110,7 @@ def test_extracted_pbs_python_is_3147_with_ssl_pip_venv_and_dispatcher(
     pin = _pin()
     archive_name = next(
         item["archive"]
-        for item in pin["artifacts"]  # type: ignore[union-attr]
+        for item in pin["artifacts"]
         if item["platform"] == "darwin-arm64"
     )
     dest = tmp_path / "seed"

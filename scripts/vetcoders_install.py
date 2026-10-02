@@ -36,11 +36,12 @@ import ast
 import ctypes
 import difflib
 import errno
+from typing import Self
 
 try:
     import fcntl
 except ImportError:  # native Windows
-    fcntl = None  # type: ignore[assignment]
+    fcntl = None
 import hashlib
 import importlib
 import importlib.util
@@ -87,7 +88,7 @@ if (
 try:
     _distribution_manifest = importlib.import_module("distribution_manifest")
     _installer_brand = importlib.import_module("installer_brand")
-except ModuleNotFoundError:  # pragma: no cover - import path depends on entrypoint
+except ModuleNotFoundError:  # import path depends on entrypoint
     _distribution_manifest = importlib.import_module("scripts.distribution_manifest")
     _installer_brand = importlib.import_module("scripts.installer_brand")
 
@@ -295,7 +296,7 @@ def compact_logging(log_path: Path, quiet: bool = True):
     log_path.parent.mkdir(parents=True, exist_ok=True)
     tee = TeeLogger(log_path, quiet=quiet)
     real_stdout = sys.stdout
-    sys.stdout = tee  # type: ignore[assignment]
+    sys.stdout = tee
     try:
         yield real_stdout  # caller prints compact lines to this
     finally:
@@ -1859,7 +1860,10 @@ def _git_blob_id(data: bytes) -> str:
     # this is an identifier in someone else's format, never a signature of
     # ours. `usedforsecurity=False` says so to OpenSSL (and keeps it working
     # under FIPS); the rule is silenced by id on this line alone.
-    return hashlib.sha1(  # nosemgrep: python.lang.security.insecure-hash-algorithms.insecure-hash-algorithm-sha1
+    # Legacy skill provenance compares Git blob identities, whose wire format is SHA-1;
+    # usedforsecurity=False is explicit and release authentication is performed separately.
+    # nosemgrep: python.lang.security.insecure-hash-algorithms.insecure-hash-algorithm-sha1
+    return hashlib.sha1(
         b"blob %d\0" % len(data) + data, usedforsecurity=False
     ).hexdigest()
 
@@ -2595,7 +2599,9 @@ def _doctor_fix_launchers(store_path: Path, state: InstallState) -> list[DoctorF
         _install_launcher(source_root, dry_run=False, update_rc=False)
         state.launcher_entries = _snapshot_launcher_entries()
         state.save(vibecrafted_home())
-    except Exception as exc:  # noqa: BLE001  # pragma: no cover - surface repair failures
+    # Launcher repair crosses filesystem, receipt and validation helpers; any exception must become
+    # a warn DoctorFinding instead of hiding the failed repair behind a crash.
+    except Exception as exc:  # noqa: BLE001
         return [
             DoctorFinding(
                 "warn",
@@ -4408,7 +4414,7 @@ class _RuntimeLaunchdMutationGate:
         self.disabled = False
         self._retain_disabled = False
 
-    def __enter__(self) -> _RuntimeLaunchdMutationGate:  # noqa: PYI034
+    def __enter__(self) -> Self:
         """Disable the service label on entry if gating is required and it was not already
         disabled.
         """
@@ -5271,7 +5277,9 @@ def _teardown_owned_runtime_for_uninstall(
             from vibecrafted_core.windows_server import uninstall_windows_server
 
             return tuple(uninstall_windows_server() or ())
-        except Exception:  # noqa: BLE001  # service teardown never blocks uninstall
+        # Windows server teardown crosses platform helpers; an unexpected teardown exception must
+        # preserve the uninstall continuation contract and cannot authorize further service work.
+        except Exception:  # noqa: BLE001
             return ()
     if sys.platform != "darwin":
         return ()
@@ -10085,13 +10093,13 @@ def _validate_runtime_verifier_semantics(runtime_root: Path) -> None:
 
         try:
             manifest = json.loads(manifest_raw.decode("utf-8"))
-        except (UnicodeError, json.JSONDecodeError) as exc:  # pragma: no cover
+        except (UnicodeError, json.JSONDecodeError) as exc:
             raise OSError(f"captured runtime manifest is invalid: {exc}") from exc
 
         legacy_snapshot = temporary / "legacy-inventory"
         legacy_manifest = dict(manifest)
         legacy_hashes = manifest.get("hashes")
-        if not isinstance(legacy_hashes, dict):  # pragma: no cover - loader owns this.
+        if not isinstance(legacy_hashes, dict):  # loader owns this.
             raise OSError("captured runtime manifest has no hash inventory")
         legacy_manifest["hashes"] = {
             Path("VERSION").as_posix(): legacy_hashes[Path("VERSION").as_posix()],
@@ -16293,11 +16301,7 @@ def _uninstall_control_state(
     try:
         # The origin is restricted above to credential-free HTTP(S); urllib is
         # retained to avoid adding a host-installer dependency.
-        with (
-            urllib.request.urlopen(  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
-                request, timeout=timeout_seconds
-            ) as response
-        ):
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except (
         OSError,
@@ -19079,6 +19083,8 @@ def _toml_unflatten(values: Mapping[str, Any]) -> dict[str, Any]:
             current = node.setdefault(part, {})
             if not isinstance(current, dict):
                 # Leaf on a parent path is a setting-identity collision.
+                # A leaf/table collision is a persisted preference identity conflict; callers handle
+                # ValueError as merge refusal, not TypeError as a programmer argument failure.
                 raise ValueError(  # noqa: TRY004
                     "settings conflict with changed shipped defaults: " + dotted
                 )
@@ -19397,6 +19403,8 @@ def _toml_delete_nested(tree: dict[str, Any], parts: Sequence[str]) -> dict[str,
     child = updated[head]
     if not isinstance(child, dict):
         # Nested delete hit a leaf; the resolved tree is unrepresentable.
+        # A nested delete against a persisted leaf is a TOML representation failure; preserve the
+        # ValueError merge-refusal contract instead of changing caller recovery dispatch.
         raise ValueError(  # noqa: TRY004
             "TOML merge could not represent the resolved preference tree"
         )
@@ -19426,6 +19434,8 @@ def _toml_update_inline_field(
     tree = _toml_loads_value(_toml_assignment_value_text(line))
     if not isinstance(tree, dict):
         # Inline assignment is not a table; representation failure, not typing.
+        # An inline assignment cannot represent the resolved preference tree; callers need the
+        # existing ValueError refusal rather than a different exception category.
         raise ValueError(  # noqa: TRY004
             "TOML merge could not represent the resolved preference tree"
         )
@@ -22497,6 +22507,8 @@ def _runtime_rescue_rollback_captured_state(
             )
             if not isinstance(loaded, dict):
                 # Malformed persisted evidence follows the recovery failure path below.
+                # A malformed persisted rescue label is recovery evidence failure; preserve
+                # RuntimeError so the existing recovery refusal path handles it.
                 raise RuntimeError("pre-rescue snapshot label is malformed")  # noqa: TRY004
             _runtime_rescue_validate_snapshot_evidence(snapshot_path, loaded)
             if expected_evidence and loaded.get("evidence_sha256") != expected_evidence:

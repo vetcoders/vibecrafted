@@ -126,13 +126,12 @@ def health_url(addr: str = DEFAULT_ADDR) -> str:
 
 
 def probe_health(addr: str = DEFAULT_ADDR, *, timeout: float = 2.0) -> dict[str, Any]:
-    request = urllib.request.Request(  # nosemgrep: dynamic-urllib-use-detected
-        health_url(addr), method="GET"
-    )
+    request = urllib.request.Request(health_url(addr), method="GET")
     try:
-        with urllib.request.urlopen(  # nosemgrep: dynamic-urllib-use-detected
-            request, timeout=timeout
-        ) as response:
+        # health_url constructs an HTTP URL from the configured server address and fixed health
+        # path; this local service probe cannot switch to file or another URL scheme.
+        # nosemgrep: dynamic-urllib-use-detected
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             body = response.read()
             payload: Any
             try:

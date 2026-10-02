@@ -14,7 +14,7 @@ use control_core::{ScaffoldArtifactStore, ScaffoldDoctorReport, doctor_plan_root
 
 fn main() -> ExitCode {
     // argv values select local inputs; they never establish executable trust.
-    let arguments = std::env::args_os().skip(1).collect::<Vec<_>>(); // nosemgrep: rust.lang.security.args-os.args-os
+    let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     let mut json = false;
     let mut plan: Option<PathBuf> = None;
     let mut repo: Option<PathBuf> = None;

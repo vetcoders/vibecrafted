@@ -2326,7 +2326,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.publish_output,
                 )
             print(f"Archive built: {archive}")
-        else:  # pragma: no cover - argparse owns command validation.
+        else:  # argparse owns command validation.
             raise ManifestError(f"unknown command: {args.command}")
     except (ManifestError, OSError) as exc:
         print(str(exc), file=sys.stderr)

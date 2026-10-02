@@ -2171,7 +2171,9 @@ def _probe_triage_run(binary: str, runner: Callable[..., Any]) -> _Probe:
     """
     try:
         proc = runner([binary, "triage-run", "--help"])
-    except Exception:  # noqa: BLE001 - an unusable binary means the capability is unsupported
+    # The capability runner is injected; any invocation exception must report supported=False rather
+    # than assume a missing or broken binary can triage runs.
+    except Exception:  # noqa: BLE001
         return _Probe(supported=False)
     if getattr(proc, "returncode", 1) != 0:
         return _Probe(supported=False)
@@ -2365,7 +2367,9 @@ def _serialized_triage_call(
         meta = Path(meta_path)
         try:
             payload = read_run_meta(meta)
-        except Exception:  # noqa: BLE001 - preserve the function's no_meta receipt
+        # Meta parsing crosses store implementations; any parser failure must preserve the wrapped
+        # function no_meta receipt path rather than invent run identity.
+        except Exception:  # noqa: BLE001
             return function(meta_path, env, runner)
         run_id = str(payload.get("run_id") or "").strip()
         if not run_id:
@@ -2383,7 +2387,9 @@ def _serialized_triage_call(
             ):
                 read_run_meta(meta, expected_run_id=run_id)
                 return function(meta_path, env, runner)
-        except Exception as exc:  # noqa: BLE001 - triage stays fail-open
+        # The triage lock crosses store and parser implementations; any exception must become
+        # OUTCOME_ERROR with triage_lock_unavailable before mutation.
+        except Exception as exc:  # noqa: BLE001
             return TriageOutcome(
                 OUTCOME_ERROR,
                 reason=f"triage_lock_unavailable: {type(exc).__name__}: {exc}",
@@ -2410,7 +2416,9 @@ def triage_finished_run(
     meta = Path(meta_path)
     try:
         payload = read_run_meta(meta)
-    except Exception as exc:  # noqa: BLE001 - unreadable meta is the result; triage stays fail-open
+    # Reading run metadata crosses versioned validators; any exception must return the explicit
+    # no_meta outcome because there is no proven receipt identity to write.
+    except Exception as exc:  # noqa: BLE001
         # No meta means no receipt to write to either; report and stop.
         return TriageOutcome(OUTCOME_SKIPPED, reason=f"no_meta: {exc}")
 
@@ -2849,7 +2857,9 @@ def _run_triage(
             )
         else:
             proc = runner(argv)
-    except Exception as exc:  # noqa: BLE001 - an invoke failure becomes an error outcome
+    # The invocation runner is injected; every runner exception must become invoke_error rather than
+    # a successful or silently skipped triage outcome.
+    except Exception as exc:  # noqa: BLE001
         return _error(f"invoke_error: {type(exc).__name__}: {exc}")
 
     returncode = getattr(proc, "returncode", 1)
@@ -3259,7 +3269,9 @@ def reconcile_untriaged_runs(
         try:
             _safe_run_id(run_dir.name)
             payload = read_run_meta(meta, expected_run_id=run_dir.name)
-        except Exception as exc:  # noqa: BLE001 - one corrupt run cannot stop sweep
+        # Each sweep row crosses metadata parsers; every exception must produce an OUTCOME_ERROR
+        # item so one corrupt run cannot hide the remaining sweep results.
+        except Exception as exc:  # noqa: BLE001
             item = TriageSweepItem(
                 run_id=run_dir.name,
                 meta_path=str(meta),
@@ -3349,5 +3361,5 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-if __name__ == "__main__":  # pragma: no cover - CLI entry point.
+if __name__ == "__main__":  # CLI entry point.
     raise SystemExit(main())

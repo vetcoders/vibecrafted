@@ -1255,9 +1255,9 @@ def _assert_shared_recovered_tuple(
     """App + runtime + config + wrappers share the isolated recover, same PTY."""
     restored = _read_installer_publication(Path(env["VIBECRAFTED_RUNTIME_HOME"]))
     assert restored["version"] == prior_pub["version"]
-    _assert_isolated_receipt_roots(restored["receipt"], tmp_path)  # type: ignore[arg-type]
-    _assert_receipt_names_live_app(restored["receipt"], dest)  # type: ignore[arg-type]
-    roots = restored["receipt"].get("roots")  # type: ignore[union-attr]
+    _assert_isolated_receipt_roots(restored["receipt"], tmp_path)
+    _assert_receipt_names_live_app(restored["receipt"], dest)
+    roots = restored["receipt"].get("roots")
     assert isinstance(roots, dict)
     for key in ("runtime_home", "product_config", "crafted_home", "launcher_home"):
         assert key in roots, f"recovered receipt missing shared {key}"
@@ -2643,8 +2643,8 @@ def test_product_update_cross_generation_publish_then_restore_previous_tuple(
             assert prior_pack.returncode == 0, prior_pack.stderr or prior_pack.stdout
             prior_pub = _read_installer_publication(runtime_home)
             assert apps.prior_source[:8] in str(prior_pub["version"]).lower()
-            _assert_isolated_receipt_roots(prior_pub["receipt"], tmp_path)  # type: ignore[arg-type]
-            _assert_receipt_names_live_app(prior_pub["receipt"], dest)  # type: ignore[arg-type]
+            _assert_isolated_receipt_roots(prior_pub["receipt"], tmp_path)
+            _assert_receipt_names_live_app(prior_pub["receipt"], dest)
 
             receipt = tmp_path / "receipt.json"
             journal = _replace_prior_with_candidate(
@@ -2661,8 +2661,8 @@ def test_product_update_cross_generation_publish_then_restore_previous_tuple(
             current_pub = _read_installer_publication(runtime_home)
             assert apps.current_source[:8] in str(current_pub["version"]).lower()
             assert current_pub["version"] != prior_pub["version"]
-            _assert_isolated_receipt_roots(current_pub["receipt"], tmp_path)  # type: ignore[arg-type]
-            _assert_receipt_names_live_app(current_pub["receipt"], dest)  # type: ignore[arg-type]
+            _assert_isolated_receipt_roots(current_pub["receipt"], tmp_path)
+            _assert_receipt_names_live_app(current_pub["receipt"], dest)
 
             capture = Path(journal["capture"])
             prior_app = capture / "prior.app"

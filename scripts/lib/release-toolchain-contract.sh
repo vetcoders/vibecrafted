@@ -23,7 +23,9 @@
 #
 # A present ld-classic of another version is drift and stops the release; only
 # an absent ld-classic selects the xcode pair, and that pair is version-exact.
-# shellcheck disable=SC2034 # exported contract values are consumed by sourcers
+# This sourced helper publishes a caller-visible result or status; its consumer lives outside this
+# file, so deleting the binding would break the shared helper contract.
+# shellcheck disable=SC2034
 readonly VIBECRAFTED_RELEASE_RUSTUP_TOOLCHAIN='1.96.0'
 readonly VIBECRAFTED_RELEASE_RUST_TARGETS='wasm32-wasip1 wasm32-unknown-unknown'
 readonly VIBECRAFTED_RELEASE_DARWIN_CLANG='/Library/Developer/CommandLineTools/usr/bin/clang'

@@ -207,7 +207,7 @@ def _stage_generation(
         shutil.copyfile(_NATIVE_DONOR, native)
         native.chmod(0o755)
         engine_path.symlink_to(native)
-    elif engine != "absent":  # pragma: no cover - test construction error
+    elif engine != "absent":  # test construction error
         raise ValueError(f"unknown engine mode: {engine}")
 
     if config != "absent":
@@ -232,7 +232,7 @@ def _stage_generation(
             outside.mkdir()
             shutil.rmtree(view / "layouts")
             (view / "layouts").symlink_to(outside)
-        elif config != "installed":  # pragma: no cover - construction error
+        elif config != "installed":  # construction error
             raise ValueError(f"unknown config mode: {config}")
 
     path_entries = ["/usr/bin", "/bin"]

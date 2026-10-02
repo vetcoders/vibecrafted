@@ -169,7 +169,7 @@ def _read_toml(path: Path) -> dict[str, Any]:
         with path.open("rb") as handle:
             loaded: dict[str, Any] = tomllib.load(handle)
             return loaded
-    except (OSError, tomllib.TOMLDecodeError) as exc:  # pragma: no cover
+    except (OSError, tomllib.TOMLDecodeError) as exc:
         _logger.warning("memex: failed to parse %s: %s", path, exc)
         return {}
 
@@ -427,7 +427,9 @@ def search(
     if mcp_call is not None:
         try:
             payload = mcp_call(query, ns, limit)
-        except Exception as exc:  # noqa: BLE001 - an injected MCP transport may raise anything; recall degrades
+        # The injected MCP recall transport has no closed exception taxonomy; any exception must log
+        # a warning and degrade to [] without blocking the parent operation.
+        except Exception as exc:  # noqa: BLE001
             _logger.warning("memex MCP call failed: %s", exc)
             return []
         return _parse_chunks(payload, namespace=ns, retrieved_at=retrieved_at)
@@ -452,7 +454,9 @@ def search(
     except MemexClientError as exc:
         _logger.warning("memex: %s — degrading to empty list", exc)
         return []
-    except Exception as exc:  # noqa: BLE001  # last-resort net: never raise to caller
+    # Optional recall crosses transport and payload conversion; unexpected exceptions must log a
+    # warning and return [] under the public non-raising recall contract.
+    except Exception as exc:  # noqa: BLE001
         _logger.warning("memex: unexpected failure: %s — degrading", exc)
         return []
 

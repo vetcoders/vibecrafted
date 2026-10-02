@@ -335,9 +335,9 @@ def _run_native_voc_build(
     result = subprocess.run(
         ["bash", str(harness)], env=env, text=True, capture_output=True, check=False
     )
-    result.captured_target = captured_target  # type: ignore[attr-defined]
-    result.captured_args = tmp_path / "captured-args"  # type: ignore[attr-defined]
-    result.hostile_target = hostile_target  # type: ignore[attr-defined]
+    result.captured_target = captured_target
+    result.captured_args = tmp_path / "captured-args"
+    result.hostile_target = hostile_target
     return result
 
 

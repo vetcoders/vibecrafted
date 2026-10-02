@@ -43,8 +43,8 @@ def _build_wheel(dist: Path) -> Path:
             check=False,
         )
     wheels = sorted(dist.glob("*.whl"))
-    if not wheels:
-        pytest.skip(f"wheel build failed: {(proc.stderr or proc.stdout)[-400:]}")
+    if proc.returncode != 0 or not wheels:
+        pytest.fail(f"wheel build failed: {(proc.stderr or proc.stdout)[-400:]}")
     return wheels[-1]
 
 
@@ -70,7 +70,7 @@ def _install_wheel_venv(wheel: Path, venv_dir: Path) -> Path:
     """Create venv, install wheel --no-deps, return venv python path.
 
     Prefer ``uv venv`` + ``uv pip`` (stable on this host). Fall back to
-    stdlib ``venv`` + ensurepip; if that SIGABRTs, record env limit and skip.
+    stdlib ``venv`` + ensurepip; if creation fails, retain the diagnostic and fail the proof.
     """
     py: Path | None = None
     # 1) uv venv (no ensurepip)
@@ -113,7 +113,9 @@ def _install_wheel_venv(wheel: Path, venv_dir: Path) -> Path:
     # 2) stdlib venv
     try:
         venv.create(venv_dir, with_pip=True, clear=True)
-    except Exception as exc:  # noqa: BLE001 — env limitation is a test outcome
+    # Venv creation crosses ensurepip implementations; any failure is logged and fails this
+    # packaging proof, including failures beyond stdlib documented exception types.
+    except Exception as exc:  # noqa: BLE001
         limit = Path(
             os.environ.get(
                 "VIBECRAFTED_E2E_LIMIT_LOG",
@@ -130,7 +132,7 @@ def _install_wheel_venv(wheel: Path, venv_dir: Path) -> Path:
             f"uv available: {bool(uv)}\n",
             encoding="utf-8",
         )
-        pytest.skip(f"venv creation impossible on this host: {exc}")
+        pytest.fail(f"venv creation impossible on this host: {exc}")
     py = venv_dir / "bin" / "python"
     if not py.is_file():
         py = venv_dir / "Scripts" / "python.exe"
@@ -285,3 +287,25 @@ def test_checkout_delivery_uses_unpublished_materialization(
     assert {p: p.read_bytes() for p in source.rglob("*") if p.is_file()} == before
     assert not (tmp_path / ".config").exists()
     assert not (tmp_path / "tools/vibecrafted-current").exists()
+
+
+@pytest.mark.parametrize("stale_wheel", [False, True])
+def test_failed_wheel_build_is_failure_not_skip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stale_wheel: bool
+) -> None:
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    if stale_wheel:
+        (dist / "vibecrafted-stale.whl").write_bytes(b"old source")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 7, "", "broken builder"
+        ),
+    )
+    try:
+        with pytest.raises(pytest.fail.Exception, match="wheel build failed"):
+            _build_wheel(tmp_path / "dist")
+    except pytest.skip.Exception as exc:
+        pytest.fail(f"builder hid failure as skip: {exc}")

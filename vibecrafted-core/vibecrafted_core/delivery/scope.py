@@ -357,7 +357,7 @@ def _installed_refusals(evidence: ScopeEvidence) -> list[str]:
     try:
         resolved_abs = resolved.resolve()
         root_abs = root.resolve()
-    except OSError:  # pragma: no cover - defensive on exotic filesystems
+    except OSError:  # defensive on exotic filesystems
         resolved_abs, root_abs = resolved, root
 
     if not installed.resolved_path.strip():

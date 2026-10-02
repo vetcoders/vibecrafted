@@ -110,7 +110,7 @@ def _default_runner(timeout: float) -> Runner:
             return ProbeResult(ok=False, returncode=None, stderr="not found")
         except subprocess.TimeoutExpired:
             return ProbeResult(ok=False, returncode=None, stderr="timeout")
-        except OSError as exc:  # pragma: no cover - defensive
+        except OSError as exc:  # defensive
             return ProbeResult(ok=False, returncode=None, stderr=str(exc))
         return ProbeResult(
             ok=completed.returncode == 0,

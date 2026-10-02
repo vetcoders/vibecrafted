@@ -1318,7 +1318,9 @@ def assemble_resume_continuity_pack(
             ).strip()
         except SessionChainError as exc:
             degradations.append(f"continuity:{exc.kind}:{exc.message[:160]}")
-        except Exception as exc:  # noqa: BLE001 — pack degrades, never crashes resume
+        # Continuity providers are injected and may raise arbitrary exceptions; pack construction
+        # records a continuity degradation and preserves resume instead of inventing continuity.
+        except Exception as exc:  # noqa: BLE001
             degradations.append(f"continuity:error:{exc!s:.160}")
 
         if isinstance(chain, CliSessionChain):
@@ -1326,7 +1328,9 @@ def assemble_resume_continuity_pack(
                 intents = chain.project_intents(project=project_filter, hours=hours)
             except SessionChainError as exc:
                 degradations.append(f"intents:{exc.kind}:{exc.message[:160]}")
-            except Exception as exc:  # noqa: BLE001 — same contract as continuity
+            # The AICX CLI projection crosses external decoding and validation; unexpected errors
+            # must be recorded as intents degradations without blocking native resume.
+            except Exception as exc:  # noqa: BLE001
                 degradations.append(f"intents:error:{exc!s:.160}")
 
     mission_available = bool(intents and intents.items)

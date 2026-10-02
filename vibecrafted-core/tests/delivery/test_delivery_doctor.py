@@ -132,7 +132,7 @@ def test_delivery_doctor_rejection_matrix(
 ) -> None:
     env = valid_envelope_payload()
     prf = valid_proof_payload()
-    mutator(env, prf)  # type: ignore[operator]
+    mutator(env, prf)
 
     report = diagnose_payload(env, prf)
     assert report.ok is False

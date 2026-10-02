@@ -344,7 +344,9 @@ _ks_arm_traps() {
       body="${body#\'}"
       body="${body%\'}"
     fi
-    # shellcheck disable=SC2064  # the handler body must expand at arm time; see below
+    # The previous trap body must be captured when arming the keychain cleanup; delaying body
+    # expansion would use a later trap state and lose the original cleanup contract.
+    # shellcheck disable=SC2064
     # Expanding now is the point, not an oversight: $body is the handler that
     # was already registered, read back a few lines above, and it has to be
     # baked into the new handler at arm time. Deferring it would splice the

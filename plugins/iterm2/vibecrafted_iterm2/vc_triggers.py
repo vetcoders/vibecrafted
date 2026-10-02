@@ -105,15 +105,17 @@ async def apply_triggers_to_default_profile(
     """
     try:
         import iterm2
-    except ImportError as exc:  # pragma: no cover - sandbox guard
+    except ImportError as exc:  # sandbox guard
         raise RuntimeError("iterm2 package unavailable") from exc
 
-    if iterm2 is None:  # pragma: no cover - type narrow for unusual import hooks
+    if iterm2 is None:  # type narrow for unusual import hooks
         raise RuntimeError("iterm2 package unavailable")
 
     try:
-        profiles = await iterm2.PartialProfile.async_query(connection)  # type: ignore[attr-defined]
-    except Exception:  # pragma: no cover - API surface variance  # noqa: BLE001
+        profiles = await iterm2.PartialProfile.async_query(connection)
+    # iTerm profile RPC exceptions vary by API version; profile query failure must return False and
+    # retain a debug traceback rather than terminate the plugin.
+    except Exception:  # noqa: BLE001
         _LOG.debug("could not query iTerm2 profiles", exc_info=True)
         return False
 
@@ -129,8 +131,10 @@ async def apply_triggers_to_default_profile(
         return False
 
     try:
-        full_profile = await default_profile.async_get_full_profile()  # type: ignore[attr-defined]
-    except Exception:  # pragma: no cover  # noqa: BLE001
+        full_profile = await default_profile.async_get_full_profile()
+    # Loading the default profile crosses iTerm RPC versions; an API exception must return False
+    # with a debug traceback before any trigger replacement.
+    except Exception:  # noqa: BLE001
         _LOG.debug("full profile load failed", exc_info=True)
         return False
 
@@ -143,8 +147,10 @@ async def apply_triggers_to_default_profile(
     new_payload = preserved + triggers_as_iterm2_payload(triggers)
 
     try:
-        await full_profile.async_set_triggers(new_payload)  # type: ignore[attr-defined]
-    except Exception:  # pragma: no cover  # noqa: BLE001
+        await full_profile.async_set_triggers(new_payload)
+    # The iTerm trigger-write RPC may raise API-specific errors; failure must return False with a
+    # debug traceback instead of claiming trigger installation.
+    except Exception:  # noqa: BLE001
         _LOG.debug("async_set_triggers failed", exc_info=True)
         return False
 

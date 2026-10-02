@@ -65,6 +65,8 @@ target_dir="$config_base/vibecrafted/shell"
 target_file="$target_dir/vc-skills.sh"
 
 # Minimal host-shell line — same syntax works in both bash and zsh.
+# This value is literal source or output for a later shell, awk, or Xcode evaluator; expanding its
+# dollar expressions in the producing shell would change the emitted contract.
 # shellcheck disable=SC2016
 path_line='case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac'
 

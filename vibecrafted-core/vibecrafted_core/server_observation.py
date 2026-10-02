@@ -191,15 +191,16 @@ def _local_observation(run_id: str, *, reason: str) -> dict[str, Any] | None:
 
 
 def _request_json(path: str, *, timeout: float | None) -> dict[str, Any]:
-    request = urllib.request.Request(  # nosemgrep: dynamic-urllib-use-detected
+    request = urllib.request.Request(
         f"{_origin()}{path}",
         headers={"Accept": "application/json"},
         method="GET",
     )
     try:
-        with urllib.request.urlopen(  # nosemgrep: dynamic-urllib-use-detected
-            request, timeout=timeout
-        ) as response:
+        # The origin comes from the canonical server_config public_url and paths are internal
+        # observation endpoints; response admission independently checks control-plane identity.
+        # nosemgrep: dynamic-urllib-use-detected
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = json.load(response)
     except urllib.error.HTTPError as exc:
         try:

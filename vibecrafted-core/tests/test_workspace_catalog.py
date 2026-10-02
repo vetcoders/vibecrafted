@@ -514,7 +514,7 @@ def test_atomic_write_crash_preserves_previous_catalog(
     path = wc.catalog_path()
     before = path.read_text(encoding="utf-8")
 
-    def boom(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+    def boom(*_args, **_kwargs):
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(wc.os, "replace", boom)

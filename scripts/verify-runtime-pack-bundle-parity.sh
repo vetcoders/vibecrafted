@@ -78,7 +78,9 @@ config_sha_before="$(shasum -a 256 "$config_file" | awk '{print $1}')"
 # A PATH sentinel turns any attempted `vc-frame` restart into a hard failure.
 # VC_FRAME_SOCKET_DIR also prevents an isolated test from ever addressing the
 # Founder's uid-wide live socket namespace.
-# shellcheck disable=SC2016  # expansion belongs to the generated sentinel
+# This value is literal source or output for a later shell, awk, or Xcode evaluator; expanding its
+# dollar expressions in the producing shell would change the emitted contract.
+# shellcheck disable=SC2016
 printf '%s\n' \
   '#!/usr/bin/env bash' \
   'printf "%s\n" "invoked" > "${VC_FRAME_PROBE_LOG:?}"' \

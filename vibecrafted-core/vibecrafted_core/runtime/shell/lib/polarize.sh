@@ -308,7 +308,9 @@ _vetcoders_polarize_loop() {
   root="${_vetcoders_contract_root:-$(_vetcoders_repo_root)}"
   skill_code="$(_vetcoders_skill_prefix "polarize")"
   run_id="${VIBECRAFTED_LOOP_RUN_ID:-$(_vetcoders_generate_run_id "$skill_code")}"
-  # shellcheck disable=SC2154  # _vetcoders_contract_* are set by _vetcoders_parse_contract (prompts.sh) first
+  # The sourced facade/parser initializes this shared result before the consuming function runs;
+  # assigning a local default here would mask missing ownership initialization.
+  # shellcheck disable=SC2154
   prompt="$(_vetcoders_compose_polarize_prompt "$_vetcoders_contract_prompt" "$_vetcoders_contract_file" "$_vetcoders_contract_task")" || return 1
   if [[ -n "$_vetcoders_contract_depth" ]]; then
     prompt+=$'\n\n'

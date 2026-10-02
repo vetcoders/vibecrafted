@@ -2171,6 +2171,8 @@ def _sweep_stale_runs() -> None:
         from .run_reaper import sweep_quietly
 
         sweep_quietly()
+    # The opportunistic reaper crosses process and store helpers; any exception must preserve the
+    # workflow launch because failed cleanup evidence cannot authorize additional work.
     except Exception as _sweep_exc:  # noqa: BLE001
         _ = _sweep_exc  # best-effort reaper sweep
 

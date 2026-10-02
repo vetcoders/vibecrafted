@@ -238,6 +238,13 @@ release-rehearsal:
 publish-release:
 	@zsh -ic 'cd "$(CURDIR)" && exec bash scripts/publish-vibecrafted-release.sh'
 
+# Rust unit tests cannot provision the selected source Python themselves.
+# Admit the exact checkout deck before exercising VOC's two real core paths.
+.PHONY: voc-core-contract-gate
+voc-core-contract-gate:
+	@env -u PYTHONPATH -u PYTHONHOME uv run --project vibecrafted-core --with pytest \
+		python -m pytest tests/tui/test_voc_core_contract.py -q
+
 unified-product-contract-gate:
 	@$(MAKE) --no-print-directory release-version-gate
 	@set -eu; \

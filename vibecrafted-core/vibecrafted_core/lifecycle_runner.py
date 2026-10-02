@@ -1365,7 +1365,9 @@ def record_stage_worker_completion(
             "verdict": str(synced.get("settlement_verdict") or ""),
             "tui": str(synced.get("settlement_tui") or ""),
         }
-    except Exception as exc:  # noqa: BLE001 — persist the failed projection
+    # Settlement synchronization crosses projection and filesystem helpers; every exception must be
+    # retained as settlement_sync.ok=False rather than erase the completed proof.
+    except Exception as exc:  # noqa: BLE001
         settlement_sync = {
             "ok": False,
             "error": f"{type(exc).__name__}: {exc}",

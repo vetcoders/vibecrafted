@@ -5,7 +5,9 @@
 
 _vetcoders_source_launcher_ulimits() {
   local candidate
-  # shellcheck disable=SC2154  # _vetcoders_shell_lib_dir is set by the vetcoders.sh facade loader
+  # The sourced facade/parser initializes this shared result before the consuming function runs;
+  # assigning a local default here would mask missing ownership initialization.
+  # shellcheck disable=SC2154
   for candidate in \
     "${_vetcoders_shell_lib_dir%/shell/lib}/scripts/lib/ulimits.sh" \
     "${VIBECRAFTED_ROOT:-}/vibecrafted-core/vibecrafted_core/runtime/scripts/lib/ulimits.sh" \

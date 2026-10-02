@@ -164,7 +164,9 @@ def report_claim_matches(
         return False, "report_missing"
     try:
         frontmatter = parse_report_path(path)
-    except Exception:  # noqa: BLE001 — fail closed on any parse path
+    # Report parsing crosses changing YAML/frontmatter validators; every exception must refuse
+    # admission with report_frontmatter_invalid rather than grant a seal.
+    except Exception:  # noqa: BLE001
         return False, "report_frontmatter_invalid"
     if not frontmatter.ok:
         return False, frontmatter.errors[0] if frontmatter.errors else "report_invalid"
@@ -495,7 +497,9 @@ def try_grant_lifecycle_stage_seal(
                 event_sink=event_sink,
             )
         )
-    except Exception as exc:  # noqa: BLE001 — lifecycle must fail closed
+    # The delivery kernel crosses verifier and proof-store implementations; any exception must
+    # return an unverified, ungranted StageSealResult with its reason.
+    except Exception as exc:  # noqa: BLE001
         return StageSealResult(
             granted=False,
             proof_state=ProofState.UNDECLARED.value,
@@ -696,5 +700,5 @@ def _main(argv: list[str] | None = None) -> int:
     return 0
 
 
-if __name__ == "__main__":  # pragma: no cover - exercised by proof subprocess
+if __name__ == "__main__":  # exercised by proof subprocess
     raise SystemExit(_main())

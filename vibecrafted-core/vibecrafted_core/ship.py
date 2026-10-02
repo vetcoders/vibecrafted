@@ -585,5 +585,5 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0 if state.get("status") in {"launching", "completed"} else 1
 
 
-if __name__ == "__main__":  # pragma: no cover
+if __name__ == "__main__":
     raise SystemExit(main())

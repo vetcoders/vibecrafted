@@ -238,5 +238,5 @@ def status_main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-if __name__ == "__main__":  # pragma: no cover - CLI entrypoint
+if __name__ == "__main__":  # CLI entrypoint
     raise SystemExit(status_main())

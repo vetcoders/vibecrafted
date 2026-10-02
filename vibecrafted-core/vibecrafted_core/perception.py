@@ -36,13 +36,15 @@ import time
 import zlib
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from importlib import import_module
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
-try:  # pragma: no cover - exercised on every supported (POSIX) platform
-    import fcntl
-except ImportError:  # pragma: no cover - Windows has no fcntl; flock probe is skipped
-    fcntl = None  # type: ignore[assignment]
+try:  # exercised on every supported (POSIX) platform
+    fcntl: ModuleType | None = import_module("fcntl")
+except ImportError:  # Windows has no fcntl; flock probe is skipped
+    fcntl = None
 
 from .capabilities import _resolve_executable as _resolve_foundation
 from .clock import utc_now_iso
@@ -453,5 +455,5 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-if __name__ == "__main__":  # pragma: no cover - CLI entrypoint
+if __name__ == "__main__":  # CLI entrypoint
     raise SystemExit(main())

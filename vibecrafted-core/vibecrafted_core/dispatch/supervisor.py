@@ -593,6 +593,8 @@ class DispatchSupervisor:
                             free_slots.add(slot)
                             try:
                                 verdict = future.result()
+                            # A worker Future can contain any callback exception; every failure must
+                            # produce a failed Verdict and mark the dispatch substrate broken.
                             except Exception as exc:  # noqa: BLE001
                                 # A worker verdict may fail independently; an
                                 # exception here means the launch/evidence
@@ -656,6 +658,8 @@ class DispatchSupervisor:
         except KeyboardInterrupt:
             self._mark_supervisor_interrupt("KeyboardInterrupt")
             raise
+        # Supervisor callbacks may raise implementation-specific exceptions; every failure must
+        # produce the journal and baton failure path, preserving interrupt handling above.
         except Exception as exc:  # noqa: BLE001
             label = (
                 "dispatch substrate failure"
@@ -680,12 +684,16 @@ class DispatchSupervisor:
         inflight = {"launching", "active", "reported"}
         try:
             self._receipt_store.request_stop(scheduler_error=reason)
-        except Exception:  # noqa: BLE001, S110 — interrupt must still re-raise
+        # Receipt updates can fail during KeyboardInterrupt recovery; this secondary failure must
+        # not replace the original interrupt, which the caller re-raises.
+        except Exception:  # noqa: BLE001, S110
             pass
         for cut in self.dispatch.cuts:
             try:
                 current = str(self._receipt_store.cut(cut.id).get("state") or "")
-            except Exception:  # noqa: BLE001, S112 — best-effort per cut
+            # A cut receipt can be corrupt during interrupt cleanup; that cut must be skipped so
+            # remaining cuts still receive stop requests and the original interrupt survives.
+            except Exception:  # noqa: BLE001, S112
                 continue
             if current in inflight or current in {"queued"}:
                 try:
@@ -695,7 +703,9 @@ class DispatchSupervisor:
                         acceptance="interrupted",
                         unresolved_surfaces=[reason],
                     )
-                except Exception:  # noqa: BLE001, S112 — best-effort per cut
+                # A stop receipt write may fail during interrupt cleanup; preserve the original
+                # interrupt and continue other cuts without reporting this cut as stopped.
+                except Exception:  # noqa: BLE001, S112
                     continue
                 self._set_state(cut.id, STATE_PENDING, "stopped: supervisor interrupt")
 
@@ -1665,6 +1675,8 @@ class DispatchSupervisor:
         """
         try:
             cell = self.launcher(cut, prompt, kind)
+        # The launcher is an injected provider callback; any exception must be journaled and
+        # returned as a failed Verdict before the cell can be admitted.
         except Exception as exc:  # noqa: BLE001
             message = f"{kind} launch crashed: {type(exc).__name__}: {exc}"
             self._journal(f"[{cut.id}] {message}")

@@ -251,15 +251,16 @@ def _probe_health_once(
     target: str, *, timeout: float
 ) -> tuple[dict[str, Any] | None, str]:
     """One bounded ``GET``: ``(health payload, "")`` or ``(None, reason)``."""
-    request = urllib.request.Request(  # nosemgrep: dynamic-urllib-use-detected
+    request = urllib.request.Request(
         target,
         headers={"Accept": "application/json"},
         method="GET",
     )
     try:
-        with urllib.request.urlopen(  # nosemgrep: dynamic-urllib-use-detected
-            request, timeout=timeout
-        ) as response:
+        # This private helper probes the declared server origin with a fixed /api/health suffix;
+        # its caller owns the configured HTTP endpoint and no request-supplied URL is consumed.
+        # nosemgrep: dynamic-urllib-use-detected
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = json.load(response)
     except urllib.error.HTTPError as exc:
         return None, f"HTTP {exc.code}"
@@ -383,7 +384,9 @@ def build_server_section(
             "port": config.port,
             "url": config.public_url,
         }
-    except Exception as exc:  # noqa: BLE001 - a bad config must not blind the menu
+    # Status projection reads platform and parser helpers; any config exception becomes
+    # section.reason so a malformed config cannot remove the repair menu.
+    except Exception as exc:  # noqa: BLE001
         section["reason"] = f"server config unreadable: {type(exc).__name__}: {exc}"
 
     receipt_path = supervisor_receipt_path(home=home)
@@ -525,7 +528,9 @@ def build_resumeability_section(
     try:
         from .init_resume import RESUME_CLASSES, classify_resume_row, resume_command
         from .settlements_query import list_settlements
-    except Exception as exc:  # noqa: BLE001 - import faults must not brick status
+    # Status dependencies may fail during import-time initialization; any import exception must be
+    # shown in section.reason while retaining the diagnostic menu.
+    except Exception as exc:  # noqa: BLE001
         section["reason"] = f"{type(exc).__name__}: {exc}"
         return section
 
@@ -542,7 +547,9 @@ def build_resumeability_section(
 
     try:
         rows = list_settlements(bucket="n").get("runs") or []
-    except Exception as exc:  # noqa: BLE001 - a corrupt ledger is a finding
+    # Settlement projection crosses evolving ledger readers; any exception must produce an
+    # unavailable section with its reason rather than a falsely empty successful list.
+    except Exception as exc:  # noqa: BLE001
         section["reason"] = f"{type(exc).__name__}: {exc}"
         return section
 
@@ -1150,5 +1157,5 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-if __name__ == "__main__":  # pragma: no cover - module entrypoint
+if __name__ == "__main__":  # module entrypoint
     raise SystemExit(main())

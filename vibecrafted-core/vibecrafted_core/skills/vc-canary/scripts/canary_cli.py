@@ -135,7 +135,9 @@ def load_language_plugins() -> tuple[LanguagePlugin, ...]:
         module = importlib.util.module_from_spec(spec)
         try:
             spec.loader.exec_module(module)
-        except Exception as e:  # noqa: BLE001 - surface plugin failures as catalog errors.
+        # Language plugins execute arbitrary module initialization; any plugin exception must become
+        # a named catalog error before the plugin values are consumed.
+        except Exception as e:  # noqa: BLE001
             _die(f"cannot load language plugin {plugin_path.name}: {e}")
 
         values = {

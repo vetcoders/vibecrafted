@@ -3057,7 +3057,7 @@ def test_walkaround_missing_scenario_provider_fails_closed(
 
 
 def test_walkaround_production_registry_covers_all_late_stage_probes() -> None:
-    providers = contract._walkaround_provider_registry(object())  # type: ignore[arg-type]
+    providers = contract._walkaround_provider_registry(object())
 
     assert set(providers) == {
         spec.name

@@ -39,7 +39,7 @@ if _CORE_SRC.is_dir() and str(_CORE_SRC) not in sys.path:
 
 try:
     _installer_brand = importlib.import_module("installer_brand")
-except ModuleNotFoundError:  # pragma: no cover - depends on entrypoint
+except ModuleNotFoundError:  # depends on entrypoint
     _installer_brand = importlib.import_module("scripts.installer_brand")
 
 from vibecrafted_core.control_plane import sync_state
@@ -780,7 +780,9 @@ class InstallController:
                 if exit_code != 0:
                     break
                 env = install_runtime_env(env)
-        except Exception as exc:  # pragma: no cover - defensive path  # noqa: BLE001
+        # The installer GUI worker crosses process and environment helpers; any exception must be
+        # projected to its completed failed run state and error text.
+        except Exception as exc:  # noqa: BLE001
             error = str(exc)
             exit_code = -1
 
@@ -2862,5 +2864,5 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-if __name__ == "__main__":  # pragma: no cover - CLI entrypoint
+if __name__ == "__main__":  # CLI entrypoint
     raise SystemExit(main())

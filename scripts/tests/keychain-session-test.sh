@@ -221,7 +221,9 @@ test_case "safe default never registers an ephemeral keychain globally"
 LOGIN="$HOME/Library/Keychains/login.keychain-db"
 seed_list "$LOGIN"
 unset KEYCHAIN_SESSION_REGISTER_SEARCH_LIST
-# shellcheck disable=SC2016  # expansion belongs to the generated child shell
+# This value is literal source or output for a later shell, awk, or Xcode evaluator; expanding its
+# dollar expressions in the producing shell would change the emitted contract.
+# shellcheck disable=SC2016
 run_child 'keychain_session_begin codescribe-signing >/dev/null
            cat "$FAKE_SECURITY_STATE/search-list" > "'"$ROOT"'/list-during.txt"
            keychain_session_end' >/dev/null
@@ -400,7 +402,9 @@ teardown_env
 setup_env
 test_case "no password material is ever printed"
 seed_list "$HOME/Library/Keychains/login.keychain-db"
-# shellcheck disable=SC2016  # the $(...) is for the child shell, not this one
+# This value is literal source or output for a later shell, awk, or Xcode evaluator; expanding its
+# dollar expressions in the producing shell would change the emitted contract.
+# shellcheck disable=SC2016
 OUT="$(run_child 'keychain_session_begin codescribe-signing >/dev/null
                   cat "$(keychain_session_password_file)" > "'"$ROOT"'/pw.txt"
                   keychain_session_end' 2>&1)"
@@ -466,7 +470,9 @@ setup_env
 test_case "the login session's default keychain is never taken by default"
 LOGIN="$HOME/Library/Keychains/login.keychain-db"
 seed_list "$LOGIN"
-# shellcheck disable=SC2016  # the $(...) is for the child shell, not this one
+# This value is literal source or output for a later shell, awk, or Xcode evaluator; expanding its
+# dollar expressions in the producing shell would change the emitted contract.
+# shellcheck disable=SC2016
 run_child 'keychain_session_begin codescribe-signing >/dev/null
            printf "%s" "$(cat "'"$FAKE_SECURITY_STATE"'/default")" > "'"$ROOT"'/default-during.txt"
            keychain_session_end' >/dev/null
@@ -492,7 +498,9 @@ test_case "KEYCHAIN_SESSION_SET_DEFAULT=1 takes the default and gives it back"
 LOGIN="$HOME/Library/Keychains/login.keychain-db"
 seed_list "$LOGIN"
 export KEYCHAIN_SESSION_SET_DEFAULT=1
-# shellcheck disable=SC2016  # the $(...) is for the child shell, not this one
+# This value is literal source or output for a later shell, awk, or Xcode evaluator; expanding its
+# dollar expressions in the producing shell would change the emitted contract.
+# shellcheck disable=SC2016
 run_child 'keychain_session_begin codescribe-signing >/dev/null
            printf "%s" "$(cat "'"$FAKE_SECURITY_STATE"'/default")" > "'"$ROOT"'/default-during.txt"
            keychain_session_end' >/dev/null 2>&1

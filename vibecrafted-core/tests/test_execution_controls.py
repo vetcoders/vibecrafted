@@ -352,7 +352,7 @@ def _spec(**overrides: object) -> workflow.WorkflowLaunchSpec:
         "root": "/tmp/repo",
     }
     base.update(overrides)
-    return workflow.WorkflowLaunchSpec(**base)  # type: ignore[arg-type]
+    return workflow.WorkflowLaunchSpec(**base)
 
 
 def test_normalize_launch_spec_parses_and_refuses_before_launch(

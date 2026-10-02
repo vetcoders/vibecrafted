@@ -182,9 +182,9 @@ def test_bind_terminal_paper_uses_default_colors_not_ansi_black() -> None:
             calls.append(("bkgdset", ch, attr))
 
     original = workshop.curses
-    workshop.curses = FakeCurses()  # type: ignore[misc]
+    workshop.curses = FakeCurses()
     try:
-        attr = workshop.bind_terminal_paper(FakeWindow())  # type: ignore[arg-type]
+        attr = workshop.bind_terminal_paper(FakeWindow())
     finally:
         workshop.curses = original
 

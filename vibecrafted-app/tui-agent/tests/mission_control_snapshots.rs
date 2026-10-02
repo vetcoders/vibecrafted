@@ -23,10 +23,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::style::Color;
+use ratatui::Terminal;
 use tempfile::tempdir;
 use voc::app::{App, AppTab, DispatchFocus, LaunchFocus, QueueScope};
 use voc::config::AppConfig;
@@ -770,6 +770,9 @@ fn vc_admin_status_renders_all_panels_from_disk_fixtures() {
     );
 
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_vc-admin"))
+        // This fixture has no quota monitors; never read the host's agent quota files.
+        .env("VIBECRAFTED_AGY_QUOTA_JSON", "")
+        .env("VIBECRAFTED_KIMI_QUOTA_JSON", "")
         .arg("--state-root")
         .arg(&state_root)
         .arg("--artifact-root")

@@ -80,6 +80,9 @@ def safe_urlopen(request: Request, timeout: float):
     url = validate_remote_url(request.full_url)
     context = ssl.create_default_context() if url.startswith("https://") else None
     # Validation above rejects file:// and other non-network schemes before opening.
+
+    # safe_urlopen validates request.full_url as absolute http(s) before this call and supplies a
+    # default verified TLS context for HTTPS; file and non-network schemes are refused.
     # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
     return urlopen(request, timeout=timeout, context=context)
 
@@ -98,7 +101,7 @@ def is_url(s: str) -> bool:
     try:
         p = urlparse(s)
         return p.scheme in ("http", "https")
-    except Exception:  # noqa: BLE001
+    except (ValueError, TypeError):
         return False
 
 
@@ -152,6 +155,8 @@ def internet_search(query: str, timeout: float = 6.0) -> str:
             data = json.loads(resp.read().decode("utf-8", "strict"))
     except (TimeoutError, HTTPError, URLError) as e:
         return f"Search failed: {e}"
+    # Search transport and JSON decoding can raise implementation-specific errors; the interactive
+    # search lane must return Search failed text without losing the chat session.
     except Exception as e:  # noqa: BLE001
         return f"Search failed: {e}"
 
@@ -242,6 +247,8 @@ def build_user_content(
         try:
             url = img if is_url(img) else file_to_data_url(img)
             parts.append({"type": "image_url", "image_url": {"url": url}})
+        # Image attachment conversion crosses filesystem and encoders; an attachment exception
+        # becomes an explicit failed-attachment message and preserves the remaining chat input.
         except Exception as e:  # noqa: BLE001
             parts.append({"type": "text", "text": f"[Image attach failed: {e}]"})
     for a in audios:
@@ -250,6 +257,8 @@ def build_user_content(
             parts.append(
                 {"type": "input_audio", "input_audio": {"data": b64, "format": fmt}}
             )
+        # Audio attachment conversion crosses filesystem and encoders; an attachment exception
+        # becomes an explicit failed-attachment message and preserves the remaining chat input.
         except Exception as e:  # noqa: BLE001
             parts.append({"type": "text", "text": f"[Audio attach failed: {e}]"})
     return parts
@@ -407,6 +416,8 @@ Created by Vetcoders (c)2024-2026
                     print(chunk, end="", flush=True)
                     full += chunk
                 print()
+            # The streaming chat transport can fail midway through an iterator; any transport
+            # exception is printed as Error and the prompt loop remains available.
             except Exception as e:  # noqa: BLE001
                 print()
                 print_system(f"Error: {e}\n")
@@ -417,12 +428,14 @@ Created by Vetcoders (c)2024-2026
                 resp = post_once(
                     f"{base_url}/chat/completions", headers, data, timeout=args.timeout
                 )
+            # The interactive POST crosses transport and response decoders; any request exception is
+            # printed as Error before continuing the prompt loop.
             except Exception as e:  # noqa: BLE001
                 print_system(f"Error: {e}\n")
                 continue
             try:
                 content = resp["choices"][0]["message"]["content"]
-            except Exception:  # noqa: BLE001
+            except (KeyError, IndexError, TypeError):
                 content = json.dumps(resp)
             print(f"{C.ASSISTANT}Assistant: {C.RESET}{content}\n")
             messages.append({"role": "assistant", "content": content})
@@ -431,6 +444,8 @@ Created by Vetcoders (c)2024-2026
 if __name__ == "__main__":
     try:
         main()
+    # This CLI process boundary must turn unexpected chat failures into a fatal diagnostic and
+    # nonzero exit, including errors originating in optional transport implementations.
     except Exception as e:  # noqa: BLE001
         print(f"{C.SYSTEM}Fatal error: {e}{C.RESET}", file=sys.stderr)
         sys.exit(1)

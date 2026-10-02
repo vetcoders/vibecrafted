@@ -75,7 +75,7 @@ def test_failed_workspace_entry_leaves_a_live_shell(tmp_path: Path) -> None:
     }
 
     pid, master = pty.fork()
-    if pid == 0:  # pragma: no cover - child replaced by the entry script
+    if pid == 0:  # child replaced by the entry script
         os.chdir(str(tmp_path))
         os.execve(
             "/bin/bash",
