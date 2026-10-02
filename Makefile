@@ -10,6 +10,7 @@ SOURCE   := $(CURDIR)
 BRANCH   ?= main
 VERSION_FILE := VERSION
 RUNTIME ?= none
+RUNTIME_HOME ?=
 INSTALL_SERVER_SERVICE_POLICY ?= ensure
 INSTALL_TOOLS_SERVICE_POLICY ?= preserve
 INSTALLER_CACHE_HOME ?= $(if $(XDG_CACHE_HOME),$(XDG_CACHE_HOME),$(HOME)/.cache)
@@ -44,6 +45,8 @@ help:
 	@printf "\n"
 	@printf "  make install      \033[2mInstall the receipted Runtime Pack\033[0m\n"
 	@printf "  make doctor       \033[2mHealth check\033[0m\n"
+	@printf "  make runtime-cleanup-plan \033[2mShow obsolete payloads and live pins; read-only\033[0m\n"
+	@printf "  make runtime-cleanup \033[2mRetire verified unpinned payloads; preserve current/rollback\033[0m\n"
 	@printf "  make update       \033[2mPull latest + reinstall\033[0m\n"
 	@printf "  make uninstall    \033[2mReverse the install\033[0m\n"
 	@printf "  make test         \033[2mRun the gates\033[0m\n"
@@ -197,6 +200,15 @@ runtime-pack:
 	runtime_pack_selection_read "$(CURDIR)" "" "" \
 		|| { printf "%s\n" "$${RUNTIME_PACK_SELECTION_ERROR:-release builder produced no standalone Runtime Pack}" >&2; exit 1; }; \
 	printf "%s\n" "$$RUNTIME_PACK_SELECTION_PACK"'
+
+# Reuse the publication owner's lease, census, closed inventory and receipts.
+# No rebuild/reinstall, process signals or separate deletion implementation.
+.PHONY: runtime-cleanup-plan runtime-cleanup
+runtime-cleanup-plan:
+	@env -u PYTHONPATH $(PYTHON) $(INSTALLER) runtime-repair --retire --json --plan $(if $(RUNTIME_HOME),--runtime-home "$(RUNTIME_HOME)",)
+
+runtime-cleanup:
+	@env -u PYTHONPATH $(PYTHON) $(INSTALLER) runtime-repair --retire --json $(if $(RUNTIME_HOME),--runtime-home "$(RUNTIME_HOME)",)
 
 # The portable channel needs no signing identity and no notary account: it is a
 # provenance-bound source distribution, so it builds anywhere git and python3 do.
