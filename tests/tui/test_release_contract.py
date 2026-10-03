@@ -1154,7 +1154,7 @@ def test_release_bundle_binds_the_vibecrafted_app_icon() -> None:
     assert 'cmp -s "$ICONSET/icon_128x128.png" "$REFERENCE"' in icon_builder
 
 
-def test_release_bundle_binds_the_canonical_terminal_policy_and_font() -> None:
+def test_release_binds_canonical_terminal_policy_and_private_fonts() -> None:
     terminal = (REPO_ROOT / "config/vc-terminal/vibecrafted.toml").read_text(
         encoding="utf-8"
     )
@@ -1172,13 +1172,16 @@ def test_release_bundle_binds_the_canonical_terminal_policy_and_font() -> None:
     )
     installer = (REPO_ROOT / "scripts/vetcoders_install.py").read_text(encoding="utf-8")
 
-    assert 'family = "Spot Mono"' in terminal
+    assert 'family = "Source Code Pro"' in terminal
     assert "size = 19.5" in terminal
     assert "live_config_reload = true" in terminal
     assert 'background = "#0b0b12"' in dark
     assert 'background = "#fafafa"' in light
     assert 'chars = "\\u001b[101;9u"' in terminal
     assert "/Users/" not in terminal
+    # The Source Code Pro policy does not prove its font is carried: the
+    # builder still supplies legacy Spot Mono resources until redistribution
+    # is migrated. Keep that existing ownership boundary covered here.
     # Font ownership belongs to the process that draws the glyphs. The app used
     # to register SpotMono.ttc for the whole login session on its way to
     # spawning the terminal, which reached unrelated processes and outranked the

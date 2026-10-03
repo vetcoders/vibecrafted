@@ -2151,7 +2151,7 @@ def _user_terminal_policy(*, shell: str = _USER_STRIPPED_SHELL) -> str:
     return (
         _previous_terminal_policy()
         .replace(_PREVIOUS_SHELL, shell)
-        .replace('family = "Spot Mono"', 'family = "User Mono"', 1)
+        .replace('family = "Source Code Pro"', 'family = "User Mono"', 1)
         .replace('background = "#0b0b12"', 'background = "#111111"')
         # Trailing [[keyboard.bindings]] group, split from the first by other tables.
         .replace('key = "Enter"\nmods = "Shift"', 'key = "Enter"\nmods = "Control"')
@@ -2226,16 +2226,16 @@ def test_terminal_chrome_and_font_overrides_survive_matching_default_then_retry(
         base.replace("blur = true", "blur = false")
         .replace("opacity = 0.9", "opacity = 0.75")
         .replace('decorations = "Transparent"', 'decorations = "Full"')
-        .replace('family = "Spot Mono"', 'family = "Founder Mono"')
+        .replace('family = "Source Code Pro"', 'family = "Founder Mono"')
     )
     first_update = (
         base.replace("blur = true", "blur = false")
         .replace("opacity = 0.9", "opacity = 0.85")
         .replace('decorations = "Transparent"', 'decorations = "None"')
-        .replace('family = "Spot Mono"', 'family = "Shipped Mono"')
+        .replace('family = "Source Code Pro"', 'family = "Shipped Mono"')
     )
     second_update = base.replace("opacity = 0.9", "opacity = 0.95").replace(
-        'family = "Spot Mono"', 'family = "Future Mono"'
+        'family = "Source Code Pro"', 'family = "Future Mono"'
     )
 
     _install(
@@ -2266,7 +2266,8 @@ def test_terminal_chrome_and_font_overrides_survive_matching_default_then_retry(
         "decorations": "Full",
     }
     assert {
-        preserved["font"][face]["family"] for face in ("normal", "bold", "italic")
+        preserved["font"][face]["family"]
+        for face in ("normal", "bold", "italic", "bold_italic")
     } == {"Founder Mono"}
     receipt = json.loads(
         (roots["runtime_home"] / installer.RUNTIME_INSTALL_RECEIPT).read_text()
@@ -2285,7 +2286,7 @@ _PRODUCT_WINDOW_DEFAULTS = {
     "opacity": 0.9,
     "decorations": "Transparent",
 }
-_PRODUCT_FONT_FAMILY = "Spot Mono"
+_PRODUCT_FONT_FAMILY = "Source Code Pro"
 
 
 def _installed_policy(roots) -> dict:
@@ -2305,8 +2306,90 @@ def test_fresh_install_lands_the_product_chrome_and_font(tmp_path, roots, capsys
         key: policy["window"][key] for key in _PRODUCT_WINDOW_DEFAULTS
     } == _PRODUCT_WINDOW_DEFAULTS
     assert {
-        policy["font"][face]["family"] for face in ("normal", "bold", "italic")
+        policy["font"][face]["family"]
+        for face in ("normal", "bold", "italic", "bold_italic")
     } == {_PRODUCT_FONT_FAMILY}
+    assert {
+        face: policy["font"][face]["style"]
+        for face in ("normal", "bold", "italic", "bold_italic")
+    } == {
+        "normal": "Regular",
+        "bold": "Bold",
+        "italic": "Italic",
+        "bold_italic": "Bold Italic",
+    }
+    assert policy["font"]["offset"] == {"x": 0, "y": 0}
+    assert policy["font"]["size"] == 19.5
+    _resolve(roots, capsys, status="ready")
+
+
+@pytest.mark.parametrize("user_font_choice", [False, True])
+def test_upgrade_replaces_untouched_spot_mono_with_source_code_pro(
+    tmp_path, roots, capsys, user_font_choice
+):
+    """Untouched old metrics migrate; explicit font answers remain owned."""
+    incoming = _REPO_TERMINAL_POLICY.read_text(encoding="utf-8")
+    legacy_font = """[font]
+size = 19.5
+[font.offset]
+x = -3
+y = -8
+[font.normal]
+family = "Spot Mono"
+style = "Regular"
+[font.bold]
+family = "Spot Mono"
+style = "Regular"
+[font.italic]
+family = "Spot Mono"
+style = "Regular"
+"""
+    previous = re.sub(
+        r"\[font\]\n.*?(?=\[cursor\])",
+        legacy_font + "\n",
+        incoming,
+        count=1,
+        flags=re.DOTALL,
+    )
+    assert previous != incoming
+    _install(
+        seed_runtime_pack(
+            tmp_path / "pack-a", version="9.9.9+a", terminal_policy=previous
+        ),
+        capsys,
+    )
+    policy_path = roots["product_config"] / "terminal-policy.toml"
+    if user_font_choice:
+        policy_path.write_text(
+            previous.replace('family = "Spot Mono"', 'family = "Founder Mono"')
+            .replace("size = 19.5", "size = 18.5")
+            .replace("y = -8", "y = -6"),
+            encoding="utf-8",
+        )
+    _install(
+        seed_runtime_pack(
+            tmp_path / "pack-b", version="9.9.10+b", terminal_policy=incoming
+        ),
+        capsys,
+    )
+    font = _installed_policy(roots)["font"]
+    if user_font_choice:
+        assert {font[face]["family"] for face in ("normal", "bold", "italic")} == {
+            "Founder Mono"
+        }
+        assert font["size"] == 18.5
+        assert font["offset"] == {"x": 0, "y": -6}
+    else:
+        assert {
+            face: font[face] for face in ("normal", "bold", "italic", "bold_italic")
+        } == {
+            "normal": {"family": "Source Code Pro", "style": "Regular"},
+            "bold": {"family": "Source Code Pro", "style": "Bold"},
+            "italic": {"family": "Source Code Pro", "style": "Italic"},
+            "bold_italic": {"family": "Source Code Pro", "style": "Bold Italic"},
+        }
+        assert font["size"] == 19.5
+        assert font["offset"] == {"x": 0, "y": 0}
     _resolve(roots, capsys, status="ready")
 
 

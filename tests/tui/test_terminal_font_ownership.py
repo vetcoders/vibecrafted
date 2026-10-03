@@ -34,6 +34,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import tomllib
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PROBE_SOURCE = Path(__file__).resolve().parent / "fixtures" / "font_probe.m"
@@ -157,7 +158,7 @@ def test_parent_app_does_not_register_fonts_for_the_login_session() -> None:
 
 
 def test_builder_binds_the_font_to_the_bundle_that_draws_it() -> None:
-    """The fallback moved, it was not dropped: same licensed input, new home."""
+    """Legacy font resources remain private until the packaging migration."""
     builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
         encoding="utf-8"
     )
@@ -173,11 +174,19 @@ def test_builder_binds_the_font_to_the_bundle_that_draws_it() -> None:
     ) < builder.index("sign_nested_app_bundles\n")
 
 
-def test_product_terminal_config_asks_for_the_bundled_family() -> None:
-    terminal = (REPO_ROOT / "config/vc-terminal/vibecrafted.toml").read_text(
-        encoding="utf-8"
+def test_product_terminal_config_asks_for_source_code_pro_native_metrics() -> None:
+    """Canonical family and real styles use their native cell metrics."""
+    terminal = tomllib.loads(
+        (REPO_ROOT / "config/vc-terminal/vibecrafted.toml").read_text(encoding="utf-8")
     )
-    assert terminal.count('family = "Spot Mono"') == 3
+    assert terminal["font"] == {
+        "size": 19.5,
+        "offset": {"x": 0, "y": 0},
+        "normal": {"family": "Source Code Pro", "style": "Regular"},
+        "bold": {"family": "Source Code Pro", "style": "Bold"},
+        "italic": {"family": "Source Code Pro", "style": "Italic"},
+        "bold_italic": {"family": "Source Code Pro", "style": "Bold Italic"},
+    }
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="CoreText is macOS-only")
