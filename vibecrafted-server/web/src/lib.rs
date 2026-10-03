@@ -10,6 +10,8 @@ fn skills_one_list_then_one_editor() {
 }
 pub mod bus;
 pub mod control;
+#[cfg(feature = "ssr")]
+pub mod dispatch;
 pub mod mcp;
 #[cfg(feature = "ssr")]
 pub mod mcp_aggregator;

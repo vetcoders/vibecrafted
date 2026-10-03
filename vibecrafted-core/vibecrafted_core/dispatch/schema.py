@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shlex
@@ -155,6 +156,7 @@ def parse_dispatch(text: str, *, base_dir: str | Path | None = None) -> Dispatch
 
     _validate_recovery_targets(cuts, phases, errors)
     _validate_cut_dag(cuts, errors)
+    _validate_compile_embargo(cuts, errors)
 
     if errors:
         raise DispatchSchemaError(errors)
@@ -173,7 +175,7 @@ def parse_dispatch(text: str, *, base_dir: str | Path | None = None) -> Dispatch
 
 
 def render_cell_prompt(
-    dispatch: Dispatch, cut: Cut, *, baton: Baton | None = None
+    dispatch: Dispatch, cut: Cut, *, baton: Baton | None = None, run_id: str = ""
 ) -> str:
     """Assemble one cut's worker prompt: common text + brief/prompt + extra + baton JSON."""
     active_baton = baton if baton is not None else dispatch.empty_baton()
@@ -192,7 +194,8 @@ def render_cell_prompt(
     if cut.mode != "read" and dispatch.policy.require_commit:
         slot = cut.id.split("_", 1)[0]
         delivery_contract = (
-            "DELIVERY CONTRACT (supervisor-enforced): commit the verified delivery. "
+            "DELIVERY CONTRACT (supervisor-enforced): commit the owned delivery "
+            "or unverified structural checkpoint when compile embargo applies. "
             f"The commit message must contain the exact cut id '{cut.id}' or slot "
             f"marker '[{slot}]'. If no new commit is needed and "
             "allow_idempotent_existing is enabled, report exactly one proof line "
@@ -211,6 +214,96 @@ def render_cell_prompt(
         for part in parts
         if part
     ]
+    payload = json.dumps(
+        {
+            "run_id": run_id,
+            "cut_id": cut.id,
+            "commit_sha": "<exact full delivery SHA>",
+            "report_path": "$VIBECRAFTED_REPORT_PATH",
+            "measurements": ["<what you actually measured with permitted tools>"],
+        },
+        indent=2,
+    )
+    claim_contract = (
+        "DISPATCH CLAIM CONTRACT (authoritative closing rail):\n"
+        "Finish by POSTing a claim to http://127.0.0.1:3024/api/dispatch/claim. "
+        "This POST is a doorbell: the canonical Python writer records [~], "
+        "never verified delivery. The HTTP handler is a read model and hands "
+        "the claim to that writer; it does not write durable receipts or tracker state.\n"
+        "The dispatch run_id below is distinct from the worker runtime's "
+        "VIBECRAFTED_RUN_ID and report frontmatter run_id. Preserve both runtime "
+        "identities; use only the supplied dispatch run_id in the POST. "
+        "Write the report at the runtime-supplied VIBECRAFTED_REPORT_PATH before "
+        "posting; do not guess an artifact path.\n"
+        "Construct the body with a JSON serializer using the exact full commit "
+        "SHA, the report path's environment value, and actual measurements. "
+        "The JSON below describes the body; replace its placeholders, including "
+        "$VIBECRAFTED_REPORT_PATH, with their values. Never interpolate report "
+        "text or measurements into shell JSON. Use only tools your worker "
+        "shell permits; describe any measurement you could not run honestly.\n"
+        f"```json\n{payload}\n```\n"
+        "Before a normal claim, perform the full applicable VERIFICATION_RULE "
+        "(vibecrafted_core/skills/VERIFICATION_RULE.md): exercise the real artifact "
+        "and runtime path, re-verify upstream evidence, and check that your "
+        "verification instrument can fail. This self-check qualifies the claim; "
+        "it does not settle it. Afterwards the writer independently runs every "
+        "declared verifier in its own shell, in the cut runtime root, against "
+        "the claimed SHA. Only a passed full VERIFICATION_RULE and all green "
+        "matchers allow the writer to set tracker [x]. A unit test, worker "
+        "sentence, report, or HTTP success alone cannot set [x].\n"
+        "Worker shell permissions differ from the verifier shell: measure with "
+        "your permitted tools; the writer executes the declared command. "
+        "Default verifier timeout is 600s. Its sanitized environment drops "
+        "keys such as DEVELOPER_DIR unless the declared command inlines them.\n"
+        "Compile embargo is the only deferral; follow "
+        "vc-scaffold/references/compile-embargo.md. During structural W1/W2 "
+        "do not compile, build, format, lint, type-check, run tests, or select "
+        "gates. Add checkpoint to the same POST: "
+        '{"owned_scope": ["<owned paths>"], "skipped_controls": '
+        '["<exact declared verifier command for every skipped hook/control>"]}. '
+        "Include security and secret controls. Each skipped_controls item must "
+        "map to an exact plan-declared verifier command; the writer never "
+        "executes payload commands. If a skipped hook has no declared command, "
+        "record that unknown obligation honestly: closure remains unverified "
+        "until the plan includes the control. "
+        "The commit_sha is the checkpoint SHA and measurements describe only "
+        "checks actually performed. The writer stores it as unverified [~]. "
+        "A worker cannot close embargo through this POST. "
+        "W2_STRUCTURALLY_CLOSED means assembled and ready to check. The integrator "
+        "alone closes embargo by running the full applicable gates, including "
+        "every skipped control, on the assembled SHA; only that verified result "
+        "may become [x].\n"
+        "Never write tracker [x] or claim settlement by editing brief Acceptance "
+        "checkboxes, even if older brief text requests it. An unflipped [ ] "
+        "cannot skip verifiers or become a failed test. A missing claim means "
+        "'claim not received, verifiers were not run'; resume with "
+        "vibecrafted dispatch <plan.toml> --resume <run_id>. A red matcher stays "
+        "[!] with verifier cwd in the journal. --allow-red-baseline admits "
+        "work and does not count as delivery."
+    )
+    if not run_id:
+        claim_contract += (
+            "\nThis preview has no dispatch run_id. Do not POST an empty or "
+            "guessed identity; obtain the launch-rendered dispatch identity first."
+        )
+    if cut.compile_embargo:
+        claim_contract += (
+            "\nPLAN PHASE: compile_embargo = true. This cut must POST an "
+            "unverified checkpoint with owned_scope and skipped_controls; "
+            "do not perform executable gates or submit a normal delivery claim."
+        )
+    if cut.closes_embargo:
+        claim_contract += (
+            "\nPLAN INTEGRATOR CLOSURE: this cut assembles checkpoint cuts "
+            f"{json.dumps(cut.closes_embargo)}. Record W2_STRUCTURALLY_CLOSED "
+            "and the exact assembled SHA in measurements after inspecting "
+            "scope, dependencies, and interfaces. Restore and run every "
+            "applicable gate, including all controls those checkpoints "
+            "skipped. POST a normal claim. The writer checks assembly and "
+            "independently runs full gates against that SHA before deriving "
+            "embargo closure; this attestation cannot close it by itself."
+        )
+    rendered.append(claim_contract)
     return "\n\n".join(part for part in rendered if part).rstrip() + "\n"
 
 
@@ -497,6 +590,13 @@ def _parse_cuts(
             item.get("depends_on"), f"cuts[{index}].depends_on", errors
         )
         integrator = bool(item.get("integrator"))
+        compile_embargo = item.get("compile_embargo", False)
+        if not isinstance(compile_embargo, bool):
+            errors.append(f"cuts[{index}].compile_embargo: expected a boolean")
+            compile_embargo = False
+        closes_embargo = _string_tuple(
+            item.get("closes_embargo"), f"cuts[{index}].closes_embargo", errors
+        )
         base = _string(item.get("base"))
         if base:
             _validate_base_declaration(base, index, depends_on, integrator, errors)
@@ -525,10 +625,35 @@ def _parse_cuts(
                 recovery=_parse_recovery(item.get("recovery"), index, errors),
                 depends_on=depends_on,
                 integrator=integrator,
+                compile_embargo=compile_embargo,
+                closes_embargo=closes_embargo,
                 base=base,
             )
         )
     return cuts
+
+
+def _validate_compile_embargo(cuts: list[Cut], errors: list[str]) -> None:
+    """Keep structural phases and their closure authority in the typed plan."""
+    by_id = {cut.id: cut for cut in cuts}
+    for index, cut in enumerate(cuts):
+        prefix = f"cuts[{index}]"
+        if cut.compile_embargo and (cut.integrator or cut.mode == "read"):
+            errors.append(
+                f"{prefix}.compile_embargo: only structural WRITE workers may defer gates"
+            )
+        if cut.closes_embargo and (not cut.integrator or cut.mode == "read"):
+            errors.append(f"{prefix}.closes_embargo: only a WRITE integrator may close")
+        for checkpoint_id in cut.closes_embargo:
+            checkpoint = by_id.get(checkpoint_id)
+            if checkpoint is None or not checkpoint.compile_embargo:
+                errors.append(
+                    f"{prefix}.closes_embargo: {checkpoint_id!r} must name a compile_embargo cut"
+                )
+            if checkpoint_id not in cut.depends_on:
+                errors.append(
+                    f"{prefix}.closes_embargo: {checkpoint_id!r} must be declared in depends_on"
+                )
 
 
 def _doctor_policy_errors(dispatch: Dispatch) -> list[str]:

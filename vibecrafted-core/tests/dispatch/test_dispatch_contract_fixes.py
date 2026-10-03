@@ -44,6 +44,9 @@ from vibecrafted_core.dispatch.worktrees import (
     WorktreeManager,
 )
 
+pytestmark = pytest.mark.usefixtures("worker_claims")
+
+
 FAST_AWAIT = "await = { poll_s = 0.02, timeout_min = 1.0 }"
 
 
@@ -75,6 +78,8 @@ def _commit(repo: Path, name: str) -> str:
 
 def _dispatch_text(repo: Path, cuts: str, *, policy: str = "") -> str:
     repo.mkdir(exist_ok=True)
+    if not (repo / ".git").exists():
+        _seed_repo(repo)
     policy_text = policy or "repair_rounds = 0"
     if "await" not in policy_text:
         policy_text += f"\n{FAST_AWAIT}"

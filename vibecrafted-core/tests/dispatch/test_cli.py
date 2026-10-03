@@ -12,6 +12,8 @@ from vibecrafted_core.dispatch import cli as dispatch_cli
 from vibecrafted_core.dispatch import supervisor as supervisor_module
 from vibecrafted_core.dispatch.supervisor import CellRun
 
+pytestmark = pytest.mark.usefixtures("worker_claims")
+
 
 def _init_repo(path: Path) -> None:
     path.mkdir()

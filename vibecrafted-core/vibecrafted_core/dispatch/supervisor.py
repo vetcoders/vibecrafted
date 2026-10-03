@@ -41,6 +41,7 @@ from vibecrafted_core.workflow import (
     reserve_run_id,
 )
 
+from .claims import claim_git_state
 from .model import (
     BASE_CUT_PREFIX,
     STATE_FAILED,
@@ -54,7 +55,7 @@ from .model import (
     Verdict,
     classify_base,
 )
-from .receipts import DispatchReceiptStore, IntegratorLease
+from .receipts import DispatchReceiptStore, IntegratorLease, ReceiptContractError
 from .schema import render_cell_prompt, render_cut_verifies
 from .verify import run_verifies
 from .worktrees import WorktreeContractError, WorktreeGeometry, WorktreeManager
@@ -278,6 +279,7 @@ def workflow_cell_launcher(
             "VIBECRAFTED_DISPATCH_INTEGRATOR": str(cut.integrator).lower(),
         }
         if dispatch_run_id:
+            runtime_env["VIBECRAFTED_DISPATCH_RUN_ID"] = dispatch_run_id
             runtime_env[LAUNCH_IDEMPOTENCY_KEY_ENV] = (
                 f"dispatch:{dispatch_run_id}:cut:{cut.id}:attempt:{kind}"
             )
@@ -367,11 +369,6 @@ class DispatchSupervisor:
             base = Path.cwd()
         self.artifacts_dir = Path(base)
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
-        receipt_root = (
-            None
-            if self.manage_worktrees or run_id
-            else self.artifacts_dir / ".test-runtime" / self.run_id
-        )
         claim_root = (
             None
             if self.manage_worktrees
@@ -387,7 +384,6 @@ class DispatchSupervisor:
             self.run_id,
             dispatch.cuts,
             concurrency=dispatch.policy.concurrency,
-            root=receipt_root,
             repo_root=self.repo,
             create=not resume,
         )
@@ -405,6 +401,12 @@ class DispatchSupervisor:
         self._states: dict[str, tuple[str, str]] = {
             cut.id: (STATE_PENDING, "pending") for cut in dispatch.cuts
         }
+        for cut in dispatch.cuts:
+            self._receipt_store.update(
+                cut.id,
+                compile_embargo=cut.compile_embargo,
+                closes_embargo=list(cut.closes_embargo),
+            )
 
     # ------------------------------------------------------------------ run
 
@@ -495,7 +497,12 @@ class DispatchSupervisor:
                             self._set_state(
                                 stopped.id,
                                 STATE_PENDING,
-                                "skipped: line broken upstream",
+                                "skipped: line broken upstream; "
+                                + "; ".join(
+                                    f"{item}: {self._verdict_note(result)}"
+                                    for item, result in verdicts.items()
+                                    if not result.ok
+                                ),
                             )
                             self._receipt_store.update(
                                 stopped.id, "stopped", acceptance="fail-fast"
@@ -505,7 +512,12 @@ class DispatchSupervisor:
                     completed_ok = {
                         cut_id for cut_id, verdict in verdicts.items() if verdict.ok
                     }
-                    completed_bad = set(verdicts) - completed_ok
+                    structural = {
+                        cut_id
+                        for cut_id in verdicts
+                        if self._structural_checkpoint(cut_id)
+                    }
+                    completed_bad = set(verdicts) - completed_ok - structural
                     # A failed `critical = false` cut was declared expendable
                     # by the plan: with an explicit fail-open policy it
                     # resolves its dependents' edges instead of stopping them.
@@ -522,15 +534,20 @@ class DispatchSupervisor:
                     )
                     blocking_bad = completed_bad - tolerated_bad
                     for cut_id, cut in list(pending.items()):
-                        failed_dependencies = set(cut.depends_on) & blocking_bad
+                        failed_dependencies = set(cut.depends_on) & (
+                            blocking_bad | (structural - set(cut.closes_embargo))
+                        )
                         if failed_dependencies:
                             verdict = Verdict(
                                 cut_id=cut.id,
                                 phase=cut.phase,
                                 state=STATE_FAILED,
                                 failures=(
-                                    f"{cut.id}: stopped because dependencies failed: "
-                                    + ", ".join(sorted(failed_dependencies)),
+                                    f"{cut.id}: stopped because dependencies were not verified: "
+                                    + "; ".join(
+                                        f"{dep}: {self._verdict_note(verdicts[dep])}"
+                                        for dep in sorted(failed_dependencies)
+                                    ),
                                 ),
                             )
                             verdicts[cut.id] = verdict
@@ -547,7 +564,9 @@ class DispatchSupervisor:
                             made_progress = True
                             continue
                         if not set(cut.depends_on).issubset(
-                            completed_ok | tolerated_bad
+                            completed_ok
+                            | tolerated_bad
+                            | (structural & set(cut.closes_embargo))
                         ):
                             continue
                         missing_deliveries = sorted(set(cut.depends_on) & tolerated_bad)
@@ -615,12 +634,21 @@ class DispatchSupervisor:
                                     unresolved_surfaces=list(verdict.failures),
                                 )
                             verdicts[cut.id] = verdict
+                            if verdict.ok and cut.closes_embargo:
+                                for dependency in cut.closes_embargo:
+                                    restored = self._settled_verdict(
+                                        by_id[dependency],
+                                        self._receipt_store.cut(dependency),
+                                    )
+                                    if restored is not None:
+                                        verdicts[dependency] = restored
                             self._set_state(
                                 cut.id, verdict.state, self._verdict_note(verdict)
                             )
                             if (
                                 cut.critical
                                 and not verdict.ok
+                                and not self._structural_checkpoint(cut.id)
                                 and self.policy.on_critical_fail == "break"
                             ):
                                 line_broken = True
@@ -631,6 +659,7 @@ class DispatchSupervisor:
                             elif (
                                 not cut.critical
                                 and not verdict.ok
+                                and not self._structural_checkpoint(cut.id)
                                 and self.policy.on_noncritical_dep_fail == "stop"
                             ):
                                 line_broken = True
@@ -647,7 +676,14 @@ class DispatchSupervisor:
             if line_broken:
                 for cut in pending.values():
                     self._set_state(
-                        cut.id, STATE_PENDING, "skipped: line broken upstream"
+                        cut.id,
+                        STATE_PENDING,
+                        "skipped: line broken upstream; "
+                        + "; ".join(
+                            f"{item}: {self._verdict_note(result)}"
+                            for item, result in verdicts.items()
+                            if not result.ok
+                        ),
                     )
                     self._receipt_store.update(
                         cut.id, "stopped", acceptance="fail-fast"
@@ -803,22 +839,12 @@ class DispatchSupervisor:
             return settled
         runtime_cut = self._prepare_runtime_cut(cut, verdicts)
         receipt = self._receipt_store.cut(cut.id)
-        if receipt.get("state") in {"launching", "active", "reported"} or (
+        if receipt.get("state") in {"launching", "active", "reported", "verified"} or (
             self._resume and not receipt.get("provider_run_id")
         ):
             resumed = self._resume_active_cut(runtime_cut, receipt, baton)
             if resumed is not None:
-                self._receipt_store.update(
-                    runtime_cut.id,
-                    "settled" if resumed.ok else "failed",
-                    delivered_commit_sha=resumed.commit,
-                    integrated_sha=resumed.commit if runtime_cut.integrator else "",
-                    report_path=resumed.report,
-                    acceptance="verified" if resumed.ok else "failed",
-                    gates=[evidence.to_dict() for evidence in resumed.verifiers],
-                    unresolved_surfaces=list(resumed.failures),
-                )
-                return resumed
+                return self._record_cut_verdict(runtime_cut, resumed)
         lease = None
         if runtime_cut.integrator and self.worktrees is not None:
             geometry = self._geometries[runtime_cut.id]
@@ -842,24 +868,57 @@ class DispatchSupervisor:
                 ),
             )
             verdict = self._run_cut(runtime_cut, baton)
-            state = "settled" if verdict.ok else "failed"
-            self._receipt_store.update(
-                runtime_cut.id,
-                state,
-                delivered_commit_sha=verdict.commit,
-                integrated_sha=verdict.commit if runtime_cut.integrator else "",
-                report_path=verdict.report,
-                acceptance="verified" if verdict.ok else "failed",
-                gates=[evidence.to_dict() for evidence in verdict.verifiers],
-                unresolved_surfaces=list(verdict.failures),
-            )
-            return verdict
+            return self._record_cut_verdict(runtime_cut, verdict)
         finally:
             if lease is not None:
                 lease.release()
 
+    def _record_cut_verdict(self, cut: Cut, verdict: Verdict) -> Verdict:
+        """Persist verifier results; unknowns remain resumable and unverified."""
+        if verdict.ok:
+            try:
+                head, dirty = claim_git_state(cut.runtime_root or self.repo)
+            except (ReceiptContractError, OSError, subprocess.TimeoutExpired):
+                return self._unverified_claim(
+                    cut, "runtime unavailable before settlement"
+                )
+            if head != verdict.commit or dirty:
+                return self._unverified_claim(cut, "runtime changed before settlement")
+            admitted = self._receipt_store.settle_verified(
+                cut.id,
+                commit=verdict.commit,
+                report=verdict.report,
+                integrated=cut.integrator,
+                closes=cut.closes_embargo,
+            )
+            if not admitted:
+                return self._unverified_claim(
+                    cut, "claim changed before settlement; verification must run again"
+                )
+            for dependency in cut.closes_embargo:
+                self._set_state(
+                    dependency,
+                    STATE_VERIFIED,
+                    f"embargo closed by {cut.id}: full VERIFICATION_RULE at assembled SHA {verdict.commit}",
+                )
+        else:
+            self._receipt_store.update(
+                cut.id,
+                "failed" if verdict.state == STATE_FAILED else "reported",
+                delivered_commit_sha=verdict.commit,
+                report_path=verdict.report
+                or self._receipt_store.cut(cut.id).get("report_path", ""),
+                acceptance="failed" if verdict.state == STATE_FAILED else "unverified",
+                gates=[evidence.to_dict() for evidence in verdict.verifiers],
+                unresolved_surfaces=list(verdict.failures),
+            )
+        return verdict
+
     def _prepare_runtime_cut(self, cut: Cut, verdicts: dict[str, Verdict]) -> Cut:
         if self.worktrees is None:
+            self._receipt_store.update(
+                cut.id, worktree_path=cut.runtime_root or self.repo
+            )
             return cut
         selection = self._baseline_for(cut, verdicts)
         baseline = selection.selected
@@ -982,7 +1041,12 @@ class DispatchSupervisor:
         delivered_deps = [
             dependency
             for dependency in cut.depends_on
-            if dependency in verdicts and verdicts[dependency].ok
+            if dependency in verdicts
+            and (
+                verdicts[dependency].ok
+                or dependency in cut.closes_embargo
+                and self._structural_checkpoint(dependency)
+            )
         ]
         if not delivered_deps and self.policy.on_noncritical_dep_fail == "continue":
             return self._prefer_live_head(
@@ -1107,16 +1171,47 @@ class DispatchSupervisor:
                 cut.id, STATE_VERIFIED, "restored from receipt and Git ancestry"
             )
 
+    def _structural_checkpoint(self, cut_id: str) -> bool:
+        """Only plan-declared structural work can unlock its named integrator."""
+        entry = self._receipt_store.cut(cut_id)
+        claim = entry.get("claim", {})
+        return bool(
+            entry.get("compile_embargo")
+            and isinstance(claim, dict)
+            and claim.get("checkpoint")
+            and entry.get("acceptance") == "unverified"
+            and entry.get("state") == "reported"
+            and entry.get("delivered_commit_sha") == claim.get("commit_sha")
+            and bool(claim.get("commit_sha"))
+        )
+
     def _settled_verdict(self, cut: Cut, receipt: dict[str, Any]) -> Verdict | None:
         """Return a verified verdict only for a durable, ancestry-valid settle."""
         if receipt.get("state") != "settled":
             return None
-        commit = str(receipt.get("delivered_commit_sha") or "")
+        proof = receipt.get("verification_rule", {})
+        gates = receipt.get("gates", [])
+        commit = str(
+            receipt.get("integrated_sha") or receipt.get("delivered_commit_sha") or ""
+        )
+        if (
+            not isinstance(proof, dict)
+            or not proof.get("passed")
+            or proof.get("rule") != "VERIFICATION_RULE.md"
+            or proof.get("commit_sha") != commit
+            or not gates
+            or any(
+                not item.get("ok") or item.get("matcher_result") != "pass"
+                for item in gates
+            )
+        ):
+            return None
         if commit:
             resolved = self._git(["rev-parse", "--verify", f"{commit}^{{commit}}"])
             reference = (
                 "HEAD"
                 if bool(receipt.get("integrator_exclusivity"))
+                or receipt.get("embargo_closed_by")
                 else str(receipt.get("branch") or f"cut/{cut.id}")
             )
             if not resolved or not self._git_ok(
@@ -1140,7 +1235,9 @@ class DispatchSupervisor:
         # same-named worktree, or a report label is never enough to adopt it.
         if not receipt.get("provider_run_id"):
             recovered = self._recover_dispatched_cell(
-                cut, render_cell_prompt(self.dispatch, cut, baton=baton), "initial"
+                cut,
+                render_cell_prompt(self.dispatch, cut, baton=baton, run_id=self.run_id),
+                "initial",
             )
             if recovered is not None:
                 receipt = {**receipt, **recovered}
@@ -1459,7 +1556,7 @@ class DispatchSupervisor:
                     f"{cut.id}: blocked before spawn: {reason}" for reason in blocked
                 ),
             )
-        prompt = render_cell_prompt(self.dispatch, cut, baton=baton)
+        prompt = render_cell_prompt(self.dispatch, cut, baton=baton, run_id=self.run_id)
         attempt = self._resume_owned_progress.get(cut.id, "initial")
         self._materialize_prompt(cut, attempt, prompt)
         git_before = self._git_state(cut)
@@ -1528,12 +1625,6 @@ class DispatchSupervisor:
                 raise CellContractError(
                     f"[{cut.id}] repair round {repair_attempts} also timed out"
                 )
-
-        self._set_state(
-            cut.id,
-            STATE_WORKER_DONE,
-            "worker finished; supervisor verification pending",
-        )
 
         substrate = self._substrate_failure(cut, outcome)
         if substrate is not None:
@@ -1673,6 +1764,13 @@ class DispatchSupervisor:
         ``(None, verdict)`` for a launch-time refusal/crash. Raises
         ``CellContractError`` when the finished cell fails the exit/meta/report contract.
         """
+        self._receipt_store.update(
+            cut.id,
+            claim={},
+            claim_marker="",
+            verification_rule={},
+            acceptance="pending",
+        )
         try:
             cell = self.launcher(cut, prompt, kind)
         # The launcher is an injected provider callback; any exception must be journaled and
@@ -2003,45 +2101,169 @@ class DispatchSupervisor:
 
     def _verify(self, cut: Cut) -> Verdict:
         """Run the cut's rendered verifiers and journal each verifier's outcome."""
-        flip_failures = self._acceptance_flip_failures(cut)
-        if flip_failures:
-            for failure in flip_failures:
-                self._journal(f"[{cut.id}] acceptance gate: {failure}")
+        receipt = self._receipt_store.cut(cut.id)
+        claim = receipt.get("claim")
+        root = cut.runtime_root or self.repo
+        if not isinstance(claim, dict) or not claim:
+            plan = self._receipt_store.read().get("plan_path") or str(
+                self.artifacts_dir / "validated-dispatch.toml"
+            )
+            note = (
+                "claim not received, verifiers were not run; resume with "
+                f"vibecrafted dispatch {shlex.quote(str(plan))} --resume {self.run_id}"
+            )
+            self._journal(f"[{cut.id}] {note}; verifier cwd={root}")
+            return Verdict(
+                cut_id=cut.id, phase=cut.phase, state=STATE_UNKNOWN, failures=(note,)
+            )
+        if (
+            receipt.get("claim_writer") != "vibecrafted_core.dispatch.claims"
+            or claim.get("run_id") != self.run_id
+            or claim.get("cut_id") != cut.id
+            or claim.get("provider_run_id", "") != receipt.get("provider_run_id", "")
+            or claim.get("attempt", "") != receipt.get("attempt", "")
+        ):
+            return self._unverified_claim(
+                cut, "claim does not belong to the registered worker attempt"
+            )
+        try:
+            head, dirty = claim_git_state(root)
+        except (ReceiptContractError, OSError, subprocess.TimeoutExpired) as exc:
+            return self._unverified_claim(cut, f"claim runtime unavailable: {exc}")
+        if head != claim.get("commit_sha") or dirty:
+            return self._unverified_claim(
+                cut, "claim SHA differs from clean runtime HEAD"
+            )
+        self._set_state(
+            cut.id,
+            STATE_WORKER_DONE,
+            f"claim received for {head}; verification pending",
+        )
+        if "checkpoint" in claim or cut.compile_embargo:
+            note = "compile embargo checkpoint unverified; verifiers were not run; integrator must restore all skipped controls"
+            self._journal(f"[{cut.id}] {note}; verifier cwd={root}")
             return Verdict(
                 cut_id=cut.id,
                 phase=cut.phase,
-                state=STATE_FAILED,
-                failures=tuple(flip_failures),
+                state=STATE_WORKER_DONE,
+                commit=head,
+                report=str(claim["report_path"]),
+                failures=(note,),
+            )
+        rendered = render_cut_verifies(self.dispatch, cut)
+        checkpoint_sequences: dict[str, int] = {}
+        if cut.closes_embargo:
+            deferred = []
+            planned = {item.id: item for item in self.dispatch.cuts}
+            for dependency in cut.closes_embargo:
+                checkpoint_entry = self._receipt_store.cut(dependency)
+                checkpoint_sequences[dependency] = checkpoint_entry.get(
+                    "claim_sequence", 0
+                )
+                checkpoint = checkpoint_entry.get("claim", {})
+                if "checkpoint" not in checkpoint or not self._git_ok(
+                    [
+                        "merge-base",
+                        "--is-ancestor",
+                        str(checkpoint.get("commit_sha", "")),
+                        head,
+                    ],
+                    repo=root,
+                ):
+                    return self._unverified_claim(
+                        cut,
+                        f"embargo checkpoint {dependency} is not assembled at claimed SHA",
+                    )
+                deferred_cut = replace(
+                    planned[dependency],
+                    runtime_root=root,
+                    target_path=cut.target_path,
+                    artifact_path=cut.artifact_path,
+                )
+                deferred.extend(render_cut_verifies(self.dispatch, deferred_cut).verify)
+            verifies = (*rendered.verify, *deferred)
+            declared_commands = {verify.run for verify in verifies}
+            skipped = {
+                control
+                for dependency in cut.closes_embargo
+                for control in self._receipt_store.cut(dependency)["claim"][
+                    "checkpoint"
+                ]["skipped_controls"]
+            }
+            if skipped - declared_commands:
+                return self._unverified_claim(
+                    cut,
+                    "skipped controls lack declared verifiers: "
+                    + ", ".join(sorted(skipped - declared_commands)),
+                )
+            rendered = replace(rendered, verify=tuple(dict.fromkeys(verifies)))
+            self._receipt_store.update(
+                cut.id,
+                structural_closure={
+                    "marker": "W2_STRUCTURALLY_CLOSED",
+                    "assembled_sha": head,
+                    "checkpoints": list(cut.closes_embargo),
+                    "verification": "unverified",
+                },
+            )
+            self._journal(
+                f"[{cut.id}] W2_STRUCTURALLY_CLOSED assembled_sha={head}; ready to check, unverified"
             )
         if self.policy.verify_executor != "supervisor":
             self._journal(
-                f"[{cut.id}] verify_executor={self.policy.verify_executor!r}"
-                " is not supported yet; falling back to supervisor execution"
+                f"[{cut.id}] verify_executor={self.policy.verify_executor!r} is not supported; using canonical supervisor shell"
             )
-        root = cut.runtime_root or self.repo
         verifier_env = (
             {"CARGO_TARGET_DIR": cut.target_path} if cut.target_path else None
         )
-        verdict = run_verifies(
-            render_cut_verifies(self.dispatch, cut), repo=root, env=verifier_env
-        )
+        verdict = run_verifies(rendered, repo=root, env=verifier_env)
         for evidence in verdict.verifiers:
             self._journal(
-                f"[{cut.id}] verifier {evidence.matcher_result}:"
-                f" {evidence.command!r} exit={evidence.exit_code}"
-                f" ({evidence.elapsed_ms}ms)"
+                f"[{cut.id}] verifier {evidence.matcher_result}: cwd={root} sha={head}"
+                f" {evidence.command!r} exit={evidence.exit_code} ({evidence.elapsed_ms}ms)"
             )
         for failure in verdict.failures:
-            self._journal(f"[{cut.id}] verifier failure: {failure}")
+            self._journal(f"[{cut.id}] verifier failure: cwd={root}: {failure}")
         if not verdict.ok:
             self._journal_verifier_interpreters(cut, verdict, verifier_env)
-        if verdict.ok:
-            self._receipt_store.update(
-                cut.id,
-                "verified",
-                gates=[evidence.to_dict() for evidence in verdict.verifiers],
+        try:
+            final_head, final_dirty = claim_git_state(root)
+        except (ReceiptContractError, OSError, subprocess.TimeoutExpired) as exc:
+            return self._unverified_claim(
+                cut, f"post-verification runtime unavailable: {exc}"
             )
-        return verdict
+        if final_head != head or final_dirty:
+            return self._unverified_claim(
+                cut,
+                "runtime changed during verification; measurements cannot settle claimed SHA",
+            )
+        recorded = self._receipt_store.record_verification(
+            cut.id,
+            {
+                "rule": "VERIFICATION_RULE.md",
+                "passed": verdict.ok,
+                "commit_sha": head,
+                "cwd": root,
+                "claim_received_at": receipt.get("claim_received_at"),
+                "claim_sequence": receipt.get("claim_sequence"),
+                "checkpoint_sequences": checkpoint_sequences,
+            },
+            [evidence.to_dict() for evidence in verdict.verifiers],
+        )
+        if not recorded:
+            return self._unverified_claim(
+                cut, "claim changed during verification; measurements are superseded"
+            )
+        return replace(verdict, commit=head, report=str(claim["report_path"]))
+
+    def _unverified_claim(self, cut: Cut, note: str) -> Verdict:
+        """Keep admission/provenance failures distinct from red matchers."""
+        self._journal(
+            f"[{cut.id}] unverified: {note}; verifier cwd={cut.runtime_root or self.repo}"
+        )
+        return Verdict(
+            cut_id=cut.id, phase=cut.phase, state=STATE_UNKNOWN, failures=(note,)
+        )
 
     def _journal_verifier_interpreters(
         self, cut: Cut, verdict: Verdict, extra_env: dict[str, str] | None
@@ -2094,40 +2316,6 @@ class DispatchSupervisor:
                 f"[{cut.id}] verifier interpreter:"
                 f" {head} -> {resolved or 'not found on verifier PATH'}"
             )
-
-    def _acceptance_flip_failures(self, cut: Cut) -> list[str]:
-        """Refuse to verify a cut whose brief still carries unflipped `[ ]` boxes.
-
-        Founder 2026-09-15: an untouched `[ ]` is a delivery indicator, not a
-        formatting nit — the worker either did not deliver the requirement or
-        never measured it. The worker must flip its own Acceptance checkboxes
-        before the supervisor spends verifier time. The flip itself remains a
-        claim, never proof: when every box is flipped, the declared verifiers
-        still run and are the only thing that settles the cut as `[x]`.
-        Briefs without an Acceptance checkbox section keep the legacy path.
-        """
-        if not cut.brief:
-            return []
-        try:
-            content = Path(cut.brief).expanduser().read_text(encoding="utf-8")
-        except OSError:
-            return []
-        in_acceptance = False
-        unflipped: list[str] = []
-        for line in content.splitlines():
-            stripped = line.strip()
-            lowered = stripped.lower()
-            if lowered.startswith("#") and "acceptance" in lowered:
-                in_acceptance = True
-                continue
-            if in_acceptance and stripped.startswith("## "):
-                break
-            if in_acceptance and stripped.startswith("-") and "[ ]" in stripped:
-                unflipped.append(stripped)
-        return [
-            f"acceptance checkbox never flipped by the worker: {line!r}"
-            for line in unflipped
-        ]
 
     def _repair_prompt(self, prompt: str, failures: tuple[str, ...]) -> str:
         """Append a REPAIR ROUND directive citing prior failure evidence to the base prompt."""
@@ -2421,7 +2609,11 @@ class DispatchSupervisor:
                 past_failed_cut = True
                 continue
             if past_failed_cut and self._states[cut.id][0] == STATE_PENDING:
-                self._set_state(cut.id, STATE_PENDING, "skipped: line broken upstream")
+                self._set_state(
+                    cut.id,
+                    STATE_PENDING,
+                    "skipped: line broken upstream; " + self._states[cut_id][1],
+                )
 
     def _build_result(self, baton: Baton, line_broken: bool) -> DispatchResult:
         """Assemble the final ``DispatchResult`` from the baton and current per-cut states."""
@@ -2510,7 +2702,9 @@ class DispatchSupervisor:
                     f" exit={evidence.exit_code}"
                 )
             for failure in verdict.failures:
-                lines.append(f"- [{verdict.cut_id}] FAILURE: {failure}")
+                lines.append(
+                    f"- [{verdict.cut_id}] {'FAILURE' if verdict.state == STATE_FAILED else 'UNVERIFIED'}: {failure}"
+                )
         lines += ["", "## Next suggested action", ""]
         lines.append(self._next_action(result))
         self.handoff_path.write_text("\n".join(lines) + "\n", encoding="utf-8")

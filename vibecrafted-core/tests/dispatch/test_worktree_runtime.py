@@ -8,6 +8,7 @@ import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,7 @@ from vibecrafted_core.dispatch.schema import (
 )
 from vibecrafted_core.dispatch.supervisor import (
     CellRun,
+    DispatchSupervisor,
     cleanup_settled_run,
     run_dispatch,
 )
@@ -40,6 +42,8 @@ from vibecrafted_core.dispatch.worktrees import (
 from vibecrafted_core.report_contract import reserve_launcher_report_template
 from vibecrafted_core.workflow import _canonical_report_path
 
+pytestmark = pytest.mark.usefixtures("worker_claims")
+
 
 def _git(repo: Path, *args: str) -> str:
     proc = subprocess.run(
@@ -48,12 +52,17 @@ def _git(repo: Path, *args: str) -> str:
     return proc.stdout.strip()
 
 
-def _repo(path: Path, *, rust: bool = False) -> str:
+def _repo(
+    path: Path, *, rust: bool = False, ignored_outputs: tuple[str, ...] = ()
+) -> str:
     path.mkdir()
     _git(path, "init", "-q")
     _git(path, "config", "user.email", "agents@vetcoders.io")
     _git(path, "config", "user.name", "runtime-test")
-    (path / ".gitignore").write_text("target/\n", encoding="utf-8")
+    (path / ".gitignore").write_text(
+        "target/\n" + "".join(f"/{name}\n" for name in ignored_outputs),
+        encoding="utf-8",
+    )
     (path / "README.md").write_text("seed\n", encoding="utf-8")
     if rust:
         (path / "src").mkdir()
@@ -245,7 +254,7 @@ def test_public_dispatch_recovers_killed_worker_with_monotonic_resume_attempts(
     """Exercise recovery through launch_workflow, its real receipt, and lookup_run.
 
     The fake provider is only the agent executable. The dispatch/supervisor and
-    core runtime are unmocked: its first child leaves dirty work and fails, and
+    core runtime are unmocked: its first child leaves generated progress and fails, and
     each later public resume must mint one new attempt identity without losing
     that worktree or accepting the reserved report template as delivery.
     """
@@ -272,7 +281,7 @@ def test_public_dispatch_recovers_killed_worker_with_monotonic_resume_attempts(
     monkeypatch.setenv("VIBECRAFTED_RUNTIME_BIN", str(fake_bin))
     monkeypatch.setenv("PATH", str(fake_bin) + os.pathsep + os.environ["PATH"])
     repo = tmp_path / "repo"
-    _repo(repo)
+    _repo(repo, ignored_outputs=(".interrupted", "owned-progress.txt"))
     dispatch = _dispatch(repo, _cut("recover"))
     run_id = "recover-public"
 
@@ -344,7 +353,7 @@ def test_stopped_owned_worker_recovers_original_baseline_after_projection_drift(
     monkeypatch.setenv("VIBECRAFTED_RUNTIME_BIN", str(fake_bin))
     monkeypatch.setenv("PATH", str(fake_bin) + os.pathsep + os.environ["PATH"])
     repo = tmp_path / "repo"
-    baseline = _repo(repo)
+    baseline = _repo(repo, ignored_outputs=(".worker-started", "owned-progress.txt"))
     dispatch = _dispatch(repo, _cut("stopped"))
     run_id = "stopped-parent-moved"
     initial: list[dict[str, str]] = []
@@ -503,7 +512,7 @@ def test_stopped_owned_worker_recovers_original_baseline_after_projection_drift(
 def test_public_concurrent_resumes_preserve_live_siblings_then_retry_killed_child(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Only a killed dirty child is recovered while its live siblings survive.
+    """Only a killed child is recovered while its live siblings survive.
 
     This deliberately exercises the public dispatcher with three real provider
     processes.  The provider itself is disposable, but launch receipts,
@@ -554,7 +563,7 @@ def test_public_concurrent_resumes_preserve_live_siblings_then_retry_killed_chil
     monkeypatch.setenv("VIBECRAFTED_TEST_LAUNCH_DIR", str(launches))
     monkeypatch.setenv("PATH", str(fake_bin) + os.pathsep + os.environ["PATH"])
     repo = tmp_path / "repo"
-    _repo(repo)
+    _repo(repo, ignored_outputs=("provider-key.txt", "owned-progress.txt"))
     dispatch = _dispatch(
         repo, _cut("killed") + _cut("retained") + _cut("retry"), concurrency=3
     )
@@ -1010,7 +1019,7 @@ def test_legacy_dispatch_identity_recovers_real_writer_safe_spec_only_when_bound
 
 
 def test_cross_day_legacy_resume_reuses_original_checkout_and_leaves_settled_siblings(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, verified_history
 ) -> None:
     """Reproduce the installed W0-c resume shape across a calendar boundary.
 
@@ -1048,18 +1057,32 @@ def test_cross_day_legacy_resume_reuses_original_checkout_and_leaves_settled_sib
     )
 
     store = DispatchReceiptStore(run_id, dispatch.cuts, concurrency=3)
+    historical_supervisor = DispatchSupervisor(
+        dispatch,
+        launcher=lambda *args: None,
+        artifacts_dir=tmp_path / "history",
+        run_id=run_id,
+        resume=True,
+    )
     for cut_id in ("W0-a", "W0-b"):
         geometry = geometries[cut_id]
         store.update(
             cut_id,
-            "settled",
-            acceptance="verified",
-            delivered_commit_sha=baseline,
+            "reported",
             worktree_path=geometry.worktree_path,
             target_path=geometry.target_path,
             artifact_path=geometry.artifact_path,
             branch=geometry.branch,
             baseline_sha=baseline,
+        )
+        historical_cut = replace(
+            next(cut for cut in dispatch.cuts if cut.id == cut_id),
+            runtime_root=geometry.worktree_path,
+        )
+        verified_history(
+            historical_supervisor,
+            historical_cut,
+            tmp_path / f"history-{cut_id}.md",
         )
 
     provider_run_id = "impl-260907-234041-50924"
@@ -1159,7 +1182,9 @@ def test_cross_day_legacy_resume_reuses_original_checkout_and_leaves_settled_sib
         resume=True,
     )
 
-    assert result.states == {"W0-a": "[x]", "W0-b": "[x]", "W0-c": "[x]"}
+    # Recovery preserves dirty progress, but an inadmissible claim cannot settle it.
+    assert result.states == {"W0-a": "[x]", "W0-b": "[x]", "W0-c": "[?]"}
+    assert store.cut("W0-c")["acceptance"] == "unverified"
     assert launches == [("W0-c", "resume-1", str(dirty_root))]
     assert _git(dirty_root, "rev-parse", "HEAD") == committed_head
     assert (

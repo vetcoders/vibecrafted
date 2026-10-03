@@ -17,6 +17,7 @@ async fn main() {
     use vibecrafted_server_web::app::{App, settings_routes, shell, skills_routes};
     use vibecrafted_server_web::bus::api::bus_routes;
     use vibecrafted_server_web::control::api::control_routes;
+    use vibecrafted_server_web::dispatch::dispatch_routes;
     use vibecrafted_server_web::mcp::api::mcp_routes;
     use vibecrafted_server_web::scaffold::api::scaffold_routes;
     use vibecrafted_server_web::tools::api::{
@@ -226,6 +227,7 @@ Examples:
         .merge(scaffold_routes())
         .merge(skills_routes())
         .merge(control_routes())
+        .merge(dispatch_routes())
         .merge(settings_routes())
         // Streamable HTTP MCP. Protocol and bearer live in `mcp`; this is the only mount.
         .merge(mcp_routes())

@@ -6,6 +6,7 @@ import json
 import os
 import threading
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from importlib import import_module
 from pathlib import Path
@@ -155,6 +156,125 @@ class DispatchReceiptStore:
             payload.update(fields)
             payload["updated_at"] = _now()
             atomic_write_json(self.path, payload)
+
+    def record_claim(
+        self,
+        cut_id: str,
+        claim: dict[str, Any],
+        *,
+        validate: Callable[[dict[str, Any], dict[str, Any]], None],
+    ) -> None:
+        """Record a doorbell under the same lock as scheduler transitions.
+
+        Admission can never overwrite a settlement or a concurrent launch's
+        identity. Only the supervisor executes gates and writes tracker states.
+        """
+        with self._locked_ledger():
+            payload = self._read_unlocked()
+            entry = payload.get("cuts", {}).get(cut_id)
+            if not isinstance(entry, dict):
+                raise ReceiptContractError(f"unknown receipt cut {cut_id!r}")
+            validate(entry, payload)
+            if entry.get("state") == "settled":
+                raise ReceiptContractError("settled cut cannot accept a worker claim")
+            recorded = dict(claim)
+            recorded.update(
+                provider_run_id=entry.get("provider_run_id", ""),
+                attempt=entry.get("attempt", ""),
+            )
+            entry.update(
+                claim=recorded,
+                claim_marker="[~]",
+                claim_sequence=int(entry.get("claim_sequence") or 0) + 1,
+                claim_received_at=_now(),
+                claim_writer="vibecrafted_core.dispatch.claims",
+                claim_writer_pid=os.getpid(),
+                acceptance="unverified",
+                verification_rule={},
+                updated_at=_now(),
+            )
+            payload["updated_at"] = _now()
+            atomic_write_json(self.path, payload)
+
+    def record_verification(
+        self, cut_id: str, proof: dict[str, Any], gates: list[dict[str, Any]]
+    ) -> bool:
+        """Bind writer measurements to the claim that rang the doorbell."""
+        with self._locked_ledger():
+            payload = self._read_unlocked()
+            entry = payload["cuts"][cut_id]
+            if entry.get("claim_sequence") != proof.get("claim_sequence"):
+                return False
+            entry.update(verification_rule=proof, gates=gates, updated_at=_now())
+            if proof.get("passed"):
+                entry["state"] = "verified"
+                entry["verified_at"] = _now()
+                entry["verified_epoch_ns"] = time.time_ns()
+            payload["updated_at"] = _now()
+            atomic_write_json(self.path, payload)
+            return True
+
+    def settle_verified(
+        self,
+        cut_id: str,
+        *,
+        commit: str,
+        report: str,
+        integrated: bool,
+        closes: tuple[str, ...] = (),
+    ) -> bool:
+        """Atomic admission of passed VERIFICATION_RULE, never an HTTP action."""
+        with self._locked_ledger():
+            payload = self._read_unlocked()
+            entry = payload["cuts"][cut_id]
+            proof = entry.get("verification_rule", {})
+            gates = entry.get("gates", [])
+            if (
+                not proof.get("passed")
+                or proof.get("rule") != "VERIFICATION_RULE.md"
+                or proof.get("commit_sha") != commit
+                or proof.get("claim_sequence") != entry.get("claim_sequence")
+                or "checkpoint" in entry.get("claim", {})
+                or not gates
+                or any(
+                    not item.get("ok") or item.get("matcher_result") != "pass"
+                    for item in gates
+                )
+            ):
+                return False
+            for dependency in closes:
+                checkpoint = payload["cuts"][dependency]
+                if checkpoint.get("claim_sequence") != proof.get(
+                    "checkpoint_sequences", {}
+                ).get(dependency):
+                    return False
+            now = _now()
+            entry.update(
+                state="settled",
+                acceptance="verified",
+                delivered_commit_sha=commit,
+                report_path=report,
+                integrated_sha=commit if integrated else "",
+                updated_at=now,
+                settled_at=now,
+                settled_epoch_ns=time.time_ns(),
+            )
+            for dependency in closes:
+                checkpoint = payload["cuts"][dependency]
+                checkpoint.update(
+                    state="settled",
+                    acceptance="verified",
+                    verification_rule=proof,
+                    gates=gates,
+                    integrated_sha=commit,
+                    embargo_closed_by=cut_id,
+                    updated_at=now,
+                    settled_at=now,
+                    settled_epoch_ns=time.time_ns(),
+                )
+            payload["updated_at"] = now
+            atomic_write_json(self.path, payload)
+            return True
 
     def stop_requested(self) -> bool:
         with self._locked_ledger():

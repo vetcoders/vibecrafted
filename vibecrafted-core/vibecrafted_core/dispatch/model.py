@@ -184,6 +184,9 @@ class Cut:
     recovery: Recovery | None = None
     depends_on: tuple[str, ...] = ()
     integrator: bool = False
+    # Plan-owned phase obligations; worker payloads cannot close an embargo.
+    compile_embargo: bool = False
+    closes_embargo: tuple[str, ...] = ()
     # Optional per-cut checkout base declaration: "<sha>", "<branch>", or
     # "cut:<cut-id>". Absent = the plan baseline (today's behavior).
     base: str = ""
