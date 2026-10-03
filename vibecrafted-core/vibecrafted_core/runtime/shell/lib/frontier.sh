@@ -6,7 +6,13 @@
 # source checkout. Product configuration lives only in ~/.config/vibecrafted.
 _vetcoders_frontier_candidates() {
   local repo_root crafted_sidecar candidate seen=""
-  repo_root="$(_vetcoders_repo_root)"
+  if _vetcoders_vc_frame_developer_mode; then
+    repo_root="$(_vetcoders_repo_root)"
+  else
+    # Installed defaults belong to the loaded generation. Looking up cwd's
+    # Git root here probes the no-project lobby before vc-start can guard it.
+    repo_root="$(_vetcoders_vc_frame_owner_root)" || return 1
+  fi
   crafted_sidecar="${VIBECRAFTED_TOOLS_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted/tools}/vibecrafted-current/config"
 
   for candidate in \

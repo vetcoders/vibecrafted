@@ -467,6 +467,9 @@ def test_build_id_fails_closed_when_git_status_fails(
     responses = iter(
         (
             subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=f"{tmp_path}\n", stderr=""
+            ),
+            subprocess.CompletedProcess(
                 args=[], returncode=0, stdout=f"{'a' * 40}\n", stderr=""
             ),
             subprocess.CompletedProcess(args=[], returncode=2, stdout=b"", stderr=b""),
@@ -746,3 +749,173 @@ def test_write_meta_stamps_workspace_fields(
     assert payload["vibecrafted_session_id"]
     assert payload["workspace_instance_id"]
     assert isinstance(payload["build_id"], dict)
+
+
+def test_default_lobby_resolution_has_no_git_build_or_selected_identity(
+    home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    wc.create_workspace(root=project)
+    lobby = home / "projects"
+    lobby.mkdir()
+    monkeypatch.chdir(lobby)
+    monkeypatch.setattr(
+        wc, "compute_build_id", lambda *a, **k: pytest.fail("no build in lobby")
+    )
+    monkeypatch.setattr(
+        wc.subprocess, "run", lambda *a, **k: pytest.fail("no Git in lobby")
+    )
+    assert wc.workspace_cli_main(["resolve", "--env"]) == 0
+    assert capsys.readouterr().out == ""
+    assert wc.workspace_cli_main(["resolve", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {}
+
+
+def test_workspace_catalog_refuses_home_and_identity_free_lobby(home: Path) -> None:
+    lobby = home / "projects"
+    lobby.mkdir()
+    for root in (home, lobby):
+        with pytest.raises(wc.WorkspaceCatalogError):
+            wc.create_workspace(root=root)
+        with pytest.raises(wc.WorkspaceCatalogError):
+            wc.resolve_run_workspace_identity(root=root)
+
+
+def test_supplied_env_cannot_disguise_runtime_home_as_a_project(
+    home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lobby = home / "projects"
+    lobby.mkdir()
+    monkeypatch.setattr(
+        wc, "read_catalog", lambda: pytest.fail("deny before touching catalog")
+    )
+    for root in (home, lobby):
+        with pytest.raises(wc.WorkspaceCatalogError):
+            wc.resolve_run_workspace_identity(
+                root=root, env={"VIBECRAFTED_HOME": str(tmp_path / "other-home")}
+            )
+
+
+def test_run_identity_defers_full_dirty_digest(
+    home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    (root / "untracked").write_text("content")
+    monkeypatch.setattr(
+        wc, "_dirty_worktree_digest", lambda *a, **k: pytest.fail("digest must be lazy")
+    )
+    identity = wc.resolve_run_workspace_identity(root=root)
+    assert identity.build_id.dirty_digest == "dirty-unknown"
+    assert "dirty-unknown" in identity.build_id.rendered
+
+
+def test_exact_digest_timeout_is_dirty_unknown_without_aborting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    (root / "untracked").write_text("content")
+
+    def timeout(*a: object, **k: object) -> str:
+        raise subprocess.TimeoutExpired("git diff --binary HEAD", 20)
+
+    monkeypatch.setattr(wc, "_dirty_worktree_digest", timeout)
+    build = wc.compute_build_id(root)
+    assert build.dirty_digest == "dirty-unknown"
+    assert "dirty-unknown" in build.rendered
+    assert not build.matches(build)
+
+
+def test_git_identity_probe_timeout_never_claims_a_clean_build(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def timeout(*a: object, **k: object) -> str:
+        raise subprocess.TimeoutExpired("git rev-parse", 1)
+
+    monkeypatch.setattr(wc.subprocess, "run", timeout)
+    build = wc.compute_build_id(tmp_path, exact=False)
+    assert build.dirty
+    assert build.dirty_digest == "dirty-unknown"
+
+
+def test_explicit_project_from_lobby_resolves_only_selected_project(
+    home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    foreign = tmp_path / "foreign"
+    selected = tmp_path / "selected"
+    foreign.mkdir()
+    selected.mkdir()
+    foreign_workspace = wc.create_workspace(root=foreign)
+    lobby = home / "projects"
+    lobby.mkdir()
+    monkeypatch.chdir(lobby)
+    assert wc.workspace_cli_main(["resolve", "--repo", str(selected), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["VIBECRAFTED_WORKSPACE_ROOT"] == str(selected)
+    assert payload[wc.ENV_WORKSPACE_ID] != foreign_workspace.workspace_id
+    assert wc.workspace_cli_main(["resolve", "--repo", str(lobby), "--json"]) == 2
+
+
+def test_uncertain_digest_preserves_same_session_without_build_equality(
+    home: Path,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    workspace = wc.create_workspace(root=root)
+    session_id = wc.new_uuid7()
+    exact = wc.BuildId("a" * 40, False, "", "1", str(root))
+    uncertain = wc.BuildId("a" * 40, True, "dirty-unknown", "1", str(root))
+    first = wc.materialize_instance(
+        workspace_id=workspace.workspace_id,
+        root=root,
+        vibecrafted_session_id=session_id,
+        build_id=exact,
+    )
+    observed = wc.materialize_instance(
+        workspace_id=workspace.workspace_id,
+        root=root,
+        vibecrafted_session_id=session_id,
+        build_id=uncertain,
+    )
+    assert observed.workspace_instance_id == first.workspace_instance_id
+    assert not observed.build_id.matches(exact)
+    assert not observed.build_id.matches(uncertain)
+
+    wc.materialize_instance(
+        workspace_id=workspace.workspace_id,
+        root=root,
+        vibecrafted_session_id=wc.new_uuid7(),
+        build_id=uncertain,
+    )
+    assert all(i.status == wc.INSTANCE_STATUS_LIVE for i in wc.list_instances())
+
+    changed_revision = wc.BuildId("b" * 40, True, "dirty-unknown", "1", str(root))
+    changed = wc.materialize_instance(
+        workspace_id=workspace.workspace_id,
+        root=root,
+        vibecrafted_session_id=session_id,
+        build_id=changed_revision,
+    )
+    assert changed.workspace_instance_id != first.workspace_instance_id
+    assert all(
+        i.status == wc.INSTANCE_STATUS_STALE
+        for i in wc.list_instances()
+        if i.workspace_instance_id != changed.workspace_instance_id
+    )

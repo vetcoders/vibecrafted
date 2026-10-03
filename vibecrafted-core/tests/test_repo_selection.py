@@ -188,6 +188,36 @@ def test_selection_expands_user_home(
     assert select_repository("~/proj", "").path == str((home / "proj").resolve())
 
 
+def test_projects_lobby_fallback_performs_no_git_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _git_repo(tmp_path / "home")
+    lobby = home / "projects"
+    lobby.mkdir()
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    monkeypatch.setattr(
+        "vibecrafted_core.repo_selection.subprocess.run",
+        lambda *a, **k: pytest.fail("lobby entry must not run Git"),
+    )
+    selection = select_repository("", fallback=lobby)
+    assert selection.path == str(lobby.resolve())
+    assert not selection.is_git
+
+
+def test_home_is_never_a_selected_workspace_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _git_repo(tmp_path / "home")
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    with pytest.raises(RepoSelectionError, match="VIBECRAFTED_HOME"):
+        select_repository(str(home))
+    project = home / "projects" / "actual-project"
+    project.mkdir(parents=True)
+    assert not select_repository(str(project)).is_git
+    subprocess.run(["git", "init", "-q", str(project)], check=True)
+    assert select_repository(str(project)).git_toplevel == str(project.resolve())
+
+
 def _repo_selection_cli(
     *args: str, cwd: Path | None = None
 ) -> subprocess.CompletedProcess[str]:

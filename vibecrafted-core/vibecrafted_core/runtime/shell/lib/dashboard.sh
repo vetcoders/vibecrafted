@@ -70,6 +70,12 @@ _vetcoders_product_workspace_prepare() {
   if [[ -z "$requested_root" ]]; then
     requested_root="$(pwd -P)" || return $?
   fi
+  if _vetcoders_start_is_lobby "$requested_root"; then
+    # The entry lobby is a host surface, never a project registration.
+    unset VIBECRAFTED_WORKSPACE_ID VIBECRAFTED_SESSION_ID VIBECRAFTED_WORKSPACE_INSTANCE_ID
+    unset VIBECRAFTED_BUILD_ID VIBECRAFTED_OPERATOR_SESSION VIBECRAFTED_WORKSPACE_ROOT
+    return 0
+  fi
   resolved="$(
     _vetcoders_product_core_cli \
       workspace resolve --root "$requested_root" --env
@@ -537,6 +543,7 @@ _vetcoders_start_open_terminal_if_needed() {
     printf 'Run vc-start from a terminal, or install the runtime so bin/vc-terminal and bin/vc-start exist.\n' >&2
     return 1
   fi
+  printf 'vc-start: opening terminal...\n' >&2
   _vetcoders_open_entry_in_vc_terminal "$front_door" "$project_root" "$@" || return 1
   VIBECRAFTED_START_ESCALATED=1
   export VIBECRAFTED_START_ESCALATED
@@ -569,6 +576,7 @@ _vetcoders_product_entry_prepare() {
       VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS=1
       return 1
     fi
+    printf 'vc-start: checking the installed runtime...\n' >&2
     _vetcoders_product_runtime_admit "$owner_root" || {
       entry_status=$?
       VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS="$entry_status"
@@ -612,11 +620,22 @@ _vetcoders_product_entry_prepare() {
     PATH="$(_vetcoders_path_with_bundled_bin_priority "${PATH:-}")"
     export PATH
   fi
+  if _vetcoders_start_is_lobby "$requested_root"; then
+    printf 'vc-start: preparing Home...\n' >&2
+  else
+    printf 'vc-start: preparing workspace %s...\n' "$(_vetcoders_shell_quote "$requested_root")" >&2
+  fi
   _vetcoders_product_workspace_prepare "$requested_root" || {
     entry_status=$?
     VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS="$entry_status"
     return "$entry_status"
   }
+  if _vetcoders_start_is_lobby "$requested_root"; then
+    # Home still uses the shared service; only project-owned preparation is skipped.
+    _vetcoders_control_plane_eye_prepare
+    export VIBECRAFTED_PRODUCT_ENTRY=1
+    return 0
+  fi
   if [[ -n "${VIBECRAFTED_WORKSPACE_ROOT:-}" && -d "$VIBECRAFTED_WORKSPACE_ROOT" ]]; then
     cd "$VIBECRAFTED_WORKSPACE_ROOT" || {
       entry_status=$?
@@ -975,9 +994,32 @@ _vetcoders_resume_as_guest() {
 # contains the caller's directory (a subdirectory names the SAME workspace as
 # the root does), else the directory itself. Documented default; no ambient
 # SPAWN_ROOT/VIBECRAFTED_ROOT, no wrapper cwd, no generation.
+_vetcoders_start_is_lobby() {
+  local root="${1:-}" lobby="${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/projects"
+  [[ -d "$lobby" ]] || return 1
+  lobby="$(cd "$lobby" && pwd -P)" || return 1
+  [[ "$root" == "$lobby" ]]
+}
+
+_vetcoders_start_is_storage_root() {
+  local root="${1:-}" storage="${VIBECRAFTED_HOME:-$HOME/.vibecrafted}"
+  [[ -d "$storage" ]] || return 1
+  storage="$(cd "$storage" && pwd -P)" || return 1
+  [[ "$root" == "$storage" ]]
+}
+
 _vetcoders_start_resolve_root() {
   local root="${VIBECRAFTED_START_ROOT:-}" top=""
   if [[ -z "$root" ]]; then
+    root="$(pwd -P)" || return 1
+    if _vetcoders_start_is_storage_root "$root"; then
+      printf 'vc-start: VIBECRAFTED_HOME cannot be a workspace root; choose --repo <path>.\n' >&2
+      return 2
+    fi
+    if _vetcoders_start_is_lobby "$root"; then
+      printf '%s\n' "$root"
+      return 0
+    fi
     top="$(git rev-parse --show-toplevel 2>/dev/null || true)"
     if [[ -n "$top" && -d "$top" ]]; then
       root="$top"
@@ -1464,6 +1506,9 @@ _vetcoders_start_create_workspace_session() {
       _vetcoders_start_release_create_lock
       return "$rc"
     }
+  fi
+  if [[ "$kind" != chrome ]]; then
+    printf 'vc-start: opening workspace %s...\n' "$(_vetcoders_shell_quote "$session_name")" >&2
   fi
   out="$(_vetcoders_start_frame_env "$vc_frame_bin" "${create_argv[@]}" 2>&1)" || rc=$?
   if ((rc != 0)); then
@@ -2047,6 +2092,7 @@ _vetcoders_start_ensure_host() {
       return $?
       ;;
     missing)
+      printf 'vc-start: starting host %s...\n' "$(_vetcoders_shell_quote "$host")" >&2
       _vetcoders_start_create_workspace_session "$vc_frame_bin" "$host" \
         "$(_vetcoders_host_layout_file 2>/dev/null || true)" chrome || rc=$?
       # 3: a concurrent start created the host first — that host is ours too.
@@ -2056,6 +2102,7 @@ _vetcoders_start_ensure_host() {
       rc=0
       ;;
     dead)
+      printf 'vc-start: restoring host %s...\n' "$(_vetcoders_shell_quote "$host")" >&2
       _vetcoders_start_frame_env "$vc_frame_bin" attach --create-background "$host" >/dev/null 2>&1 || true
       _vetcoders_wait_for_vc_frame_session "$host" 40 || {
         printf 'vc-start: Frame host %s exited and could not be resurrected.\n' \
@@ -2145,6 +2192,51 @@ _vetcoders_start_enter_via_host() {
   _vetcoders_start_spawn_guest_projector "$vc_frame_bin" "$host" "$session_name"
   printf 'vc-start: entering host %s; workspace %s opens in it as a guest\n' \
     "$(_vetcoders_shell_quote "$host")" "$(_vetcoders_shell_quote "$session_name")"
+  _vetcoders_start_frame_env "$vc_frame_bin" attach "$host"
+}
+
+# No-project entry: one host, no guest, no catalogue/digest or workspace IDs.
+# Terminal escalation replays from its cwd without turning the lobby into --repo.
+_vetcoders_start_enter_lobby() {
+  local root="${1:-}" vc_frame_bin="" host="" rc=0
+  _vetcoders_product_workspace_prepare "$root" || return $?
+  unset VIBECRAFTED_START_CREATED_SESSION VIBECRAFTED_PREPARED_VC_FRAME_SESSION
+  if [[ -n "${_vetcoders_start_workspace_name:-}" \
+    || -n "${_vetcoders_start_contract_base:-}" \
+    || -n "${_vetcoders_start_contract_execution_runtime:-}" \
+    || "${_vetcoders_start_contract_worktree:-false}" == true ]]; then
+    printf 'vc-start: choose a project with --repo <path> before naming or preparing a workspace.\n' >&2
+    return 2
+  fi
+  _vetcoders_require_vc_frame || return 1
+  _vetcoders_pin_vc_frame_config_dir || return $?
+  vc_frame_bin="$(_vetcoders_vc_frame_bin)" || return 1
+  _vetcoders_start_resolve_inventory_host "" || rc=$?
+  if ((rc == 1)); then
+    _vetcoders_start_ensure_host "$vc_frame_bin" "" || return $?
+    rc=0
+    _vetcoders_start_resolve_inventory_host "" || rc=$?
+  fi
+  if ((rc != 0)); then
+    _vetcoders_start_refuse_inventory "lobby"
+    return 4
+  fi
+  host="$_vetcoders_start_resolved_host"
+  printf 'vc-start: opening Home in host %s; choose a project when ready.\n' \
+    "$(_vetcoders_shell_quote "$host")" >&2
+  if _vetcoders_in_vc_frame && [[ "${VC_FRAME_SESSION_NAME:-}" == "$host" ]]; then
+    _vetcoders_start_frame_env "$vc_frame_bin" --session "$host" action go-to-tab-name Home
+    return $?
+  fi
+  if ! _vetcoders_start_is_owned_terminal_child && [[ ! -t 0 || ! -t 1 ]]; then
+    _vetcoders_start_open_terminal_if_needed strict "$root"
+    return $?
+  fi
+  if [[ ! -t 0 || ! -t 1 ]]; then
+    printf 'vc-start: terminal supplied no TTY; host %s remains detached.\n' "$host" >&2
+    return 4
+  fi
+  _vetcoders_product_entry_prepare "$root" || return $?
   _vetcoders_start_frame_env "$vc_frame_bin" attach "$host"
 }
 
@@ -2315,6 +2407,10 @@ PY_HOST_GENERATION
 _vetcoders_start_new_host() (
   local root="${1:-}" active="" owner="" generation="" short="" base="vc-host" host="" rc=0 index=1
   local vc_frame_bin="" role="" front_door="" existing="" sessions=""
+  local entry_args=(--new-host)
+  if ! _vetcoders_start_is_lobby "$root"; then
+    entry_args+=(--repo "$root")
+  fi
   owner="$(_vetcoders_vc_frame_owner_root)" || return 4
   active="$(_vetcoders_start_active_host_root)" || return 4
   if [[ "$(basename "$(dirname "$active")")" == releases ]]; then
@@ -2333,7 +2429,7 @@ _vetcoders_start_new_host() (
     fi
     printf 'vc-start: opening the active generation %s (selected shell: %s).\n' \
       "$(basename "$active")" "$(basename "$owner")" >&2
-    "$active/bin/vc-start" --new-host --repo "$root"
+    "$active/bin/vc-start" "${entry_args[@]}"
     return $?
   fi
   generation="$(_vetcoders_start_generation_label "$active")"
@@ -2386,7 +2482,7 @@ _vetcoders_start_new_host() (
     # canonical PTY supplier, which clears inherited Frame markers.
     front_door="$(_vetcoders_product_front_door vc-start)" || return 4
     export VIBECRAFTED_START_CREATED_HOST="$host"
-    _vetcoders_open_entry_in_vc_terminal "$front_door" "$root" --new-host --repo "$root" || {
+    _vetcoders_open_entry_in_vc_terminal "$front_door" "$root" "${entry_args[@]}" || {
       printf 'vc-start: host %s remains detached; enter it with: vc-frame attach %s\n' "$host" "$host" >&2
       return 4
     }
@@ -2436,16 +2532,35 @@ _vetcoders_start_offer_generation_host() {
 # _vetcoders_start_prepare_arguments. $@ = _vetcoders_start_frame_argv.
 _vetcoders_start_entry() {
   local root="" session_name="" state="" rc=0 join_rc=0
+  # Emit life before launch-spec/catalogue resolution can do expensive work.
+  # Progress stays on stderr so machine-readable entry probes keep stdout.
+  printf 'vc-start: checking your workspace and available host...\n' >&2
   # Long-lived shells must refresh inventory before each generation decision.
   _vetcoders_start_inventory_cache_valid=0
   root="$(_vetcoders_start_resolve_root)" || {
+    rc=$?
     printf 'vc-start: could not resolve the project root.\n' >&2
-    return 1
+    return "$rc"
   }
+  if _vetcoders_start_is_lobby "$root"; then
+    if [[ "${VIBECRAFTED_PRODUCT_ENTRY_PROBE:-0}" == 1 ]]; then
+      _vetcoders_product_entry_prepare "$root" || return $?
+      _vetcoders_product_entry_probe_print
+      return $?
+    fi
+    if [[ "${_vetcoders_start_new_host_requested:-0}" == 1 ]]; then
+      _vetcoders_product_workspace_prepare "$root" || return $?
+      _vetcoders_start_new_host "$root"
+      return $?
+    fi
+    _vetcoders_start_enter_lobby "$root"
+    return $?
+  fi
   _vetcoders_start_apply_launch_spec "$root" || return $?
   root="$(_vetcoders_start_resolve_root)" || {
+    rc=$?
     printf 'vc-start: could not resolve the project root.\n' >&2
-    return 1
+    return "$rc"
   }
 
   if [[ "${_vetcoders_start_mode:-start}" == "resume" ]]; then

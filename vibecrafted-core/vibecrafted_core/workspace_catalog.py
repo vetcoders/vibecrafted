@@ -47,13 +47,21 @@ from pathlib import Path
 from typing import Any
 
 from .control_plane import _is_pytest_temp_path, control_plane_home
-from .repo_selection import RepoSelectionError, add_repo_arguments, select_repository
+from .repo_selection import (
+    RepoSelectionError,
+    add_repo_arguments,
+    git_toplevel,
+    is_workspace_lobby,
+    select_repository,
+    validate_workspace_root,
+)
 from .runtime_paths import read_version_file
 
 CATALOG_SCHEMA = "vibecrafted.workspace-catalog.v1"
 WORKSPACE_RECORD_SCHEMA = "vibecrafted.workspace.v1"
 INSTANCE_SCHEMA = "vibecrafted.workspace-instance.v1"
 BUILD_ID_SCHEMA = "vibecrafted.build-id.v1"
+DIRTY_UNKNOWN = "dirty-unknown"
 SESSION_RECORD_SCHEMA = "vibecrafted.workspace-session.v1"
 SNAPSHOT_MANIFEST_SCHEMA = "vibecrafted.workspace-snapshot-manifest.v1"
 MIGRATION_REPORT_SCHEMA = "vibecrafted.workspace-migration-report.v1"
@@ -317,7 +325,13 @@ class BuildId:
 
     @property
     def rendered(self) -> str:
-        dirty_part = f"+dirty:{self.dirty_digest[:12]}" if self.dirty else ""
+        dirty_part = (
+            f"+{DIRTY_UNKNOWN}"
+            if self.dirty_digest == DIRTY_UNKNOWN
+            else f"+dirty:{self.dirty_digest[:12]}"
+            if self.dirty
+            else ""
+        )
         commit = self.git_commit[:12] if self.git_commit else "nogit"
         version = self.package_version or "unknown"
         return f"git:{commit}{dirty_part}@v{version}"
@@ -351,6 +365,8 @@ class BuildId:
         )
 
     def matches(self, other: BuildId) -> bool:
+        if DIRTY_UNKNOWN in (self.dirty_digest, other.dirty_digest):
+            return False
         return (
             self.git_commit == other.git_commit
             and self.dirty == other.dirty
@@ -361,6 +377,14 @@ class BuildId:
 
 def _dirty_worktree_digest(root: Path, *, porcelain: bytes, git_commit: str) -> str:
     """Hash tracked diffs plus untracked path/type/content for one dirty checkout."""
+
+    deadline = time.monotonic() + 20
+
+    def remaining() -> float:
+        budget = deadline - time.monotonic()
+        if budget <= 0:
+            raise subprocess.TimeoutExpired("dirty worktree digest", 20)
+        return budget
 
     digest = hashlib.sha256()
     digest.update(b"vibecrafted-dirty-build-v1\0status\0")
@@ -391,7 +415,7 @@ def _dirty_worktree_digest(root: Path, *, porcelain: bytes, git_commit: str) -> 
             command,
             check=False,
             capture_output=True,
-            timeout=20,
+            timeout=remaining(),
         )
         if proc.returncode != 0:
             raise WorkspaceCatalogError(
@@ -413,13 +437,14 @@ def _dirty_worktree_digest(root: Path, *, porcelain: bytes, git_commit: str) -> 
         ],
         check=False,
         capture_output=True,
-        timeout=20,
+        timeout=remaining(),
     )
     if untracked_proc.returncode != 0:
         raise WorkspaceCatalogError(
             "cannot compute exact dirty build_id: untracked inventory failed"
         )
     for raw_path in sorted(item for item in untracked_proc.stdout.split(b"\0") if item):
+        remaining()
         path = root / os.fsdecode(raw_path)
         digest.update(b"untracked\0")
         digest.update(len(raw_path).to_bytes(8, "big"))
@@ -435,6 +460,7 @@ def _dirty_worktree_digest(root: Path, *, porcelain: bytes, git_commit: str) -> 
                 digest.update(meta.st_size.to_bytes(8, "big"))
                 with path.open("rb") as handle:
                     while chunk := handle.read(1024 * 1024):
+                        remaining()
                         digest.update(chunk)
             else:
                 digest.update(b"non-regular")
@@ -445,50 +471,75 @@ def _dirty_worktree_digest(root: Path, *, porcelain: bytes, git_commit: str) -> 
     return digest.hexdigest()
 
 
-def compute_build_id(root: str | Path | None = None) -> BuildId:
-    """Compute build_id for a checkout root (commit + dirty digest + version)."""
+def compute_build_id(root: str | Path | None = None, *, exact: bool = True) -> BuildId:
+    """Describe a project build; full content hashing is explicitly optional.
 
-    resolved = Path(root or os.getcwd()).expanduser().resolve()
+    Run entry uses ``exact=False``: no binary diff or untracked content reads.
+    An unavailable/timed-out digest is visible as ``dirty-unknown`` and can
+    never attest equality with an exact build.
+    """
+
+    try:
+        resolved = validate_workspace_root(root or os.getcwd())
+    except RepoSelectionError as exc:
+        raise WorkspaceCatalogError(str(exc)) from exc
     git_commit = ""
     dirty = False
     dirty_digest = ""
     try:
-        commit_proc = subprocess.run(
-            ["git", "-C", str(resolved), "rev-parse", "HEAD"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
+        top = git_toplevel(resolved, raise_on_timeout=True)
+        commit_proc = (
+            subprocess.run(
+                ["git", "-C", str(resolved), "rev-parse", "HEAD"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5 if exact else 1,
+            )
+            if top
+            else None
         )
-        if commit_proc.returncode == 0:
+        if commit_proc is not None and commit_proc.returncode == 0:
             git_commit = commit_proc.stdout.strip()
-        status_proc = subprocess.run(
-            [
-                "git",
-                "-C",
-                str(resolved),
-                "status",
-                "--porcelain=v1",
-                "-z",
-                "--untracked-files=all",
-            ],
-            check=False,
-            capture_output=True,
-            timeout=10,
+        status_proc = (
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(resolved),
+                    "status",
+                    "--porcelain=v1",
+                    "-z",
+                    "--untracked-files=all" if exact else "--untracked-files=normal",
+                ],
+                check=False,
+                capture_output=True,
+                timeout=10 if exact else 1,
+            )
+            if top
+            else None
         )
-        if status_proc.returncode == 0:
+        if status_proc is not None and status_proc.returncode == 0:
             porcelain = status_proc.stdout
             dirty = bool(porcelain.strip())
             if dirty:
-                dirty_digest = _dirty_worktree_digest(
-                    resolved,
-                    porcelain=porcelain,
-                    git_commit=git_commit,
+                dirty_digest = (
+                    _dirty_worktree_digest(
+                        resolved,
+                        porcelain=porcelain,
+                        git_commit=git_commit,
+                    )
+                    if exact
+                    else DIRTY_UNKNOWN
                 )
-        elif git_commit:
+        elif git_commit and exact:
             raise WorkspaceCatalogError(
                 "cannot compute exact build_id: git status failed"
             )
+        elif git_commit:
+            dirty, dirty_digest = True, DIRTY_UNKNOWN
+    except subprocess.TimeoutExpired:
+        dirty, dirty_digest = True, DIRTY_UNKNOWN
     except (OSError, subprocess.SubprocessError) as exc:
         if git_commit or dirty:
             raise WorkspaceCatalogError(
@@ -1048,7 +1099,10 @@ def create_workspace(
 ) -> WorkspaceRecord:
     """Create a durable workspace. workspace_id is never derived from root."""
 
-    resolved = Path(root).expanduser().resolve()
+    try:
+        resolved = validate_workspace_root(root)
+    except RepoSelectionError as exc:
+        raise WorkspaceCatalogError(str(exc)) from exc
     _refuse_operator_catalog_test_root(resolved)
     label = (display_label or resolved.name or "workspace").strip()
     wid = (
@@ -1340,8 +1394,11 @@ def materialize_instance(
     """
 
     wid = require_uuid(workspace_id, field_name="workspace_id")
-    resolved_root = Path(root or os.getcwd()).expanduser().resolve()
-    bid = build_id or compute_build_id(resolved_root)
+    try:
+        resolved_root = validate_workspace_root(root or os.getcwd())
+    except RepoSelectionError as exc:
+        raise WorkspaceCatalogError(str(exc)) from exc
+    bid = build_id or compute_build_id(resolved_root, exact=False)
     session_id = (
         require_uuid(vibecrafted_session_id, field_name="vibecrafted_session_id")
         if vibecrafted_session_id
@@ -1360,8 +1417,22 @@ def materialize_instance(
         for instance in existing:
             if instance.status != INSTANCE_STATUS_LIVE:
                 continue
-            if instance.build_id.matches(bid):
+            previous = instance.build_id
+            uncertain = DIRTY_UNKNOWN in (previous.dirty_digest, bid.dirty_digest)
+            same_revision = (
+                previous.git_commit == bid.git_commit
+                and previous.package_version == bid.package_version
+                and previous.root == bid.root
+            )
+            same_session_observation = (
+                uncertain
+                and same_revision
+                and instance.vibecrafted_session_id == session_id
+            )
+            if previous.matches(bid) or same_session_observation:
                 # Same build — refresh session stamp if provided.
+                # An uncertain observation may refresh the same physical
+                # materialization/session; this does not attest build equality.
                 refreshed = WorkspaceInstance(
                     workspace_instance_id=instance.workspace_instance_id,
                     workspace_id=wid,
@@ -1373,6 +1444,10 @@ def materialize_instance(
                 )
                 _write_instance_unlocked(refreshed)
                 return refreshed
+            if uncertain and same_revision:
+                # Unknown content is no evidence that another live session
+                # runs a different build. Keep its receipt intact.
+                continue
             # Different build cannot claim live ownership.
             detached = WorkspaceInstance(
                 workspace_instance_id=instance.workspace_instance_id,
@@ -1610,8 +1685,13 @@ def resolve_run_workspace_identity(
     """
 
     environ = dict(env) if env is not None else dict(os.environ)
-    resolved_root = Path(root).expanduser().resolve()
-    bid = compute_build_id(resolved_root)
+    try:
+        # The store and build probes use this process's runtime home. Supplied
+        # child context must not disguise that storage root as a project.
+        resolved_root = validate_workspace_root(root)
+        validate_workspace_root(resolved_root, env=environ)
+    except RepoSelectionError as exc:
+        raise WorkspaceCatalogError(str(exc)) from exc
 
     env_wid = str(environ.get(ENV_WORKSPACE_ID) or "").strip()
     catalog = read_catalog()
@@ -1673,6 +1753,8 @@ def resolve_run_workspace_identity(
             display_label=resolved_root.name or "workspace",
             select=True,
         )
+
+    bid = compute_build_id(resolved_root, exact=False)
 
     inherited_same_root = (
         record is not None
@@ -2251,6 +2333,14 @@ def workspace_cli_main(argv: Sequence[str] | None = None) -> int:
     counts_p.add_argument("--json", action="store_true")
 
     args = parser.parse_args(list(argv) if argv is not None else None)
+    if (
+        args.action == "resolve"
+        and not (str(args.repo or "").strip() or str(args.root or "").strip())
+        and is_workspace_lobby(os.getcwd())
+    ):
+        if not args.env:
+            print("{}" if args.json else "")
+        return 0
     if hasattr(args, "repo"):
         # ``resolve`` keeps an empty root so its own catalogue fallback decides;
         # ``create``/``materialize`` operate on the caller's directory by default.
