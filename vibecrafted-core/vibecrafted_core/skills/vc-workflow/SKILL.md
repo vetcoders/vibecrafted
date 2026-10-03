@@ -42,17 +42,20 @@ native_fleet: "use native fleet delegation widely"
 
 ### Living Tree / Worktree Rule
 
-This workflow runs in the operator's current checkout and current branch. Do not create, switch to, or move execution into a git worktree unless the operator explicitly asks for a worktree in this prompt. Generic words like "isolate", "parallel", or "clean branch" are not enough. The one sanctioned second mode is a Fleet Worktree dispatch (written plan, pre-committed verifiers, disjoint domains, single-thread integrator — see Living Tree Rule, Mode B); outside that formation, stay in the shared tree. Re-read files before editing, adapt to concurrent changes, and report a substrate failure if the current tree is too poisoned to continue safely.
-
-See [Living Tree Rule](../LIVING_TREE_RULE.md).
+Run in the operator's current checkout and branch; no worktree unless the
+operator explicitly asks (the one sanctioned second mode is a Fleet Worktree
+dispatch — plan, pre-committed verifiers, disjoint domains, single-thread
+integrator). Re-read before editing; report substrate failure if the tree is
+poisoned. Full rule: [../LIVING_TREE_RULE.md](../LIVING_TREE_RULE.md).
 
 ## Canonical Orientation Gate
 
-Before this workflow performs repo-specific analysis, planning, implementation, review, release, or delegation, it MUST run or consume the `vc-init` procedure for the assigned repo. If fresh `vc-init` evidence is absent, perform the init pass first and treat workflow-specific work as blocked until repo truth exists.
-
-`Loctree:loctree` is the default structural perception skill for that pass. Use Loctree before grep or docs-driven claims to produce or refresh the Code-Derived Application Map: repo-view, focus, slice, impact, find, and follow as relevant. Search for existing symbols and contracts before creating new ones; run impact before delete or major refactor; run slice before editing.
-
-The point is to find the hooks: load-bearing hubs, twins, dead code, drift, runtime entrypoints, and blast-radius traps. If the task is explicitly non-repo or no-code, state the no-repo exception in the report. Otherwise, missing `vc-init`/Loctree evidence is a process failure.
+Before repo-specific analysis, planning, implementation, review, release, or
+delegation, run or consume `vc-init` for the assigned repo — fresh evidence or
+the work is blocked. Loctree is the perception layer (repo-view/focus/slice/
+impact/find/follow; search before creating, impact before deleting, slice
+before editing). Missing `vc-init`/Loctree evidence is a process failure; the
+full gate text lives in [../vc-init/SKILL.md](../vc-init/SKILL.md).
 
 Standard launcher (`vibecrafted start` / `vc-start`, then `vc-<launcher> <agent> [--prompt|--file ...]`).
 
@@ -62,7 +65,8 @@ vc-workflow codex --prompt 'Research SSO options then implement the best fit'
 vibecrafted workflow agy --file /path/to/research-plan.md   # gemini deprecated; agy is Google replacement
 ```
 
-Foundation deps (loaded with framework): `vc-loctree`, `vc-aicx`.
+Foundation deps (loaded with framework): `vc-loctree`, `vc-aicx`,
+[`vc-delegate`](../vc-delegate/SKILL.md) (native fan-out policy for Phase 3).
 
 **Examine. Research. Implement.** Three-phase pipeline that chains structural
 code intelligence, ground truth research, and parallel agent delegation. Each
@@ -70,11 +74,9 @@ phase accumulates context for the next — no blind implementation.
 
 ## Repository Work Doctrine
 
-For repository work, start with Loctree as the map: use `loct context`,
-`loct occurrences`, `loct body`, and `loct find --literal` before broad manual
-search. Use AICX for intent and session context. Use rg/grep as fallback or
-local magnifier, not as a replacement for structural mapping. If Loctree fails
-or misses a surface, append feedback to `~/.vibecrafted/loctree/loctree-fail.md`.
+Loctree first (`loct context/occurrences/body/find --literal`), AICX for
+intent history, rg/grep as local magnifier only; Loctree gaps go to
+`~/.vibecrafted/loctree/loctree-fail.md`.
 
 ## Pipeline Position
 
@@ -84,26 +86,15 @@ scaffold → init → [WORKFLOW] → followup → marbles → dou → decorate �
 
 ## Pipeline Overview
 
-```
- EXAMINE (loctree)         RESEARCH (web)          IMPLEMENT (agents)      CONVERGE (marbles+polarize)
- ┌────────────────┐        ┌────────────────┐      ┌────────────────┐      ┌────────────────┐
- │ repo-view      │        │ Brave Search   │      │ write plans    │      │ marbles: fix   │
- │ focus 1-3 dirs │ ─────▸ │ WebFetch docs  │ ───▸ │ spawn agents   │ ───▸ │ gates (P0=0)   │
- │ slice + impact │        │ Context7 libs  │      │ collect reports│      │ polarize: align│
- │ find symbols   │        │ curate         │      │ review + merge │      │ docs & product │
- └────────────────┘        └────────────────┘      └────────────────┘      └────────────────┘
-        ↓                          ↓                       ↓                       ↓
-   CONTEXT.md                 RESEARCH.md             REPORTS/*.md            THESIS.md
-```
+`EXAMINE (loctree: repo-view → focus → slice/impact → find) ⇒ CONTEXT.md` →
+`RESEARCH (brave/WebFetch/Context7, curated) ⇒ RESEARCH.md` →
+`IMPLEMENT (fan-out agents, collect reports, review+merge) ⇒ reports/*.md` →
+`CONVERGE (marbles P0=0 → polarize align) ⇒ THESIS.md`.
 
-Canonical artifact root: `$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/{plans,reports,tmp}/`.
-Final Markdown artifacts use `%Y-%m-%d_<org>_<repo>_<full_session_id>-<kind>.md`
-(`kind=report,plan,tracker,research,...`) with matching `.transcript.log` and
-`.meta.json` sidecars. `CONTEXT.md` and `RESEARCH.md` live in `plans/` as
-`<ts>_<slug>_CONTEXT.md` and `<ts>_<slug>_RESEARCH.md`. `../../runtime/scripts/common.sh`
-`spawn_prepare_paths()` is the source of truth for day-root resolution.
-Repo-local `.vibecrafted/plans` and `.vibecrafted/reports` are convenience
-symlinks only.
+Canonical artifact root: `$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/{plans,reports,tmp}/`;
+`spawn_prepare_paths()` in `../../runtime/scripts/common.sh` is the source of
+truth for day-root and naming; repo-local `.vibecrafted/{plans,reports}` are
+convenience symlinks only.
 
 ## Phase 1 — EXAMINE
 
@@ -123,46 +114,10 @@ sensory layer.
 
 ### Output: CONTEXT.md
 
-Write to `$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/plans/<ts>_<slug>_CONTEXT.md`:
-
-```markdown
----
-run_id: <id>
-agent: <claude|codex|agy>
-skill: vc-workflow
-project: <repo>
-status: completed
-created: <ISO-8601>
----
-
-# Examination: <slug>
-
-## Repo Health
-
-- <3-5 bullets from repo-view>
-
-## Scope
-
-- Target dirs: <list>
-- Why: <rationale>
-
-## Critical Files
-
-| File | Consumers | Risk | Notes |
-
-## Symbols Found
-
-- <existing symbols relevant to task>
-
-## Risk Map
-
-- <high-impact files + mitigation>
-
-## Decision
-
-- [ ] Research needed (unknown APIs/patterns)
-- [ ] Skip to Implement (well-understood domain)
-```
+Write to `plans/<ts>_<slug>_CONTEXT.md` using the template in
+[references/output-templates.md](references/output-templates.md)
+(frontmatter + Repo Health, Scope, Critical Files, Symbols Found, Risk Map,
+Decision: research needed vs skip to implement).
 
 ### Phase Gate
 
@@ -180,40 +135,10 @@ WebFetch directly: query `"<API> usage example <year>"`, fetch standard docs.
 
 ### Output: RESEARCH.md
 
-```markdown
----
-run_id: <id>
-agent: <claude|codex|agy>
-skill: vc-workflow
-project: <repo>
-status: completed
-created: <ISO-8601>
----
-
-# Research: <slug>
-
-## Questions (from Examination)
-
-1. <question>
-
-## Findings
-
-### Q1: <question>
-
-- **Source**: <URL or Context7 lib>
-- **Answer**: <concise>
-- **Code example**: <if applicable>
-
-## Architectural Decision
-
-- Chosen: <decision>
-- Why: <findings-based>
-- Alternatives rejected: <reasons>
-
-## Implementation Notes
-
-- <concrete guidance for agents>
-```
+Write to `plans/<ts>_<slug>_RESEARCH.md` using the template in
+[references/output-templates.md](references/output-templates.md)
+(questions from examination, per-question findings with sources,
+architectural decision, implementation notes).
 
 ### Phase Gate
 
@@ -221,7 +146,17 @@ Present RESEARCH.md summary. Ask: **Proceed to Implement?**
 
 ## Phase 3 — IMPLEMENT
 
-Armed with CONTEXT.md + RESEARCH.md, delegate to parallel agents.
+Armed with CONTEXT.md + RESEARCH.md, parallelize the implementation:
+
+- **Operator seat**: spawn external workers per `vc-agents` (Spawn Pattern).
+- **Worker seat** (a dispatched `vibecrafted workflow <agent>` run): external
+  fleet is operator-only, but that is NOT a sentence to serial execution —
+  **fan out with your runtime's native subagents** (Claude: Task tool via
+  [`vc-delegate`](../vc-delegate/SKILL.md); Kimi: swarm; other runtimes:
+  their native lane). Workerhood constrains run scope, not native delegation
+  rights. Split disjoint subcuts; pick tiers by subtask economics
+  (`vc-delegate` → Native Delegation Policy). A plan that parallelizes but is
+  executed serially is a slower, worse delivery, not a safer one.
 
 ### Agent Plan Template
 
@@ -229,15 +164,11 @@ Every plan MUST include:
 
 1. **Mandatory frontmatter** — `run_id`, `agent`, `skill (vc-workflow/vc-agents)`, etc.
 2. **Pipeline context** — paste relevant sections from CONTEXT.md + RESEARCH.md.
-3. **Loctree instruction preamble** (proven 98% vs 85% completeness):
-   ```
-   Use loctree MCP tools as your primary exploration layer:
-   - repo-view(project) first for overview
-   - slice(file) before modifying any file
-   - find(name) before creating new symbols
-   - impact(file) before deleting
-   Never edit code without mapping it first.
-   ```
+3. **Loctree instruction preamble** (proven 98% vs 85% completeness) — the
+   canonical block lives in
+   [references/phase-implement.md](references/phase-implement.md): repo-view
+   first, slice before modify, find before create, impact before delete,
+   never edit unmapped code.
 4. **Living tree rule** — standard 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. preamble.
 5. **Quality gate** — repo-specific test/lint commands.
 
@@ -249,35 +180,27 @@ default `plans/`, reports → default `reports/` under
 `.vibecrafted/plans` and `.vibecrafted/reports` are convenience symlinks only.
 
 After dispatch, arm `vibecrafted await <agent> --run-id <id>` immediately,
-supervisor-side. Control-plane JSON, report files, transcripts, panes, and
-scheduled wakeups are diagnostic only, not wake signals. Hedging await with
-ad-hoc pollers/watchers is a Class 3 violation; fix `control_plane.await_run`,
-do not normalize the hedge. See `docs/runtime/AGENT_OPS.md`.
-
-3-signal liveness: await verdict, terminal run meta, worker pid dead, plus
-promised report presence. Two agreeing signals are enough to act, three to
-declare done; any disagreement means treat as live and re-arm await. Known skew:
-rc=0-on-live and meta stuck `active`/`stalled` after real completion.
+supervisor-side. Full liveness doctrine (3 signals, known skew, Class 3
+hedging violation) is canonical in `docs/runtime/AGENT_OPS.md` and
+`vc-agents` → references/runbook.md.
 
 ### Phase 4 — CONVERGE (Marbles & Polarize)
 
-After implementation agents complete, the code exists but may not be true or shippable.
-Do not stop at implementation. Proceed through the convergence boundary:
-
-1. **Gate Check** — Read all reports, run quality gates (`make check`), verify risk map.
-2. **Code Truth (`vc-marbles`)** — If gates fail, tests are red, or the runtime path is fragile:
-   - **DO NOT STOP.** Do not present a diff summary with broken tests or known gaps.
-   - Invoke `vc-marbles` to loop until gates are green (P0=0) and the codebase stops lying.
-3. **Product Truth (`vc-polarize`)** — Once the code is stable (gates pass), check for "conceptual smear" (e.g., conflicting docs, ambiguous public interfaces, or architectural "split brains" where two valid paths compete).
-   - If the concept is smeared, run `vc-polarize --task <concept>` and let the prism band-action contract decide: `0..4 abort`, `5..8 memo`, `9..12 full pass`, `13..15 doctrine pass with regression contract`.
-4. **Handoff** — Present the final diff summary and/or `THESIS.md` ready for `dou` and Release.
+Implementation existing ≠ true or shippable. (1) Gate check: read reports,
+run `make check`, verify the risk map. (2) Gates red or runtime fragile →
+**do not stop and do not present a diff with known gaps** — invoke
+`vc-marbles` until P0=0. (3) Code stable but concept smeared (conflicting
+docs, competing paths) → `vc-polarize --task <concept>`; prism bands decide
+(`0..4 abort · 5..8 memo · 9..12 pass · 13..15 doctrine`). (4) Handoff:
+final diff summary / `THESIS.md` ready for `dou` and Release.
 
 ### Commit cadence
 
-One commit per round (marbles: one round = one commit), committed locally on the current
-branch, well-formed per the commit-msg hook — delivered work is never left uncommitted. A
-vc-workflow run produces **up to 3 commits** (the write phases — Implement, Marbles, Polarize
-— each commit their round). Non-destructive remote push of this feature branch is a duty after those commits. Force-push, trunk push, merge, and deploy stay operator buttons.
+One commit per round (marbles: one round = one commit), well-formed per the
+commit-msg hook — delivered work is never left uncommitted; a run yields up
+to 3 commits (Implement, Marbles, Polarize). Non-destructive push of the
+feature branch is a duty afterwards. Force-push, trunk push, merge, and
+deploy stay operator buttons.
 
 ## Quick Reference
 

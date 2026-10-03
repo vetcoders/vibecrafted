@@ -48,3 +48,4 @@ ureq = { version = "2", features = ["json"] }
 insta = { version = "1", features = ["filters"] }
 tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
+vt100 = "0.16.2"

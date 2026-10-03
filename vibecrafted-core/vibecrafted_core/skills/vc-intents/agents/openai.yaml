@@ -1,4 +1,4 @@
 interface:
   display_name: "VC Intents"
-  short_description: "Operator-side intention-to-runtime truth audit for checking which planned implementations actually landed in code."
-  default_prompt: "Pull recent project intents from aicx, reduce them to a bounded implementation checklist, then verify each item against the live repo as done, partial, missing, superseded, or non-code."
+  short_description: "Hunt the Founder's intents for a repo inside a window, settle them against the code with two fleets, and hand back a stable plan of cuts."
+  default_prompt: "You are one lane of a vc-intents hunt. Read the brief named in your cut in full before anything else (extraction-brief.md for a transcript shard, confrontation-brief.md for a lane of intents). READ only: never edit the repo, never commit; the only file you write is the JSON your cut names. Extraction: every `quote` is a verbatim substring of its source file — Whisper misspellings stay, normalization goes in `topic`; skip noise rather than invent. Confrontation: loctree-mcp is the first move; `landed` needs `path:line`, `absent` needs the question that returned zero, `superseded` names its successor, every input id is preserved. Then a short report in Polish per the brief's final section."

@@ -9,10 +9,9 @@
 #      config.kdl without parse errors.
 #   3. auto-theme.sh passes `bash -n` and shellcheck (if shellcheck is
 #      installed).
-#   4. auto-theme.sh maps each canonical host name to the expected theme
-#      (dragon → vetcoders-dragon, sztudio → vetcoders-sztudio, etc.)
-#      including the mgbook16 → vetcoders-div0 alias from kronika 2026-05-05
-#      and the neutral fallback for unknown hosts.
+#   4. auto-theme.sh resolves host -> theme from a mesh.conf (and from the
+#      VIBECRAFTED_MESH_MAP env override), honours aliases, case and
+#      .local suffix, and falls back to the neutral theme for unknown hosts.
 #
 # Designed to run inside `make test-vc-frame`. Tolerant of missing vc-frame
 # (e.g. CI image without the binary) — it warns and skips KDL syntax checks
@@ -129,12 +128,12 @@ if ! vc_frame_bin="$(vc_frame_bin)"; then
     skip "vc-frame missing — mesh theme parse skipped"
 else
     tmpcfg=$(mktemp -d)
-    trap 'rm -rf "$tmpcfg"' EXIT
+    trap 'rm -rf "$tmpcfg" "${mesh_tmp:-}"' EXIT
     cp "$CFG_DIR/config.kdl" "$tmpcfg/config.kdl"
     cp -R "$CFG_DIR/themes" "$tmpcfg/themes"
     cp -R "$LAYOUT_DIR" "$tmpcfg/layouts"
 
-    for theme_name in vetcoders-dragon vetcoders-sztudio vetcoders-silver vetcoders-div0; do
+    for theme_name in mesh-red mesh-purple mesh-cyan mesh-green; do
         sed -i.bak "s/^theme \".*\"$/theme \"$theme_name\"/" "$tmpcfg/config.kdl"
         out=$(VC_FRAME_CONFIG_DIR="$tmpcfg" "$vc_frame_bin" setup --check 2>&1 || true)
         if echo "$out" | grep -qiE "Failed to parse|error parsing|invalid theme"; then
@@ -148,15 +147,31 @@ fi
 # ───── 5. host-aware theme resolver ─────────────────────────────────────────
 printf '\n[5] auto-theme host mapping\n'
 
+# The mapping is operator configuration, never a built-in host list. Write a
+# throwaway mesh.conf with generic hosts and point the resolver at it.
+mesh_tmp=$(mktemp -d)
+trap 'rm -rf "$mesh_tmp" "${tmpcfg:-}"' EXIT
+MESH_CONF="$mesh_tmp/mesh.conf"
+cat >"$MESH_CONF" <<'CONF'
+# host      theme
+host-a      mesh-red
+host-b      mesh-purple   # trailing comment
+
+host-c      mesh-cyan
+host-d      mesh-green
+host-d-alias mesh-green
+CONF
+
 declare -a host_cases=(
-    "dragon:vetcoders-dragon"
-    "DRAGON:vetcoders-dragon"
-    "dragon.local:vetcoders-dragon"
-    "sztudio:vetcoders-sztudio"
-    "silver:vetcoders-silver"
-    "div0:vetcoders-div0"
-    "mgbook16:vetcoders-div0"
-    "MGBOOK16:vetcoders-div0"
+    "host-a:mesh-red"
+    "HOST-A:mesh-red"
+    "host-a.local:mesh-red"
+    "host-a-2:mesh-red"
+    "host-b:mesh-purple"
+    "host-c:mesh-cyan"
+    "host-d:mesh-green"
+    "host-d-alias:mesh-green"
+    "HOST-D-ALIAS:mesh-green"
     "unknown-laptop:vibecrafted"
     "ci-runner-7:vibecrafted"
 )
@@ -164,7 +179,7 @@ declare -a host_cases=(
 for case in "${host_cases[@]}"; do
     host="${case%%:*}"
     expected="${case#*:}"
-    actual=$(VIBECRAFTED_HOST_NAME="$host" "$CFG_DIR/auto-theme.sh" 2>/dev/null)
+    actual=$(VIBECRAFTED_MESH_CONF="$MESH_CONF" VIBECRAFTED_HOST_NAME="$host" "$CFG_DIR/auto-theme.sh" 2>/dev/null)
     if [[ "$actual" == "$expected" ]]; then
         ok "host $host -> $actual"
     else
@@ -172,8 +187,24 @@ for case in "${host_cases[@]}"; do
     fi
 done
 
+# No config at all -> neutral fallback.
+none=$(VIBECRAFTED_MESH_CONF="$mesh_tmp/does-not-exist.conf" VIBECRAFTED_HOST_NAME="host-a" "$CFG_DIR/auto-theme.sh" 2>/dev/null)
+if [[ "$none" == "vibecrafted" ]]; then
+    ok "missing mesh.conf -> vibecrafted"
+else
+    fail "missing mesh.conf fallback broken" "got: $none"
+fi
+
+# VIBECRAFTED_MESH_MAP env takes precedence over mesh.conf.
+mapped=$(VIBECRAFTED_MESH_MAP="host-a=mesh-green,host-x=mesh-cyan" VIBECRAFTED_MESH_CONF="$MESH_CONF" VIBECRAFTED_HOST_NAME="host-a" "$CFG_DIR/auto-theme.sh" 2>/dev/null)
+if [[ "$mapped" == "mesh-green" ]]; then
+    ok "VIBECRAFTED_MESH_MAP wins over mesh.conf"
+else
+    fail "VIBECRAFTED_MESH_MAP precedence broken" "got: $mapped"
+fi
+
 # VIBECRAFTED_THEME pin should bypass detection.
-forced=$(VIBECRAFTED_THEME="custom-theme" VIBECRAFTED_HOST_NAME="dragon" "$CFG_DIR/auto-theme.sh" 2>/dev/null)
+forced=$(VIBECRAFTED_THEME="custom-theme" VIBECRAFTED_MESH_CONF="$MESH_CONF" VIBECRAFTED_HOST_NAME="host-a" "$CFG_DIR/auto-theme.sh" 2>/dev/null)
 if [[ "$forced" == "custom-theme" ]]; then
     ok "VIBECRAFTED_THEME override honored"
 else

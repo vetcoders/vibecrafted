@@ -18,7 +18,7 @@ Today the Agent-Operator orchestrates a fleet from memory:
 - "Did Wave B-2 land green?" — re-read your own session log
 - "Has Gemini been pulling its weight this week?" — guess
 - "Is `vc-partner` actually invoked?" — run an empirical recon every time
-- "Is the dragon host disk under 80%?" — `ssh dragon df -h` and hope
+- "Is the host-a host disk under 80%?" — `ssh host-a df -h` and hope
 - "Which prompt is in flight right now?" — remember the run_id
 
 Every one of those data points lives on disk. The operator-agent and the

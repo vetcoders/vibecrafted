@@ -27,7 +27,7 @@ from .run_triage import (
 )
 
 BUCKET_SESSIONS = ("Finalized runs", "Failed runs", "Needs attention")
-PROTECTED_TAB_NAMES = {"Start here", "Shell"}
+PROTECTED_TAB_NAMES = {"Start here", "Agents", "Shell", "Voc"}
 _HEX = frozenset("0123456789abcdefABCDEF")
 
 
@@ -295,7 +295,7 @@ def plan_tab_cleanup(
 
     for proof in proofs.values():
         origin = proof.origin_identity
-        if origin is None:
+        if origin is None or origin.name in PROTECTED_TAB_NAMES:
             continue
         matches = [
             tab
@@ -663,5 +663,5 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 1 if failed else 0
 
 
-if __name__ == "__main__":  # pragma: no cover
+if __name__ == "__main__":
     raise SystemExit(main())

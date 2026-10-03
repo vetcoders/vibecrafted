@@ -1,0 +1,592 @@
+"""Durable, run-addressed provider-message control plane.
+
+This is an outbox owned by the existing control-plane root, not another JSONL
+bus. A provider queue receipt is only evidence of provider acceptance: it is
+never promoted to an agent acknowledgement or execution.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import re
+import subprocess
+import uuid
+from pathlib import Path
+from typing import Any
+
+from .control_plane import (
+    RunNotResolved,
+    _read_json,
+    _write_json_durable,
+    control_plane_home,
+    resolve_run,
+)
+from .run_mutation import run_mutation_locks
+from .runtime_paths import selected_runtime_environment
+from .spawn import _resolve_agent_command
+
+MESSAGE_SCHEMA = "vibecrafted.provider-message.v1"
+MAX_MESSAGE_BYTES = 64 * 1024
+_SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_PLACEHOLDER_IDS = frozenset({"pending", "none", "null", "unknown"})
+_UNRESOLVED_OR_FAILED = frozenset(
+    {"recorded", "retryable_failure", "permanent_failure"}
+)
+_INBOX_PROVIDERS = frozenset(
+    {"claude", "agy", "grok", "junie", "kimi", "copilot", "cursor", "gemini"}
+)
+# Observed facts only. A value never means the recipient read or executed.
+DELIVERY_STATES: dict[str, str] = {
+    "recorded": (
+        "intent persisted before a native queue attempt; a crash leaves it unresolved"
+    ),
+    "inbox_pending": "stored for the selected run; not attached to model context",
+    "context_injected": "attached to a tool response; not proof the recipient read it",
+    "provider_accepted": (
+        "provider queue command returned success; not an agent acknowledgement"
+    ),
+    "agent_acknowledged": (
+        "recipient claimed the message; not proof the requested action ran"
+    ),
+    "retryable_failure": "queue attempt failed in a way retry may resubmit",
+    "permanent_failure": "queue attempt cannot be retried as the same operation",
+}
+_ACKABLE_STATES = frozenset(DELIVERY_STATES)
+_INJECTION_NONCE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+/=-]{0,255}$")
+
+
+class MessageControlError(ValueError):
+    """A request cannot safely be bound to one tracked provider session."""
+
+
+def _now() -> str:
+    from .clock import utc_now
+
+    return utc_now().isoformat()
+
+
+def _digest(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _outbox_root() -> Path:
+    root = control_plane_home() / "messages"
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # mkdir's mode is affected by umask and an existing directory can predate
+    # this feature. Message payloads are private control-plane data.
+    # Private directory: owner needs traversal; group and others get no access.
+
+    # This private message directory needs owner execute permission for traversal; 0700 denies
+    # group/other access, while the rule suggestion 0644 would break traversal and expose data.
+    # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
+    os.chmod(root, 0o700)
+    return root
+
+
+def _message_path(message_id: str) -> Path:
+    if not _SAFE_ID.fullmatch(message_id):
+        raise MessageControlError("invalid_message_id")
+    return _outbox_root() / f"{message_id}.json"
+
+
+def _idempotency_path(key: str) -> Path:
+    directory = _outbox_root() / "idempotency"
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # Private directory: owner needs traversal; group and others get no access.
+
+    # This private idempotency directory needs owner execute permission for traversal; 0700 denies
+    # group/other access and reasserts the mode when mkdir finds an existing directory.
+    # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
+    os.chmod(directory, 0o700)
+    return directory / f"{_digest(key)}.json"
+
+
+def _run_identity(run_id: str) -> tuple[str, str, str]:
+    """Read the provider, native session and runtime session from one run."""
+
+    try:
+        resolved = resolve_run(run_id)
+    except (RunNotResolved, OSError, ValueError) as exc:
+        raise MessageControlError(f"run_not_resolved:{run_id}") from exc
+    if resolved.meta is None:
+        raise MessageControlError("run_meta_missing")
+    meta = _read_json(resolved.meta)
+    agent = str(meta.get("agent") or "").strip().lower()
+    session = str(meta.get("agent_session_id") or "").strip()
+    runtime_session = str(
+        meta.get("runtime_session_id") or meta.get("vibecrafted_session_id") or ""
+    ).strip()
+    if not agent:
+        raise MessageControlError("provider_missing")
+    if session.lower() in _PLACEHOLDER_IDS:
+        session = ""
+    if runtime_session and session == runtime_session:
+        raise MessageControlError("provider_session_is_runtime_session")
+    return agent, session, runtime_session
+
+
+def resolve_message_run(*, run_id: str = "", session: str = "") -> str:
+    """Bind a public selector to exactly one recorded run.
+
+    A provider session can span several resumed runs. Never guess which
+    executor owns it; callers can use the exact run id in that case.
+
+    Contract: return one run id or raise ``MessageControlError``. A missing
+    native provider session does not block resolution by run id or by a
+    recorded runtime session. Placeholder session tokens are refused.
+    """
+    target = str(run_id or "").strip()
+    token = str(session or "").strip()
+    if not target and not token:
+        raise MessageControlError("run_id_or_session_required")
+    if target and not _SAFE_ID.fullmatch(target):
+        raise MessageControlError("invalid_run_id")
+    if token and not _SAFE_ID.fullmatch(token):
+        raise MessageControlError("invalid_session_id")
+    if token.lower() in _PLACEHOLDER_IDS:
+        raise MessageControlError("invalid_session_id")
+    if target:
+        _, native, runtime = _run_identity(target)
+        resolved = resolve_run(target)
+        meta = _read_json(resolved.meta) if resolved.meta else {}
+        identities = {
+            native,
+            runtime,
+            str(meta.get("session_id") or "").strip(),
+            str(meta.get("vibecrafted_session_id") or "").strip(),
+        }
+        if token and token not in identities:
+            raise MessageControlError("session_run_mismatch")
+        return target
+    root = control_plane_home() / "runtime_runs"
+    matches: set[str] = set()
+    if root.is_dir():
+        for path in root.glob("*/meta.json"):
+            if not _SAFE_ID.fullmatch(path.parent.name):
+                continue
+            meta = _read_json(path)
+            identities = {
+                str(meta.get(key) or "").strip()
+                for key in (
+                    "agent_session_id",
+                    "runtime_session_id",
+                    "vibecrafted_session_id",
+                    "session_id",
+                )
+            }
+            if token in identities:
+                matches.add(path.parent.name)
+    if not matches:
+        raise MessageControlError("session_not_resolved")
+    if len(matches) != 1:
+        raise MessageControlError("session_ambiguous_use_run_id")
+    return matches.pop()
+
+
+def pending_messages(*, run_id: str = "", session: str = "") -> list[dict[str, Any]]:
+    """Read injection-eligible inbox receipts without consuming them.
+
+    Automatic lanes use this subset. A provider queue may still deliver an
+    accepted message later, so do not automatically inject it a second time.
+    Recipient checkpoint reads use :func:`receive_messages` instead.
+    """
+    target = resolve_message_run(run_id=run_id, session=session)
+    result: list[dict[str, Any]] = []
+    for path in _outbox_root().glob("msg-*.json"):
+        record = _read_json(path)
+        if record.get("run_id") != target:
+            continue
+        if record.get("delivery_state") != "inbox_pending":
+            continue
+        result.append(record)
+    return sorted(
+        result, key=lambda row: (str(row.get("created_at")), str(row.get("message_id")))
+    )
+
+
+def receive_messages(*, run_id: str = "", session: str = "") -> list[dict[str, Any]]:
+    """Return unacknowledged, unattached receipts for a recipient checkpoint.
+
+    Contract:
+    - Resolve exactly one run via :func:`resolve_message_run`. Inbox providers,
+      including Gemini with no native session, are addressable by run id or by
+      a recorded runtime session.
+    - Include ``inbox_pending``, queue-accepted, failed and unresolved messages until
+      recipient ACK. Acceptance or attachment never proves context receipt.
+      Delivery state and provider receipts remain unchanged by this read.
+    - Attached receipts stay inspectable/ackable by id. Do not repeat their
+      injection; preserve the established explicit nonce/replay boundary.
+    - Do not acknowledge, delete, or change ``delivery_state``.
+    - An empty list is not proof the run is idle. This call does not wake a
+      stopped worker.
+    """
+
+    target = resolve_message_run(run_id=run_id, session=session)
+    rows = []
+    for path in _outbox_root().glob("msg-*.json"):
+        record = _read_json(path)
+        if (
+            record.get("run_id") == target
+            and record.get("delivery_state") in _ACKABLE_STATES
+            and record.get("delivery_state")
+            not in {"agent_acknowledged", "context_injected"}
+        ):
+            rows.append(record)
+    return sorted(
+        rows, key=lambda row: (str(row.get("created_at")), str(row.get("message_id")))
+    )
+
+
+def acknowledge_message(
+    message_id: str, *, run_id: str = "", session: str = ""
+) -> dict[str, Any]:
+    """Record explicit recipient acknowledgement, without claiming execution.
+
+    Contract: any known unacknowledged receipt advances to
+    ``agent_acknowledged`` with ``agent_ack_state`` ``claimed_by_recipient``.
+    A repeated ACK returns the stored receipt. ACK is the recipient's claim,
+    not proof the text was read before the claim and not proof the requested
+    work ran.
+    """
+    target = resolve_message_run(run_id=run_id, session=session)
+    with run_mutation_locks(control_plane_home(), run_id=target):
+        record = inspect_message(message_id)
+        if record is None:
+            raise MessageControlError("message_not_found")
+        if record.get("run_id") != target:
+            raise MessageControlError("message_target_mismatch")
+        if record.get("delivery_state") not in _ACKABLE_STATES:
+            raise MessageControlError("message_not_in_inbox")
+        if record.get("delivery_state") == "agent_acknowledged":
+            return record
+        updated = {
+            **record,
+            "delivery_state": "agent_acknowledged",
+            "agent_ack_state": "claimed_by_recipient",
+            "updated_at": _now(),
+            "acknowledged_at": _now(),
+        }
+        _write_json_durable(_message_path(message_id), updated)
+        return updated
+
+
+def mark_context_injected(message_id: str, nonce: str) -> dict[str, Any]:
+    """Record that one inbox receipt was attached to a tool response.
+
+    Contract: ``context_injected`` means the text was glued onto a tool
+    result. It does not mean the recipient read it, acknowledged it, or
+    carried out the ask. Only ``inbox_pending`` advances. The same nonce
+    again is a no-op. A different nonce on an already injected receipt is a
+    conflict, not a rewrite. The bus still does not wake a worker.
+    """
+
+    token = str(nonce or "")
+    if not token.strip():
+        raise MessageControlError("context_injection_nonce_required")
+    if token != token.strip() or not _INJECTION_NONCE.fullmatch(token):
+        raise MessageControlError("invalid_context_injection_nonce")
+    current = inspect_message(message_id)
+    if current is None:
+        raise MessageControlError("message_not_found")
+    target = str(current.get("run_id") or "").strip()
+    if not target:
+        raise MessageControlError("message_run_missing")
+    with run_mutation_locks(control_plane_home(), run_id=target):
+        record = inspect_message(message_id)
+        if record is None:
+            raise MessageControlError("message_not_found")
+        state = str(record.get("delivery_state") or "")
+        if state == "context_injected":
+            stored = str(record.get("context_injected_nonce") or "")
+            if stored != token:
+                raise MessageControlError("context_injection_nonce_mismatch")
+            return record
+        if state != "inbox_pending":
+            raise MessageControlError("message_not_awaiting_injection")
+        stamped = _now()
+        updated = {
+            **record,
+            "delivery_state": "context_injected",
+            "context_injected_nonce": token,
+            "context_injected_at": stamped,
+            "updated_at": stamped,
+            "agent_ack_state": record.get("agent_ack_state") or "unobserved",
+        }
+        _write_json_durable(_message_path(str(record["message_id"])), updated)
+        return updated
+
+
+def _provider_argv(provider: str, session: str, text: str) -> list[str]:
+    if provider == "codex":
+        # Queue acceptance is not active-turn steering. Bind the value to its
+        # option: clap rejects a separate value starting with '-' (e.g. YAML).
+        # subprocess receives literal argv; no shell or payload transformation.
+        return ["codex", "queue", "--thread", session, f"--message={text}"]
+    raise MessageControlError(f"provider_steering_unsupported:{provider or 'unknown'}")
+
+
+def _queue_failure_diagnostic(exit_code: int, stderr: str) -> dict[str, str]:
+    """Classify bounded stderr; return only fixed, payload-free diagnostics."""
+
+    bounded = stderr[:8192].casefold()
+    if (
+        "does not support thread/queue/add" in bounded
+        or "unrecognized subcommand 'queue'" in bounded
+    ):
+        category, action = (
+            "queue_unsupported",
+            "Check the provider CLI/server version; use recipient --receive.",
+        )
+    elif "thread not found" in bounded or "no active session found" in bounded:
+        category, action = (
+            "session_unavailable",
+            "Check the exact native thread identity; use recipient --receive.",
+        )
+    elif "is archived" in bounded or "ephemeral thread" in bounded:
+        category, action = (
+            "session_not_queueable",
+            "Use recipient --receive; the native session cannot accept this queue operation.",
+        )
+    elif "connection refused" in bounded or "failed to connect" in bounded:
+        category, action = (
+            "queue_connection_failed",
+            "Check the provider server connection; use recipient --receive before retrying.",
+        )
+    elif exit_code == 2:
+        category, action = (
+            "cli_arguments_rejected",
+            "Check exact native queue help and adapter argv; use recipient --receive.",
+        )
+    else:
+        category, action = (
+            "queue_nonzero",
+            "Use recipient --receive; inspect exit code and digests before an explicit retry.",
+        )
+    return {"category": category, "action": action}
+
+
+def _record_failure(
+    record: dict[str, Any], *, state: str, reason: str
+) -> dict[str, Any]:
+    updated = dict(record)
+    updated.update(
+        {
+            "delivery_state": state,
+            "updated_at": _now(),
+            "failure": {"reason": reason, "at": _now()},
+        }
+    )
+    if reason == "provider_queue_timeout":
+        category = "queue_timeout"
+        action = "Outcome is ambiguous; use recipient --receive before considering an explicit retry."
+    elif reason.startswith("provider_command_unavailable:"):
+        category = "provider_command_unavailable"
+        action = "Check the selected provider executable; use recipient --receive."
+    else:
+        category = "queue_unavailable"
+        action = "Check the provider queue transport; use recipient --receive before retrying."
+    updated["failure"]["diagnostic"] = {"category": category, "action": action}
+    _write_json_durable(_message_path(str(updated["message_id"])), updated)
+    return updated
+
+
+def _queue_attempt_failure(
+    record: dict[str, Any],
+    attempt: dict[str, Any],
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    """Persist a typed queue failure without exception or argv payload."""
+
+    updated = dict(record)
+    updated["attempts"] = [
+        *list(record.get("attempts") or []),
+        {**attempt, "finished_at": _now(), "outcome": reason},
+    ]
+    return _record_failure(updated, state="retryable_failure", reason=reason)
+
+
+def inspect_message(message_id: str) -> dict[str, Any] | None:
+    """Return one durable message receipt without inferring semantic ACK.
+
+    Contract: read the receipt unchanged, or return ``None`` when the id is
+    well-formed and no receipt exists. Do not change delivery state and do
+    not treat any state as proof the recipient read or executed the ask.
+    """
+
+    candidate = str(message_id or "").strip()
+    if not candidate:
+        raise MessageControlError("message_id_required")
+    payload = _read_json(_message_path(candidate))
+    return payload if payload else None
+
+
+def send_message(
+    *,
+    run_id: str = "",
+    session: str = "",
+    text: str,
+    idempotency_key: str = "",
+    retry: bool = False,
+    env: dict[str, str] | None = None,
+    runner: Any = subprocess.run,
+) -> dict[str, Any]:
+    """Persist intent, then submit one native provider queue operation.
+
+    A crash after ``recorded`` deliberately leaves the state unresolved.
+    Reuse of a key is keyed by body digest; a different target run is a
+    conflict, not a replay. ``retry`` resubmits only unresolved or failed
+    receipts. ``provider_accepted`` is never submitted again. Timeouts are
+    ambiguous: the typed reason does not claim exactly-once delivery.
+
+    Inbox providers (Claude, Agy, Grok, Junie, Kimi, Copilot, Cursor, Gemini) stop at
+    ``inbox_pending``. That is storage for the selected run, not attachment
+    to model context. Codex with a native thread is the only provider queue.
+    A missing native session still uses the inbox and does not spawn or
+    resume a provider process.
+
+    Accepted or failed queue messages remain explicitly receivable until
+    recipient ACK. Automatic lanes must use pending_messages, not this
+    checkpoint route, to avoid a second delivery of a native queued message.
+    """
+
+    target = resolve_message_run(run_id=run_id, session=session)
+    body = str(text or "")
+    if not body.strip():
+        raise MessageControlError("message_empty")
+    if len(body.encode("utf-8")) > MAX_MESSAGE_BYTES:
+        raise MessageControlError("message_too_large")
+    if "\0" in body:
+        raise MessageControlError("message_contains_nul")
+    key = str(idempotency_key or "").strip() or f"message:{uuid.uuid4()}"
+
+    with run_mutation_locks(control_plane_home(), run_id=target, idempotency_key=key):
+        idempotency = _read_json(_idempotency_path(key))
+        prior_id = str(idempotency.get("message_id") or "")
+        if prior_id:
+            prior = inspect_message(prior_id)
+            if prior is None:
+                raise MessageControlError("idempotency_receipt_missing")
+            if str(prior.get("text_digest") or "") != _digest(body):
+                raise MessageControlError("idempotency_key_payload_mismatch")
+            if str(prior.get("run_id") or "") != target:
+                raise MessageControlError("idempotency_key_run_mismatch")
+            state = str(prior.get("delivery_state") or "")
+            if (
+                not retry
+                or state == "provider_accepted"
+                or state not in _UNRESOLVED_OR_FAILED
+            ):
+                return {**prior, "idempotent_replay": True}
+            record = prior
+        else:
+            provider, native_session, runtime_session = _run_identity(target)
+            if provider not in _INBOX_PROVIDERS and provider != "codex":
+                raise MessageControlError(f"provider_steering_unsupported:{provider}")
+            inbox = provider in _INBOX_PROVIDERS or not native_session
+            message_id = f"msg-{uuid.uuid4()}"
+            record = {
+                "schema": MESSAGE_SCHEMA,
+                "message_id": message_id,
+                "idempotency_key": key,
+                "run_id": target,
+                "provider": provider,
+                "provider_session_id": native_session,
+                "runtime_session_id": runtime_session,
+                "text": body,
+                "text_digest": _digest(body),
+                "text_preview": f"sha256:{_digest(body)[:12]}; bytes={len(body.encode('utf-8'))}",
+                "delivery_state": "inbox_pending" if inbox else "recorded",
+                "agent_ack_state": "unobserved",
+                "created_at": _now(),
+                "updated_at": _now(),
+                "attempts": [],
+                "receiver_command": f"vibecrafted message --run-id {target} --receive",
+                "delivery_notice": (
+                    "Explicit recipient checkpoint required until ACK. Native queue "
+                    "acceptance does not establish context receipt or automatic mid-turn delivery."
+                ),
+            }
+            _write_json_durable(_message_path(message_id), record)
+            _write_json_durable(
+                _idempotency_path(key),
+                {
+                    "schema": MESSAGE_SCHEMA,
+                    "message_id": message_id,
+                    "created_at": _now(),
+                },
+            )
+
+        provider = str(record.get("provider") or "")
+        session = str(record.get("provider_session_id") or "")
+        if record.get("delivery_state") in {
+            "inbox_pending",
+            "context_injected",
+            "agent_acknowledged",
+        }:
+            return record
+        try:
+            argv = _provider_argv(provider, session, body)
+        except MessageControlError as exc:
+            return _record_failure(record, state="permanent_failure", reason=str(exc))
+
+        command_env = selected_runtime_environment(dict(env or os.environ))
+        try:
+            command = _resolve_agent_command(provider, argv, command_env)
+        except (OSError, ValueError) as exc:
+            return _record_failure(
+                record,
+                state="retryable_failure",
+                reason=f"provider_command_unavailable:{type(exc).__name__}",
+            )
+        attempt = {"started_at": _now(), "argv": command[:3]}
+        try:
+            completed = runner(
+                command,
+                env=command_env,
+                text=True,
+                capture_output=True,
+                timeout=30,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            # TimeoutExpired stringifies the full argv, including --message.
+            return _queue_attempt_failure(
+                record, attempt, reason="provider_queue_timeout"
+            )
+        except OSError:
+            return _queue_attempt_failure(
+                record, attempt, reason="provider_queue_unavailable"
+            )
+
+        stdout = str(completed.stdout or "")
+        stderr = str(completed.stderr or "")
+        receipt = {
+            **attempt,
+            "finished_at": _now(),
+            "exit_code": int(completed.returncode),
+            "stdout_digest": _digest(stdout),
+            "stderr_digest": _digest(stderr),
+        }
+        updated = dict(record)
+        updated["attempts"] = [*list(record.get("attempts") or []), receipt]
+        updated["updated_at"] = _now()
+        if completed.returncode == 0:
+            updated.pop("failure", None)
+            updated["delivery_state"] = "provider_accepted"
+            updated["provider_receipt"] = receipt
+            # Explicitly retain the absence of semantic evidence.
+            updated["agent_ack_state"] = "unobserved"
+        else:
+            updated["delivery_state"] = "retryable_failure"
+            updated["failure"] = {
+                "reason": "provider_queue_nonzero",
+                "at": _now(),
+                "provider_receipt": receipt,
+                "diagnostic": _queue_failure_diagnostic(
+                    int(completed.returncode), stderr
+                ),
+            }
+        _write_json_durable(_message_path(str(updated["message_id"])), updated)
+        return updated

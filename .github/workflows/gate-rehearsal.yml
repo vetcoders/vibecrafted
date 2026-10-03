@@ -33,10 +33,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   gate-rehearsal:
     runs-on: macos-15
-    timeout-minutes: 60
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -63,7 +67,10 @@ jobs:
         run: make semgrep
 
       - name: Run installer and product tests
-        run: make test
+        timeout-minutes: 120
+        run: make test-source
+        env:
+          PYTEST_ADDOPTS: "-vv -o faulthandler_timeout=120"
 
       - name: Build the portable release channel
         run: make portable

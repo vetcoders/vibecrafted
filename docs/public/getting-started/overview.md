@@ -44,7 +44,7 @@ Every workflow run is a first-class control-plane run. The truth of a run lives 
 Vibecrafted orchestrates the agent CLIs you already have installed and authenticated:
 
 ```text
-claude · codex · agy · junie · grok
+claude · codex · agy · junie · grok · cursor
 ```
 
 You pick the agent per invocation (`vibecrafted review codex …`, `vibecrafted scaffold claude …`). Multi-agent research sends the same question to several agents independently and lets you synthesize the strongest answer.

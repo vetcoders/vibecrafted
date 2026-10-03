@@ -30,6 +30,7 @@ pub enum FfiClientKind {
     Codex,
     Gemini,
     Junie,
+    Cursor,
     Generic { name: String },
 }
 
@@ -40,6 +41,7 @@ impl From<ClientKind> for FfiClientKind {
             ClientKind::Codex => FfiClientKind::Codex,
             ClientKind::Gemini => FfiClientKind::Gemini,
             ClientKind::Junie => FfiClientKind::Junie,
+            ClientKind::Cursor => FfiClientKind::Cursor,
             ClientKind::Generic { name } => FfiClientKind::Generic { name },
         }
     }
@@ -52,6 +54,7 @@ impl From<FfiClientKind> for ClientKind {
             FfiClientKind::Codex => ClientKind::Codex,
             FfiClientKind::Gemini => ClientKind::Gemini,
             FfiClientKind::Junie => ClientKind::Junie,
+            FfiClientKind::Cursor => ClientKind::Cursor,
             FfiClientKind::Generic { name } => ClientKind::Generic { name },
         }
     }

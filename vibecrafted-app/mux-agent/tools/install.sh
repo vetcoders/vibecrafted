@@ -68,6 +68,8 @@ ensure_path_line() {
   # The literal `$PATH` inside the format string is intentional: this printf
   # emits a line into the user's rc file as plain text, where `$PATH` will be
   # expanded at shell-reload time, not at install time.
+  # This value is literal source or output for a later shell, awk, or Xcode evaluator; expanding its
+  # dollar expressions in the producing shell would change the emitted contract.
   # shellcheck disable=SC2016
   printf '\n%s\nexport PATH="%s:%s:$PATH"\n' "$tag" "$cargo" "$install" >>"$file"
   warn "Appended PATH to $file; reload shell or run: source $file"

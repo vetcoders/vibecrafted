@@ -1,0 +1,142 @@
+# A stacked dispatch: each cut's worktree starts from the PREVIOUS cut's
+# delivered commit, not from the plan baseline. `depends_on` orders time;
+# `base = "cut:<id>"` orders the tree. The integrator no longer rebases the
+# stack by hand after every cut settles.
+#
+# Every command below is a real gate of THIS repository, narrowed to the one
+# surface its cut owns. Nothing here is a placeholder target: bind the plan to
+# a checkout of vibecrafted and the verifiers execute.
+#
+# --- binding this example to a checkout -----------------------------------
+#
+# `meta.repo` is the ONLY binding between a plan and a working copy, and the
+# parser takes it verbatim: no `$VAR` expansion, no `~`, no cwd inference. To
+# run this example, replace the placeholder with an absolute path — either by
+# editing the file, or through the supported parser entry point, which accepts
+# text rather than a path:
+#
+#     from pathlib import Path
+#     from vibecrafted_core.dispatch.schema import parse_dispatch
+#
+#     source = Path("examples/dispatch/stacked-cuts.dispatch.toml")
+#     bound = source.read_text(encoding="utf-8").replace(
+#         "/absolute/path/to/repository", str(checkout.resolve())
+#     )
+#     dispatch = parse_dispatch(bound, base_dir=source.parent)
+#
+# --- the `base` contract ----------------------------------------------------
+#
+# Every cut may declare ONE optional base for its worktree:
+#
+#   base = "<sha>"        worktree from that commit (must be reachable in meta.repo)
+#   base = "<branch>"     worktree from that local branch, pinned at resolution
+#   base = "cut:<cut-id>" worktree from the named cut's delivered_commit_sha,
+#                         resolved at launch from its settled receipt
+#
+# A `cut:<id>` base requires `<id>` in the cut's `depends_on` (doctor refuses
+# otherwise): the dependency orders time, the base orders ancestry. The
+# supervisor resolves `cut:` only after the dependency settles, so a dry-run
+# shows it as "<pending: cut-id>".
+#
+# An explicit base is FROZEN: the local-069/071 rule that advances a plan
+# baseline to a descendant living-tree HEAD never touches it, and a resume
+# keeps the base recorded on the cut's receipt instead of re-resolving a moved
+# branch. No `base` = today's behavior (the plan baseline), so existing plans
+# parse and run unchanged.
+#
+# Only `cut:` bases are exercised below: sha/branch bases are verified against
+# `meta.repo` by the doctor, which a placeholder path cannot satisfy. This file
+# passes `vibecrafted dispatch examples/dispatch/stacked-cuts.dispatch.toml
+# --doctor` as-is.
+schema = "vibecrafted.dispatch.v1"
+
+[meta]
+name = "stacked-cuts-example"
+repo = "/absolute/path/to/repository"
+description = "Three cuts stacked by ancestry: each worktree starts from its predecessor's delivered commit."
+
+[policy]
+# A stack is serial by definition: cut N+1 cannot start (in time OR in tree)
+# before cut N settles, so one scheduler slot is the honest shape.
+concurrency = 1
+require_commit = true
+# No automatic repair rounds: a failed cut comes back to the root with its
+# evidence instead of being silently re-driven by the scheduler.
+repair_rounds = 0
+await = { poll_s = 5, timeout_min = 90 }
+
+[common]
+text = """
+Work only inside the worktree the dispatcher gave you. Never switch checkout,
+branch or Cargo target — the dispatcher owns all three. Stay inside the file
+scope your cut names; your base already contains every settled predecessor's
+commits, so you never rebase or merge another cut's branch yourself. Commit
+your cut locally and leave a complete report at VIBECRAFTED_REPORT_PATH.
+Do not push: integration of the stack stays a human button.
+"""
+
+[[phases]]
+title = "Stack"
+detail = "serial cuts, each based on its predecessor's delivered commit"
+
+# --- cut 1: schema layer ----------------------------------------------------
+[[cuts]]
+id = "schema-layer"
+phase = "Stack"
+agent = "codex"
+model = "gpt-5.6-terra"
+workflow = "implement"
+prompt = """
+Cut {id} in {repo}. Own vibecrafted-core/vibecrafted_core/dispatch/schema.py
+and vibecrafted-core/tests/dispatch/test_schema.py, and nothing else.
+
+This is the base of the stack: later cuts start their worktrees from the
+commit you deliver here, so keep the cut complete and self-contained.
+"""
+
+  [[cuts.verify]]
+  run = "uv run --project vibecrafted-core --with pytest python -m pytest vibecrafted-core/tests/dispatch/test_schema.py -q"
+  expect = { exit_code = 0 }
+
+# --- cut 2: supervisor layer, stacked on cut 1 ------------------------------
+[[cuts]]
+id = "supervisor-layer"
+phase = "Stack"
+agent = "codex"
+model = "gpt-5.6-terra"
+workflow = "implement"
+depends_on = ["schema-layer"]
+base = "cut:schema-layer"
+prompt = """
+Cut {id} in {repo}. Own vibecrafted-core/vibecrafted_core/dispatch/supervisor.py
+and vibecrafted-core/tests/dispatch/test_supervisor.py, and nothing else.
+
+Your worktree was created from cut schema-layer's delivered commit: its changes
+are already in your tree. Build on them; never re-deliver them.
+"""
+
+  [[cuts.verify]]
+  run = "uv run --project vibecrafted-core --with pytest python -m pytest vibecrafted-core/tests/dispatch/test_supervisor.py -q"
+  expect = { exit_code = 0 }
+
+# --- cut 3: docs layer, stacked on cut 2 ------------------------------------
+[[cuts]]
+id = "docs-layer"
+phase = "Stack"
+agent = "claude"
+model = "claude-opus-5"
+workflow = "implement"
+depends_on = ["supervisor-layer"]
+base = "cut:supervisor-layer"
+prompt = """
+Cut {id} in {repo}. Own docs/public/dispatch/dispatch-schema.md and
+examples/dispatch/, and nothing else.
+
+Your worktree was created from cut supervisor-layer's delivered commit, which
+itself contains cut schema-layer's commit: document the behavior that stack
+delivers, not a behavior you imagine.
+"""
+
+  [[cuts.verify]]
+  run = "uv run --project vibecrafted-core --with pytest python -m pytest vibecrafted-core/tests/dispatch/test_cut_base.py -q"
+  expect = { exit_code = 0 }

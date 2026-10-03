@@ -2,15 +2,15 @@
 
 # Staged formula for vetcoders/homebrew-tap.
 # sha256 is a placeholder. Do not `brew install` this file until
-# v3.7.1 is tagged and the operator pastes the real archive digest.
+# v4.3.1 is tagged and the operator pastes the real archive digest.
 class Vibecrafted < Formula
   desc "Release engine for AI-built software"
   homepage "https://vibecrafted.io"
-  version "3.7.1"
+  version "4.3.2"
   license "BUSL-1.1"
 
   # GitHub source archive of the annotated tag. The product does not yet
-  # publish a 3.7.1 tarball on the Releases page (latest public release
+  # publish a 4.3.1 tarball on the Releases page (latest public release
   # is still v3.5.0).
   url "https://github.com/vetcoders/vibecrafted/archive/refs/tags/v#{version}.tar.gz"
   sha256 "0000000000000000000000000000000000000000000000000000000000000000"
@@ -41,8 +41,8 @@ class Vibecrafted < Formula
       After install:
         vibecrafted doctor
 
-      There is no native Windows bottle. On Windows install WSL2 and use
-      this formula inside the Linux distro, or follow docs/INSTALL.md.
+      Native Windows MSI/EXE installers are distributed through GitHub Releases.
+      For this formula on Windows, install WSL2 and use the Linux distro.
 
       The signed desktop app is a separate cask (vibecrafted-app) and
       stays unpublished until a release actually attaches a DMG.

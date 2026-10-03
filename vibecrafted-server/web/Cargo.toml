@@ -1,6 +1,6 @@
 [package]
 name = "vibecrafted-server-web"
-version = "4.2.4"
+version = "4.3.2"
 edition = "2024"
 rust-version = "1.85.0"
 license = "BUSL-1.1"
@@ -19,13 +19,14 @@ leptos = { version = "0.8" }
 leptos_router = { version = "0.8" }
 leptos_meta = { version = "0.8" }
 control-core = { path = "../control-core", optional = true }
-serde = { version = "1", features = ["derive"], optional = true }
-serde_json = { version = "1", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
 serde_urlencoded = { version = "0.7", optional = true }
 chrono = { version = "0.4", default-features = false, features = ["clock"], optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
 
 axum = { version = "0.8", optional = true }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util"], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util", "process"], optional = true }
 leptos_axum = { version = "0.8", optional = true }
 tower = { version = "0.5", features = ["util"], optional = true }
 tower-http = { version = "0.6", features = ["fs", "trace"], optional = true }
@@ -33,6 +34,10 @@ http-body-util = { version = "0.1", optional = true }
 futures-util = { version = "0.3", default-features = false, features = ["std"], optional = true }
 bytes = { version = "1", optional = true }
 http = { version = "1", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+sysinfo = { version = "0.33", optional = true }
+sha2 = { version = "0.10", optional = true }
+libc = { version = "0.2", optional = true }
 
 console_error_panic_hook = { version = "0.1", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
@@ -40,6 +45,7 @@ web-sys = { version = "0.3", optional = true, features = [
     "Document",
     "Element",
     "HtmlElement",
+    "Response",
     "Storage",
     "Window",
 ] }
@@ -50,6 +56,7 @@ hydrate = [
     "leptos/hydrate",
     "dep:console_error_panic_hook",
     "dep:wasm-bindgen",
+    "dep:wasm-bindgen-futures",
     "dep:web-sys",
 ]
 ssr = [
@@ -62,9 +69,11 @@ ssr = [
     "dep:futures-util",
     "dep:bytes",
     "dep:http",
+    "dep:reqwest",
+    "dep:sysinfo",
+    "dep:sha2",
+    "dep:libc",
     "dep:control-core",
-    "dep:serde",
-    "dep:serde_json",
     "dep:serde_urlencoded",
     "dep:chrono",
     "leptos/ssr",
@@ -85,6 +94,61 @@ required-features = ["ssr"]
 [[test]]
 name = "server_cli"
 path = "tests/server_cli.rs"
+required-features = ["ssr"]
+
+[[test]]
+name = "run_observation_http"
+path = "tests/run_observation_http.rs"
+required-features = ["ssr"]
+
+[[test]]
+name = "tools_http"
+path = "tests/tools_http.rs"
+required-features = ["ssr"]
+
+[[test]]
+name = "scaffold_shell_http"
+path = "tests/scaffold_shell_http.rs"
+required-features = ["ssr"]
+
+[[test]]
+name = "control_transcripts_http"
+path = "tests/control_transcripts_http.rs"
+required-features = ["ssr"]
+
+[[test]]
+name = "tools_report_http"
+path = "tests/tools_report_http.rs"
+required-features = ["ssr"]
+
+[[test]]
+name = "usage_http"
+path = "tests/usage_http.rs"
+required-features = ["ssr"]
+
+[[test]]
+name = "usage_heatmap_lock"
+path = "tests/usage_heatmap_lock.rs"
+required-features = ["ssr"]
+
+[[test]]
+name = "mcp_http"
+path = "tests/mcp_http.rs"
+required-features = ["ssr"]
+
+[[test]]
+name = "mcp_aggregator"
+path = "tests/mcp_aggregator.rs"
+required-features = ["ssr"]
+
+[[test]]
+name = "mcp_bridge"
+path = "tests/mcp_bridge.rs"
+required-features = ["ssr"]
+
+[[test]]
+name = "envelope_injection"
+path = "tests/envelope_injection.rs"
 required-features = ["ssr"]
 
 [package.metadata.leptos]

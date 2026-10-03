@@ -67,6 +67,7 @@ __all__ = [
     "process_start_token",
     "snapshot_processes",
     "terminate_process",
+    "terminate_process_tree",
     "validate_process_identity",
 ]
 
@@ -204,32 +205,62 @@ def validate_process_identity(
     ``SPAWN_RUN_ID`` evidence is best-effort on macOS. If the OS exposes it, it
     must match; when it does not, the mandatory receipt run id plus start token,
     command hash, PID, and PGID still have to match exactly.
+
+    Receipt-invalid and receipt-mismatch reasons are emitted before OS capture
+    and are never proof of stale ownership. ``process_identity_mismatch`` is
+    reserved for a complete receipt that reached capture and differed from the
+    live identity.
     """
 
     if not isinstance(receipt, Mapping):
         return False, "process_identity_unavailable", None
-    try:
-        receipt_pid = int(receipt.get("pid") or 0)
-        receipt_pgid = int(receipt.get("pgid") or 0)
-    except (TypeError, ValueError):
-        return False, "process_identity_invalid", None
-    receipt_run_id = str(receipt.get("run_id") or "").strip()
-    expected_run = str(expected_run_id or "").strip()
-    expected_start = str(receipt.get("start_token") or "").strip()
-    expected_hash = str(receipt.get("command_sha256") or "").strip()
+    receipt_pid = receipt.get("pid")
+    receipt_pgid = receipt.get("pgid")
+    receipt_run_id = receipt.get("run_id")
+    expected_start = receipt.get("start_token")
+    expected_hash = receipt.get("command_sha256")
     if (
-        receipt_pid <= 0
-        or receipt_pid != expected_pid
-        or not expected_run
-        or receipt_run_id != expected_run
+        isinstance(receipt_pid, bool)
+        or not isinstance(receipt_pid, int)
+        or receipt_pid <= 0
+        or isinstance(receipt_pgid, bool)
+        or not isinstance(receipt_pgid, int)
+        or receipt_pgid <= 0
+        or not isinstance(receipt_run_id, str)
+        or receipt_run_id != receipt_run_id.strip()
+        or not receipt_run_id
+        or not isinstance(expected_start, str)
+        or expected_start != expected_start.strip()
         or not expected_start
+        or not isinstance(expected_hash, str)
         or len(expected_hash) != 64
+        or any(char not in "0123456789abcdef" for char in expected_hash)
     ):
-        return False, "process_identity_mismatch", None
-    if expected_pgid is not None and (
-        expected_pgid <= 0 or receipt_pgid != expected_pgid
+        return False, "process_identity_receipt_invalid", None
+
+    if (
+        isinstance(expected_pid, bool)
+        or not isinstance(expected_pid, int)
+        or expected_pid <= 0
+        or not isinstance(expected_run_id, str)
+        or expected_run_id != expected_run_id.strip()
+        or not expected_run_id
+        or (
+            expected_pgid is not None
+            and (
+                isinstance(expected_pgid, bool)
+                or not isinstance(expected_pgid, int)
+                or expected_pgid <= 0
+            )
+        )
     ):
-        return False, "process_identity_mismatch", None
+        return False, "process_identity_expectation_invalid", None
+    if (
+        receipt_pid != expected_pid
+        or receipt_run_id != expected_run_id
+        or (expected_pgid is not None and receipt_pgid != expected_pgid)
+    ):
+        return False, "process_identity_receipt_mismatch", None
 
     identity = capture_process_identity(expected_pid, table=table)
     if identity is None:
@@ -247,7 +278,7 @@ def validate_process_identity(
         if env_index is None
         else env_index.get(expected_pid)
     )
-    if discovered and str(discovered).strip() != expected_run:
+    if discovered and str(discovered).strip() != expected_run_id:
         return False, "process_run_id_mismatch", identity
     return True, "process_identity_current", identity
 
@@ -443,6 +474,8 @@ def _looks_vc_family(command: str) -> bool:
         "agy ",
         "junie",
         "grok",
+        "cursor",
+        "cursor-agent",
         "mlx",
         "lbrx-stt",
         "ollama",
@@ -450,6 +483,87 @@ def _looks_vc_family(command: str) -> bool:
         ".vibecrafted",
     )
     return any(m in low for m in markers)
+
+
+def terminate_process_tree(pid: int, *, grace: float | None = None) -> TerminateOutcome:
+    """Stop an owned worker and its PPID descendants, including detached sessions.
+
+    The caller must own the root (e.g. a launched cell). Capture the complete
+    subtree and start identities BEFORE signalling anything: killing the root
+    first reparents escaped descendants and loses their ownership evidence.
+    Recheck start tokens before each signal so PID reuse during the grace window
+    cannot target an unrelated process. PGID/PPID may change after capture.
+    """
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 1:
+        return TerminateOutcome(
+            ok=False, outcome="unproven", pid=pid, detail="invalid_root"
+        )
+    table = build_process_table()
+    if not table:
+        return TerminateOutcome(
+            ok=False, outcome="unproven", pid=pid, detail="process_table_unavailable"
+        )
+    by_pid = {entry.pid: entry for entry in table}
+    if pid not in by_pid:
+        return TerminateOutcome(ok=True, outcome="already_gone", pid=pid)
+    children: dict[int, list[int]] = {}
+    for entry in table:
+        children.setdefault(entry.ppid, []).append(entry.pid)
+    targets = [pid]
+    seen = {pid}
+    for parent in targets:
+        for child in children.get(parent, []):
+            if child > 1 and child not in seen:
+                targets.append(child)
+                seen.add(child)
+    if os.getpid() in seen:
+        return TerminateOutcome(
+            ok=False, outcome="protected", pid=pid, detail="contains_self"
+        )
+    identities = {
+        target: process_start_token(target, by_pid[target].command)
+        for target in targets
+    }
+    receipt: dict[str, Any] = {"pid": pid, "pids": targets, "steps": []}
+    failures = []
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        # Snapshot once per phase; start tokens are rechecked at signal time.
+        current = {entry.pid: entry for entry in build_process_table()}
+        if not current:
+            return TerminateOutcome(
+                ok=False,
+                outcome="unproven",
+                pid=pid,
+                detail="process_table_unavailable",
+                receipt=receipt,
+            )
+        for target in reversed(targets):
+            entry = current.get(target)
+            if entry is None:
+                continue
+            if process_start_token(target, entry.command) != identities[target]:
+                receipt["steps"].append(
+                    {"pid": target, "signal": sig.name, "result": "identity_changed"}
+                )
+                continue
+            result = _signal_pid(target, sig)
+            receipt["steps"].append(
+                {"pid": target, "signal": sig.name, "result": result}
+            )
+            if result not in {"signalled", "already_gone"}:
+                failures.append(f"{target}:{sig.name}:{result}")
+        if sig == signal.SIGTERM:
+            window = grace_seconds() if grace is None else grace
+            if window > 0:
+                time.sleep(window)
+    # Signal delivery is receipted separately from process exit/reaping.
+    return TerminateOutcome(
+        ok=not failures,
+        outcome="signal_failed" if failures else "signals_sent",
+        pid=pid,
+        detail="; ".join(failures),
+        receipt=receipt,
+    )
 
 
 def terminate_process(

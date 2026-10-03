@@ -291,3 +291,253 @@ def test_grok_tool_call_update_renders_nested_content_text() -> None:
     assert '{"type"' not in rendered
     assert "rawOutput" not in rendered
     assert "84" not in rendered
+
+
+def test_agent_stream_parser_renders_agy_stream_json_events(tmp_path) -> None:
+    """agy stream-json: init banner, streamed answer, one usage record from result."""
+    parser = AgentStreamParser("agy")
+    init = parser.feed_line(
+        b'{"event":"init","conversation_id":"conv-1","init":{"model":"gemini-3.8-flash-low","cwd":"/repo","tools":["run_command"]}}\n'
+    )
+    assert "session: conv-1" in init
+    assert "model: gemini-3.8-flash-low" in init
+    assert parser.session_id == "conv-1"
+    assert parser.model_id == "gemini-3.8-flash-low"
+    assert (
+        parser.feed_line(
+            b'{"event":"step_update","step_update":{"conversation_id":"conv-1","step_index":0,"state":"DONE","step_type":"user_input"}}\n'
+        )
+        == ""
+    )
+    assert (
+        parser.feed_line(
+            b'{"event":"step_update","step_update":{"conversation_id":"conv-1","step_index":1,"state":"ACTIVE","step_type":"agent_response","text_delta":"OK"}}\n'
+        )
+        == "OK"
+    )
+    tool = parser.feed_line(
+        b'{"event":"step_update","step_update":{"conversation_id":"conv-1","step_index":2,"state":"ACTIVE","step_type":"run_command"}}\n'
+    )
+    result = parser.feed_line(
+        b'{"event":"result","result":{"conversation_id":"conv-1","status":"SUCCESS","response":"OK\\n","duration_seconds":1.5,"num_turns":1,"usage":{"input_tokens":31345,"output_tokens":20,"thinking_tokens":19,"cache_read_tokens":128,"total_tokens":31365}}}\n'
+    )
+    assert "run_command" in tool + result
+    assert "tokens: 31345 in (128 cached) / 20 out" in result
+    assert "SUCCESS" in result
+    assert parser.tokens_input == 31345
+    assert parser.tokens_cached_input == 128
+    assert parser.tokens_output == 20
+    assert parser.final_response == "OK\n"
+    assert parser.resume_command("/repo") == "cd /repo && agy --conversation conv-1"
+
+    failed = AgentStreamParser("agy").feed_line(
+        b'{"event":"result","result":{"conversation_id":"conv-2","status":"ERROR","response":"","error":"stream input message is missing the \\"event\\" field","usage":{"input_tokens":0,"output_tokens":0}}}\n'
+    )
+    assert "error" in failed and "missing the" in failed and "ERROR" in failed
+
+
+def test_filter_stream_writes_agy_last_message(tmp_path) -> None:
+    import io
+
+    from vibecrafted_core.agent_stream import filter_stream
+
+    stream = io.BytesIO(
+        b'{"event":"init","conversation_id":"conv-9","init":{"model":"m"}}\n'
+        b'{"event":"step_update","step_update":{"step_type":"agent_response","state":"DONE","text_delta":"done"}}\n'
+        b'{"event":"result","result":{"status":"SUCCESS","response":"final answer","usage":{"input_tokens":1,"output_tokens":1}}}\n'
+    )
+    out = io.BytesIO()
+    last = tmp_path / "last-message.md"
+    assert filter_stream("agy", stdin=stream, stdout=out, last_message_file=last) == 0
+    assert last.read_text(encoding="utf-8") == "final answer"
+    assert b"done" in out.getvalue()
+
+    empty_out = io.BytesIO()
+    missing = tmp_path / "absent.md"
+    filter_stream(
+        "agy",
+        stdin=io.BytesIO(b'{"event":"init","conversation_id":"c"}\n'),
+        stdout=empty_out,
+        last_message_file=missing,
+    )
+    assert not missing.exists()
+
+
+def test_agent_stream_parser_renders_kimi_stream_json_events(tmp_path) -> None:
+    """kimi stream-json: version head, assistant text+tool calls, retry, resume hint."""
+    parser = AgentStreamParser("kimi")
+
+    version = parser.feed_line(
+        b'{"role":"meta","type":"system.version","version":"0.42.0"}\n'
+    )
+    assert "kimi 0.42.0" in version
+
+    assistant = parser.feed_line(
+        b'{"role":"assistant","content":"working on it",'
+        b'"tool_calls":[{"type":"function","id":"call-1",'
+        b'"function":{"name":"Read","arguments":"{}"}}]}\n'
+    )
+    assert "Read" in assistant
+    assert "working on it" in assistant
+    assert parser.final_response == "working on it"
+
+    tool = parser.feed_line(
+        b'{"role":"tool","tool_call_id":"call-1","content":"file body"}\n'
+    )
+    assert "file body" in tool
+
+    retry = parser.feed_line(
+        b'{"role":"meta","type":"turn.step.retrying","failed_attempt":1,'
+        b'"next_attempt":2,"max_attempts":5,"delay_ms":1000,'
+        b'"error_name":"RateLimitError","error_message":"slow down",'
+        b'"status_code":429}\n'
+    )
+    assert "retry" in retry
+    assert "(attempt 2/5)" in retry
+    assert "slow down" in retry
+
+    final = parser.feed_line(b'{"role":"assistant","content":"the answer"}\n')
+    assert "the answer" in final
+    assert parser.final_response == "the answer"
+
+    hint = parser.feed_line(
+        b'{"role":"meta","type":"session.resume_hint","session_id":"kimi-sess-1",'
+        b'"command":"kimi -r kimi-sess-1","content":"resume"}\n'
+    )
+    assert "kimi-sess-1" in hint
+    assert parser.session_id == "kimi-sess-1"
+    assert parser.resume_command("/repo") == "cd /repo && kimi -S kimi-sess-1"
+
+    summary = parser.feed_line(
+        b'{"type":"goal.summary","goalId":"g1","status":"complete",'
+        b'"turnsUsed":2,"tokensUsed":100,"wallClockMs":5000}\n'
+    )
+    assert "goal: complete" in summary
+
+
+def test_filter_stream_writes_kimi_last_message(tmp_path) -> None:
+    import io
+
+    from vibecrafted_core.agent_stream import filter_stream
+
+    stream = io.BytesIO(
+        b'{"role":"meta","type":"system.version","version":"0.42.0"}\n'
+        b'{"role":"assistant","content":"intermediate"}\n'
+        b'{"role":"assistant","content":"final answer"}\n'
+        b'{"role":"meta","type":"session.resume_hint","session_id":"s-9"}\n'
+    )
+    out = io.BytesIO()
+    last = tmp_path / "last-message.md"
+    assert filter_stream("kimi", stdin=stream, stdout=out, last_message_file=last) == 0
+    assert last.read_text(encoding="utf-8") == "final answer"
+    assert b"final answer" in out.getvalue()
+
+    empty_out = io.BytesIO()
+    missing = tmp_path / "absent.md"
+    filter_stream(
+        "kimi",
+        stdin=io.BytesIO(
+            b'{"role":"meta","type":"system.version","version":"0.42.0"}\n'
+        ),
+        stdout=empty_out,
+        last_message_file=missing,
+    )
+    assert not missing.exists()
+
+
+def test_tool_burst_collapses_instead_of_empty_timestamps(monkeypatch) -> None:
+    """A Bash burst is one summary, never a column of empty timestamps."""
+    import json
+    import re
+    from io import BytesIO
+
+    from vibecrafted_core.agent_stream import ANSI_PATTERN, filter_stream
+
+    ticks = iter(f"05:33:{index:02d}" for index in range(1, 80))
+    monkeypatch.setattr("vibecrafted_core.agent_stream.stamp", lambda: next(ticks))
+
+    def render(payloads: list[str]) -> str:
+        out = BytesIO()
+        assert (
+            filter_stream(
+                "claude", stdin=BytesIO("".join(payloads).encode()), stdout=out
+            )
+            == 0
+        )
+        return ANSI_PATTERN.sub("", out.getvalue().decode())
+
+    empty = [
+        '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{}}]}}\n'
+        for _ in range(12)
+    ]
+    empty.append(
+        '{"type":"assistant","message":{"content":[{"type":"text","text":"reasoning"}]}}\n'
+    )
+    blank = render(empty)
+    bare = [
+        line
+        for line in blank.splitlines()
+        if re.fullmatch(r"\[\d\d:\d\d:\d\d Bash\]\s*", line)
+    ]
+    assert bare == []
+    assert sum(1 for line in blank.splitlines() if line.strip()) < 12
+    assert "12x Bash" in blank
+    assert "reasoning" in blank
+
+    commands = ["grep -n foo"] * 8 + ["loct find render"] * 2 + ["aicx sed -n 1p"] * 2
+    counted = [
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Bash",
+                            "input": {"command": command},
+                        }
+                    ]
+                },
+            }
+        )
+        + "\n"
+        for command in commands
+    ]
+    counted.append(
+        '{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}\n'
+    )
+    summary_text = render(counted)
+    summaries = [
+        line for line in summary_text.splitlines() if line.startswith("from [")
+    ]
+    assert len(summaries) == 1
+    summary = summaries[0]
+    assert "12x Bash: grep 8, loct 2, aicx sed 2" in summary
+    assert summary_text.count("Bash") == 1
+
+    long_command = ("grep " + ("needle " * 40)).strip()
+    single = render(
+        [
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "name": "Bash",
+                                "input": {"command": long_command},
+                            }
+                        ]
+                    },
+                }
+            )
+            + "\n",
+            '{"type":"assistant","message":{"content":[{"type":"text","text":"after"}]}}\n',
+        ]
+    )
+    tool_lines = [line for line in single.splitlines() if "Bash" in line]
+    assert len(tool_lines) == 1
+    assert len(tool_lines[0]) <= 60
+    assert tool_lines[0].startswith("[")
+    assert "grep" in tool_lines[0]

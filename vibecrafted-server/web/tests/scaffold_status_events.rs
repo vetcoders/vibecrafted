@@ -13,7 +13,7 @@ use axum::http::{Request, StatusCode, header};
 use futures_util::StreamExt;
 use leptos::config::{Env, LeptosOptions};
 use tower::ServiceExt;
-use vibecrafted_server_web::control::api::control_routes;
+use vibecrafted_server_web::control::api::{SsePace, control_routes_with};
 use vibecrafted_server_web::scaffold::api::scaffold_routes;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -36,10 +36,11 @@ impl TempHome {
                 .unwrap_or(0)
         ));
         fs::create_dir_all(&path).expect("create temp home");
+        // Scaffold handlers still call `vibecrafted_home()` per request.
+        // This binary has one test. Drop restores the variable. SSE pace
+        // is passed into the control router and is not process env.
         unsafe {
             std::env::set_var("VIBECRAFTED_HOME", &path);
-            std::env::set_var("VC_CONTROL_SSE_POLL_MS", "50");
-            std::env::set_var("VC_CONTROL_SSE_KEEPALIVE_MS", "200");
         }
         Self {
             path,
@@ -94,7 +95,16 @@ impl TempHome {
     }
 }
 
-fn test_app() -> axum::Router {
+impl Drop for TempHome {
+    fn drop(&mut self) {
+        unsafe {
+            std::env::remove_var("VIBECRAFTED_HOME");
+        }
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+fn test_app(home: &std::path::Path) -> axum::Router {
     let opts = LeptosOptions::builder()
         .output_name("vibecrafted-server-web-test")
         .site_root("target/site-test")
@@ -105,7 +115,13 @@ fn test_app() -> axum::Router {
         .build();
     axum::Router::new()
         .merge(scaffold_routes())
-        .merge(control_routes())
+        .merge(control_routes_with(
+            home,
+            SsePace {
+                poll: Duration::from_millis(50),
+                keepalive: Duration::from_millis(200),
+            },
+        ))
         .with_state(opts)
 }
 
@@ -143,7 +159,7 @@ async fn post_scaffold_status_updates_disk_and_emits_control_event_sse() {
     let home = TempHome::new("scaffold-status");
     let plan_dir = home.setup_scaffold_plan("vetcoders", "vibecrafted", "2026_0728", "plan-alpha");
 
-    let app = test_app();
+    let app = test_app(&home.path);
 
     // 1. Post typed status update via JSON to /api/scaffold/status
     let payload = serde_json::json!({

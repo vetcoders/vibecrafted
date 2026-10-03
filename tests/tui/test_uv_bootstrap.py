@@ -53,8 +53,13 @@ FIXTURE_REQUIRED_FILES = {
     "install.ps1",
     "install.toml",
     "scripts/distribution_manifest.py",
+    "scripts/build-linux-arm64-runtime-pack.sh",
+    "scripts/build-linux-runtime-pack.sh",
+    "scripts/build-windows-x64-runtime-pack.ps1",
+    "scripts/install-runtime-pack.ps1",
+    "scripts/package-runtime-pack.ps1",
+    "scripts/installer_brand.py",
     "scripts/vetcoders_install.py",
-    "scripts/runtime_paths.py",
     "scripts/vibecrafted",
     "scripts/verify-vibecrafted-product.sh",
     "vibecrafted-core/pyproject.toml",
@@ -71,6 +76,9 @@ FIXTURE_REQUIRED_FILES = {
     "vibecrafted-app/Cargo.lock",
     "vibecrafted-server/Cargo.toml",
     "vibecrafted-server/Cargo.lock",
+    "vibecrafted-vm/RuntimePack.Containerfile",
+    "vibecrafted-vm/runtime-entry.sh",
+    "vibecrafted-vm/runtime-provider-lock.json",
 }
 FIXTURE_REQUIRED_SURFACES = {
     "bin/vc-workflow",
@@ -578,7 +586,7 @@ def test_repo_version_file_exists_and_is_non_empty() -> None:
         "VIBECRAFTED_RUN_NO_UV_E2E=1 to opt in."
     ),
 )
-def test_make_install_no_uv_e2e(tmp_path: Path) -> None:  # pragma: no cover
+def test_make_install_no_uv_e2e(tmp_path: Path) -> None:
     env = _build_no_uv_env(tmp_path, fake_uv=False)
     result = subprocess.run(
         ["make", "install"],

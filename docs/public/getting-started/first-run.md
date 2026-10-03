@@ -19,7 +19,7 @@ vibecrafted init claude
 
 `init` recovers intent through AICX, maps the living tree through Loctree, and
 checks runtime truth before any work begins. Substitute any agent you have
-installed: `claude`, `codex`, `agy`, `junie`, `grok`.
+installed: `claude`, `codex`, `agy`, `junie`, `grok`, `cursor`.
 
 ## When an agent CLI is missing
 
@@ -46,6 +46,7 @@ The known install commands are:
 | `junie`  | `npm install -g @jetbrains/junie`                  |
 | `grok`   | `npm install -g @xai-official/grok`                |
 | `agy`    | install Google Antigravity CLI, then `agy install` |
+| `cursor` | `curl https://cursor.com/install -fsS \| bash`     |
 
 ### Two failures, two answers
 
@@ -57,9 +58,9 @@ you already have.
 
 ### Your CLI wins
 
-Vibecrafted **appends** its bundled agent bin to `PATH` rather than prepending
-it. An agent CLI you installed and authenticated yourself always takes
-precedence over a bundled copy. Vibecrafted extends your environment; it does
+Vibecrafted **appends** its own `tools/node/bin` to `PATH` (when that directory
+exists) rather than prepending it. An agent CLI you installed and authenticated
+yourself always takes precedence. Vibecrafted extends your environment; it does
 not shadow it.
 
 ## Reading doctor on a plain install

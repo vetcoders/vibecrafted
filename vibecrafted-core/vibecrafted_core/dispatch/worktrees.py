@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import os
+import json
 import re
 import subprocess
 from dataclasses import asdict, dataclass
@@ -10,9 +10,38 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from ..control_plane import control_plane_home
+from ..runtime_paths import vibecrafted_home
+
 
 class WorktreeContractError(RuntimeError):
     """Raised when a worker checkout cannot satisfy isolation ownership."""
+
+
+def find_worktree_owner(root: str | Path) -> tuple[str, str] | None:
+    """Return ``(dispatch_run_id, cut_id)`` that registered this checkout."""
+    target = Path(root).expanduser()
+    dispatches = control_plane_home() / "dispatches"
+    if not dispatches.is_dir():
+        return None
+    for receipts in dispatches.glob("*/receipts.json"):
+        try:
+            payload = json.loads(receipts.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        run_id = str(payload.get("run_id") or "").strip()
+        cuts = payload.get("cuts")
+        if not run_id or not isinstance(cuts, dict):
+            continue
+        for cut_id, cut in cuts.items():
+            if not isinstance(cut, dict):
+                continue
+            path = str(cut.get("worktree_path") or "").strip()
+            if path and _same_filesystem_location(path, target):
+                return run_id, str(cut_id)
+    return None
 
 
 @dataclass(frozen=True)
@@ -34,36 +63,46 @@ class WorktreeGeometry:
         return asdict(self)
 
 
-def vibecrafted_home() -> Path:
-    """Return the single global Vibecrafted state root."""
-    return Path(os.environ.get("VIBECRAFTED_HOME", "~/.vibecrafted")).expanduser()
+def _same_filesystem_location(left: str | Path, right: str | Path) -> bool:
+    """Compare existing paths by identity, including case aliases on macOS."""
+    if not str(left).strip() or not str(right).strip():
+        return False
+    try:
+        return Path(left).samefile(right)
+    except OSError:
+        return Path(left).resolve() == Path(right).resolve()
 
 
-def repo_identity(repo: str | Path) -> tuple[str, str]:
-    """Resolve a stable ``(org, repo)`` from origin, with local fallbacks."""
-    root = Path(repo).expanduser().resolve()
-    remote = _git(root, "remote", "get-url", "origin")
-    tail = remote.strip().removesuffix(".git")
-    if ":" in tail and "://" not in tail:
-        tail = tail.split(":", 1)[1]
-    elif "://" in tail:
-        tail = tail.split("://", 1)[1]
-        tail = tail.split("/", 1)[1] if "/" in tail else ""
-    parts = [part for part in tail.strip("/").split("/") if part]
-    org = parts[-2] if len(parts) >= 2 else "local"
-    name = parts[-1] if parts else root.name
-    return _safe_component(org, "local"), _safe_component(name, "repo")
+def repo_identity(repo: str | Path, *, explicit: str | None = None) -> tuple[str, str]:
+    """``(org, repo)`` from the forge origin, or from ``explicit``.
+
+    Never from the resolved symlink path or the checkout directory name.
+    """
+    from ..runtime_receipt import artifact_org_repo
+
+    return artifact_org_repo(repo, explicit=explicit)
 
 
-def canonical_artifact_root(repo: str | Path, *, day: str | None = None) -> Path:
+def canonical_artifact_root(
+    repo: str | Path, *, day: str | None = None, explicit: str | None = None
+) -> Path:
     """Return the durable, agent-agnostic artifact root for this repository."""
-    org, name = repo_identity(repo)
+    org, name = repo_identity(repo, explicit=explicit)
     stamp = day or datetime.now(UTC).strftime("%Y_%m%d")
     return vibecrafted_home() / "artifacts" / org / name / stamp
 
 
 class WorktreeManager:
-    """Create, validate, reuse, and remove canonical per-cut worktrees."""
+    """Create, validate, reuse, and remove canonical per-cut worktrees.
+
+    Branch canon: the dispatcher's contract branch for a worker cut is
+    ``cut/<id>`` — receipts, recovery, delivery-head resolution and cleanup
+    all key on it. Per-agent branch names (``<agent>/workflow/<slug>`` and
+    friends) may exist ONLY as additional refs; a worker that switched its
+    checkout to such a branch is re-adopted onto ``cut/<id>`` at the same
+    commit during recovery (see :meth:`recover_active`), never rejected by
+    name alone.
+    """
 
     def __init__(self, main_repo: str | Path, *, day: str | None = None) -> None:
         self.main_repo = Path(main_repo).expanduser().resolve()
@@ -110,6 +149,14 @@ class WorktreeManager:
         allow_reuse: bool = False,
     ) -> WorktreeGeometry:
         """Resolve and materialize a cut root, refusing ambiguous reuse."""
+        # This boundary consumes a resolved commit, never a moving ref. The
+        # declaration resolver owns branch/tag/short-SHA interpretation.
+        if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", baseline_sha):
+            raise WorktreeContractError("baseline must be a full pinned commit SHA")
+        if _git(self.main_repo, "cat-file", "-t", baseline_sha) != "commit":
+            raise WorktreeContractError(
+                "baseline commit is unavailable in selected repository"
+            )
         geometry = self.geometry(cut_id, baseline_sha, integrator=integrator)
         root = Path(geometry.worktree_path)
         if integrator:
@@ -119,8 +166,17 @@ class WorktreeManager:
         self.worktree_root.mkdir(parents=True, exist_ok=True)
         if root.exists():
             if not allow_reuse:
+                owner = find_worktree_owner(root)
+                if owner is not None:
+                    run_id, cut_id = owner
+                    raise WorktreeContractError(
+                        f"refusing existing worktree {root}; owning run {run_id} "
+                        f"cut {cut_id}; resume with: "
+                        f"vibecrafted dispatch <plan.toml> --resume {run_id}"
+                    )
                 raise WorktreeContractError(
-                    f"refusing existing worktree {root}; resume with its owning run id or clean it explicitly"
+                    f"refusing existing worktree {root}; resume with its owning "
+                    "run id or clean it explicitly"
                 )
             self._validate_target(root)
             self._validate_reuse(geometry)
@@ -136,13 +192,34 @@ class WorktreeManager:
             )
             command = ["git", "worktree", "add", "--quiet"]
             if branch_exists:
-                command.extend([str(root), geometry.branch])
-            else:
-                command.extend(["-b", geometry.branch, str(root), baseline_sha])
+                raise WorktreeContractError(
+                    f"refusing existing branch {geometry.branch}; resume requires its owning run receipt"
+                )
+            # Git's ref lock arbitrates concurrent attempts. Never attach an
+            # existing branch after losing that race, even at the same SHA.
+            command.extend(["-b", geometry.branch, str(root), baseline_sha])
             _run(self.main_repo, command, "create linked checkout")
+            if _git(root, "rev-parse", "HEAD") != baseline_sha:
+                raise WorktreeContractError(
+                    "new worker baseline differs from pinned commit"
+                )
             self._validate_reuse(geometry)
         self._validate_target(root)
         return geometry
+
+    def prepare_agent_launch(
+        self, provider: str, launch_id: str, baseline_sha: str
+    ) -> WorktreeGeometry:
+        """Create one clean per-Agent interactive checkout through this owner."""
+        observed_root = _git(self.main_repo, "rev-parse", "--show-toplevel")
+        if not _same_filesystem_location(observed_root, self.main_repo):
+            raise WorktreeContractError(
+                f"selected workspace is not a git repository root: {self.main_repo}"
+            )
+        # The parent may move or contain staged, unstaged and untracked work.
+        # Materialize Git objects at the pinned SHA without reading its index
+        # or copying, stashing, committing or cleaning its working files.
+        return self.prepare(f"{provider}-{launch_id}", baseline_sha)
 
     def validate(self, geometry: WorktreeGeometry) -> None:
         """Revalidate a receipt's geometry before launch or resume."""
@@ -152,20 +229,73 @@ class WorktreeManager:
             self._validate_reuse(geometry)
             self._validate_target(Path(geometry.worktree_path))
 
-    def recover_active(self, geometry: WorktreeGeometry) -> None:
-        """Validate an already-live legacy checkout without relocating or dirt checks."""
+    def recover_active(
+        self, geometry: WorktreeGeometry, *, delivered_sha: str = ""
+    ) -> None:
+        """Validate an already-live checkout without relocating or dirt checks.
+
+        A resume receipt is allowed to preserve a dirty worker root, but it may
+        not turn an arbitrary directory with a matching branch name into that
+        worker.  In particular, the original baseline remains part of the
+        identity even when the worker committed (or staged) progress after it.
+
+        Identity is Git ownership + SHA ancestry, never the branch label: a
+        worker that renamed or switched its branch (briefs teach per-agent
+        names like ``<agent>/workflow/<slug>``) is adopted back onto the
+        contract branch ``cut/<id>`` at its current HEAD, provided the HEAD is
+        the receipt's delivered commit or a descendant of the pinned baseline.
+        The foreign branch ref is left untouched (field incident 2026-09-17:
+        resume rejected an intact delivered worktree purely by branch name).
+        """
         root = Path(geometry.worktree_path)
         if not root.is_dir():
             raise WorktreeContractError(f"active recovery worktree is missing: {root}")
         observed_root = _git(root, "rev-parse", "--show-toplevel")
         observed_branch = _git(root, "branch", "--show-current")
-        if not observed_root or Path(observed_root).resolve() != root.resolve():
+        if not _same_filesystem_location(observed_root, root):
             raise WorktreeContractError(
                 f"active recovery root is not a registered worktree: {root}"
             )
-        if observed_branch != geometry.branch:
+        main_common_dir = _git(
+            self.main_repo, "rev-parse", "--path-format=absolute", "--git-common-dir"
+        )
+        worker_common_dir = _git(
+            root, "rev-parse", "--path-format=absolute", "--git-common-dir"
+        )
+        if not _same_filesystem_location(main_common_dir, worker_common_dir):
             raise WorktreeContractError(
-                f"active recovery branch mismatch: expected {geometry.branch}, observed {observed_branch or '<detached>'}"
+                f"active recovery worktree is not owned by selected repository: {root}"
+            )
+        registered_roots = [
+            line.removeprefix("worktree ")
+            for line in _git(
+                self.main_repo, "worktree", "list", "--porcelain"
+            ).splitlines()
+            if line.startswith("worktree ")
+        ]
+        if not any(
+            _same_filesystem_location(candidate, root) for candidate in registered_roots
+        ):
+            raise WorktreeContractError(
+                f"active recovery root is not registered by selected repository: {root}"
+            )
+        baseline = _git(
+            root, "rev-parse", "--verify", f"{geometry.baseline_sha}^{{commit}}"
+        )
+        head = _git(root, "rev-parse", "HEAD")
+        ancestor = _git(root, "merge-base", baseline, head) if baseline and head else ""
+        if not baseline or not head or ancestor != baseline:
+            raise WorktreeContractError(
+                "active recovery baseline mismatch: receipt baseline is not an ancestor "
+                f"of {root} HEAD"
+            )
+        if observed_branch != geometry.branch:
+            self._adopt_contract_branch(
+                root,
+                geometry,
+                head=head,
+                observed_branch=observed_branch,
+                delivered_sha=delivered_sha,
             )
         target = Path(geometry.target_path)
         if target != root / "target":
@@ -173,6 +303,49 @@ class WorktreeManager:
                 "old shared fleet target is forbidden for concurrent plans; unset CARGO_TARGET_DIR — Vibecrafted assigns $PWD/target per worker"
             )
         self._validate_target(root)
+
+    def _adopt_contract_branch(
+        self,
+        root: Path,
+        geometry: WorktreeGeometry,
+        *,
+        head: str,
+        observed_branch: str,
+        delivered_sha: str,
+    ) -> None:
+        """Re-point the contract branch ``cut/<id>`` at an authenticated HEAD.
+
+        Runs only after ownership (common Git dir, worktree registration) and
+        baseline ancestry are proven. When the receipt names a delivered
+        commit, HEAD must be that commit or a descendant of it — an unrelated
+        tip is a different work stream, not this cut. The adoption itself is
+        non-destructive: ``checkout -B`` moves/creates ``cut/<id>`` at the
+        current commit and leaves the worker's own branch ref in place.
+        """
+        if delivered_sha:
+            delivered = _git(
+                root, "rev-parse", "--verify", f"{delivered_sha}^{{commit}}"
+            )
+            delivered_ok = bool(delivered) and (
+                delivered == head
+                or _git(root, "merge-base", delivered, head) == delivered
+            )
+            if not delivered_ok:
+                raise WorktreeContractError(
+                    "active recovery branch mismatch: expected"
+                    f" {geometry.branch}, observed"
+                    f" {observed_branch or '<detached>'}; HEAD {head[:12]} does"
+                    f" not contain the receipt's delivered commit"
+                    f" {delivered_sha[:12]}, refusing adoption"
+                )
+        # Git itself refuses when cut/<id> is checked out in another worktree;
+        # that surfaces as a WorktreeContractError instead of a silent steal.
+        _run(
+            root,
+            ["git", "checkout", "-B", geometry.branch, head],
+            f"adopt recovery branch {geometry.branch} at {head[:12]}"
+            f" (was {observed_branch or '<detached>'})",
+        )
 
     def cleanup(self, geometry: WorktreeGeometry, *, settled: bool) -> str:
         """Remove only a settled worker checkout; durable evidence and branch remain."""
@@ -212,12 +385,16 @@ class WorktreeManager:
             )
 
     def _validate_reuse(self, geometry: WorktreeGeometry) -> None:
+        # Authenticate common Git directory, registration, branch and baseline
+        # ancestry using the same owner as active recovery. A matching branch
+        # name in an unrelated checkout is not a resume receipt.
+        self.recover_active(geometry)
         root = Path(geometry.worktree_path)
         if not root.is_dir():
             raise WorktreeContractError(f"worker worktree is missing: {root}")
         observed_root = _git(root, "rev-parse", "--show-toplevel")
         observed_branch = _git(root, "branch", "--show-current")
-        if Path(observed_root).resolve() != root.resolve():
+        if not _same_filesystem_location(observed_root, root):
             raise WorktreeContractError(
                 f"worker root is not the registered worktree: {root}"
             )

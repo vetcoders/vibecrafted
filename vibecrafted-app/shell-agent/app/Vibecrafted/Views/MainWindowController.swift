@@ -2,79 +2,234 @@
 // Created by Vetcoders
 
 import AppKit
+import SwiftUI
 
-class MainWindowController: NSWindowController, NSToolbarDelegate {
-  private let mainViewController = MainSplitViewController()
+/// One window shape for every native tab: the console and each tool or
+/// reference tab are `NSWindow`s in one tab group, so AppKit's own tab bar,
+/// Window menu and ⌘⇧] / ⌘⇧[ tab switching apply. The SwiftUI toolbar is
+/// bridged into the unified titlebar; there is no second chrome row.
+@MainActor
+enum CommandDeckWindowFactory {
+  /// Windows sharing this identifier tab together. One product, one group.
+  static let tabbingIdentifier = "io.vetcoders.vibecrafted.command-deck"
 
-  private let toolbarSidebarItem = NSToolbarItem.Identifier("toggleSidebar")
-  private let toolbarInspectorItem = NSToolbarItem.Identifier("toggleInspector")
-
-  init() {
+  static func makeWindow(title: String, frameAutosaveName: String?) -> NSWindow {
     let window = NSWindow(
       contentRect: NSRect(x: 0, y: 0, width: 1200, height: 800),
-      styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
-      backing: .buffered,
-      defer: false
-    )
-    window.title = "Vibecrafted"
-    window.titleVisibility = .hidden
-    window.titlebarAppearsTransparent = true
-    window.toolbarStyle = .unified
-    window.center()
-    window.setFrameAutosaveName("VibecraftedMainWindow")
-    window.contentViewController = mainViewController
+      styleMask: [.titled, .closable, .miniaturizable, .resizable],
+      backing: .buffered, defer: false)
+    window.title = title
+    window.isReleasedWhenClosed = false
     window.minSize = NSSize(width: 800, height: 600)
+    window.tabbingIdentifier = tabbingIdentifier
+    window.tabbingMode = .preferred
+    window.toolbarStyle = .unified
+    window.titleVisibility = .visible
+    // Frame autosave is geometry only. AppKit window restoration is owned
+    // here: titled windows default restorable; these two assignments are the
+    // verified off switch (NSWindowRestoration.h). Loginwindow must not
+    // restitch the Command Deck.
+    window.isRestorable = false
+    window.restorationClass = nil
+    var restored = false
+    if let frameAutosaveName {
+      window.setFrameAutosaveName(frameAutosaveName)
+      restored = window.setFrameUsingName(frameAutosaveName)
+    }
+    if !restored { window.center() }
+    fitToVisibleFrame(window)
+    return window
+  }
 
+  /// Fit the complete titled frame, including native toolbar chrome. A
+  /// saved frame may belong to a larger display or a different Dock position.
+  static func fittedFrame(_ frame: NSRect, in visibleFrame: NSRect) -> NSRect {
+    guard visibleFrame.width > 0, visibleFrame.height > 0 else { return frame }
+    let width = min(frame.width, visibleFrame.width)
+    let height = min(frame.height, visibleFrame.height)
+    return NSRect(
+      x: min(max(frame.minX, visibleFrame.minX), visibleFrame.maxX - width),
+      y: min(max(frame.minY, visibleFrame.minY), visibleFrame.maxY - height),
+      width: width, height: height)
+  }
+
+  static func fitToVisibleFrame(_ window: NSWindow, in visibleFrame: NSRect? = nil) {
+    guard let visibleFrame = visibleFrame ?? (window.screen ?? NSScreen.main)?.visibleFrame,
+      visibleFrame.width > 0, visibleFrame.height > 0
+    else { return }
+    // Visibility wins over the usual minimum on a small display.
+    let minimum = NSSize(
+      width: min(800, visibleFrame.width), height: min(600, visibleFrame.height))
+    if window.minSize != minimum { window.minSize = minimum }
+    let frame = fittedFrame(window.frame, in: visibleFrame)
+    if frame != window.frame { window.setFrame(frame, display: false) }
+  }
+
+  static func mount<Root: View>(_ root: Root, in window: NSWindow) {
+    let hosting = CommandDeckHostingView(rootView: root)
+    // The window factory owns minimum/saved geometry. SwiftUI's default
+    // minSize/intrinsicContentSize publication can grow an ordered window
+    // beyond its screen when the ready shell and inspector finish mounting.
+    hosting.sizingOptions = []
+    // The SwiftUI `.toolbar` becomes the window's toolbar. Title stays native
+    // so the tab bar shows the window title the controller sets.
+    hosting.sceneBridgingOptions = [.toolbars]
+    window.contentView = hosting
+    window.layoutIfNeeded()
+    fitToVisibleFrame(window)
+  }
+}
+
+/// AppKit lays out the bridged toolbar and split columns after mount returns.
+/// Keep geometry with the same window owner at that actual layout boundary.
+@MainActor
+private final class CommandDeckHostingView<Content: View>: NSHostingView<Content> {
+  private var fitQueued = false
+
+  override func layout() {
+    super.layout()
+    guard !fitQueued else { return }
+    fitQueued = true
+    DispatchQueue.main.async { [weak self] in
+      guard let self else { return }
+      self.fitQueued = false
+      if let window = self.window { CommandDeckWindowFactory.fitToVisibleFrame(window) }
+    }
+  }
+}
+
+/// The console tab. The App retains this controller after close; reopen
+/// mounts the same session, so no runtime state is ever lost to a window.
+@MainActor
+final class MainWindowController: NSWindowController, CommandDeckNavigationHandling, NSWindowDelegate {
+  let session: WebConsoleSession
+  private let openExternally: @MainActor (URL) -> Void
+  /// Configured `vc-frame web` origin, when `[tools.vc-frame]` names one.
+  /// The corner mark projects it across this window. Absent, the mark stays
+  /// quiet. Never a second window, and never a guessed port.
+  var frameWebURL: (() -> URL?)?
+  /// Product route to restore when the projection bar goes back.
+  private var dashboardPath = "/"
+
+  init(
+    frameAutosaveName: String? = "VibecraftedCommandDeck",
+    model: AppModel, session: WebConsoleSession, actions: any CommandDeckActionHandling,
+    openExternally: @escaping @MainActor (URL) -> Void = { NSWorkspace.shared.open($0) }
+  ) {
+    self.session = session
+    self.openExternally = openExternally
+    let window = CommandDeckWindowFactory.makeWindow(
+      title: "Vibecrafted", frameAutosaveName: frameAutosaveName)
     super.init(window: window)
+    window.delegate = self
+    CommandDeckWindowFactory.mount(
+      CommandDeckRootView(
+        model: model, session: session, actions: actions, navigationHandler: self,
+        openPath: { [weak self] path in self?.openWorkspacePath(path) },
+        frameOrigin: { [weak self] in self?.configuredFrameOrigin() },
+        presentFrame: { [weak self] in self?.presentConfiguredFrame() ?? false },
+        restoreFrame: { [weak self] in self?.restoreFromFrame() }),
+      in: window)
+  }
 
-    let toolbar = NSToolbar(identifier: "VibecraftedToolbar")
-    toolbar.delegate = self
-    toolbar.displayMode = .iconOnly
-    window.toolbar = toolbar
+  /// Sidebar selection returns to the product console in this window.
+  /// The frame origin is not a destination; the corner mark presents it.
+  func openWorkspacePath(_ path: String) {
+    dashboardPath = path
+    if session.restoreProduct(route: path) { return }
+    session.navigate(path: path)
+  }
+
+  /// Corner mark. `present(service:)` is the only way the configured origin
+  /// occupies this window. Returns false when there is nothing to project.
+  @discardableResult
+  func presentConfiguredFrame() -> Bool {
+    guard case .runtime = session.scope, let url = frameWebURL?(), WebRuntimeOrigin(url: url) != nil
+    else { return false }
+    if let current = session.navigation.currentURL, session.runtimeOrigin?.covers(current) == true {
+      dashboardPath = Self.dashboardRoute(from: current)
+    }
+    session.present(service: url)
+    return true
+  }
+
+  /// Projection bar. Puts the product console back on the route that was open.
+  func restoreFromFrame() {
+    let path = dashboardPath
+    if session.restoreProduct(route: path) { return }
+    session.navigate(path: path)
+  }
+
+  private func configuredFrameOrigin() -> URL? {
+    guard case .runtime = session.scope else { return nil }
+    return frameWebURL?()
+  }
+
+  private static func dashboardRoute(from url: URL) -> String {
+    let path = url.path.isEmpty ? "/" : url.path
+    guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+      let query = components.percentEncodedQuery, !query.isEmpty
+    else { return path }
+    return "\(path)?\(query)"
   }
 
   @available(*, unavailable)
-  required init?(coder: NSCoder) {
-    fatalError()
+  required init?(coder: NSCoder) { fatalError("Use the App-owned session initializer") }
+
+  override func showWindow(_ sender: Any?) {
+    let wasVisible = window?.isVisible == true
+    super.showWindow(sender)
+    lifecycleLog("window.show owner=command-deck reason=present restored=\(!wasVisible) visible=\(window?.isVisible == true)")
   }
 
-  // MARK: - NSToolbarDelegate
+  func windowWillClose(_ notification: Notification) {
+    lifecycleLog("window.hide owner=command-deck reason=close session=retained")
+  }
 
-  func toolbar(
-    _ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
-    willBeInsertedIntoToolbar flag: Bool
-  ) -> NSToolbarItem? {
-    switch itemIdentifier {
-    case toolbarSidebarItem:
-      let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-      item.label = "Sidebar"
-      item.toolTip = "Toggle Sidebar"
-      item.image = NSImage(
-        systemSymbolName: "sidebar.left", accessibilityDescription: "Toggle Sidebar")
-      item.target = mainViewController
-      item.action = #selector(NSSplitViewController.toggleSidebar(_:))
-      return item
+  func windowDidResignKey(_ notification: Notification) {
+    lifecycleLog("window.focus-lost owner=command-deck visible=\(window?.isVisible == true) appHidden=\(NSApp.isHidden)")
+  }
 
-    case toolbarInspectorItem:
-      let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-      item.label = "Inspector"
-      item.toolTip = "Toggle Inspector"
-      item.image = NSImage(
-        systemSymbolName: "sidebar.right", accessibilityDescription: "Toggle Inspector")
-      item.target = mainViewController
-      item.action = #selector(NSSplitViewController.toggleInspector(_:))
-      return item
+  func windowDidMiniaturize(_ notification: Notification) {
+    lifecycleLog("window.hide owner=command-deck reason=minimize session=retained")
+  }
 
-    default:
-      return nil
+  func windowDidDeminiaturize(_ notification: Notification) {
+    lifecycleLog("window.restore owner=command-deck reason=unminimize session=retained")
+  }
+
+  /// History moves apply to this window's session only.
+  func navigate(_ action: CommandDeckNavigationAction) {
+    switch action {
+    case .home: session.goHome()
+    case .back: session.goBack()
+    case .forward: session.goForward()
+    case .openInBrowser:
+      guard let url = session.navigation.currentURL, session.runtimeOrigin?.covers(url) == true else { return }
+      openExternally(url)
     }
   }
+}
 
-  func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-    [toolbarSidebarItem, .flexibleSpace, toolbarInspectorItem]
-  }
+@MainActor
+private struct CommandDeckRootView: View {
+  let model: AppModel
+  let session: WebConsoleSession
+  let actions: any CommandDeckActionHandling
+  let navigationHandler: any CommandDeckNavigationHandling
+  var openPath: (String) -> Void
+  var frameOrigin: () -> URL?
+  var presentFrame: () -> Bool
+  var restoreFrame: () -> Void
 
-  func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-    [toolbarSidebarItem, .flexibleSpace, toolbarInspectorItem]
+  var body: some View {
+    CommandDeckView(
+      presentation: model.presentation, actions: actions,
+      navigation: session.navigation, navigationHandler: navigationHandler,
+      openPath: openPath, frameOrigin: frameOrigin, presentFrame: presentFrame,
+      restoreFrame: restoreFrame
+    ) {
+      WebConsoleHost(session: session)
+    }
   }
 }

@@ -3,11 +3,13 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # install-foundations.sh — portable installer for 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. foundation layer
 #
-# Handles:
-#   loctree / loctree-mcp  — required Loctree product binaries via Loctree installer
-#   aicx / aicx-mcp       — required AICX product binaries via Loctree installer
+# Handles (each foundation comes from its own public channel; the Runtime
+# Pack never carries them, and an existing working install is left alone):
+#   loctree / loctree-mcp  — npm: @loctree/loctree
+#   aicx / aicx-mcp       — npm: @loctree/aicx
 #   vc-frame               — required donor BINARY installed by this owner from sibling source
-#   prview                 — cargo install OR binary from GH releases
+#   prview                 — GitHub releases: vetcoders/prview-rs (SHA256SUMS-verified)
+#   screenscribe           — PyPI: screenscribe, installed through uv or pipx
 #
 # Usage:
 #   bash scripts/install-foundations.sh                   # install/validate foundations
@@ -29,10 +31,13 @@ set -euo pipefail
 # without a rideable operator surface.
 # ---------------------------------------------------------------------------
 
-PRVIEW_CRATE="prview"
-PRVIEW_REPO="vetcoders/prview"
-
-LOCTREE_INSTALL_URL="${LOCTREE_INSTALL_URL:-https://loct.io/install.sh}"
+LOCTREE_NPM_PACKAGE="@loctree/loctree"
+AICX_NPM_PACKAGE="@loctree/aicx"
+PRVIEW_REPO="vetcoders/prview-rs"
+PRVIEW_RELEASE_BASE="${PRVIEW_RELEASE_BASE:-https://github.com/$PRVIEW_REPO/releases/latest/download}"
+# Every published prview Darwin binary carries this Developer ID team.
+PRVIEW_MACOS_TEAM_ID="MW223P3NPX"
+SCREENSCRIBE_PACKAGE="screenscribe"
 
 # Agent CLIs — npm packages when the vendor publishes an official package.
 AGENT_PACKAGES=(
@@ -44,98 +49,19 @@ AGENT_PACKAGES=(
 
 AGENT_MANUAL_INSTALLS=(
   "agy|Install Google Antigravity CLI from its vendor distribution, then run: agy install"
+  "cursor-agent|Install the Cursor CLI: curl https://cursor.com/install -fsS | bash"
 )
 
-# Script/source resolution (used by the bundled-toolchain attempt).
+# Script/source resolution (used by the optional sandbox installer).
 # Respects VIBECRAFTED_SOURCE when set; otherwise resolves the parent of
 # scripts/install-foundations.sh.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_DIR="${VIBECRAFTED_SOURCE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
-default_vibecrafted_home() {
-  if [[ -n "${VIBECRAFTED_HOME:-}" ]]; then
-    printf '%s\n' "$VIBECRAFTED_HOME"
-    return
-  fi
-  if [[ -n "${VIBECRAFTED_ROOT:-}" ]]; then
-    printf '%s\n' "$VIBECRAFTED_ROOT/.vibecrafted"
-    return
-  fi
-  printf '%s\n' "$HOME/.vibecrafted"
-}
-
-default_vibecrafted_runtime_home() {
-  if [[ -n "${VIBECRAFTED_RUNTIME_HOME:-}" ]]; then
-    printf '%s\n' "$VIBECRAFTED_RUNTIME_HOME"
-    return
-  fi
-  if [[ -n "${XDG_DATA_HOME:-}" ]]; then
-    printf '%s\n' "$XDG_DATA_HOME/vibecrafted"
-    return
-  fi
-  printf '%s\n' "$HOME/.local/share/vibecrafted"
-}
-
-canonical_vibecrafted_home() {
-  printf '%s\n' "$HOME/.vibecrafted"
-}
-
-canonical_vibecrafted_runtime_home() {
-  printf '%s\n' "$HOME/.local/share/vibecrafted"
-}
-
-canonical_vibecrafted_launcher_bin() {
-  printf '%s\n' "$HOME/.local/bin"
-}
-
-pause_runtime_contract_failure() {
-  printf '\nRuntime root contract failed fast.\n'
-  printf 'No automatic cleanup was performed. Review and run the explicit migration:\n'
-  printf '  python3 scripts/vetcoders_install.py doctor --fix-legacy-bootstrap\n'
-  printf 'Then rerun make install-all with canonical roots:\n'
-  printf '  store ~/.vibecrafted · runtime ~/.local/share/vibecrafted · launchers ~/.local/bin\n\n'
-  if [[ "${VIBECRAFTED_INSTALL_NONINTERACTIVE:-0}" == "1" ]] || ! is_interactive; then
-    return
-  fi
-  printf 'Press Enter to continue after reviewing cleanup steps, or Ctrl-C to abort: '
-  read -r _ || true
-}
-
-enforce_runtime_root_contract() {
-  local expected_store expected_runtime expected_launcher
-  local resolved_store resolved_runtime resolved_launcher
-  local failed=0
-
-  expected_store="$(canonical_vibecrafted_home)"
-  expected_runtime="$(canonical_vibecrafted_runtime_home)"
-  expected_launcher="$(canonical_vibecrafted_launcher_bin)"
-
-  resolved_store="$(default_vibecrafted_home)"
-  resolved_runtime="$(default_vibecrafted_runtime_home)"
-  resolved_launcher="${VIBECRAFTED_LAUNCHER_BIN:-$expected_launcher}"
-
-  if [[ "$resolved_store" != "$expected_store" ]]; then
-    warn "Fail-fast: store root drift detected ($resolved_store, expected $expected_store)."
-    failed=1
-  fi
-
-  if [[ "$resolved_runtime" != "$expected_runtime" ]]; then
-    warn "Fail-fast: runtime root drift detected ($resolved_runtime, expected $expected_runtime)."
-    failed=1
-  fi
-
-  if [[ "$resolved_launcher" != "$expected_launcher" ]]; then
-    warn "Fail-fast: launcher root drift detected ($resolved_launcher, expected $expected_launcher)."
-    failed=1
-  fi
-
-  if [[ "$failed" == "1" ]]; then
-    pause_runtime_contract_failure
-    return 1
-  fi
-
-  return 0
-}
+# Runtime roots: one shell definition, shared with install-runtime.sh and
+# pinned to install.sh by tests/tui/test_runtime_roots_parity.py.
+# shellcheck source=scripts/lib/runtime-roots.sh
+source "$SCRIPT_DIR/lib/runtime-roots.sh"
 
 VIBECRAFTED_HOME="$(default_vibecrafted_home)"
 VIBECRAFTED_RUNTIME_HOME="$(default_vibecrafted_runtime_home)"
@@ -144,12 +70,11 @@ LAUNCHER_PREFIX="${VIBECRAFTED_LAUNCHER_BIN:-$HOME/.local/bin}"
 CHECK_ONLY=0
 INSTALL_ALL=0
 AGENTS_REQUIRED=0
-# Product foundations (loctree/aicx/vc-frame) are externally managed: this
-# script deliberately refuses to guess crates/npm/checkout paths and points at
-# the canonical installer instead. Their absence is therefore an ADVISORY, not
-# an install failure — consistent with `make install-vendored-binaries`, which
-# already keeps the "external fallback" path non-fatal when vendored binaries
-# are absent. Set REQUIRE_FOUNDATIONS=1 (e.g. release validation) to make a
+# Product foundations install from their own channels (npm, GitHub releases,
+# PyPI). A channel can be unreachable (no npm, no network), so a foundation
+# that stays missing is an ADVISORY, not an install failure — consistent with
+# `make install-vendored-binaries`, which keeps its "external fallback" path
+# non-fatal. Set REQUIRE_FOUNDATIONS=1 (e.g. release validation) to make a
 # missing product foundation fail the run instead.
 REQUIRE_FOUNDATIONS="${REQUIRE_FOUNDATIONS:-0}"
 TARGETS=()
@@ -192,13 +117,10 @@ binary_runs() {
   "$bin" --version >/dev/null 2>&1 || "$bin" --help >/dev/null 2>&1
 }
 
-# Live config dirs the product actually reads (frontier first — VC_FRAME_CONFIG_DIR).
+# Sole live vc-frame config directory owned by the product.
 _vcframe_config_roots() {
-  local xdg="${XDG_CONFIG_HOME:-$HOME/.config}"
-  printf '%s\n' \
-    "${VC_FRAME_CONFIG_DIR:-}" \
-    "$xdg/vetcoders/frontier/vc-frame" \
-    "$xdg/vc-frame"
+  local xdg="$HOME/.config"
+  printf '%s\n' "$xdg/vibecrafted/vc-frame"
 }
 
 # COCKPIT READY — hard product spine after binary is on PATH.
@@ -237,15 +159,15 @@ verify_vcframe_cockpit() {
   cfg_root=""
   while IFS= read -r candidate; do
     [[ -n "$candidate" ]] || continue
-    if [[ -f "$candidate/config.kdl" ]]; then
+    if [[ -d "$candidate" && ! -L "$candidate" && -f "$candidate/config.kdl" && ! -L "$candidate/config.kdl" ]]; then
       cfg_root="$candidate"
       break
     fi
   done < <(_vcframe_config_roots)
 
   if [[ -z "$cfg_root" ]]; then
-    warn "cockpit: no live config.kdl under frontier or ~/.config/vc-frame"
-    warn "  fix: vibecrafted config install   # or checkout stage_vc_frame_config"
+    warn "cockpit: no live config.kdl under ~/.config/vibecrafted/vc-frame"
+    warn "  fix: run make install from the Vibecrafted checkout with your verified Runtime Pack"
     fails=1
   else
     cfg="$cfg_root/config.kdl"
@@ -293,22 +215,16 @@ verify_vcframe_cockpit() {
 
   composer=""
   if [[ -n "$cfg_root" ]]; then
-    for candidate in \
-      "$cfg_root/vc-composer.sh" \
-      "${XDG_CONFIG_HOME:-$HOME/.config}/vetcoders/frontier/vc-frame/vc-composer.sh" \
-      "${XDG_CONFIG_HOME:-$HOME/.config}/vc-frame/vc-composer.sh"
-    do
-      if [[ -x "$candidate" || -L "$candidate" ]]; then
-        # Prefer non-tiny STALE stubs (legacy 606B antique).
-        if [[ -f "$candidate" ]] && [[ "$(wc -c <"$candidate" | tr -d ' ')" -lt 1500 ]]; then
-          warn "cockpit: $candidate looks like a STALE stub (<1.5KB) — re-run config install"
-          fails=1
-          continue
-        fi
+    candidate="$cfg_root/vc-composer.sh"
+    if [[ -x "$candidate" && ! -L "$candidate" ]]; then
+      # Reject tiny STALE stubs (legacy 606B antique).
+      if [[ -f "$candidate" ]] && [[ "$(wc -c <"$candidate" | tr -d ' ')" -lt 1500 ]]; then
+        warn "cockpit: $candidate looks like a STALE stub (<1.5KB) — reinstall the verified Runtime Pack"
+        fails=1
+      else
         composer="$candidate"
-        break
       fi
-    done
+    fi
   fi
   if [[ -n "$composer" ]]; then
     ok "cockpit: operator composer @ $composer"
@@ -339,28 +255,8 @@ verify_vcframe_cockpit() {
 }
 
 # ---------------------------------------------------------------------------
-# Bundled-toolchain drop-in
+# Optional local source resolution
 # ---------------------------------------------------------------------------
-# Resolves the per-arch directory where release tarballs ship notarized
-# binaries. Order of precedence:
-#   1. $VIBECRAFTED_BUNDLED_BIN (explicit override — absolute path)
-#   2. $SOURCE_DIR/tools/bin/<os>-<arch>
-#   3. $SOURCE_DIR/tools/bin  (flat fallback for dev / single-arch drops)
-bundled_bin_root() {
-  local os arch
-  if [[ -n "${VIBECRAFTED_BUNDLED_BIN:-}" ]]; then
-    printf '%s\n' "$VIBECRAFTED_BUNDLED_BIN"
-    return
-  fi
-  os="$(detect_os)"
-  arch="$(detect_arch)"
-  if [[ -d "$SOURCE_DIR/tools/bin/${os}-${arch}" ]]; then
-    printf '%s\n' "$SOURCE_DIR/tools/bin/${os}-${arch}"
-    return
-  fi
-  printf '%s\n' "$SOURCE_DIR/tools/bin"
-}
-
 _realpath_quiet() {
   local path="$1"
   if [[ -d "$path" ]]; then
@@ -368,34 +264,6 @@ _realpath_quiet() {
     return
   fi
   return 1
-}
-
-# Attempt 0 for every install_*: copy a drop-in binary from the bundled
-# tarball directory before reaching out to GitHub / cargo / npm.
-# Returns 0 only when the binary copied, chmod+x'd, and actually runs.
-install_from_bundled() {
-  local name="$1"
-  local root
-  root="$(bundled_bin_root)"
-  local src="$root/$name"
-
-  [[ -f "$src" ]] || return 1
-
-  if (( CHECK_ONLY )); then
-    info "Would install $name from bundled tarball ($src)"
-    return 0
-  fi
-
-  ensure_prefix
-  cp "$src" "$PREFIX/$name" || return 1
-  chmod +x "$PREFIX/$name"
-  if ! binary_runs "$name"; then
-    warn "Bundled $name failed to run — falling back to remote sources."
-    rm -f "$PREFIX/$name"
-    return 1
-  fi
-  ok "Installed $name from bundled tarball (notarized): $PREFIX/$name"
-  return 0
 }
 
 ensure_node() {
@@ -471,22 +339,21 @@ install_from_npm() {
     return 1
   }
 
+  local npm_args=(install -g "$package")
+  case "$package" in
+    "$LOCTREE_NPM_PACKAGE"|"$AICX_NPM_PACKAGE")
+      # An ambient or scoped registry must not redirect public foundations.
+      npm_args+=(--registry=https://registry.npmjs.org
+        --@loctree:registry=https://registry.npmjs.org)
+      ;;
+  esac
   info "Installing $package via npm..."
-  npm install -g "$package" 2>&1 | tail -3 || {
+  npm "${npm_args[@]}" 2>&1 | tail -3 || {
     warn "npm install $package failed."
     return 1
   }
 
   binary_runs "$binary"
-}
-
-ensure_prefix() {
-  mkdir -p "$PREFIX"
-  # Add to PATH for the rest of this script
-  case ":$PATH:" in
-    *":$PREFIX:"*) ;;
-    *) export PATH="$PREFIX:$PATH" ;;
-  esac
 }
 
 install_loctree() {
@@ -508,77 +375,87 @@ install_loctree() {
   fi
 
   if (( CHECK_ONLY )); then
-    info "Would install Loctree foundations from canonical installer:"
-    info "  curl -fsSL $LOCTREE_INSTALL_URL | sh"
+    info "Would install Loctree from npm: npm install -g $LOCTREE_NPM_PACKAGE"
     return 0
   fi
 
-  warn "Loctree foundations are required, but Vibecrafted will not guess crates, npm packages, or local checkout paths."
-  warn "Use the canonical installer, then rerun this check:"
-  warn "  curl -fsSL $LOCTREE_INSTALL_URL | sh"
+  install_from_npm "$LOCTREE_NPM_PACKAGE" loct || true
+  if loctree_suite_ready; then
+    ok "Loctree from npm: loct=$(command -v loct), loctree-mcp=$(command -v loctree-mcp)"
+    return 0
+  fi
+  warn "Install Loctree from its channel, then rerun this check:"
+  warn "  npm install -g $LOCTREE_NPM_PACKAGE"
   return 1
 }
 
 # ---------------------------------------------------------------------------
-# Generic cargo installer
+# pipx-installed Python products
 # ---------------------------------------------------------------------------
 
-install_from_cargo() {
-  local crate="$1" binary="${2:-$1}"
+ensure_pipx() {
+  has_cmd pipx && return 0
 
-  if has_cmd "$binary"; then
-    ok "$binary already installed: $(command -v "$binary")"
+  if has_cmd brew; then
+    info "Installing pipx via Homebrew..."
+    brew install pipx 2>&1 | tail -3 || true
+    has_cmd pipx && return 0
+  fi
+
+  if has_cmd python3 && python3 -m pip --version >/dev/null 2>&1; then
+    info "Installing pipx into the user Python environment..."
+    _public_pypi python3 -m pip install --user pipx 2>&1 | tail -3 || true
+    export PATH="$HOME/.local/bin:$PATH"
+    has_cmd pipx && return 0
+  fi
+
+  warn "pipx is required to install ScreenScribe."
+  return 1
+}
+
+_public_pypi() (
+  # Scope channel isolation to the command; retain the Founder's settings.
+  unset UV_INDEX UV_EXTRA_INDEX_URL UV_INDEX_URL UV_DEFAULT_INDEX UV_FIND_LINKS
+  unset UV_CONFIG_FILE UV_NO_INDEX PIP_EXTRA_INDEX_URL PIP_FIND_LINKS PIP_NO_INDEX
+  export UV_NO_CONFIG=1 PIP_CONFIG_FILE=/dev/null
+  export PIP_INDEX_URL=https://pypi.org/simple
+  "$@"
+)
+
+install_screenscribe() {
+  if binary_runs screenscribe; then
+    ok "screenscribe already installed: $(command -v screenscribe)"
     return 0
   fi
 
   if (( CHECK_ONLY )); then
-    if has_cmd cargo; then
-      info "Would run: cargo install $crate"
-    else
-      warn "$binary not found and cargo not available"
-      info "Install Rust (https://rustup.rs) then: cargo install $crate"
-    fi
+    info "Would install $SCREENSCRIBE_PACKAGE from PyPI via uv or pipx"
     return 0
   fi
 
-  if ! has_cmd cargo; then
-    warn "cargo not found. Cannot install $crate from crates.io."
-    warn "Options:"
-    warn "  1. Install Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
-    warn "  2. Download binary from GitHub releases"
-    return 1
-  fi
-
-  ensure_prefix
-
-  info "Installing $crate via cargo..."
-  # Install to a temp dir, then copy binaries to PREFIX
-  local cargo_root
-  cargo_root="$(mktemp -d)"
-
-  if cargo install "$crate" --root "$cargo_root" 2>&1; then
-    local installed=0
-    for bin in "$cargo_root/bin/"*; do
-      [ -f "$bin" ] || continue
-      local name
-      name="$(basename "$bin")"
-      cp "$bin" "$PREFIX/$name"
-      chmod +x "$PREFIX/$name"
-      ok "Installed $name -> $PREFIX/$name"
-      installed=1
-    done
-    if (( !installed )); then
-      rm -rf "$cargo_root"
-      warn "cargo install $crate succeeded but no binaries found"
+  if has_cmd uv; then
+    info "Installing $SCREENSCRIBE_PACKAGE from PyPI via uv (Python >= 3.11)..."
+    _public_pypi uv tool install --no-config --force --python '>=3.11' \
+      --default-index https://pypi.org/simple "$SCREENSCRIBE_PACKAGE" || {
+      warn "uv failed to install $SCREENSCRIBE_PACKAGE from PyPI."
       return 1
-    fi
-  else
-    rm -rf "$cargo_root"
-    warn "cargo install $crate failed"
-    return 1
+    }
+    local tool_bin
+    tool_bin="$(_public_pypi uv tool dir --bin)" || return 1
+    export PATH="$tool_bin:$PATH"
+    binary_runs screenscribe
+    return
   fi
 
-  rm -rf "$cargo_root"
+  ensure_pipx || return 1
+  info "Installing $SCREENSCRIBE_PACKAGE from PyPI via pipx..."
+  _public_pypi pipx install --force --index-url https://pypi.org/simple "$SCREENSCRIBE_PACKAGE" || {
+    warn "pipx failed to install $SCREENSCRIBE_PACKAGE."
+    warn "ScreenScribe needs Python >= 3.11; pipx uses its default interpreter unless told otherwise:"
+    warn "  pipx install --python python3.12 $SCREENSCRIBE_PACKAGE"
+    return 1
+  }
+  binary_runs screenscribe
 }
 
 # ---------------------------------------------------------------------------
@@ -586,272 +463,42 @@ install_from_cargo() {
 # ---------------------------------------------------------------------------
 
 install_aicx() {
-  if has_cmd aicx-mcp; then
-    ok "aicx-mcp already installed: $(command -v aicx-mcp)"
+  aicx_ready() { binary_runs aicx && binary_runs aicx-mcp; }
+
+  if aicx_ready; then
+    ok "aicx already installed: aicx=$(command -v aicx), aicx-mcp=$(command -v aicx-mcp)"
     return 0
   fi
 
   if (( CHECK_ONLY )); then
-    info "Would install AICX foundations from canonical Loctree installer:"
-    info "  curl -fsSL $LOCTREE_INSTALL_URL | sh"
+    info "Would install AICX from npm: npm install -g $AICX_NPM_PACKAGE"
     return 0
   fi
 
-  warn "AICX foundations are required, but Vibecrafted will not guess crates, npm packages, or local checkout paths."
-  warn "Use the canonical installer, then rerun this check:"
-  warn "  curl -fsSL $LOCTREE_INSTALL_URL | sh"
+  install_from_npm "$AICX_NPM_PACKAGE" aicx || true
+  if aicx_ready; then
+    ok "AICX from npm: aicx=$(command -v aicx), aicx-mcp=$(command -v aicx-mcp)"
+    return 0
+  fi
+  warn "Install AICX from its channel, then rerun this check:"
+  warn "  npm install -g $AICX_NPM_PACKAGE"
   return 1
 }
 
 # ---------------------------------------------------------------------------
 # vc-frame — product frame binary (hard install on product path)
 #
-# Order:
-#   1. already on PATH and runs
-#   2. sibling Living Tree: build donor with `make release`, then install the
-#      exact binary through this Vibecrafted-owned installer.
-# There is deliberately no vc-frame release/installer fallback.
+# The Runtime Pack installer publishes vc-frame with its matching config.
+# This foundations step inspects that installation.
 # ---------------------------------------------------------------------------
 
-_vcframe_sibling_root() {
-  local candidate
-  for candidate in \
-    "${VIBECRAFTED_VC_FRAME_SOURCE:-}" \
-    "$SOURCE_DIR/../vc-frame" \
-    "$SOURCE_DIR/../vetcoders/vc-frame"
-  do
-    [[ -n "$candidate" ]] || continue
-    if [[ -f "$candidate/Makefile" && -d "$candidate/zellij-utils" ]]; then
-      printf '%s\n' "$(cd "$candidate" && pwd)"
-      return 0
-    fi
-  done
-  return 1
-}
-
+# vc-frame and its product config are installed together by runtime-install.
+# Foundations consumes that result; it cannot build a second donor installation
+# or patch the selected immutable generation.
 install_vcframe() {
-  local sibling vcframe_target_root donor_binary
-  local need_binary=0
-
-  if binary_runs vc-frame; then
-    ok "vc-frame binary present: $(command -v vc-frame)"
-  else
-    need_binary=1
-  fi
-
-  if (( need_binary )); then
-    sibling="$(_vcframe_sibling_root 2>/dev/null || true)"
-    if [[ -n "$sibling" ]]; then
-      if (( CHECK_ONLY )); then
-        info "Would build the vc-frame donor from sibling source and install it through Vibecrafted:"
-        info "  make -C $sibling release"
-        info "  install -m 0755 <donor-binary> $LAUNCHER_PREFIX/vc-frame"
-      else
-        info "Building vc-frame donor from sibling Living Tree: $sibling"
-        vcframe_target_root="${XDG_CACHE_HOME:-$HOME/.cache}/vibecrafted/build/vc-frame"
-        mkdir -p "$vcframe_target_root"
-        if CARGO_TARGET_DIR="$vcframe_target_root" \
-          make -C "$sibling" --no-print-directory release; then
-          donor_binary="$vcframe_target_root/release/vc-frame"
-          [[ -x "$donor_binary" ]] || {
-            warn "vc-frame donor build completed without $donor_binary"
-            return 1
-          }
-          mkdir -p "$LAUNCHER_PREFIX"
-          install -m 0755 "$donor_binary" "$LAUNCHER_PREFIX/vc-frame"
-          if binary_runs vc-frame; then
-            ok "vc-frame donor installed by Vibecrafted: $(command -v vc-frame)"
-            need_binary=0
-          else
-            warn "donor install finished but vc-frame is still not runnable on PATH"
-          fi
-        else
-          warn "vc-frame donor build failed"
-        fi
-      fi
-    fi
-  fi
-
-  if (( need_binary )) && ! (( CHECK_ONLY )); then
-    warn "vc-frame binary missing — cockpit cannot exist without it."
-    warn "Manual paths:"
-    sibling="$(_vcframe_sibling_root 2>/dev/null || true)"
-    if [[ -n "$sibling" ]]; then
-      warn "  make -C $sibling release"
-    fi
-    warn "  set VIBECRAFTED_VC_FRAME_SOURCE to a checkout and rerun"
-    warn "  end users should install the canonical versioned Vibecrafted DMG"
+  if ! verify_vcframe_cockpit; then
+    warn "Repair: run make install from the Vibecrafted checkout with your verified Runtime Pack."
     return 1
-  fi
-
-  if (( CHECK_ONLY )); then
-    # Dry-run still reports cockpit gaps against current machine.
-    verify_vcframe_cockpit || warn "cockpit gaps present (check-only; install would fail until fixed)"
-    return 0
-  fi
-
-  # Best-effort projection before cockpit verify (binary alone is not enough).
-  if command -v vibecrafted >/dev/null 2>&1 \
-    && vibecrafted help 2>/dev/null | grep -q 'config'; then
-    vibecrafted config install 2>/dev/null || true
-  elif [[ -f "$SOURCE_DIR/vibecrafted-core/vibecrafted_core/vc_frame_delivery.py" ]]; then
-    (
-      cd "$SOURCE_DIR"
-      PYTHONPATH="$SOURCE_DIR/vibecrafted-core${PYTHONPATH:+:$PYTHONPATH}" \
-        python3 -c "from vibecrafted_core.vc_frame_delivery import stage_vc_frame_config; stage_vc_frame_config()" \
-        >/dev/null 2>&1
-    ) || true
-  fi
-
-  verify_vcframe_cockpit
-}
-
-
-# Product entry wrapper: ~/.local/bin/vc-frame → product choke + real binary.
-install_vc_frame_product_wrapper() {
-  local real dest wrapper_src cargo_bin product_bin legacy_bin
-  dest="$LAUNCHER_PREFIX/vc-frame"
-  wrapper_src="$SOURCE_DIR/scripts/vc-frame-product-entry.sh"
-  cargo_bin="${HOME}/.cargo/bin/vc-frame"
-  product_bin="${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted/bin/vc-frame"
-  legacy_bin="$LAUNCHER_PREFIX/vc-frame.real"
-
-  if [[ ! -f "$wrapper_src" ]]; then
-    warn "product entry wrapper source missing: $wrapper_src"
-    return 0
-  fi
-
-  # Locate real Mach-O/ELF binary (not a shell wrapper).
-  real=""
-  if [[ -n "${VIBECRAFTED_VC_FRAME_BIN:-}" && -x "${VIBECRAFTED_VC_FRAME_BIN}" ]]; then
-    real="$VIBECRAFTED_VC_FRAME_BIN"
-  elif [[ -x "$cargo_bin" ]] && ! head -c 2 "$cargo_bin" 2>/dev/null | grep -q '#!'; then
-    real="$cargo_bin"
-  elif [[ -x "$product_bin" ]] && ! head -c 2 "$product_bin" 2>/dev/null | grep -q '#!'; then
-    real="$product_bin"
-  elif [[ -x "$dest" ]] && ! head -c 2 "$dest" 2>/dev/null | grep -q '#!'; then
-    real="$dest"
-  elif [[ -x "$legacy_bin" ]] && ! head -c 2 "$legacy_bin" 2>/dev/null | grep -q '#!'; then
-    # One-way migration from the retired sibling shadow into the product data root.
-    real="$legacy_bin"
-  fi
-
-  if [[ -z "$real" ]]; then
-    warn "could not locate real vc-frame binary for product wrapper"
-    return 0
-  fi
-
-  if (( CHECK_ONLY )); then
-    info "Would install product vc-frame entry wrapper -> $dest (symlink into vibecrafted-current/bin; real=$real; remove legacy=$legacy_bin)"
-    return 0
-  fi
-
-  mkdir -p "$LAUNCHER_PREFIX" "$(dirname "$product_bin")"
-  if [[ "$real" == "$dest" || "$real" == "$legacy_bin" ]]; then
-    install -m 0755 "$real" "$product_bin"
-    real="$product_bin"
-  fi
-
-  # PATH must be a symlink into vibecrafted-current so path-doctor and
-  # `vibecrafted update` see one owner. A copied wrapper in ~/.local/bin
-  # is a snapshot Claude/CLI keep running after the generation moves.
-  local tools_home current gen
-  tools_home="${VIBECRAFTED_TOOLS_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted/tools}"
-  current="$tools_home/vibecrafted-current"
-  if [[ -d "$current" ]]; then
-    gen="$(cd "$current" && pwd -P)"
-    mkdir -p "$gen/bin"
-    install -m 0755 "$wrapper_src" "$gen/bin/vc-frame"
-    ln -sfn "$current/bin/vc-frame" "$dest"
-    ok "product vc-frame entry installed: $dest -> $current/bin/vc-frame (real=$real)"
-  else
-    install -m 0755 "$wrapper_src" "$dest"
-    ok "product vc-frame entry installed: $dest (real=$real; no generation, copied)"
-  fi
-  rm -f "$legacy_bin"
-}
-
-
-# Sync product entry choke into the active vibecrafted-current generation so
-# shell vc-start (not only the git checkout) carries prepare + deck cmd_start.
-install_product_entry_into_current() {
-  local tools_home current gen deck_src shell_src
-  tools_home="${VIBECRAFTED_TOOLS_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted/tools}"
-  current="$tools_home/vibecrafted-current"
-  if [[ ! -d "$current" ]]; then
-    warn "vibecrafted-current missing — skip product-entry generation sync"
-    return 0
-  fi
-  # Resolve generation root (current may be a symlink).
-  gen="$(cd "$current" && pwd -P)"
-
-  deck_src=""
-  for candidate in \
-    "$SOURCE_DIR/vibecrafted-core/vibecrafted_core/deck/vibecrafted" \
-    "$SOURCE_DIR/scripts/vibecrafted"
-  do
-    if [[ -f "$candidate" ]] && grep -q '_vetcoders_product_entry_prepare\|Product entrypoint choke' "$candidate" 2>/dev/null; then
-      deck_src="$candidate"
-      break
-    fi
-  done
-  # Fallback: any deck with cmd_start
-  if [[ -z "$deck_src" ]]; then
-    for candidate in \
-      "$SOURCE_DIR/vibecrafted-core/vibecrafted_core/deck/vibecrafted" \
-      "$SOURCE_DIR/scripts/vibecrafted"
-    do
-      [[ -f "$candidate" ]] && deck_src="$candidate" && break
-    done
-  fi
-
-  shell_src=""
-  for candidate in \
-    "$SOURCE_DIR/vibecrafted-core/vibecrafted_core/runtime/shell/lib" \
-    "$SOURCE_DIR/vibecrafted-core/vibecrafted_core/runtime/shell/lib"
-  do
-    if [[ -f "$candidate/dashboard.sh" ]] && grep -q '_vetcoders_product_entry_prepare' "$candidate/dashboard.sh" 2>/dev/null; then
-      shell_src="$candidate"
-      break
-    fi
-  done
-
-  if (( CHECK_ONLY )); then
-    info "Would sync product entry into $gen (shell=${shell_src:-missing} deck=${deck_src:-missing})"
-    return 0
-  fi
-
-  if [[ -n "$shell_src" ]]; then
-    local dest_lib
-    for dest_lib in \
-      "$gen/runtime/shell/lib" \
-      "$gen/vibecrafted-core/vibecrafted_core/runtime/shell/lib"
-    do
-      if [[ -d "$dest_lib" ]]; then
-        install -m 0644 "$shell_src/dashboard.sh" "$dest_lib/dashboard.sh"
-        install -m 0644 "$shell_src/dispatch.sh" "$dest_lib/dispatch.sh"
-        ok "product entry shell synced: $dest_lib/{dashboard,dispatch}.sh"
-      fi
-    done
-  else
-    warn "product entry shell source missing (dashboard.sh prepare not found)"
-  fi
-
-  if [[ -n "$deck_src" ]]; then
-    local dest_deck="$gen/vibecrafted-core/vibecrafted_core/deck/vibecrafted"
-    if [[ -d "$(dirname "$dest_deck")" ]]; then
-      install -m 0755 "$deck_src" "$dest_deck"
-      ok "product entry deck synced: $dest_deck"
-    fi
-  else
-    warn "product entry deck source missing"
-  fi
-
-  local wrapper_src="$SOURCE_DIR/scripts/vc-frame-product-entry.sh"
-  if [[ -f "$wrapper_src" ]]; then
-    mkdir -p "$gen/bin"
-    install -m 0755 "$wrapper_src" "$gen/bin/vc-frame"
-    ok "product vc-frame wrapper synced: $gen/bin/vc-frame"
   fi
 }
 
@@ -917,17 +564,85 @@ install_agents() {
 # prview installer
 # ---------------------------------------------------------------------------
 
+prview_release_target() {
+  case "$(detect_os)-$(detect_arch)" in
+    macos-aarch64) printf 'aarch64-apple-darwin\n' ;;
+    linux-x86_64)  printf 'x86_64-unknown-linux-gnu\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+sha256_of() {
+  if has_cmd shasum; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    sha256sum "$1" | awk '{print $1}'
+  fi
+}
+
+# The latest GitHub release asset for this host, checked against the release's
+# own SHA256SUMS and, on macOS, against the Developer ID team that signs every
+# published prview. Lands in the launcher bin, which agents already search.
 install_prview() {
-  if has_cmd prview; then
+  if binary_runs prview; then
     ok "prview already installed: $(command -v prview)"
     return 0
   fi
 
-  # --- Attempt 0: bundled tarball (notarized drop-in) ---
-  install_from_bundled "prview" && return 0
+  local target asset
+  if ! target="$(prview_release_target)"; then
+    warn "prview publishes no GitHub release asset for $(detect_os)/$(detect_arch) ($PRVIEW_REPO)."
+    return 1
+  fi
+  asset="prview-${target}.tar.gz"
 
-  info "Installing prview from crate metadata; release repo is $PRVIEW_REPO"
-  install_from_cargo "$PRVIEW_CRATE" "prview"
+  if (( CHECK_ONLY )); then
+    info "Would install prview from GitHub releases: $PRVIEW_RELEASE_BASE/$asset -> $LAUNCHER_PREFIX/prview"
+    return 0
+  fi
+
+  if [[ -e "$LAUNCHER_PREFIX/prview" || -L "$LAUNCHER_PREFIX/prview" ]]; then
+    warn "$LAUNCHER_PREFIX/prview exists but does not run; not overwriting another install."
+    return 1
+  fi
+  has_cmd curl || { warn "curl is required to download prview."; return 1; }
+  local work expected observed version
+  work="$(mktemp -d "${TMPDIR:-/tmp}/vibecrafted-prview.XXXXXX")" || return 1
+  if ! curl -fsSL --retry 3 "$PRVIEW_RELEASE_BASE/$asset" -o "$work/$asset" \
+    || ! curl -fsSL --retry 3 "$PRVIEW_RELEASE_BASE/SHA256SUMS" -o "$work/SHA256SUMS"; then
+    warn "Could not download $asset from $PRVIEW_RELEASE_BASE."
+    rm -rf "$work"
+    return 1
+  fi
+  expected="$(awk -v asset="$asset" '$2 == asset || $2 == "*" asset {print $1}' "$work/SHA256SUMS")"
+  observed="$(sha256_of "$work/$asset")"
+  if [[ -z "$expected" || "$expected" != "$observed" ]]; then
+    warn "prview $asset does not match the release SHA256SUMS; refusing to install it."
+    rm -rf "$work"
+    return 1
+  fi
+  if ! tar -xzf "$work/$asset" -C "$work" || [[ ! -f "$work/prview" ]]; then
+    warn "prview $asset carries no prview binary."
+    rm -rf "$work"
+    return 1
+  fi
+  if [[ "$(detect_os)" == "macos" ]]; then
+    local signature
+    signature="$(codesign -dv "$work/prview" 2>&1 || true)"
+    if ! grep -qx "TeamIdentifier=$PRVIEW_MACOS_TEAM_ID" <<<"$signature"; then
+      warn "prview $asset is not signed by Developer ID team $PRVIEW_MACOS_TEAM_ID; refusing to install it."
+      rm -rf "$work"
+      return 1
+    fi
+  fi
+  mkdir -p "$LAUNCHER_PREFIX"
+  install -m 0755 "$work/prview" "$LAUNCHER_PREFIX/prview"
+  rm -rf "$work"
+  if ! version="$("$LAUNCHER_PREFIX/prview" --version 2>/dev/null)"; then
+    warn "prview installed at $LAUNCHER_PREFIX/prview does not run."
+    return 1
+  fi
+  ok "Installed $version from GitHub releases: $LAUNCHER_PREFIX/prview"
 }
 
 # ---------------------------------------------------------------------------
@@ -1072,13 +787,14 @@ usage() {
 Usage: install-foundations.sh [options] [targets...]
 
 Targets:
-  loctree         Validate loctree + loctree-mcp product binaries
-  aicx            Validate aicx / aicx-mcp product binaries
+  loctree         Install loctree + loctree-mcp from npm when missing
+  aicx            Install aicx / aicx-mcp from npm when missing
   vc-frame        Validate vc-frame product binary
-  prview          Install prview (cargo)
+  prview          Install prview from its GitHub release when missing
+  screenscribe    Install screenscribe from PyPI through pipx when missing
   sandbox         Optional microsandbox/libkrun runtime
   iterm2-plugin   vibecrafted iTerm2 / locterm AutoLaunch plugin (macOS, opt-in)
-  (no target)     Validate required foundations; install only framework-owned tools
+  (no target)     Install missing required foundations from their channels
 
 Options:
   --all        Install all foundations (including optional)
@@ -1099,6 +815,7 @@ while [[ $# -gt 0 ]]; do
     vc-frame)    TARGETS+=("vc-frame") ;;
     agents)      TARGETS+=("agents"); AGENTS_REQUIRED=1 ;;
     prview)      TARGETS+=("prview") ;;
+    screenscribe) TARGETS+=("screenscribe") ;;
     sandbox)     TARGETS+=("sandbox") ;;
     iterm2-plugin) TARGETS+=("iterm2-plugin") ;;
     *)           die "Unknown argument: $1" ;;
@@ -1134,7 +851,7 @@ foundation_optional_fail() {
   if [[ "$REQUIRE_FOUNDATIONS" == "1" ]]; then
     exit_code=1
   else
-    warn "$name unavailable — deferring to external/canonical install (non-fatal). Set REQUIRE_FOUNDATIONS=1 to enforce."
+    warn "$name unavailable — install it from its channel later (non-fatal). Set REQUIRE_FOUNDATIONS=1 to enforce."
   fi
 }
 
@@ -1147,8 +864,6 @@ for target in "${TARGETS[@]}"; do
     # separate vc-frame release or installer fallback.
     vc-frame)
       install_vcframe  || foundation_optional_fail vc-frame
-      install_vc_frame_product_wrapper || true
-      install_product_entry_into_current || true
       ;;
     agents)
       if ! install_agents; then
@@ -1159,7 +874,8 @@ for target in "${TARGETS[@]}"; do
         fi
       fi
       ;;
-    prview)  install_prview  || exit_code=1 ;;
+    prview)  install_prview  || foundation_optional_fail prview ;;
+    screenscribe) install_screenscribe || foundation_optional_fail screenscribe ;;
     sandbox) install_sandbox || exit_code=1 ;;
     iterm2-plugin) install_iterm2_integration || exit_code=1 ;;
   esac
@@ -1177,7 +893,9 @@ if (( exit_code == 0 )) && (( !CHECK_ONLY )); then
     *":$LAUNCHER_PREFIX:"*) ;;
     *)
       printf '\n\033[33mAdd to your shell profile:\033[0m\n'
-      # shellcheck disable=SC2016 # $PATH is literal output for the user
+      # This value is literal source or output for a later shell, awk, or Xcode evaluator; expanding
+      # its dollar expressions in the producing shell would change the emitted contract.
+      # shellcheck disable=SC2016
       printf '  export PATH="%s:$PATH"\n\n' "$LAUNCHER_PREFIX"
       ;;
   esac

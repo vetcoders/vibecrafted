@@ -1,0 +1,679 @@
+"""Falsifiers for G2 observation, await-loop, and launch disk-guard repairs."""
+
+from __future__ import annotations
+
+import io
+import json
+import os
+from pathlib import Path
+from typing import Any
+
+import pytest
+from vibecrafted_core import control_plane, process_control, server_observation
+
+
+def _write_runtime_meta(home: Path, run_id: str, payload: dict[str, Any]) -> Path:
+    run_dir = home / "control_plane" / "runtime_runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    meta = run_dir / "meta.json"
+    body = {"run_id": run_id, **payload}
+    meta.write_text(json.dumps(body), encoding="utf-8")
+    (run_dir / "transcript.log").write_text("still working\n", encoding="utf-8")
+    return meta
+
+
+def test_observe_client_timeout_is_longer_than_measured_slow_observe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("VIBECRAFTED_OBSERVE_TIMEOUT_S", raising=False)
+    timeout = server_observation.observe_timeout_seconds()
+    assert timeout >= 15.0
+    recorded: dict[str, float | None] = {}
+
+    def _boom(*_args: Any, **kwargs: Any) -> Any:
+        recorded["timeout"] = kwargs.get("timeout")
+        raise TimeoutError("slow observe")
+
+    monkeypatch.setattr(server_observation, "_origin", lambda: "http://127.0.0.1:9")
+    monkeypatch.setattr(server_observation.urllib.request, "urlopen", _boom)
+    _disable_control_observe(monkeypatch)
+
+    with pytest.raises(server_observation.ServerObservationError):
+        server_observation.observe_run("missing-run")
+
+    assert recorded["timeout"] is not None
+    assert recorded["timeout"] >= 15.0
+
+
+def _disable_control_observe(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("VIBECRAFTED_CONTROL_OBSERVE", raising=False)
+    monkeypatch.delenv("VIBECRAFTED_ROOT", raising=False)
+    monkeypatch.setattr(server_observation.shutil, "which", lambda _name: None)
+
+
+def test_observe_run_falls_back_to_runtime_runs_after_http_timeout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = tmp_path / ".vibecrafted"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    _disable_control_observe(monkeypatch)
+    run_id = "polr-260904-200526-39344"
+    _write_runtime_meta(
+        home,
+        run_id,
+        {
+            "state": "running",
+            "status": "running",
+            "agent": "claude",
+            "liveness": "pid_alive",
+        },
+    )
+
+    def _boom(*_args: Any, **_kwargs: Any) -> Any:
+        raise TimeoutError("observe took 5.94s")
+
+    monkeypatch.setattr(server_observation, "_origin", lambda: "http://127.0.0.1:9")
+    monkeypatch.setattr(server_observation.urllib.request, "urlopen", _boom)
+
+    payload = server_observation.observe_run(run_id)
+
+    assert payload["found"] is True
+    assert payload["run_id"] == run_id
+    assert payload["source"] in (
+        "local_control_plane_fallback",
+        "control_core_observe_unavailable",
+    )
+    assert payload["terminal"] is False
+    assert payload["process_truth"] == "unknown"
+    assert payload.get("run") is not None
+    assert (payload.get("run") or {}).get("state") in (None, "", "unknown")
+
+
+def _write_loop_lock(home: Path, run_id: str, **fields: object) -> Path:
+    locks = home / "locks" / ".vibecrafted"
+    locks.mkdir(parents=True, exist_ok=True)
+    payload = {"run_id": run_id, **fields}
+    path = locks / f"{run_id}.lock"
+    path.write_text(
+        "\n".join(f"{key}={value}" for key, value in payload.items()) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_failed_lock_with_counters_and_dead_pid_is_not_running(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = tmp_path / ".vibecrafted"
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    run_id = "review-loop"
+    _write_loop_lock(
+        home,
+        run_id,
+        status="failed",
+        current=1,
+        total=5,
+        pid=99999999,
+        agent="claude",
+        root=tmp_path,
+    )
+    assert control_plane._loop_lock_is_running(run_id) is False
+
+
+def test_running_lock_with_dead_owner_is_not_running(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = tmp_path / ".vibecrafted"
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    run_id = "review-loop"
+    _write_loop_lock(
+        home,
+        run_id,
+        status="running",
+        current=1,
+        total=5,
+        pid=99999999,
+        agent="claude",
+        root=tmp_path,
+    )
+    assert control_plane._loop_lock_is_running(run_id) is False
+
+
+def test_await_does_not_complete_settled_parent_while_live_loop_lock_is_owned(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import subprocess
+    import sys
+
+    home = tmp_path / ".vibecrafted"
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    run_id = "polr-lock-parent"
+    _write_runtime_meta(
+        home,
+        run_id,
+        {
+            "state": "settled",
+            "status": "settled",
+            "agent": "guardian",
+            "liveness": "lock_present",
+            "latest_report": "",
+            "latest_transcript": "",
+        },
+    )
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        _write_loop_lock(
+            home,
+            run_id,
+            status="running",
+            current=3,
+            total=5,
+            pid=child.pid,
+            pgid=os.getpgid(child.pid),
+            agent="claude",
+            root=tmp_path,
+            started="2026-09-04T20:00:00+00:00",
+        )
+        assert control_plane._loop_lock_is_running(run_id) is True
+        payload = control_plane.await_run(
+            run_id,
+            timeout_seconds=0.15,
+            interval_seconds=0.05,
+            hard_cap_seconds=0.35,
+        )
+    finally:
+        child.terminate()
+        child.wait()
+
+    assert payload["completed"] is False
+    assert payload["worker_alive"] is True
+    assert payload["run_id"] == run_id
+
+
+def test_await_hard_cap_fires_while_live_loop_lock_is_owned(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import subprocess
+    import sys
+
+    home = tmp_path / ".vibecrafted"
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    run_id = "polr-lock-hard-cap"
+    _write_runtime_meta(
+        home,
+        run_id,
+        {
+            "state": "settled",
+            "status": "settled",
+            "agent": "guardian",
+            "liveness": "lock_present",
+        },
+    )
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        _write_loop_lock(
+            home,
+            run_id,
+            status="running",
+            current=1,
+            total=5,
+            pid=child.pid,
+            pgid=os.getpgid(child.pid),
+        )
+        payload = control_plane.await_run(
+            run_id,
+            timeout_seconds=0.05,
+            interval_seconds=0.05,
+            hard_cap_seconds=0.2,
+        )
+    finally:
+        child.terminate()
+        child.wait()
+
+    assert payload["completed"] is False
+    assert payload["worker_alive"] is True
+    assert payload["timed_out"] is True
+    assert payload["reason"] == "hard_cap"
+
+
+def test_loop_lock_stays_running_when_child_process_is_alive(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import subprocess
+    import sys
+
+    home = tmp_path / ".vibecrafted"
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    monkeypatch.setattr(process_control, "build_env_index", dict)
+    parent = "polr-child-lock"
+    _write_loop_lock(
+        home,
+        parent,
+        status="running",
+        current=1,
+        total=5,
+        pid=99999999,
+    )
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        identity = process_control.process_identity_receipt(
+            child.pid, run_id=f"{parent}-claude-L1"
+        )
+        assert identity is not None
+        _write_runtime_meta(
+            home,
+            f"{parent}-claude-L1",
+            {
+                "state": "running",
+                "status": "running",
+                "agent": "claude",
+                "worker_pid": child.pid,
+                "worker_pgid": os.getpgid(child.pid),
+                "worker_identity": identity,
+                "liveness": "pid_alive",
+            },
+        )
+        assert control_plane._loop_lock_is_running(parent) is True
+    finally:
+        child.terminate()
+        child.wait()
+
+
+def test_await_idle_stale_lock_does_not_keep_settled_parent_alive(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = tmp_path / ".vibecrafted"
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    run_id = "polr-stale-idle"
+    _write_runtime_meta(
+        home,
+        run_id,
+        {
+            "state": "settled",
+            "status": "settled",
+            "agent": "guardian",
+            "liveness": "lock_present",
+            "latest_report": "",
+            "latest_transcript": "",
+        },
+    )
+    _write_loop_lock(
+        home,
+        run_id,
+        status="failed",
+        current=1,
+        total=5,
+        pid=99999999,
+    )
+
+    payload = control_plane.await_run(
+        run_id,
+        timeout_seconds=0.15,
+        interval_seconds=0.05,
+        hard_cap_seconds=0.35,
+    )
+
+    assert payload["worker_alive"] is False
+    assert payload["completed"] is True
+
+
+def test_await_finds_loop_children_in_runtime_runs_without_snapshot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import subprocess
+    import sys
+
+    home = tmp_path / ".vibecrafted"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    monkeypatch.setattr(process_control, "build_env_index", dict)
+    parent = "polr-runtime-children"
+    _write_runtime_meta(
+        home,
+        parent,
+        {"state": "settled", "status": "settled", "agent": "guardian"},
+    )
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        identity = process_control.process_identity_receipt(
+            child.pid, run_id=f"{parent}-claude-L1"
+        )
+        assert identity is not None
+        _write_runtime_meta(
+            home,
+            f"{parent}-claude-L1",
+            {
+                "state": "running",
+                "status": "running",
+                "agent": "claude",
+                "worker_pid": child.pid,
+                "worker_pgid": os.getpgid(child.pid),
+                "worker_identity": identity,
+                "liveness": "pid_alive",
+            },
+        )
+        payload = control_plane.await_run(
+            parent,
+            timeout_seconds=0.15,
+            interval_seconds=0.05,
+            hard_cap_seconds=0.4,
+        )
+    finally:
+        child.terminate()
+        child.wait()
+
+    assert payload["completed"] is False
+    assert payload["worker_alive"] is True
+
+
+def test_ensure_launch_storage_refuses_when_volume_is_below_floor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("VIBECRAFTED_LAUNCH_MIN_FREE_BYTES", raising=False)
+    monkeypatch.setattr(control_plane, "_storage_free_bytes", lambda _path: 1024)
+    with pytest.raises(control_plane.ControlPlaneStorageError) as excinfo:
+        control_plane.ensure_launch_storage(tmp_path)
+    message = str(excinfo.value)
+    assert "control-plane degraded" in message
+    assert "launch" in message
+
+
+def test_ensure_launch_storage_can_be_disabled_for_tiny_fixtures(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_LAUNCH_MIN_FREE_BYTES", "0")
+    monkeypatch.setattr(control_plane, "_storage_free_bytes", lambda _path: 0)
+    control_plane.ensure_launch_storage(tmp_path)
+
+
+def _boom_observe(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _boom(*_args: Any, **_kwargs: Any) -> Any:
+        raise TimeoutError("observe timeout")
+
+    monkeypatch.setattr(server_observation, "_origin", lambda: "http://127.0.0.1:9")
+    monkeypatch.setattr(server_observation.urllib.request, "urlopen", _boom)
+
+
+def _patch_lookup_run(monkeypatch: pytest.MonkeyPatch, payload: dict[str, Any]) -> None:
+    monkeypatch.setattr(control_plane, "lookup_run", lambda _run_id: dict(payload))
+
+
+def test_observe_fallback_completed_status_is_not_classified_without_control_core(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without control-observe, Python must not invent terminal from lookup_run."""
+    _boom_observe(monkeypatch)
+    _disable_control_observe(monkeypatch)
+    _patch_lookup_run(
+        monkeypatch,
+        {"run_id": "probe", "status": "completed", "exit_code": 0},
+    )
+
+    payload = server_observation.observe_run("probe")
+
+    assert payload["found"] is True
+    assert payload["terminal"] is False
+    assert payload["worker_alive"] is None
+    assert payload["process_truth"] == "unknown"
+    assert payload["source"] in (
+        "local_control_plane_fallback",
+        "control_core_observe_unavailable",
+    )
+    assert "control_core_observe_unavailable" in payload["disagreement_reasons"]
+
+
+def test_observe_fallback_unknown_running_is_not_death(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Independent probe (b): missing worker evidence is not proof of death."""
+    _boom_observe(monkeypatch)
+    _disable_control_observe(monkeypatch)
+    _patch_lookup_run(
+        monkeypatch,
+        {"run_id": "probe", "state": "running", "process_truth": "unknown"},
+    )
+
+    payload = server_observation.observe_run("probe")
+
+    assert payload["found"] is True
+    assert payload["terminal"] is False
+    assert payload["worker_alive"] is None
+    assert payload["process_truth"] == "unknown"
+    assert payload["evidence_disagreement"] is True
+    assert "control_core_observe_unavailable" in payload["disagreement_reasons"]
+
+
+def test_observe_fallback_without_control_core_does_not_classify(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _boom_observe(monkeypatch)
+    _disable_control_observe(monkeypatch)
+    _patch_lookup_run(
+        monkeypatch,
+        {"run_id": "probe", "state": "running", "liveness": "pid_alive"},
+    )
+
+    payload = server_observation.observe_run("probe")
+
+    assert payload["found"] is True
+    assert payload["source"] in (
+        "local_control_plane_fallback",
+        "control_core_observe_unavailable",
+    )
+    assert payload["terminal"] is False
+    assert payload["worker_alive"] is None
+    assert payload["process_truth"] == "unknown"
+    assert "control_core_observe_unavailable" in payload["disagreement_reasons"]
+    assert (payload.get("run") or {}).get("state") in (None, "", "unknown")
+
+
+def test_observe_fallback_uses_control_observe_binary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _boom_observe(monkeypatch)
+    binary = tmp_path / "control-observe"
+    binary.write_text(
+        "#!/bin/sh\n"
+        "cat <<'EOF'\n"
+        '{"schema":"vibecrafted.run-observation.v1","run_id":"probe","found":true,'
+        '"terminal":false,"worker_alive":true,"process_truth":"live",'
+        '"run":{"run_id":"probe","state":"active"}}\n'
+        "EOF\n",
+        encoding="utf-8",
+    )
+    binary.chmod(0o755)
+    monkeypatch.setenv("VIBECRAFTED_CONTROL_OBSERVE", str(binary))
+
+    payload = server_observation.observe_run("probe")
+
+    assert payload["source"] == "control_core_compute_view"
+    assert payload["process_truth"] == "live"
+    assert payload["worker_alive"] is True
+    assert (payload.get("run") or {}).get("state") == "active"
+
+
+def test_observe_http_stamps_source_when_server_omits_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        server_observation,
+        "_request_json",
+        lambda *_args, **_kwargs: {
+            "schema": "vibecrafted.run-observation.v1",
+            "run_id": "probe",
+            "found": True,
+            "run": {"run_id": "probe", "state": "active"},
+        },
+    )
+
+    payload = server_observation.observe_run("probe")
+
+    assert payload["source"] == "vc-server-compute_view"
+    assert (payload.get("run") or {}).get("state") == "active"
+
+
+def _serve_http_payload(
+    monkeypatch: pytest.MonkeyPatch, payload: dict[str, Any]
+) -> None:
+    """Answer every observation request with ``payload`` as a vc-server would."""
+
+    def _respond(*_args: Any, **_kwargs: Any) -> io.BytesIO:
+        return io.BytesIO(json.dumps(payload).encode("utf-8"))
+
+    monkeypatch.setattr(server_observation, "_origin", lambda: "http://127.0.0.1:9")
+    monkeypatch.setattr(server_observation.urllib.request, "urlopen", _respond)
+
+
+def _fake_control_observe(tmp_path: Path, run_id: str) -> Path:
+    binary = tmp_path / "control-observe"
+    binary.write_text(
+        "#!/bin/sh\n"
+        "cat <<'EOF'\n"
+        '{"schema":"vibecrafted.run-observation.v1","run_id":"' + run_id + '",'
+        '"found":true,"terminal":false,"worker_alive":true,"process_truth":"live",'
+        '"run":{"run_id":"' + run_id + '","state":"active"}}\n'
+        "EOF\n",
+        encoding="utf-8",
+    )
+    binary.chmod(0o755)
+    return binary
+
+
+def test_observe_refuses_a_server_that_serves_another_control_plane(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The server origin is operator-wide; VIBECRAFTED_HOME is per caller.
+
+    A vc-server that answers for a different control plane cannot know this
+    caller's runs, so its ``found: false`` is not evidence. The reader must
+    fall back to control-core against its own home instead of reporting a
+    live run as missing.
+    """
+    home = tmp_path / "caller" / ".vibecrafted"
+    (home / "control_plane").mkdir(parents=True)
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    foreign = tmp_path / "operator" / ".vibecrafted" / "control_plane"
+    _serve_http_payload(
+        monkeypatch,
+        {
+            "schema": "vibecrafted.run-observation.v1",
+            "run_id": "probe",
+            "control_plane": str(foreign),
+            "found": False,
+            "terminal": False,
+            "worker_alive": None,
+            "process_truth": "unknown",
+            "run": None,
+        },
+    )
+    monkeypatch.setenv(
+        "VIBECRAFTED_CONTROL_OBSERVE", str(_fake_control_observe(tmp_path, "probe"))
+    )
+
+    payload = server_observation.observe_run("probe")
+
+    assert payload["found"] is True
+    assert payload["source"] == "control_core_compute_view"
+    assert payload["process_truth"] == "live"
+    assert "ForeignControlPlaneError" in payload["writer_revalidation"]
+
+
+def test_observe_refuses_a_server_answer_without_control_plane_identity(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = tmp_path / ".vibecrafted"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    _serve_http_payload(
+        monkeypatch,
+        {"schema": "vibecrafted.run-observation.v1", "run_id": "probe", "found": False},
+    )
+    monkeypatch.setenv(
+        "VIBECRAFTED_CONTROL_OBSERVE", str(_fake_control_observe(tmp_path, "probe"))
+    )
+
+    payload = server_observation.observe_run("probe")
+
+    assert payload["found"] is True
+    assert payload["source"] == "control_core_compute_view"
+
+
+def test_observe_trusts_the_server_that_serves_this_control_plane(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = tmp_path / ".vibecrafted"
+    (home / "control_plane").mkdir(parents=True)
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    _disable_control_observe(monkeypatch)
+    _serve_http_payload(
+        monkeypatch,
+        {
+            "schema": "vibecrafted.run-observation.v1",
+            "run_id": "probe",
+            "control_plane": str(home / "control_plane"),
+            "found": True,
+            "terminal": False,
+            "worker_alive": True,
+            "process_truth": "live",
+            "run": {"run_id": "probe", "state": "active"},
+        },
+    )
+
+    payload = server_observation.observe_run("probe")
+
+    assert payload["source"] == "vc-server-compute_view"
+    assert payload["found"] is True
+    assert (payload.get("run") or {}).get("state") == "active"
+
+
+def test_list_runs_refuses_runs_from_another_control_plane(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``--last`` must never pick a run that lives in someone else's home."""
+    home = tmp_path / "caller" / ".vibecrafted"
+    (home / "control_plane").mkdir(parents=True)
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    _serve_http_payload(
+        monkeypatch,
+        {
+            "control_plane": str(
+                tmp_path / "operator" / ".vibecrafted" / "control_plane"
+            ),
+            "count": 1,
+            "runs": [{"run_id": "foreign-run", "agent": "codex"}],
+        },
+    )
+    monkeypatch.setattr(
+        control_plane,
+        "sync_state",
+        lambda: {"active_runs": [{"run_id": "own-run", "agent": "codex"}]},
+    )
+
+    assert server_observation.resolve_run_id("codex", "", last=True) == "own-run"
+
+
+def test_control_core_fallback_observes_the_home_the_identity_check_uses(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The fallback eye and the server identity check read one home, not two."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("VIBECRAFTED_HOME", "~/vc-home-probe")
+    _boom_observe(monkeypatch)
+    binary = tmp_path / "control-observe"
+    binary.write_text(
+        "#!/bin/sh\n"
+        'printf \'{"schema":"vibecrafted.run-observation.v1","run_id":"probe",'
+        '"found":true,"run":{"run_id":"probe","home":"%s"}}\\n\' "$2"\n',
+        encoding="utf-8",
+    )
+    binary.chmod(0o755)
+    monkeypatch.setenv("VIBECRAFTED_CONTROL_OBSERVE", str(binary))
+
+    payload = server_observation.observe_run("probe")
+
+    assert payload["source"] == "control_core_compute_view"
+    assert (payload.get("run") or {}).get("home") == str(tmp_path / "vc-home-probe")

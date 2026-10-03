@@ -1,0 +1,3 @@
+{"role":"meta","type":"system.version","version":"0.42.0"}
+error: failed to run prompt: provider.auth_error: 403 You've reached your monthly usage limit for this billing cycle. Your quota will be refreshed in the next cycle. To continue now, purchase extra usage or upgrade your plan: https://www.kimi.com/membership/subscription?tab=quota
+See log: /redacted/home/.kimi-code/logs/kimi-code.log

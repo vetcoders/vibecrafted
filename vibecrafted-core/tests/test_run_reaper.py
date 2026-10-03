@@ -675,3 +675,87 @@ def test_reap_json_exposes_three_ownership_buckets():
     assert payload["ownership"]["provable"]
     assert payload["ownership"]["legacy"]
     assert payload["ownership"]["undecidable"]
+
+
+# --- F11: orphaned run-lock sweep -------------------------------------------
+
+
+def _lock_file(tmp_path, name, body, *, age_seconds=0.0):
+    import os
+    import time as _time
+
+    path = tmp_path / name
+    path.write_text(body, encoding="utf-8")
+    if age_seconds:
+        stamp = _time.time() - age_seconds
+        os.utime(path, (stamp, stamp))
+    return path
+
+
+def test_lock_sweep_removes_stale_running_lock_without_pid(tmp_path):
+    """A month-old status=running lock with no PID is a zombie, not a run."""
+    stale = _lock_file(
+        tmp_path,
+        "old.lock",
+        "run_id=old\nstatus=running\n",
+        age_seconds=30 * 24 * 3600,
+    )
+    result = run_reaper.sweep_orphaned_locks(lock_files=[stale])
+    assert result["removed"] == [f"{stale}:stale_no_pid"]
+    assert not stale.exists()
+
+
+def test_lock_sweep_keeps_a_fresh_lock_and_a_live_pid(tmp_path):
+    """Fresh starts and provably live launchers must survive the sweep."""
+    fresh = _lock_file(tmp_path, "fresh.lock", "run_id=f\nstatus=running\n")
+    live = _lock_file(
+        tmp_path,
+        "live.lock",
+        "run_id=l\nstatus=running\nlauncher_pid=4242\n",
+        age_seconds=3 * 3600,
+    )
+    result = run_reaper.sweep_orphaned_locks(
+        lock_files=[fresh, live], alive_check=lambda pid: pid == 4242
+    )
+    assert result["removed"] == []
+    assert fresh.exists() and live.exists()
+
+
+def test_lock_sweep_removes_old_lock_with_dead_pid(tmp_path):
+    dead = _lock_file(
+        tmp_path,
+        "dead.lock",
+        "run_id=d\nstatus=running\nlauncher_pid=555\n",
+        age_seconds=3 * 3600,
+    )
+    result = run_reaper.sweep_orphaned_locks(
+        lock_files=[dead], alive_check=lambda pid: False
+    )
+    assert result["removed"] == [f"{dead}:pid_gone"]
+    assert not dead.exists()
+
+
+def test_lock_sweep_removes_terminal_status_lock(tmp_path):
+    done = _lock_file(tmp_path, "done.lock", "run_id=x\nstatus=completed\n")
+    result = run_reaper.sweep_orphaned_locks(lock_files=[done])
+    assert result["removed"] == [f"{done}:terminal_status"]
+    assert not done.exists()
+
+
+def test_lock_sweep_dry_run_reports_without_deleting(tmp_path):
+    stale = _lock_file(
+        tmp_path,
+        "old.lock",
+        "run_id=old\nstatus=running\n",
+        age_seconds=30 * 24 * 3600,
+    )
+    result = run_reaper.sweep_orphaned_locks(lock_files=[stale], dry_run=True)
+    assert result["removed"] == [f"{stale}:stale_no_pid"]
+    assert stale.exists()
+
+
+def test_lock_sweep_never_raises_on_unreadable_entries(tmp_path):
+    missing = tmp_path / "gone.lock"
+    result = run_reaper.sweep_orphaned_locks(lock_files=[missing])
+    assert result["removed"] == []
+    assert result["kept"] == [str(missing)]

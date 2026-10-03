@@ -64,28 +64,36 @@ prompt = "Implement cut {id} in {repo}."
 | `reports_dir` | no       | Rendered into `{reports_dir}`                     |
 | `tracker`     | no       | Tracker path, rendered into `{tracker}`           |
 
-`reports_dir` and `tracker` are recovery-only compatibility inputs. New
-dispatch writes ignore them and allocate under the canonical global artifact
-plane:
+`reports_dir` and `tracker` are optional. When set, they must live under the
+canonical global artifact plane (`~/.vibecrafted/artifacts` or
+`$VIBECRAFTED_HOME/artifacts`) after path normalization. Prefix matches such
+as `~/.vibecrafted/artifacts-typo` are not that plane. Traversal
+(`artifacts/../../.codex`) and existing symlink escapes are resolved even
+when the destination file does not yet exist, then checked against the
+directory boundary. If symlink resolution raises, the path is not admitted
+as the canonical artifacts plane. New dispatch writes that omit them allocate there:
 
 ```text
 ~/.vibecrafted/artifacts/<org>/<repo>/YYYY_MMDD/{plans,reports,...}
 ```
 
-Provider-specific roots and repo-local `.vibecrafted` paths fail doctor.
+Provider-specific roots (`~/.claude`, `~/.codex`, `~/.gemini`, `~/.cursor`)
+and repo-local `.vibecrafted` paths fail doctor. The canonical artifacts
+plane itself is accepted.
 
 ## `[policy]`
 
-| Key                         | Default        | Values / meaning                                        |
-| --------------------------- | -------------- | ------------------------------------------------------- |
-| `repair_rounds`             | `0`            | Repair attempts after a failed cut                      |
-| `on_critical_fail`          | `"break"`      | `break` \| `continue`                                   |
-| `on_timeout`                | `"fail"`       | `repair` \| `fail` \| `continue`                        |
-| `concurrency`               | `1`            | `> 1` requires `allow_concurrency = true`               |
-| `allow_concurrency`         | `false`        | Also accepted: `enable_concurrency`, `parallel_enabled` |
-| `verify_executor`           | `"supervisor"` | Who runs verifiers                                      |
-| `require_commit`            | `false`        | Require a commit from the worker                        |
-| `allow_idempotent_existing` | `true`         | Accept already-satisfied cuts                           |
+| Key                         | Default        | Values / meaning                                                                                                       |
+| --------------------------- | -------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `repair_rounds`             | `0`            | Repair attempts after a failed cut                                                                                     |
+| `on_critical_fail`          | `"break"`      | `break` \| `continue`                                                                                                  |
+| `on_noncritical_dep_fail`   | `"stop"`       | `stop` fences queued cuts after an unverified non-critical contract; `continue` explicitly permits expendable failures |
+| `on_timeout`                | `"fail"`       | `repair` \| `fail` \| `continue`                                                                                       |
+| `concurrency`               | `1`            | `> 1` requires `allow_concurrency = true`                                                                              |
+| `allow_concurrency`         | `false`        | Also accepted: `enable_concurrency`, `parallel_enabled`                                                                |
+| `verify_executor`           | `"supervisor"` | Who runs verifiers                                                                                                     |
+| `require_commit`            | `false`        | Require a commit from the worker                                                                                       |
+| `allow_idempotent_existing` | `true`         | Accept already-satisfied cuts                                                                                          |
 
 ### `[policy.await]`
 
@@ -110,7 +118,7 @@ the titles.
 | Key                | Required     | Meaning                                                                                                               |
 | ------------------ | ------------ | --------------------------------------------------------------------------------------------------------------------- |
 | `id`               | yes          | Unique cut id, rendered into `{id}`                                                                                   |
-| `agent`            | no           | Fleet agent (`claude`, `codex`, `agy`, `junie`, `grok`)                                                               |
+| `agent`            | no           | Fleet agent (`claude`, `codex`, `agy`, `junie`, `grok`, `cursor`)                                                     |
 | `workflow`         | yes          | Must resolve (via `workflow_map`) to a supported workflow                                                             |
 | `phase`            | no           | Phase title, when phases are declared                                                                                 |
 | `prompt` / `brief` | one required | Inline prompt, or a brief file path (resolved relative to the plan file; must exist)                                  |
@@ -123,14 +131,38 @@ the titles.
 | `verify`           | usually      | Array of verifier tables (below)                                                                                      |
 | `recovery`         | no           | `{ on = "[!]", goto = "<cut-id-or-phase>", max_loops = <int> }` — `goto` must name an existing cut or phase           |
 | `depends_on`       | no           | Cut id array. A cut becomes ready only after every dependency settles successfully; cycles and unknown ids fail parse |
+| `base`             | no           | Per-cut worktree base: `"<sha>"`, `"<branch>"`, or `"cut:<cut-id>"`. Absent = the plan baseline (below)               |
 | `integrator`       | no           | `true` names an exclusive WRITE cut that alone may modify the main checkout                                           |
+| `compile_embargo`  | no           | Boolean, default `false`. Structural WRITE worker posts an unverified checkpoint and defers all executable gates      |
+| `closes_embargo`   | no           | Checkpoint cut ids; only a WRITE integrator may declare closure, and every id must be a `compile_embargo` dependency  |
+
+Embargo is plan-owned. An integrator cannot itself declare `compile_embargo`.
+Checkpoint claims include SHA, owned scope, and every skipped hook or security
+control. They remain `[~]`; their declared commands are deferred, not certified.
+Each skipped control must map to an exact declared verifier command. An unknown
+hook obligation blocks closure until the plan declares that command. The writer
+uses the union of integrator and checkpoint declared verifiers in the assembled
+runtime root; a claim cannot supply executable commands.
+A closure integrator may assemble its named checkpoint dependencies while they
+are unverified. It records `W2_STRUCTURALLY_CLOSED` for the exact assembled SHA
+and restores full gates. Only the canonical writer's full verification against
+that SHA can close the embargo and settle `[x]`. Payloads cannot grant closure
+authority or choose a smaller set of gates.
 
 ## Scheduling and checkout contract
 
 The supervisor parses `depends_on` as a DAG. It launches all ready workers up
-to `policy.concurrency`; independent failures do not stop siblings unless the
-declared critical-failure policy breaks the line. An integrator is exclusive
+to `policy.concurrency`. By default, a failed or unknown contract stops admission
+of every queued cut, including cuts without a dependency edge. Already active
+siblings finish and keep their evidence; they are not terminated by this fence.
+Repair rounds run before the supervisor decides whether a contract is verified.
+An integrator is exclusive
 for the repository and never overlaps another active cut.
+
+Plans that deliberately tolerate an expendable non-critical cut must explicitly
+set `on_noncritical_dep_fail = "continue"`. Its failure stays in the baton.
+Critical cuts retain their separate `on_critical_fail` policy. Worker completion
+alone never releases the default fence: supervisor verification must be green.
 
 Every non-integrator cut receives:
 
@@ -163,9 +195,40 @@ vibecrafted dispatch plan.dispatch.toml --cleanup-settled <run-id>
 
 Branches and durable reports remain. Active cuts are never cleaned.
 
+### Per-cut `base`
+
+`depends_on` orders time only: a dependent cut still starts its worktree from
+the plan baseline and never sees its predecessor's commits. `base` orders the
+tree. Each form:
+
+```toml
+base = "<sha>"        # worktree from that commit (must be reachable in meta.repo)
+base = "<branch>"     # worktree from that local branch, pinned at resolution time
+base = "cut:w1-02"    # worktree from that cut's delivered_commit_sha (settled receipt)
+```
+
+- A `cut:<id>` base requires `<id>` in the cut's `depends_on` — the dependency
+  orders time, the base orders ancestry. The supervisor resolves it at launch,
+  after the dependency settles; `--dry-run --json` reports it as
+  `"<pending: cut-id>"`.
+- The doctor refuses a `cut:` base without the matching `depends_on`, an
+  unknown target, a cycle through `base` (same check as `depends_on`), and a
+  `sha`/`branch` that is not reachable in `meta.repo`
+  ("base not reachable in meta.repo").
+- An explicit base is frozen: the living-tree descendant follow that may
+  advance the _plan_ baseline never applies to `base`, and `--resume` keeps
+  the base recorded on the cut's receipt instead of re-resolving a moved ref.
+- An integrator cannot declare `base` — it works on the main checkout.
+- Every cut receipt records `base_ref` (the declaration), `base_sha` (the
+  resolved commit), and `base_source` (`plan` \| `sha` \| `branch` \| `cut`).
+- No `base` = the plan baseline, exactly as before; existing plans parse and
+  run unchanged. See `examples/dispatch/stacked-cuts.dispatch.toml`.
+
 ## `[[cuts.verify]]`
 
-Each verifier runs a shell command and matches its output:
+Each verifier runs a shell command and matches its output. A command must exit
+with code 0 unless `expect.exit_code` explicitly declares a different code for
+a negative-path probe; matching text alone cannot hide a failed command:
 
 ```toml
 [[cuts.verify]]
@@ -206,3 +269,19 @@ commands render these placeholders:
 Anything not listed in these tables is not part of the v1 schema. When in
 doubt, `--doctor` is the authority: it reports every unknown or invalid
 field by path (for example `cuts[2].verify[0].expect.exit_code`).
+
+## Brief frontmatter: `agent:` must equal `cuts[].agent`
+
+When a cut's `brief` (or an inline `prompt` that itself begins with YAML
+frontmatter) names an `agent:`, that value must equal the cut's
+`cuts[].agent` — the selected fleet provider. `vibecrafted dispatch
+--doctor` and launch refuse a mismatch with:
+
+```text
+cuts[N].model: frontmatter agent conflicts with selected provider
+```
+
+This is independent of `cuts[].model`. The brief's `agent:` is the fleet
+agent (`claude`, `codex`, `agy`, `junie`, `grok`, `cursor`); the cut must
+name the same agent. A model pin may still live on the brief as `model:`
+or on the cut as `model`.

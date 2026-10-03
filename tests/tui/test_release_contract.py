@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -12,11 +15,12 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RELEASE_PAGE = "https://github.com/vetcoders/vibecrafted/releases/latest"
 
-# Pinned so the Windows entry point cannot drift silently. Measured
-# 2026-08-18; both copies agreed at this digest. See
+# Pinned to the native Windows entry point selected for v4.3.1 on 2026-10-01.
+# The public website still serves the older WSL-only copy; release acceptance
+# must separately settle that deployment drift. See
 # test_windows_entry_point_does_not_drift_between_its_two_copies for why a
 # constant is needed on top of the cross-repo comparison.
-INSTALL_PS1_SHA256 = "12c2ca5b95195a2fcee0f4987962fd35ec52dde85588c226f68bcab4680450b6"
+INSTALL_PS1_SHA256 = "595ec587d69448419073efdc6d0d490d87c80c6149ba3cad658370b9fb1ec30c"
 
 # Binaries a developer laptop always has and the GitHub macos-15 image does
 # not. Measured 2026-08-18 against actions/runner-images
@@ -27,7 +31,375 @@ INSTALL_PS1_SHA256 = "12c2ca5b95195a2fcee0f4987962fd35ec52dde85588c226f68bcab468
 ABSENT_FROM_MACOS_RUNNER_IMAGE = ("rg", "fd")
 
 
-def test_public_install_surfaces_name_both_release_channels() -> None:
+def test_make_release_bootstraps_exact_rust_targets_and_uses_classic_ld() -> None:
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+    linker = (REPO_ROOT / "scripts/lib/rust-linker-darwin-classic.sh").read_text(
+        encoding="utf-8"
+    )
+    contract = (REPO_ROOT / "scripts/lib/release-toolchain-contract.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        "RELEASE_TOOLCHAIN_CONTRACT := scripts/lib/release-toolchain-contract.sh"
+        in makefile
+    )
+    assert "VIBECRAFTED_RELEASE_RUSTUP_TOOLCHAIN='1.96.0'" in contract
+    assert (
+        "VIBECRAFTED_RELEASE_RUST_TARGETS='wasm32-wasip1 wasm32-unknown-unknown'"
+        in contract
+    )
+    assert "clang-1700.6.3.2" in contract
+    assert "PROJECT:ld64-956.6" in contract
+    assert 'rustup toolchain install "$$toolchain" --profile minimal' in makefile
+    assert 'rustup target add --toolchain "$$toolchain" "$$target"' in makefile
+    assert (
+        "app dmg dmg-signed release-local release runtime-pack: release-prereqs"
+        in makefile
+    )
+    assert "RELEASE_MIN_FREE_KIB ?= 6291456" in makefile
+
+    assert 'export RUSTUP_TOOLCHAIN="$VIBECRAFTED_RELEASE_RUSTUP_TOOLCHAIN"' in builder
+    assert 'target list --installed --toolchain "$RUSTUP_TOOLCHAIN"' in builder
+    assert "VIBECRAFTED_RELEASE_RUST_TARGETS" in builder
+    assert "notary_profile_from_keychain" in builder
+    assert 'export NOTARY_PROFILE="$profile"' in builder
+    assert "CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER" in builder
+    assert "rust-linker-darwin-classic.sh" in builder
+    assert 'if [[ "$MODE" != "notarize" ]]; then' in builder
+    assert builder.index('--notarize-only) MODE="notarize"') < builder.index(
+        'export RUSTUP_TOOLCHAIN="$VIBECRAFTED_RELEASE_RUSTUP_TOOLCHAIN"'
+    )
+    assert builder.count('if [[ "$MODE" != "notarize" ]]; then') >= 2
+    assert "release-toolchain-contract.sh" in linker
+    assert 'exec "$VIBECRAFTED_RELEASE_DARWIN_CLANG" -Wl,-ld_classic "$@"' in linker
+    # Legacy mangling spells Leptos view types into 111k-character drop-glue
+    # symbols that Apple ld refuses; the server build is mangled v0.
+    server_build = builder[
+        builder.index('log "Building the bundled Vibecrafted Server') : builder.index(
+            "build-server-release\n"
+        )
+    ]
+    assert '-C symbol-mangling-version=v0" \\\n' in server_build
+
+
+def test_classic_darwin_linker_wrapper_injects_flag_before_cargo_arguments(
+    tmp_path: Path,
+) -> None:
+    captured = tmp_path / "clang-arguments"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_clang = fake_bin / "clang"
+    fake_clang.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'if [[ "${1:-}" == --version ]]; then printf "%s\\n" "Fake pinned clang"; exit 0; fi\n'
+        'printf "%s\\n" "$@" > "$CAPTURED"\n',
+        encoding="utf-8",
+    )
+    fake_clang.chmod(0o755)
+    fake_ld_classic = fake_bin / "ld-classic"
+    fake_ld_classic.write_text(
+        "#!/usr/bin/env bash\n"
+        'printf "%s\\n" "Fake pinned ld-classic"\n'
+        'for ((i = 0; i < 10000; i++)); do printf "%s\\n" "linker detail"; done\n',
+        encoding="utf-8",
+    )
+    fake_ld_classic.chmod(0o755)
+    fake_contract = tmp_path / "release-toolchain-contract.sh"
+    contract = (REPO_ROOT / "scripts/lib/release-toolchain-contract.sh").read_text(
+        encoding="utf-8"
+    )
+    for old, new in (
+        ("/Library/Developer/CommandLineTools/usr/bin/clang", str(fake_clang)),
+        ("Apple clang version 17.0.0 (clang-1700.6.3.2)", "Fake pinned clang"),
+        (
+            "/Library/Developer/CommandLineTools/usr/bin/ld-classic",
+            str(fake_ld_classic),
+        ),
+        ("@(#)PROGRAM:ld-classic  PROJECT:ld64-956.6", "Fake pinned ld-classic"),
+    ):
+        assert old in contract
+        contract = contract.replace(old, new)
+    fake_contract.write_text(contract, encoding="utf-8")
+
+    env = dict(os.environ)
+    env.update(
+        {
+            "CAPTURED": str(captured),
+            "VIBECRAFTED_RELEASE_TOOLCHAIN_CONTRACT": str(fake_contract),
+        }
+    )
+    result = subprocess.run(
+        [
+            str(REPO_ROOT / "scripts/lib/rust-linker-darwin-classic.sh"),
+            "object.o",
+            "-o",
+            "product",
+        ],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert captured.read_text(encoding="utf-8").splitlines() == [
+        "-Wl,-ld_classic",
+        "object.o",
+        "-o",
+        "product",
+    ]
+
+    for tool, expected_error in (
+        ("CLANG", "release clang drift"),
+        ("LD_CLASSIC", "release ld-classic drift"),
+    ):
+        drifted_contract = contract.replace(
+            f"VIBECRAFTED_RELEASE_DARWIN_{tool}_VERSION='Fake pinned ",
+            f"VIBECRAFTED_RELEASE_DARWIN_{tool}_VERSION='Wrong ",
+        )
+        assert drifted_contract != contract
+        fake_contract.write_text(drifted_contract, encoding="utf-8")
+        result = subprocess.run(
+            [str(REPO_ROOT / "scripts/lib/rust-linker-darwin-classic.sh"), "object.o"],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode != 0
+        assert expected_error in result.stderr
+
+
+def test_darwin_linker_wrapper_uses_measured_xcode_pair_without_ld_classic(
+    tmp_path: Path,
+) -> None:
+    """CLT 27 ships no ld-classic; the contract then links with the Xcode pair.
+
+    Only an absent ld-classic selects the Xcode pair, the pair is
+    version-exact, and the -ld_classic flag is never forwarded to it.
+    """
+    captured = tmp_path / "clang-arguments"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    xcode_clang = fake_bin / "xcode-clang"
+    xcode_clang.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'if [[ "${1:-}" == --version ]]; then printf "%s\\n" "Fake xcode clang"; exit 0; fi\n'
+        'printf "%s\\n" "$@" > "$CAPTURED"\n',
+        encoding="utf-8",
+    )
+    xcode_ld = fake_bin / "xcode-ld"
+    xcode_ld.write_text(
+        '#!/usr/bin/env bash\nprintf "%s\\n" "Fake xcode ld"\n', encoding="utf-8"
+    )
+    fake_xcrun = fake_bin / "xcrun"
+    fake_xcrun.write_text(
+        "#!/usr/bin/env bash\n"
+        'case "$2" in\n'
+        f'  clang) printf "%s\\n" "{xcode_clang}" ;;\n'
+        f'  ld) printf "%s\\n" "{xcode_ld}" ;;\n'
+        "  *) exit 1 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    for tool in (xcode_clang, xcode_ld, fake_xcrun):
+        tool.chmod(0o755)
+    contract = (REPO_ROOT / "scripts/lib/release-toolchain-contract.sh").read_text(
+        encoding="utf-8"
+    )
+    for old, new in (
+        (
+            "/Library/Developer/CommandLineTools/usr/bin/ld-classic",
+            str(tmp_path / "absent" / "ld-classic"),
+        ),
+        ("Apple clang version 21.0.0 (clang-2100.3.34.2)", "Fake xcode clang"),
+        ("@(#)PROGRAM:ld PROJECT:ld-27037.1", "Fake xcode ld"),
+    ):
+        assert old in contract
+        contract = contract.replace(old, new)
+    fake_contract = tmp_path / "release-toolchain-contract.sh"
+    fake_contract.write_text(contract, encoding="utf-8")
+    env = dict(os.environ)
+    env.update(
+        {
+            "CAPTURED": str(captured),
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "VIBECRAFTED_RELEASE_TOOLCHAIN_CONTRACT": str(fake_contract),
+        }
+    )
+    linker = REPO_ROOT / "scripts/lib/rust-linker-darwin-classic.sh"
+
+    result = subprocess.run(
+        [str(linker), "object.o", "-o", "product"],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert captured.read_text(encoding="utf-8").splitlines() == [
+        "object.o",
+        "-o",
+        "product",
+    ]
+
+    # The CLT 27 pair (ld-27037.1) is not the measured one: exact versions only.
+    for key, expected_error in (
+        ("XCODE_CLANG_VERSION='Fake", "release xcode clang drift"),
+        ("XCODE_LD_VERSION='Fake", "release xcode ld drift"),
+    ):
+        drifted = contract.replace(key, key.replace("'Fake", "'Wrong"))
+        assert drifted != contract
+        fake_contract.write_text(drifted, encoding="utf-8")
+        captured.unlink(missing_ok=True)
+        result = subprocess.run(
+            [str(linker), "object.o"],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode != 0
+        assert expected_error in result.stderr
+        assert not captured.exists()
+
+
+def _native_voc_build_function() -> str:
+    """Extract the builder helper so this test executes its actual command path."""
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+    match = re.search(
+        r"^build_native_voc\(\) \{\n.*?^\}\n",
+        builder,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    assert match, "release builder must own native vc-start/VOC construction"
+    return match.group(0)
+
+
+def _run_native_voc_build(
+    tmp_path: Path, *, outputs: tuple[str, ...]
+) -> subprocess.CompletedProcess[str]:
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    captured_target = tmp_path / "captured-target"
+    fake_cargo = fake_bin / "cargo"
+    fake_cargo.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'printf "%s\\n" "$CARGO_TARGET_DIR" > "$CAPTURED_TARGET"\n'
+        'printf "%s\\n" "$@" > "$CAPTURED_ARGS"\n'
+        'mkdir -p "$CARGO_TARGET_DIR/release"\n'
+        "for binary in ${FAKE_CARGO_OUTPUTS}; do\n"
+        '  printf "#!/usr/bin/env bash\\nexit 0\\n" > "$CARGO_TARGET_DIR/release/$binary"\n'
+        '  chmod 0755 "$CARGO_TARGET_DIR/release/$binary"\n'
+        "done\n",
+        encoding="utf-8",
+    )
+    fake_cargo.chmod(0o755)
+    harness = tmp_path / "native-voc-harness.sh"
+    harness.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "log() { :; }\n"
+        'die() { printf "FATAL: %s\\n" "$*" >&2; exit 1; }\n'
+        + _native_voc_build_function()
+        + 'build_native_voc\nprintf "%s\\n%s\\n%s\\n%s\\n" '
+        '"$NATIVE_VC_START_SOURCE" "$NATIVE_VOC_SOURCE" '
+        '"$NATIVE_VC_ADMIN_SOURCE" "$NATIVE_VC_PROCS_SOURCE"\n',
+        encoding="utf-8",
+    )
+    harness.chmod(0o755)
+    hostile_target = tmp_path / "hostile-cargo-target"
+    env = dict(os.environ)
+    env.update(
+        {
+            "BUILD_DIR": str(tmp_path / "release-build"),
+            "CAPTURED_TARGET": str(captured_target),
+            "CAPTURED_ARGS": str(tmp_path / "captured-args"),
+            "CARGO_TARGET_DIR": str(hostile_target),
+            "FAKE_CARGO_OUTPUTS": " ".join(outputs),
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "REPO_ROOT": str(REPO_ROOT),
+            "SOURCE_ROOT": str(REPO_ROOT),
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(harness)], env=env, text=True, capture_output=True, check=False
+    )
+    result.captured_target = captured_target
+    result.captured_args = tmp_path / "captured-args"
+    result.hostile_target = hostile_target
+    return result
+
+
+def test_native_voc_build_owns_release_target_despite_ambient_cargo_target(
+    tmp_path: Path,
+) -> None:
+    result = _run_native_voc_build(
+        tmp_path, outputs=("vc-start", "voc", "vc-admin", "vc-procs")
+    )
+    assert result.returncode == 0, result.stderr
+    owned_target = tmp_path / "release-build/cargo/vibecrafted-app"
+    assert (
+        Path(result.captured_target.read_text(encoding="utf-8").strip()) == owned_target
+    )
+    assert owned_target != result.hostile_target
+    assert result.captured_args.read_text(encoding="utf-8").splitlines() == [
+        "build",
+        "--locked",
+        "-p",
+        "voc",
+        "--bin",
+        "vc-start",
+        "--bin",
+        "voc",
+        "--bin",
+        "vc-admin",
+        "--bin",
+        "vc-procs",
+        "--release",
+    ]
+    assert result.stdout.splitlines() == [
+        str(owned_target / "release/vc-start"),
+        str(owned_target / "release/voc"),
+        str(owned_target / "release/vc-admin"),
+        str(owned_target / "release/vc-procs"),
+    ]
+
+
+def test_native_voc_build_fails_when_owned_release_output_is_missing(
+    tmp_path: Path,
+) -> None:
+    result = _run_native_voc_build(tmp_path, outputs=("vc-start",))
+    assert result.returncode != 0
+    assert "VOC release binary is missing" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("outputs", "missing"),
+    [
+        (("vc-start", "voc"), "vc-admin release binary is missing"),
+        (("vc-start", "voc", "vc-admin"), "vc-procs release binary is missing"),
+    ],
+)
+def test_native_voc_build_fails_when_operator_binary_is_missing(
+    tmp_path: Path, outputs: tuple[str, ...], missing: str
+) -> None:
+    result = _run_native_voc_build(tmp_path, outputs=outputs)
+    assert result.returncode != 0
+    assert missing in result.stderr
+
+
+def test_public_install_surfaces_name_all_release_carriers() -> None:
     surfaces = (
         "README.md",
         "docs/QUICK_START.md",
@@ -37,12 +409,63 @@ def test_public_install_surfaces_name_both_release_channels() -> None:
         text = (REPO_ROOT / relative).read_text(encoding="utf-8")
         assert RELEASE_PAGE in text, f"{relative} must point to the unified release"
         assert "Vibecrafted_<version>-<YYYYMMDD>-<sha8>.dmg" in text
+        assert (
+            "Vibecrafted_RuntimePack_<version>-<YYYYMMDD>-<sha8>-darwin-<arch>.tar.gz"
+            in text
+        ), f"{relative} must name the macOS CLI Runtime Pack"
         # A non-macOS reader must find a version-pinned artifact on the same
         # page, not only a curl-pipe-bash line that tracks a moving branch.
         assert "Vibecrafted_<version>-<YYYYMMDD>-<sha8>-portable.tar.gz" in text, (
             f"{relative} must name the portable channel asset"
         )
         assert "vc-frame/releases/latest/download/install.sh" not in text
+
+
+@pytest.mark.parametrize("doctor_step", [0, 1], ids=["ubuntu", "debian"])
+@pytest.mark.parametrize("failing_donor", [None, "vc-frame", "vc-terminal"])
+def test_linux_install_doctor_rejects_unrunnable_owned_donors(
+    tmp_path: Path, doctor_step: int, failing_donor: str | None
+) -> None:
+    """A green doctor must not hide an installed engine's loader failure."""
+    workflow = (REPO_ROOT / ".github/workflows/install-linux.yml").read_text(
+        encoding="utf-8"
+    )
+    steps = re.findall(
+        r"      - name: Run vibecrafted doctor\n        run: \|\n"
+        r"((?:          [^\n]*\n|\n)+)",
+        workflow,
+    )
+    assert len(steps) == 2
+    home = tmp_path / "home"
+    generation = home / ".local/share/vibecrafted/releases/4.3.1"
+    path_bin = home / ".local/bin"
+    path_bin.mkdir(parents=True)
+    (generation / "bin").mkdir(parents=True)
+    doctor = path_bin / "vibecrafted"
+    doctor.write_text("#!/bin/bash\necho '65 ok, 13 warnings, 0 failures'\n")
+    doctor.chmod(0o755)
+    for donor in ("vc-frame", "vc-terminal"):
+        binary = generation / "bin" / donor
+        exit_code = 126 if donor == failing_donor else 0
+        binary.write_text(f"#!/bin/bash\necho '{donor} identity'\nexit {exit_code}\n")
+        binary.chmod(0o755)
+    (tmp_path / "VERSION").write_text("4.3.1\n")
+    env = os.environ.copy()
+    env.update(
+        HOME=str(home),
+        XDG_DATA_HOME=str(home / ".local/share"),
+        RUNNER_TEMP=str(tmp_path),
+        PATH=f"{path_bin}:/usr/bin:/bin",
+    )
+    result = subprocess.run(
+        ["bash", "-c", textwrap.dedent(steps[doctor_step])],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert (result.returncode == 0) == (failing_donor is None), result.stdout
 
 
 def test_tag_workflow_is_a_read_only_source_gate() -> None:
@@ -146,8 +569,8 @@ def test_tag_gate_only_calls_tools_its_own_runner_provides() -> None:
         )
 
 
-def test_publication_boundary_step_still_asserts_both_channel_names() -> None:
-    """The boundary step is the only thing pinning the six-asset shape.
+def test_publication_boundary_step_still_asserts_all_carrier_names() -> None:
+    """The boundary step pins the exact three-carrier release shape.
 
     Rewriting its matcher (rg -> grep) must not quietly drop what it matches:
     one canonically named DMG and one portable tarball, each resolved by the
@@ -157,13 +580,58 @@ def test_publication_boundary_step_still_asserts_both_channel_names() -> None:
 
     assert "Vibecrafted_.*YYYYMMDD|DMG_NAME|\\.dmg\\.sha256" in workflow
     assert "PORTABLE_NAME|portable\\.tar\\.gz|portable-output\\.json" in workflow
+    assert (
+        "RUNTIME_PACK_NAME|RuntimePack_.*tar\\.gz|install-runtime-pack\\.sh" in workflow
+    )
     for target in (
         "scripts/build-vibecrafted-release.sh",
         "scripts/build-portable-release.sh",
+        "scripts/package-runtime-pack.sh",
+        "scripts/install-runtime-pack.sh",
         "scripts/publish-vibecrafted-release.sh",
         "docs/RELEASE_KICKOFF.md",
     ):
         assert target in workflow, f"boundary step stopped covering {target}"
+
+
+def test_native_carrier_records_its_own_executables_and_no_channel_tool() -> None:
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+    installer = (REPO_ROOT / "scripts/vetcoders_install.py").read_text(encoding="utf-8")
+
+    manifest = builder.index("runtime_pack_contract write-foundations")
+    for required_runtime_install in (
+        '"$runtime/bin/vc-start"',
+        '"$runtime/bin/vc-server"',
+        '"$runtime/bin/vibecrafted-server-web"',
+    ):
+        assert builder.index(required_runtime_install) < manifest
+    assert '"$runtime/source-provenance.json"' in builder
+    assert 'carrier --source "$SOURCE_ROOT"' in builder
+    assert "provenance_stage" not in builder
+    assert '"$runtime/scripts/vc-frame-product-entry.sh"' in builder
+    # Loctree, AICX, PRView and ScreenScribe ship through npm / GitHub
+    # releases / PyPI; the carrier neither stages nor requires them.
+    assert "stage-runtime-foundations" not in builder
+    assert "screenscribe==" not in builder
+    assert "bin/screenscribe" not in builder
+    required = installer.split("def _runtime_pack_required_paths(", 1)[1].split(
+        "\ndef ", 1
+    )[0]
+    for command in (
+        "loct",
+        "loctree",
+        "loctree-mcp",
+        "aicx",
+        "aicx-mcp",
+        "prview",
+        "screenscribe",
+    ):
+        assert f'"bin/{command}"' not in required, command
+        assert f'"{command}")' not in required, command
+    assert 'generation / "libexec/vc-frame"' in installer
+    assert "_write_runtime_generation_manifest(" in installer
 
 
 def test_macos_publisher_cold_verifies_exact_uploaded_bytes() -> None:
@@ -199,13 +667,32 @@ def test_macos_publisher_cold_verifies_exact_uploaded_bytes() -> None:
     for entry in (
         '"$DMG_NAME"',
         '"$DMG_NAME.sha256"',
+        '"$RUNTIME_PACK_NAME"',
+        '"$RUNTIME_PACK_NAME.sha256"',
+        '"$RUNTIME_PACK_NAME.sig"',
         '"$PORTABLE_NAME"',
         '"$PORTABLE_NAME.sha256"',
+        '"$WINDOWS_MSI_NAME"',
+        '"$WINDOWS_MSI_NAME.sha256"',
+        '"$WINDOWS_EXE_NAME"',
+        '"$WINDOWS_EXE_NAME.sha256"',
+        '"$WINDOWS_PACK_NAME"',
+        '"$WINDOWS_PACK_NAME.sha256"',
+        '"$WINDOWS_PACK_NAME.sig"',
         '"release-output.json"',
         '"release-output.json.sig"',
     ):
         assert entry in allowlist
     assert "LC_ALL=C sort" in publisher
+    assert "*" not in allowlist
+    assert "WINDOWS_MSI_NAME=" in publisher
+    assert "windows-x64.msi" in publisher
+    assert "win32-x64.tar.gz" in publisher
+    assert 'cmp "$WINDOWS_MSI" "$DOWNLOAD_DIR/$WINDOWS_MSI_NAME"' in publisher
+    assert 'cmp "$WINDOWS_PACK" "$DOWNLOAD_DIR/$WINDOWS_PACK_NAME"' in publisher
+    assert 'shasum -a 256 -c "$WINDOWS_PACK_NAME.sha256"' in publisher
+    assert "downloaded Windows Runtime Pack signature verification failed" in publisher
+    assert "Authenticode-unsigned" in publisher or "Authenticode" in publisher
 
 
 def test_macos_publisher_cold_verifies_the_portable_channel() -> None:
@@ -225,6 +712,23 @@ def test_macos_publisher_cold_verifies_the_portable_channel() -> None:
     assert (
         'bash "$PORTABLE_UNPACK_DIR/$PORTABLE_ROOT_NAME/install.sh" --help' in publisher
     )
+
+
+def test_macos_publisher_cold_verifies_runtime_pack_install_and_uninstall() -> None:
+    publisher = (REPO_ROOT / "scripts/publish-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert '["runtime_pack"]["path"]' in publisher
+    assert 'shasum -a 256 -c "$RUNTIME_PACK_NAME.sha256"' in publisher
+    assert 'openssl dgst -sha256 -verify "$RUNTIME_PACK_PUBLIC_KEY"' in publisher
+    assert 'cmp "$RUNTIME_PACK" "$DOWNLOAD_DIR/$RUNTIME_PACK_NAME"' in publisher
+    assert publisher.count("--verify-only") == 2
+    assert '--expected-terminal-revision "$VC_TERMINAL_SHA"' in publisher
+    assert '--expected-frame-revision "$VC_FRAME_SHA"' in publisher
+    assert "make --no-print-directory install RUNTIME_PACK=" in publisher
+    assert "make --no-print-directory uninstall" in publisher
+    assert 'find "$RUNTIME_PACK_SMOKE_HOME" -mindepth 1 -print -quit' in publisher
 
 
 def test_portable_builder_binds_one_commit_and_proves_its_own_bytes() -> None:
@@ -267,6 +771,20 @@ def test_builder_emits_the_canonical_versioned_dmg_and_checksum() -> None:
     assert 'printf \'%s\\n\' "$RUNTIME_VERSION" > "$runtime/VERSION"' in builder
     assert 'DMG_CHECKSUM="$DMG.sha256"' in builder
     assert 'LEGACY_DMG="$DIST_DIR/Vibecrafted.dmg"' in builder
+    assert (
+        'RUNTIME_PACK_NAME="Vibecrafted_RuntimePack_${VERSION}-${RELEASE_DATE}-${ROOT_SHA:0:8}-${RUNTIME_PACK_PLATFORM}.tar.gz"'
+        in builder
+    )
+    assert 'RUNTIME_PACK_PLATFORM="darwin-arm64"' in builder
+    assert (
+        'printf \'%s\\n\' "$RUNTIME_VERSION" > "$RUNTIME_PACK_RESOURCE_DIR/VERSION"'
+        in builder
+    )
+    assert '"$SOURCE_ROOT/scripts/package-runtime-pack.sh"' in builder
+    assert '-out "$RUNTIME_PACK_SIGNATURE" "$RUNTIME_PACK"' in builder
+    assert 'install -m 0644 "$RUNTIME_PACK" "$EMBEDDED_RUNTIME_PACK"' in builder
+    assert 'cmp "$EMBEDDED_RUNTIME_PACK" "$RUNTIME_PACK"' in builder
+    assert '--runtime-pack "$RUNTIME_PACK"' in builder
     assert 'rm -f "$DMG_CHECKSUM" "$LEGACY_DMG"' in builder
     assert '/usr/bin/shasum -a 256 "$DMG_NAME"' in builder
     assert "-type d -name __pycache__" in builder
@@ -275,9 +793,266 @@ def test_builder_emits_the_canonical_versioned_dmg_and_checksum() -> None:
     assert "build-server-release" in builder
     assert 'install -m 0755 "$server_source" "$runtime/bin/vc-server"' in builder
     assert '"$runtime/server/site/"' in builder
-    assert '"$REPO_ROOT/scripts/render-python-entrypoint-launchers.py"' in builder
-    assert '"$REPO_ROOT/vibecrafted-core/pyproject.toml"' in builder
+    mcp_copy = '/bin/cp -R "$SOURCE_ROOT/vibecrafted-mcp/vibecrafted_mcp" \\\n    "$runtime/vibecrafted-mcp/"'
+    mcp_generation_version = 'printf \'%s\\n\' "$RUNTIME_VERSION" \\\n    > "$runtime/vibecrafted-mcp/vibecrafted_mcp/VERSION"'
+    assert mcp_copy in builder
+    assert mcp_generation_version in builder
+    assert builder.index(mcp_copy) < builder.index(mcp_generation_version)
+    assert '"$SOURCE_ROOT/scripts/render-python-entrypoint-launchers.py"' in builder
+    assert '"$SOURCE_ROOT/vibecrafted-core/pyproject.toml"' in builder
     assert '"$runtime/runtime"' not in builder
+
+
+def test_runtime_pack_signing_happens_after_final_copy_and_before_archive() -> None:
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+    packager = (REPO_ROOT / "scripts/package-runtime-pack.sh").read_text(
+        encoding="utf-8"
+    )
+
+    copied = packager.index('cp -R "$payload_root/." "$root/"')
+    signed = packager.index('sign_macho_tree "$root"')
+    verified = packager.index('verify_macho_tree "$root" 1')
+    foundations = packager.index("refresh-foundations")
+    inventoried = packager.index("vibecrafted_core.runtime_pack_contract write")
+    archived = packager.index('-czf "$candidate"')
+    assert copied < signed < verified < foundations < inventoried < archived
+
+    producer = builder.split("produce_runtime_pack() {", 1)[1].split(
+        "\nembed_runtime_pack() {", 1
+    )[0]
+    materializer = builder.split("materialize_runtime_payload() {", 1)[1].split(
+        "\nbuild_product() {", 1
+    )[0]
+    embed = builder.split("embed_runtime_pack() {", 1)[1].split(
+        "\nmaterialize_runtime_payload() {", 1
+    )[0]
+    assert '--payload-root "$RUNTIME_PAYLOAD"' in producer
+    assert '--app "$APP"' not in producer
+    assert (
+        'install -m 0755 "$terminal_source" "$runtime/libexec/vc-terminal"'
+        in materializer
+    )
+    assert 'install -m 0755 "$voc_source" "$runtime/bin/voc"' in materializer
+    assert 'install -m 0755 "$voc_source" "$runtime/bin/vc-o"' in materializer
+    assert 'install -m 0755 "$admin_source" "$runtime/bin/vc-admin"' in materializer
+    assert 'install -m 0755 "$procs_source" "$runtime/bin/vc-procs"' in materializer
+    assert (
+        'install -m 0755 "$runtime/scripts/vc-terminal-product-entry.sh"'
+        in materializer
+    )
+    assert '"$runtime/bin/vc-terminal"' in materializer
+    assert (
+        'install -m 0755 "$terminal_source" "$runtime/bin/vc-terminal"'
+        not in materializer
+    )
+    assert 'install -m 0755 "$frame_source" "$runtime/libexec/vc-frame"' in materializer
+    assert (
+        "cargo build --locked -p voc --bin vc-start --bin voc "
+        "--bin vc-admin --bin vc-procs --release"
+    ) in builder
+    assert 'install -m 0644 "$RUNTIME_PACK" "$EMBEDDED_RUNTIME_PACK"' in embed
+    assert '--codesign-identity "$SIGNING_IDENTITY"' in builder
+    assert (
+        'packager_codesign_args+=(--codesign-keychain "$TEMP_KEYCHAIN_PATH")' in builder
+    )
+    standalone_preflight = builder.index(
+        'verify_runtime_pack_macho_signatures "$RUNTIME_PACK"'
+    )
+    carrier_signature = builder.index('-out "$RUNTIME_PACK_SIGNATURE" "$RUNTIME_PACK"')
+    assert standalone_preflight < carrier_signature
+
+
+def test_bundle_parity_verifier_uses_artifact_and_isolated_install_roots() -> None:
+    verifier = (REPO_ROOT / "scripts/verify-runtime-pack-bundle-parity.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        'bash "$repo_root/scripts/install-runtime-pack.sh" --pack "$pack"' in verifier
+    )
+    assert 'VIBECRAFTED_RUNTIME_HOME="$runtime_home"' in verifier
+    assert 'VIBECRAFTED_LAUNCHER_BIN="$launcher_bin"' in verifier
+    assert 'VC_FRAME_SOCKET_DIR="$frame_socket_dir"' in verifier
+    assert 'for binary in "${expected_binaries[@]}"' in verifier
+    assert 'loct find --literal --whole-token --compact --all "$binary"' in verifier
+    assert 'die "Loctree returned no code contract for $binary"' in verifier
+    assert 'loct find --literal "${expected_binaries[@]}"' not in verifier
+    assert '[[ ! -L "$generation/bin/vc-o" ]]' in verifier
+    assert 'cmp -s "$generation/bin/voc" "$generation/bin/vc-o"' in verifier
+    assert '[[ -x "$launcher_bin/$binary" ]]' in verifier
+    assert 'vc_o_version="$("$launcher_bin/vc-o" --version)"' in verifier
+    assert (
+        "from vibecrafted_core.server_observation import _control_observe_bin"
+        in verifier
+    )
+    assert '[[ ! -e "$probe_log" ]]' in verifier
+    assert 'config_sha_after="$(shasum -a 256 "$config_file"' in verifier
+
+
+def test_exact_release_gate_is_release_only_and_repeats_the_repo_verifier() -> None:
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    source_workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text(
+        encoding="utf-8"
+    )
+    release_workflow = (REPO_ROOT / ".github/workflows/release-dmg.yml").read_text(
+        encoding="utf-8"
+    )
+    exact_gate = makefile.split("exact-release-contract-gate:", 1)[1].split(
+        "\nrelease-version-gate:", 1
+    )[0]
+
+    assert "for pass in 1 2" in exact_gate
+    assert "verify-vibecrafted-walkaround verify-release" in exact_gate
+    assert "run: make exact-release-contract-gate" in release_workflow
+    assert "exact-release-contract-gate" not in source_workflow
+
+
+def test_codeql_keeps_default_coverage_and_builds_swift_for_one_architecture() -> None:
+    workflow = (REPO_ROOT / ".github/workflows/codeql.yml").read_text(encoding="utf-8")
+
+    for language in ("actions", "javascript-typescript", "python", "ruby", "rust"):
+        assert f"- {language}" in workflow
+    assert "languages: swift" in workflow
+    assert "build-mode: manual" in workflow
+    assert "runs-on: macos-15" in workflow
+    assert "make -C vibecrafted-app/shell-agent xcode" in workflow
+    assert "ARCHS=arm64" in workflow
+    assert "ONLY_ACTIVE_ARCH=YES" in workflow
+    assert "CODE_SIGNING_ALLOWED=NO" in workflow
+    assert "github/codeql-action/init@" in workflow
+    assert "github/codeql-action/analyze@" in workflow
+
+
+def test_tag_release_builds_all_carriers_from_a_commit_on_main() -> None:
+    workflow = (REPO_ROOT / ".github/workflows/release-dmg.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert '"v*"' in workflow
+    assert "git fetch --no-tags origin main:refs/remotes/origin/main" in workflow
+    assert "git merge-base --is-ancestor HEAD refs/remotes/origin/main" in workflow
+    assert "make release" in workflow
+    assert "make portable" in workflow
+    for artifact in (
+        "Vibecrafted_*.dmg",
+        "Vibecrafted_RuntimePack_*.tar.gz",
+        "Vibecrafted_RuntimePack_*.tar.gz.sha256",
+        "Vibecrafted_RuntimePack_*.tar.gz.sig",
+        "Vibecrafted_*-portable.tar.gz",
+        "Vibecrafted_*-portable.tar.gz.sha256",
+        "release-output.json",
+        "release-output.json.sig",
+        "portable-output.json",
+    ):
+        assert artifact in workflow
+
+
+def test_tag_dmg_donors_match_the_public_cross_platform_source_pins() -> None:
+    workflow = (REPO_ROOT / ".github/workflows/release-dmg.yml").read_text()
+    linux = (REPO_ROOT / "scripts/build-linux-arm64-runtime-pack.sh").read_text()
+    windows = (REPO_ROOT / "scripts/build-windows-x64-runtime-pack.ps1").read_text()
+    for donor in ("frame", "terminal"):
+        revision = re.search(rf'{donor}_revision="([0-9a-f]{{40}})"', linux)
+        assert revision is not None
+        sha = revision.group(1)
+        assert f'${donor}Revision = "{sha}"' in windows
+        assert f"ref: ${{{{ inputs.{donor}_ref || '{sha}' }}}}" in workflow
+        assert f"repository: vetcoders/vc-{donor}" in workflow
+
+
+@pytest.mark.parametrize("mechanism", ["api", "apple-id", "incomplete"])
+def test_hosted_notary_materialization_accepts_complete_credentials_only(
+    tmp_path: Path, mechanism: str
+) -> None:
+    workflow = (REPO_ROOT / ".github/workflows/release-dmg.yml").read_text()
+    step = workflow.split("      - name: Materialize signing keys from secrets\n", 1)[1]
+    step = step.split("      - name:", 1)[0]
+    script = textwrap.dedent(step.split("        run: |\n", 1)[1])
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    for command, body in {
+        "xcrun": 'printf "%s\\n" "$1 $2" > "$NOTARY_CAPTURE"\n',
+        "openssl": "exit 0\n",
+        "file": "exit 0\n",
+    }.items():
+        tool = fake_bin / command
+        tool.write_text("#!/bin/sh\nset -eu\n" + body)
+        tool.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+        "KEYS": str(tmp_path / "keys"),
+        "GITHUB_ENV": str(tmp_path / "github-env"),
+        "NOTARY_CAPTURE": str(tmp_path / "notary-called"),
+        "PAYLOAD_HYGIENE_EXTRA_LITERALS": "/workspace/private-fixture",
+        "VC_CERT_P12_B64": "Zml4dHVyZQ==",
+        "VC_CERT_PASSWORD": "fixture-password",
+        "VC_SIGNING_IDENTITY": "fixture-identity",
+        "VC_SIGNING_KEY": "fixture-key",
+        "VC_FONT_PASSPHRASE": "fixture-font-passphrase",
+        "VC_NOTARY_API_KEY_B64": "Zml4dHVyZQ==" if mechanism == "api" else "",
+        "VC_NOTARY_API_KEY_ID": "fixture-key-id" if mechanism == "api" else "",
+        "VC_NOTARY_API_ISSUER": "fixture-issuer" if mechanism == "api" else "",
+        "VC_NOTARY_APPLE_ID": "test@example.com",
+        "VC_NOTARY_PASSWORD": "fixture-password" if mechanism == "apple-id" else "",
+        "VC_NOTARY_TEAM_ID": "fixture-team",
+    }
+    result = subprocess.run(
+        ["bash", "-c", script], env=env, text=True, capture_output=True, check=False
+    )
+    if mechanism == "incomplete":
+        assert result.returncode != 0
+        assert "provide a complete notary" in result.stdout
+        assert not (tmp_path / "github-env").exists()
+    elif mechanism == "apple-id":
+        assert result.returncode == 0, result.stderr
+        assert (
+            tmp_path / "notary-called"
+        ).read_text().strip() == "notarytool store-credentials"
+        assert (
+            tmp_path / "github-env"
+        ).read_text().strip() == "NOTARY_PROFILE=vibecrafted-ci-notary"
+        assert not (tmp_path / "keys/notary-api-key.p8").exists()
+    else:
+        assert result.returncode == 0, result.stderr
+        assert (tmp_path / "keys/notary-api-key.p8").read_bytes() == b"fixture"
+        assert not (tmp_path / "notary-called").exists()
+
+
+def test_notary_authentication_never_puts_the_password_in_process_argv() -> None:
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+    notary_function = builder[
+        builder.index("notary_submit() {") : builder.index("strip_debug_stabs() {")
+    ]
+
+    assert '--keychain-profile "$profile"' in notary_function
+    assert '--key "$NOTARY_API_KEY_PATH"' in notary_function
+    assert "--password" not in notary_function
+    assert "NOTARY_PASSWORD" not in notary_function
+    assert 'source "$NOTARY_ENV"' not in notary_function
+    assert "notary_profile_from_env_file" in builder
+    assert 'notarytool store-credentials "$fallback_profile"' in notary_function
+    assert "if [[ ! -t 0 || ! -t 1 ]]; then" in notary_function
+    assert "raw Apple-ID notarization credentials are not accepted headlessly" in (
+        notary_function
+    )
+
+
+def test_xcodegen_project_is_generated_from_one_tracked_source() -> None:
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+    ignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
+    assert (REPO_ROOT / "vibecrafted-app/shell-agent/app/project.yml").is_file()
+    assert "/vibecrafted-app/shell-agent/app/Vibecrafted.xcodeproj/" in ignore
+    assert (
+        'git -C "$SOURCE_ROOT" ls-files --error-unmatch "$generated_project"' in builder
+    )
+    assert "generated Xcode project must not be tracked" in builder
 
 
 def test_release_entrypoint_renderer_uses_manifest_and_preserves_existing(
@@ -330,7 +1105,10 @@ native-cli = "demo_module:main"
         capture_output=True,
         text=True,
     )
-    assert json.loads(result.stdout) == ["demo-cli", "one"]
+    # argv[0] is the shim's ABSOLUTE path now (identity-guard contract:
+    # the declared launcher path must be visible in process argv), with
+    # VIBECRAFTED_DECLARED_LAUNCHER as the wrapper-chain override.
+    assert json.loads(result.stdout) == [str(bin_dir / "demo-cli"), "one"]
 
 
 def test_release_bundle_binds_the_vibecrafted_app_icon() -> None:
@@ -351,16 +1129,27 @@ def test_release_bundle_binds_the_vibecrafted_app_icon() -> None:
     )
     icon = REPO_ROOT / "vibecrafted-app/shell-agent/app/Vibecrafted/Vibecrafted.icns"
 
+    version = (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    assert version
     assert "INFOPLIST_FILE: Vibecrafted/Info.plist" in project
+    assert f'MARKETING_VERSION: "{version}"' in project
+    assert '- "Vibecrafted.icns"' in project
     assert "<key>CFBundleIconFile</key>" in info_plist
     assert "<string>Vibecrafted.icns</string>" in info_plist
+    assert "\t<key>LSUIElement</key>\n\t<true/>" in info_plist
+    assert "<key>CFBundleShortVersionString</key>" in info_plist
+    assert "<string>$(MARKETING_VERSION)</string>" in info_plist
     assert 'plist["CFBundleIconFile"] = contract.PRODUCT_ICON_FILE' in manifest
+    assert 'plist["CFBundleShortVersionString"] = args.version' in manifest
+    assert '--version "$VERSION"' in builder
     assert icon.is_file()
     assert icon.stat().st_size > 100_000
     assert "$TERMINAL_REPO/assets/icon/vc-terminal-icon.png" in builder
     assert "$TERMINAL_REPO/assets/icon/terminal.png" in builder
     assert '"$ICON_SOURCE" "$resources/Vibecrafted.icns" "$ICON_REFERENCE"' in builder
     assert "! -name 'Vibecrafted.icns'" in builder
+    assert '[[ -s "$resources/TrayIcon.png" ]]' in builder
+    assert "must remain a menu-bar application without a Dock tile" in builder
     assert "iconutil -c icns" in icon_builder
     assert 'cmp -s "$ICONSET/icon_128x128.png" "$REFERENCE"' in icon_builder
 
@@ -381,34 +1170,58 @@ def test_release_bundle_binds_the_canonical_terminal_policy_and_font() -> None:
     builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
         encoding="utf-8"
     )
+    installer = (REPO_ROOT / "scripts/vetcoders_install.py").read_text(encoding="utf-8")
 
     assert 'family = "Spot Mono"' in terminal
-    assert "size = 18.5" in terminal
+    assert "size = 19.5" in terminal
     assert "live_config_reload = true" in terminal
     assert 'background = "#0b0b12"' in dark
     assert 'background = "#fafafa"' in light
     assert 'chars = "\\u001b[101;9u"' in terminal
     assert "/Users/" not in terminal
-    assert "Contents/Resources/fonts/SpotMono.ttc" in app_delegate
-    assert "CTFontManagerRegisterFontsForURL" in app_delegate
-    assert "kCTFontFamilyNameAttribute as String" in app_delegate
+    # Font ownership belongs to the process that draws the glyphs. The app used
+    # to register SpotMono.ttc for the whole login session on its way to
+    # spawning the terminal, which reached unrelated processes and outranked the
+    # owner's own installed copy. See tests/tui/test_terminal_font_ownership.py
+    # for the measured evidence behind this line.
+    assert "CTFontManagerRegisterFontsForURL" not in app_delegate
+    assert "Contents/Resources/fonts/SpotMono.ttc" not in app_delegate
     assert 'CTFontDescriptorCreateWithNameAndSize("Spot Mono"' not in app_delegate
-    assert "let terminalPolicy = generation.appendingPathComponent" in app_delegate
-    assert 'productConfig.appendingPathComponent("terminal-entry.toml")' in app_delegate
-    assert 'productConfig.appendingPathComponent("terminal-theme.toml")' in app_delegate
-    assert 'productConfig.appendingPathComponent("terminal.toml")' not in app_delegate
+    assert "_RUNTIME_PREFERENCE_SOURCES" in installer
+    assert (
+        '("terminal-policy.toml", "config/vc-terminal/vibecrafted.toml")' in installer
+    )
+    assert '("starship.toml", "config/starship.toml")' in installer
+    assert 'for relative in ("atuin/config.toml",):' in installer
+    assert 'name="zsh-autosuggestions"' in installer
+    assert 'name="zsh-syntax-highlighting"' in installer
+    assert 'product_config / "terminal-policy.toml"' in installer
+    assert 'policy = product / "terminal-policy.toml"' in installer
+    assert '(terminal / "vc-terminal.toml").write_text' in installer
+    assert 'product_config / "vc-terminal" / "vc-terminal.toml"' in installer
+    assert 'product_config / "terminal-entry.toml"' not in installer
+    assert "_PRODUCT_TERMINAL_DEBRIS" in installer
+    assert "vc-terminal/alacritty.toml" in installer
+    assert "launch-alt-screen" not in installer
+    assert 'product_config / "terminal-theme.toml"' in installer
+    assert 'product_config / "terminal.toml"' not in installer
+    assert (
+        'install -m 0755 "$terminal_source" "$runtime/libexec/vc-terminal"' in builder
+    )
+    assert "vc-terminal-product-entry.sh" in builder
     assert (
         'install -m 0644 "$SPOT_MONO_FONT" "$resources/fonts/SpotMono.ttc"' in builder
     )
+    assert 'embed_terminal_font_resources "$terminal_app"' in builder
+    assert "Add :ATSApplicationFontsPath string fonts" in builder
     assert "missing licensed Spot Mono input" in builder
     assert "(OpenType|TrueType) font collection data" in builder
 
 
 def test_mission_control_failure_board_exposes_absolute_failure_time() -> None:
-    view = (
-        REPO_ROOT
-        / "vibecrafted-app/shell-agent/app/Vibecrafted/Views/MissionControlViewController.swift"
-    ).read_text(encoding="utf-8")
+    view = (REPO_ROOT / "vibecrafted-server/web/src/run_detail.rs").read_text(
+        encoding="utf-8"
+    )
     ffi = (REPO_ROOT / "vibecrafted-app/shell-agent/ffi/src/lib.rs").read_text(
         encoding="utf-8"
     )
@@ -416,11 +1229,8 @@ def test_mission_control_failure_board_exposes_absolute_failure_time() -> None:
         REPO_ROOT / "vibecrafted-app/tui-agent/src/mission_control.rs"
     ).read_text(encoding="utf-8")
 
-    assert '("Date", "DATE", 145)' in view
-    assert 'case "DATE": return dateTime(item.occurredAt)' in view
-    assert "private static let iso8601DateFormatter" in view
-    assert "private static let failureDateFormatter" in view
-    assert "ISO8601DateFormatter().date" not in view
+    assert 'fact("completed", run.completed_at)' in view
+    assert "completed_at: run.completed_at" in view
     assert "pub occurred_at: Option<String>" in ffi
     assert "occurred_at: Some(record.completed_at.to_rfc3339())" in mission
 
@@ -456,7 +1266,39 @@ def test_publisher_writes_the_mandatory_release_report() -> None:
     ):
         assert heading in publisher
     assert ".vibecrafted/artifacts" in publisher
-    assert "100.82.232.70:3025" in publisher
+    assert "127.0.0.1:3024" in publisher
+
+
+@pytest.mark.parametrize("version", ["4.3.1", "4.3.1-rc.1", "4.3.1+g12345678"])
+def test_publisher_derives_windows_carriers_with_bash_ere(version: str) -> None:
+    publisher = (REPO_ROOT / "scripts/publish-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+    block = publisher[
+        publisher.index('if [[ "$DMG_NAME" =~') : publisher.index('WINDOWS_MSI="$DIST/')
+    ]
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "set -eu\ndie() { exit 2; }\n"
+            + block
+            + '\nprintf "%s\\n" "$WINDOWS_MSI_NAME" "$WINDOWS_PACK_NAME"',
+        ],
+        env={
+            **os.environ,
+            "VERSION": version,
+            "DMG_NAME": f"Vibecrafted_{version}-20261001-12345678.dmg",
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        f"Vibecrafted_{version}-20261001-12345678-windows-x64.msi",
+        f"Vibecrafted_RuntimePack_{version}-20261001-12345678-win32-x64.tar.gz",
+    ]
 
 
 def test_vc_release_skill_locks_four_mandatory_report_sections() -> None:
@@ -509,9 +1351,19 @@ def test_dirty_donors_are_a_release_flag_with_a_reaper_not_a_manual_ritual() -> 
     # The reaper runs from the same trap that ends the keychain session, so it
     # fires on success, on error, and on Ctrl-C during a notarization wait.
     assert "donor_snapshot_reap || true" in builder
-    assert "trap cleanup EXIT INT TERM HUP" in builder
+    assert "trap cleanup EXIT" in builder
+    assert "trap 'cleanup; exit 130' INT" in builder
+    assert "trap 'cleanup; exit 143' TERM" in builder
+    assert "trap 'cleanup; exit 129' HUP" in builder
     assert "materialize_donor_snapshots" in builder
     assert "VIBECRAFTED_RELEASE_FAIL_AFTER_SNAPSHOT" in builder
+
+    # Regenerated plugin assets are deterministic derived output. Their
+    # mutation must not make the binary claim that the immutable donor commit
+    # itself was dirty.
+    assert 'frame_release_sha="$(git_sha "$FRAME_REPO")"' in builder
+    assert 'VC_FRAME_GIT_SHA="$frame_release_sha"' in builder
+    assert "VC_FRAME_GIT_DIRTY=0" in builder
 
     # Reaping goes through git; `rm -rf` alone is what creates ghosts.
     assert "worktree add --detach" in library
@@ -529,9 +1381,14 @@ def test_dirty_donors_are_a_release_flag_with_a_reaper_not_a_manual_ritual() -> 
     # $(touch /tmp/proof)'` created the file, because zsh evaluates command
     # substitution while building the exec's argv. (A `;` lands after `exec`
     # and never runs — the vector is narrower than it looks, and real.)
-    for flag in ("--app-only", "--no-notarize", "--notarize-only"):
+    for flag in (
+        "--app-only",
+        "--runtime-pack-only",
+        "--no-notarize",
+        "--notarize-only",
+    ):
         assert f"{flag} $${{=VC_RELEASE_FLAGS}}" in makefile, flag
-    assert makefile.count("VC_RELEASE_FLAGS='$(RELEASE_FLAGS)'") == 4
+    assert makefile.count("VC_RELEASE_FLAGS='$(RELEASE_FLAGS)'") == 5
     # The only place $(RELEASE_FLAGS) may still be expanded is that leading
     # environment assignment. Nothing after `zsh -ic` may name it, because
     # everything after `zsh -ic` is source.
@@ -586,6 +1443,7 @@ def test_remaps_run_broadest_prefix_first() -> None:
     order = [
         '"$HOME=/usr/src/operator-home"',
         '"$REPO_ROOT=/usr/src/vibecrafted"',
+        '"$SOURCE_ROOT=/usr/src/vibecrafted"',
         '"$TERMINAL_DONOR=/usr/src/vc-terminal"',
         '"$FRAME_DONOR=/usr/src/vc-frame"',
         '"$TERMINAL_REPO=/usr/src/vc-terminal"',
@@ -688,7 +1546,7 @@ def test_the_embedded_interpreter_forgets_where_it_was_seeded() -> None:
 
     Measured on the 4.1.0 payload: 27 mentions of the ephemeral
     `build/unified-release/python-seed.XXXXXX/` directory inside
-    `runtime/python/lib/python3.12/_sysconfigdata__darwin_darwin.py`, and a pip
+    `runtime/python/lib/python3.N/_sysconfigdata__darwin_darwin.py`, and a pip
     console script at `runtime/python-site/bin/jsonschema` whose shebang points
     at that same directory — a path no customer has, so the script could never
     have run. python-site is on PYTHONPATH and never on PATH, so nothing
@@ -701,6 +1559,195 @@ def test_the_embedded_interpreter_forgets_where_it_was_seeded() -> None:
     assert 'rm -rf "$runtime/python-site/bin"' in builder
     assert "normalize_embedded_python_paths()" in builder
     assert 'normalize_embedded_python_paths "$runtime" "$python_seed"' in builder
+
+
+def test_embedded_interpreter_forgets_the_python_build_standalone_runner_home(
+    tmp_path: Path,
+) -> None:
+    """CPython 3.14 ships _sysconfig_vars__darwin_darwin.json with the PBS CI
+    runner's home frozen into `userbase`. The product contract refuses any
+    /Users path in a config file, so the release died at the bundled verifier.
+    Run the real normalizer function on a generation-shaped tree.
+    """
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+    start = builder.index("normalize_embedded_python_paths() {")
+    end = builder.index("\n}\n", start) + len("\n}\n")
+    function = builder[start:end]
+
+    runtime = tmp_path / "runtime"
+    seed = tmp_path / "python-seed.XXXXXX"
+    lib = runtime / "python/lib/python3.14"
+    lib.mkdir(parents=True)
+    vars_json = lib / "_sysconfig_vars__darwin_darwin.json"
+    vars_json.write_text(
+        json.dumps(
+            {
+                "userbase": "/Users/runner/.local",
+                "prefix": f"{seed}/python",
+                "EXT_SUFFIX": ".cpython-314-darwin.so",
+            },
+            indent=4,
+        ),
+        encoding="utf-8",
+    )
+    (lib / "_sysconfigdata__darwin_darwin.py").write_text(
+        f"build_time_vars = {{'prefix': '{seed}/python'}}\n", encoding="utf-8"
+    )
+    script = tmp_path / "normalize.sh"
+    script.write_text(
+        function + '\nnormalize_embedded_python_paths "$1" "$2"\n', encoding="utf-8"
+    )
+
+    result = subprocess.run(
+        ["/bin/bash", str(script), str(runtime), str(seed)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    values = json.loads(vars_json.read_text(encoding="utf-8"))
+    assert values["userbase"] == "/usr/src/python-build-standalone/.local"
+    assert values["prefix"] == "/usr/src/python-seed/python"
+    assert values["EXT_SUFFIX"] == ".cpython-314-darwin.so"
+    for path in lib.iterdir():
+        text = path.read_text(encoding="utf-8")
+        assert "/Users/" not in text, path.name
+        assert str(seed) not in text, path.name
+
+
+def _embedded_python_fixture(root: Path) -> Path:
+    python = root / "python"
+    stdlib = python / "lib/python3.14"
+    for relative in (
+        "bin/pip3",
+        "bin/idle3",
+        "bin/idle3.14",
+        "lib/libpython3.14.dylib",
+        "lib/libtcl9.0.dylib",
+        "lib/libtcl9tk9.0.dylib",
+        "lib/tcl9.0/init.tcl",
+        "lib/tcl9/9.0/msgcat.tm",
+        "lib/tk9.0/tk.tcl",
+        "lib/thread3.0.6/libthread3.0.6.dylib",
+        "lib/itcl4.3.8/libitcl4.3.8.dylib",
+        "lib/pkgconfig/python3-embed.pc",
+        "lib/python3.14/json/__init__.py",
+        "lib/python3.14/tkinter/__init__.py",
+        "lib/python3.14/idlelib/idle.py",
+        "lib/python3.14/turtledemo/__main__.py",
+        "lib/python3.14/lib-dynload/_ssl.cpython-314-darwin.so",
+        "lib/python3.14/lib-dynload/_tkinter.cpython-314-darwin.so",
+    ):
+        (python / relative).parent.mkdir(parents=True, exist_ok=True)
+        (python / relative).write_bytes(b"fixture\n")
+    assert stdlib.is_dir()
+    interpreter = python / "bin/python3.14"
+    # copyfile, not copy2: /usr/bin/true carries a system-restricted file flag
+    # that chflags may not copy onto a user file.
+    shutil.copyfile("/usr/bin/true", interpreter)
+    interpreter.chmod(0o755)
+    return python
+
+
+def _run_python_prune(tmp_path: Path, python: Path, *, path: str) -> None:
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+    start = builder.index("prune_embedded_python_unreachable() {")
+    end = builder.index("\n}\n", start) + len("\n}\n")
+    script = tmp_path / "prune.sh"
+    # The builder runs under `set -euo pipefail`; release #8 died silently
+    # inside this function on a status that only errexit turns fatal.
+    script.write_text(
+        "set -euo pipefail\n"
+        + builder[start:end]
+        + '\nprune_embedded_python_unreachable "$1" python3.14 libpython3.14.dylib\n'
+        + "printf 'PRUNE_DONE\\n'\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        ["/bin/bash", str(script), str(python)],
+        capture_output=True,
+        text=True,
+        env={"PATH": path},
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "PRUNE_DONE" in result.stdout
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="otool reads Mach-O load commands")
+def test_embedded_python_drops_native_code_no_declared_executable_reaches(
+    tmp_path: Path,
+) -> None:
+    """Release #7 (c71487bf, CPython 3.14.7) died at VCPC027: the bundled
+    verifier found libpython, the Tcl/Tk stack and its thread/itcl packages
+    reachable from no declared executable. Run the real prune function on a
+    python-build-standalone shaped tree whose interpreter links no libpython.
+    """
+    python = _embedded_python_fixture(tmp_path / "static")
+    _run_python_prune(tmp_path, python, path="/usr/bin:/bin")
+
+    remaining = sorted(
+        str(path.relative_to(python)) for path in python.rglob("*") if path.is_file()
+    )
+    assert remaining == [
+        "bin/pip3",
+        "bin/python3.14",
+        "lib/pkgconfig/python3-embed.pc",
+        "lib/python3.14/json/__init__.py",
+        "lib/python3.14/lib-dynload/_ssl.cpython-314-darwin.so",
+    ]
+
+
+def test_embedded_python_keeps_libpython_the_interpreter_links(tmp_path: Path) -> None:
+    python = _embedded_python_fixture(tmp_path / "shared")
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    otool = shim / "otool"
+    otool.write_text(
+        "#!/bin/sh\n"
+        'printf "%s:\\n\\t@executable_path/../lib/libpython3.14.dylib\\n" "$2"\n',
+        encoding="utf-8",
+    )
+    otool.chmod(0o755)
+    _run_python_prune(tmp_path, python, path=f"{shim}:/usr/bin:/bin")
+
+    assert (python / "lib/libpython3.14.dylib").is_file()
+    assert not (python / "lib/libtcl9.0.dylib").exists()
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+    call = builder.index('prune_embedded_python_unreachable "$runtime/python"')
+    assert call < builder.index(
+        'install_name_tool -id "@loader_path/${PORTABLE_PYTHON_DYLIB}"'
+    )
+    assert 'if [[ -f "$runtime/python/lib/${PORTABLE_PYTHON_DYLIB}" ]]; then' in builder
+
+
+def test_usage_recovery_does_not_bake_the_checkout_into_release_binaries() -> None:
+    """control-core's source probe is debug-only.
+
+    `env!("CARGO_MANIFEST_DIR")` is opaque to --remap-path-prefix. One release
+    copy of it in source_core_dir was the snapshot path in voc, vc-admin,
+    vc-o, vc-server and vibecrafted-server-web.
+    """
+    usage = (REPO_ROOT / "vibecrafted-server/control-core/src/usage.rs").read_text(
+        encoding="utf-8"
+    )
+    start = usage.index("fn source_core_dir()")
+    body = usage[start : usage.index("fn regular_file")]
+    code = [line for line in body.splitlines() if not line.lstrip().startswith("//")]
+    joined = "\n".join(code)
+    assert "#[cfg(debug_assertions)]" in joined
+    assert joined.index("#[cfg(debug_assertions)]") < joined.index(
+        'env!("CARGO_MANIFEST_DIR")'
+    )
 
 
 def test_release_binaries_never_probe_the_machine_that_compiled_them() -> None:
@@ -735,22 +1782,302 @@ def test_release_binaries_never_probe_the_machine_that_compiled_them() -> None:
 
 
 def test_release_strips_linker_paths_and_pins_frame_source_identity() -> None:
-    """Final Mach-O bytes must not retain snapshot or DerivedData object paths."""
+    """Final Mach-O bytes must not retain snapshot or DerivedData object paths.
+
+    One shared boundary, no per-binary lists. MEASURED 2026-09-08 on the
+    f131b81b candidate: the Runtime Pack step named libexec/vc-terminal and
+    libexec/vc-frame and left bin/voc, bin/vc-start, bin/scaffold-doctor,
+    bin/control-observe,
+    bin/aicx, bin/aicx-mcp and bin/prview carrying the rustup sysroot and the
+    Cargo target directory in linker stabs; the hygiene gate refused the build
+    before packaging. Both payloads now pass every Mach-O executable through
+    scripts/lib/macho-signing.sh::strip_macho_debug_tree before the gate reads
+    the bytes and before any signature is spent.
+    """
     builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
         encoding="utf-8"
     )
+    helper = (REPO_ROOT / "scripts/lib/macho-signing.sh").read_text(encoding="utf-8")
 
     assert (
         'CARGO_PROFILE_RELEASE_STRIP=false make -C "$FRAME_REPO" plugins-assets'
         in builder
     )
     assert "VC_FRAME_SOURCE_MANIFEST_DIR=/usr/src/vc-frame/zellij-utils" in builder
-    assert '"$APP/Contents/MacOS/Vibecrafted"' in builder
-    assert '"$terminal_app/Contents/MacOS/alacritty"' in builder
-    assert '"$APP/Contents/Helpers/vc-frame"' in builder
-    strip_at = builder.index("/usr/bin/strip -S")
-    hygiene_at = builder.index('assert_payload_is_anonymous "$APP"')
-    assert strip_at < hygiene_at
+    assert "strip_macho_debug_tree() {" in helper
+    assert "strip -S" not in builder, "per-binary strip lists came back"
+
+    runtime_strip = builder.index(
+        'strip_macho_debug_tree "$runtime/bin" "$runtime/libexec"'
+    )
+    runtime_gate = builder.index(
+        'assert_payload_is_anonymous "$runtime" "Runtime Pack payload"'
+    )
+    runtime_signing = builder.index("\n  produce_runtime_pack\n")
+    assert runtime_strip < runtime_gate < runtime_signing
+
+    app_strip = builder[builder.index("strip_debug_stabs() {") :]
+    app_strip = app_strip[: app_strip.index("\n}\n")]
+    assert (
+        'strip_macho_debug_tree "$APP/Contents/MacOS" "$APP/Contents/Helpers"'
+        in app_strip
+    )
+    # MEASURED 2026-09-09 on the aa12980d candidate: the Runtime Pack passed
+    # and the App gate refused Contents/Frameworks/libvibecrafted_shell_ffi.dylib
+    # for 17 linker stabs. That root holds the one library this build links,
+    # so it is the only root stripped with --shared-libraries; vendor roots
+    # (the embedded Runtime Pack under Contents/Resources/runtime) never are.
+    assert (
+        'strip_macho_debug_tree --shared-libraries "$APP/Contents/Frameworks"'
+        in app_strip
+    )
+    assert builder.count("strip_macho_debug_tree --shared-libraries") == 1, (
+        "--shared-libraries reached a root other than Contents/Frameworks"
+    )
+    app_strip_call = builder.index("\n  strip_debug_stabs\n")
+    app_gate = builder.index('assert_payload_is_anonymous "$APP"')
+    app_signing = builder.index('sign_macho_tree "$APP/Contents"')
+    assert app_strip_call < app_gate < app_signing
+
+
+_BUNDLE_SIGNING_DRIVER = """
+set -euo pipefail
+. "$1/scripts/lib/macho-signing.sh"
+root="$2"
+SIGNING_IDENTITY="Developer ID Application: Fixture"
+CODESIGN_KEYCHAIN_ARGS=(--keychain "$3")
+sign_macho_tree "$root"
+sign_macho_app_bundles "$root"
+verify_macho_tree "$root" 1
+"""
+
+
+def _seed_signing_fixture_tree(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """A pack-shaped tree: a flat native host plus a real .app beside it.
+
+    The Mach-O is a copy of /usr/bin/true, so `is_macho_file` reads genuine
+    bytes through the real /usr/bin/file — the helper calls that by absolute
+    path and a shim could not reach it anyway. Only `codesign` is faked, and
+    only to record the order it was called in.
+    """
+
+    # copy2 replicates st_flags, and /usr/bin/true carries SF_RESTRICTED under
+    # SIP: chflags on the copy fails with EPERM. The bytes are the point here,
+    # so copy those and set the mode explicitly.
+    def _donor(destination: Path) -> None:
+        destination.write_bytes(Path("/usr/bin/true").read_bytes())
+        destination.chmod(0o755)
+
+    root = tmp_path / "VibecraftedRuntime"
+    (root / "libexec").mkdir(parents=True)
+    _donor(root / "libexec/vc-terminal")
+    bundle = root / "libexec/vc-terminal.app"
+    (bundle / "Contents/MacOS").mkdir(parents=True)
+    (bundle / "Contents/Resources").mkdir(parents=True)
+    _donor(bundle / "Contents/MacOS/alacritty")
+    (bundle / "Contents/Resources/alacritty.icns").write_bytes(b"icns-fixture")
+    (bundle / "Contents/Info.plist").write_text(
+        '<?xml version="1.0"?><plist version="1.0"><dict>'
+        "<key>CFBundleExecutable</key><string>alacritty</string>"
+        "</dict></plist>\n",
+        encoding="utf-8",
+    )
+
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    log = tmp_path / "codesign.log"
+    codesign = fake_bin / "codesign"
+    codesign.write_text(
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$*" >> "' + str(log) + '"\n'
+        # Sealing a bundle is what writes CodeResources; sealing a file does not.
+        'for argument in "$@"; do\n'
+        '  case "$argument" in\n'
+        "    -*) continue ;;\n"
+        "  esac\n"
+        '  if [ -d "$argument/Contents" ]; then\n'
+        '    case "$*" in\n'
+        "      *--verify*) : ;;\n"
+        '      *) mkdir -p "$argument/Contents/_CodeSignature"\n'
+        '         printf "sealed\\n" > "$argument/Contents/_CodeSignature/CodeResources" ;;\n'
+        "    esac\n"
+        "  fi\n"
+        "done\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    codesign.chmod(0o755)
+    return root, fake_bin, log
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin",
+    reason="Mach-O donors and bundle seals are a Darwin boundary",
+)
+def test_bundle_seal_follows_the_inner_macho_and_verification_demands_it(
+    tmp_path: Path,
+) -> None:
+    """Signing a bundle's executable is not signing the bundle.
+
+    `sign_macho_tree` walks `find -type f`, so inside an .app it reaches the
+    inner Mach-O and signs that FILE. Contents/_CodeSignature/CodeResources —
+    the seal that covers Info.plist and the icon, i.e. the Finder/Dock identity
+    the bundle exists for — is written only when codesign is handed the bundle
+    DIRECTORY. This proves the packager now does both, in that order, and that
+    verification refuses a tree where the second step did not happen.
+    """
+    root, fake_bin, log = _seed_signing_fixture_tree(tmp_path)
+    bundle = root / "libexec/vc-terminal.app"
+    keychain = tmp_path / "fixture.keychain"
+    keychain.write_bytes(b"")
+    environment = {
+        "PATH": f"{fake_bin}:/usr/bin:/bin",
+        "HOME": str(tmp_path / "home"),
+    }
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _BUNDLE_SIGNING_DRIVER,
+            "driver",
+            str(REPO_ROOT),
+            str(root),
+            str(keychain),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=environment,
+    )
+    assert result.returncode == 0, result.stderr
+
+    calls = log.read_text(encoding="utf-8").splitlines()
+    signed = [line for line in calls if "--verify" not in line]
+    inner = next(
+        index
+        for index, line in enumerate(signed)
+        if line.endswith("vc-terminal.app/Contents/MacOS/alacritty")
+    )
+    sealed = next(
+        index for index, line in enumerate(signed) if line.endswith("vc-terminal.app")
+    )
+    assert inner < sealed, "the bundle was sealed before its own executable"
+    assert any(line.endswith("libexec/vc-terminal") for line in signed), (
+        "the flat native host beside the bundle stopped being signed"
+    )
+    assert (bundle / "Contents/_CodeSignature/CodeResources").is_file()
+    verified = [line for line in calls if "--verify" in line]
+    assert any(line.endswith("vc-terminal.app") for line in verified)
+
+    # Strip only the seal and the same verification must refuse the tree.
+    shutil.rmtree(bundle / "Contents/_CodeSignature")
+    refusal = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                'set -euo pipefail\n. "$1/scripts/lib/macho-signing.sh"\n'
+                'verify_macho_tree "$2" 1\n'
+            ),
+            "driver",
+            str(REPO_ROOT),
+            str(root),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=environment,
+    )
+    assert refusal.returncode != 0
+    assert "not sealed as a bundle" in refusal.stderr
+
+
+def test_runtime_pack_seals_its_app_bundles_before_the_inventory_closes() -> None:
+    """The pack's own vc-terminal.app must be sealed inside the byte owner.
+
+    Vibecrafted.app has always closed this through sign_nested_app_bundles.
+    The standalone pack gained libexec/vc-terminal.app and had no equivalent
+    step, so it shipped a signed executable inside an unsealed shell — and the
+    closed inventory and provenance then recorded exactly those bytes. The seal
+    therefore has to land before refresh-foundations, not after.
+    """
+    packager = (REPO_ROOT / "scripts/package-runtime-pack.sh").read_text(
+        encoding="utf-8"
+    )
+    helper = (REPO_ROOT / "scripts/lib/macho-signing.sh").read_text(encoding="utf-8")
+
+    signed = packager.index('sign_macho_tree "$root"')
+    sealed = packager.index('sign_macho_app_bundles "$root"')
+    verified = packager.index('verify_macho_tree "$root" 1')
+    foundations = packager.index("refresh-foundations")
+    inventoried = packager.index("vibecrafted_core.runtime_pack_contract write")
+    archived = packager.index('-czf "$candidate"')
+    assert signed < sealed < verified < foundations < inventoried < archived
+
+    assert "sign_macho_app_bundles() {" in helper
+    assert "verify_macho_app_bundles() {" in helper
+    # -depth hands children over before parents: a nested bundle is sealed
+    # before the bundle enclosing it, the same inside-out order the loose
+    # Mach-O files are signed in. The suffix match is case-insensitive: macOS
+    # still treats `Stranger.APP` as an application bundle.
+    assert helper.count("find \"$root\" -depth -type d -iname '*.app' -print0") == 2
+    assert "-name '*.app'" not in helper
+    # One verification boundary: everything that calls verify_macho_tree — the
+    # packager on its staging tree and the archive preflight the App runs on
+    # the embedded carrier — inherits the bundle proof.
+    assert 'verify_macho_app_bundles "$root" || return 1' in helper
+    assert helper.index("verify_macho_app_bundles() {") < helper.index(
+        "verify_macho_tree() {"
+    )
+    assert "_CodeSignature/CodeResources" in helper
+
+
+def test_vc_terminal_bundle_identity_has_a_single_materializer() -> None:
+    """Both payloads' bundles are stamped by one function, or they drift.
+
+    Measured on 5ff2c4c5: the App helper was stamped VC Terminal and the new
+    Runtime Pack bundle kept the donor's CFBundleName, so the same binary
+    reached the Dock under two names depending on which payload was installed.
+    """
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+    entry = (REPO_ROOT / "scripts/vc-terminal-product-entry.sh").read_text(
+        encoding="utf-8"
+    )
+    installer_source = (REPO_ROOT / "scripts/vetcoders_install.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        builder.count('/usr/bin/ditto "$TERMINAL_REPO/extra/osx/vc-terminal.app"') == 1
+    )
+    assert builder.count("Set :CFBundleDisplayName VC Terminal") == 1
+    assert builder.count("Set :CFBundleName VC Terminal") == 1
+    assert (
+        builder.count(
+            'materialize_vc_terminal_app_bundle "$runtime/libexec/vc-terminal.app"'
+        )
+        == 1
+    )
+    assert builder.count('materialize_vc_terminal_app_bundle "$terminal_app"') == 1
+    # The pack bundle is a Darwin-only product contract; Linux keeps the flat
+    # native host, so the call has to stay inside the platform guard.
+    materializer = builder.split("materialize_runtime_payload() {", 1)[1].split(
+        "\nbuild_product() {", 1
+    )[0]
+    guard = materializer.index('if [[ "$RUNTIME_PACK_PLATFORM" == darwin-* ]]; then')
+    call = materializer.index("materialize_vc_terminal_app_bundle")
+    assert guard < call < materializer.index("\n  fi\n", guard)
+
+    # The two admission predicates read the same stamp.
+    assert '"$bundle/Contents/Info.plist" 2>/dev/null)" == "VC Terminal"' in entry
+    assert '_TERMINAL_BUNDLE_DISPLAY_NAME = "VC Terminal"' in installer_source
+    assert (
+        'document.get("CFBundleName") == _TERMINAL_BUNDLE_DISPLAY_NAME'
+        in installer_source
+    )
 
 
 def test_windows_entry_point_does_not_drift_between_its_two_copies() -> None:
@@ -783,4 +2110,293 @@ def test_windows_entry_point_does_not_drift_between_its_two_copies() -> None:
         pytest.skip("vibecrafted-io is not checked out beside this repository")
     assert digest == hashlib.sha256(served.read_bytes()).hexdigest(), (
         "install.ps1 drifted between the framework repo and the served site copy"
+    )
+
+
+def test_python_entrypoint_launcher_declares_identity_path(tmp_path):
+    """The rendered shim must put a DECLARED absolute path into process argv.
+
+    The deck's identity guard matches the declared launcher path against the
+    live argv. A bare `launcher=vc-guardian` made capture-identity fail through
+    every wrapper chain: `server start` rolled a healthy server back
+    (2026-08-19). The wrapper exports VIBECRAFTED_DECLARED_LAUNCHER="$0"; the
+    shim must honor it and fall back to its own absolute path.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "render_launchers_mod",
+        Path(__file__).resolve().parents[2]
+        / "scripts"
+        / "render-python-entrypoint-launchers.py",
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        '[project]\nname = "x"\nversion = "0"\n'
+        '[project.scripts]\nvc-guardian = "vibecrafted_core.guardian:main"\n',
+        encoding="utf-8",
+    )
+    bin_dir = tmp_path / "bin"
+    created = mod.render_launchers(pyproject, bin_dir)
+    assert created == ["vc-guardian"]
+    payload = (bin_dir / "vc-guardian").read_text(encoding="utf-8")
+    assert (
+        'launcher="${VIBECRAFTED_DECLARED_LAUNCHER:-$bin_dir/vc-guardian}"' in payload
+    )
+    assert "launcher=vc-guardian\n" not in payload
+
+
+def test_deck_server_service_translates_short_host_port_flags(tmp_path):
+    """`vibecrafted server service install -h X -p Y` must reach the supervisor
+    as --host/--port — argparse owns `-h` as --help, so the raw forward printed
+    usage and exited 0: an install that never happened (2026-08-19).
+    """
+    import os
+    import subprocess
+
+    repo = Path(__file__).resolve().parents[2]
+    deck = repo / "vibecrafted-core" / "vibecrafted_core" / "deck" / "vibecrafted"
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    capture = tmp_path / "argv.txt"
+    supervisor = fake_bin / "vc-server-supervisor"
+    supervisor.write_text(
+        '#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "$CAPTURE_FILE"\nexit 0\n',
+        encoding="utf-8",
+    )
+    supervisor.chmod(0o755)
+    # _server_launcher_path requires a sibling `vibecrafted` executable.
+    (fake_bin / "vibecrafted").write_text(
+        "#!/usr/bin/env bash\nexit 0\n", encoding="utf-8"
+    )
+    (fake_bin / "vibecrafted").chmod(0o755)
+
+    env = dict(os.environ)
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+    env["CAPTURE_FILE"] = str(capture)
+    env["VIBECRAFTED_HOME"] = str(tmp_path / "home")
+    result = subprocess.run(
+        [
+            "bash",
+            str(deck),
+            "server",
+            "service",
+            "status",
+            "-h",
+            "9.9.9.9",
+            "-p",
+            "3025",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    argv = capture.read_text(encoding="utf-8").split()
+    assert "--host" in argv and argv[argv.index("--host") + 1] == "9.9.9.9"
+    assert "--port" in argv and argv[argv.index("--port") + 1] == "3025"
+    assert "-h" not in argv
+
+
+def test_standalone_pack_publishes_its_selection_only_after_it_is_signed() -> None:
+    """The producer owns the handoff, and publishes at the completion boundary.
+
+    package-runtime-pack.sh prints the archive path as soon as the tar exists,
+    which is BEFORE the Mach-O payload is verified and before the detached
+    signature is written. Publishing there would advertise an artifact that is
+    not yet installable, so the record is written at the end of
+    produce_runtime_pack instead.
+    """
+
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert '. "$REPO_ROOT/scripts/lib/runtime-pack-selection.sh"' in builder
+    produce = builder.split("produce_runtime_pack() {", 1)[1].split("\n}\n", 1)[0]
+    assert "runtime_pack_selection_publish" in produce
+    signature_at = produce.index('$RUNTIME_PACK_SIGNATURE" "$RUNTIME_PACK"')
+    assert produce.index("runtime_pack_selection_publish") > signature_at
+    assert produce.index("verify_runtime_pack_macho_signatures") < signature_at
+
+    # The donor SHAs recorded are the ones handed to the packager, read once.
+    # Re-reading a sibling HEAD after sealing lets a donor that moved mid-build
+    # describe bytes it did not produce.
+    assert 'terminal_revision="$(git_sha "$TERMINAL_REPO")"' in produce
+    assert produce.count('git_sha "$TERMINAL_REPO"') == 1
+    assert produce.count('git_sha "$FRAME_REPO"') == 1
+
+
+def test_a_build_that_can_still_fail_has_already_invalidated_its_selection() -> None:
+    """Claim the attempt BEFORE the first thing that can fail.
+
+    Otherwise a failed or interrupted retry leaves the previous success standing
+    as the implicit answer to `make install` -- and when the retry runs at the
+    same source SHA, no name derived from HEAD can tell the two apart.
+
+    Where the claim sits in the file is what this test can see, and position
+    alone is a weak proof: claiming immediately before `build_product` reads as
+    "first thing that can fail" and is not, because the donor roots, the release
+    date and the Xcode preflight all die above it. The behaviour is proven by
+    running the builder in
+    tests/tui/test_runtime_pack_cli.py::test_a_failed_preflight_invalidates_the_previous_ready_selection;
+    what remains here is the structural guard that keeps it there.
+    """
+
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+
+    # The claim precedes the executable top level in its entirety: the donor
+    # roots are the first statement that can die, and everything the release
+    # contract cares about -- date, toolchain, signing inputs, cargo, the
+    # packager -- comes after them.
+    begin_at = builder.index("runtime_pack_selection_begin")
+    acquire_at = builder.index("release_single_flight_acquire")
+    output_at = builder.index("release_single_flight_acquire_output")
+    assert acquire_at < output_at < begin_at
+    assert begin_at < builder.index('TERMINAL_DONOR="$(canonical_dir')
+    assert begin_at < builder.index("\nbuild_product\n")
+    assert "release_single_flight_release" in builder
+    assert builder.index("donor_snapshot_reap") < builder.index(
+        "release_single_flight_release"
+    )
+    build_product = builder.split("build_product() {", 1)[1].split("\n}\n", 1)[0]
+    assert "runtime_pack_selection_begin" not in build_product
+    assert (
+        'RUNTIME_PACK_SELECTION_ATTEMPT="$(runtime_pack_selection_attempt_id)"'
+        in builder
+    )
+    # Notarize-only re-runs an existing App: it produces no new carrier, so it
+    # is excluded by an explicit mode guard rather than by happening to sit
+    # above the claim, which is no longer where it sits.
+    assert 'if [[ "$MODE" != "notarize" ]]; then' in builder
+    notarize_arm = builder.split('if [[ "$MODE" == "notarize" ]]; then', 1)[1].split(
+        "\nfi\n", 1
+    )[0]
+    assert "runtime_pack_selection" not in notarize_arm
+    assert 'release_single_flight_acquire "$REPO_ROOT"' in builder
+    assert 'release_single_flight_acquire_output "$REPO_ROOT" "$DIST_DIR"' in builder
+    assert builder.index("release_single_flight_acquire") < builder.index(
+        'if [[ "$MODE" == "notarize" ]]; then'
+    )
+    assert "--help|-h)" in builder
+    assert "VIBECRAFTED_RELEASE_FAKE_STAGES" not in builder
+    assert "VIBECRAFTED_RELEASE_FAKE_KEYCHAIN" not in builder
+    assert "release_run_fake_bounded_stages" not in builder
+    assert ".vibecrafted-release-owner" not in builder
+
+
+def test_standalone_selection_is_not_the_app_dmg_release_tuple() -> None:
+    """Two records, two meanings; an old release-output is not fresh proof.
+
+    dist/release-output.json requires app modules, embedded byte equality and
+    notarization evidence, and the standalone lane exits long before it exists.
+    """
+
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+    library = (REPO_ROOT / "scripts/lib/runtime-pack-selection.sh").read_text(
+        encoding="utf-8"
+    )
+    installer = (REPO_ROOT / "scripts/install-runtime-pack.sh").read_text(
+        encoding="utf-8"
+    )
+    # Both files EXPLAIN the separation in prose; neither may reach for it.
+    code = "\n".join(
+        line
+        for line in (library + "\n" + installer).splitlines()
+        if not line.lstrip().startswith("#")
+    )
+
+    assert "release-output.json" not in code
+    tuple_at = builder.index('--output "$DIST_DIR/release-output.json"')
+    assert builder.index("runtime_pack_selection_publish") < tuple_at
+    # Build state under the ignored build/, not user configuration.
+    assert "build/$RUNTIME_PACK_SELECTION_BASENAME" in library
+
+
+def test_main_source_snapshot_pins_launch_sha_across_payload_app_and_selection() -> (
+    None
+):
+    """Living Tree movement after launch must not mint a mixed generation.
+
+    ROOT_SHA is captured once. Payload copies, the App manifest, pack names
+    and the selection record all bind that SHA. Compile inputs come from
+    SOURCE_ROOT, the detached snapshot at that SHA. DIST_DIR, BUILD_DIR and
+    the selection file stay on the living REPO_ROOT so a reap cannot
+    unpublish a carrier or delete a reusable cache.
+    """
+
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+    library = (REPO_ROOT / "scripts/lib/donor-snapshot.sh").read_text(encoding="utf-8")
+
+    assert 'SOURCE_ROOT="$DONOR_SNAPSHOT_ROOT/vibecrafted"' in builder
+    assert 'donor_snapshot_create "$REPO_ROOT" "$SOURCE_ROOT" "$ROOT_SHA"' in builder
+    assert "require_bound_revision() {" in builder
+    assert 'require_bound_revision "$SOURCE_ROOT" vibecrafted "$ROOT_SHA"' in builder
+    assert '--vibecrafted-sha "$ROOT_SHA"' in builder
+    assert 'git_sha "$REPO_ROOT"' not in builder
+    assert 'show "$ROOT_SHA:VERSION"' in builder
+    assert 'RUNTIME_VERSION="${VERSION}+g${ROOT_SHA:0:8}"' in builder
+    assert '--source-revision "$ROOT_SHA"' in builder
+    assert 'carrier --source "$SOURCE_ROOT"' in builder
+    assert 'DIST_DIR="${VIBECRAFTED_RELEASE_DIR:-$REPO_ROOT/dist}"' in builder
+    assert 'BUILD_DIR="$REPO_ROOT/build/unified-release"' in builder
+    assert 'runtime_pack_selection_begin "$REPO_ROOT"' in builder
+    assert 'runtime_pack_selection_publish "$REPO_ROOT"' in builder
+    assert 'CARGO_TARGET_DIR="$NATIVE_VOC_BUILD_ROOT"' in builder
+    assert 'CARGO_BUILD_ROOT="$server_build_root"' in builder
+
+    # After the pin, dirt/identity checks the snapshot, not the living tree.
+    product = builder.split("build_product() {", 1)[1].split("\n}\n", 1)[0]
+    assert 'require_clean_repo "$SOURCE_ROOT" vibecrafted' in product
+    assert 'require_clean_repo "$REPO_ROOT" vibecrafted' not in product
+    assert (
+        product.count('require_bound_revision "$SOURCE_ROOT" vibecrafted "$ROOT_SHA"')
+        == 2
+    )
+
+    # A failed snapshot build has already claimed the selection and still reaps.
+    begin_at = builder.index("runtime_pack_selection_begin")
+    snapshot_at = builder.index(
+        'donor_snapshot_create "$REPO_ROOT" "$SOURCE_ROOT" "$ROOT_SHA"'
+    )
+    fail_at = builder.index("VIBECRAFTED_RELEASE_FAIL_AFTER_SNAPSHOT")
+    publish_at = builder.index("runtime_pack_selection_publish")
+    assert begin_at < snapshot_at < fail_at < publish_at
+    assert "donor_snapshot_reap || true" in builder
+    assert "worktree add --detach" in library
+    assert "[revision]" in library
+    assert "donor_snapshot_owner_stamp_file" in library
+    assert ".vibecrafted-release-owner" not in library
+    assert "%s.release-owner" in library
+
+
+def test_main_snapshot_does_not_own_selection_or_artifact_output() -> None:
+    """Selection and carriers must not point at a path the reaper deletes."""
+
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+    selection = (REPO_ROOT / "scripts/lib/runtime-pack-selection.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'SOURCE_ROOT="$DONOR_SNAPSHOT_ROOT/vibecrafted"' in builder
+    assert 'runtime_pack_selection_begin "$SOURCE_ROOT"' not in builder
+    assert 'runtime_pack_selection_publish "$SOURCE_ROOT"' not in builder
+    assert 'DIST_DIR="${VIBECRAFTED_RELEASE_DIR:-$SOURCE_ROOT/dist}"' not in builder
+    assert 'BUILD_DIR="$SOURCE_ROOT/build/unified-release"' not in builder
+    assert "build/$RUNTIME_PACK_SELECTION_BASENAME" in selection
+    assert "$1/build/$RUNTIME_PACK_SELECTION_BASENAME" in selection or (
+        "printf '%s\\n' \"$1/build/$RUNTIME_PACK_SELECTION_BASENAME\"" in selection
     )

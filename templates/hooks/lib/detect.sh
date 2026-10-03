@@ -240,7 +240,6 @@ husky_write_auto_config() {
   # is intentionally opt-in (default OFF) — multi-second test runs at
   # push time are user-hostile. Operator flips HUSKY_PREPUSH_VITEST=1
   # manually in repos where the test suite is fast enough.
-  local g_lintstaged=0; husky_have_lint_staged_config "$root" && g_lintstaged=1
 
   local cargo_dir; cargo_dir="$(husky_detect_cargo_dir "$root")"
   [ -z "$cargo_dir" ] && cargo_dir="."
@@ -248,14 +247,14 @@ husky_write_auto_config() {
   # --- gate selection logic
   # Pre-commit (stage-scoped, fast):
   #   - Security ALWAYS strict (handled by hook entry, not config flag)
-  #   - lint-staged wins over individual prettier/eslint if config exists
+  #   - arbitrary lint-staged tasks are never run on the shared working copy
   #   - tsc disabled by default — workspace repos break flat tsc invocation
   local pc_secrets=1
   local pc_env=1
-  local pc_lintstaged=$(( g_lintstaged ))
-  local pc_prettier=$(( g_prettier && !g_lintstaged ))
-  local pc_eslint=$(( g_eslint && !g_lintstaged ))
-  local pc_stylelint=$(( g_stylelint && !g_lintstaged ))
+  local pc_lintstaged=0
+  local pc_prettier=$(( g_prettier ))
+  local pc_eslint=$(( g_eslint ))
+  local pc_stylelint=$(( g_stylelint ))
   local pc_semgrep=$(( g_semgrep ))
   local pc_loct_health=$(( g_loct ))
   local pc_loct_supp=0   # opt-in only — budgets need per-repo tuning
@@ -267,6 +266,7 @@ husky_write_auto_config() {
   # Pre-push (full-repo, slower):
   #   - Defaults skew higher coverage; user already paying push latency
   local pp_prettier_full=0  # often noisy on existing repos — opt-in
+  local pp_ruff_full=$(( g_python && g_ruff ))
   local pp_semgrep_full=$(( g_semgrep ))
   local pp_tsc=0            # workspace-aware tsc not solved in template
   local pp_loct_cycles=$(( g_loct ))
@@ -298,6 +298,7 @@ HUSKY_WARN_RETENTION=5
 # themselves — when on, they are non-negotiable.
 HUSKY_PRECOMMIT_SECRETS=${pc_secrets}
 HUSKY_PRECOMMIT_ENV_FILES=${pc_env}
+HUSKY_PRECOMMIT_CLAIMS=1
 
 HUSKY_PRECOMMIT_LINT_STAGED=${pc_lintstaged}
 HUSKY_PRECOMMIT_PRETTIER_STAGED=${pc_prettier}
@@ -319,6 +320,7 @@ HUSKY_PRECOMMIT_SH_SHELLCHECK=${pc_shellcheck}
 
 # ── Pre-push (full-repo, slower) ───────────────────────────────────
 HUSKY_PREPUSH_PRETTIER_FULL=${pp_prettier_full}
+HUSKY_PREPUSH_RUFF_FULL=${pp_ruff_full}
 HUSKY_PREPUSH_SEMGREP_FULL=${pp_semgrep_full}
 HUSKY_PREPUSH_TSC=${pp_tsc}
 HUSKY_PREPUSH_LOCT_CYCLES=${pp_loct_cycles}

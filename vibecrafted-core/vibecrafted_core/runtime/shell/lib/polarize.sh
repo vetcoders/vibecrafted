@@ -67,7 +67,7 @@ _vetcoders_write_polarize_prism_payload() {
 
 _vetcoders_polarize_score() {
   local prism_json="$1"
-  python3 - "$prism_json" <<'PY'
+  "$(_vetcoders_internal_python)" - "$prism_json" <<'PY'
 import json
 import pathlib
 import sys
@@ -79,7 +79,7 @@ PY
 
 _vetcoders_polarize_band_select() {
   local prism_json="$1"
-  python3 - "$prism_json" <<'PY'
+  "$(_vetcoders_internal_python)" - "$prism_json" <<'PY'
 import json
 import pathlib
 import sys
@@ -184,7 +184,7 @@ _vetcoders_polarize_emit_context_pack() {
     }
   fi
 
-  python3 - "$prism_json" "$sidecar_path" "$band" "$target_repo" "$slug" "$raw_path" "$task" <<'PY'
+  "$(_vetcoders_internal_python)" - "$prism_json" "$sidecar_path" "$band" "$target_repo" "$slug" "$raw_path" "$task" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -308,6 +308,9 @@ _vetcoders_polarize_loop() {
   root="${_vetcoders_contract_root:-$(_vetcoders_repo_root)}"
   skill_code="$(_vetcoders_skill_prefix "polarize")"
   run_id="${VIBECRAFTED_LOOP_RUN_ID:-$(_vetcoders_generate_run_id "$skill_code")}"
+  # The sourced facade/parser initializes this shared result before the consuming function runs;
+  # assigning a local default here would mask missing ownership initialization.
+  # shellcheck disable=SC2154
   prompt="$(_vetcoders_compose_polarize_prompt "$_vetcoders_contract_prompt" "$_vetcoders_contract_file" "$_vetcoders_contract_task")" || return 1
   if [[ -n "$_vetcoders_contract_depth" ]]; then
     prompt+=$'\n\n'

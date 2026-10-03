@@ -36,16 +36,18 @@ import time
 import zlib
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from importlib import import_module
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
-try:  # pragma: no cover - exercised on every supported (POSIX) platform
-    import fcntl
-except ImportError:  # pragma: no cover - Windows has no fcntl; flock probe is skipped
-    fcntl = None  # type: ignore[assignment]
+try:  # exercised on every supported (POSIX) platform
+    fcntl: ModuleType | None = import_module("fcntl")
+except ImportError:  # Windows has no fcntl; flock probe is skipped
+    fcntl = None
 
 from .capabilities import _resolve_executable as _resolve_foundation
+from .clock import utc_now_iso
 
 # ---------------------------------------------------------------------------
 # Transport canon
@@ -83,11 +85,6 @@ EXIT_LOCK_CONTENDED = 75
 # launching a real ``loct watch``. The returned object only needs ``pid`` and a
 # ``poll()`` returning the exit code or ``None`` while still running.
 Spawner = Callable[[Sequence[str]], "subprocess.Popen[bytes]"]
-
-
-def _now_iso() -> str:
-    """Current UTC timestamp in ISO 8601 form, used for outcome timestamps."""
-    return datetime.now(timezone.utc).isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -268,7 +265,7 @@ class WatchOutcome:
     pid: int | None = None
     returncode: int | None = None
     detail: str = ""
-    checked_at: str = field(default_factory=_now_iso)
+    checked_at: str = field(default_factory=utc_now_iso)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize this outcome for JSON printing / receipt embedding."""
@@ -452,11 +449,11 @@ def main(argv: list[str] | None = None) -> int:
         "transport": args.transport,
         "endpoint": (mcp_endpoint(canonical) if args.transport == "http" else None),
         "port": (port_for_root(canonical) if args.transport == "http" else None),
-        "checked_at": _now_iso(),
+        "checked_at": utc_now_iso(),
     }
     print(json.dumps(payload, indent=2))
     return 0
 
 
-if __name__ == "__main__":  # pragma: no cover - CLI entrypoint
+if __name__ == "__main__":  # CLI entrypoint
     raise SystemExit(main())

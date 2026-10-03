@@ -184,7 +184,7 @@ earns PASS only with all four:
 ### Hard Non-Trust Rules
 
 You MUST NOT trust task frontmatter status, prior agent reports,
-commit messages, AICX entries, memory slices, kronika notes,
+commit messages, AICX entries, memory slices, chronicle notes,
 "completed" annotations, PR descriptions, inline `// done` comments,
 or prior `vc-followup` / `vc-review` reports — unless **independently
 confirmed in current code/tests**. Each of those is a _claim_, not
@@ -279,7 +279,7 @@ Do not in audit mode:
 - treat Stage 1 landed as full-plan PASS
 - treat Stage 2 deferred as full-plan FAIL
 - produce only the report without a matrix + trace
-- trust AICX / kronika / memory slices as repo truth
+- trust AICX / chronicle / memory slices as repo truth
 - bypass Loctree on importer-graph / blast-radius / dead-code questions
 - protect your first verdict during self-attack instead of downgrading
 

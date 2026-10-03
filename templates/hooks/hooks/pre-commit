@@ -12,13 +12,10 @@ set -euo pipefail
 HUSKY_HOOK_NAME="pre-commit"
 
 HUSKY_LIB="${BASH_SOURCE[0]%/*}/lib"
-# shellcheck disable=SC1090,SC1091
 . "$HUSKY_LIB/core.sh"
-# shellcheck disable=SC1090,SC1091
+. "$HUSKY_LIB/claims.sh"
 . "$HUSKY_LIB/secrets.sh"
-# shellcheck disable=SC1090,SC1091
 . "$HUSKY_LIB/env-files.sh"
-# shellcheck disable=SC1090,SC1091
 . "$HUSKY_LIB/lint-routing.sh"
 
 husky_init
@@ -52,10 +49,11 @@ set +e
   # warning even on feature branches. A leaked credential / staged .env in
   # the commit object cannot be retroactively scrubbed without history
   # rewriting, so the gate has to actually gate.
+  [ "$HUSKY_PRECOMMIT_CLAIMS" = "1" ]         && husky_run_strict_step "Living Tree claim fence" husky_claims_check_staged
   [ "$HUSKY_PRECOMMIT_SECRETS" = "1" ]          && husky_run_strict_step "Secret leak guard" husky_secrets_scan_staged
   [ "$HUSKY_PRECOMMIT_ENV_FILES" = "1" ]        && husky_run_strict_step "Env-file guard"    husky_env_files_scan_staged
 
-  [ "$HUSKY_PRECOMMIT_LINT_STAGED" = "1" ]      && husky_run_step "lint-staged"              husky_lint_lint_staged
+  [ "$HUSKY_PRECOMMIT_LINT_STAGED" = "1" ]      && husky_run_strict_step "lint-staged safety fence" husky_lint_lint_staged
   [ "$HUSKY_PRECOMMIT_PRETTIER_STAGED" = "1" ]  && husky_run_step "Prettier (staged)"        husky_lint_prettier_staged
   [ "$HUSKY_PRECOMMIT_ESLINT_STAGED" = "1" ]    && husky_run_step "ESLint (staged)"          husky_lint_eslint_staged
   [ "$HUSKY_PRECOMMIT_STYLELINT_STAGED" = "1" ] && husky_run_step "Stylelint (staged)"       husky_lint_stylelint_staged
@@ -106,7 +104,7 @@ if [ "$(grep -l "^signature=${signature}$" "$(husky_warns_dir)"/"${HUSKY_HOOK_NA
 fi
 
 if husky_warn_mode_active; then
-  # shellcheck disable=SC2012
+  # shellcheck disable=SC2012  # newest-first by mtime; hook log names are hyphenated alphanumerics
   husky_warn "WARN mode: commit allowed, log archived as $(ls -1t "$(husky_warns_dir)"/"${HUSKY_HOOK_NAME}"-*.log | head -1)"
   exit 0
 fi

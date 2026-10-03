@@ -67,7 +67,6 @@ REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 # Source detection helpers so suggestion logic works before activator
 # validation. detect.sh is sourced from the template location, not the
 # target — we may not have installed lib/ yet.
-# shellcheck disable=SC1090,SC1091
 . "$SOURCE_LIB/detect.sh"
 
 # Auto-suggest activator from repo shape unless caller explicitly overrode.
@@ -209,7 +208,9 @@ activator_lefthook() {
   # that path without --force. We detect the collision and pass --force so
   # the installer succeeds without operator intervention.
   local existing_hookspath
-  existing_hookspath="$( cd "$REPO_ROOT" && git config --get core.hooksPath 2>/dev/null || true )"
+  if ! existing_hookspath="$(cd "$REPO_ROOT" && git config --get core.hooksPath 2>/dev/null)"; then
+    existing_hookspath=""
+  fi
   local force_flag=""
   if [ -n "$existing_hookspath" ] && [ "$existing_hookspath" != ".git/hooks" ]; then
     force_flag="--force"
@@ -220,7 +221,7 @@ activator_lefthook() {
     if [ "$DRY_RUN" = "1" ]; then
       say "DRY: would run 'lefthook install ${force_flag}'"
     else
-      # shellcheck disable=SC2086  # force_flag may be empty, intentional split
+      # force_flag may be empty, intentional split
       ( cd "$REPO_ROOT" && lefthook install $force_flag ) \
         || say "lefthook install reported a non-zero exit — check repo state"
     fi

@@ -1,4 +1,8 @@
-# vc-workspace — static quick-launch compose (no wizard needed).
+# Personal-dev convenience only. This file is not the Workshop local-vm
+# selector backend and is not a security boundary. It deliberately requires an
+# operator-supplied development image; the hardened selector image is built
+# from the exact Runtime Pack using the commands in README.md and must not be
+# combined with these broad mounts.
 # ============================================================================
 # One command:   cp .env.example .env  &&  $EDITOR .env  &&  docker compose up -d --build
 # Enter shell:   docker compose exec dev zsh
@@ -8,8 +12,8 @@
 #
 # Tailscale runs in USERSPACE networking (entry.sh: tailscaled
 # --tun=userspace-networking), so NO NET_ADMIN cap and NO /dev/net/tun device
-# are needed — this keeps the same surface on macOS Docker Desktop (dragon,
-# silver) and Linux (ops) hosts. Do NOT add `devices: /dev/net/tun` here; it
+# are needed — this keeps the same surface on macOS Docker Desktop (host-a,
+# host-d) and Linux (host-e) hosts. Do NOT add `devices: /dev/net/tun` here; it
 # does not exist on macOS hosts and would break the run.
 #
 # The interactive wizard (wizard/vc-onboard.py) writes its own
@@ -19,10 +23,7 @@
 
 services:
   dev:
-    image: vetcoders/vc-workspace:trixie
-    build:
-      context: .
-      dockerfile: Containerfile
+    image: ${VC_PERSONAL_DEV_IMAGE:?set VC_PERSONAL_DEV_IMAGE to an operator-owned development image}
     container_name: vc-workspace
     hostname: ${TAILSCALE_HOSTNAME:-vc-workspace}
     stdin_open: true

@@ -175,7 +175,7 @@ przypisać do segmentu lifecycle, a nie rozmazać po "jakiś agent coś zrobił"
 ## Helper ochrony przed wyścigiem (dodany 2026-05-12, Plan 07)
 
 Living Tree dyscyplinuje pracę równoległą, ale sam z siebie nie sprawia, że
-`git commit --only path1 path2` jest atomowy względem jednoczesnego commita innego agenta na tym samym branchu. Kronika
+`git commit --only path1 path2` jest atomowy względem jednoczesnego commita innego agenta na tym samym branchu. Doktryna
 2026-04-16/17 uchwyciła dokładny tryb awarii:
 przy współbieżnej aktywności komunikat commita jednego agenta może wylądować pod kopertą drzewa innego agenta.
 

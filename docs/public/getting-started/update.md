@@ -1,13 +1,16 @@
 ---
 title: "Update and rollback"
-description: "How vibecrafted update publishes atomic runtime generations, how to roll back by pointer, and how to uninstall cleanly."
+description: "Source runtime and App update owners, receipt-bound recovery, and clean uninstall."
 section: getting-started
 order: 40
 ---
 
 # Update and rollback
 
-The installed runtime is a chain of immutable generations with one atomic pointer. Updating publishes a new generation; rolling back moves the pointer. Nothing is edited in place.
+Installers publish immutable runtime generations. The source-runtime lane uses
+the `tools/vibecrafted-current` selector described below; the macOS product
+updates its signed App and matching Runtime Pack together. Each lane must use
+its installer and recovery receipts.
 
 ## Update
 
@@ -15,15 +18,29 @@ The installed runtime is a chain of immutable generations with one atomic pointe
 vibecrafted update
 ```
 
-Update checks the installed version against the latest release and reinstalls when a newer one exists:
+The CLI updates the source runtime through its installer. Its `Launcher`
+version identifies the command deck executing this request; it is not proof of
+which App or service process is running. A matching channel version skips the
+installer unless `--force` is supplied, and does not attest installation health.
 
-```text
-⚒  Vibecrafted Update
-  Installed: 3.6.0
-  Available: 3.7.0
-```
+After the installer returns successfully, the CLI reports `Installer completed;
+installed runtime acceptance pending`. Use `vibecrafted doctor` and
+`vibecrafted receipt` to inspect the selected installed generation. The command
+deck performs no cleanup inside that immutable generation: publication and
+receipt-owned cleanup belong to the installer.
 
-When you are already current, update says so; pass `--force` to reinstall the same version. From a local checkout, `make update` pulls latest and reinstalls.
+From a local checkout, `make update` fast-forwards only when the checkout is on
+the requested branch. A failed fetch or fast-forward stops before installation.
+On another branch it installs the current checkout without switching branches.
+
+For the macOS product, use **Check for Updates** in Vibecrafted.app. That path
+verifies the signed release feed and candidate, publishes the Runtime Pack
+through its installer, and replaces the App through the sole bundle mutation
+helper. CLI source-runtime Update does not replace the App. See
+[the App update contract](../../installer/IN_APP_UPDATE.md) for receipts and
+recovery requirements.
+
+Install and update also reconcile **skill-copy shadows**: real directory copies of bundled skills that a pre-3.x installer left in per-runtime skill dirs such as `~/.junie/skills`. A copy whose Vibecrafted provenance is proven is moved into `~/.vibecrafted/backups/installer/shadowed-views-<timestamp>/` and then removed, so the canonical `~/.agents/skills` view is the only truth. Provenance is proven from content only: either the copy is byte-identical to the store copy, or the release manifest (`SKILL_PROVENANCE.json`, shipped inside the skill store) proves both halves of it — its `SKILL.md` is a release Vibecrafted shipped, and every file it carries is, byte for byte, a version we shipped at that same path. A file you edited, a file we never shipped, a symlink, or a hand-edited `SKILL.md` all withdraw the claim, and the warning names the file. Every runtime is reconciled, `~/.claude/skills` and `~/.codex/skills` included: install links the canonical `~/.agents/skills` view first — reconciliation needs it in place before it may remove anything — then reconciles, then links the remaining runtime views. A `vc-*` directory whose provenance cannot be proven is only reported — never removed, and neither is anything reached through a symlinked skill directory. The view writer itself no longer removes anything real to make room for a link — a directory or a plain file under a `vc-*` name is kept, and named in the output. The same proof guards **orphans**, the `vc-*` directories whose names have left the bundle: one that cannot be proven is kept and reported instead of removed, even in a non-interactive install. `vibecrafted doctor` names these cases; see [Doctor](../troubleshooting/doctor.md).
 
 ## Runtime generations
 
@@ -75,18 +92,24 @@ cat ~/.local/share/vibecrafted/tools/vibecrafted-current/VERSION
 python3 -m json.tool ~/.local/share/vibecrafted/tools/vibecrafted-current/runtime-manifest.json
 ```
 
-## Rollback by pointer
+## Recovery through the installer
 
-Because generations are immutable, rollback is a pointer move to a previous generation directory, followed by the health gate:
+A failed candidate audit before publication preserves the previous generation.
+Do not repoint `vibecrafted-current` with `ln -sfn`: that bypasses the publisher's
+pre-swap validation and service handoff, and does not restore a matching App.
+Running `doctor` afterward cannot make an unvalidated pointer swap atomic.
 
-```bash
-ls -d ~/.local/share/vibecrafted/tools/vibecrafted-generation-*
-ln -sfn ~/.local/share/vibecrafted/tools/<previous-generation> \
-        ~/.local/share/vibecrafted/tools/vibecrafted-current
-vibecrafted doctor
-```
+For macOS product recovery, retain the exact Update transaction's admission,
+journal, receipt and prior App/Runtime Pack. The existing replacement helper
+owns restore/recover as well as replacement; use the
+[App update recovery contract](../../installer/IN_APP_UPDATE.md) and
+[capture lifecycle contract](../../installer/APP_CAPTURE_LIFECYCLE.md). Missing
+or mismatched evidence is a refusal, not a successful rollback.
 
-`doctor` re-audits the manifest and hashes of whatever generation the pointer names, so a bad rollback target is caught immediately.
+After uninstall, use the self-contained restore command printed by that
+installer's receipt, described below. Source reinstall, App replacement and
+teardown restore are different actions; choose the owner for the action rather
+than editing a selector by hand.
 
 ## Compare source and installed
 

@@ -48,7 +48,7 @@ fn frontmatter(role: &str, plan_id: &str) -> String {
 
 fn driver_body(plan_id: &str) -> String {
     format!(
-        "{}# DRIVER\n\n## 1. Pełne ścieżki\n\n| Rzecz | Ścieżka |\n|---|---|\n| Root | /Users/polyversai/.vibecrafted/artifacts/vetcoders/vibecrafted/2026_0720/plans/{plan_id}/ |\n\n## 2. Graf zależności — why\n\n| Krawędź | Why |\n|---|---|\n| A → B | why shared domain |\n\n## 3. Gotowe komendy\n\n```bash\nvibecrafted implement claude --file /Users/polyversai/.vibecrafted/artifacts/vetcoders/vibecrafted/2026_0720/plans/{plan_id}/briefs/W1-01_cut.md\n```\n\n## 4. Reguła `[ ]→[x]`\n\n`[ ]` todo · `[~]` running · `[?]` done-unverified · `[!]` blocked · `[x]` verifier-green\n**Only a delivery-verifier flips `[~]→[x]`.**\n\n## 5. Snapshot\n\nW1-01 [ ]\ndou-index = 0/1 = 0.00\n",
+        "{}# DRIVER\n\n## 1. Pełne ścieżki\n\n| Rzecz | Ścieżka |\n|---|---|\n| Root | /Users/tester/.vibecrafted/artifacts/vetcoders/vibecrafted/2026_0720/plans/{plan_id}/ |\n\n## 2. Graf zależności — why\n\n| Krawędź | Why |\n|---|---|\n| A → B | why shared domain |\n\n## 3. Gotowe komendy\n\n```bash\nvibecrafted implement claude --file /Users/tester/.vibecrafted/artifacts/vetcoders/vibecrafted/2026_0720/plans/{plan_id}/briefs/W1-01_cut.md\n```\n\n## 4. Reguła `[ ]→[x]`\n\n`[ ]` todo · `[~]` running · `[?]` done-unverified · `[!]` blocked · `[x]` verifier-green\n**Only a delivery-verifier flips `[~]→[x]`.**\n\n## 5. Snapshot\n\nW1-01 [ ]\ndou-index = 0/1 = 0.00\n\n## 6. Odbiór (matryca wyników)\n\n| cut | commit | dowód (Operator) | Worker | Operator | Founder |\n|---|---|---|---|---|---|\n| W1-01 | — | — | [ ] | [ ] | [ ] |\n\nZatwierdzono przez: Worker [ ] Operator [ ] Founder [ ]\n",
         frontmatter("driver", plan_id)
     )
 }
@@ -104,8 +104,13 @@ fn published_schema_and_fixture_match_the_typed_model() {
     assert_eq!(manifest.schema_version, "1");
     assert_eq!(manifest.artifacts[2].role, ScaffoldArtifactRole::Brief);
     assert_eq!(manifest.artifacts[2].dependencies, ["driver", "atlas"]);
+    assert_eq!(manifest.artifacts[3].role, ScaffoldArtifactRole::Dispatch);
+    assert_eq!(
+        manifest.artifacts[3].path,
+        "aicx-product-convergence-v1.dispatch.toml"
+    );
     assert!(SCAFFOLD_MANIFEST_SCHEMA_JSON.contains("\"wave-atlas\""));
-    assert_eq!(path_pattern, r"^[^/\\].*\.md$");
+    assert_eq!(path_pattern, r"^[^/\\].*(\.md|\.dispatch\.toml)$");
 }
 
 #[test]
@@ -306,7 +311,7 @@ fn portable_export_removes_host_paths_and_freezes_no_branch() {
     fs::write(
         root.join("DRIVER.md"),
         driver.replace(
-            "/Users/polyversai/.vibecrafted/artifacts/vetcoders/vibecrafted/2026_0720/plans/plan-a",
+            "/Users/tester/.vibecrafted/artifacts/vetcoders/vibecrafted/2026_0720/plans/plan-a",
             &root.display().to_string(),
         ),
     )
@@ -455,6 +460,97 @@ fn global_catalog_lists_scaffold_truth_and_ignores_unrelated_manifests() {
         Err(ScaffoldError::SelectionRequired { plan_ids })
             if plan_ids == ["plan-a", "plan-b"]
     ));
+
+    fs::remove_dir_all(home).ok();
+}
+
+/// Live shape: `vetcoders/vibecrafted` is the real repo directory, and
+/// `vetcoders/vibecrafted-suite` plus `local/vibecrafted-suite` are symlinks
+/// onto it. Titles are not the key — the manifest plan_id is.
+#[cfg(unix)]
+#[test]
+fn catalog_collapses_symlink_aliases() {
+    use std::os::unix::fs::symlink;
+
+    let home = temp_home("catalog-aliases");
+    let plan_id = "shelf-plan";
+    let root = write_plan(&home, plan_id, declarations());
+    populate(&root, plan_id);
+
+    let real_repo = home.join("artifacts/vetcoders/vibecrafted");
+    let same_org_alias = home.join("artifacts/vetcoders/vibecrafted-suite");
+    let other_org = home.join("artifacts/local");
+    fs::create_dir_all(&other_org).expect("alias org");
+    let other_alias = other_org.join("vibecrafted-suite");
+    symlink("vibecrafted", &same_org_alias).expect("same-org alias");
+    symlink("../vetcoders/vibecrafted", &other_alias).expect("other-org alias");
+
+    let broken = plan_root(&home, "broken-manifest");
+    fs::create_dir_all(&broken).expect("broken plan root");
+    fs::write(
+        broken.join("manifest.json"),
+        br#"{"plan_id":"broken-manifest"}"#,
+    )
+    .expect("broken manifest");
+
+    let catalog = ScaffoldArtifactStore::new(&home).catalog_detailed();
+    assert_eq!(
+        catalog
+            .plans
+            .iter()
+            .map(|plan| plan.plan_id.as_str())
+            .collect::<Vec<_>>(),
+        [plan_id]
+    );
+    let plan = &catalog.plans[0];
+    assert_eq!(plan.plan_id, plan_id);
+    assert_eq!(plan.org, "vetcoders");
+    assert_eq!(plan.repo, "vibecrafted");
+    assert!(
+        plan.plan_root
+            .contains("artifacts/vetcoders/vibecrafted/2026_0720/plans/shelf-plan"),
+        "row must keep the real plan root, got {}",
+        plan.plan_root
+    );
+    assert!(
+        !plan.plan_root.contains("vibecrafted-suite"),
+        "alias path leaked into plan_root: {}",
+        plan.plan_root
+    );
+
+    assert_eq!(
+        catalog.skipped.len(),
+        1,
+        "a broken manifest is one skip, not a silent drop and not an alias triple: {:?}",
+        catalog
+            .skipped
+            .iter()
+            .map(|skip| skip.plan_root.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        catalog.skipped[0].plan_root.contains("broken-manifest"),
+        "skip root: {}",
+        catalog.skipped[0].plan_root
+    );
+    assert_eq!(
+        catalog.skipped[0].guessed_plan_id.as_deref(),
+        Some("broken-manifest")
+    );
+
+    assert!(
+        fs::symlink_metadata(&same_org_alias)
+            .expect("same-org alias metadata")
+            .file_type()
+            .is_symlink()
+    );
+    assert!(
+        fs::symlink_metadata(&other_alias)
+            .expect("other-org alias metadata")
+            .file_type()
+            .is_symlink()
+    );
+    assert!(real_repo.is_dir());
 
     fs::remove_dir_all(home).ok();
 }
@@ -708,5 +804,99 @@ fn typed_status_update_and_control_event_bridge_holds() {
 
     assert!(running.content.contains("- [~] W1-01 first task"));
 
+    fs::remove_dir_all(home).ok();
+}
+
+#[test]
+fn doctor_r12_requires_reception_matrix_in_driver() {
+    let home = temp_home("r12-missing-matrix");
+    let root = write_plan(&home, "plan-r12", declarations());
+    populate(&root, "plan-r12");
+    // Strip the Odbiór section from the driver: R12 must refuse.
+    let driver = fs::read_to_string(root.join("DRIVER.md")).expect("driver");
+    let stripped = driver
+        .split("## 6. Odbiór")
+        .next()
+        .expect("driver head")
+        .to_string();
+    fs::write(root.join("DRIVER.md"), stripped).expect("driver rewrite");
+
+    let report = ScaffoldArtifactStore::new(&home)
+        .doctor("vetcoders", "vibecrafted", "2026_0720", "plan-r12")
+        .expect("doctor");
+    assert!(!report.valid);
+    assert!(
+        report.errors.iter().any(|error| {
+            error.code == "reception_matrix" && error.rule.as_deref() == Some("R12")
+        }),
+        "errors={:?}",
+        report.errors
+    );
+    fs::remove_dir_all(home).ok();
+}
+
+#[test]
+fn doctor_r12_refuses_forged_founder_signature() {
+    let home = temp_home("r12-forged-founder");
+    let root = write_plan(&home, "plan-forged", declarations());
+    populate(&root, "plan-forged");
+    let driver = fs::read_to_string(root.join("DRIVER.md")).expect("driver");
+    let forged = driver.replace(
+        "| W1-01 | — | — | [ ] | [ ] | [ ] |",
+        "| W1-01 | — | — | [x] | [x] | [x] |",
+    );
+    assert_ne!(driver, forged, "fixture must carry the reception row");
+    fs::write(root.join("DRIVER.md"), forged).expect("driver rewrite");
+
+    let store = ScaffoldArtifactStore::new(&home);
+    let report = store
+        .doctor("vetcoders", "vibecrafted", "2026_0720", "plan-forged")
+        .expect("doctor");
+    assert!(!report.valid);
+    assert!(
+        report.errors.iter().any(|error| {
+            error.code == "reception_matrix" && error.message.contains("acceptance/founder.json")
+        }),
+        "errors={:?}",
+        report.errors
+    );
+
+    // Founder acceptance evidence on disk legitimizes the checked box.
+    fs::create_dir_all(root.join("acceptance")).expect("acceptance dir");
+    fs::write(
+        root.join("acceptance/founder.json"),
+        "{\"accepted_by\":\"founder\",\"date\":\"2026-09-15\"}",
+    )
+    .expect("founder evidence");
+    let report = store
+        .doctor("vetcoders", "vibecrafted", "2026_0720", "plan-forged")
+        .expect("doctor");
+    assert!(report.valid, "{:?}", report.errors);
+    fs::remove_dir_all(home).ok();
+}
+
+#[test]
+fn doctor_r12_ignores_checked_founder_explanation_outside_table() {
+    let home = temp_home("r12-explanatory-prose");
+    let root = write_plan(&home, "plan-explanation", declarations());
+    populate(&root, "plan-explanation");
+    let driver = fs::read_to_string(root.join("DRIVER.md")).expect("driver");
+    fs::write(
+        root.join("DRIVER.md"),
+        format!("{driver}\nFounder [x] requires acceptance evidence.\n"),
+    )
+    .expect("driver rewrite");
+
+    let report = ScaffoldArtifactStore::new(&home)
+        .doctor("vetcoders", "vibecrafted", "2026_0720", "plan-explanation")
+        .expect("doctor");
+
+    assert!(
+        !report.errors.iter().any(|error| {
+            error.code == "reception_matrix" && error.message.contains("acceptance/founder.json")
+        }),
+        "errors={:?}",
+        report.errors
+    );
     fs::remove_dir_all(home).ok();
 }

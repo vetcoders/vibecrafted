@@ -122,7 +122,7 @@ def test_preflight_payload_summarizes_diagnostics(monkeypatch, tmp_path: Path) -
     monkeypatch.setattr(
         installer_gui,
         "helper_layer_path",
-        lambda: tmp_path / ".config" / "vetcoders" / "vc-skills.sh",
+        lambda: tmp_path / ".config" / "vibecrafted" / "shell" / "vc-skills.sh",
     )
     skill_store = tmp_path / ".vibecrafted" / "skills"
     (skill_store / "vc-init").mkdir(parents=True)
@@ -199,7 +199,7 @@ def test_build_html_renders_wizard_shell() -> None:
             "version": "1.2.1",
             "source_dir_display": "~/src/vibecrafted",
             "guide_path_display": "~/.vibecrafted/START_HERE.md",
-            "helper_path_display": "~/.config/vetcoders/vc-skills.sh",
+            "helper_path_display": "~/.config/vibecrafted/shell/vc-skills.sh",
             "found_count": 3,
             "missing_count": 2,
             "found_items": ["Frameworks: workflows"],
@@ -220,7 +220,7 @@ def test_build_html_renders_wizard_shell() -> None:
                 "recent_runs": [],
                 "warnings": [],
                 "events": [],
-                "helper_path": "~/.config/vetcoders/vc-skills.sh",
+                "helper_path": "~/.config/vibecrafted/shell/vc-skills.sh",
                 "skills_ready": 3,
             },
             "launcher_defaults": {

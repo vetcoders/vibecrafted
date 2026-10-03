@@ -116,6 +116,29 @@ fn compute_view_surfaces_a_launching_run_not_yet_synced() {
 }
 
 #[test]
+fn read_state_view_surfaces_a_fresh_launching_runtime_run() {
+    let home = temp_home("runtime-runs-snapshot-view");
+    let run_id = "marb-view-launching-snapshot";
+    let run_dir = home.join("control_plane").join("runtime_runs").join(run_id);
+    fs::create_dir_all(&run_dir).expect("run dir");
+    fs::write(run_dir.join("transcript.log"), "fresh\n").expect("transcript");
+
+    let plane = ControlPlane::new(&home);
+    let view = plane.read_state_view();
+
+    assert!(
+        view.active_runs
+            .iter()
+            .any(|run| run.run_id == run_id && run.state == "launching" && run.health == "active"),
+        "snapshot view keeps a fresh launching runtime run in Current: {:?}",
+        view.active_runs
+            .iter()
+            .map(|run| &run.run_id)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn compute_view_reads_settlement_board_only_from_retained_snapshots() {
     let home = temp_home("settlement-board");
     let control_plane = home.join("control_plane");
@@ -393,4 +416,96 @@ fn lookup_run_returns_none_when_run_not_on_disk_yet() {
         plane.lookup_run("ghost-run").is_none(),
         "a run with nothing on disk resolves to None (still launching -> await)"
     );
+}
+
+#[test]
+fn compute_view_does_not_count_completed_runtime_meta_as_active() {
+    let home = temp_home("completed-runtime-meta");
+    let runs_dir = home.join("control_plane").join("runs");
+    fs::create_dir_all(&runs_dir).expect("runs dir");
+    write_snapshot(&runs_dir, "work-ghost", "running", None);
+
+    let run_dir = home
+        .join("control_plane")
+        .join("runtime_runs")
+        .join("work-ghost");
+    fs::create_dir_all(&run_dir).expect("runtime dir");
+    fs::write(
+        run_dir.join("meta.json"),
+        serde_json::to_vec(&json!({
+            "run_id": "work-ghost",
+            "status": "completed",
+            "state": "completed",
+            "exit_code": 0,
+            "completed_at": "2026-08-28T05:00:00+00:00",
+            "worker_pid": 999_999_999i64,
+        }))
+        .expect("meta JSON"),
+    )
+    .expect("write runtime meta");
+
+    let view = ControlPlane::new(&home).compute_view(Utc::now());
+    assert!(
+        view.active_runs
+            .iter()
+            .all(|run| run.run_id != "work-ghost"),
+        "completed runtime meta with a dead pid must not stay in active_runs: {:?}",
+        view.active_runs
+            .iter()
+            .map(|run| &run.run_id)
+            .collect::<Vec<_>>()
+    );
+
+    fs::remove_dir_all(home).ok();
+}
+
+#[test]
+fn overlay_does_not_stamp_final_from_contradictory_running_meta() {
+    let home = temp_home("contradictory-runtime-meta");
+    let runs_dir = home.join("control_plane").join("runs");
+    fs::create_dir_all(&runs_dir).expect("runs dir");
+    write_snapshot(&runs_dir, "work-live", "running", None);
+    let path = runs_dir.join("work-live.json");
+    let mut snapshot: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    snapshot["updated_at"] = json!(Utc::now().to_rfc3339());
+    fs::write(path, snapshot.to_string()).unwrap();
+
+    let run_dir = home
+        .join("control_plane")
+        .join("runtime_runs")
+        .join("work-live");
+    fs::create_dir_all(&run_dir).expect("runtime dir");
+    fs::write(
+        run_dir.join("meta.json"),
+        serde_json::to_vec(&json!({
+            "run_id": "work-live",
+            "status": "running",
+            "state": "running",
+            "exit_code": 0,
+            "completed_at": "2026-08-28T05:00:00+00:00",
+            "worker_pid": 999_999_999i64,
+        }))
+        .expect("meta JSON"),
+    )
+    .expect("write runtime meta");
+
+    let plane = ControlPlane::new(&home);
+    let run = plane.lookup_run("work-live").expect("snapshot");
+    assert_eq!(run.run_id, "work-live");
+    assert_eq!(run.state, "running");
+    assert_ne!(run.liveness, "terminal");
+    assert_ne!(run.health, "final");
+    let view = plane.compute_view(Utc::now());
+    let seen = view
+        .active_runs
+        .iter()
+        .chain(view.stalled_runs.iter())
+        .chain(view.recent_runs.iter())
+        .find(|item| item.run_id == "work-live")
+        .expect("contradictory running meta remains visible");
+    assert_eq!(seen.state, "running");
+    assert_ne!(seen.liveness, "terminal");
+    assert_ne!(seen.health, "final");
+
+    fs::remove_dir_all(home).ok();
 }

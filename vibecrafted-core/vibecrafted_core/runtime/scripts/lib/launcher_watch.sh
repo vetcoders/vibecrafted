@@ -15,7 +15,7 @@ spawn_watch_startup() {
   [[ "$seconds" =~ ^[0-9]+$ ]] || seconds=10
   (( seconds > 0 )) || return 0
 
-  if python3 - "$meta_path" "$transcript_path" "$report_path" "$seconds" <<'PY'
+  if "$(spawn_python_bin)" - "$meta_path" "$transcript_path" "$report_path" "$seconds" <<'PY'
 import json
 import os
 import re

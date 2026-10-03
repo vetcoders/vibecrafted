@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from vibecrafted_core.cli import LAUNCHERS
 from vibecrafted_core.help_surface import (
+    CORE_SURFACE_COMMANDS,
     WORKFLOW_HELP,
+    advertised_compact_verbs,
+    render_message_help,
     render_resume_session_help,
     render_root_help,
     render_workflow_help,
@@ -26,13 +29,41 @@ def test_worker_help_declares_headless_as_the_default_surface() -> None:
     output = render_workflow_help("implement")
 
     assert "--runtime <terminal|headless>" in output
-    assert "Worker surface (default: headless)" in output
+    assert "Presentation (default: headless)" in output
+    assert "--execution-runtime <living-tree|local-worktrees>" in output
+    assert "--base <ref|SHA|HEAD>" in output
+    assert "--session <id|current|last>" in output
+
+
+def test_workflow_help_documents_session_continuation() -> None:
+    output = render_workflow_help("workflow")
+
+    assert "--session <id|current|last>" in output
+    assert "vibecrafted workflow agy --session <provider-uuid>" in output
+    assert "never a work-* run id" in output
+    assert "--remediate-trust-block" in output
+    assert "--remediation-task <id>" in output
+
+
+def test_partner_help_is_interactive_only() -> None:
+    output = render_workflow_help("partner")
+
+    assert "Worker surface (default: headless)" not in output
+    assert "--runtime <terminal|headless>" not in output
+    assert "--runtime <terminal|visible|plain>" in output
+    assert "vibecrafted partner codex" in output
+    assert "not a job" in output
 
 
 def test_research_help_exposes_swarm_alias() -> None:
     output = render_workflow_help("research")
 
     assert "vibecrafted swarm [agents...] [flags]" in output
+    assert "vibecrafted research [agents...] [flags]" in output
+    assert "vibecrafted research <uno|duo|trio> <agents...> [flags]" in output
+    assert "research.yaml lanes" in output
+    assert "Single-agent research" not in output
+    assert "claude + codex + junie" not in output
 
 
 def test_root_help_uses_the_registered_ship_cycle() -> None:
@@ -46,7 +77,34 @@ def test_root_help_uses_the_registered_ship_cycle() -> None:
     assert "More workflows: vibecrafted help --all" in output
     assert "Vibecrafted core command surface" not in output
     assert "resume-session" in output
+    assert "fork <agent>" in output
     assert "--run-id" in output
+    assert "Codex queue receipts" in output
+    assert "uninstall            Remove runtime" in output
+    assert "vibecrafted uninstall --dry-run" in output
+    advertised = advertised_compact_verbs("test-version")
+    assert set(CORE_SURFACE_COMMANDS) <= set(advertised)
+    assert "init" in advertised
+    assert "<skill>" not in advertised
+
+
+def test_message_help_names_codex_queue_and_the_inbox_honestly() -> None:
+    # bd07974d replaced "Codex queue only" with a durable inbox for every other
+    # provider. What must survive the change: no worker is started, an inbox
+    # entry is not delivery into model context, and acceptance is not an ACK.
+    output = render_message_help()
+    display = " ".join(output.split())
+
+    assert "Codex `queue --thread`" in display
+    assert "Claude/other-provider messages use the durable inbox" in display
+    assert "never starts or resumes another worker" in display
+    assert "inbox_pending is not delivery into model context" in display
+    assert "provider_accepted is not an agent ACK" in display
+    assert "Claude steering" not in display
+    assert "--run-id <id>" in output
+    assert "--receive" in output
+    assert "--ack <message-id>" in output
+    assert "--inspect <message-id>" in output
 
 
 def test_resume_session_help_matches_the_tracked_headless_contract() -> None:

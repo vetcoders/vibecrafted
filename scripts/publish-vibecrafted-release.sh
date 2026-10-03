@@ -2,9 +2,11 @@
 # Publish the installable Vibecrafted artifacts after a cold verification of the
 # exact bytes downloaded back from a draft GitHub Release.
 #
-# Two channels, one release, one commit:
-#   macOS desktop  -> the signed, notarized, stapled DMG
-#   every other OS -> the provenance-bound portable tarball install.sh consumes
+# Six carriers, one release, one commit:
+#   macOS desktop -> the signed, notarized, stapled DMG
+#   macOS CLI     -> the signed binary Runtime Pack embedded in that App
+#   other systems -> the provenance-bound portable source tarball
+#   Windows       -> checksummed MSI/EXE and a signed Windows Runtime Pack
 # Each channel is verified against the bytes GitHub hands back, never against
 # the bytes this machine still has in dist/. The asset allowlist below stays
 # exact: a release that grew an asset nobody named is a release nobody audited.
@@ -29,7 +31,7 @@ die() {
   exit 1
 }
 
-for command_name in git gh uv shasum xcrun spctl hdiutil; do
+for command_name in git gh uv shasum openssl xcrun spctl hdiutil; do
   command -v "$command_name" >/dev/null 2>&1 || die "missing command: $command_name"
 done
 test "$(uname -s)" = "Darwin" || die "the notarized DMG publisher must run on macOS"
@@ -62,6 +64,32 @@ test -s "$DMG_CHECKSUM" || die "missing $DMG_CHECKSUM"
 xcrun stapler validate "$DMG"
 spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG"
 
+RUNTIME_PACK_NAME="$(uv run python3 -c 'import json; print(json.load(open("dist/release-output.json"))["runtime_pack"]["path"])')"
+RUNTIME_PACK="$DIST/$RUNTIME_PACK_NAME"
+RUNTIME_PACK_CHECKSUM="$RUNTIME_PACK.sha256"
+RUNTIME_PACK_SIGNATURE="$RUNTIME_PACK.sig"
+RUNTIME_PACK_PUBLIC_KEY="$ROOT/vibecrafted-core/vibecrafted_core/trust/vibecrafted-signing-v1.pub"
+test -s "$RUNTIME_PACK" || die "missing $RUNTIME_PACK; run make release first"
+test -s "$RUNTIME_PACK_CHECKSUM" || die "missing $RUNTIME_PACK_CHECKSUM"
+test -s "$RUNTIME_PACK_SIGNATURE" || die "missing $RUNTIME_PACK_SIGNATURE"
+test -s "$RUNTIME_PACK_PUBLIC_KEY" || die "missing trusted Runtime Pack public key"
+(
+  cd "$DIST"
+  shasum -a 256 -c "$(basename "$RUNTIME_PACK_CHECKSUM")"
+)
+openssl dgst -sha256 -verify "$RUNTIME_PACK_PUBLIC_KEY" \
+  -signature "$RUNTIME_PACK_SIGNATURE" "$RUNTIME_PACK" >/dev/null \
+  || die "Runtime Pack signature verification failed"
+VC_FRAME_SHA="$(uv run python3 -c 'import json; print(json.load(open("dist/release-output.json"))["source_revisions"]["vc-frame"])')"
+VC_TERMINAL_SHA="$(uv run python3 -c 'import json; print(json.load(open("dist/release-output.json"))["source_revisions"]["vc-terminal"])')"
+VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY="$RUNTIME_PACK_PUBLIC_KEY" \
+  bash "$ROOT/scripts/install-runtime-pack.sh" \
+    --pack "$RUNTIME_PACK" \
+    --verify-only \
+    --expected-source-revision "$HEAD_SHA" \
+    --expected-terminal-revision "$VC_TERMINAL_SHA" \
+    --expected-frame-revision "$VC_FRAME_SHA" >/dev/null
+
 # The portable channel carries no Apple ticket, so its identity claim is the
 # closed source-provenance carrier: an allowlisted tree whose digest names one
 # commit. Bind that claim to the same HEAD the DMG names, or the release would
@@ -78,6 +106,43 @@ test "$(uv run python3 -c 'import json; print(json.load(open("dist/portable-outp
   shasum -a 256 -c "$(basename "$PORTABLE_CHECKSUM")"
 )
 
+# Windows channel (prep): same ver-date-sha stem as the DMG. Carriers are
+# Authenticode-unsigned; trust is .sha256 (+ .sig for the Runtime Pack), the
+# same provenance idea as the portable tarball not being Apple-notarized.
+# Never invent a wildcard here — every asset must be named before upload.
+if [[ "$DMG_NAME" =~ ^Vibecrafted_"$VERSION"-([0-9]{8})-([0-9a-f]{8})\.dmg$ ]]; then
+  WINDOWS_DATE="${BASH_REMATCH[1]}"
+  WINDOWS_SHA="${BASH_REMATCH[2]}"
+else
+  die "cannot derive Windows asset stem from DMG name: $DMG_NAME"
+fi
+WINDOWS_MSI_NAME="Vibecrafted_${VERSION}-${WINDOWS_DATE}-${WINDOWS_SHA}-windows-x64.msi"
+WINDOWS_EXE_NAME="Vibecrafted_${VERSION}-${WINDOWS_DATE}-${WINDOWS_SHA}-windows-x64.exe"
+WINDOWS_PACK_NAME="Vibecrafted_RuntimePack_${VERSION}-${WINDOWS_DATE}-${WINDOWS_SHA}-win32-x64.tar.gz"
+WINDOWS_MSI="$DIST/$WINDOWS_MSI_NAME"
+WINDOWS_EXE="$DIST/$WINDOWS_EXE_NAME"
+WINDOWS_PACK="$DIST/$WINDOWS_PACK_NAME"
+WINDOWS_MSI_CHECKSUM="$WINDOWS_MSI.sha256"
+WINDOWS_EXE_CHECKSUM="$WINDOWS_EXE.sha256"
+WINDOWS_PACK_CHECKSUM="$WINDOWS_PACK.sha256"
+WINDOWS_PACK_SIGNATURE="$WINDOWS_PACK.sig"
+for windows_required in \
+  "$WINDOWS_MSI" "$WINDOWS_MSI_CHECKSUM" \
+  "$WINDOWS_EXE" "$WINDOWS_EXE_CHECKSUM" \
+  "$WINDOWS_PACK" "$WINDOWS_PACK_CHECKSUM" "$WINDOWS_PACK_SIGNATURE"
+do
+  test -s "$windows_required" || die "missing Windows release asset: $windows_required"
+done
+(
+  cd "$DIST"
+  shasum -a 256 -c "$(basename "$WINDOWS_MSI_CHECKSUM")"
+  shasum -a 256 -c "$(basename "$WINDOWS_EXE_CHECKSUM")"
+  shasum -a 256 -c "$(basename "$WINDOWS_PACK_CHECKSUM")"
+)
+openssl dgst -sha256 -verify "$RUNTIME_PACK_PUBLIC_KEY" \
+  -signature "$WINDOWS_PACK_SIGNATURE" "$WINDOWS_PACK" >/dev/null \
+  || die "Windows Runtime Pack signature verification failed"
+
 RUN_ID="$(gh run list --repo "$REPO" --workflow release.yml --commit "$HEAD_SHA" \
   --json databaseId,status,conclusion --jq 'map(select(.status == "completed" and .conclusion == "success"))[0].databaseId // empty')"
 test -n "$RUN_ID" || die "no successful Release source gate exists for $HEAD_SHA"
@@ -88,6 +153,13 @@ test -n "$RUN_ID" || die "no successful Release source gate exists for $HEAD_SHA
 OPEN_ALERTS="$(gh api "/repos/$REPO/code-scanning/alerts?state=open&ref=refs/heads/main&per_page=1" \
   --jq 'length')"
 test "$OPEN_ALERTS" = "0" || die "$OPEN_ALERTS open CodeQL alert(s) remain on main"
+
+# Source CI cannot certify replacement/rollback of signed applications. Run the
+# mandatory physical gate on these exact candidate bytes and an explicitly
+# provisioned prior release before creating or uploading any public draft.
+VIBECRAFTED_UPDATE_FIXTURE_ROOT="$DIST" \
+VIBECRAFTED_UPDATE_SOURCE_REVISION="$HEAD_SHA" \
+  make --no-print-directory test-product-update-physical
 
 if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
   test "$(gh release view "$TAG" --repo "$REPO" --json isDraft --jq .isDraft)" = "true" \
@@ -101,8 +173,18 @@ fi
 gh release upload "$TAG" --repo "$REPO" \
   "$DMG" \
   "$DMG_CHECKSUM" \
+  "$RUNTIME_PACK" \
+  "$RUNTIME_PACK_CHECKSUM" \
+  "$RUNTIME_PACK_SIGNATURE" \
   "$PORTABLE" \
   "$PORTABLE_CHECKSUM" \
+  "$WINDOWS_MSI" \
+  "$WINDOWS_MSI_CHECKSUM" \
+  "$WINDOWS_EXE" \
+  "$WINDOWS_EXE_CHECKSUM" \
+  "$WINDOWS_PACK" \
+  "$WINDOWS_PACK_CHECKSUM" \
+  "$WINDOWS_PACK_SIGNATURE" \
   "$RELEASE_OUTPUT#release-output.json" \
   "$RELEASE_SIGNATURE#release-output.json.sig" \
   --clobber
@@ -114,23 +196,62 @@ gh release download "$TAG" --repo "$REPO" --dir "$DOWNLOAD_DIR"
 EXPECTED_ASSETS="$(printf '%s\n' \
   "$DMG_NAME" \
   "$DMG_NAME.sha256" \
+  "$RUNTIME_PACK_NAME" \
+  "$RUNTIME_PACK_NAME.sha256" \
+  "$RUNTIME_PACK_NAME.sig" \
   "$PORTABLE_NAME" \
   "$PORTABLE_NAME.sha256" \
+  "$WINDOWS_MSI_NAME" \
+  "$WINDOWS_MSI_NAME.sha256" \
+  "$WINDOWS_EXE_NAME" \
+  "$WINDOWS_EXE_NAME.sha256" \
+  "$WINDOWS_PACK_NAME" \
+  "$WINDOWS_PACK_NAME.sha256" \
+  "$WINDOWS_PACK_NAME.sig" \
   "release-output.json" \
   "release-output.json.sig" | LC_ALL=C sort)"
 ACTUAL_ASSETS="$(find "$DOWNLOAD_DIR" -maxdepth 1 -type f -exec basename {} \; | LC_ALL=C sort)"
 test "$ACTUAL_ASSETS" = "$EXPECTED_ASSETS" || die "draft release contains unexpected assets"
 cmp "$DMG" "$DOWNLOAD_DIR/$DMG_NAME"
 cmp "$DMG_CHECKSUM" "$DOWNLOAD_DIR/$DMG_NAME.sha256"
+cmp "$RUNTIME_PACK" "$DOWNLOAD_DIR/$RUNTIME_PACK_NAME"
+cmp "$RUNTIME_PACK_CHECKSUM" "$DOWNLOAD_DIR/$RUNTIME_PACK_NAME.sha256"
+cmp "$RUNTIME_PACK_SIGNATURE" "$DOWNLOAD_DIR/$RUNTIME_PACK_NAME.sig"
 cmp "$PORTABLE" "$DOWNLOAD_DIR/$PORTABLE_NAME"
 cmp "$PORTABLE_CHECKSUM" "$DOWNLOAD_DIR/$PORTABLE_NAME.sha256"
+cmp "$WINDOWS_MSI" "$DOWNLOAD_DIR/$WINDOWS_MSI_NAME"
+cmp "$WINDOWS_MSI_CHECKSUM" "$DOWNLOAD_DIR/$WINDOWS_MSI_NAME.sha256"
+cmp "$WINDOWS_EXE" "$DOWNLOAD_DIR/$WINDOWS_EXE_NAME"
+cmp "$WINDOWS_EXE_CHECKSUM" "$DOWNLOAD_DIR/$WINDOWS_EXE_NAME.sha256"
+cmp "$WINDOWS_PACK" "$DOWNLOAD_DIR/$WINDOWS_PACK_NAME"
+cmp "$WINDOWS_PACK_CHECKSUM" "$DOWNLOAD_DIR/$WINDOWS_PACK_NAME.sha256"
+cmp "$WINDOWS_PACK_SIGNATURE" "$DOWNLOAD_DIR/$WINDOWS_PACK_NAME.sig"
 cmp "$RELEASE_OUTPUT" "$DOWNLOAD_DIR/release-output.json"
 cmp "$RELEASE_SIGNATURE" "$DOWNLOAD_DIR/release-output.json.sig"
 (
   cd "$DOWNLOAD_DIR"
   shasum -a 256 -c "$DMG_NAME.sha256"
+  shasum -a 256 -c "$RUNTIME_PACK_NAME.sha256"
   shasum -a 256 -c "$PORTABLE_NAME.sha256"
+  shasum -a 256 -c "$WINDOWS_MSI_NAME.sha256"
+  shasum -a 256 -c "$WINDOWS_EXE_NAME.sha256"
+  shasum -a 256 -c "$WINDOWS_PACK_NAME.sha256"
 )
+openssl dgst -sha256 -verify "$RUNTIME_PACK_PUBLIC_KEY" \
+  -signature "$DOWNLOAD_DIR/$RUNTIME_PACK_NAME.sig" \
+  "$DOWNLOAD_DIR/$RUNTIME_PACK_NAME" >/dev/null \
+  || die "downloaded Runtime Pack signature verification failed"
+openssl dgst -sha256 -verify "$RUNTIME_PACK_PUBLIC_KEY" \
+  -signature "$DOWNLOAD_DIR/$WINDOWS_PACK_NAME.sig" \
+  "$DOWNLOAD_DIR/$WINDOWS_PACK_NAME" >/dev/null \
+  || die "downloaded Windows Runtime Pack signature verification failed"
+VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY="$RUNTIME_PACK_PUBLIC_KEY" \
+  bash "$ROOT/scripts/install-runtime-pack.sh" \
+    --pack "$DOWNLOAD_DIR/$RUNTIME_PACK_NAME" \
+    --verify-only \
+    --expected-source-revision "$HEAD_SHA" \
+    --expected-terminal-revision "$VC_TERMINAL_SHA" \
+    --expected-frame-revision "$VC_FRAME_SHA" >/dev/null
 
 uv run --project vibecrafted-core verify-vibecrafted-walkaround verify-release \
   --release-output "$DOWNLOAD_DIR/release-output.json" \
@@ -159,14 +280,35 @@ uv run python3 "$DISTRIBUTION_MANIFEST" check \
   --expected-source-revision "$HEAD_SHA"
 bash "$PORTABLE_UNPACK_DIR/$PORTABLE_ROOT_NAME/install.sh" --help >/dev/null
 
+# Exercise the exact downloaded binary carrier through both public CLI buttons
+# in an isolated HOME. The second button consumes the receipt written by the
+# first and must leave no private XDG/agent residue behind.
+RUNTIME_PACK_SMOKE_HOME="$DOWNLOAD_DIR/runtime-pack-home"
+mkdir -p "$RUNTIME_PACK_SMOKE_HOME"
+RUNTIME_PACK_SMOKE_ENV=(
+  HOME="$RUNTIME_PACK_SMOKE_HOME"
+  XDG_CONFIG_HOME="$RUNTIME_PACK_SMOKE_HOME/.config"
+  XDG_DATA_HOME="$RUNTIME_PACK_SMOKE_HOME/.local/share"
+  VIBECRAFTED_HOME="$RUNTIME_PACK_SMOKE_HOME/.vibecrafted"
+  VIBECRAFTED_RUNTIME_HOME="$RUNTIME_PACK_SMOKE_HOME/.local/share/vibecrafted"
+  VIBECRAFTED_LAUNCHER_BIN="$RUNTIME_PACK_SMOKE_HOME/.local/bin"
+)
+env "${RUNTIME_PACK_SMOKE_ENV[@]}" \
+  make --no-print-directory install RUNTIME_PACK="$DOWNLOAD_DIR/$RUNTIME_PACK_NAME"
+env "${RUNTIME_PACK_SMOKE_ENV[@]}" \
+  make --no-print-directory uninstall
+test -z "$(find "$RUNTIME_PACK_SMOKE_HOME" -mindepth 1 -print -quit)" \
+  || die "Runtime Pack install/uninstall left residue in isolated HOME"
+
 DMG_SHA="$(shasum -a 256 "$DOWNLOAD_DIR/$DMG_NAME" | awk '{print $1}')"
 DMG_SIZE="$(stat -f %z "$DOWNLOAD_DIR/$DMG_NAME")"
+RUNTIME_PACK_SHA="$(shasum -a 256 "$DOWNLOAD_DIR/$RUNTIME_PACK_NAME" | awk '{print $1}')"
+RUNTIME_PACK_SIZE="$(stat -f %z "$DOWNLOAD_DIR/$RUNTIME_PACK_NAME")"
 PORTABLE_SHA="$(shasum -a 256 "$DOWNLOAD_DIR/$PORTABLE_NAME" | awk '{print $1}')"
 PORTABLE_SIZE="$(stat -f %z "$DOWNLOAD_DIR/$PORTABLE_NAME")"
 PORTABLE_TREE_SHA="$(uv run python3 -c 'import json; print(json.load(open("dist/portable-output.json"))["provenance"]["tree_sha256"])')"
-VC_FRAME_SHA="$(uv run python3 -c 'import json; print(json.load(open("dist/release-output.json"))["source_revisions"]["vc-frame"])')"
-VC_TERMINAL_SHA="$(uv run python3 -c 'import json; print(json.load(open("dist/release-output.json"))["source_revisions"]["vc-terminal"])')"
 DOWNLOAD_URL="https://github.com/$REPO/releases/download/$TAG/$DMG_NAME"
+RUNTIME_PACK_URL="https://github.com/$REPO/releases/download/$TAG/$RUNTIME_PACK_NAME"
 PORTABLE_URL="https://github.com/$REPO/releases/download/$TAG/$PORTABLE_NAME"
 
 mkdir -p "$REPORT_DIR"
@@ -180,6 +322,7 @@ cat > "$REPORT" <<EOF
 - CodeQL: PASS; zero open alerts on \`main\` immediately before publication.
 - Signed release-output verification: PASS.
 - Apple notarization ticket, Gatekeeper assessment and staple validation: PASS on local and downloaded bytes.
+- Runtime Pack checksum, detached signature and isolated install/uninstall: PASS on downloaded bytes.
 - Portable channel source-provenance validation against \`$HEAD_SHA\`: PASS on downloaded bytes.
 
 ## 2. Exposed surface inventory
@@ -187,13 +330,14 @@ cat > "$REPORT" <<EOF
 | Surface | Bind / endpoint | Proxy / TLS | Auth boundary | Secret materialization |
 | --- | --- | --- | --- | --- |
 | Vibecrafted.app desktop UI | local process | none | logged-in macOS user | app-owned runtime environment |
-| Portable tarball install (Linux / WSL2 / macOS CLI) | none; \`install.sh\` publishes into the user-owned runtime home | not applicable | invoking user | user-owned runtime home, no host config rewrites |
-| vc-server service | typed Vibecrafted settings; default loopback, operator may choose any host:port such as \`100.82.232.70:3025\` | operator-owned for non-loopback exposure | configured service policy | runtime service environment, never host config rewrites |
+| Runtime Pack install (macOS CLI) | none; same immutable payload as the App | not applicable | invoking user | one receipted runtime/config layout |
+| Portable source install (Linux / WSL2 / explicit source fallback) | none; \`install.sh\` publishes into the user-owned runtime home | not applicable | invoking user | user-owned runtime home, no host config rewrites |
+| vc-server service | typed Vibecrafted settings; default loopback \`127.0.0.1:3024\`; the Founder chooses any non-loopback bind | Founder-owned for non-loopback exposure | configured service policy | runtime service environment, never host config rewrites |
 | vc-frame web client | disabled unless explicitly configured | operator-owned | vc-frame auth boundary | runtime-only |
 
 ## 3. Deployment mode decision
 
-The shipped topology is one signed and notarized macOS desktop product plus one portable source distribution for every system Apple notarization cannot reach. \`Vibecrafted.app\` owns app/DMG/install/update and carries the complete runtime. \`vc-terminal\` is a deterministic embedded terminal substrate and \`vc-frame\` is the embedded session interior. The app sources its own XDG/runtime environment at startup and does not overwrite user terminal or vc-frame configuration. Rollback is replacement with the prior notarized Vibecrafted.app; live tmux/vc-frame session processes remain separate runtime state.
+The shipped topology is one runtime product with six carriers: a signed and notarized macOS desktop DMG, the same signed binary Runtime Pack for macOS CLI users, a portable source distribution, Windows MSI/EXE installers, and the signed Windows Runtime Pack. \`Vibecrafted.app\` owns app/DMG/onboarding/update but does not own a second runtime. \`vc-terminal\` is a deterministic embedded terminal substrate and \`vc-frame\` is the embedded session interior. App onboarding and \`make install\` invoke the same receipted installer. Rollback is deterministic uninstall plus installation of the prior carrier; live session state remains separate runtime state.
 
 The portable channel is not a second product: it is the same commit, projected through the allowlisted distribution writer, carrying a closed \`source-provenance.json\` whose distribution-tree digest names that commit. It installs through \`install.sh --archive-file\`, which refuses a payload whose provenance does not close. Rollback is re-running the installer from the prior release asset.
 
@@ -215,7 +359,25 @@ Source tuple:
 - Mounted-DMG walk-around probes from downloaded bytes: PASS.
 - Stapler and Gatekeeper validation on downloaded bytes: PASS.
 
-### Portable channel (Linux / WSL2 / macOS CLI)
+### macOS CLI Runtime Pack
+
+- Source: [$RUNTIME_PACK_URL]($RUNTIME_PACK_URL)
+- SHA-256: \`$RUNTIME_PACK_SHA\`
+- Size: \`$RUNTIME_PACK_SIZE\` bytes
+- Downloaded tarball, checksum and detached signature byte-compared: PASS.
+- Signature verified with the bundled Vibecrafted release public key: PASS.
+- Isolated \`make install\` -> \`make uninstall\` left an empty HOME: PASS.
+
+Install from a checkout without installing the App:
+
+\`\`\`bash
+curl -fsSLO $RUNTIME_PACK_URL
+curl -fsSLO $RUNTIME_PACK_URL.sha256
+curl -fsSLO $RUNTIME_PACK_URL.sig
+make install RUNTIME_PACK=$RUNTIME_PACK_NAME
+\`\`\`
+
+### Portable source channel (Linux / WSL2 / source fallback)
 
 - Source: [$PORTABLE_URL]($PORTABLE_URL)
 - SHA-256: \`$PORTABLE_SHA\`
@@ -236,12 +398,13 @@ bash $PORTABLE_ROOT_NAME/install.sh
 
 ## Sign-off
 
-PASS — the release has exactly two canonically named installable artifacts built from one commit, \`$DMG_NAME\` for macOS desktop and \`$PORTABLE_NAME\` for every other system, and no donor repo owns a competing app, installer or update channel.
+PASS — the release has exactly six canonically named installable carriers built from one commit: \`$DMG_NAME\` for macOS desktop, \`$RUNTIME_PACK_NAME\` for macOS CLI, \`$PORTABLE_NAME\` as the cross-platform source fallback, plus the Windows MSI/EXE (\`$WINDOWS_MSI_NAME\` / \`$WINDOWS_EXE_NAME\`) and Windows Runtime Pack (\`$WINDOWS_PACK_NAME\`). Windows MSI/EXE are Authenticode-unsigned; trust is provenance (.sha256 / .sig), same idea as the portable tarball not being Apple-notarized. App and CLI consume one Runtime Pack authority; no donor repo owns a competing app, installer or update channel.
 EOF
 
 gh release edit "$TAG" --repo "$REPO" --notes-file "$REPORT" --draft=false --latest
 test "$(gh release view "$TAG" --repo "$REPO" --json isDraft --jq .isDraft)" = "false"
 
-printf 'Published %s\nReport: %s\nDMG: %s bytes / %s\nPortable: %s\n  %s bytes / %s\n' \
+printf 'Published %s\nReport: %s\nDMG: %s bytes / %s\nRuntime Pack: %s\n  %s bytes / %s\nPortable: %s\n  %s bytes / %s\n' \
   "$DOWNLOAD_URL" "$REPORT" "$DMG_SIZE" "$DMG_SHA" \
+  "$RUNTIME_PACK_URL" "$RUNTIME_PACK_SIZE" "$RUNTIME_PACK_SHA" \
   "$PORTABLE_URL" "$PORTABLE_SIZE" "$PORTABLE_SHA"

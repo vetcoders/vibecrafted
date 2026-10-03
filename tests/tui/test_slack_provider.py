@@ -10,14 +10,13 @@ def _write_source(root: Path) -> None:
     files = {
         "package.json": '{"name":"vc-slack-agent","version":"0.1.0"}\n',
         "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
-        "pnpm-workspace.yaml": "packages:\n  - console\n",
+        "pnpm-workspace.yaml": "packages:\n  - portal\n",
         "README.md": "# Slack\n",
         "bin/vc-slack": "#!/usr/bin/env bash\nexit 0\n",
         "src/index.js": "export {};\n",
         "src/observer.js": "export {};\n",
         "src/runtime-env.js": "export {};\n",
-        "console/package.json": '{"name":"vc-slack-console","scripts":{"build":"vite build"}}\n',
-        "console/server.mjs": "#!/usr/bin/env node\n",
+        "portal/package.json": '{"name":"vc-slack-portal","scripts":{"build":"vite build"}}\n',
         "scripts/doctor-bridge.sh": "#!/usr/bin/env bash\nexit 0\n",
         "scripts/install-launchagent.sh": "#!/usr/bin/env bash\nexit 0\n",
         "scripts/resolve-server-url.mjs": "#!/usr/bin/env node\n",
@@ -37,8 +36,8 @@ def _write_fake_pnpm(path: Path) -> None:
         "from pathlib import Path\n"
         "Path('node_modules/@slack/bolt').mkdir(parents=True, exist_ok=True)\n"
         "if 'build' in sys.argv:\n"
-        "    Path('console/dist').mkdir(parents=True, exist_ok=True)\n"
-        "    Path('console/dist/index.html').write_text('<main>console</main>')\n",
+        "    Path('portal/dist').mkdir(parents=True, exist_ok=True)\n"
+        "    Path('portal/dist/index.html').write_text('<main>portal</main>')\n",
         encoding="utf-8",
     )
     path.chmod(0o755)
@@ -65,7 +64,7 @@ def test_install_publishes_immutable_provider_and_secure_env(tmp_path: Path) -> 
     assert (provider_root / "current").resolve() == generation
     assert (bin_dir / "vc-slack").resolve() == generation / "bin" / "vc-slack"
     assert not (generation / ".env").exists()
-    assert (generation / "console" / "dist" / "index.html").is_file()
+    assert (generation / "portal" / "dist" / "index.html").is_file()
     assert (config / "slack.env").stat().st_mode & 0o777 == 0o600
     manifest = json.loads((generation / "provider-manifest.json").read_text())
     assert manifest["schema"] == "vibecrafted.slack-provider.v1"

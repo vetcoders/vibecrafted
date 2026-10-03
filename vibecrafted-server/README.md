@@ -50,14 +50,16 @@ make server SERVER_ADDR=127.0.0.1:8080   # pick another address
 
 Reads against the live `~/.vibecrafted/control_plane/` (or `$VIBECRAFTED_HOME`):
 
-| route                                 | returns                                                                                                                 |
-| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `GET /api/health`                     | constant-time process readiness; does not scan control-plane history                                                    |
-| `GET /api/control/state`              | merged `StateView` — `active_runs`, `recent_runs`, `warnings`, `events`, `generated_at`; includes lifecycle projections |
-| `GET /api/control/runs`               | every `runs/<id>.json` snapshot, newest-first, with `count`                                                             |
-| `GET /api/control/runs/{run_id}`      | a single flat run projection, including lifecycle runs, or `404` JSON                                                   |
-| `GET /api/control/lifecycle`          | lifecycle run summaries from `control_plane/lifecycle_runs/`, newest-first, with DoU readiness and controls             |
-| `GET /api/control/lifecycle/{run_id}` | the full nested lifecycle `state.json`, or `404` JSON                                                                   |
+| route                                    | returns                                                                                                                 |
+| ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `GET /api/health`                        | constant-time process readiness; does not scan control-plane history                                                    |
+| `GET /api/control/state`                 | merged `StateView` — `active_runs`, `recent_runs`, `warnings`, `events`, `generated_at`; includes lifecycle projections |
+| `GET /api/control/runs`                  | every `runs/<id>.json` snapshot, newest-first, with `count`                                                             |
+| `GET /api/control/runs/{run_id}`         | a single flat run projection, including lifecycle runs, or `404` JSON                                                   |
+| `GET /api/control/runs/{run_id}/observe` | versioned one-shot run observation; never creates an await monitor                                                      |
+| `GET /api/control/runs/{run_id}/await`   | shared server-owned await subscription with separate idle timeout and hard cap                                          |
+| `GET /api/control/lifecycle`             | lifecycle run summaries from `control_plane/lifecycle_runs/`, newest-first, with DoU readiness and controls             |
+| `GET /api/control/lifecycle/{run_id}`    | the full nested lifecycle `state.json`, or `404` JSON                                                                   |
 
 Lifecycle summaries surface workflow, status, current stage, baton next
 stage/agent, human controls, operator action count, accepted DoU, and

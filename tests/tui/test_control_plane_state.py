@@ -4,7 +4,7 @@ import datetime as dt
 import json
 from pathlib import Path
 
-from scripts import control_plane_state
+from vibecrafted_core import control_plane
 
 
 def _now_iso() -> str:
@@ -57,10 +57,10 @@ def test_sync_state_normalizes_agent_meta_and_lock(monkeypatch, tmp_path: Path) 
         + "\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(control_plane_state, "vibecrafted_home", lambda: crafted_home)
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(crafted_home))
 
-    first = control_plane_state.sync_state()
-    second = control_plane_state.sync_state()
+    first = control_plane.sync_state()
+    second = control_plane.sync_state()
 
     assert [run["run_id"] for run in first["active_runs"]] == ["run-123"]
     assert first["active_runs"][0]["skill"] == "workflow"
@@ -97,9 +97,9 @@ def test_sync_state_reads_marbles_progress(monkeypatch, tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(control_plane_state, "vibecrafted_home", lambda: crafted_home)
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(crafted_home))
 
-    payload = control_plane_state.sync_state()
+    payload = control_plane.sync_state()
 
     assert payload["active_runs"][0]["run_id"] == "run-456"
     assert payload["active_runs"][0]["skill"] == "marbles"

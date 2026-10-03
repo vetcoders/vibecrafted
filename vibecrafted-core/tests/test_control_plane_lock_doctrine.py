@@ -18,7 +18,7 @@ training-data habit both suggest: wrap the append/hot path back in a global
 mutex "for safety". That reintroduces the migraine. If you are here because this
 test failed, do not delete it — the design is deliberate. Append-only JSONL uses
 its event lock; conflicting snapshots use an independent per-run CAS. Neither
-needs the shared lock. See the fix commits and the Kronika.
+needs the shared lock. See the fix commits.
 """
 
 from __future__ import annotations

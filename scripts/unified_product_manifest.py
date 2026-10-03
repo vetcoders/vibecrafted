@@ -4,15 +4,30 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import ipaddress
 import json
 import os
 import plistlib
+import re
 import stat
 import subprocess
+import tarfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from vibecrafted_core import product_contract as contract
+from vibecrafted_core import runtime_pack_contract
+
+# Product code whose kind the walker must not have to guess. Every declared
+# vc-terminal.app is named from the contract's own tuple, so adding a payload
+# that carries the bundle cannot leave its executable inventoried as a resource.
+_DECLARED_CODE = {
+    "Contents/Helpers/vc-frame",
+    "Contents/Resources/runtime/bin/vc-start",
+    *(f"{bundle}/Contents/MacOS/alacritty" for bundle in contract.TERMINAL_APP_BUNDLES),
+}
 
 
 def _write(path: Path, payload: dict[str, Any], *, canonical: bool = False) -> None:
@@ -25,14 +40,96 @@ def _write(path: Path, payload: dict[str, Any], *, canonical: bool = False) -> N
     )
 
 
+def validate_update_feed_url(raw: str) -> str:
+    """Package a locator admitted by ProductUpdatePolicy's HTTPS contract.
+
+    Packaging additionally refuses local origins and ambiguous URL spellings;
+    it never normalizes the approved input or changes release trust metadata.
+    """
+    invalid = "update feed must be an explicit well-formed public HTTPS URL"
+    if (
+        not raw
+        or not raw.isascii()
+        or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in raw)
+        or "\\" in raw
+        or re.search(r"%(?![0-9a-fA-F]{2})", raw)
+        or "#" in raw
+    ):
+        raise SystemExit(invalid)
+    try:
+        url = urlsplit(raw)
+        host = (url.hostname or "").lower().rstrip(".")
+        port = url.port
+    except ValueError:
+        raise SystemExit(invalid) from None
+    if (
+        url.scheme.lower() != "https"
+        or not host
+        or url.username is not None
+        or url.password is not None
+        or (port is not None and not 1 <= port <= 65535)
+        or url.netloc.endswith(":")
+    ):
+        raise SystemExit(invalid)
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        labels = host.split(".")
+        if (
+            len(labels) < 2
+            or len(host) > 253
+            or host.endswith((".local", ".localhost", ".internal", ".home", ".lan"))
+            or all(label.isdigit() for label in labels)
+            or any(
+                not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+                for label in labels
+            )
+        ):
+            raise SystemExit(invalid)
+    else:
+        if not address.is_global:
+            raise SystemExit(invalid)
+    return raw
+
+
+def configure_update_channel(args: argparse.Namespace) -> None:
+    feed = None if args.unprovisioned else validate_update_feed_url(args.feed_url)
+    receipt: dict[str, Any] = {
+        "status": "unprovisioned" if feed is None else "configured",
+        "feed_url": feed,
+    }
+    if args.app is not None:
+        plist_path = args.app / "Contents/Info.plist"
+        if plist_path.is_symlink() or not plist_path.is_file():
+            raise SystemExit("update channel requires a regular Info.plist")
+        with plist_path.open("rb") as handle:
+            plist = plistlib.load(handle)
+        if args.verify_only:
+            if (feed is None and "VCUpdateFeedURL" in plist) or (
+                feed is not None and plist.get("VCUpdateFeedURL") != feed
+            ):
+                raise SystemExit(
+                    "packaged VCUpdateFeedURL does not match explicit input"
+                )
+        else:
+            if (args.app / "Contents/_CodeSignature").exists():
+                raise SystemExit("refusing update channel mutation of a signed App")
+            if feed is None:
+                plist.pop("VCUpdateFeedURL", None)
+            else:
+                plist["VCUpdateFeedURL"] = feed
+            with plist_path.open("wb") as handle:
+                plistlib.dump(plist, handle, sort_keys=True)
+        receipt["info_plist_sha256"] = contract._sha256(plist_path)
+    elif args.verify_only:
+        raise SystemExit("--verify-only requires --app")
+    print(json.dumps(receipt, sort_keys=True))
+
+
 def _entry(root: Path, relative: str, *, kind: str | None = None) -> dict[str, Any]:
     path = root / relative
     if kind is None:
-        if relative in {
-            "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty",
-            "Contents/Helpers/vc-frame",
-            "Contents/Resources/runtime/bin/vc-start",
-        }:
+        if relative in _DECLARED_CODE:
             kind = "executable"
         elif path.suffix == ".dylib":
             kind = "dylib"
@@ -171,12 +268,15 @@ def produce_app(args: argparse.Namespace) -> None:
     for path in sorted(app.rglob("*")):
         relative = path.relative_to(app)
         relative_text = relative.as_posix()
+        # Not "anything called _CodeSignature": that blanket rule would also
+        # exempt an undeclared nested bundle from ever being inventoried, and
+        # the verifier would then be arguing with a manifest that never named
+        # it. Ask the contract for the exact paths the signer owns.
         if (
             not path.is_file()
             or path.is_symlink()
             or relative_text in excluded
-            or "Contents/_CodeSignature" in relative_text
-            or relative.name == "CodeResources"
+            or contract.is_signature_inventory_artifact(relative_text)
         ):
             continue
         files.append(_entry(app, relative_text))
@@ -232,6 +332,31 @@ def produce_release(args: argparse.Namespace) -> None:
     executable = app / product["outer_bundle_code"]["path"]
     signer = contract._codesign_release_evidence(app)
     policy = contract._release_policy()
+    runtime_pack = args.runtime_pack.resolve()
+    embedded_runtime_pack = app / "Contents/Resources/runtime-pack" / runtime_pack.name
+    if (
+        runtime_pack.stat().st_size != embedded_runtime_pack.stat().st_size
+        or contract._sha256(runtime_pack) != contract._sha256(embedded_runtime_pack)
+    ):
+        raise SystemExit(
+            "standalone Runtime Pack bytes differ from the App-embedded carrier"
+        )
+    with tarfile.open(runtime_pack, "r:gz") as archive:
+        member = archive.getmember(
+            f"VibecraftedRuntime/{runtime_pack_contract.PROVENANCE_NAME}"
+        )
+        extracted = archive.extractfile(member)
+        if extracted is None:
+            raise SystemExit("Runtime Pack provenance cannot be read")
+        provenance_raw = extracted.read()
+    provenance = json.loads(provenance_raw.decode("utf-8"))
+    expected_revisions = {
+        "vibecrafted": product["git_sha"],
+        "vc-terminal": modules["vc-terminal"]["git_sha"],
+        "vc-frame": modules["vc-frame"]["git_sha"],
+    }
+    if provenance.get("source_revisions") != expected_revisions:
+        raise SystemExit("Runtime Pack provenance disagrees with the product sources")
     payload = {
         "schema": contract.RELEASE_OUTPUT_SCHEMA,
         "signature_policy": {
@@ -270,6 +395,20 @@ def produce_release(args: argparse.Namespace) -> None:
             "path": dmg.name,
             "sha256": contract._sha256(dmg),
             "size": dmg.stat().st_size,
+        },
+        "runtime_pack": {
+            "path": runtime_pack.name,
+            "embedded_path": (f"Contents/Resources/runtime-pack/{runtime_pack.name}"),
+            "sha256": contract._sha256(runtime_pack),
+            "size": runtime_pack.stat().st_size,
+            "provenance": {
+                "path": runtime_pack_contract.PROVENANCE_NAME,
+                "sha256": hashlib.sha256(provenance_raw).hexdigest(),
+                "version": provenance["version"],
+                "platform": provenance["platform"],
+                "architecture": provenance["architecture"],
+                "source_revisions": provenance["source_revisions"],
+            },
         },
         "modules": {
             name: {
@@ -321,12 +460,21 @@ def main() -> int:
     release = commands.add_parser("release")
     release.add_argument("--app", type=Path, required=True)
     release.add_argument("--dmg", type=Path, required=True)
+    release.add_argument("--runtime-pack", type=Path, required=True)
     release.add_argument("--output", type=Path, required=True)
+    channel = commands.add_parser("update-channel")
+    choice = channel.add_mutually_exclusive_group(required=True)
+    choice.add_argument("--feed-url")
+    choice.add_argument("--unprovisioned", action="store_true")
+    channel.add_argument("--app", type=Path)
+    channel.add_argument("--verify-only", action="store_true")
     args = parser.parse_args()
     if args.command == "app":
         produce_app(args)
-    else:
+    elif args.command == "release":
         produce_release(args)
+    else:
+        configure_update_channel(args)
     return 0
 
 

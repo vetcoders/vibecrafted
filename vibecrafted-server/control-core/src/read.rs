@@ -13,19 +13,24 @@
 //!   active/recent/warnings without ever depending on the Python sync having
 //!   run. This is what lets the web/TUI frontends be self-sufficient.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(not(unix))]
 use std::process::{Command, Stdio};
+use std::sync::{LazyLock, Mutex, PoisonError};
+use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, Utc};
 
 use crate::events::EventStream;
 use crate::model::{
-    AgentMeta, DeliverySealRef, Event, FINAL_STATES, Health, LifecycleRun, LifecycleRunSummary,
-    RECENT_RUN_LIMIT, RUN_STALL_SECONDS, RunStatus, SettlementBoard, SettlementTui,
-    SettlementVerdict, TrustReceiptV1, coerce_int_value, is_final_state, merge_status,
-    operator_session_name, parse_iso, skill_from_code, state_health,
+    AgentMeta, ContinuityPolicyProjection, DeliverySealRef, Event, FINAL_STATES, Health,
+    LifecycleRun, LifecycleRunSummary, OperatorAgentPolicyProjection, OperatorAgentProjection,
+    RECENT_RUN_LIMIT, RUN_STALL_SECONDS, RunRouting, RunStatus, SettlementBoard, SettlementTui,
+    SettlementVerdict, SupervisionRelationProjection, TrustReceiptV1, age_label, coerce_int_value,
+    is_active_state, is_final_state, merge_status, operator_session_name, parse_iso,
+    skill_from_code, state_health,
 };
 
 /// Resolve `~`-prefixed paths against `$HOME`. Other paths pass through.
@@ -92,6 +97,9 @@ pub struct StateView {
     pub stalled_runs: Vec<RunStatus>,
     /// Up to [`RECENT_RUN_LIMIT`] most-recently-updated runs.
     pub recent_runs: Vec<RunStatus>,
+    /// Exact run-to-provider/workspace/Frame axes read only from canonical
+    /// `runtime_runs/<id>/meta.json` receipts.
+    pub run_routing: BTreeMap<String, RunRouting>,
     /// Human-readable warnings (stalls, locks without reports).
     pub warnings: Vec<String>,
     /// Newest-first event tail.
@@ -310,6 +318,12 @@ impl ControlPlane {
         if run.runtime_session_id.is_empty() {
             run.runtime_session_id = string("runtime_session_id").to_string();
         }
+        if run.logical_session_id.is_empty() {
+            run.logical_session_id = string("vibecrafted_session_id").to_string();
+            if run.logical_session_id.is_empty() {
+                run.logical_session_id = string("workspace_session_id").to_string();
+            }
+        }
         if run.resume_of.is_empty() {
             run.resume_of = string("resume_of").to_string();
         }
@@ -344,7 +358,68 @@ impl ControlPlane {
         if probe_worker_alive {
             refresh_worker_liveness(&mut run);
         }
+        self.overlay_runtime_meta_terminal(&mut run);
         run
+    }
+
+    /// Prefer terminal runtime meta over a stale active snapshot.
+    ///
+    /// `/api/control/state` counted completed runs as active when
+    /// `runs/<id>.json` lagged `runtime_runs/<id>/meta.json`. A dead PID plus
+    /// a completed/failed meta stamp is durable truth; a live worker still
+    /// wins so we do not seal a running job.
+    fn overlay_runtime_meta_terminal(&self, run: &mut RunStatus) {
+        if !is_safe_run_id(&run.run_id) {
+            return;
+        }
+        let path = self.runtime_run_dir(&run.run_id).join("meta.json");
+        let Some(payload) = read_json::<serde_json::Value>(&path) else {
+            return;
+        };
+        let string = |key: &str| {
+            payload
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+        };
+        let status = string("status");
+        let state = string("state");
+        let meta_state = if !status.is_empty() { status } else { state };
+        let meta_run_id = string("run_id");
+        if !meta_run_id.is_empty() && meta_run_id != run.run_id {
+            return;
+        }
+        let exit_code = payload.get("exit_code").and_then(coerce_int_value);
+        let completed_at = string("completed_at");
+        if !runtime_meta_is_consistently_terminal(meta_state, exit_code, completed_at) {
+            return;
+        }
+        let worker_pid = payload
+            .get("worker_pid")
+            .and_then(coerce_int_value)
+            .or(run.worker_pid);
+        let owner_pid = payload
+            .get("owner_pid")
+            .and_then(coerce_int_value)
+            .or(run.owner_pid);
+        if worker_pid.is_some_and(pid_is_alive) || owner_pid.is_some_and(pid_is_alive) {
+            return;
+        }
+        if run.process_truth == "live" {
+            return;
+        }
+        if !meta_state.is_empty() {
+            run.state = meta_state.to_string();
+        }
+        run.health = "final".to_string();
+        run.liveness = "terminal".to_string();
+        if run.exit_code.is_none() {
+            run.exit_code = exit_code;
+        }
+        if run.completed_at.is_empty() && !completed_at.is_empty() {
+            run.completed_at = completed_at.to_string();
+        }
+        run.worker_alive = Some(false);
     }
 
     /// Read `delivery-seal.json` under the runtime run directory, if present
@@ -412,7 +487,7 @@ impl ControlPlane {
             .and_then(|payload| payload.get("exit_code"))
             .and_then(coerce_int_value);
         let completed_at = value("completed_at");
-        let terminal = is_final_state(&state) || exit_code.is_some() || !completed_at.is_empty();
+        let terminal = runtime_meta_is_consistently_terminal(&state, exit_code, &completed_at);
         let transcript = dir.join("transcript.log");
         let latest_transcript = {
             let declared = value("transcript");
@@ -458,11 +533,20 @@ impl ControlPlane {
             launcher_pid: None,
             completed_at,
             session_id: value("session_id"),
+            logical_session_id: nonempty_runtime_value(
+                &value("vibecrafted_session_id"),
+                &value("workspace_session_id"),
+            ),
             current_loop: None,
             total_loops: None,
+            owner_pid: integer("owner_pid"),
             worker_pid: integer("worker_pid"),
             worker_pgid: integer("worker_pgid"),
             worker_alive: boolean("worker_alive"),
+            process_truth: value("process_truth"),
+            process_truth_reason: value("process_truth_reason"),
+            operator_agent: meta.as_ref().and_then(operator_agent_projection),
+            continuity: meta.as_ref().and_then(continuity_projection),
             recovery_required: boolean("recovery_required").unwrap_or(false),
             stop_reason: value("stop_reason"),
             agent_session_id: value("agent_session_id"),
@@ -526,6 +610,51 @@ impl ControlPlane {
         runs
     }
 
+    /// Read exact routing axes from canonical runtime receipts.
+    ///
+    /// Directory names and payload `run_id` values must agree. Symlinked run
+    /// directories or metadata files are ignored, so a read-only frontend
+    /// cannot be routed outside the control-plane root. Missing or malformed
+    /// axes remain absent and force consumers to refuse rather than guess.
+    #[must_use]
+    pub fn load_run_routing(&self) -> BTreeMap<String, RunRouting> {
+        let root = self.control_plane_home().join("runtime_runs");
+        let Ok(entries) = fs::read_dir(&root) else {
+            return BTreeMap::new();
+        };
+        let mut routes = BTreeMap::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(directory_meta) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if directory_meta.file_type().is_symlink() || !directory_meta.is_dir() {
+                continue;
+            }
+            let Some(directory_run_id) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            if !is_safe_run_id(&directory_run_id) {
+                continue;
+            }
+            let meta_path = path.join("meta.json");
+            let Ok(meta) = fs::symlink_metadata(&meta_path) else {
+                continue;
+            };
+            if meta.file_type().is_symlink() || !meta.is_file() {
+                continue;
+            }
+            let Some(wire) = read_json::<RunRoutingWire>(&meta_path) else {
+                continue;
+            };
+            if wire.run_id.trim() != directory_run_id {
+                continue;
+            }
+            routes.insert(directory_run_id, wire.normalized());
+        }
+        routes
+    }
+
     /// Resolve a full nested lifecycle run from `lifecycle_runs/<id>/state.json`.
     ///
     /// Delivery-proof axes are projected onto the run and each stage (shape of
@@ -538,10 +667,9 @@ impl ControlPlane {
             return None;
         }
         let state_path = self.lifecycle_run_dir(target).join("state.json");
-        let mut run = read_json::<LifecycleRun>(&state_path)?;
+        let run = read_json::<LifecycleRun>(&state_path)?;
         if run.run_id == target {
-            run.project_delivery_axes();
-            Some(run)
+            Some(self.project_lifecycle_read(run, &state_path, Utc::now()))
         } else {
             None
         }
@@ -561,13 +689,13 @@ impl ControlPlane {
                 continue;
             }
             let state_path = entry.path().join("state.json");
-            let Some(mut run) = read_json::<LifecycleRun>(&state_path) else {
+            let Some(run) = read_json::<LifecycleRun>(&state_path) else {
                 continue;
             };
             if !is_safe_run_id(&run.run_id) {
                 continue;
             }
-            run.project_delivery_axes();
+            let run = self.project_lifecycle_read(run, &state_path, Utc::now());
             runs.push((modified_at(&state_path), run));
         }
         runs.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
@@ -610,11 +738,11 @@ impl ControlPlane {
         state_paths
             .into_iter()
             .filter_map(|(_, state_path)| {
-                let mut run = read_json::<LifecycleRun>(&state_path)?;
+                let run = read_json::<LifecycleRun>(&state_path)?;
                 if run.run_id.is_empty() {
                     return None;
                 }
-                run.project_delivery_axes();
+                let run = self.project_lifecycle_read(run, &state_path, Utc::now());
                 Some(self.lifecycle_run_summary(&run))
             })
             .take(limit)
@@ -635,6 +763,73 @@ impl ControlPlane {
             self.lifecycle_run_updated_at(run),
             self.lifecycle_dou_index_from_reports(run),
         )
+    }
+
+    /// Overlay liveness + stall at read time. Never writes `state.json`.
+    ///
+    /// A lifecycle container with no live owner and no movement past
+    /// [`RUN_STALL_SECONDS`] is `abandoned` and must not keep
+    /// `approve_transition` as a human control. This is the same class of
+    /// derivation as [`Self::compute_view`], not a second policy.
+    fn project_lifecycle_read(
+        &self,
+        mut run: LifecycleRun,
+        state_path: &Path,
+        now: DateTime<Utc>,
+    ) -> LifecycleRun {
+        run.project_delivery_axes();
+        if run.state_path.trim().is_empty() {
+            run.state_path = state_path.display().to_string();
+        }
+        if is_final_state(&run.status) {
+            return run;
+        }
+        let owner_live = [run.pid, run.owner_pid, run.launcher_pid]
+            .into_iter()
+            .flatten()
+            .any(pid_is_alive);
+        if owner_live {
+            return run;
+        }
+        let updated_at = if run.updated_at.trim().is_empty() {
+            self.lifecycle_run_updated_at(&run)
+        } else {
+            run.updated_at.clone()
+        };
+        let age_secs = parse_iso(&updated_at)
+            .map(|updated| (now - updated).num_seconds())
+            .unwrap_or(i64::MAX);
+        if age_secs > RUN_STALL_SECONDS {
+            let age = parse_iso(&updated_at)
+                .map(|updated| age_label(updated, now))
+                .unwrap_or_else(|| "unknown age".to_string());
+            run.status = "abandoned".to_string();
+            run.human_controls.clear();
+            run.error = format!("no live owner for {age}");
+        }
+        run
+    }
+
+    /// One run as [`compute_view`] would show it, else the single-id lookup.
+    ///
+    /// Observe/CLI/web detail must not bypass this and re-read `meta.json`.
+    #[must_use]
+    pub fn derived_run(&self, run_id: &str, now: DateTime<Utc>) -> Option<RunStatus> {
+        let target = run_id.trim();
+        if !is_safe_run_id(target) {
+            return None;
+        }
+        self.derived_runs(now)
+            .into_iter()
+            .find(|run| run.run_id == target)
+            .or_else(|| self.lookup_run(target))
+    }
+
+    /// Every derived run, newest-first. Same merge as [`compute_view`],
+    /// without the recent-window projection cap.
+    #[must_use]
+    pub fn derived_runs(&self, now: DateTime<Utc>) -> Vec<RunStatus> {
+        self.merge_derived_runs(now).0
     }
 
     fn lifecycle_run_status(&self, run: &LifecycleRun) -> RunStatus {
@@ -690,24 +885,45 @@ impl ControlPlane {
     /// Build a [`StateView`] from the on-disk snapshots plus the event tail.
     /// The cheap path: assumes `runs/<id>.json` are already merged by the
     /// Python writer. Read-only.
+    ///
+    /// Lifecycle containers appended here pass through
+    /// `Self::project_lifecycle_read`, the same liveness overlay
+    /// [`Self::compute_view`] derives: a stale ownerless container reads
+    /// `abandoned` (health `stalled`, `no live owner`), never `launching`.
     #[must_use]
     pub fn read_state_view(&self) -> StateView {
         let mut runs = self.load_snapshots();
+        quarantine_test_runs(&mut runs);
         let settlement_counts = SettlementBoard::from_snapshots(&runs);
         self.append_discoverable_lifecycle_runs(&mut runs);
+        // Same read-follows-write gap compute_view closes: a just-launched
+        // runtime dir is live before Python writes runs/<id>.json. Fresh only;
+        // the directory itself is not liveness evidence.
+        let now = chrono::Utc::now();
+        for run in self.iter_runtime_run_status() {
+            if !runs.iter().any(|existing| existing.run_id == run.run_id)
+                && self.runtime_run_is_fresh(&run.run_id, now)
+            {
+                runs.push(run);
+            }
+        }
         sort_recent_first(&mut runs);
         self.project_view(runs, settlement_counts)
     }
 
     fn append_discoverable_lifecycle_runs(&self, merged: &mut Vec<RunStatus>) {
         for mut run in self.iter_lifecycle_run_status() {
+            let abandoned = run.state == "abandoned";
             if !merged.iter().any(|existing| existing.run_id == run.run_id)
-                && (run.is_terminal() || run.health == "active")
+                && (run.is_terminal() || abandoned || run.health == "active")
             {
                 // Lifecycle containers remain discoverable in `recent`, but
                 // they are neither workers nor heartbeat sources. Only their
                 // dispatched worker runs may enter active/stalled projections.
-                if !run.is_terminal() {
+                if abandoned {
+                    run.health = "stalled".to_string();
+                    run.last_error = "no live owner".to_string();
+                } else if !run.is_terminal() {
                     run.health = "unknown".to_string();
                 }
                 merged.push(run);
@@ -721,10 +937,24 @@ impl ControlPlane {
     /// frontend-self-sufficient path.
     #[must_use]
     pub fn compute_view(&self, now: DateTime<Utc>) -> StateView {
+        let (merged, settlement_counts, mut events) = self.merge_derived_runs(now);
+        if events.len() > crate::model::EVENT_TAIL_LIMIT {
+            let start = events.len() - crate::model::EVENT_TAIL_LIMIT;
+            events.drain(..start);
+        }
+        events.reverse();
+        Self::project_view_with_events(merged, settlement_counts, events, self.load_run_routing())
+    }
+
+    fn merge_derived_runs(
+        &self,
+        now: DateTime<Utc>,
+    ) -> (Vec<RunStatus>, SettlementBoard, Vec<Event>) {
         // Verdict truth is Python's persisted snapshot projection. Raw meta,
         // lock, runtime, marbles, and lifecycle sources below can disagree on
         // process state, but they must never be used to invent a settlement.
-        let retained_snapshots = self.load_snapshots();
+        let mut retained_snapshots = self.load_snapshots();
+        quarantine_test_runs(&mut retained_snapshots);
         let settlement_counts = SettlementBoard::from_snapshots(&retained_snapshots);
         // Snapshots are also the durable run baseline. Event rotation is
         // allowed only after Python has projected the generation into these
@@ -743,26 +973,37 @@ impl ControlPlane {
             };
         }
 
+        // Raw launcher evidence (meta sidecars, locks, marbles state) outlives
+        // the run it describes. An id whose terminal snapshot was archived is
+        // closed history, so its raw files are ignored; a retained `runs/`
+        // snapshot for the same id keeps folding them, as the Python sync does.
+        let mut raw = RawSources {
+            sealed: self.archived_run_ids(),
+            touched: HashMap::new(),
+        };
+        for run in &retained_snapshots {
+            raw.sealed.remove(&run.run_id);
+        }
         for path in self.iter_meta_files() {
             if let Some(payload) = read_json::<serde_json::Value>(&path) {
                 if let Ok(meta) = serde_json::from_value::<AgentMeta>(payload.clone()) {
                     if let Some(mut status) = meta.normalize(now) {
                         enrich_run_status(&mut status, &payload, false);
-                        absorb_status(&mut merged, status);
+                        raw.absorb(&mut merged, status, &path);
                     }
                 }
             }
         }
         for path in self.iter_lock_files() {
             if let Some(status) = normalize_lock(&path, now) {
-                absorb_status(&mut merged, status);
+                raw.absorb(&mut merged, status, &path);
             }
         }
         for path in self.iter_marbles_state_files() {
             if let Some(status) =
                 read_json::<MarblesState>(&path).and_then(|state| state.normalize(now))
             {
-                absorb_status(&mut merged, status);
+                raw.absorb(&mut merged, status, &path);
             }
         }
         // Python sync_state folds the event stream after raw sources. The
@@ -776,6 +1017,7 @@ impl ControlPlane {
         events.retain(|event| !event_has_test_provenance(event, &self.home));
         let worker_pid_candidates: HashSet<(String, i64)> = events
             .iter()
+            .filter(|event| event_owner_pid(event).is_none_or(pid_is_alive))
             .flat_map(|event| event_worker_pids(event).map(|pid| (event.run_id.clone(), pid)))
             .collect();
         let live_worker_runs: HashSet<String> = worker_pid_candidates
@@ -794,11 +1036,25 @@ impl ControlPlane {
             if event.kind == "settlement.changed" {
                 continue;
             }
+            // Python's `state` records are projection notifications. They can
+            // be appended after a fresher lifecycle event when a concurrent
+            // sync finishes from an older read boundary, so marked records
+            // must never become lifecycle authority in the Rust eye either.
+            if event.kind == "state"
+                && event
+                    .payload
+                    .get("projection_event")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+            {
+                continue;
+            }
             let existing = merged.iter().find(|run| run.run_id == event.run_id);
             let status = normalize_event(event, existing, now);
             absorb_status(&mut merged, status);
         }
         for run in &mut merged {
+            self.overlay_runtime_meta_terminal(run);
             let operator_stopped = run.state == "stopped" && !run.stop_reason.trim().is_empty();
             if operator_stopped {
                 run.health = "final".to_string();
@@ -810,14 +1066,20 @@ impl ControlPlane {
             let terminal = run.is_terminal();
             if terminal {
                 run.health = "final".to_string();
-            } else if live_worker_runs.contains(&run.run_id) {
+            } else if live_worker_runs.contains(&run.run_id) || run_has_live_process(run) {
                 run.worker_alive = Some(true);
                 run.health = "active".to_string();
             } else {
-                if run.worker_pid.is_some() || run.worker_pgid.is_some() {
-                    run.worker_alive = Some(false);
+                // A cached boolean is not a liveness probe.
+                run.worker_alive = Some(false);
+                if run.owner_pid.is_some() && run.worker_alive == Some(false) {
+                    run.health = "stalled".to_string();
+                    run.liveness = "pid_gone".to_string();
+                    run.recovery_required = true;
                 }
             }
+            reconcile_orphaned(run, now, raw.touched.get(&run.run_id).copied());
+            let terminal = run.is_terminal();
             let await_run = !terminal
                 && run
                     .controls
@@ -846,14 +1108,10 @@ impl ControlPlane {
             }
         }
         self.append_discoverable_lifecycle_runs(&mut merged);
+        quarantine_test_runs(&mut merged);
 
         sort_recent_first(&mut merged);
-        if events.len() > crate::model::EVENT_TAIL_LIMIT {
-            let start = events.len() - crate::model::EVENT_TAIL_LIMIT;
-            events.drain(..start);
-        }
-        events.reverse();
-        Self::project_view_with_events(merged, settlement_counts, events)
+        (merged, settlement_counts, events)
     }
 
     fn project_view(&self, runs: Vec<RunStatus>, settlement_counts: SettlementBoard) -> StateView {
@@ -861,6 +1119,7 @@ impl ControlPlane {
             runs,
             settlement_counts,
             self.read_event_tail(crate::model::EVENT_TAIL_LIMIT),
+            self.load_run_routing(),
         )
     }
 
@@ -868,6 +1127,7 @@ impl ControlPlane {
         runs: Vec<RunStatus>,
         mut settlement_counts: SettlementBoard,
         events: Vec<Event>,
+        run_routing: BTreeMap<String, RunRouting>,
     ) -> StateView {
         let warnings = warnings_for_runs(&runs);
         let active_runs: Vec<RunStatus> = runs
@@ -886,6 +1146,7 @@ impl ControlPlane {
             active_runs,
             stalled_runs,
             recent_runs,
+            run_routing,
             warnings,
             events,
             settlement_counts,
@@ -907,21 +1168,109 @@ impl ControlPlane {
     }
 
     fn iter_meta_files(&self) -> Vec<PathBuf> {
-        rglob(&self.home.join("artifacts"), &|p| {
-            p.to_str().is_some_and(|s| s.ends_with(".meta.json"))
+        rglob(&self.home.join("artifacts"), &|name| {
+            name.ends_with(".meta.json")
         })
     }
 
     fn iter_lock_files(&self) -> Vec<PathBuf> {
-        rglob(&self.home.join("locks"), &|p| {
-            p.extension().and_then(|e| e.to_str()) == Some("lock")
+        rglob(&self.home.join("locks"), &|name| {
+            Path::new(name).extension().and_then(|e| e.to_str()) == Some("lock")
         })
     }
 
     fn iter_marbles_state_files(&self) -> Vec<PathBuf> {
-        rglob(&self.home.join("marbles"), &|p| {
-            p.file_name().and_then(|n| n.to_str()) == Some("state.json")
-        })
+        rglob(&self.home.join("marbles"), &|name| name == "state.json")
+    }
+
+    /// Ids archived under `runs/.archived/`: the Python sync moves only
+    /// terminal snapshots there and the operator console writes markers only
+    /// for finished runs, so every entry is a closed verdict. Snapshot files
+    /// are `<run_id>.json`, so the listing alone names the ids -- no JSON
+    /// parse, which keeps a years-deep archive cheap on every projection.
+    /// Mirrors `control_plane._archived_run_ids`.
+    fn archived_run_ids(&self) -> HashSet<String> {
+        let Ok(entries) = fs::read_dir(self.run_snapshot_dir().join(".archived")) else {
+            return HashSet::new();
+        };
+        entries
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name().into_string().ok()?;
+                let run_id = name.strip_suffix(".json")?;
+                is_safe_run_id(run_id).then(|| run_id.to_string())
+            })
+            .collect()
+    }
+}
+
+/// Per-projection bookkeeping for raw launcher evidence (`*.meta.json`,
+/// `*.lock`, marbles `state.json`).
+struct RawSources {
+    /// Archived ids no raw file may resurrect.
+    sealed: HashSet<String>,
+    /// Newest raw-file mtime per run id: the age of evidence that carries no
+    /// parseable `updated_at`/`started_at` of its own.
+    touched: HashMap<String, DateTime<Utc>>,
+}
+
+impl RawSources {
+    fn absorb(&mut self, merged: &mut Vec<RunStatus>, status: RunStatus, path: &Path) {
+        if self.sealed.contains(&status.run_id) {
+            return;
+        }
+        if let Some(modified) = modified_at(path).map(DateTime::<Utc>::from) {
+            self.touched
+                .entry(status.run_id.clone())
+                .and_modify(|stamp| *stamp = (*stamp).max(modified))
+                .or_insert(modified);
+        }
+        absorb_status(merged, status);
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RunRoutingWire {
+    #[serde(default)]
+    run_id: String,
+    #[serde(default)]
+    agent: String,
+    #[serde(default)]
+    root: String,
+    #[serde(default)]
+    provider_session_id: String,
+    #[serde(default)]
+    workspace_id: String,
+    #[serde(default)]
+    workspace_instance_id: String,
+    #[serde(default)]
+    workspace_display_label: String,
+    #[serde(default)]
+    vibecrafted_session_id: String,
+    #[serde(default)]
+    workspace_session_id: String,
+    #[serde(default)]
+    worker_host_session: String,
+    #[serde(default)]
+    worker_host_display: String,
+}
+
+impl RunRoutingWire {
+    fn normalized(self) -> RunRouting {
+        RunRouting {
+            agent: self.agent,
+            root: self.root,
+            provider_session_id: self.provider_session_id,
+            workspace_id: self.workspace_id,
+            workspace_instance_id: self.workspace_instance_id,
+            workspace_display_label: self.workspace_display_label,
+            workspace_session_id: nonempty_runtime_value(
+                &self.vibecrafted_session_id,
+                &self.workspace_session_id,
+            ),
+            worker_host_session: self.worker_host_session,
+            worker_host_display: self.worker_host_display,
+        }
     }
 }
 
@@ -1024,6 +1373,11 @@ fn normalize_event(event: &Event, existing: Option<&RunStatus>, now: DateTime<Ut
         .get("worker_pgid")
         .and_then(coerce_int_value)
         .or_else(|| existing.and_then(|run| run.worker_pgid));
+    let owner_pid = event
+        .payload
+        .get("owner_pid")
+        .and_then(coerce_int_value)
+        .or_else(|| existing.and_then(|run| run.owner_pid));
     let payload_error = existing_string(&payload_string("error"), &payload_string("last_error"));
     let last_error = if !payload_error.is_empty() {
         payload_error
@@ -1110,12 +1464,44 @@ fn normalize_event(event: &Event, existing: Option<&RunStatus>, now: DateTime<Ut
                 .map(|run| run.session_id.as_str())
                 .unwrap_or_default(),
         ),
+        // Same alias order as snapshots and meta: the canonical key first, the
+        // workspace alias second, the prior projection last. Provider
+        // `session_id` is never consulted here — it is a different identity.
+        logical_session_id: existing_string(
+            &nonempty_runtime_value(
+                &payload_string("vibecrafted_session_id"),
+                &payload_string("workspace_session_id"),
+            ),
+            existing
+                .map(|run| run.logical_session_id.as_str())
+                .unwrap_or_default(),
+        ),
         current_loop: existing.and_then(|run| run.current_loop),
         total_loops: existing.and_then(|run| run.total_loops),
+        owner_pid,
         worker_pid,
         worker_pgid,
         worker_alive: payload_bool("worker_alive")
             .or_else(|| existing.and_then(|run| run.worker_alive)),
+        process_truth: existing_string(
+            &payload_string("process_truth"),
+            existing
+                .map(|run| run.process_truth.as_str())
+                .unwrap_or_default(),
+        ),
+        process_truth_reason: existing_string(
+            &payload_string("process_truth_reason"),
+            existing
+                .map(|run| run.process_truth_reason.as_str())
+                .unwrap_or_default(),
+        ),
+        operator_agent: existing.and_then(|run| run.operator_agent.clone()),
+        continuity: event
+            .payload
+            .get("continuity")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .or_else(|| existing.and_then(|run| run.continuity.clone())),
         recovery_required: payload_bool("recovery_required")
             .unwrap_or_else(|| existing.is_some_and(|run| run.recovery_required)),
         stop_reason: existing_string(
@@ -1220,15 +1606,61 @@ fn json_scalar_string(value: &serde_json::Value) -> String {
     }
 }
 
+fn operator_agent_projection(payload: &serde_json::Value) -> Option<OperatorAgentProjection> {
+    let role = payload.get("role")?.as_str()?.to_string();
+    if role.is_empty() {
+        return None;
+    }
+    let policy: OperatorAgentPolicyProjection =
+        serde_json::from_value(payload.get("operator_policy")?.clone()).ok()?;
+    let supervision: SupervisionRelationProjection =
+        serde_json::from_value(payload.get("supervision")?.clone()).ok()?;
+    Some(OperatorAgentProjection {
+        role,
+        prompt_role: payload
+            .get("prompt_role")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        provider_session_id: payload
+            .get("provider_session_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        policy,
+        supervision,
+        stop_actor_run_id: payload
+            .get("stop_actor_run_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    })
+}
+
+fn continuity_projection(payload: &serde_json::Value) -> Option<ContinuityPolicyProjection> {
+    serde_json::from_value(payload.get("continuity")?.clone()).ok()
+}
+
 fn event_has_test_provenance(event: &Event, home: &Path) -> bool {
     if is_pytest_temp_path(home) {
         return false;
     }
-    ["root", "source_dir", "report", "transcript", "meta"]
-        .into_iter()
-        .filter_map(|key| event.payload.get(key))
-        .filter_map(serde_json::Value::as_str)
-        .any(|value| is_pytest_temp_path(Path::new(value)))
+    let doctor_smoke = event
+        .payload
+        .get("agent")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|agent| agent == "doctor-smoke")
+        && event
+            .payload
+            .get("mode")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|mode| mode == "doctor");
+    doctor_smoke
+        || ["root", "source_dir", "report", "transcript", "meta"]
+            .into_iter()
+            .filter_map(|key| event.payload.get(key))
+            .filter_map(serde_json::Value::as_str)
+            .any(path_has_test_provenance)
 }
 
 fn event_worker_pids(event: &Event) -> impl Iterator<Item = i64> + '_ {
@@ -1238,6 +1670,30 @@ fn event_worker_pids(event: &Event) -> impl Iterator<Item = i64> + '_ {
         .filter_map(coerce_int_value)
 }
 
+fn event_owner_pid(event: &Event) -> Option<i64> {
+    event.payload.get("owner_pid").and_then(coerce_int_value)
+}
+
+/// Whether `pid` names a process this user may signal.
+///
+/// Signal 0 runs the kernel's existence and permission checks without
+/// delivering anything — the same answer `kill -0` gave: a missing process
+/// and one owned by another user (`EPERM`) both read as not alive. Every
+/// projection read probes each in-flight run, so a probe must not cost a
+/// process spawn.
+#[cfg(unix)]
+fn pid_is_alive(pid: i64) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: kill(2) with signal 0 delivers no signal; it only checks `pid`.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+#[cfg(not(unix))]
 fn pid_is_alive(pid: i64) -> bool {
     if pid <= 0 {
         return false;
@@ -1250,6 +1706,20 @@ fn pid_is_alive(pid: i64) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+fn runtime_meta_is_consistently_terminal(
+    meta_state: &str,
+    exit_code: Option<i64>,
+    completed_at: &str,
+) -> bool {
+    if is_final_state(meta_state) {
+        return true;
+    }
+    if is_active_state(meta_state) {
+        return false;
+    }
+    exit_code.is_some() || !completed_at.is_empty()
+}
+
 fn is_pytest_temp_path(path: &Path) -> bool {
     path.components().any(|component| {
         component
@@ -1257,6 +1727,53 @@ fn is_pytest_temp_path(path: &Path) -> bool {
             .to_str()
             .is_some_and(|part| part.starts_with("pytest-of-"))
     })
+}
+
+fn path_has_test_provenance(value: &str) -> bool {
+    let path = Path::new(value);
+    if is_pytest_temp_path(path) {
+        return true;
+    }
+    let normalized = value.replace('\\', "/");
+    normalized.contains("/.vibecrafted/artifacts/local/test_")
+        || normalized.contains("/artifacts/local/test_")
+}
+
+fn run_has_test_provenance(run: &RunStatus) -> bool {
+    (run.agent == "doctor-smoke" && run.mode == "doctor")
+        || [
+            run.root.as_str(),
+            run.latest_report.as_str(),
+            run.latest_transcript.as_str(),
+        ]
+        .into_iter()
+        .any(path_has_test_provenance)
+}
+
+/// Remove synthetic runs from the product projection while retaining their
+/// durable evidence on disk. A test parent also quarantines its derived worker
+/// rows (`<parent>-research-*`), which often carry no paths of their own.
+fn quarantine_test_runs(runs: &mut Vec<RunStatus>) {
+    let test_families = runs
+        .iter()
+        .filter(|run| run_has_test_provenance(run))
+        .map(|run| {
+            ["-research-", "-marbles-"]
+                .into_iter()
+                .find_map(|marker| run.run_id.split_once(marker).map(|(parent, _)| parent))
+                .unwrap_or(&run.run_id)
+                .to_string()
+        })
+        .collect::<HashSet<_>>();
+    runs.retain(|run| {
+        !test_families.iter().any(|family| {
+            run.run_id == *family
+                || run
+                    .run_id
+                    .strip_prefix(family)
+                    .is_some_and(|suffix| suffix.starts_with('-'))
+        })
+    });
 }
 
 fn sort_recent_first(runs: &mut [RunStatus]) {
@@ -1348,13 +1865,22 @@ fn settlement_tui(value: &str) -> Option<SettlementTui> {
 }
 
 fn enrich_run_status(run: &mut RunStatus, payload: &serde_json::Value, probe_worker_alive: bool) {
-    if probe_worker_alive && (run.worker_pid.is_some() || run.worker_pgid.is_some()) {
-        run.worker_alive = Some(
-            [run.worker_pid, run.worker_pgid]
-                .into_iter()
-                .flatten()
-                .any(pid_is_alive),
-        );
+    if probe_worker_alive && run.is_terminal() {
+        // Canonical terminal meta/event truth outranks retained pid_alive and a
+        // recycled PID.  The read-only server never resurrects a settled run.
+        run.worker_alive = Some(false);
+    } else if probe_worker_alive && (run.worker_pid.is_some() || run.worker_pgid.is_some()) {
+        let provider_alive = [run.worker_pid, run.worker_pgid]
+            .into_iter()
+            .flatten()
+            .any(pid_is_alive);
+        let owner_alive = run.owner_pid.is_none_or(pid_is_alive);
+        run.worker_alive = Some(provider_alive && owner_alive);
+        if run.owner_pid.is_some() && run.worker_alive == Some(false) && !run.is_terminal() {
+            run.health = "stalled".to_string();
+            run.liveness = "pid_gone".to_string();
+            run.recovery_required = true;
+        }
     }
 
     let settlement = payload
@@ -1427,16 +1953,97 @@ fn enrich_run_status(run: &mut RunStatus, payload: &serde_json::Value, probe_wor
     run.set_controls(await_run, stop, retry);
 }
 
+/// Read-only liveness verdict; settlement and canonical meta remain writer-owned.
+///
+/// One rule for every in-flight run: it stays live only with a live process
+/// or activity younger than [`RUN_STALL_SECONDS`]. `raw_touched` is the newest
+/// mtime of the run's raw launcher files (lock, meta sidecar, marbles state),
+/// `None` when no raw file backs it. Raw evidence settles whatever non-final
+/// state it claims (a statusless marbles loop reads `unknown`), and its file
+/// age stands in when the evidence carries no parseable stamp -- a legacy lock
+/// without `started=` would otherwise keep its `running` forever.
+fn reconcile_orphaned(run: &mut RunStatus, now: DateTime<Utc>, raw_touched: Option<DateTime<Utc>>) {
+    let in_flight = crate::model::is_active_state(&run.state)
+        || run.state == "prepared"
+        || raw_touched.is_some();
+    if run.is_terminal()
+        || !in_flight
+        || run.state == "paused"
+        || run.worker_alive == Some(true)
+        || run_has_live_process(run)
+    {
+        return;
+    }
+    let activity = parse_iso(&run.updated_at)
+        .or_else(|| parse_iso(&run.started_at))
+        .or(raw_touched);
+    let transcript = modified_at(Path::new(&run.latest_transcript)).map(DateTime::<Utc>::from);
+    let Some(stamp) = activity.into_iter().chain(transcript).max() else {
+        return;
+    };
+    if (now - stamp).num_seconds() <= RUN_STALL_SECONDS {
+        return;
+    }
+    run.state = "failed".into();
+    run.health = "final".into();
+    run.worker_alive = Some(false);
+    run.liveness = "pid_gone".into();
+    run.process_truth = "orphaned".into();
+    run.process_truth_reason = "orphaned_no_live_process".into();
+    // Deterministic stale cutoff, not a fabricated exact process-exit time.
+    // Consumers identify this inference through process_truth=orphaned.
+    run.completed_at = (stamp + chrono::Duration::seconds(RUN_STALL_SECONDS)).to_rfc3339();
+    run.last_error =
+        "No live process remains for this old run. Observe its transcript or archive it.".into();
+    run.set_controls(false, false, false);
+}
+
+fn run_has_live_process(run: &RunStatus) -> bool {
+    [run.worker_pid, run.owner_pid]
+        .into_iter()
+        .flatten()
+        .any(pid_is_alive)
+        || run.worker_pgid.is_some_and(pgid_is_alive)
+}
+
+#[cfg(unix)]
+fn pgid_is_alive(pgid: i64) -> bool {
+    let Ok(pgid) = libc::pid_t::try_from(pgid) else {
+        return false;
+    };
+    if pgid <= 1 {
+        return false;
+    }
+    // SAFETY: signal zero only observes whether the recorded group exists.
+    unsafe { libc::kill(-pgid, 0) == 0 }
+}
+
+#[cfg(not(unix))]
+fn pgid_is_alive(pgid: i64) -> bool {
+    pid_is_alive(pgid)
+}
+
 fn refresh_worker_liveness(run: &mut RunStatus) {
+    if run.is_terminal() {
+        run.worker_alive = Some(false);
+        let retry = run.controls.as_ref().is_some_and(|controls| controls.retry);
+        run.set_controls(false, false, retry);
+        return;
+    }
     if run.worker_pid.is_none() && run.worker_pgid.is_none() {
         return;
     }
-    run.worker_alive = Some(
-        [run.worker_pid, run.worker_pgid]
-            .into_iter()
-            .flatten()
-            .any(pid_is_alive),
-    );
+    let provider_alive = [run.worker_pid, run.worker_pgid]
+        .into_iter()
+        .flatten()
+        .any(pid_is_alive);
+    let owner_alive = run.owner_pid.is_none_or(pid_is_alive);
+    run.worker_alive = Some(provider_alive && owner_alive);
+    if run.owner_pid.is_some() && run.worker_alive == Some(false) && !run.is_terminal() {
+        run.health = "stalled".to_string();
+        run.liveness = "pid_gone".to_string();
+        run.recovery_required = true;
+    }
     let terminal = run.is_terminal();
     let await_run = !terminal
         && run
@@ -1505,24 +2112,101 @@ fn parse_nonnegative_i64(raw: &str) -> Option<i64> {
     coerce_int_value(&serde_json::Value::String(value.to_string())).filter(|item| *item >= 0)
 }
 
-/// Recursively collect files under `root` matching `pred`. Empty when `root`
-/// is absent. A small std-only stand-in for `Path.rglob`.
-fn rglob(root: &Path, pred: &dyn Fn(&Path) -> bool) -> Vec<PathBuf> {
+/// One directory as `rglob` last listed it. A directory's mtime moves when an
+/// entry is added, removed or renamed in it -- exactly the changes that alter
+/// what `rglob` returns -- so an unchanged stamp lets the walk reuse the
+/// listing instead of reading the directory again.
+struct DirListing {
+    stamp: SystemTime,
+    /// Entry names only: full paths for 126k files cost ~70 MB per console.
+    dirs: Vec<std::ffi::OsString>,
+    /// UTF-8 file names; a name that is not UTF-8 matches no `rglob` caller.
+    files: Vec<String>,
+    seen: u64,
+}
+
+#[derive(Default)]
+struct RglobListings {
+    generation: u64,
+    listings: HashMap<PathBuf, DirListing>,
+}
+
+/// Listings shared by every walk in this process. Long-lived readers (voc,
+/// vc-server) recompute the view on every control-plane change; relisting the
+/// artifact tree each time (22,684 directories on the Founder's Mac, ~1.1 s of
+/// CPU per view) held every idle voc near a third of a core while any run was
+/// writing events (thermal report, Silver, 2026-09-23).
+static RGLOB_LISTINGS: LazyLock<Mutex<RglobListings>> = LazyLock::new(Mutex::default);
+
+/// A directory modified this recently may change again within the same
+/// timestamp tick, so its listing is read afresh rather than trusted.
+const RGLOB_TRUST_AFTER: Duration = Duration::from_secs(2);
+
+/// Recursively collect files under `root` whose file name matches `pred`.
+/// Empty when `root` is absent. A small std-only stand-in for `Path.rglob`:
+/// symlinked entries are neither followed nor returned, as `read_dir` file
+/// types report them.
+fn rglob(root: &Path, pred: &dyn Fn(&str) -> bool) -> Vec<PathBuf> {
+    let now = SystemTime::now();
+    let mut cache = RGLOB_LISTINGS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    cache.generation += 1;
+    let generation = cache.generation;
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&dir) else {
+        let Ok(stamp) = fs::metadata(&dir).and_then(|meta| meta.modified()) else {
             continue;
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            match entry.file_type() {
-                Ok(ft) if ft.is_dir() => stack.push(path),
-                Ok(ft) if ft.is_file() && pred(&path) => out.push(path),
-                _ => {}
+        let trusted = now
+            .duration_since(stamp)
+            .is_ok_and(|age| age >= RGLOB_TRUST_AFTER);
+        let reusable = trusted
+            && cache
+                .listings
+                .get(&dir)
+                .is_some_and(|listing| listing.stamp == stamp);
+        if !reusable {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            let mut listing = DirListing {
+                stamp,
+                dirs: Vec::new(),
+                files: Vec::new(),
+                seen: generation,
+            };
+            for entry in entries.flatten() {
+                match entry.file_type() {
+                    Ok(ft) if ft.is_dir() => listing.dirs.push(entry.file_name()),
+                    Ok(ft) if ft.is_file() => {
+                        if let Ok(name) = entry.file_name().into_string() {
+                            listing.files.push(name);
+                        }
+                    }
+                    _ => {}
+                }
             }
+            cache.listings.insert(dir.clone(), listing);
         }
+        let Some(listing) = cache.listings.get_mut(&dir) else {
+            continue;
+        };
+        listing.seen = generation;
+        stack.extend(listing.dirs.iter().map(|name| dir.join(name)));
+        out.extend(
+            listing
+                .files
+                .iter()
+                .filter(|name| pred(name))
+                .map(|name| dir.join(name)),
+        );
     }
+    // Forget directories under this root that the walk no longer reaches.
+    cache
+        .listings
+        .retain(|path, listing| listing.seen == generation || !path.starts_with(root));
     out
 }
 
@@ -1590,11 +2274,17 @@ fn normalize_lock(path: &Path, now: DateTime<Utc>) -> Option<RunStatus> {
         launcher_pid: None,
         completed_at: String::new(),
         session_id: String::new(),
+        logical_session_id: String::new(),
         current_loop: None,
         total_loops: None,
+        owner_pid: None,
         worker_pid: None,
         worker_pgid: None,
         worker_alive: None,
+        process_truth: String::new(),
+        process_truth_reason: String::new(),
+        operator_agent: None,
+        continuity: None,
         recovery_required: false,
         stop_reason: String::new(),
         agent_session_id: String::new(),
@@ -1719,11 +2409,21 @@ impl MarblesState {
             launcher_pid: None,
             completed_at: String::new(),
             session_id: String::new(),
+            logical_session_id: String::new(),
             current_loop: self.current_loop,
             total_loops: self.total_loops,
+            owner_pid: None,
             worker_pid: None,
             worker_pgid: None,
             worker_alive: None,
+            process_truth: if terminal {
+                "terminal".to_string()
+            } else {
+                String::new()
+            },
+            process_truth_reason: String::new(),
+            operator_agent: None,
+            continuity: None,
             recovery_required: false,
             stop_reason: String::new(),
             agent_session_id: String::new(),
@@ -1752,7 +2452,8 @@ impl MarblesState {
 
 #[cfg(test)]
 mod tests {
-    use super::{ControlPlane, is_safe_run_id};
+    use super::{ControlPlane, is_safe_run_id, quarantine_test_runs};
+    use crate::RunStatus;
     use crate::events::STREAM_SEGMENT_SCHEMA;
     use chrono::{DateTime, Duration, Utc};
     use serde_json::json;
@@ -1781,6 +2482,121 @@ mod tests {
             }
         }
         panic!("could not allocate an isolated fixture home")
+    }
+
+    #[test]
+    fn old_ownerless_runs_leave_live_without_mutating_history() {
+        let home = temp_home("orphan-projection");
+        let runs = home.join("control_plane/runs");
+        fs::create_dir_all(&runs).unwrap();
+        let now = Utc::now();
+        let old = (now - Duration::days(180)).to_rfc3339();
+        for (id, state, stamp, pid) in [
+            ("old-launch", "launching", old.clone(), None),
+            ("old-active", "active", old.clone(), Some(99999999)),
+            (
+                "live",
+                "active",
+                old.clone(),
+                Some(i64::from(std::process::id())),
+            ),
+            ("new-launch", "launching", now.to_rfc3339(), None),
+        ] {
+            let payload = json!({"run_id":id,"state":state,"agent":"codex","skill":"workflow",
+                "mode":"headless","root":"/repo","operator_session":"","latest_report":"",
+                "latest_transcript":"","last_error":"","started_at":stamp,"updated_at":stamp,
+                "health":"active","source":"meta","lock_present":false,"worker_pid":pid,
+                "launcher_pid": std::process::id(), "worker_alive": true});
+            fs::write(runs.join(format!("{id}.json")), payload.to_string()).unwrap();
+        }
+        let before = fs::read(runs.join("old-launch.json")).unwrap();
+        let plane = ControlPlane::new(&home);
+        let view = plane.compute_view(now);
+        let active: Vec<_> = view.active_runs.iter().map(|r| r.run_id.as_str()).collect();
+        assert!(active.contains(&"live"));
+        assert!(active.contains(&"new-launch"));
+        assert!(!active.contains(&"old-launch"));
+        assert!(view.stalled_runs.is_empty());
+        let orphan = plane.derived_run("old-launch", now).unwrap();
+        assert_eq!(orphan.state, "failed");
+        assert!(!orphan.completed_at.is_empty());
+        assert_eq!(fs::read(runs.join("old-launch.json")).unwrap(), before);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn compute_view_projects_exact_runtime_routing_axes_without_guessing() {
+        let home = temp_home("run-routing");
+        let runtime = home.join("control_plane/runtime_runs");
+        let exact = runtime.join("route-exact");
+        let mismatched = runtime.join("route-mismatch");
+        fs::create_dir_all(&exact).expect("exact runtime dir");
+        fs::create_dir_all(&mismatched).expect("mismatched runtime dir");
+        let now = Utc::now();
+        fs::write(
+            exact.join("meta.json"),
+            serde_json::to_vec(&json!({
+                "run_id": "route-exact",
+                "status": "running",
+                "updated_at": now.to_rfc3339(),
+                "agent": "codex",
+                "root": "/work/alpha",
+                "provider_session_id": "provider-alpha",
+                "workspace_id": "0198f84e-1234-7abc-8def-1234567890ab",
+                "workspace_instance_id": "0198f84e-3333-7abc-8def-1234567890ab",
+                "workspace_display_label": "alpha",
+                "vibecrafted_session_id": "0198f84e-2222-7abc-8def-1234567890ab",
+                "worker_host_session": "frame-alpha",
+                "worker_host_display": "Alpha Frame"
+            }))
+            .expect("routing json"),
+        )
+        .expect("routing meta");
+        fs::write(
+            mismatched.join("meta.json"),
+            br#"{"run_id":"different-run","workspace_id":"wrong"}"#,
+        )
+        .expect("mismatched meta");
+
+        let view = ControlPlane::new(&home).compute_view(now);
+        let route = view
+            .run_routing
+            .get("route-exact")
+            .expect("exact route projected");
+        assert_eq!(route.agent, "codex");
+        assert_eq!(route.root, "/work/alpha");
+        assert_eq!(route.provider_session_id, "provider-alpha");
+        assert_eq!(route.workspace_id, "0198f84e-1234-7abc-8def-1234567890ab");
+        assert_eq!(
+            route.workspace_session_id,
+            "0198f84e-2222-7abc-8def-1234567890ab"
+        );
+        assert_eq!(route.worker_host_session, "frame-alpha");
+        assert!(!view.run_routing.contains_key("route-mismatch"));
+        fs::remove_dir_all(home).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pid_probe_keeps_the_kill_zero_answers_without_spawning_kill() {
+        assert!(super::pid_is_alive(i64::from(std::process::id())));
+        for invalid in [0, -1, i64::from(i32::MAX) + 1, i64::MAX, i64::MIN] {
+            assert!(!super::pid_is_alive(invalid), "pid {invalid}");
+        }
+
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn true");
+        let reaped = i64::from(child.id());
+        child.wait().expect("reap true");
+        assert!(!super::pid_is_alive(reaped), "a reaped child is gone");
+
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } != 0 {
+            // pid 1 belongs to root: signal 0 answers EPERM, which `kill -0`
+            // also reported as a failure.
+            assert!(!super::pid_is_alive(1));
+        }
     }
 
     #[test]
@@ -2151,6 +2967,374 @@ mod tests {
     }
 
     #[test]
+    fn product_projection_quarantines_doctor_smoke_and_test_run_families() {
+        fn run(run_id: &str, agent: &str, mode: &str, root: &str, report: &str) -> RunStatus {
+            serde_json::from_value(json!({
+                "run_id": run_id,
+                "state": "active",
+                "agent": agent,
+                "skill": "doctor",
+                "mode": mode,
+                "root": root,
+                "operator_session": "fixture",
+                "latest_report": report,
+                "latest_transcript": "",
+                "last_error": "",
+                "updated_at": "2026-09-21T00:00:00Z",
+                "started_at": "2026-09-21T00:00:00Z",
+                "health": "stalled",
+                "source": "agent-meta",
+                "lock_present": false
+            }))
+            .expect("run fixture")
+        }
+
+        let test_parent = "rese-260826-184310-92149";
+        let mut runs = vec![
+            run(
+                "smoke-000",
+                "doctor-smoke",
+                "doctor",
+                "/srv/checkout/vibecrafted",
+                "",
+            ),
+            run(
+                test_parent,
+                "swarm",
+                "research",
+                "/srv/checkout/vibecrafted",
+                "",
+            ),
+            run(
+                &format!("{test_parent}-research-codex"),
+                "codex",
+                "research",
+                "/private/tmp/pytest-of-founder/pytest-1/test_research0",
+                "",
+            ),
+            run(
+                &format!("{test_parent}-research-agy"),
+                "agy",
+                "research",
+                "",
+                "",
+            ),
+            run(
+                "impl-test-report",
+                "codex",
+                "implement",
+                "",
+                "/srv/.vibecrafted/artifacts/local/test_delivery/2026/report.md",
+            ),
+            run(
+                "real-run",
+                "codex",
+                "implement",
+                "/srv/checkout/vibecrafted",
+                "/srv/report.md",
+            ),
+        ];
+
+        quarantine_test_runs(&mut runs);
+
+        assert_eq!(
+            runs.iter()
+                .map(|run| run.run_id.as_str())
+                .collect::<Vec<_>>(),
+            ["real-run"]
+        );
+    }
+
+    #[test]
+    fn logical_session_identity_joins_all_three_sources_and_never_borrows_the_provider_id() {
+        // Provider ids (`session_id`) and Vibecrafted session ids are distinct
+        // identities. Every source must project the logical id through the same
+        // alias order — canonical key, then `workspace_session_id` — and must
+        // never fall back to the provider id.
+        let home = temp_home("logical-session-join");
+        let control_plane = home.join("control_plane");
+        let runs = control_plane.join("runs");
+        let runtime = control_plane.join("runtime_runs/meta-run");
+        fs::create_dir_all(&runs).expect("runs");
+        fs::create_dir_all(&runtime).expect("runtime run");
+        let now = Utc::now();
+
+        // 1. Event source: first event carries only the workspace alias, the
+        //    second carries the canonical key; the provider id differs on purpose.
+        let records = [
+            json!({
+                "ts": (now - Duration::minutes(2)).to_rfc3339(),
+                "run_id": "event-run",
+                "kind": "launch",
+                "message": "launch",
+                "payload": {
+                    "root": "/srv/checkout/vibecrafted",
+                    "agent": "claude",
+                    "session_id": "provider-session-0001",
+                    "workspace_session_id": "vc-session-logical-01"
+                }
+            }),
+            json!({
+                "ts": (now - Duration::minutes(1)).to_rfc3339(),
+                "run_id": "event-run",
+                "kind": "lifecycle:active",
+                "message": "heartbeat",
+                "payload": {
+                    "state": "active",
+                    "liveness": "pid_alive",
+                    "worker_pid": std::process::id(),
+                    "vibecrafted_session_id": "vc-session-logical-01",
+                    "heartbeat_at": now.to_rfc3339()
+                }
+            }),
+            json!({
+                "ts": now.to_rfc3339(),
+                "run_id": "provider-only-run",
+                "kind": "launch",
+                "message": "launch",
+                "payload": {
+                    "root": "/srv/checkout/vibecrafted",
+                    "session_id": "provider-session-0002"
+                }
+            }),
+        ];
+        let encoded = records
+            .iter()
+            .map(serde_json::Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(control_plane.join("events.jsonl"), format!("{encoded}\n"))
+            .expect("event stream");
+
+        // 2. Snapshot source: only the workspace alias is present.
+        fs::write(
+            runs.join("snapshot-run.json"),
+            serde_json::to_vec(&json!({
+                "run_id": "snapshot-run",
+                "state": "completed",
+                "agent": "codex",
+                "skill": "implement",
+                "mode": "implement",
+                "root": "/srv/checkout/vibecrafted",
+                "operator_session": "repo-snapshot-run",
+                "latest_report": "",
+                "latest_transcript": "",
+                "last_error": "",
+                "updated_at": now.to_rfc3339(),
+                "started_at": now.to_rfc3339(),
+                "health": "final",
+                "source": "agent-meta",
+                "lock_present": false,
+                "session_id": "provider-session-0003",
+                "workspace_session_id": "vc-session-logical-02"
+            }))
+            .expect("snapshot json"),
+        )
+        .expect("snapshot");
+
+        // 3. Meta source: canonical key present, provider id distinct.
+        fs::write(
+            runtime.join("meta.json"),
+            serde_json::to_vec(&json!({
+                "run_id": "meta-run",
+                "status": "completed",
+                "exit_code": 0,
+                "agent": "claude",
+                "skill": "workflow",
+                "root": "/srv/checkout/vibecrafted",
+                "updated_at": now.to_rfc3339(),
+                "completed_at": now.to_rfc3339(),
+                "session_id": "provider-session-0004",
+                "vibecrafted_session_id": "vc-session-logical-03"
+            }))
+            .expect("meta json"),
+        )
+        .expect("meta");
+
+        let view = ControlPlane::new(&home).compute_view(now);
+        let find = |run_id: &str| {
+            view.active_runs
+                .iter()
+                .chain(view.stalled_runs.iter())
+                .chain(view.recent_runs.iter())
+                .find(|run| run.run_id == run_id)
+                .unwrap_or_else(|| panic!("{run_id} projected"))
+        };
+
+        let event_run = find("event-run");
+        assert_eq!(event_run.logical_session_id, "vc-session-logical-01");
+        assert_eq!(event_run.session_id, "provider-session-0001");
+        let provider_only = find("provider-only-run");
+        assert_eq!(provider_only.session_id, "provider-session-0002");
+        assert!(
+            provider_only.logical_session_id.is_empty(),
+            "provider id must never be promoted to a logical session id"
+        );
+        let snapshot_run = find("snapshot-run");
+        assert_eq!(snapshot_run.logical_session_id, "vc-session-logical-02");
+        assert_eq!(snapshot_run.session_id, "provider-session-0003");
+        let meta_run = find("meta-run");
+        assert_eq!(meta_run.logical_session_id, "vc-session-logical-03");
+        assert_eq!(meta_run.session_id, "provider-session-0004");
+
+        // The logical id survives serialisation under its canonical name only.
+        let serialised = serde_json::to_value(event_run).expect("run json");
+        assert_eq!(serialised["logical_session_id"], "vc-session-logical-01");
+        assert!(serialised.get("workspace_session_id").is_none());
+
+        fs::remove_dir_all(home).ok();
+    }
+
+    #[test]
+    fn guardian_settlement_is_terminal_and_never_enters_stalled_runs() {
+        let home = temp_home("guardian-settlement-terminal");
+        let runs = home.join("control_plane/runs");
+        fs::create_dir_all(&runs).expect("runs");
+        let now = Utc::now();
+        let snapshot = json!({
+            "run_id": "guardian-settled",
+            "agent": "guardian",
+            "skill": "settlement",
+            "mode": "n",
+            "root": "",
+            "operator_session": "guardian-settled",
+            "latest_report": "",
+            "latest_transcript": "",
+            "last_error": "",
+            "state": "settled",
+            "health": "stalled",
+            "source": "event-stream",
+            "lock_present": false,
+            "liveness": "heartbeat",
+            "updated_at": (now - Duration::days(8)).to_rfc3339(),
+            "started_at": (now - Duration::days(8)).to_rfc3339(),
+            "settlement_verdict": "needs_attention",
+            "settlement_tui": "n"
+        });
+        fs::write(
+            runs.join("guardian-settled.json"),
+            serde_json::to_vec_pretty(&snapshot).unwrap(),
+        )
+        .expect("settled snapshot");
+
+        let view = ControlPlane::new(&home).compute_view(now);
+        let run = view
+            .recent_runs
+            .iter()
+            .find(|run| run.run_id == "guardian-settled")
+            .expect("settled run remains inspectable as recent truth");
+
+        assert_eq!(run.state, "settled");
+        assert_eq!(run.health, "final");
+        assert!(
+            view.active_runs
+                .iter()
+                .all(|run| run.run_id != "guardian-settled")
+        );
+        assert!(
+            view.stalled_runs
+                .iter()
+                .all(|run| run.run_id != "guardian-settled")
+        );
+        fs::remove_dir_all(home).ok();
+    }
+
+    #[test]
+    fn projection_notification_cannot_regress_newer_lifecycle_state() {
+        let home = temp_home("projection-notification-race");
+        let control_plane = home.join("control_plane");
+        fs::create_dir_all(&control_plane).expect("control plane");
+        let now = Utc::now();
+        let records = [
+            json!({
+                "ts": now.to_rfc3339(),
+                "run_id": "parity-projection-race",
+                "kind": "lifecycle:active",
+                "message": "process active",
+                "payload": {
+                    "state": "active",
+                    "root": "/srv/checkout/vibecrafted",
+                    "worker_pid": std::process::id(),
+                    "liveness": "pid_alive",
+                    "heartbeat_at": now.to_rfc3339()
+                }
+            }),
+            json!({
+                "ts": (now + Duration::milliseconds(1)).to_rfc3339(),
+                "run_id": "parity-projection-race",
+                "kind": "state",
+                "message": "parity-projection-race entered process_spawned",
+                "payload": {
+                    "projection_event": true,
+                    "previous_state": "created",
+                    "state": "process_spawned",
+                    "root": "/srv/checkout/vibecrafted",
+                    "liveness": "heartbeat"
+                }
+            }),
+        ];
+        let encoded = records
+            .iter()
+            .map(serde_json::Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(control_plane.join("events.jsonl"), format!("{encoded}\n"))
+            .expect("event stream");
+
+        let view = ControlPlane::new(&home).compute_view(now);
+        let run = view
+            .recent_runs
+            .iter()
+            .find(|run| run.run_id == "parity-projection-race")
+            .expect("projected run");
+
+        assert_eq!(run.state, "active");
+        assert_eq!(run.liveness, "pid_alive");
+        fs::remove_dir_all(home).ok();
+    }
+
+    #[test]
+    fn interactive_owner_and_provider_must_both_be_live_for_active_projection() {
+        let home = temp_home("interactive-owner-liveness");
+        let runtime = home.join("control_plane/runtime_runs/interactive-owner-dead");
+        fs::create_dir_all(&runtime).expect("runtime run");
+        let now = Utc::now();
+        fs::write(
+            runtime.join("meta.json"),
+            serde_json::to_vec(&json!({
+                "run_id": "interactive-owner-dead",
+                "status": "active",
+                "agent": "codex",
+                "skill": "init",
+                "root": "/srv/checkout/vibecrafted",
+                "updated_at": now.to_rfc3339(),
+                "liveness": "active",
+                "owner_pid": 999999999_i64,
+                "worker_pid": std::process::id()
+            }))
+            .expect("meta json"),
+        )
+        .expect("meta");
+
+        let view = ControlPlane::new(&home).compute_view(now);
+        let run = view
+            .recent_runs
+            .iter()
+            .find(|run| run.run_id == "interactive-owner-dead")
+            .expect("interactive run remains inspectable");
+
+        assert_eq!(run.owner_pid, Some(999999999));
+        assert_eq!(run.worker_alive, Some(false));
+        assert!(
+            view.active_runs
+                .iter()
+                .all(|run| run.run_id != "interactive-owner-dead")
+        );
+        assert_eq!(view.settlement_counts.active, 0);
+        fs::remove_dir_all(home).ok();
+    }
+
+    #[test]
     fn settlement_needs_attention_counts_and_stalled_bucket_is_orthogonal() {
         let unique = format!(
             "control-core-settle-stall-{}-{}",
@@ -2296,5 +3480,82 @@ mod tests {
         assert_eq!(projected.settlement_revision, 9);
 
         fs::remove_dir_all(home).ok();
+    }
+}
+
+#[cfg(test)]
+mod rglob_listing_tests {
+    use super::rglob;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, SystemTime};
+
+    fn age(dir: &Path) {
+        // An hour-old stamp puts the directory past RGLOB_TRUST_AFTER, so the
+        // next walk reuses its listing unless the stamp moves again.
+        fs::File::open(dir)
+            .and_then(|handle| handle.set_modified(SystemTime::now() - Duration::from_secs(3600)))
+            .expect("age directory");
+    }
+
+    fn metas(root: &Path) -> Vec<String> {
+        let mut found: Vec<String> = rglob(root, &|name| name.ends_with(".meta.json"))
+            .into_iter()
+            .map(|path| path.strip_prefix(root).unwrap().display().to_string())
+            .collect();
+        found.sort();
+        found
+    }
+
+    #[test]
+    fn a_trusted_listing_still_sees_entries_added_and_removed_later() {
+        let root: PathBuf = std::env::temp_dir().join(format!(
+            "control-core-rglob-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let reports = root.join("org/repo/2026_0924/reports");
+        fs::create_dir_all(&reports).unwrap();
+        fs::write(reports.join("a.meta.json"), "{}").unwrap();
+        for dir in [
+            &reports,
+            &root.join("org/repo/2026_0924"),
+            &root.join("org/repo"),
+            &root.join("org"),
+            &root,
+        ] {
+            age(dir);
+        }
+        assert_eq!(metas(&root), ["org/repo/2026_0924/reports/a.meta.json"]);
+        // Reused: nothing moved, so the answer is identical.
+        assert_eq!(metas(&root), ["org/repo/2026_0924/reports/a.meta.json"]);
+
+        fs::write(reports.join("b.meta.json"), "{}").unwrap();
+        assert_eq!(
+            metas(&root),
+            [
+                "org/repo/2026_0924/reports/a.meta.json",
+                "org/repo/2026_0924/reports/b.meta.json"
+            ]
+        );
+
+        fs::remove_file(reports.join("a.meta.json")).unwrap();
+        fs::create_dir(root.join("org/repo/2026_0925")).unwrap();
+        fs::write(root.join("org/repo/2026_0925/c.meta.json"), "{}").unwrap();
+        assert_eq!(
+            metas(&root),
+            [
+                "org/repo/2026_0924/reports/b.meta.json",
+                "org/repo/2026_0925/c.meta.json"
+            ]
+        );
+
+        fs::remove_dir_all(root.join("org/repo/2026_0924")).unwrap();
+        assert_eq!(metas(&root), ["org/repo/2026_0925/c.meta.json"]);
+        fs::remove_dir_all(&root).unwrap();
+        assert!(metas(&root).is_empty());
     }
 }

@@ -58,7 +58,7 @@ def _dry_run_launcher(tmp_path: Path, agent: str) -> Path:
 
 
 def test_command_deck_exposes_agy_junie_and_grok_help_topics() -> None:
-    for agent in ("agy", "junie", "grok"):
+    for agent in ("agy", "junie", "grok", "cursor"):
         result = subprocess.run(
             [str(LAUNCHER), "help", agent],
             check=True,
@@ -71,15 +71,23 @@ def test_command_deck_exposes_agy_junie_and_grok_help_topics() -> None:
         assert f"await     {agent} --last" in result.stdout
 
 
-def test_agy_spawn_dry_run_uses_antigravity_print_contract(tmp_path: Path) -> None:
+def test_agy_spawn_dry_run_uses_private_stream_json_stdin_contract(
+    tmp_path: Path,
+) -> None:
     launcher = _dry_run_launcher(tmp_path, "agy")
     text = launcher.read_text(encoding="utf-8")
 
     assert "SPAWN_AGENT=agy" in text
-    assert "agy --dangerously-skip-permissions --add-dir" in text
+    # The prompt never rides argv: agy reads one stream-json user message from stdin.
+    assert "agy --print= --input-format stream-json --output-format stream-json" in text
+    assert "--dangerously-skip-permissions --add-dir" in text
     assert "--print-timeout 30m" in text
-    assert '--print "$(cat ' in text
-    assert "agy --print --dangerously-skip-permissions" not in text
+    assert "_agy_prompt.ndjson" in text
+    assert '--print "$(cat ' not in text
+    assert "$(cat " not in text
+    # Human pane through the shared parser; raw stream teed for await/meta.
+    assert "vibecrafted_core.agent_stream --agent agy --last-message" in text
+    assert "tee -a" in text
     assert "Agy completed without writing a standalone report file" in text
     assert "Agy failed before writing a standalone report file" in text
     assert "pipeline_status=65" not in text
@@ -138,8 +146,23 @@ def test_grok_spawn_dry_run_uses_prompt_file_contract(tmp_path: Path) -> None:
     # resume flag shape covered in dedicated grok test below (source contract)
 
 
+def test_cursor_spawn_dry_run_uses_stream_json_stdin_contract(
+    tmp_path: Path,
+) -> None:
+    launcher = _dry_run_launcher(tmp_path, "cursor")
+    text = launcher.read_text(encoding="utf-8")
+
+    # cursor-agent headless contract: `-p` reads the prompt from stdin,
+    # stream-json events tee'd into the transcript, --force --trust mirror
+    # the headless bypass policy used by the other fleet wrappers.
+    assert "SPAWN_AGENT=cursor" in text
+    assert "cursor-agent -p --output-format stream-json --force --trust" in text
+    assert "tee -a" in text
+    assert "Cursor failed before writing a standalone report file" in text
+
+
 def test_dry_run_meta_records_new_agents(tmp_path: Path) -> None:
-    for agent in ("agy", "junie", "grok"):
+    for agent in ("agy", "junie", "grok", "cursor"):
         launcher = _dry_run_launcher(tmp_path / agent, agent)
         meta_line = next(
             line
@@ -157,8 +180,10 @@ def test_grok_resume_uses_resume_flag_not_session_id_and_streams_json() -> None:
     - headless uses --output-format streaming-json for parseable transcript
     - --single for prompt continuation; --permission-mode and --no-alt-screen
     - non-interactive wraps streaming-json through AgentStreamParser
-    - non-interactive lands in G7 worker host (not operator seat)
-    Source-of-truth is the grok case in marbles.sh (shell resume builder).
+    - prompted resume is admitted as a tracked run (36614036); a bare resume
+      opens the operator seat — the untracked G7 worker branch is gone
+    Source-of-truth is the grok case in marbles.sh (shell resume builder) and
+    `grok --help` (0.2.x: `-r/--resume`, `-p/--single`, `--output-format`).
     """
     marbles_path = (
         REPO_ROOT / "vibecrafted-core/vibecrafted_core/runtime/shell/lib/marbles.sh"
@@ -189,13 +214,13 @@ def test_grok_resume_uses_resume_flag_not_session_id_and_streams_json() -> None:
     assert "--no-alt-screen" in grok_block
     assert "--cwd " in grok_block
 
-    # AgentStreamParser + G7 worker host are resume-agent contracts (not only
-    # inside the grok case of the command builder).
+    # AgentStreamParser and the admitted-run seat are resume-agent contracts
+    # (not only inside the grok case of the command builder).
     assert "_vetcoders_wrap_with_agent_stream" in src
     assert "vibecrafted_core.agent_stream" in src
-    assert "Resume launched in worker session:" in src
-    assert "_vetcoders_effective_worker_session" in src
-    assert "headless (G7 workers column)" in src
+    assert "_vetcoders_enter_admitted_interactive" in src
+    assert "Resume launched in operator session:" in src
+    assert "Resume launched in worker session:" not in src
 
     # Fixture-based unit test for spawn.py extraction against grok 0.2.97 streaming-json shape
     # (no real grok call). Covers session-id (sessionId in end event) + JSON_TOKEN_PATTERNS usage.
@@ -221,3 +246,26 @@ def test_grok_resume_uses_resume_flag_not_session_id_and_streams_json() -> None:
     assert _extract_cost(grok_stream) is None or isinstance(
         _extract_cost(grok_stream), float
     )
+
+
+def test_agy_stdin_command_is_a_private_stream_json_argv() -> None:
+    """The supervised agy lane is a direct argv; the prompt rides stdin as one
+    stream-json user turn (prompt_transport), never argv and never a shell shim.
+    """
+    from vibecrafted_core.model_overrides import _with_model_override
+    from vibecrafted_core.prompt_transport import stdin_transport
+    from vibecrafted_core.spawn import _stdin_command
+
+    command = _stdin_command("agy")
+    assert command[0] == "agy"
+    assert "bash" not in command
+    assert "--print=" in command
+    assert "--print" not in command
+    assert command[command.index("--input-format") + 1] == "stream-json"
+    assert command[command.index("--output-format") + 1] == "stream-json"
+    assert not any("$(cat)" in part for part in command)
+    assert stdin_transport("agy") == "stream-json"
+
+    pinned = _with_model_override("agy", command, "gemini-3.8-flash-high")
+    assert pinned[:3] == ["agy", "--model", "gemini-3.8-flash-high"]
+    assert pinned[3:] == command[1:]

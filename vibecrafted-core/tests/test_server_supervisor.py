@@ -9,7 +9,9 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from vibecrafted_core import server_supervisor as supervisor
@@ -218,6 +220,7 @@ def test_plistlib_renderer_preserves_metacharacters_without_xml_injection(
     payload = plistlib.loads(rendered)
 
     assert payload["Label"] == supervisor.LAUNCH_AGENT_LABEL
+    assert payload["AssociatedBundleIdentifiers"] == ["io.vetcoders.vibecrafted"]
     assert payload["ProgramArguments"][0] == str(supervisor_binary)
     arguments = payload["ProgramArguments"]
     assert arguments[arguments.index("--supervisor-bin") + 1] == str(supervisor_binary)
@@ -295,6 +298,12 @@ def test_launch_agent_carries_the_installing_path_and_active_generation(
     assert payload["EnvironmentVariables"]["PATH"] == (
         f"{generation / 'bin'}:/opt/homebrew/bin:/usr/bin:/bin"
     )
+    assert payload["EnvironmentVariables"]["VIBECRAFTED_RUNTIME_ROOT"] == str(
+        generation
+    )
+    assert supervisor._child_environment(config.paths)[
+        "VIBECRAFTED_RUNTIME_ROOT"
+    ] == str(generation)
 
     # No active-runtime receipt: the installing PATH still survives whole.
     (config.paths.runtime_home / "active.json").unlink()
@@ -306,6 +315,8 @@ def test_launch_agent_carries_the_installing_path_and_active_generation(
     )
 
     assert payload["EnvironmentVariables"]["PATH"] == "/opt/homebrew/bin:/usr/bin:/bin"
+    assert "VIBECRAFTED_RUNTIME_ROOT" not in payload["EnvironmentVariables"]
+    assert "VIBECRAFTED_RUNTIME_ROOT" not in supervisor._child_environment(config.paths)
 
 
 def test_launch_agent_path_drops_empty_and_relative_segments(
@@ -350,6 +361,75 @@ def test_child_environment_keeps_the_inherited_path_behind_canonical_bins(
     assert f"{tmp_path}/.cargo/bin" in path
     assert path.index("/opt/homebrew/bin") < path.index(f"{tmp_path}/.cargo/bin")
     assert len(path) == len(set(path))
+
+
+def test_child_path_keeps_user_path_after_canonical_bins(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Guest, not landlord: every absolute entry of the user's PATH survives
+    into the child PATH, behind the canonical bins that must win name
+    collisions we own."""
+
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    config = _config(tmp_path, launcher)
+    user_path = [
+        "/opt/homebrew/bin",
+        f"{tmp_path}/.cargo/bin",
+        f"{tmp_path}/.local/share/mise/shims",
+        "/usr/bin",
+    ]
+    monkeypatch.setenv("PATH", os.pathsep.join(user_path))
+
+    path = supervisor._child_path(config.paths).split(os.pathsep)
+
+    canonical = [
+        f"{config.paths.operator_home}/.local/bin",
+        "/usr/local/bin",
+        "/opt/homebrew/bin",
+    ]
+    assert path[: len(canonical)] == canonical
+    for entry in user_path:
+        assert entry in path
+    assert max(path.index(entry) for entry in canonical) < path.index(
+        f"{tmp_path}/.cargo/bin"
+    )
+
+
+def test_child_environment_passes_ssh_auth_sock_through(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The user's SSH agent must survive into supervised children — its death
+    was the first-time-user symptom that motivated the guest contract."""
+
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    config = _config(tmp_path, launcher)
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/probe.sock")
+
+    environment = supervisor._child_environment(config.paths)
+
+    assert environment["SSH_AUTH_SOCK"] == "/tmp/probe.sock"
+
+
+def test_child_environment_scrubs_only_the_explicit_denylist(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deny-list is the exception, not the rule: deny-listed variables are
+    scrubbed, everything else in the user's environment flows through."""
+
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    config = _config(tmp_path, launcher)
+    for name in supervisor._CHILD_ENV_DENYLIST:
+        monkeypatch.setenv(name, "/foreign/runtime/poison")
+    monkeypatch.setenv("EDITOR", "nvim")
+
+    environment = supervisor._child_environment(config.paths)
+
+    for name in supervisor._CHILD_ENV_DENYLIST:
+        assert name not in environment
+    assert environment["EDITOR"] == "nvim"
 
 
 def test_launch_agent_propagates_terminal_triage_kill_switch(
@@ -411,7 +491,7 @@ def test_foreground_supervisor_lock_and_receipt_are_truthful(
         tmp_path / "bin" / "vibecrafted",
         f"""#!/bin/sh
 printf '%s\n' "$2" >> {str(lifecycle_log)!r}
-if [ "$2" = "status" ]; then
+if [ "$2" = "supervisor-pair-health" ]; then
     printf '%s\n' 'Server: RUNNING' 'Guardian: RUNNING'
 fi
 exit 0
@@ -462,6 +542,111 @@ exit 0
     assert lifecycle_log.read_text(encoding="utf-8").splitlines()[-1] == "stop"
 
 
+def test_healthy_supervisor_loop_probes_without_restarting_pair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    config = _config(tmp_path, launcher)
+    stop_event = threading.Event()
+    pair_checks = 0
+    child_calls: list[list[str]] = []
+
+    monkeypatch.setattr(
+        supervisor,
+        "_managed_pair_snapshot",
+        lambda _paths: {
+            "server_pid": os.getpid(),
+            "guardian_pid": os.getppid(),
+        },
+    )
+
+    def healthy_pair(
+        _launcher: Path,
+        _environment: dict[str, str],
+        **_kwargs: object,
+    ) -> bool:
+        nonlocal pair_checks
+        pair_checks += 1
+        if pair_checks == 2:
+            stop_event.set()
+        return True
+
+    def record_child(
+        argv: list[str],
+        **_kwargs: object,
+    ) -> supervisor._ChildResult:
+        child_calls.append(argv)
+        return supervisor._ChildResult(0, "", "")
+
+    monkeypatch.setattr(supervisor, "_pair_healthy", healthy_pair)
+    monkeypatch.setattr(supervisor, "_run_child", record_child)
+
+    assert supervisor.run_supervisor(config, stop_event=stop_event) == 0
+    assert pair_checks == 2
+    assert child_calls == [[str(launcher), "server", "stop"]]
+
+
+def test_supervisor_stop_interrupts_inflight_pair_health_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe_started = tmp_path / "pair-probe-started"
+    launcher = _executable(
+        tmp_path / "bin" / "vibecrafted",
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "import time\n"
+        "from pathlib import Path\n"
+        f"marker = Path({str(probe_started)!r})\n"
+        "if sys.argv[1:] == ['server', 'supervisor-pair-health']:\n"
+        "    marker.touch()\n"
+        "    time.sleep(60)\n"
+        "raise SystemExit(0)\n",
+    )
+    base = _config(tmp_path, launcher)
+    config = supervisor.SupervisorConfig(
+        paths=base.paths,
+        launcher=base.launcher,
+        host=base.host,
+        port=base.port,
+        interval=base.interval,
+        maximum_backoff=base.maximum_backoff,
+        command_timeout=60,
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "_managed_pair_snapshot",
+        lambda _paths: {
+            "server_pid": os.getpid(),
+            "guardian_pid": os.getppid(),
+        },
+    )
+    stop_event = threading.Event()
+    result: list[int] = []
+    worker = threading.Thread(
+        target=lambda: result.append(
+            supervisor.run_supervisor(config, stop_event=stop_event)
+        ),
+        daemon=True,
+    )
+    worker.start()
+
+    deadline = time.monotonic() + 5
+    while not probe_started.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert probe_started.exists()
+    stopped_at = time.monotonic()
+    stop_event.set()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert time.monotonic() - stopped_at < 5
+    assert result == [0]
+    receipt = json.loads(config.paths.receipt_file.read_text(encoding="utf-8"))
+    assert receipt["state"] == "stopped"
+
+
 def test_run_child_does_not_wait_for_daemonized_descendant_capture(
     tmp_path: Path,
 ) -> None:
@@ -475,7 +660,7 @@ exit 0
     )
 
     started = time.monotonic()
-    return_code, detail = supervisor._run_child(
+    result = supervisor._run_child(
         [str(launcher)],
         env=dict(os.environ),
         timeout=2,
@@ -483,8 +668,58 @@ exit 0
     )
 
     assert time.monotonic() - started < 2
-    assert return_code == 0
-    assert detail == "launcher complete"
+    assert result.exit_code == 0
+    assert result.stdout == "launcher complete"
+    assert result.stderr == ""
+    assert result.abort_reason is None
+
+
+def test_run_child_timeout_preserves_raw_streams(tmp_path: Path) -> None:
+    launcher = _executable(
+        tmp_path / "bin" / "launcher",
+        """#!/bin/sh
+printf 'launcher stdout\n'
+printf 'launcher stderr\n' >&2
+sleep 5
+""",
+    )
+
+    result = supervisor._run_child(
+        [str(launcher)],
+        env=dict(os.environ),
+        timeout=0.2,
+        stop_event=threading.Event(),
+    )
+
+    assert result.exit_code == 124
+    assert result.stdout == "launcher stdout"
+    assert result.stderr == "launcher stderr"
+    assert result.abort_reason == "timeout"
+    assert result.detail == "command timed out: launcher stderr"
+
+
+def test_run_child_stop_preserves_raw_streams(tmp_path: Path) -> None:
+    launcher = _executable(
+        tmp_path / "bin" / "launcher",
+        """#!/bin/sh
+sleep 5
+""",
+    )
+    stop_event = threading.Event()
+    stop_event.set()
+
+    result = supervisor._run_child(
+        [str(launcher)],
+        env=dict(os.environ),
+        timeout=2,
+        stop_event=stop_event,
+    )
+
+    assert result.exit_code == 143
+    assert result.stdout == ""
+    assert result.stderr == ""
+    assert result.abort_reason == "stopping"
+    assert result.detail == "supervisor stopping"
 
 
 def test_zero_exit_without_verified_pid_pair_is_degraded(
@@ -806,6 +1041,316 @@ def test_pair_health_probe_failures_are_degraded(
     assert not supervisor._pair_healthy(launcher, {})
 
 
+def test_pair_health_uses_single_compact_launcher_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    calls: list[list[str]] = []
+
+    def fake_probe(
+        argv: list[str],
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            "Server: RUNNING\nGuardian: RUNNING\n",
+            "",
+        )
+
+    monkeypatch.setattr(supervisor.subprocess, "run", fake_probe)
+
+    assert supervisor._pair_healthy(launcher, {})
+    assert calls == [[str(launcher), "server", "supervisor-pair-health"]]
+
+
+def test_stop_aware_pair_health_preserves_stdout_with_stderr_warning(
+    tmp_path: Path,
+) -> None:
+    launcher = _executable(
+        tmp_path / "bin" / "vibecrafted",
+        "#!/bin/sh\n"
+        "printf '%s\\n' 'ulimit helper unavailable' >&2\n"
+        "printf '%s\\n' 'Server: RUNNING' 'Guardian: RUNNING'\n",
+    )
+
+    assert supervisor._pair_healthy(
+        launcher,
+        dict(os.environ),
+        stop_event=threading.Event(),
+    )
+
+
+def _setup_healthy_pair_state(
+    tmp_path: Path, config: supervisor.SupervisorConfig
+) -> tuple[int, int, Path]:
+    config.paths.server_dir.mkdir(parents=True, exist_ok=True)
+    server_pid = os.getpid()
+    guardian_pid = os.getppid()
+
+    (config.paths.server_dir / "server.pid").write_text(
+        f"{server_pid}\n", encoding="utf-8"
+    )
+    (config.paths.server_dir / "guardian.pid").write_text(
+        f"{guardian_pid}\n", encoding="utf-8"
+    )
+    (config.paths.server_dir / "server.identity.json").write_text(
+        json.dumps(
+            {
+                "schema": "vibecrafted.managed-process.v1",
+                "role": "server",
+                "pid": server_pid,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (config.paths.server_dir / "guardian.identity.json").write_text(
+        json.dumps(
+            {
+                "schema": "vibecrafted.managed-process.v1",
+                "role": "guardian",
+                "pid": guardian_pid,
+                "nonce": "test-nonce-12345",
+            }
+        ),
+        encoding="utf-8",
+    )
+    target_url = f"http://{config.host}:{config.port}"
+    (config.paths.server_dir / "guardian.url").write_text(
+        f"{target_url}\n", encoding="utf-8"
+    )
+    ready_receipt = tmp_path / "ready.receipt.json"
+    ready_receipt.write_text(
+        json.dumps(
+            {
+                "schema": "vibecrafted.guardian-ready.v1",
+                "nonce": "test-nonce-12345",
+                "pid": guardian_pid,
+                "server_url": target_url,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (config.paths.server_dir / "guardian.ready-path").write_text(
+        f"{ready_receipt}\n", encoding="utf-8"
+    )
+    return server_pid, guardian_pid, ready_receipt
+
+
+def test_in_process_pair_health_does_not_spawn_subprocesses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    config = _config(tmp_path, launcher)
+    _setup_healthy_pair_state(tmp_path, config)
+
+    monkeypatch.setattr(
+        supervisor, "_server_http_healthy", lambda _h, _p, timeout=1.0: True
+    )
+
+    calls: list[list[str]] = []
+
+    def fake_subprocess_run(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        raise AssertionError(
+            f"subprocess.run must not be called when in-process healthy: {argv}"
+        )
+
+    monkeypatch.setattr(supervisor.subprocess, "run", fake_subprocess_run)
+
+    assert supervisor._pair_healthy(
+        launcher,
+        {},
+        paths=config.paths,
+        host=config.host,
+        port=config.port,
+    )
+    assert calls == []
+
+
+def test_server_http_healthy_closes_connection_on_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed = False
+
+    class DummyConnection:
+        def __init__(self, host: str, port: int, timeout: float = 1.0) -> None:
+            pass
+
+        def request(self, method: str, url: str, headers: dict[str, str]) -> None:
+            raise OSError("connection reset")
+
+        def close(self) -> None:
+            nonlocal closed
+            closed = True
+
+    monkeypatch.setattr(supervisor.http.client, "HTTPConnection", DummyConnection)
+    assert not supervisor._server_http_healthy("127.0.0.1", 3024)
+    assert closed
+
+
+def _tamper_url_mismatch(config: supervisor.SupervisorConfig, _receipt: Path) -> None:
+    (config.paths.server_dir / "guardian.url").write_text(
+        "http://127.0.0.1:9999\n", encoding="utf-8"
+    )
+
+
+def _tamper_url_symlink(config: supervisor.SupervisorConfig, _receipt: Path) -> None:
+    target = config.paths.server_dir / "guardian.url"
+    target.unlink()
+    target.symlink_to(config.paths.server_dir / "server.pid")
+
+
+def _tamper_ready_pointer_symlink(
+    config: supervisor.SupervisorConfig, _receipt: Path
+) -> None:
+    target = config.paths.server_dir / "guardian.ready-path"
+    target.unlink()
+    target.symlink_to(config.paths.server_dir / "server.pid")
+
+
+def _tamper_ready_receipt_symlink(
+    config: supervisor.SupervisorConfig, receipt: Path
+) -> None:
+    receipt.unlink()
+    receipt.symlink_to(config.paths.server_dir / "server.pid")
+
+
+def _tamper_receipt_corrupted_json(
+    _config: supervisor.SupervisorConfig, receipt: Path
+) -> None:
+    receipt.write_text("{bad-json", encoding="utf-8")
+
+
+def _tamper_receipt_nonce_mismatch(
+    config: supervisor.SupervisorConfig, receipt: Path
+) -> None:
+    receipt.write_text(
+        json.dumps(
+            {
+                "schema": "vibecrafted.guardian-ready.v1",
+                "nonce": "tampered-nonce",
+                "pid": os.getppid(),
+                "server_url": f"http://{config.host}:{config.port}",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize(
+    "tamper_fn",
+    [
+        pytest.param(_tamper_url_mismatch, id="url_mismatch"),
+        pytest.param(_tamper_url_symlink, id="url_symlink"),
+        pytest.param(_tamper_ready_pointer_symlink, id="ready_pointer_symlink"),
+        pytest.param(_tamper_ready_receipt_symlink, id="ready_receipt_symlink"),
+        pytest.param(_tamper_receipt_corrupted_json, id="receipt_corrupted_json"),
+        pytest.param(_tamper_receipt_nonce_mismatch, id="receipt_nonce_mismatch"),
+    ],
+)
+def test_in_process_pair_health_negative_paths_fall_back_to_launcher(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tamper_fn: object,
+) -> None:
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    config = _config(tmp_path, launcher)
+    _, _, ready_receipt = _setup_healthy_pair_state(tmp_path, config)
+
+    monkeypatch.setattr(
+        supervisor, "_server_http_healthy", lambda _h, _p, timeout=1.0: True
+    )
+
+    tamper_fn(config, ready_receipt)
+
+    assert not supervisor._managed_pair_in_process_healthy(
+        config.paths, host=config.host, port=config.port
+    )
+
+    calls: list[list[str]] = []
+
+    def fake_subprocess_run(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(
+            argv, 0, "Server: RUNNING\nGuardian: RUNNING\n", ""
+        )
+
+    monkeypatch.setattr(supervisor.subprocess, "run", fake_subprocess_run)
+
+    assert supervisor._pair_healthy(
+        launcher,
+        {},
+        paths=config.paths,
+        host=config.host,
+        port=config.port,
+    )
+    assert calls == [[str(launcher), "server", "supervisor-pair-health"]]
+
+
+def test_in_process_pair_health_falls_back_when_http_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    config = _config(tmp_path, launcher)
+    _setup_healthy_pair_state(tmp_path, config)
+
+    monkeypatch.setattr(
+        supervisor, "_server_http_healthy", lambda _h, _p, timeout=1.0: False
+    )
+
+    assert not supervisor._managed_pair_in_process_healthy(
+        config.paths, host=config.host, port=config.port
+    )
+
+    calls: list[list[str]] = []
+
+    def fake_subprocess_run(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(
+            argv, 0, "Server: RUNNING\nGuardian: RUNNING\n", ""
+        )
+
+    monkeypatch.setattr(supervisor.subprocess, "run", fake_subprocess_run)
+
+    assert supervisor._pair_healthy(
+        launcher,
+        {},
+        paths=config.paths,
+        host=config.host,
+        port=config.port,
+    )
+    assert calls == [[str(launcher), "server", "supervisor-pair-health"]]
+
+
+def test_launcher_sha256_cache_invalidates_on_content_change(
+    tmp_path: Path,
+) -> None:
+    supervisor._LAUNCHER_STAT_CACHE.clear()
+    launcher = _executable(tmp_path / "bin" / "vibecrafted", "#!/bin/sh\necho 1\n")
+    digest1 = supervisor._launcher_sha256(launcher)
+
+    # Second call uses cache
+    assert supervisor._launcher_sha256(launcher) == digest1
+
+    # Modify content and chmod to trigger ctime/mtime/content update
+    launcher.write_text("#!/bin/sh\necho 222\n", encoding="utf-8")
+    launcher.chmod(0o755)
+
+    digest2 = supervisor._launcher_sha256(launcher)
+    assert digest2 != digest1
+
+
 def test_truncated_launch_agent_plist_degrades_service_and_runtime_status(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -905,7 +1450,7 @@ def test_launcher_fingerprint_is_enforced_by_run_and_service_status(
 
     status = supervisor.service_status(config)
     assert not status.build_current
-    assert not status.pair_healthy
+    assert status.pair_healthy
     assert supervisor._runtime_status(config.paths) == 1
     assert "Supervision: BROKEN" in capsys.readouterr().out
     with pytest.raises(supervisor.SupervisorError, match="launcher hash differs"):
@@ -1175,6 +1720,221 @@ def test_install_bootstraps_fresh_service_with_installed_identity(
     assert started[0].launcher_sha256 == supervisor._sha256_file(launcher)
 
 
+def test_install_reconcile_retries_transient_lease_refusal_until_convergence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The F5 race: bootout frees the label, launchd reactivates before the
+    cleanup lease lands, and reconcile used to strand the unloaded service
+    until a manual retry. The transient refusal must be retried in-process so
+    startup/upgrade reconciles converge without operator action."""
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    supervisor_binary = _executable(
+        tmp_path / "bin" / "vc-server-supervisor",
+        "#!/bin/sh\n# build one\nexit 0\n",
+    )
+    config = _config(tmp_path, launcher)
+    supervisor.install_service(config, supervisor_binary=supervisor_binary)
+    stale_probe = _managed_probe(config, pid=1111)
+    supervisor_binary.write_text(
+        "#!/bin/sh\n# build two\nexit 0\n",
+        encoding="utf-8",
+    )
+    supervisor_binary.chmod(0o755)
+    monkeypatch.setattr(supervisor.sys, "platform", "darwin")
+    monkeypatch.setattr(supervisor, "_launchctl_loaded", lambda: True)
+    monkeypatch.setattr(supervisor, "probe_supervisor", lambda _paths: stale_probe)
+    monkeypatch.setattr(supervisor.time, "sleep", lambda _seconds: None)
+    attempts: list[int | None] = []
+
+    def flaky_restart(
+        target: supervisor.SupervisorConfig,
+        *,
+        previous_pid: int | None = None,
+    ) -> supervisor.SupervisorProbe:
+        attempts.append(previous_pid)
+        if len(attempts) == 1:
+            raise supervisor.SupervisorError(
+                "launchd became active while acquiring the service-stop cleanup "
+                "lease; refusing uncoordinated cleanup",
+                supervisor.EX_TEMPFAIL,
+            )
+        return _managed_probe(target, pid=2222)
+
+    monkeypatch.setattr(supervisor, "restart_service", flaky_restart)
+
+    changed, restarted = supervisor.install_and_reconcile_service(
+        config,
+        supervisor_binary=supervisor_binary,
+    )
+
+    assert changed and restarted
+    assert attempts == [1111, 1111]
+
+
+def test_install_reconcile_starts_fresh_when_refusal_left_launchd_unloaded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The refusal can fire after bootout already unloaded the job (the F5 end
+    state: LaunchAgent unloaded, port dead). The retry pass must converge by
+    starting the service instead of restarting a job that is gone."""
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    supervisor_binary = _executable(
+        tmp_path / "bin" / "vc-server-supervisor",
+        "#!/bin/sh\n# build one\nexit 0\n",
+    )
+    config = _config(tmp_path, launcher)
+    supervisor.install_service(config, supervisor_binary=supervisor_binary)
+    stale_probe = _managed_probe(config, pid=1111)
+    supervisor_binary.write_text(
+        "#!/bin/sh\n# build two\nexit 0\n",
+        encoding="utf-8",
+    )
+    supervisor_binary.chmod(0o755)
+    monkeypatch.setattr(supervisor.sys, "platform", "darwin")
+    monkeypatch.setattr(supervisor.time, "sleep", lambda _seconds: None)
+    loaded = True
+    dead_probe = supervisor.SupervisorProbe(False, False, None, None)
+    monkeypatch.setattr(supervisor, "_launchctl_loaded", lambda: loaded)
+    monkeypatch.setattr(
+        supervisor,
+        "probe_supervisor",
+        lambda _paths: stale_probe if loaded else dead_probe,
+    )
+
+    def refusing_restart(
+        target: supervisor.SupervisorConfig,
+        *,
+        previous_pid: int | None = None,
+    ) -> supervisor.SupervisorProbe:
+        nonlocal loaded
+        loaded = False
+        raise supervisor.SupervisorError(
+            "launchd became active while acquiring the service-stop cleanup "
+            "lease; refusing uncoordinated cleanup",
+            supervisor.EX_TEMPFAIL,
+        )
+
+    started: list[supervisor.SupervisorIdentity] = []
+
+    def fake_start(target: supervisor.SupervisorConfig) -> None:
+        identity = supervisor._installed_service_identity(target.paths)
+        assert identity is not None
+        started.append(identity)
+
+    monkeypatch.setattr(supervisor, "restart_service", refusing_restart)
+    monkeypatch.setattr(supervisor, "start_service", fake_start)
+
+    changed, restarted = supervisor.install_and_reconcile_service(
+        config,
+        supervisor_binary=supervisor_binary,
+    )
+
+    assert changed
+    assert not restarted
+    assert len(started) == 1
+
+
+def test_install_reconcile_reraises_persistent_tempfail_after_attempts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    supervisor_binary = _executable(
+        tmp_path / "bin" / "vc-server-supervisor",
+        "#!/bin/sh\n# build one\nexit 0\n",
+    )
+    config = _config(tmp_path, launcher)
+    supervisor.install_service(config, supervisor_binary=supervisor_binary)
+    stale_probe = _managed_probe(config, pid=1111)
+    supervisor_binary.write_text(
+        "#!/bin/sh\n# build two\nexit 0\n",
+        encoding="utf-8",
+    )
+    supervisor_binary.chmod(0o755)
+    monkeypatch.setattr(supervisor.sys, "platform", "darwin")
+    monkeypatch.setattr(supervisor, "_launchctl_loaded", lambda: True)
+    monkeypatch.setattr(supervisor, "probe_supervisor", lambda _paths: stale_probe)
+    sleeps: list[float] = []
+    monkeypatch.setattr(supervisor.time, "sleep", sleeps.append)
+    attempts = 0
+
+    def always_refusing_restart(
+        target: supervisor.SupervisorConfig,
+        *,
+        previous_pid: int | None = None,
+    ) -> supervisor.SupervisorProbe:
+        nonlocal attempts
+        attempts += 1
+        raise supervisor.SupervisorError(
+            "launchd became active while acquiring the service-stop cleanup "
+            "lease; refusing uncoordinated cleanup",
+            supervisor.EX_TEMPFAIL,
+        )
+
+    monkeypatch.setattr(supervisor, "restart_service", always_refusing_restart)
+
+    with pytest.raises(supervisor.SupervisorError, match="became active"):
+        supervisor.install_and_reconcile_service(
+            config,
+            supervisor_binary=supervisor_binary,
+        )
+
+    assert attempts == supervisor._RECONCILE_MAX_ATTEMPTS
+    assert len(sleeps) == supervisor._RECONCILE_MAX_ATTEMPTS - 1
+
+
+def test_install_reconcile_does_not_retry_non_transient_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    supervisor_binary = _executable(
+        tmp_path / "bin" / "vc-server-supervisor",
+        "#!/bin/sh\n# build one\nexit 0\n",
+    )
+    config = _config(tmp_path, launcher)
+    supervisor.install_service(config, supervisor_binary=supervisor_binary)
+    stale_probe = _managed_probe(config, pid=1111)
+    supervisor_binary.write_text(
+        "#!/bin/sh\n# build two\nexit 0\n",
+        encoding="utf-8",
+    )
+    supervisor_binary.chmod(0o755)
+    monkeypatch.setattr(supervisor.sys, "platform", "darwin")
+    monkeypatch.setattr(supervisor, "_launchctl_loaded", lambda: True)
+    monkeypatch.setattr(supervisor, "probe_supervisor", lambda _paths: stale_probe)
+    monkeypatch.setattr(
+        supervisor.time,
+        "sleep",
+        lambda _seconds: pytest.fail("non-transient failure must not sleep"),
+    )
+    attempts = 0
+
+    def broken_restart(
+        target: supervisor.SupervisorConfig,
+        *,
+        previous_pid: int | None = None,
+    ) -> supervisor.SupervisorProbe:
+        nonlocal attempts
+        attempts += 1
+        raise supervisor.SupervisorError(
+            "installed LaunchAgent has no verified supervisor identity",
+            supervisor.EX_CONFIG,
+        )
+
+    monkeypatch.setattr(supervisor, "restart_service", broken_restart)
+
+    with pytest.raises(supervisor.SupervisorError, match="no verified"):
+        supervisor.install_and_reconcile_service(
+            config,
+            supervisor_binary=supervisor_binary,
+        )
+
+    assert attempts == 1
+
+
 def test_hermetic_service_upgrade_restarts_into_new_provenance(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1427,23 +2187,65 @@ def test_linux_service_command_fails_closed_without_mutation(
     assert not (tmp_path / "operator" / "Library" / "LaunchAgents").exists()
 
 
-def test_child_environment_is_a_minimal_nonsecret_allowlist(
+def test_service_logs_reports_canonical_owner_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    home = (tmp_path / "crafted-home").resolve()
+    runtime_home = (tmp_path / "runtime").resolve()
+    operator_home = (tmp_path / "operator").resolve()
+    monkeypatch.setattr(supervisor.sys, "platform", "darwin")
+
+    result = supervisor.main(
+        [
+            "service",
+            "logs",
+            "--json",
+            "--launcher",
+            str(launcher),
+            "--home",
+            str(home),
+            "--runtime-home",
+            str(runtime_home),
+            "--operator-home",
+            str(operator_home),
+        ]
+    )
+
+    assert result == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "directory": str(home / "server"),
+        "stdout": str(home / "server" / "supervisor.stdout.log"),
+        "stderr": str(home / "server" / "supervisor.stderr.log"),
+    }
+    assert not (operator_home / "Library" / "LaunchAgents").exists()
+
+
+def test_child_environment_is_the_users_environment_with_pins_overlaid(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Guest, not landlord: the user's own variables — including their
+    credentials and agent sockets — flow through to supervised children;
+    the supervisor only overlays its identity pins on top."""
+
     launcher = _executable(tmp_path / "bin" / "vibecrafted")
     config = _config(tmp_path, launcher)
-    monkeypatch.setenv("GITHUB_TOKEN", "must-not-cross")
-    monkeypatch.setenv("OPENAI_API_KEY", "must-not-cross")
+    monkeypatch.setenv("GITHUB_TOKEN", "user-owned-flows-through")
+    monkeypatch.setenv("OPENAI_API_KEY", "user-owned-flows-through")
     monkeypatch.setenv("VIBECRAFTED_STOP_TERM_WAIT_TICKS", "9")
     monkeypatch.setenv("VIBECRAFTED_TRIAGE_RUN", "0")
+    monkeypatch.setenv("VIBECRAFTED_HOME", "/foreign/home-must-not-win")
 
     environment = supervisor._child_environment(config.paths)
 
-    assert "GITHUB_TOKEN" not in environment
-    assert "OPENAI_API_KEY" not in environment
+    assert environment["GITHUB_TOKEN"] == "user-owned-flows-through"
+    assert environment["OPENAI_API_KEY"] == "user-owned-flows-through"
     assert environment["VIBECRAFTED_STOP_TERM_WAIT_TICKS"] == "9"
     assert environment["VIBECRAFTED_TRIAGE_RUN"] == "0"
+    assert environment["HOME"] == str(config.paths.operator_home)
     assert environment["VIBECRAFTED_HOME"] == str(config.paths.home)
     assert environment["VIBECRAFTED_RUNTIME_HOME"] == str(config.paths.runtime_home)
     assert environment["VIBECRAFTED_SERVER_SUPERVISOR_CHILD"] == "1"
@@ -1757,9 +2559,11 @@ def test_service_stop_rejects_launchd_reactivation_during_cleanup(
     assert not supervisor.probe_supervisor(config.paths).live
 
 
+@pytest.mark.parametrize("recorded_pid", [os.getpid(), 2**31 - 1, 2**100, None])
 def test_service_mutation_lease_refuses_concurrent_runtime_install(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    recorded_pid: int | None,
 ) -> None:
     launcher = _executable(tmp_path / "bin" / "vibecrafted")
     config = _config(tmp_path, launcher)
@@ -1772,6 +2576,16 @@ def test_service_mutation_lease_refuses_concurrent_runtime_install(
     monkeypatch.delenv(supervisor._TOOLS_INSTALL_LEASE_ENV, raising=False)
 
     try:
+        os.write(
+            descriptor,
+            json.dumps(
+                {
+                    "pid": recorded_pid,
+                    "operation": "runtime-install",
+                    "started_at": "2026-09-28T00:00:00Z",
+                }
+            ).encode(),
+        )
         with (
             pytest.raises(
                 supervisor.SupervisorError,
@@ -1781,9 +2595,35 @@ def test_service_mutation_lease_refuses_concurrent_runtime_install(
         ):
             pass
         assert failure.value.exit_code == supervisor.EX_TEMPFAIL
+        assert str(lock_path) in str(failure.value)
+        assert f"pid={recorded_pid}" in str(failure.value)
+        assert "lsof" in str(failure.value)
+        assert "ps -p" in str(failure.value)
     finally:
         fcntl.flock(descriptor, fcntl.LOCK_UN)
         os.close(descriptor)
+
+
+def test_service_mutation_records_owner_and_clears_it_on_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path, _executable(tmp_path / "bin" / "vibecrafted"))
+    monkeypatch.setenv("VIBECRAFTED_TOOLS_HOME", str(tmp_path / "tools"))
+    monkeypatch.delenv(supervisor._TOOLS_INSTALL_LEASE_ENV, raising=False)
+    lock = supervisor._tools_install_lock_path(config.paths)
+    with (
+        pytest.raises(RuntimeError, match="abort"),
+        supervisor._ToolsInstallMutationLease(config.paths),
+    ):
+        owner = json.loads(lock.read_text())
+        assert owner["pid"] == os.getpid()
+        assert owner["acquired_at"]
+        assert owner["role"] == "service-mutation"
+        inode = lock.stat().st_ino
+        raise RuntimeError("abort")
+    assert lock.read_text() == ""
+    with supervisor._ToolsInstallMutationLease(config.paths):
+        assert lock.stat().st_ino == inode
 
 
 def test_service_mutation_lease_accepts_verified_inherited_descriptor(
@@ -1810,6 +2650,666 @@ def test_service_mutation_lease_accepts_verified_inherited_descriptor(
         os.close(descriptor)
 
 
+def _hold_install_lock(
+    lock_path: Path,
+    hold_seconds: float,
+    ready: threading.Event,
+) -> None:
+    """Hold the install lease flock from a second open description — the
+    old-generation holder signature: no owner metadata, a 0-byte lock file."""
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        ready.set()
+        time.sleep(hold_seconds)
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
+
+
+def test_service_mutation_lease_waits_out_transient_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A concurrent install that finishes inside the bounded wait must not
+    fail the service mutation (d5-installer-self-lock)."""
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    config = _config(tmp_path, launcher)
+    tools_home = tmp_path / "tools"
+    tools_home.mkdir()
+    lock_path = tools_home / supervisor._TOOLS_INSTALL_LOCK_NAME
+    monkeypatch.setenv("VIBECRAFTED_TOOLS_HOME", str(tools_home))
+    monkeypatch.delenv(supervisor._TOOLS_INSTALL_LEASE_ENV, raising=False)
+    monkeypatch.setenv(supervisor._SERVICE_MUTATION_LOCK_TIMEOUT_ENV, "10")
+    ready = threading.Event()
+    holder = threading.Thread(
+        target=_hold_install_lock,
+        args=(lock_path, 0.4, ready),
+        daemon=True,
+    )
+    holder.start()
+    assert ready.wait(timeout=5)
+
+    started = time.monotonic()
+    with supervisor._ToolsInstallMutationLease(config.paths):
+        pass
+    elapsed = time.monotonic() - started
+    holder.join(timeout=5)
+
+    assert elapsed >= 0.3
+    assert "waiting up to 10s" in capsys.readouterr().err
+
+
+def test_service_mutation_lease_still_refuses_live_foreign_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A foreign install that outlives the bounded wait is still refused."""
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    config = _config(tmp_path, launcher)
+    tools_home = tmp_path / "tools"
+    tools_home.mkdir()
+    lock_path = tools_home / supervisor._TOOLS_INSTALL_LOCK_NAME
+    monkeypatch.setenv("VIBECRAFTED_TOOLS_HOME", str(tools_home))
+    monkeypatch.delenv(supervisor._TOOLS_INSTALL_LEASE_ENV, raising=False)
+    monkeypatch.setenv(supervisor._SERVICE_MUTATION_LOCK_TIMEOUT_ENV, "0.2")
+    ready = threading.Event()
+    holder = threading.Thread(
+        target=_hold_install_lock,
+        args=(lock_path, 5.0, ready),
+        daemon=True,
+    )
+    holder.start()
+    assert ready.wait(timeout=5)
+
+    started = time.monotonic()
+    try:
+        with (
+            pytest.raises(
+                supervisor.SupervisorError,
+                match="runtime install is active",
+            ) as failure,
+            supervisor._ToolsInstallMutationLease(config.paths),
+        ):
+            pass
+    finally:
+        elapsed = time.monotonic() - started
+    assert failure.value.exit_code == supervisor.EX_TEMPFAIL
+    assert elapsed >= 0.2
+
+
+def test_service_mutation_lease_admits_installer_ownership_proof_same_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """install -> reconcile in the same process: the installer's lease
+    descriptor plus its owner metadata admit the service mutation through the
+    inherited path, so a reconcile under the install transaction never bounces
+    off the installer's own lock."""
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    config = _config(tmp_path, launcher)
+    tools_home = tmp_path / "tools"
+    tools_home.mkdir()
+    lock_path = tools_home / supervisor._TOOLS_INSTALL_LOCK_NAME
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    os.write(
+        descriptor,
+        (
+            json.dumps(
+                {
+                    "pid": os.getpid(),
+                    "operation": "runtime-install",
+                    "started_at": "2026-10-01T00:00:00+00:00",
+                }
+            )
+            + "\n"
+        ).encode(),
+    )
+    monkeypatch.setenv("VIBECRAFTED_TOOLS_HOME", str(tools_home))
+    monkeypatch.setenv(supervisor._TOOLS_INSTALL_LEASE_ENV, str(descriptor))
+
+    try:
+        with supervisor._ToolsInstallMutationLease(config.paths) as lease:
+            assert lease.inherited
+            assert lease.descriptor == descriptor
+        # The installer's own flock survives the mutation: the inherited
+        # lease is never unlocked or closed by the borrower.
+        probe = os.open(lock_path, os.O_RDWR)
+        try:
+            with pytest.raises(OSError):
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(probe)
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def test_service_mutation_lock_timeout_env_must_be_finite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    config = _config(tmp_path, launcher)
+    tools_home = tmp_path / "tools"
+    tools_home.mkdir()
+    monkeypatch.setenv("VIBECRAFTED_TOOLS_HOME", str(tools_home))
+    monkeypatch.delenv(supervisor._TOOLS_INSTALL_LEASE_ENV, raising=False)
+    monkeypatch.setenv(supervisor._SERVICE_MUTATION_LOCK_TIMEOUT_ENV, "often")
+
+    with (
+        pytest.raises(
+            supervisor.SupervisorError,
+            match="VIBECRAFTED_SERVICE_MUTATION_LOCK_TIMEOUT",
+        ) as failure,
+        supervisor._ToolsInstallMutationLease(config.paths),
+    ):
+        pass
+    assert failure.value.exit_code == supervisor.EX_CONFIG
+
+
+@pytest.fixture
+def service_admission(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Two receipted generations with all process/service boundaries mocked."""
+    base = _config(tmp_path, tmp_path / "unused")
+    monkeypatch.setattr(supervisor.sys, "platform", "darwin")
+    monkeypatch.setattr(supervisor, "PACKAGE_VERSION", "1.0.0")
+    monkeypatch.setenv("HOME", str(base.paths.operator_home))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(base.paths.home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(base.paths.runtime_home))
+    monkeypatch.delenv(supervisor._TOOLS_INSTALL_LEASE_ENV, raising=False)
+    monkeypatch.delenv("VIBECRAFTED_TOOLS_HOME", raising=False)
+    original_module = Path(supervisor.__file__).read_bytes()
+    generations = {}
+    for version in ("1.0.0", "2.0.0"):
+        root = base.paths.runtime_home / "releases" / version
+        launcher = _executable(root / "bin/vibecrafted")
+        binary = _executable(root / "bin/vc-server-supervisor")
+        module = root / "vibecrafted-core/vibecrafted_core/server_supervisor.py"
+        module.parent.mkdir(parents=True)
+        module.write_bytes(original_module)
+        generations[version] = (replace(base, launcher=launcher), binary, module)
+
+    def publish(version):
+        config, binary, _module = generations[version]
+        root = binary.parent.parent
+        active = base.paths.runtime_home / "active.json"
+        active.write_text(
+            json.dumps(
+                {
+                    "schema": "vibecrafted.active-runtime.v1",
+                    "version": version,
+                    "runtime_root": str(root),
+                    "app_root": "",
+                }
+            )
+        )
+        current = base.paths.runtime_home / "tools/vibecrafted-current"
+        current.parent.mkdir(exist_ok=True)
+        current.unlink(missing_ok=True)
+        current.symlink_to(root)
+        receipt = {
+            "schema": "vibecrafted.runtime-install.v1",
+            "version": version,
+            "roots": {"launcher_home": str(base.paths.operator_home / ".local/bin")},
+            "owned_files": {str(active): supervisor._sha256_file(active)},
+            "owned_symlinks": {str(current): str(root)},
+        }
+        (base.paths.runtime_home / "install-receipt.json").write_text(
+            json.dumps(receipt)
+        )
+        supervisor.install_service(config, supervisor_binary=binary)
+
+    def command(action, version="1.0.0", *, public=False):
+        config, binary, module = generations[version]
+        monkeypatch.setattr(supervisor, "__file__", str(module))
+        monkeypatch.setattr(supervisor, "PACKAGE_VERSION", version)
+        if public:
+            config = replace(
+                config, launcher=base.paths.operator_home / ".local/bin/vibecrafted"
+            )
+            binary = base.paths.operator_home / ".local/bin/vc-server-supervisor"
+        return supervisor.main(
+            [
+                "service",
+                action,
+                "--launcher",
+                str(config.launcher),
+                "--supervisor-bin",
+                str(binary),
+            ]
+        )
+
+    publish("1.0.0")
+    mutations = Mock()
+    monkeypatch.setattr(supervisor, "_launchctl_loaded", lambda: True)
+    monkeypatch.setattr(supervisor, "_launchctl_job_owns_paths", lambda _paths: True)
+    monkeypatch.setattr(
+        supervisor, "probe_supervisor", lambda _paths: _managed_probe(base, pid=2222)
+    )
+    monkeypatch.setattr(supervisor, "restart_service", mutations.restart)
+    monkeypatch.setattr(supervisor, "start_service", mutations.start)
+    monkeypatch.setattr(supervisor, "stop_service", mutations.stop)
+    monkeypatch.setattr(supervisor, "uninstall_service", mutations.uninstall)
+    monkeypatch.setattr(supervisor, "_launchctl", mutations.launchctl)
+    monkeypatch.setattr(
+        supervisor.subprocess,
+        "run",
+        Mock(side_effect=AssertionError("unexpected subprocess")),
+    )
+    monkeypatch.setattr(
+        supervisor.subprocess,
+        "Popen",
+        Mock(side_effect=AssertionError("unexpected process")),
+    )
+    return base, generations, publish, command, mutations
+
+
+@pytest.mark.parametrize(
+    "action", ["install", "reconcile", "restart", "start", "stop", "uninstall"]
+)
+def test_service_admission_rejects_generation_switch(
+    service_admission, monkeypatch, capsys, action
+):
+    base, _generations, publish, command, mutations = service_admission
+    enter = supervisor._ToolsInstallMutationLease.__enter__
+    published = []
+
+    def switch_before_acquisition(lease):
+        # B publishes after A's deck selected its argv, before A owns the lock.
+        publish("2.0.0")
+        published.append(base.paths.launch_agent_file.read_bytes())
+        return enter(lease)
+
+    monkeypatch.setattr(
+        supervisor._ToolsInstallMutationLease, "__enter__", switch_before_acquisition
+    )
+    result = command(action)
+
+    assert base.paths.launch_agent_file.read_bytes() == published[0]
+    assert mutations.mock_calls == []
+    assert result == supervisor.EX_TEMPFAIL
+    assert "selected runtime" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "action", ["install", "reconcile", "restart", "start", "stop", "uninstall"]
+)
+def test_service_admission_accepts_current_generation(service_admission, action):
+    _base, _generations, _publish, command, _mutations = service_admission
+    assert command(action) == 0
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    ["absent", "json", "schema", "version", "outside", "symlink", "receipt", "pointer"],
+)
+def test_service_admission_rejects_invalid_publication(
+    service_admission, invalid, capsys
+):
+    base, _generations, _publish, command, mutations = service_admission
+    active = base.paths.runtime_home / "active.json"
+    before = base.paths.launch_agent_file.read_bytes()
+    payload = json.loads(active.read_text())
+    if invalid == "absent":
+        active.unlink()
+    elif invalid == "json":
+        active.write_text("{")
+    elif invalid == "symlink":
+        target = active.with_name("other.json")
+        active.rename(target)
+        active.symlink_to(target)
+    elif invalid == "receipt":
+        (active.parent / "install-receipt.json").unlink()
+    elif invalid == "pointer":
+        (active.parent / "tools/vibecrafted-current").unlink()
+    else:
+        payload[
+            {"schema": "schema", "version": "version", "outside": "runtime_root"}[
+                invalid
+            ]
+        ] = "invalid"
+        active.write_text(json.dumps(payload))
+    assert command("reconcile") == supervisor.EX_CONFIG
+    assert mutations.mock_calls == []
+    assert base.paths.launch_agent_file.read_bytes() == before
+    assert "publication" in capsys.readouterr().err
+
+
+def test_service_admission_preserves_installer_inherited_lease(
+    service_admission, monkeypatch
+):
+    base, _generations, publish, command, _mutations = service_admission
+    with supervisor._ToolsInstallMutationLease(base.paths) as owner:
+        monkeypatch.setenv(supervisor._TOOLS_INSTALL_LEASE_ENV, str(owner.descriptor))
+        # Drain the old selection, then reconcile the newly published one,
+        # retaining the installer's descriptor throughout the transaction.
+        assert command("stop") == 0
+        publish("2.0.0")
+        receipt_path = base.paths.runtime_home / "install-receipt.json"
+        receipt = json.loads(receipt_path.read_text())
+        receipt["install_pending"] = True
+        receipt_path.write_text(json.dumps(receipt))
+        assert command("reconcile", version="2.0.0") == 0
+        os.fstat(owner.descriptor)
+        other = os.open(supervisor._tools_install_lock_path(base.paths), os.O_RDWR)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(other)
+
+
+@pytest.mark.parametrize("tampered", [False, True])
+def test_service_admission_binds_public_wrappers_to_receipt(
+    service_admission, tampered
+):
+    base, _generations, _publish, command, mutations = service_admission
+    receipt_path = base.paths.runtime_home / "install-receipt.json"
+    receipt = json.loads(receipt_path.read_text())
+    for name in ("vibecrafted", "vc-server-supervisor"):
+        wrapper = _executable(
+            base.paths.operator_home / ".local/bin" / name,
+            "#!/bin/sh\n# public wrapper\nexit 0\n",
+        )
+        receipt["owned_files"][str(wrapper)] = supervisor._sha256_file(wrapper)
+    receipt_path.write_text(json.dumps(receipt))
+    if tampered:
+        wrapper.write_text("#!/bin/sh\n# stale wrapper\nexit 0\n")
+    assert command("reconcile", public=True) == (
+        supervisor.EX_CONFIG if tampered else 0
+    )
+    if tampered:
+        assert mutations.mock_calls == []
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        "install_pending",
+        "config_transaction",
+        "config_pending",
+        "config_conflicts",
+        "uninstall_pending",
+    ],
+)
+def test_service_admission_rejects_unfinished_publication(service_admission, state):
+    base, _generations, _publish, command, mutations = service_admission
+    path = base.paths.runtime_home / "install-receipt.json"
+    receipt = json.loads(path.read_text())
+    receipt[state] = True
+    path.write_text(json.dumps(receipt))
+    before = base.paths.launch_agent_file.read_bytes()
+    assert command("reconcile") == supervisor.EX_CONFIG
+    assert base.paths.launch_agent_file.read_bytes() == before
+    assert mutations.mock_calls == []
+
+
+@pytest.mark.parametrize("standalone", [False, True])
+def test_service_admission_distinguishes_absent_from_standalone(
+    service_admission, monkeypatch, tmp_path, standalone
+):
+    base, generations, _publish, _command, mutations = service_admission
+    for relative in (
+        "active.json",
+        "install-receipt.json",
+        "tools/vibecrafted-current",
+    ):
+        (base.paths.runtime_home / relative).unlink()
+    config, binary, module = generations["1.0.0"]
+    if standalone:
+        config = replace(
+            config, launcher=_executable(tmp_path / "standalone/bin/vibecrafted")
+        )
+        binary = _executable(tmp_path / "standalone/bin/vc-server-supervisor")
+        standalone_module = tmp_path / "standalone/server_supervisor.py"
+        standalone_module.write_bytes(module.read_bytes())
+        module = standalone_module
+    monkeypatch.setattr(supervisor, "__file__", str(module))
+    before = base.paths.launch_agent_file.read_bytes()
+    result = supervisor.main(
+        [
+            "service",
+            "install",
+            "--launcher",
+            str(config.launcher),
+            "--supervisor-bin",
+            str(binary),
+        ]
+    )
+    assert result == (0 if standalone else supervisor.EX_CONFIG)
+    if not standalone:
+        assert base.paths.launch_agent_file.read_bytes() == before
+        assert mutations.mock_calls == []
+    else:
+        assert mutations.restart.called
+
+
+def test_service_admission_reads_config_under_publication_lease(
+    service_admission, monkeypatch
+):
+    base, _generations, _publish, command, mutations = service_admission
+    enter = supervisor._ToolsInstallMutationLease.__enter__
+
+    def update_before_acquisition(lease):
+        path = base.paths.operator_home / ".config/vibecrafted/config.toml"
+        path.parent.mkdir(parents=True)
+        path.write_text('[server]\nbind_host = "127.0.0.2"\nport = 3030\n')
+        return enter(lease)
+
+    monkeypatch.setattr(
+        supervisor._ToolsInstallMutationLease, "__enter__", update_before_acquisition
+    )
+    assert command("restart") == 0
+    config = mutations.restart.call_args.args[0]
+    assert (config.host, config.port) == ("127.0.0.2", 3030)
+
+
+def test_service_admission_reads_large_projection_receipt(service_admission):
+    base, _generations, _publish, command, _mutations = service_admission
+    path = base.paths.runtime_home / "install-receipt.json"
+    receipt = json.loads(path.read_text())
+    receipt["owned_files"].update(
+        {f"/fixture/skill/{index}": "a" * 64 for index in range(1000)}
+    )
+    path.write_text(json.dumps(receipt))
+    assert path.stat().st_size > 64 * 1024
+    assert command("reconcile") == 0
+
+
+@pytest.fixture
+def settlement_receipt(service_admission):
+    """Distinct historical leaves sharing a preserved archive, as after retirement."""
+    base, _generations, _publish, _command, _mutations = service_admission
+    path = base.paths.runtime_home / "install-receipt.json"
+    receipt = json.loads(path.read_bytes())
+    archive = path.parent / ".installer-backups/drift/fixture/preference"
+    archive.parent.mkdir(parents=True)
+    archive.write_bytes(b"preserved preference and session bytes\n")
+    source = path.parent / "releases/0.9.0+retired" / ("capture-" + "x" * 180)
+
+    def write(minimum_mib=40):
+        history = {}
+        row = {str(source / "preference-000000"): [str(archive)]}
+        count = minimum_mib * 1024 * 1024 // len(json.dumps(row)) + 1
+        history.update(
+            {
+                str(source / f"preference-{index:06d}"): [str(archive)]
+                for index in range(count)
+            }
+        )
+        receipt["drift_backup_history"] = history
+        path.write_text(json.dumps(receipt))
+        assert minimum_mib * 1024 * 1024 < path.stat().st_size < 128 * 1024 * 1024
+        return path, archive
+
+    return write
+
+
+@pytest.mark.parametrize("minimum_mib", [18, 40])
+def test_service_admission_reads_settlement_receipt(
+    service_admission, settlement_receipt, minimum_mib
+):
+    base, generations, _publish, command, mutations = service_admission
+    path, archive = settlement_receipt(minimum_mib)
+    before = supervisor._sha256_file(path)
+    assert command("reconcile") == 0
+    assert supervisor._sha256_file(path) == before
+    assert archive.read_bytes() == b"preserved preference and session bytes\n"
+    config, binary, _module = generations["1.0.0"]
+    assert supervisor._installed_service_identity(
+        base.paths
+    ) == supervisor._supervisor_identity(binary, launcher=config.launcher)
+    mutations.restart.assert_called_once()
+    assert not mutations.launchctl.called
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "over-budget",
+        "schema",
+        "selection",
+        "pending",
+        "symlink",
+        "hardlink",
+        "owner",
+        "replacement",
+    ],
+)
+def test_service_admission_refuses_untrusted_settlement_receipt(
+    service_admission, settlement_receipt, monkeypatch, capsys, invalid
+):
+    base, _generations, _publish, command, mutations = service_admission
+    path, archive = settlement_receipt()
+    service_before = base.paths.launch_agent_file.read_bytes()
+    if invalid == "over-budget":
+        with path.open("ab") as output:
+            # Valid JSON may have trailing whitespace, but must remain bounded.
+            output.write(b" " * (128 * 1024 * 1024 + 1 - path.stat().st_size))
+    elif invalid in {"schema", "selection", "pending"}:
+        receipt = json.loads(path.read_bytes())
+        if invalid == "schema":
+            receipt["schema"] = "foreign.v1"
+        elif invalid == "selection":
+            receipt["owned_files"][str(path.parent / "active.json")] = "a" * 64
+        else:
+            receipt["install_pending"] = True
+        path.write_text(json.dumps(receipt))
+    elif invalid == "symlink":
+        other = path.with_name("original-receipt.json")
+        path.rename(other)
+        path.symlink_to(other)
+    elif invalid == "hardlink":
+        os.link(path, path.with_name("receipt-alias.json"))
+    elif invalid == "owner":
+        lstat = Path.lstat
+
+        def foreign_owner(named):
+            actual = lstat(named)
+            if named == path:
+                fields = list(actual)
+                fields[4] = os.getuid() + 1
+                return os.stat_result(fields)
+            return actual
+
+        monkeypatch.setattr(Path, "lstat", foreign_owner)
+    else:
+        open_file = os.open
+        replacement = path.with_name("replacement.json")
+        replacement.write_bytes(path.read_bytes())
+        replaced = []
+
+        def replace_before_open(named, *args, **kwargs):
+            if Path(named) == path and not replaced:
+                os.replace(replacement, path)
+                replaced.append(True)
+            return open_file(named, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", replace_before_open)
+    assert command("reconcile") == supervisor.EX_CONFIG
+    assert "no coherent install identity" in capsys.readouterr().err
+    assert base.paths.launch_agent_file.read_bytes() == service_before
+    assert mutations.mock_calls == []
+    assert archive.read_bytes() == b"preserved preference and session bytes\n"
+
+
+def test_service_admission_keeps_active_document_small(service_admission):
+    base, _generations, _publish, command, mutations = service_admission
+    path = base.paths.runtime_home / "active.json"
+    with path.open("ab") as output:
+        output.write(b" " * (64 * 1024 + 1 - path.stat().st_size))
+    before = base.paths.launch_agent_file.read_bytes()
+    assert command("reconcile") == supervisor.EX_CONFIG
+    assert base.paths.launch_agent_file.read_bytes() == before
+    assert mutations.mock_calls == []
+
+
+def test_service_admission_rejects_stale_imported_version(
+    service_admission, monkeypatch
+):
+    base, _generations, _publish, command, mutations = service_admission
+    enter = supervisor._ToolsInstallMutationLease.__enter__
+
+    def stale_import_before_acquisition(lease):
+        monkeypatch.setattr(supervisor, "PACKAGE_VERSION", "0.9.0")
+        return enter(lease)
+
+    monkeypatch.setattr(
+        supervisor._ToolsInstallMutationLease,
+        "__enter__",
+        stale_import_before_acquisition,
+    )
+    before = base.paths.launch_agent_file.read_bytes()
+    assert command("reconcile") == supervisor.EX_TEMPFAIL
+    assert base.paths.launch_agent_file.read_bytes() == before
+    assert mutations.mock_calls == []
+
+
+@pytest.mark.parametrize("entry", ["launcher", "supervisor", "module"])
+def test_service_admission_refuses_missing_entry_before_mutation(
+    service_admission, entry, capsys
+):
+    base, generations, _publish, command, mutations = service_admission
+    config, binary, module = generations["1.0.0"]
+    {"launcher": config.launcher, "supervisor": binary, "module": module}[
+        entry
+    ].unlink()
+    before = base.paths.launch_agent_file.read_bytes()
+    assert command("reconcile") == supervisor.EX_CONFIG
+    assert "refusing service mutation" in capsys.readouterr().err
+    assert base.paths.launch_agent_file.read_bytes() == before
+    assert mutations.mock_calls == []
+
+
+@pytest.mark.parametrize("entry", ["launcher", "supervisor"])
+def test_service_admission_refuses_mixed_generation_entry(
+    service_admission, monkeypatch, entry
+):
+    base, generations, _publish, _command, mutations = service_admission
+    current, binary, module = generations["1.0.0"]
+    other, other_binary, _other_module = generations["2.0.0"]
+    monkeypatch.setattr(supervisor, "__file__", str(module))
+    before = base.paths.launch_agent_file.read_bytes()
+    assert (
+        supervisor.main(
+            [
+                "service",
+                "reconcile",
+                "--launcher",
+                str(other.launcher if entry == "launcher" else current.launcher),
+                "--supervisor-bin",
+                str(other_binary if entry == "supervisor" else binary),
+            ]
+        )
+        == supervisor.EX_TEMPFAIL
+    )
+    assert base.paths.launch_agent_file.read_bytes() == before
+    assert mutations.mock_calls == []
+
+
 def test_stopping_receipt_failure_does_not_skip_pair_cleanup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1829,9 +3329,9 @@ def test_stopping_receipt_failure_does_not_skip_pair_cleanup(
     def fake_run_child(
         argv: list[str],
         **_kwargs: object,
-    ) -> tuple[int, str]:
+    ) -> supervisor._ChildResult:
         child_calls.append(argv)
-        return 0, ""
+        return supervisor._ChildResult(0, "", "")
 
     monkeypatch.setattr(supervisor, "_atomic_json", flaky_atomic_json)
     monkeypatch.setattr(supervisor, "_run_child", fake_run_child)
@@ -1858,3 +3358,113 @@ def test_invalid_held_kernel_lock_remains_fail_closed(tmp_path: Path) -> None:
         ) as failure:
             supervisor.manual_stop_guard(config.paths)
         assert failure.value.exit_code == supervisor.EX_TEMPFAIL
+
+
+def _oversized_stderr(path: Path, tail: bytes = b"CRASH-TAIL-MARKER\n") -> bytes:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = b"x" * (supervisor._STDERR_ROTATE_BYTES + 1) + tail
+    path.write_bytes(payload)
+    return payload
+
+
+def test_stderr_rotation_keeps_crash_tail_and_caps_generations(tmp_path: Path) -> None:
+    log = tmp_path / "server" / "supervisor.stderr.log"
+    payload = _oversized_stderr(log)
+    for index, marker in ((1, b"GEN1"), (2, b"GEN2"), (3, b"GEN3")):
+        log.with_name(f"{log.name}.{index}").write_bytes(marker)
+
+    assert supervisor.rotate_supervisor_stderr_log(log) is True
+
+    assert not log.exists()
+    assert log.with_name(f"{log.name}.1").read_bytes() == payload
+    assert log.with_name(f"{log.name}.2").read_bytes() == b"GEN1"
+    assert log.with_name(f"{log.name}.3").read_bytes() == b"GEN2"
+    assert log.name == "supervisor.stderr.log"
+
+
+def test_stderr_rotation_truncates_live_inode_without_losing_tail(
+    tmp_path: Path,
+) -> None:
+    log = tmp_path / "server" / "supervisor.stderr.log"
+    _oversized_stderr(log)
+    saved = os.dup(2)
+    live = os.open(log, os.O_WRONLY | os.O_APPEND)
+    try:
+        os.dup2(live, 2)
+        assert supervisor.rotate_supervisor_stderr_log(log) is True
+        os.write(2, b"AFTER-ROTATE\n")
+    finally:
+        os.dup2(saved, 2)
+        os.close(saved)
+        os.close(live)
+
+    rotated = log.with_name(f"{log.name}.1").read_bytes()
+    assert rotated.endswith(b"CRASH-TAIL-MARKER\n")
+    assert b"AFTER-ROTATE\n" not in rotated
+    assert log.read_bytes() == b"AFTER-ROTATE\n"
+
+
+def test_stderr_rotation_skips_small_fresh_symlink_and_hardlink(
+    tmp_path: Path,
+) -> None:
+    log = tmp_path / "server" / "supervisor.stderr.log"
+    log.parent.mkdir()
+    log.write_text("still-fresh\n", encoding="utf-8")
+    stamp = log.stat().st_mtime
+    assert (
+        supervisor.rotate_supervisor_stderr_log(
+            log,
+            now=stamp + supervisor._STDERR_ROTATE_AGE_SECONDS - 1,
+        )
+        is False
+    )
+    assert not log.with_name(f"{log.name}.1").exists()
+
+    assert (
+        supervisor.rotate_supervisor_stderr_log(
+            log,
+            now=stamp + supervisor._STDERR_ROTATE_AGE_SECONDS,
+        )
+        is True
+    )
+    assert log.with_name(f"{log.name}.1").read_text(encoding="utf-8") == "still-fresh\n"
+
+    real = tmp_path / "real.log"
+    real.write_text("keep\n", encoding="utf-8")
+    link = tmp_path / "supervisor.stderr.log"
+    link.symlink_to(real)
+    assert supervisor.rotate_supervisor_stderr_log(link, now=stamp + 10**9) is False
+    assert real.read_text(encoding="utf-8") == "keep\n"
+
+    linked = tmp_path / "linked.log"
+    _oversized_stderr(linked)
+    os.link(linked, tmp_path / "extra.log")
+    assert supervisor.rotate_supervisor_stderr_log(linked) is False
+    assert b"CRASH-TAIL-MARKER\n" in linked.read_bytes()
+
+
+def test_run_supervisor_rotates_stderr_before_the_loop(tmp_path: Path) -> None:
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    config = replace(_config(tmp_path, launcher), interval=0)
+    payload = _oversized_stderr(config.paths.stderr_log)
+
+    with pytest.raises(supervisor.SupervisorError, match="timing"):
+        supervisor.run_supervisor(config)
+
+    assert config.paths.stderr_log.name == "supervisor.stderr.log"
+    rotated = config.paths.stderr_log.with_name(f"{config.paths.stderr_log.name}.1")
+    assert rotated.read_bytes() == payload
+    assert not config.paths.stderr_log.exists()
+
+
+def test_start_service_rotates_stderr_before_launch(tmp_path: Path) -> None:
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    config = _config(tmp_path, launcher)
+    payload = _oversized_stderr(config.paths.stderr_log)
+
+    with pytest.raises(supervisor.SupervisorError, match="not installed"):
+        supervisor.start_service(config)
+
+    rotated = config.paths.stderr_log.with_name(f"{config.paths.stderr_log.name}.1")
+    assert rotated.read_bytes() == payload
+    assert not config.paths.stderr_log.exists()

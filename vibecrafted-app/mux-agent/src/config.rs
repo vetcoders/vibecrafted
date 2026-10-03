@@ -119,8 +119,10 @@ pub fn safe_read_to_string(path: &Path) -> Result<String> {
     let safe_path = vetted_existing_file(path)?;
     let mut data = String::new();
     // `safe_path` is canonicalized, must be a regular file, and rejects `..`.
-    // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path
-    let mut input = File::open(&safe_path)
+
+    // vetted_existing_file rejects parent components and requires a canonical regular file before
+    // this open; this local config boundary has no HTTP request input.
+    let mut input = File::open(&safe_path) // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path
         .with_context(|| format!("failed to open {}", safe_path.display()))?;
     input
         .read_to_string(&mut data)
@@ -132,11 +134,15 @@ pub fn safe_copy_file(src: &Path, dst: &Path) -> Result<()> {
     let safe_src = vetted_existing_file(src)?;
     let safe_dst = vetted_output_file(dst)?;
     // Both paths have passed the canonical file/output boundary above.
+    // safe_src passed vetted_existing_file before copying; the canonical regular-file boundary and
+    // parent-component rejection precede this local source open.
     let mut input = File::open(&safe_src) // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path
         .with_context(|| format!("failed to open {}", safe_src.display()))?;
     // `safe_dst` is anchored under a canonicalized directory and rejects `..`.
-    // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path
-    let mut output = File::create(&safe_dst)
+
+    // vetted_output_file anchors safe_dst under a canonical directory and rejects parent components
+    // before this local config output is created.
+    let mut output = File::create(&safe_dst) // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path
         .with_context(|| format!("failed to create {}", safe_dst.display()))?;
     io::copy(&mut input, &mut output).with_context(|| {
         format!(

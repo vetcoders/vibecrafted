@@ -4,7 +4,7 @@ Vetcoders ships a repo-tracked Hammerspoon configuration that registers eight
 `hammerspoon://vc-*` URL schemes with macOS Launch Services. Combined with the
 iTerm2 OSC 8 hyperlink GA (Plan 10) and the vc_frame mesh-aware theming (Plan 12),
 this closes the **stack agent-native runtime** loop documented in
-kronika 2026-05-08:
+doctrine 2026-05-08:
 
 ```
 agent emits OSC 8 hyperlink in terminal output
@@ -128,7 +128,7 @@ shelling out. The validator enforces four layered defenses:
    only ever fire if the charset regex were widened in a future change;
    today it is dead code by design, kept to make intent explicit.
 
-The kronika 2026-05-08 entry called out the original Plan A regex
+The doctrine 2026-05-08 entry called out the original Plan A regex
 (`^[%w%s%-_=%./%+]+$`) as the foundational defense. Plan 11 extended it
 with the four additional layers above.
 
@@ -149,7 +149,7 @@ The smoke test verifies four default attacks are rejected:
   emitter that produces the URLs this stack consumes.
 - **Plan 12 — vc_frame mesh-aware theming** (`docs/VC_FRAME.md`): the
   layout/theme layer the spawned tabs render into.
-- **kronika 2026-05-08**: stack agent-native runtime moment —
+- **doctrine 2026-05-08**: stack agent-native runtime moment —
   _"memory (aicx) + structure (loctree) + execution (vc_frame + marbles + agents) +
   visual+dispatch (OSC primitives + Hammerspoon URL handlers) + discipline
   (vc-init + AGENT MODEL PARITY + Living Tree). Cross-layer round-trip w

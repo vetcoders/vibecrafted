@@ -1,0 +1,249 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+die() { printf 'Linux Runtime Pack build failed: %s\n' "$*" >&2; exit 1; }
+require() { command -v "$1" >/dev/null 2>&1 || die "$1 is required"; }
+
+[[ "$(uname -s)" == "Linux" ]] || die "builder must run natively on Linux"
+case "$(uname -m)" in
+  aarch64|arm64)
+    architecture="arm64"
+    target="aarch64-unknown-linux-gnu"
+    ;;
+  x86_64)
+    architecture="x64"
+    target="x86_64-unknown-linux-gnu"
+    ;;
+  *) die "unsupported Linux architecture: $(uname -m)" ;;
+esac
+platform="linux-$architecture"
+for tool in cargo curl make npm python3 sha256sum tar uv; do require "$tool"; done
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+output="${1:-$repo_root/build/Vibecrafted_RuntimePack_${platform}.tar.gz}"
+source_revision="${VIBECRAFTED_SOURCE_REVISION:-}"
+[[ "$source_revision" =~ ^[0-9a-f]{40}$ ]] || die "VIBECRAFTED_SOURCE_REVISION must be a full Git SHA"
+# resolve_source_provenance refuses a one-sided environment pair. The
+# assembler already passes --owner-repo/--source-revision; export both so
+# the inherited environment is an atomic pair, not a half-set GITHUB_SHA.
+export VIBECRAFTED_SOURCE_REVISION="$source_revision"
+export VIBECRAFTED_SOURCE_OWNER_REPO="${VIBECRAFTED_SOURCE_OWNER_REPO:-vetcoders/vibecrafted}"
+# vc-terminal needs edition2024. Ambient cargo 1.83 fails an hour later.
+# Honor an explicit caller RUSTUP_TOOLCHAIN.
+export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-1.97.0}"
+# The toolchain this assembler pins is the one it provisions: the same two
+# commands install-linux.yml runs, both no-ops when already present. Without
+# them a host prepared by `make release-prereqs` (the macOS contract, 1.96.0)
+# reaches the vc-server wasm build with no wasm target for 1.97.0.
+if command -v rustup >/dev/null 2>&1; then
+  rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal >/dev/null
+  rustup target add --toolchain "$RUSTUP_TOOLCHAIN" \
+    wasm32-unknown-unknown wasm32-wasip1 >/dev/null
+fi
+# Host `c++` is often clang, which cannot find libstdc++ headers on Ubuntu
+# (MEASURED: c++ → clang-18, cstdlib missing). Prefer GCC when present.
+# Honor an explicit CC/CXX from the caller.
+if command -v gcc >/dev/null 2>&1; then
+  export CC="${CC:-gcc}"
+fi
+if command -v g++ >/dev/null 2>&1; then
+  export CXX="${CXX:-g++}"
+fi
+
+version="$(tr -d '[:space:]' < "$repo_root/VERSION")"
+terminal_revision="c5bb229673401742bf22d05e2caa17337e3e20de"
+terminal_archive_sha256="d61c3b1dab39b33c5494d77f118f0a2cc1fb5a3173d9f66aac3dd6af19cd0835"
+frame_revision="5436995ed643def9e827c0f9ceed7378d4613d6f"
+frame_archive_sha256="bee9fe63b89e273d888f93ea6e9803af0d26f37668e0ef6eebe1254217738312"
+work="$(mktemp -d "${TMPDIR:-/tmp}/vibecrafted-linux-arm64.XXXXXX")"
+trap 'rm -rf -- "$work"' EXIT INT TERM HUP
+payload="$work/payload"
+mkdir -p "$payload/bin" "$payload/libexec" "$payload/scripts" \
+  "$payload/vibecrafted-core" "$payload/vibecrafted-mcp" \
+  "$payload/config" "$payload/server/site"
+
+fetch_source() {
+  local url="$1" expected="$2" archive="$3" destination="$4"
+  curl -fL --proto '=https' --tlsv1.2 "$url" -o "$archive"
+  [[ "$(sha256sum "$archive" | awk '{print $1}')" == "$expected" ]] \
+    || die "source archive checksum mismatch: $url"
+  mkdir -p "$destination"
+  tar -xzf "$archive" --strip-components=1 -C "$destination"
+}
+
+fetch_source \
+  "https://codeload.github.com/vetcoders/vc-terminal/tar.gz/$terminal_revision" \
+  "$terminal_archive_sha256" "$work/vc-terminal.tar.gz" "$work/vc-terminal"
+fetch_source \
+  "https://codeload.github.com/vetcoders/vc-frame/tar.gz/$frame_revision" \
+  "$frame_archive_sha256" "$work/vc-frame.tar.gz" "$work/vc-frame"
+
+make -C "$work/vc-terminal" release-bins
+install -m 0755 "$work/vc-terminal/target/release/alacritty" "$payload/libexec/vc-terminal"
+install -m 0755 "$repo_root/scripts/vc-terminal-product-entry.sh" \
+  "$payload/scripts/vc-terminal-product-entry.sh"
+install -m 0755 "$payload/scripts/vc-terminal-product-entry.sh" "$payload/bin/vc-terminal"
+rm -rf "$work/vc-terminal" "$work/vc-terminal.tar.gz"
+
+frame_sha="$frame_revision"
+(
+  cd "$work/vc-frame"
+  CARGO_PROFILE_RELEASE_STRIP=false \
+    RUSTFLAGS="--remap-path-prefix=$work/vc-frame=/usr/src/vc-frame" \
+    VC_FRAME_GIT_SHA="$frame_sha" VC_FRAME_GIT_DIRTY=0 \
+    VC_FRAME_SOURCE_MANIFEST_DIR=/usr/src/vc-frame/zellij-utils \
+    cargo xtask build --release
+)
+install -m 0755 "$work/vc-frame/target/release/vc-frame" "$payload/libexec/vc-frame"
+install -m 0755 "$repo_root/scripts/vc-frame-product-entry.sh" "$payload/bin/vc-frame"
+rm -rf "$work/vc-frame" "$work/vc-frame.tar.gz"
+
+voc_target="$work/voc-target"
+CARGO_TARGET_DIR="$voc_target" cargo build --locked \
+  --manifest-path "$repo_root/vibecrafted-app/Cargo.toml" \
+  --release -p voc --bin voc --bin vc-start --bin vc-admin --bin vc-procs
+install -m 0755 "$voc_target/release/voc" "$payload/bin/voc"
+install -m 0755 "$voc_target/release/voc" "$payload/bin/vc-o"
+install -m 0755 "$voc_target/release/vc-start" "$payload/bin/vc-start"
+install -m 0755 "$voc_target/release/vc-admin" "$payload/bin/vc-admin"
+install -m 0755 "$voc_target/release/vc-procs" "$payload/bin/vc-procs"
+rm -rf "$voc_target"
+
+server_build="$work/server-build"
+make -C "$repo_root" CARGO_BUILD_ROOT="$server_build" build-server-release
+install -m 0755 "$server_build/vibecrafted-server/release/vibecrafted-server-web" \
+  "$payload/bin/vc-server"
+install -m 0755 "$server_build/vibecrafted-server/release/vibecrafted-server-web" \
+  "$payload/bin/vibecrafted-server-web"
+install -m 0755 "$server_build/vibecrafted-server/release/vibecrafted-server-web" \
+  "$payload/bin/vc-server-supervisor"
+(
+  cd "$repo_root/vibecrafted-server"
+  CARGO_TARGET_DIR="$server_build/vibecrafted-server" \
+    cargo build --release --locked -p control-core \
+      --bin scaffold-doctor --bin control-observe
+)
+install -m 0755 "$server_build/vibecrafted-server/release/scaffold-doctor" \
+  "$payload/bin/scaffold-doctor"
+install -m 0755 "$server_build/vibecrafted-server/release/control-observe" \
+  "$payload/bin/control-observe"
+cp -R "$server_build/vibecrafted-server/site/." "$payload/server/site/"
+rm -rf "$server_build"
+
+printf '%s\n' "$version" > "$payload/VERSION"
+install -m 0755 "$repo_root/vibecrafted-core/vibecrafted_core/deck/vibecrafted" \
+  "$payload/bin/vibecrafted"
+install -m 0755 "$repo_root/scripts/vibecrafted" "$payload/scripts/vibecrafted"
+install -m 0755 "$repo_root/scripts/vetcoders_install.py" "$payload/scripts/vetcoders_install.py"
+install -m 0644 "$repo_root/scripts/distribution_manifest.py" "$payload/scripts/distribution_manifest.py"
+install -m 0644 "$repo_root/scripts/installer_brand.py" "$payload/scripts/installer_brand.py"
+install -m 0755 "$repo_root/scripts/vc-frame-product-entry.sh" "$payload/scripts/vc-frame-product-entry.sh"
+cp -R "$repo_root/bin/." "$payload/bin/"
+cp -R "$repo_root/vibecrafted-core/vibecrafted_core" "$payload/vibecrafted-core/"
+cp -R "$repo_root/vibecrafted-mcp/vibecrafted_mcp" "$payload/vibecrafted-mcp/"
+printf '%s+g%.8s\n' "$version" "$source_revision" \
+  > "$payload/vibecrafted-core/vibecrafted_core/VERSION"
+printf '%s+g%.8s\n' "$version" "$source_revision" \
+  > "$payload/vibecrafted-mcp/vibecrafted_mcp/VERSION"
+cp -R "$repo_root/config/." "$payload/config/"
+
+python3 "$repo_root/scripts/distribution_manifest.py" carrier \
+  --source "$repo_root" --output "$payload/source-provenance.json" \
+  --owner-repo vetcoders/vibecrafted --source-revision "$source_revision"
+# Loctree, AICX, PRView and ScreenScribe ship through their own channels
+# (npm / GitHub releases / PyPI); the pack records only its own executables.
+PYTHONPATH="$payload/vibecrafted-core" python3 \
+  -m vibecrafted_core.runtime_pack_contract write-foundations --root "$payload" >/dev/null
+
+# shellcheck source=/dev/null
+. "$repo_root/scripts/lib/portable-python.sh"
+mkdir -p "$work/python-seed"
+portable_python_load_pin ""
+seed_python="$(install_portable_python "$work/python-seed")"
+python_home="$(cd "$(dirname "$seed_python")/.." && pwd -P)"
+mkdir -p "$payload/python" "$payload/python-site"
+cp -RL "$python_home/." "$payload/python/"
+uv pip install --python "$seed_python" --target "$payload/python-site" \
+  'jsonschema>=4.23,<5' 'PyYAML>=6.0,<7' 'fastmcp>=2.0,<3'
+rm -rf "$payload/python-site/bin"
+cat > "$payload/bin/python3" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+runtime_root="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")/.." && pwd -P)"
+export PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1
+export PYTHONPATH="\$runtime_root/vibecrafted-core:\$runtime_root/vibecrafted-mcp:\$runtime_root/python-site"
+exec "\$runtime_root/python/bin/${PORTABLE_PYTHON_BIN}" "\$@"
+EOF
+chmod 0755 "$payload/bin/python3"
+python3 "$repo_root/scripts/render-python-entrypoint-launchers.py" \
+  --pyproject "$repo_root/vibecrafted-core/pyproject.toml" --bin-dir "$payload/bin"
+python3 "$repo_root/scripts/render-python-entrypoint-launchers.py" \
+  --pyproject "$repo_root/vibecrafted-mcp/pyproject.toml" --bin-dir "$payload/bin"
+
+find "$payload" -type f -name '*.py[co]' -delete
+find "$payload" -depth -type d -name __pycache__ -exec rm -rf {} +
+find "$payload" -type l -print -quit | grep -q . && die "payload contains symlinks"
+
+PAYLOAD="$payload" SOURCE_REVISION="$source_revision" \
+RUNTIME_PLATFORM="$platform" RUNTIME_ARCHITECTURE="$architecture" RUNTIME_TARGET="$target" \
+TERMINAL_REVISION="$terminal_revision" FRAME_REVISION="$frame_revision" \
+TERMINAL_ARCHIVE_SHA256="$terminal_archive_sha256" FRAME_ARCHIVE_SHA256="$frame_archive_sha256" python3 - <<'PY'
+import hashlib, json, os, subprocess
+from pathlib import Path
+
+root = Path(os.environ["PAYLOAD"])
+source_manifest_sha = hashlib.sha256((root / "source-provenance.json").read_bytes()).hexdigest()
+sources = {
+    "vibecrafted": ("https://github.com/vetcoders/vibecrafted", os.environ["SOURCE_REVISION"], source_manifest_sha, "MIT"),
+    "vc-terminal": (f"https://codeload.github.com/vetcoders/vc-terminal/tar.gz/{os.environ['TERMINAL_REVISION']}", os.environ["TERMINAL_REVISION"], os.environ["TERMINAL_ARCHIVE_SHA256"], "Apache-2.0"),
+    "vc-frame": (f"https://codeload.github.com/vetcoders/vc-frame/tar.gz/{os.environ['FRAME_REVISION']}", os.environ["FRAME_REVISION"], os.environ["FRAME_ARCHIVE_SHA256"], "MIT"),
+}
+owners = {
+    "vibecrafted": "vibecrafted", "vc-server": "vibecrafted", "voc": "vibecrafted",
+    "vc-o": "vibecrafted", "vc-admin": "vibecrafted", "vc-procs": "vibecrafted",
+    "vc-terminal": "vc-terminal", "vc-frame": "vc-frame",
+}
+commands = {
+    "vibecrafted": ["--version"], "vc-server": ["--version"], "voc": ["--version"],
+    "vc-o": ["--version"], "vc-admin": ["--version"], "vc-procs": ["--version"],
+    "vc-terminal": ["--version"], "vc-frame": ["--version"],
+}
+records = []
+for name, argv in commands.items():
+    path = root / "bin" / name
+    output = subprocess.run([str(path), *argv], text=True, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, timeout=30, check=True).stdout.strip().splitlines()[0]
+    url, revision, archive_sha, license_name = sources[owners[name]]
+    records.append({"name": name, "path": f"bin/{name}", "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                    "version_argv": argv, "version_output": output, "source_url": url,
+                    "source_revision": revision, "source_archive_sha256": archive_sha,
+                    "target": os.environ["RUNTIME_TARGET"], "license": license_name})
+manifest = {"schema": "io.vetcoders.vibecrafted.runtime-inventory.v1",
+            "platform": os.environ["RUNTIME_PLATFORM"],
+            "architecture": os.environ["RUNTIME_ARCHITECTURE"], "executables": records}
+(root / "runtime-inventory.json").write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n")
+PY
+
+"$repo_root/scripts/package-runtime-pack.sh" --payload-root "$payload" --output "$output" \
+  --source-revision "$source_revision" --terminal-revision "$terminal_revision" \
+  --frame-revision "$frame_revision" --version "$version" \
+  --platform "$platform" --architecture "$architecture"
+
+# Local install lane (build-linux-runtime-pack.sh --for-install claimed the
+# selection record before this build began). Sign with the release key, prove
+# the signature against the key the installer trusts, then publish the record
+# `make install` reads -- here, where every value it names is already known.
+if [[ -n "${VIBECRAFTED_RUNTIME_PACK_SELECTION_ATTEMPT:-}" ]]; then
+  signing_key="${VIBECRAFTED_RUNTIME_PACK_SIGNING_KEY:?the install lane passes its signing key}"
+  public_key="$repo_root/vibecrafted-core/vibecrafted_core/trust/vibecrafted-signing-v1.pub"
+  openssl dgst -sha256 -sign "$signing_key" -out "$output.sig" "$output" \
+    || die "could not sign $output with $signing_key"
+  openssl dgst -sha256 -verify "$public_key" -signature "$output.sig" "$output" >/dev/null \
+    || die "$signing_key is not the key the installer trusts ($public_key)"
+  # shellcheck source=scripts/lib/runtime-pack-selection.sh
+  . "$repo_root/scripts/lib/runtime-pack-selection.sh"
+  runtime_pack_selection_publish "$repo_root" "$VIBECRAFTED_RUNTIME_PACK_SELECTION_ATTEMPT" \
+    "$output" "$version" "$platform" "$architecture" \
+    "$source_revision" "$terminal_revision" "$frame_revision" \
+    || die "could not record $output as the built Runtime Pack"
+fi

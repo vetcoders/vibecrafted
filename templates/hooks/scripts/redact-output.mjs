@@ -29,7 +29,7 @@ const SECRET_PATTERNS = [
   /ya29\.[0-9A-Za-z_-]{20,}/g,
   // PEM
   /-----BEGIN (RSA|OPENSSH|EC|DSA|PGP) PRIVATE KEY-----[\s\S]*?-----END \1 PRIVATE KEY-----/g,
-  // Vista-specific service tokens
+  // product-specific service tokens
   /vista-[A-Za-z0-9_-]{20,}/g,
   // Authorization header
   /(Authorization:\s*Bearer\s+)[A-Za-z0-9._-]{16,}/gi,

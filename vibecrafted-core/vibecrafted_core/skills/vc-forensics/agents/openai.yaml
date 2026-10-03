@@ -1,0 +1,4 @@
+interface:
+  display_name: "VC Forensics"
+  short_description: "Execution-path investigation with independent proof"
+  default_prompt: "Use $vc-forensics to trace the reported failure through actual execution and delivery, falsify alternatives, coordinate authorized repairs with independent integrator tests, and produce an offline Loctree/PRView/manual findings notebook."

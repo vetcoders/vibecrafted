@@ -1,11 +1,13 @@
-"""Parse agent streaming-json output (Claude/Codex/Gemini/Junie/Grok) into pane text."""
+"""Parse agent streaming-json output (Claude/Codex/Gemini/Junie/Grok/Kimi) into pane text."""
 
 from __future__ import annotations
 
 import json
 import os
 import re
+import shlex
 import time
+from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -32,6 +34,8 @@ MODEL_ENV_VARS = (
     "GROK_MODEL",
     "JUNIE_MODEL",
     "AGY_MODEL",
+    "KIMI_MODEL",
+    "COPILOT_MODEL",
 )
 MODEL_PLACEHOLDERS = {"", "none", "null", "unknown", "pending"}
 COST_PATTERNS = (
@@ -39,6 +43,26 @@ COST_PATTERNS = (
     re.compile(r"\$([0-9]+\.[0-9]+)\s*(?:usd)?", re.IGNORECASE),
 )
 GROK_IGNORABLE_TRANSPORT_ERROR = "worker quit with fatal: Transport channel closed"
+# Every provider spelling of a token count. A usage dict carrying none of these
+# is not a usage event — zero must stay a measurement, not a default.
+_USAGE_KEYS = (
+    "input_tokens",
+    "inputTokens",
+    "prompt_tokens",
+    "cached_input_tokens",
+    "cache_read_input_tokens",
+    "cacheReadInputTokens",
+    "cacheReadTokens",
+    "cacheInputTokens",
+    "cached_prompt_tokens",
+    "cache_read_tokens",
+    "cache_creation_input_tokens",
+    "cacheCreateTokens",
+    "cacheWriteTokens",
+    "output_tokens",
+    "outputTokens",
+    "completion_tokens",
+)
 
 
 def stamp() -> str:
@@ -49,6 +73,139 @@ def stamp() -> str:
 def tool_tag(name: str) -> str:
     """Render a cyan ``[HH:MM:SS name]`` tag used to mark tool-call lines in the pane."""
     return f"\x1b[36m[{stamp()} {name}]\x1b[0m "
+
+
+# One tool call stays a single clipped line. Two or more consecutive calls
+# collapse to one summary so a Bash/MCP burst cannot fill the pane with
+# empty timestamps.
+_TOOL_LINE_LIMIT = 60
+_TWO_WORD_HEADS = frozenset({"aicx"})
+_PARTIAL_TOOL_FIELD = re.compile(
+    r'"(?:command|cmd|query|pattern|file_path|path|url)"\s*:\s*"((?:\\.|[^"\\])*)'
+)
+
+
+class _ToolNote:
+    """One tool/MCP/command call held until the burst ends."""
+
+    __slots__ = ("detail", "name", "stamp")
+
+    def __init__(self, stamp: str, name: str, detail: str) -> None:
+        self.stamp = stamp
+        self.name = name
+        self.detail = detail
+
+
+def _clip_visible(text: str, limit: int = _TOOL_LINE_LIMIT) -> str:
+    """Clip ``text`` to ``limit`` visible characters, ignoring ANSI and newlines."""
+    visible = ANSI_PATTERN.sub("", text).replace("\n", " ").strip()
+    if len(visible) <= limit:
+        return visible
+    return visible[: limit - 3].rstrip() + "..."
+
+
+def _unescape_partial(value: str) -> str:
+    try:
+        return json.loads(f'"{value}"')
+    except json.JSONDecodeError:
+        return value.replace("\\n", "\n").replace('\\"', '"')
+
+
+def _command_text(value: Any) -> str:
+    """Pull the operator-visible command or argument out of a tool input."""
+    if isinstance(value, dict):
+        for key in ("command", "cmd", "query", "pattern", "file_path", "path", "url"):
+            text = _stringish(value.get(key))
+            if text:
+                return text
+        arguments = value.get("arguments")
+        if isinstance(arguments, str) and arguments.strip().startswith("{"):
+            try:
+                return _command_text(json.loads(arguments))
+            except json.JSONDecodeError:
+                return arguments
+        nested = value.get("input")
+        if nested is not None and nested is not value:
+            return _command_text(nested)
+        return ""
+    if isinstance(value, str) and value.strip().startswith("{"):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return value
+        if isinstance(parsed, dict):
+            return _command_text(parsed)
+    return _stringish(value)
+
+
+def _detail_from_partial(blob: str) -> str:
+    """Read a command field out of a still-streaming tool-input JSON fragment."""
+    match = _PARTIAL_TOOL_FIELD.search(blob)
+    if match is None:
+        return ""
+    return _unescape_partial(match.group(1)).strip()
+
+
+def _command_head(detail: str) -> str:
+    """First meaningful argv token, keeping ``aicx <sub>`` as one head."""
+    text = detail.strip()
+    if text.startswith("$ "):
+        text = text[2:].strip()
+    if not text:
+        return ""
+    try:
+        tokens = shlex.split(text)
+    except ValueError:
+        tokens = text.split()
+    cleaned: list[str] = []
+    for token in tokens:
+        if not cleaned and "=" in token and not token.startswith("-"):
+            continue
+        cleaned.append(token)
+    if not cleaned:
+        return ""
+    if cleaned[0] in _TWO_WORD_HEADS and len(cleaned) > 1:
+        return f"{cleaned[0]} {cleaned[1]}"
+    return cleaned[0]
+
+
+def render_tool_burst(notes: Sequence[_ToolNote]) -> str:
+    """Render one tool call clipped to 60 visible characters, or one burst summary.
+
+    A burst is ``from [HH:MM:SS] to [HH:MM:SS] 12x Bash: grep 8, loct 2``.
+    The calls stay in the summary; they are not dropped and not printed as
+    a column of bare timestamps.
+    """
+    if not notes:
+        return ""
+    if len(notes) == 1:
+        note = notes[0]
+        body = f"[{note.stamp} {note.name}]"
+        if note.detail:
+            body = f"{body} {note.detail}"
+        return f"\n\x1b[36m{_clip_visible(body)}\x1b[0m\n"
+    by_name: OrderedDict[str, list[_ToolNote]] = OrderedDict()
+    for note in notes:
+        by_name.setdefault(note.name, []).append(note)
+    parts: list[str] = []
+    for name, group in by_name.items():
+        order: list[str] = []
+        counts: dict[str, int] = {}
+        for note in group:
+            head = _command_head(note.detail)
+            if not head:
+                continue
+            if head not in counts:
+                order.append(head)
+                counts[head] = 0
+            counts[head] += 1
+        if order:
+            breakdown = ", ".join(f"{head} {counts[head]}" for head in order)
+            parts.append(f"{len(group)}x {name}: {breakdown}")
+        else:
+            parts.append(f"{len(group)}x {name}")
+    summary = f"from [{notes[0].stamp}] to [{notes[-1].stamp}] " + "; ".join(parts)
+    return f"\n\x1b[36m{summary}\x1b[0m\n"
 
 
 def _stringish(value: Any) -> str:
@@ -197,7 +354,7 @@ class AgentStreamParser:
     """
 
     def __init__(self, agent: str, *, default_model: str = "") -> None:
-        """Initialize parser state for ``agent`` (claude/codex/gemini/junie/grok/agy)."""
+        """Initialize parser state for a supported agent stream."""
         self.agent = agent
         self.session_id = ""
         self._rendered_session_ids: set[str] = set()
@@ -206,8 +363,45 @@ class AgentStreamParser:
         self.tokens_cached_input = 0
         self.tokens_cache_write: int | None = None
         self.tokens_output = 0
+        # Provider usage events actually observed; 0 means "never reported",
+        # which the close path records as unknown rather than zero tokens.
+        self.usage_events = 0
         self.cost_usd: float | None = None
         self.cost_source: str | None = None
+        # Final assistant answer of a stream that reports one (agy
+        # `result.response`; kimi's last assistant `content`).
+        self.final_response: str = ""
+        self._tool_burst: list[_ToolNote] = []
+        self._tool_partial = ""
+
+    def _note_tool(self, name: str, detail: str = "") -> None:
+        """Hold one tool, MCP, or command call until the burst ends."""
+        self._tool_burst.append(
+            _ToolNote(stamp(), (name or "?").strip() or "?", detail.strip())
+        )
+        self._tool_partial = ""
+
+    def _absorb_tool_input(self, fragment: str) -> None:
+        """Attach a streaming tool-input fragment to the open call."""
+        if not fragment or not self._tool_burst:
+            return
+        self._tool_partial += fragment
+        detail = _detail_from_partial(self._tool_partial)
+        if detail:
+            self._tool_burst[-1].detail = detail
+
+    def flush_tool_burst(self) -> str:
+        """Render and clear the held tool burst. Empty when nothing is held."""
+        notes = self._tool_burst
+        self._tool_burst = []
+        self._tool_partial = ""
+        return render_tool_burst(notes)
+
+    def _emit(self, text: str) -> str:
+        """Flush a held tool burst, then the agent's reasoning or result text."""
+        if not text:
+            return ""
+        return self.flush_tool_burst() + text
 
     def feed_line(self, chunk: bytes) -> str:
         """Decode one line of agent output and render it to human-readable text.
@@ -243,10 +437,16 @@ class AgentStreamParser:
             return f"cd {root_text} && gemini --resume {session}"
         if self.agent == "agy":
             return f"cd {root_text} && agy --conversation {session}"
+        if self.agent == "kimi":
+            return f"cd {root_text} && kimi -S {session}"
+        if self.agent == "copilot":
+            return f"cd {root_text} && copilot --resume {session}"
         if self.agent == "junie":
             return f"cd {root_text} && junie --resume --session-id {session}"
         if self.agent == "grok":
             return f"cd {root_text} && grok --resume {session}"
+        if self.agent == "cursor":
+            return f"cd {root_text} && cursor-agent --resume {session}"
         return f"cd {root_text} && vc-resume --session {session}"
 
     def _scan_text(self, text: str) -> None:
@@ -259,6 +459,7 @@ class AgentStreamParser:
             self.tokens_input += int(raw_in)
             self.tokens_cached_input += int(raw_cached or 0)
             self.tokens_output += int(raw_out)
+            self.usage_events += 1
         model_matches = MODEL_PATTERN.findall(clean)
         if model_matches:
             self.model_id = model_matches[-1]
@@ -266,6 +467,8 @@ class AgentStreamParser:
             matches = pattern.findall(clean)
             if matches:
                 self.cost_usd = _as_float(matches[-1])
+                if self.cost_usd is not None:
+                    self.cost_source = "provider_reported"
 
     def _record_model(self, event: dict[str, Any]) -> None:
         """Capture the first model id found in ``event`` (recursing into nested dicts).
@@ -306,8 +509,11 @@ class AgentStreamParser:
     def _record_usage(self, usage: dict[str, Any]) -> None:
         """Accumulate input/cached-input/cache-write/output token counts from a usage dict.
 
-        Handles each provider's differing key names for the same fields.
+        Handles each provider's differing key names for the same fields. Only
+        a dict carrying at least one token field counts as a usage event.
         """
+        if any(usage.get(key) is not None for key in _USAGE_KEYS):
+            self.usage_events += 1
         self.tokens_input += _as_int(
             usage.get("input_tokens")
             or usage.get("inputTokens")
@@ -319,13 +525,19 @@ class AgentStreamParser:
         if cached_input is None:
             cached_input = usage.get("cacheReadInputTokens")
         if cached_input is None:
+            cached_input = usage.get("cacheReadTokens")
+        if cached_input is None:
             cached_input = usage.get("cacheInputTokens")
         if cached_input is None:
             cached_input = usage.get("cached_prompt_tokens")
+        if cached_input is None:
+            cached_input = usage.get("cache_read_tokens")
         self.tokens_cached_input += _as_int(cached_input)
         cache_write = usage.get("cache_creation_input_tokens")
         if cache_write is None:
             cache_write = usage.get("cacheCreateTokens")
+        if cache_write is None:
+            cache_write = usage.get("cacheWriteTokens")
         if cache_write is not None:
             self.tokens_cache_write = (self.tokens_cache_write or 0) + _as_int(
                 cache_write
@@ -395,13 +607,23 @@ class AgentStreamParser:
             return ""
         self._rendered_session_ids.add(session_id)
         model_suffix = f" model: {self.model_id}" if self.model_id else ""
-        return (
+        return self._emit(
             f"\x1b[33m[{stamp()}] session: {session_id}{model_suffix}\x1b[0m{suffix}\n"
         )
 
     def _format_json_event(self, event: dict[str, Any]) -> str:
         """Dispatch a decoded JSON event to the formatter for ``self.agent``."""
-        if self.agent in {"claude", "agy"}:
+        if self.agent == "agy" and "event" in event:
+            return self._format_agy_event(event)
+        if self.agent == "kimi":
+            return self._format_kimi_event(event)
+        if self.agent == "copilot":
+            return self._format_copilot_event(event)
+        if self.agent in {"claude", "agy", "cursor"}:
+            if self.agent == "cursor":
+                thinking = self._format_cursor_thinking(event)
+                if thinking is not None:
+                    return self._emit(thinking) if thinking else ""
             return self._format_claude_event(event)
         if self.agent == "codex":
             return self._format_codex_event(event)
@@ -411,6 +633,64 @@ class AgentStreamParser:
             return self._format_junie_event(event)
         if self.agent == "grok":
             return self._format_grok_event(event)
+        return ""
+
+    def _format_copilot_event(self, event: dict[str, Any]) -> str:
+        """Render Copilot CLI JSONL while retaining native session truth."""
+        kind = str(event.get("type") or "")
+        data = event.get("data")
+        if not isinstance(data, dict):
+            data = event
+        if kind == "session.start":
+            self.model_id = str(data.get("selectedModel") or self.model_id)
+            session = str(data.get("sessionId") or "")
+            return self._session_banner(session)
+        if kind == "result":
+            # Prompt-mode JSONL closes with a top-level result carrying the
+            # native session ID; session.start is in the persisted events file
+            # but is not emitted on stdout by Copilot CLI 1.0.89-7.
+            return self._session_banner(str(event.get("sessionId") or ""))
+        if kind == "session.model_change":
+            self.model_id = str(data.get("newModel") or self.model_id)
+            return ""
+        if kind == "assistant.message":
+            self.model_id = str(data.get("model") or self.model_id)
+            content = data.get("content")
+            if isinstance(content, str) and content.strip():
+                self.final_response = content
+                return self._emit(f"\n{content}\n")
+            return ""
+        if kind == "assistant.message_delta":
+            # The complete assistant.message is the durable answer. Rendering
+            # both forms would duplicate text and last-message extraction.
+            return ""
+        if kind in {"tool.execution_start", "tool.execution_started"}:
+            name = str(data.get("toolName") or data.get("name") or "tool")
+            self._note_tool(name)
+            return ""
+        if kind == "session.shutdown":
+            metrics = data.get("modelMetrics")
+            if isinstance(metrics, dict):
+                for model, metric in metrics.items():
+                    if not isinstance(metric, dict):
+                        continue
+                    self.model_id = str(model)
+            # modelMetrics is cumulative over the native session. A resumed
+            # run cannot attribute that total to this invocation. The
+            # harness-usage adapter checks the full session window first.
+            return ""
+        if kind in {"session.error", "assistant.error"}:
+            message = str(data.get("message") or data.get("error") or "unknown")
+            return self._emit(f"\n\x1b[31m[{stamp()} error] {message}\x1b[0m\n")
+        return ""
+
+    def _format_cursor_thinking(self, event: dict[str, Any]) -> str | None:
+        """Render cursor-agent stream-json thinking deltas; None if not a thinking event."""
+        if str(event.get("type") or "") != "thinking":
+            return None
+        text = str(event.get("text") or "")
+        if str(event.get("subtype") or "") == "delta" and text:
+            return f"\x1b[2m{text}\x1b[0m"
         return ""
 
     def _format_claude_event(self, event: dict[str, Any]) -> str:
@@ -439,11 +719,18 @@ class AgentStreamParser:
                     if not isinstance(item, dict):
                         continue
                     if item.get("type") == "text":
-                        out.append("\n" + str(item.get("text") or "") + "\n")
+                        text = str(item.get("text") or "")
+                        if text:
+                            out.append(self._emit("\n" + text + "\n"))
                     elif item.get("type") == "thinking":
-                        out.append(f"\n\x1b[2m{item.get('thinking') or ''}\x1b[0m\n")
+                        thinking = str(item.get("thinking") or "").strip()
+                        if thinking:
+                            out.append(self._emit(f"\n\x1b[2m{thinking}\x1b[0m\n"))
                     elif item.get("type") == "tool_use":
-                        out.append(tool_tag(str(item.get("name") or "?")))
+                        self._note_tool(
+                            str(item.get("name") or "?"),
+                            _command_text(item.get("input")),
+                        )
             return "".join(out)
 
         if event_type == "stream_event":
@@ -455,13 +742,21 @@ class AgentStreamParser:
                 if not isinstance(delta, dict):
                     return ""
                 if delta.get("type") == "text_delta":
-                    return str(delta.get("text") or "")
+                    return self._emit(str(delta.get("text") or ""))
                 if delta.get("type") == "thinking_delta":
-                    return f"\x1b[2m{delta.get('thinking') or ''}\x1b[0m"
+                    thinking = str(delta.get("thinking") or "")
+                    return self._emit(f"\x1b[2m{thinking}\x1b[0m") if thinking else ""
+                if delta.get("type") == "input_json_delta":
+                    self._absorb_tool_input(str(delta.get("partial_json") or ""))
+                    return ""
             if stream.get("type") == "content_block_start":
                 block = stream.get("content_block") or {}
                 if isinstance(block, dict) and block.get("type") == "tool_use":
-                    return "\n" + tool_tag(str(block.get("name") or "?"))
+                    self._note_tool(
+                        str(block.get("name") or "?"),
+                        _command_text(block.get("input")),
+                    )
+                    return ""
             return ""
 
         if event_type == "result":
@@ -469,7 +764,9 @@ class AgentStreamParser:
             if isinstance(usage, dict):
                 self._record_usage(usage)
             self._record_cost(event)
-            return f"\n\x1b[32m[{stamp()}] {event.get('result') or 'done'}\x1b[0m\n"
+            return self._emit(
+                f"\n\x1b[32m[{stamp()}] {event.get('result') or 'done'}\x1b[0m\n"
+            )
 
         return ""
 
@@ -487,15 +784,19 @@ class AgentStreamParser:
                 return ""
             item_type = item.get("type")
             if item_type == "command_execution":
-                return "\n" + tool_tag(f"$ {item.get('command', 'cmd')}") + "\n"
+                self._note_tool("Bash", str(item.get("command") or ""))
+                return ""
             if item_type == "mcp_tool_call":
-                return tool_tag(
-                    f"{item.get('server', '')}:{item.get('tool') or item.get('name') or '?'}"
+                self._note_tool(
+                    f"{item.get('server', '')}:{item.get('tool') or item.get('name') or '?'}",
+                    _command_text(item.get("arguments") or item.get("input")),
                 )
+                return ""
             if item_type == "web_search":
-                return tool_tag("search")
+                self._note_tool("search", _command_text(item.get("query")))
+                return ""
             if item_type == "plan_update":
-                return f"\x1b[35m[{stamp()} plan]\x1b[0m "
+                return self._emit(f"\x1b[35m[{stamp()} plan]\x1b[0m ")
             return ""
 
         if event_type == "item.completed":
@@ -504,20 +805,24 @@ class AgentStreamParser:
                 return ""
             item_type = item.get("type")
             if item_type == "agent_message":
-                return "\n" + str(item.get("text") or "") + "\n"
+                text = str(item.get("text") or "")
+                return self._emit("\n" + text + "\n") if text else ""
             if item_type == "reasoning":
-                return f"\x1b[2m{item.get('text', '')}\x1b[0m\n"
+                text = str(item.get("text") or "")
+                return self._emit(f"\x1b[2m{text}\x1b[0m\n") if text else ""
             if item_type == "command_execution":
                 output = str(item.get("output") or "")
-                return _truncate_block(output) if output else ""
+                return self._emit(_truncate_block(output)) if output else ""
             if item_type == "mcp_tool_call":
                 result = item.get("result") or {}
                 content = result.get("content") if isinstance(result, dict) else None
                 first = content[0] if isinstance(content, list) and content else {}
                 output = str(first.get("text") or "") if isinstance(first, dict) else ""
-                return _truncate_block(output) if output else ""
+                return self._emit(_truncate_block(output)) if output else ""
             if item_type == "file_changes":
-                return f"\x1b[32m[{stamp()} write: {item.get('path', '?')}]\x1b[0m\n"
+                return self._emit(
+                    f"\x1b[32m[{stamp()} write: {item.get('path', '?')}]\x1b[0m\n"
+                )
             return ""
 
         if event_type in {"turn.completed", "turn_completed"}:
@@ -526,16 +831,20 @@ class AgentStreamParser:
                 self._record_usage(usage)
                 cached = usage.get("cached_input_tokens")
                 cached_fragment = f" ({cached} cached)" if cached is not None else ""
-                return (
+                return self._emit(
                     f"\n\x1b[2m[{stamp()}] tokens: {usage.get('input_tokens', 0)} in"
                     f"{cached_fragment} / {usage.get('output_tokens', 0)} out\x1b[0m\n"
                 )
             return ""
 
         if event_type in {"turn.failed", "turn_failed"}:
-            return f"\n\x1b[31m[{stamp()} error] {_stringish(event.get('error') or event.get('message') or 'turn failed')}\x1b[0m\n"
+            return self._emit(
+                f"\n\x1b[31m[{stamp()} error] {_stringish(event.get('error') or event.get('message') or 'turn failed')}\x1b[0m\n"
+            )
         if event_type in {"turn.aborted", "turn_aborted"}:
-            return f"\n\x1b[31m[{stamp()} abort] {_stringish(event.get('message') or event.get('reason') or event.get('error') or 'turn aborted')}\x1b[0m\n"
+            return self._emit(
+                f"\n\x1b[31m[{stamp()} abort] {_stringish(event.get('message') or event.get('reason') or event.get('error') or 'turn aborted')}\x1b[0m\n"
+            )
         return ""
 
     def _format_gemini_event(self, event: dict[str, Any]) -> str:
@@ -550,33 +859,46 @@ class AgentStreamParser:
             for thought in event.get("thoughts") or []:
                 if isinstance(thought, dict):
                     out.append(
-                        f"\x1b[2m[{stamp()} thinking] {thought.get('subject') or '?'}: {thought.get('description') or ''}\x1b[0m\n"
+                        self._emit(
+                            f"\x1b[2m[{stamp()} thinking] {thought.get('subject') or '?'}: {thought.get('description') or ''}\x1b[0m\n"
+                        )
                     )
             content = str(event.get("content") or "")
             if content:
-                out.append(content)
+                out.append(self._emit(content))
             for call in event.get("toolCalls") or []:
                 if isinstance(call, dict):
-                    out.append("\n" + tool_tag(str(call.get("name") or "?")))
+                    self._note_tool(
+                        str(call.get("name") or "?"),
+                        _command_text(
+                            call.get("args")
+                            or call.get("arguments")
+                            or call.get("input")
+                        ),
+                    )
             return "".join(out)
         if event_type == "message" and event.get("role") == "assistant":
-            return str(event.get("content") or "")
+            return self._emit(str(event.get("content") or ""))
         if event_type == "tool_use":
-            return "\n" + tool_tag(
-                str(event.get("tool_name") or event.get("name") or "?")
+            self._note_tool(
+                str(event.get("tool_name") or event.get("name") or "?"),
+                _command_text(event.get("input") or event.get("arguments")),
             )
+            return ""
         if event_type == "tool_result":
             output = str(event.get("output") or "")
-            return _truncate_block(output) if output else ""
+            return self._emit(_truncate_block(output)) if output else ""
         if event_type == "error":
-            return f"\x1b[31m[{stamp()} error] {event.get('message') or event.get('error') or 'unknown'}\x1b[0m\n"
+            return self._emit(
+                f"\x1b[31m[{stamp()} error] {event.get('message') or event.get('error') or 'unknown'}\x1b[0m\n"
+            )
         if event_type == "result":
             stats = event.get("stats") or {}
             status_line = (
                 f"\n\x1b[32m[{stamp()}] {event.get('status') or 'done'}\x1b[0m\n"
             )
             if not isinstance(stats, dict):
-                return status_line
+                return self._emit(status_line)
             self._record_usage(stats)
             input_tokens = _as_int(stats.get("input_tokens"))
             output_tokens = _as_int(stats.get("output_tokens"))
@@ -592,21 +914,20 @@ class AgentStreamParser:
                     f"\x1b[2m[{stamp()}] tokens: {input_tokens} in"
                     f"{cached_fragment} / {output_tokens} out\x1b[0m\n"
                 )
-                return tokens_line + status_line
-            return status_line
+                return self._emit(tokens_line + status_line)
+            return self._emit(status_line)
         return ""
 
     def _format_junie_event(self, event: dict[str, Any]) -> str:
         """Render one Junie streaming-json event's message/step text."""
+        # Nested telemetry already walks the top-level ``usage`` dict; a second
+        # _record_usage here counted every junie token twice.
         self._record_nested_telemetry(event)
         for key in ("session_id", "sessionId"):
             value = event.get(key)
             if isinstance(value, str) and value:
                 self.session_id = value
                 break
-        usage = event.get("usage")
-        if isinstance(usage, dict):
-            self._record_usage(usage)
         message = (
             event.get("message")
             or event.get("text")
@@ -619,8 +940,150 @@ class AgentStreamParser:
             return ""
         name = _stringish(event.get("name"))
         if name and event.get("type") == "step":
-            return f"{name}: {text}\n"
-        return text + "\n"
+            return self._emit(f"{name}: {text}\n")
+        return self._emit(text + "\n")
+
+    def _format_agy_event(self, event: dict[str, Any]) -> str:
+        """Render one agy (Antigravity) stream-json event.
+
+        agy speaks ``{"event": ..., "<event>": {...}}``: ``init`` carries
+        ``conversation_id`` and the model, ``step_update`` streams
+        ``text_delta`` per step (``user_input`` / ``agent_response`` / tool
+        steps), ``result`` closes with ``status``, ``response`` and the
+        conversation's ``usage``. Usage is recorded once, from ``result``.
+        """
+        kind = str(event.get("event") or "")
+        conversation = event.get("conversation_id")
+        if kind == "init":
+            init = event.get("init") or {}
+            if isinstance(init, dict):
+                self._record_model(init)
+                conversation = conversation or init.get("conversation_id")
+            return self._session_banner(_stringish(conversation) or "?")
+        if kind == "step_update":
+            step = event.get("step_update") or {}
+            if not isinstance(step, dict):
+                return ""
+            step_type = str(step.get("step_type") or "")
+            text = _stringish(step.get("text_delta"))
+            if step_type in {"user_input", ""}:
+                return ""
+            if step_type == "agent_response":
+                return self._emit(text) if text else ""
+            if step_type in {"thinking", "thought", "planning"}:
+                return self._emit(f"\x1b[2m{text}\x1b[0m") if text else ""
+            if str(step.get("state") or "") == "ACTIVE" and not text:
+                name = step.get("tool_name") or step.get("name") or step_type
+                self._note_tool(_stringish(name) or step_type, _command_text(step))
+                return ""
+            if text:
+                return self._emit(_truncate_block(text))
+            return ""
+        if kind == "result":
+            result = event.get("result") or {}
+            if not isinstance(result, dict):
+                return ""
+            usage = result.get("usage")
+            status = str(result.get("status") or "done")
+            response = _stringish(result.get("response"))
+            if response and response != "None":
+                self.final_response = response
+            out = ""
+            if isinstance(usage, dict):
+                self._record_usage(usage)
+                input_tokens = _as_int(usage.get("input_tokens"))
+                output_tokens = _as_int(usage.get("output_tokens"))
+                cached = _as_int(usage.get("cache_read_tokens"))
+                if input_tokens or output_tokens:
+                    cached_fragment = f" ({cached} cached)" if cached else ""
+                    out += (
+                        f"\n\x1b[2m[{stamp()}] tokens: {input_tokens} in"
+                        f"{cached_fragment} / {output_tokens} out\x1b[0m\n"
+                    )
+            error = _stringish(result.get("error"))
+            if error and error != "None":
+                out += f"\x1b[31m[{stamp()} error] {error}\x1b[0m\n"
+            color = "32" if status.upper() == "SUCCESS" else "31"
+            return self._emit(out + f"\x1b[{color}m[{stamp()}] {status}\x1b[0m\n")
+        if kind == "error":
+            message = event.get("error") or event.get("message")
+            return f"\n\x1b[31m[{stamp()} error] {_stringish(message) or 'unknown'}\x1b[0m\n"
+        return ""
+
+    def _format_kimi_event(self, event: dict[str, Any]) -> str:
+        """Render one kimi stream-json event (assistant/tool/meta; goal.summary).
+
+        kimi 0.42.0 print mode (``kimi -p --output-format stream-json``)
+        speaks NDJSON keyed by ``role``: ``assistant`` carries ``content``
+        and/or ``tool_calls`` (OpenAI-shaped ``function`` blocks), ``tool``
+        carries one tool result, ``meta`` carries ``system.version`` (stream
+        head), ``turn.step.retrying`` (provider retries) and
+        ``session.resume_hint`` (stream tail — the stream's only session-id
+        carrier; live runs adopt the id earlier from the kimi session store
+        via ``supervisor_async._adopt_provider_session_identity``).
+        Goal runs close with a ``goal.summary`` object. The stream reports no
+        usage and no model field, and thinking never reaches the JSONL
+        (kimi docs), so the pane shows text, tool tags and the closing
+        session banner. The last assistant ``content`` is the final answer.
+        """
+        role = str(event.get("role") or "")
+        if role == "assistant":
+            out: list[str] = []
+            tool_calls = event.get("tool_calls")
+            if isinstance(tool_calls, list):
+                for call in tool_calls:
+                    if not isinstance(call, dict):
+                        continue
+                    function = call.get("function")
+                    name = (
+                        function.get("name")
+                        if isinstance(function, dict)
+                        else call.get("name")
+                    )
+                    arguments = (
+                        function.get("arguments")
+                        if isinstance(function, dict)
+                        else call.get("arguments")
+                    )
+                    self._note_tool(
+                        _stringish(name) or "?",
+                        _command_text(arguments),
+                    )
+            content = str(event.get("content") or "")
+            if content:
+                out.append(self._emit("\n" + content + "\n"))
+                self.final_response = content
+            return "".join(out)
+        if role == "tool":
+            output = _stringish(event.get("content"))
+            return self._emit(_truncate_block(output)) if output else ""
+        if role == "meta":
+            meta_type = str(event.get("type") or "")
+            if meta_type == "system.version":
+                version = str(event.get("version") or "").strip()
+                return f"\x1b[2m[{stamp()}] kimi {version}\x1b[0m\n" if version else ""
+            if meta_type == "session.resume_hint":
+                return self._session_banner(str(event.get("session_id") or ""))
+            if meta_type == "turn.step.retrying":
+                detail = (
+                    _stringish(event.get("error_message"))
+                    or _stringish(event.get("error_name"))
+                    or "transient provider error"
+                )
+                next_attempt = _as_int(event.get("next_attempt"))
+                max_attempts = _as_int(event.get("max_attempts"))
+                attempt = (
+                    f" (attempt {next_attempt}/{max_attempts})"
+                    if next_attempt and max_attempts
+                    else ""
+                )
+                return f"\x1b[33m[{stamp()} retry]{attempt} {detail}\x1b[0m\n"
+            return ""
+        if str(event.get("type") or "") == "goal.summary":
+            status = str(event.get("status") or "done")
+            color = "32" if status == "complete" else "31"
+            return f"\n\x1b[{color}m[{stamp()}] goal: {status}\x1b[0m\n"
+        return ""
 
     def _format_grok_event(self, event: dict[str, Any]) -> str:
         """Render one Grok streaming-json event (thought/text/tool/diff/error/message)."""
@@ -638,19 +1101,28 @@ class AgentStreamParser:
             return ""
         if event_type == "thought":
             text = _stringish(event.get("data"))
-            return f"\x1b[2m{text}\x1b[0m" if text else ""
+            return self._emit(f"\x1b[2m{text}\x1b[0m") if text else ""
         if event_type == "text":
-            return _stringish(event.get("data"))
+            return self._emit(_stringish(event.get("data")))
         if event_type in {"tool", "tool_use", "tool_call"}:
             name = event.get("name") or event.get("tool") or event.get("toolName")
-            return "\n" + tool_tag(_stringish(name) or "?")
+            self._note_tool(
+                _stringish(name) or "?",
+                _command_text(
+                    event.get("input") or event.get("arguments") or event.get("data")
+                ),
+            )
+            return ""
         if event_type == "diff":
             path = _stringish(event.get("path"))
-            return "\n" + tool_tag("diff") + (f" {path}\n" if path else "\n")
+            self._note_tool("diff", path)
+            return ""
         if event_type == "error":
             message = event.get("message") or event.get("error") or event.get("data")
             text = _stringish(message)
-            return f"\n\x1b[31m[{stamp()} error] {text or 'unknown'}\x1b[0m\n"
+            return self._emit(
+                f"\n\x1b[31m[{stamp()} error] {text or 'unknown'}\x1b[0m\n"
+            )
 
         message = (
             event.get("message")
@@ -661,7 +1133,7 @@ class AgentStreamParser:
         text = _stringish(message)
         if not text or text == "None":
             return ""
-        return text + "\n"
+        return self._emit(text + "\n")
 
 
 def filter_stream(
@@ -671,11 +1143,16 @@ def filter_stream(
     stdout=None,
     raw_file: str | Path | None = None,
     default_model: str = "",
+    last_message_file: str | Path | None = None,
 ) -> int:
     """Read agent streaming-json from stdin, emit human text to stdout.
 
     Optional ``raw_file`` tees the unparsed stream for await/transcript parse
-    while the pane only sees AgentStreamParser output.
+    while the pane only sees AgentStreamParser output. Optional
+    ``last_message_file`` receives the stream's final assistant answer when
+    the agent reports one (agy ``result.response``; kimi's last assistant
+    ``content``); it is left absent otherwise so callers can fall back to the
+    transcript.
     """
     import sys as _sys
 
@@ -701,9 +1178,17 @@ def filter_stream(
             if display:
                 out_stream.write(display.encode("utf-8"))
                 out_stream.flush()
+        tail = parser.flush_tool_burst()
+        if tail:
+            out_stream.write(tail.encode("utf-8"))
+            out_stream.flush()
     finally:
         if raw_handle is not None:
             raw_handle.close()
+    if last_message_file and parser.final_response.strip():
+        last_path = Path(last_message_file).expanduser()
+        last_path.parent.mkdir(parents=True, exist_ok=True)
+        last_path.write_text(parser.final_response, encoding="utf-8")
     return 0
 
 
@@ -722,7 +1207,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--agent",
         required=True,
-        help="Agent family: grok, claude, codex, gemini, junie, agy",
+        help="Agent family: grok, claude, codex, gemini, junie, agy, kimi, copilot",
     )
     parser.add_argument(
         "--raw-file",
@@ -734,6 +1219,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         default="",
         help="Optional default model id for telemetry lines",
     )
+    parser.add_argument(
+        "--last-message",
+        default="",
+        help="Optional path that receives the stream's final assistant answer (agy result.response, kimi's last assistant content)",
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
     agent = str(args.agent or "").strip().lower()
     if not agent:
@@ -743,6 +1233,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         agent,
         raw_file=args.raw_file or None,
         default_model=str(args.model or ""),
+        last_message_file=(str(args.last_message).strip() or None),
     )
 
 

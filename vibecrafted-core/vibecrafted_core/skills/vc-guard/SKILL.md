@@ -53,6 +53,10 @@ python -m vibecrafted_core.guard check --sha <sha>
 ```
 
 `launch_workflow` calls `enforce_continuation` unless `VIBECRAFTED_GUARD=0`.
+Authorized repair/admission uses the public flags
+`--remediate-trust-block --remediation-task repair|admission --remediation-reason TEXT`.
+That override is recorded on the launch receipt and never rewrites the trust journal.
+`python -m vibecrafted_core.guard check` stays BLOCK.
 
 ## Doctrine (hard)
 

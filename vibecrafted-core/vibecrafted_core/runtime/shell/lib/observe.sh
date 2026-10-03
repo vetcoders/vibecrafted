@@ -5,7 +5,7 @@ _vetcoders_launch_receipt_field() {
   local json_path="$1"
   local field_name="$2"
   [[ -f "$json_path" ]] || return 0
-  python3 - "$json_path" "$field_name" <<'PY'
+  "$(_vetcoders_internal_python)" - "$json_path" "$field_name" <<'PY'
 import json
 import sys
 
@@ -85,17 +85,4 @@ _vetcoders_await() {
   else
     bash "$script" "$@"
   fi
-}
-
-_vetcoders_loop() {
-  local script
-  script="$(_vetcoders_frontier_file "runtime/scripts/vibecrafted-loop.sh" 2>/dev/null || true)"
-  if [[ -z "$script" && -n "${VIBECRAFTED_ROOT:-}" ]]; then
-    script="${VIBECRAFTED_ROOT}/runtime/scripts/vibecrafted-loop.sh"
-  fi
-  [[ -n "$script" && -f "$script" ]] || {
-    echo "vibecrafted loop runtime script not found." >&2
-    return 1
-  }
-  bash "$script" "$@"
 }

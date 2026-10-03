@@ -1,0 +1,28 @@
+---
+source: tui-agent/src/ui.rs
+expression: snapshot_without_terminal_padding(&wide)
+---
+Voc ZEN  [Global]  Live · 1 runs
+live 1  attention 1  failed 1  · attention working rule on
+┌ Live · date ↓ · h History ───────────────────────────────────────────────────┐
+│Live                                                                          │
+│  ● now         claude  ws-alpha  —        work-1   running             cost —│
+│Needs attention · working rule                                                │
+│  ! now         kimi    ws-alpha  —        ask-1    waiting on operator cost —│
+│Failed · last 24h                                                             │
+│  × now         cursor  ws-alpha  —        failed-1 failed              cost —│
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+↑/↓ select · Enter observe · g goto · h history · x archive · f scope · Tab pane
+state root: /tmp/state
+› /query  !observe <run>  !goto <run>  !resume <run>  █

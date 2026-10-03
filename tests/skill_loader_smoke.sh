@@ -29,7 +29,7 @@ SKILLS_DIR="$REPO_ROOT/vibecrafted-core/vibecrafted_core/skills"
 EXPERIMENTAL_DIR="$SKILLS_DIR/experimental"
 FOUNDATIONS_DIR="$SKILLS_DIR/foundations"
 FIXTURES_DIR="$SCRIPT_DIR/fixtures"
-HELPER_SHIM="${HOME}/.config/vetcoders/vc-skills.sh"
+HELPER_SHIM="${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/shell/vc-skills.sh"
 
 EXPECTED_HELPER_FUNCTIONS=(vc-init vc-help vc-research vc-agents)
 

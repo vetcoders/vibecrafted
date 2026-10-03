@@ -16,8 +16,8 @@ import pytest
 from vibecrafted_core import spawn, workflow_runtime
 from vibecrafted_core.continuity import capabilities as continuity
 
-EXECUTABLE_AGENTS = ("claude", "codex", "agy", "junie", "grok")
-VERIFIED_HEADLESS_RESUME_AGENTS = ("claude", "codex", "grok")
+EXECUTABLE_AGENTS = ("claude", "codex", "agy", "junie", "grok", "cursor")
+VERIFIED_HEADLESS_RESUME_AGENTS = ("claude", "codex", "grok", "agy")
 
 
 def _spawn_accepts_headless_resume(agent: str) -> bool:
@@ -51,16 +51,13 @@ def test_gemini_rejected_by_both_registry_and_spawn() -> None:
         workflow_runtime._resume_stdin_command("gemini", "sess-parity-check")
 
 
-def test_every_executable_agent_has_a_fresh_launch_lane() -> None:
+def test_every_executable_agent_has_a_fresh_launch_lane(monkeypatch) -> None:
+    monkeypatch.setattr(
+        spawn,
+        "_materialize_cursor_permission_flags",
+        lambda flags, *, permissions: tuple(flags),
+    )
     for agent in EXECUTABLE_AGENTS:
         command = spawn._stdin_command(agent)
         assert command, f"{agent} lost its fresh headless launch lane"
         assert continuity.capability_for(agent).execution == continuity.EXECUTABLE
-
-
-@pytest.mark.parametrize("surface", ["cli_alias", "mcp", "tui"])
-def test_parity_projection_placeholder(surface: str) -> None:
-    pytest.skip(
-        f"F05 {surface} projection lands with the kernel resolver (W0-03+); "
-        "core↔registry parity is enforced above"
-    )

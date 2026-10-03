@@ -197,12 +197,12 @@ def contract_payloads() -> tuple[tuple[type[object], dict[str, object]], ...]:
 def test_contracts_are_frozen_and_round_trip(
     contract_type: type[object], payload: dict[str, object]
 ) -> None:
-    contract = contract_type.from_payload(payload)  # type: ignore[attr-defined]
-    assert contract.to_payload() == payload  # type: ignore[attr-defined]
-    assert json.loads(contract.canonical_json())["schema"] == payload["schema"]  # type: ignore[attr-defined]
-    assert contract.content_digest().startswith("sha256:")  # type: ignore[attr-defined]
+    contract = contract_type.from_payload(payload)
+    assert contract.to_payload() == payload
+    assert json.loads(contract.canonical_json())["schema"] == payload["schema"]
+    assert contract.content_digest().startswith("sha256:")
     with pytest.raises(FrozenInstanceError):
-        contract.schema = "changed"  # type: ignore[attr-defined, misc]
+        contract.schema = "changed"
 
 
 def test_transition_tables_keep_axes_separate_and_delivery_fail_closed() -> None:
@@ -264,8 +264,8 @@ def test_digest_is_key_order_and_event_time_invariant(
     contract_type, first_payload = contract_payloads()[payload_index]
     second_payload = dict(reversed(tuple(first_payload.items())))
     second_payload.update(timestamp_updates)
-    first = contract_type.from_payload(first_payload)  # type: ignore[attr-defined]
-    second = contract_type.from_payload(second_payload)  # type: ignore[attr-defined]
+    first = contract_type.from_payload(first_payload)
+    second = contract_type.from_payload(second_payload)
     assert first.to_payload() != second.to_payload()
     assert first.canonical_json() == second.canonical_json()
     assert first.content_digest() == second.content_digest()
@@ -318,7 +318,7 @@ def test_future_fixtures_are_real_and_distinct(temp_git_repo, two_producers) -> 
     assert subject["producer_id"] != oracle["producer_id"]
     for producer in (subject, oracle):
         completed = subprocess.run(
-            producer["argv"],  # type: ignore[arg-type]
+            producer["argv"],
             cwd=producer["cwd"],
             check=True,
             capture_output=True,

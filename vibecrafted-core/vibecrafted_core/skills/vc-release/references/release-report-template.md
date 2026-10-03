@@ -17,7 +17,7 @@ explain in one sentence why it does not apply.
 ```yaml
 ---
 run_id: <generated-unique-id>
-agent: <claude|codex|gemini|system>
+agent: <claude|codex|gemini|cursor|system>
 skill: vc-release
 project: <repo-name>
 status: <pending|in-progress|completed|failed|blocked>

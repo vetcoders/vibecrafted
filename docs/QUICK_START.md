@@ -2,32 +2,48 @@
 
 ## 1. Install
 
+Find versioned DMG, Runtime Pack, Windows MSI/EXE and portable source assets
+on [GitHub Releases](https://github.com/vetcoders/vibecrafted/releases/latest).
+Each carrier has an adjacent checksum; Runtime Packs also have detached signatures.
+
 **macOS and Linux:**
 
 ```bash
 curl -fsSL https://vibecrafted.io/install.sh | bash
 ```
 
-**Windows** — install WSL2 once, then use the same bootstrap inside it:
+**Windows (native)** — win32-x64 Runtime Pack via `install.ps1` (no WSL
+required). Artifact names look like
+`Vibecrafted_RuntimePack_<version>-<YYYYMMDD>-<sha8>-win32-x64.tar.gz`. The
+MSI/EXE carriers are unsigned; SmartScreen will warn; trust is `.sha256` +
+`.sig`. See [INSTALL.md](INSTALL.md#windows--native-runtime-pack).
+
+**Windows (POSIX alternative)** — install WSL2 once, then use the same
+bootstrap inside it:
 
 ```powershell
 wsl --install
 wsl bash -c 'curl -fsSL https://vibecrafted.io/install.sh | bash'
 ```
 
-**From source:**
+**macOS CLI, without the App:** download the Runtime Pack plus `.sha256` and
+`.sig` from the latest release, then:
 
 ```bash
 git clone https://github.com/vetcoders/vibecrafted.git
-cd vibecrafted && make install
+cd vibecrafted
+make install RUNTIME_PACK=../Vibecrafted_RuntimePack_<version>-<YYYYMMDD>-<sha8>-darwin-<arch>.tar.gz
+make uninstall  # deterministic reset from the same receipt
 ```
 
 On macOS the intended end-user artifact is one signed and notarized
-`Vibecrafted_<version>-<YYYYMMDD>-<sha8>.dmg` from the
-[latest release](https://github.com/vetcoders/vibecrafted/releases/latest),
-verified against its adjacent `.dmg.sha256`. The build path is exercised and
-produces a signed, notarized, stapled artifact; until the release carrying it is
-published, use the bootstrap.
+`Vibecrafted_<version>-<YYYYMMDD>-<sha8>.dmg`, an artifact of releases from
+4.3.1 on, verified against its adjacent `.dmg.sha256`. Until a published
+release carries it, use the bootstrap above (see [INSTALL.md](INSTALL.md)).
+
+Power users can skip the DMG and App entirely. The adjacent
+`Vibecrafted_RuntimePack_<version>-<YYYYMMDD>-<sha8>-darwin-<arch>.tar.gz` is
+the same signed binary runtime that onboarding installs from the App.
 
 Everywhere else — Linux, WSL2, or macOS without the desktop app — take
 `Vibecrafted_<version>-<YYYYMMDD>-<sha8>-portable.tar.gz` from the same release
@@ -86,7 +102,10 @@ Use `vibecrafted help` for the full operator surface.
 
 ## Developer checkout path
 
-`make install`, `make install-auto` and the source bootstrap are the same
-runtime the public installer stages, plus the build, test and release targets.
+`make install` consumes a closed Runtime Pack selected for macOS or Linux and
+the host architecture. WSL2 consumes the matching Linux carrier and no default
+install silently compiles. `make install-source` is the explicit maintainer
+compiler lane. A developer checkout also exposes the
+build, test and release targets.
 Run `make help-dev` for the full inventory, or read
 [Build from source](public/getting-started/build-from-source.md).

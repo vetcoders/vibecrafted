@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import shlex
 import sys
+from argparse import Namespace
 from pathlib import Path
 from types import SimpleNamespace
 from xml.parsers.expat import ExpatError
 
 import pytest
+from _runtime_pack_fixture import seed_runtime_pack
 from vibecrafted_core import doctor
+
+from scripts import vetcoders_install as installer
 
 
 def test_installer_module_loads_source_file_without_mutating_sys_path(
@@ -238,11 +242,36 @@ def test_vc_frame_launcher_finding_flags_raw_binary(tmp_path: Path) -> None:
 
     assert finding.level == "fail"
     assert finding.component == "vc-frame:path"
-    assert "raw binary" in finding.message
+    if sys.platform == "win32":
+        assert "not a Windows product .cmd" in finding.message
+    else:
+        assert "raw binary" in finding.message
 
 
 def test_vc_frame_launcher_finding_ok_for_pinned_wrapper(tmp_path: Path) -> None:
-    wrapper = tmp_path / "vc-frame"
+    wrapper = tmp_path / "bin" / "vc-frame"
+    wrapper.parent.mkdir()
+    wrapper.write_text(
+        "#!/usr/bin/env bash\npin_darwin_socket_dir() { :; }\n",
+        encoding="utf-8",
+    )
+    native = tmp_path / "libexec" / "vc-frame"
+    native.parent.mkdir()
+    native.write_bytes(b"\xcf\xfa\xed\xfe" + b"\x00" * 32)
+    native.chmod(0o755)
+
+    finding = doctor._vc_frame_launcher_findings(which=lambda _name: str(wrapper))[0]
+
+    assert finding.level == "ok"
+    assert finding.component == "vc-frame:path"
+    assert "product wrapper" in finding.message
+
+
+def test_vc_frame_launcher_finding_fails_for_dead_product_wrapper(
+    tmp_path: Path,
+) -> None:
+    wrapper = tmp_path / "bin" / "vc-frame"
+    wrapper.parent.mkdir()
     wrapper.write_text(
         "#!/usr/bin/env bash\npin_darwin_socket_dir() { :; }\n",
         encoding="utf-8",
@@ -250,9 +279,38 @@ def test_vc_frame_launcher_finding_ok_for_pinned_wrapper(tmp_path: Path) -> None
 
     finding = doctor._vc_frame_launcher_findings(which=lambda _name: str(wrapper))[0]
 
+    assert finding.level == "fail"
+    assert finding.component == "vc-frame:path"
+    assert "no native vc-frame" in finding.message
+
+
+def test_vc_frame_launcher_finding_follows_runtime_owned_wrapper_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime_home = tmp_path / "share/vibecrafted"
+    target = runtime_home / "releases/4.3.0+gfixture/bin/vc-frame"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "#!/usr/bin/env bash\npin_darwin_socket_dir() { :; }\n", encoding="utf-8"
+    )
+    target.chmod(0o755)
+    native = target.parent.parent / "libexec" / "vc-frame"
+    native.parent.mkdir()
+    native.write_bytes(b"\xcf\xfa\xed\xfe" + b"\x00" * 32)
+    native.chmod(0o755)
+    wrapper = tmp_path / "bin/vc-frame"
+    wrapper.parent.mkdir()
+    wrapper.write_text(
+        f'#!/bin/bash\nexec {shlex.quote(str(target))} "$@"\n', encoding="utf-8"
+    )
+    wrapper.chmod(0o755)
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+
+    finding = doctor._vc_frame_launcher_findings(which=lambda _name: str(wrapper))[0]
+
     assert finding.level == "ok"
     assert finding.component == "vc-frame:path"
-    assert "product wrapper" in finding.message
+    assert f"pin={target}" in finding.message
 
 
 def _stamped_uv_shim(tmp_path: Path) -> Path:
@@ -415,7 +473,7 @@ def test_server_supervision_finding_proves_current_managed_pair() -> None:
     ]
 
 
-def test_server_supervision_uses_service_launcher_not_public_deck(
+def test_server_supervision_uses_declared_public_launcher_after_wrapper_exec(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -439,6 +497,10 @@ def test_server_supervision_uses_service_launcher_not_public_deck(
         return kwargs
 
     monkeypatch.setattr(doctor, "_uv_tool_shim", lambda: service_launcher)
+    public_launcher = tmp_path / "public" / "vibecrafted"
+    public_launcher.parent.mkdir(parents=True)
+    public_launcher.write_text("#!/bin/bash\n", encoding="utf-8")
+    monkeypatch.setenv("VIBECRAFTED_DECLARED_LAUNCHER", str(public_launcher))
 
     findings = doctor._server_supervision_findings(
         platform="darwin",
@@ -448,7 +510,7 @@ def test_server_supervision_uses_service_launcher_not_public_deck(
     )
 
     assert findings[0].level == "ok"
-    assert captured["launcher"] == service_launcher
+    assert captured["launcher"] == public_launcher
 
 
 def test_server_supervision_finding_fails_closed_for_stale_pair() -> None:
@@ -520,6 +582,42 @@ def test_server_supervision_finding_is_not_applicable_off_macos() -> None:
     assert "not applicable" in findings[0].message
 
 
+def test_vc_frame_launcher_finding_ok_for_windows_cmd_wrapper(tmp_path: Path) -> None:
+    generation = tmp_path / "releases" / "4.3.1"
+    wrapper = generation / "bin" / "vc-frame.cmd"
+    wrapper.parent.mkdir(parents=True)
+    wrapper.write_text(
+        "@echo off\r\n"
+        'set "ROOT=%~dp0.."\r\n'
+        'set "NATIVE_HOST=%ROOT%\\libexec\\vc-frame.exe"\r\n'
+        '"%NATIVE_HOST%" %*\r\n',
+        encoding="utf-8",
+    )
+    native = generation / "libexec" / "vc-frame.exe"
+    native.parent.mkdir(parents=True)
+    native.write_bytes(b"MZ" + b"\x00" * 32)
+
+    finding = doctor._vc_frame_launcher_findings(which=lambda _name: str(wrapper))[0]
+
+    assert finding.level == "ok"
+    assert finding.component == "vc-frame:path"
+    assert "Windows product wrapper" in finding.message
+
+
+def test_windows_unsupported_surfaces_are_explicit_ok() -> None:
+    findings = doctor._windows_unsupported_surface_findings(platform="win32")
+    components = {finding.component for finding in findings}
+    assert findings
+    assert all(finding.level == "ok" for finding in findings)
+    assert all("not supported on Windows" in finding.message for finding in findings)
+    assert "windows:pty" in components
+    assert "windows:zsh" in components
+    assert "windows:flock" in components
+    assert "windows:rescue" in components
+    assert "windows:voc" in components
+    assert doctor._windows_unsupported_surface_findings(platform="darwin") == []
+
+
 def test_doctor_run_includes_server_supervision_finding(monkeypatch) -> None:
     expected = doctor._Finding("fail", "server-supervisor", "not supervised")
 
@@ -530,10 +628,12 @@ def test_doctor_run_includes_server_supervision_finding(monkeypatch) -> None:
     monkeypatch.setattr(doctor, "_packaged_asset_findings", list)
     monkeypatch.setattr(doctor, "_launcher_shim_findings", list)
     monkeypatch.setattr(doctor, "_vc_frame_launcher_findings", list)
+    monkeypatch.setattr(doctor, "_vc_frame_generation_split_findings", list)
     monkeypatch.setattr(doctor, "_codex_mcp_config_findings", list)
     monkeypatch.setattr(doctor, "_server_supervision_findings", lambda: [expected])
     monkeypatch.setattr(doctor, "_vc_frame_delivery_findings", list)
     monkeypatch.setattr(doctor, "_vc_frame_truth_drift_findings", list)
+    monkeypatch.setattr(doctor, "_windows_unsupported_surface_findings", list)
 
     assert doctor.doctor_run() == [expected]
 
@@ -582,7 +682,14 @@ def _seed_truth(root: Path, content: str = "layout ok\n") -> None:
 
 
 def _truth_sandbox(tmp_path: Path, monkeypatch) -> tuple[Path, Path, Path]:
-    """Tools home with one published generation behind vibecrafted-current."""
+    """Publish one sealed Runtime Pack behind ``vibecrafted-current``.
+
+    These tests exercise doctor after the immutable-generation admission gate,
+    so the fixture must use the same materialization, manifest binding, and
+    payload validation path as a real package.  A hand-made config tree has no
+    runtime-manifest.json and therefore correctly fails before the behavior
+    each test intends to prove.
+    """
     from vibecrafted_core import frontier_assets
 
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
@@ -591,15 +698,33 @@ def _truth_sandbox(tmp_path: Path, monkeypatch) -> tuple[Path, Path, Path]:
         raise FileNotFoundError
 
     monkeypatch.setattr(frontier_assets, "vc_frame_config_source", no_checkout)
-    tools = tmp_path / "tools"
-    generation = tools / "vibecrafted-generation-test"
-    package = generation / "vibecrafted-core" / "vibecrafted_core"
-    _seed_truth(package / "config" / "vc-frame")
-    _seed_truth(package / "runtime" / "generated" / "vc-frame")
-    tools.mkdir(parents=True, exist_ok=True)
-    (tools / "vibecrafted-current").symlink_to(generation)
     home = tmp_path / "home"
     home.mkdir()
+    runtime_home = home / ".local" / "share" / "vibecrafted"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(home / ".local" / "bin"))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home / ".vibecrafted"))
+    monkeypatch.setenv("VC_FRAME_SOCKET_DIR", str(tmp_path / "frame-sockets"))
+    monkeypatch.setattr(
+        installer, "_teardown_owned_runtime_for_uninstall", lambda *_args, **_kwargs: ()
+    )
+    payload = seed_runtime_pack(tmp_path / "runtime-pack")
+    assert (
+        installer.cmd_runtime_install(
+            Namespace(
+                payload_root=str(payload),
+                app_root=None,
+                terminal_host=None,
+                frame_helper=None,
+            )
+        )
+        == 0
+    )
+    tools = runtime_home / "tools"
+    generation = runtime_home / "releases" / "9.9.9+g12345678"
+    assert installer._runtime_generation_payload_errors(generation) == []
+    assert (tools / "vibecrafted-current").resolve(strict=True) == generation
     return tools, generation, home
 
 
@@ -608,7 +733,7 @@ def test_truth_drift_ok_when_generation_agrees(tmp_path: Path, monkeypatch) -> N
 
     findings = doctor._vc_frame_truth_drift_findings(home=home, tools_home=tools)
 
-    assert [finding.level for finding in findings] == ["ok", "ok"]
+    assert [finding.level for finding in findings] == ["ok"]
     assert all(finding.component == "vc-frame:truth" for finding in findings)
 
 
@@ -624,20 +749,30 @@ def test_delivery_reads_package_owned_runtime_generation(
         / "generated"
         / "vc-frame"
     )
-    (generated / "themes").mkdir()
-    (generated / "vc-composer.sh").write_text("#!/bin/sh\n", encoding="utf-8")
-    monkeypatch.setenv("VIBECRAFTED_PREFER_REPO_VC_FRAME", "0")
 
     findings = doctor._vc_frame_delivery_findings(home=home, tools_home=tools)
 
-    runtime = [
-        finding for finding in findings if finding.component == "vc-frame:runtime"
-    ]
-    assert len(runtime) == 1
-    assert runtime[0].level == "ok"
-    assert "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame" in (
-        runtime[0].message
+    assert generated.is_dir()
+    assert (generated / "config.kdl").is_file()
+    assert all(finding.level == "ok" for finding in findings)
+    assert any(
+        finding.component == "vc-frame:view" and "shipped defaults" in finding.message
+        for finding in findings
     )
+
+
+def test_delivery_accepts_exact_physical_runtime_pack_config(
+    tmp_path: Path, monkeypatch
+) -> None:
+    tools, _, home = _truth_sandbox(tmp_path, monkeypatch)
+
+    findings = doctor._vc_frame_delivery_findings(home=home, tools_home=tools)
+
+    relevant = [finding for finding in findings if finding.component == "vc-frame:view"]
+    assert relevant
+    assert all(finding.level == "ok" for finding in relevant)
+    assert any("physical" in finding.message for finding in relevant)
+    assert all("runtime-copy" not in finding.message for finding in relevant)
 
 
 def test_truth_drift_fails_when_generation_disagrees_with_itself(
@@ -659,11 +794,11 @@ def test_truth_drift_fails_when_generation_disagrees_with_itself(
 
     split = [finding for finding in findings if finding.level == "fail"]
     assert len(split) == 1
-    assert "disagrees with itself" in split[0].message
+    assert "generation manifest" in split[0].message
     assert "config.kdl" in split[0].message
 
 
-def test_truth_drift_warns_when_dev_checkout_runs_ahead(
+def test_truth_drift_uses_sealed_generation_when_dev_checkout_runs_ahead(
     tmp_path: Path, monkeypatch
 ) -> None:
     from vibecrafted_core import frontier_assets
@@ -675,34 +810,60 @@ def test_truth_drift_warns_when_dev_checkout_runs_ahead(
 
     findings = doctor._vc_frame_truth_drift_findings(home=home, tools_home=tools)
 
-    ahead = [finding for finding in findings if finding.level == "warn"]
-    assert len(ahead) == 1
-    assert "dev checkout differs from published store" in ahead[0].message
+    assert [finding.level for finding in findings] == ["ok"]
+    assert "sealed generation manifest" in findings[0].message
 
 
 def test_truth_drift_fails_on_projection_into_parked_generation(
     tmp_path: Path, monkeypatch
 ) -> None:
-    tools, _, home = _truth_sandbox(tmp_path, monkeypatch)
-    parked = tools / "vibecrafted-generation-parked"
-    parked_generated = (
-        parked
-        / "vibecrafted-core"
-        / "vibecrafted_core"
-        / "runtime"
-        / "generated"
-        / "vc-frame"
+    tools, generation, home = _truth_sandbox(tmp_path, monkeypatch)
+    assert (
+        installer.cmd_runtime_install(
+            Namespace(
+                payload_root=str(
+                    seed_runtime_pack(
+                        tmp_path / "runtime-pack-next", version="9.9.10+g12345679"
+                    )
+                ),
+                app_root=None,
+                terminal_host=None,
+                frame_helper=None,
+            )
+        )
+        == 0
     )
-    _seed_truth(parked_generated)
-    view = home / ".config" / "vc-frame"
-    view.mkdir(parents=True)
-    (view / "config.kdl").symlink_to(parked_generated / "config.kdl")
+    current = tools / "vibecrafted-current"
+    assert current.resolve(strict=True) != generation
+    view = home / ".config" / "vibecrafted" / "vc-frame"
+    (view / "config.kdl").unlink()
+    (view / "config.kdl").symlink_to(
+        generation
+        / "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame/config.kdl"
+    )
 
-    findings = doctor._vc_frame_truth_drift_findings(home=home, tools_home=tools)
+    findings = doctor._vc_frame_delivery_findings(home=home, tools_home=tools)
 
     stale = [finding for finding in findings if finding.level == "fail"]
     assert len(stale) == 1
-    assert "parked generation" in stale[0].message
+    assert "physical config.kdl" in stale[0].message
+
+
+def test_truth_drift_fails_on_projection_into_checkout(
+    tmp_path: Path, monkeypatch
+) -> None:
+    tools, _, home = _truth_sandbox(tmp_path, monkeypatch)
+    checkout = tmp_path / "repo/config/vc-frame"
+    _seed_truth(checkout)
+    view = home / ".config" / "vibecrafted" / "vc-frame"
+    (view / "config.kdl").unlink()
+    (view / "config.kdl").symlink_to(checkout / "config.kdl")
+
+    findings = doctor._vc_frame_delivery_findings(home=home, tools_home=tools)
+
+    escaped = [finding for finding in findings if finding.level == "fail"]
+    assert len(escaped) == 1
+    assert "physical config.kdl" in escaped[0].message
 
 
 def test_doctor_summary_counts_findings() -> None:
@@ -722,3 +883,28 @@ def test_doctor_summary_counts_findings() -> None:
     assert payload["authority"]["healthy"] is False
     assert payload["authority"]["ok_count"] == 1
     assert payload["authority"]["failure_count"] == 1
+
+
+def test_server_supervision_finding_is_optional_when_never_installed() -> None:
+    status = SimpleNamespace(
+        installed=False,
+        loaded=False,
+        supervisor_live=False,
+        supervisor_verified=False,
+        supervisor_service_managed=False,
+        build_current=False,
+        pair_healthy=False,
+        supervisor_pid=None,
+    )
+
+    findings = doctor._server_supervision_findings(
+        platform="darwin",
+        which=lambda _name: "/usr/local/bin/vibecrafted",
+        config_factory=lambda **kwargs: kwargs,
+        status_reader=lambda _config: status,
+    )
+
+    assert findings[0].level == "warn"
+    assert findings[0].component == "server-supervisor"
+    assert "optional" in findings[0].message
+    assert "vibecrafted server service install" in findings[0].message

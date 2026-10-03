@@ -131,7 +131,7 @@ Zapisz do `$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/plans/<ts>_<slug
 ```markdown
 ---
 run_id: <id>
-agent: <claude|codex|gemini>
+agent: <claude|codex|gemini|cursor>
 skill: vc-workflow
 project: <repo>
 status: completed
@@ -186,7 +186,7 @@ WebFetch bezpośrednio: zapytaj `"<API> usage example <year>"`, pobierz standard
 ```markdown
 ---
 run_id: <id>
-agent: <claude|codex|gemini>
+agent: <claude|codex|gemini|cursor>
 skill: vc-workflow
 project: <repo>
 status: completed

@@ -20,12 +20,10 @@ command -v vibecrafted
 ls ~/.local/bin/vibecrafted
 ```
 
-**Fix.** The installer adds `PATH` entries via the cross-shell helper. Source it, or add the guarded line to your shell rc:
+**Fix.** Ordinary shell startup only needs the launcher directory on `PATH` (the installer can add this guarded line with your consent). Add it to the rc file you use:
 
 ```bash
-source "${XDG_CONFIG_HOME:-$HOME/.config}/vetcoders/vc-skills.sh"
-# persist it:
-echo '[ -f "$HOME/.config/vetcoders/vc-skills.sh" ] && source "$HOME/.config/vetcoders/vc-skills.sh"' >> ~/.zshrc
+case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac
 exec $SHELL -l
 ```
 

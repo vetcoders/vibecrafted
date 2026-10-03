@@ -44,7 +44,9 @@ vc-frame — resolves in this order:
 
 1. **`VIBECRAFTED_WORKSPACE_ID`** — the identity the runtime already resolved
    and exported into this process tree. It is honoured only when it names an
-   **active** workspace in the catalog.
+   **active** workspace whose `canonical_root` is the explicit launch root.
+   Same-root children also reuse the inherited logical session. A foreign-root
+   export is ambient parent context and cannot override an explicit launch root.
 2. **The one canonical catalog by `canonical_root`** — the unique active
    workspace rooted here. When several are rooted here, the selected one wins;
    an ambiguous root without a selection is an error, never a guess.
@@ -105,6 +107,7 @@ $VIBECRAFTED_HOME/control_plane/workspaces/
   instances/<uuid>.json        # vibecrafted.workspace-instance.v1
   sessions/<uuid>.json        # vibecrafted.workspace-session.v1
   snapshot_manifests/<uuid>.json
+  ephemeral_quarantine_receipts/<uuid>.json
   migration_report.json
 ```
 
@@ -121,11 +124,18 @@ vibecrafted workspace materialize <workspace_id> [--root PATH]
 vibecrafted workspace session-attach --workspace-id UUID --session-id UUID \
   --instance-id UUID --runtime vc-frame --runtime-session-id NAME --state live|dead|missing
 vibecrafted workspace migrate  [--dry-run]
+vibecrafted workspace quarantine-ephemeral [--apply] [--json]
 vibecrafted workspace settlement-counts <workspace_id>
 ```
 
 `bury` detaches live instances. `recover` reactivates the logical workspace
 without pretending an incompatible live runtime can be attached.
+
+`quarantine-ephemeral` previews only roots with positive pytest or generated
+temporary-directory provenance. `--apply` writes a full recovery receipt
+before removing those records from the catalog projection; instance, session,
+and snapshot history remains untouched. Workspace creation also refuses such a
+root when the catalog home is not itself pytest-isolated.
 
 ## WES runtime attachments
 
@@ -135,6 +145,18 @@ incarnations. They are append-preserved in
 process to resurrect or delete. A replacement is added as another attachment
 with `replaces_runtime_session_id`, while the dead attachment and its socket
 namespace remain visible to WES.
+
+An attachment's `state` is attach-time evidence. The writer stamps `live` when
+a Frame is bound and nothing downgrades it when that Frame exits, so readers
+never report it as current liveness. The server (`control-core`
+`FrameSessionInventory`) answers "which Frames run now" by reading
+`<socket_dir>/contract_version_*/` for the socket roots recorded on
+attachments — the same socket files `vc-frame list-sessions` enumerates — and
+never connects to them, because every client connection re-renders all plugins
+of that session. A running Frame is owned by the newest attachment that
+recorded it `live`; older claims on the same name are superseded, and `dead` /
+`missing` attachments never own one. A socket file left by a crashed server
+counts as running until the next `list-sessions` removes it.
 
 On macOS, Vibecrafted.app opens new frames under the short product socket root
 `/tmp/vc-frame-$UID`. Before opening the new window it reads the former

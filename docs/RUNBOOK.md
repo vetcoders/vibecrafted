@@ -54,8 +54,8 @@ Notes that save time:
 
 - `vibecrafted start` is an **alias for `vibecrafted dashboard`** (vc-frame
   operator layout). It is optional and is _not_ the entry point.
-- Agents: `claude · codex · agy · junie · grok`. Model override exists only
-  for claude (`--model`) and codex (`-m`); grok always runs its default.
+- Agents: `claude · codex · agy · junie · grok · cursor`. Model override exists only
+  for claude (`--model`) and codex (`-m`); other agents run their defaults.
 - Every skill also installs a `vc-<skill>` shortcut.
 
 ## 2. Dispatch grammar (one public shape, one engine)
@@ -150,7 +150,7 @@ vibecrafted release codex --prompt "Prepare release steps"
 ```bash
 vc-frame delete-session <name> 2>/dev/null
 script -q /tmp/anchor.log vc-frame --session <name> \
-  --new-session-with-layout ~/.config/vetcoders/frontier/vc-frame/layouts/operator.kdl &
+  --new-session-with-layout ~/.config/vibecrafted/vc-frame/layouts/operator.kdl &
 ```
 
 ## 6. Event bus and the Slack bridge

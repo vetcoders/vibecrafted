@@ -1,0 +1,630 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'none'; connect-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <title>VC Forensics · Evidence notebook</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font:
+          15px system-ui,
+          sans-serif;
+        --bg: #121820;
+        --panel: #1b2430;
+        --line: #354152;
+        --muted: #acb9ca;
+        --accent: #80dfcf;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: #edf3fa;
+      }
+      .shell {
+        height: 100dvh;
+        display: grid;
+        grid-template: 84px 1fr 40px / 210px minmax(0, 1fr) 280px;
+      }
+      header {
+        grid-column: 1 / -1;
+        padding: 14px 24px;
+        border-bottom: 1px solid var(--line);
+        display: flex;
+        align-items: center;
+        gap: 20px;
+      }
+      h1 {
+        font-size: 20px;
+        margin: 0 0 4px;
+      }
+      h2 {
+        font-size: 18px;
+        margin: 0 0 16px;
+      }
+      p {
+        line-height: 1.5;
+      }
+      small,
+      .muted {
+        color: var(--muted);
+      }
+      nav,
+      aside {
+        background: var(--panel);
+        padding: 20px;
+        overflow: auto;
+      }
+      nav {
+        border-right: 1px solid var(--line);
+      }
+      aside {
+        border-left: 1px solid var(--line);
+        font-size: 13px;
+      }
+      main {
+        padding: 24px;
+        min-width: 0;
+        overflow: auto;
+      }
+      footer {
+        grid-column: 1 / -1;
+        border-top: 1px solid var(--line);
+        padding: 9px 24px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      button,
+      input,
+      textarea,
+      select {
+        font: inherit;
+        color: inherit;
+        background: #242f3e;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 9px 12px;
+      }
+      button {
+        cursor: pointer;
+      }
+      button:hover {
+        border-color: var(--accent);
+      }
+      button.active {
+        color: var(--accent);
+        border-color: var(--accent);
+      }
+      nav button {
+        width: 100%;
+        margin-bottom: 10px;
+        text-align: left;
+      }
+      .tools {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-bottom: 18px;
+        align-items: center;
+      }
+      .tools input {
+        flex: 1;
+        min-width: 160px;
+      }
+      .card {
+        display: block;
+        width: 100%;
+        text-align: left;
+        margin: 8px 0;
+        padding: 14px;
+        background: var(--panel);
+      }
+      .card span {
+        display: block;
+        margin-top: 6px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      pre {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        background: #10161e;
+        padding: 16px;
+        border-radius: 8px;
+        line-height: 1.5;
+        font-size: 12px;
+      }
+      .warning {
+        color: #f2cf7b;
+      }
+      label {
+        display: block;
+        margin: 10px 0;
+      }
+      textarea {
+        width: 100%;
+        min-height: 110px;
+        resize: vertical;
+      }
+      .editor-field {
+        width: 100%;
+      }
+      .back {
+        margin-bottom: 18px;
+      }
+      .notice {
+        margin: 0;
+        max-width: 580px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      #message {
+        color: #f2cf7b;
+      }
+      .source-heading {
+        font-size: 13px;
+        margin-top: 20px;
+      }
+      @media (max-width: 900px) {
+        .shell {
+          grid-template-columns: 150px minmax(0, 1fr);
+        }
+        aside {
+          display: none;
+        }
+        header {
+          padding: 10px 16px;
+        }
+        main {
+          padding: 16px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <header>
+        <div>
+          <h1>VC Forensics</h1>
+          <small>Evidence notebook</small>
+        </div>
+        <p class="notice">
+          Tool signals are candidates. Recorded states are claims backed by
+          linked evidence. Source, installation and live acceptance remain
+          separate.
+        </p>
+      </header>
+      <nav aria-label="Evidence sources">
+        <button data-tab="manual" class="active">Findings</button>
+        <button data-tab="loctree">Loctree</button>
+        <button data-tab="prview">PRView</button>
+        <button id="export">Export findings JSON</button>
+        <button id="import">Import findings JSON</button>
+        <input
+          id="import-file"
+          type="file"
+          accept=".json,application/json"
+          hidden
+        />
+        <p class="notice">
+          Edits stay in this tab. Export before closing, then import the JSON or
+          regenerate the notebook.
+        </p>
+      </nav>
+      <main>
+        <div id="message" role="status" aria-live="polite"></div>
+        <div id="canvas"></div>
+      </main>
+      <aside>
+        <h2>Provenance</h2>
+        <div id="provenance"></div>
+      </aside>
+      <footer id="stats"></footer>
+    </div>
+    <script id="report-data" type="application/json">
+      __FORENSICS_DATA__
+    </script>
+    <script>
+      "use strict";
+      const report = JSON.parse(
+        document.getElementById("report-data").textContent,
+      );
+      const canvas = document.getElementById("canvas");
+      const message = document.getElementById("message");
+      let findings = structuredClone(report.findings);
+      let tab = "manual",
+        query = "",
+        dirty = false;
+      function node(tag, text, className) {
+        const element = document.createElement(tag);
+        if (text !== undefined) element.textContent = String(text);
+        if (className) element.className = className;
+        return element;
+      }
+      function button(text, action, className) {
+        const element = node("button", text, className);
+        element.type = "button";
+        element.addEventListener("click", action);
+        return element;
+      }
+      function validFindings(data) {
+        if (!Array.isArray(data)) {
+          if (!data || data.schema !== "vc-forensics.findings.v1")
+            throw Error("Expected vc-forensics.findings.v1 or an array");
+          data = data.findings;
+        }
+        if (!Array.isArray(data)) throw Error("findings must be an array");
+        const seen = new Set();
+        for (const finding of data) {
+          if (!finding || Array.isArray(finding) || typeof finding !== "object")
+            throw Error("Finding must be an object");
+          for (const key of ["id", "title"])
+            if (typeof finding[key] !== "string" || !finding[key].trim())
+              throw Error("Missing " + key);
+          if (seen.has(finding.id)) throw Error("Duplicate id: " + finding.id);
+          seen.add(finding.id);
+          if (!report.states.includes(finding.state ?? "hypothesis"))
+            throw Error("Unknown state: " + finding.state);
+        }
+        return data;
+      }
+      function toolRows(kind) {
+        const data = report.sources[kind].data;
+        if (!data || typeof data !== "object") return [];
+        if (Array.isArray(data))
+          return data.map((value, index) => ({
+            section: "items",
+            index,
+            value,
+          }));
+        const sections =
+          kind === "loctree"
+            ? [
+                "dead_parrots",
+                "cycles",
+                "duplicates",
+                "barrel_chaos",
+                "quick_wins",
+              ]
+            : ["checks", "checks_skipped", "ownership"];
+        const rows = [];
+        for (const section of sections) {
+          if (Array.isArray(data[section]))
+            data[section].forEach((value, index) =>
+              rows.push({ section, index, value }),
+            );
+        }
+        if (kind === "prview" && data.gate)
+          rows.unshift({ section: "gate", index: 0, value: data.gate });
+        return rows;
+      }
+      function renderInspector() {
+        const root = document.getElementById("provenance");
+        root.replaceChildren();
+        root.append(
+          node(
+            "pre",
+            JSON.stringify(
+              {
+                repo: report.repo,
+                head: report.head,
+                baseline: report.baseline,
+                generated_at: report.generated_at,
+              },
+              null,
+              2,
+            ),
+          ),
+        );
+        for (const [name, source] of Object.entries(report.sources)) {
+          root.append(node("h3", name, "source-heading"));
+          const { data, ...metadata } = source;
+          root.append(node("pre", JSON.stringify(metadata, null, 2)));
+          if (source.revision_match === false)
+            root.append(
+              node(
+                "p",
+                "Revision mismatch: this input describes a different source tip.",
+                "warning",
+              ),
+            );
+          if (
+            source.status === "IMPORTED" &&
+            source.revision_match === null &&
+            name !== "manual"
+          )
+            root.append(node("p", "Revision binding unverified.", "warning"));
+        }
+      }
+      function showDetail(title, value, edit) {
+        canvas.replaceChildren(
+          button("← Back", render, "back"),
+          node("h2", title),
+        );
+        if (edit) canvas.append(button("Edit finding", () => editor(value)));
+        canvas.append(node("pre", JSON.stringify(value, null, 2)));
+      }
+      function editor(original) {
+        const fresh = !original;
+        const draft = structuredClone(
+          original || {
+            id: "",
+            title: "",
+            state: "hypothesis",
+            severity: "",
+            path: "",
+            mechanism: "",
+            evidence: [],
+            verification: {},
+          },
+        );
+        canvas.replaceChildren(
+          node("h2", fresh ? "New finding" : "Edit " + original.id),
+        );
+        const form = node("form");
+        const fields = {};
+        for (const key of [
+          "id",
+          "title",
+          "state",
+          "severity",
+          "path",
+          "mechanism",
+          "evidence",
+          "verification",
+        ]) {
+          const label = node("label", key);
+          let input;
+          if (key === "state") {
+            input = node("select");
+            report.states.forEach((state) => {
+              const option = node("option", state);
+              option.value = state;
+              input.append(option);
+            });
+          } else
+            input = node(
+              ["mechanism", "evidence", "verification"].includes(key)
+                ? "textarea"
+                : "input",
+            );
+          input.className = "editor-field";
+          input.value = ["evidence", "verification"].includes(key)
+            ? JSON.stringify(
+                draft[key] ?? (key === "evidence" ? [] : {}),
+                null,
+                2,
+              )
+            : String(draft[key] ?? (key === "state" ? "hypothesis" : ""));
+          fields[key] = input;
+          label.append(input);
+          form.append(label);
+        }
+        form.append(
+          button("Save in notebook", () => {
+            try {
+              for (const [key, input] of Object.entries(fields))
+                draft[key] = ["evidence", "verification"].includes(key)
+                  ? JSON.parse(input.value)
+                  : input.value;
+              const next = fresh
+                ? [...findings, draft]
+                : findings.map((record) =>
+                    record.id === original.id ? draft : record,
+                  );
+              validFindings(next);
+              findings = next;
+              dirty = true;
+              message.textContent =
+                "Saved in this tab. Export JSON to retain your changes.";
+              render();
+            } catch (error) {
+              message.textContent = error.message;
+            }
+          }),
+          button("Cancel", render),
+        );
+        form.addEventListener("submit", (event) => event.preventDefault());
+        canvas.append(form);
+      }
+      function renderList(container, search) {
+        container.replaceChildren();
+        const records = tab === "manual" ? findings : toolRows(tab);
+        const visible = records.filter((record) =>
+          JSON.stringify(record).toLowerCase().includes(search.toLowerCase()),
+        );
+        visible.forEach((record) => {
+          const title =
+            tab === "manual"
+              ? record.title
+              : record.value?.title ||
+                record.value?.symbol ||
+                record.value?.name ||
+                record.value?.message ||
+                record.section;
+          const card = button(
+            title,
+            () =>
+              showDetail(
+                title,
+                tab === "manual" ? record : record.value,
+                tab === "manual",
+              ),
+            "card",
+          );
+          card.append(
+            node(
+              "span",
+              tab === "manual"
+                ? record.id + " · recorded " + (record.state ?? "hypothesis")
+                : record.section +
+                    "[" +
+                    record.index +
+                    "] · tool signal / NOT_ADJUDICATED",
+            ),
+          );
+          container.append(card);
+        });
+        if (!visible.length)
+          container.append(
+            node(
+              "p",
+              records.length
+                ? "No matches."
+                : "No indexed entries. Inspect the complete input below; this is not a clean bill of health.",
+              "muted",
+            ),
+          );
+        document.getElementById("stats").textContent =
+          visible.length +
+          " / " +
+          records.length +
+          " entries · " +
+          (dirty ? "Unexported edits" : "Loaded snapshot") +
+          " · Offline";
+      }
+      function render() {
+        canvas.replaceChildren(
+          node(
+            "h2",
+            tab === "manual"
+              ? "Findings"
+              : tab === "loctree"
+                ? "Loctree signals"
+                : "PRView evidence",
+          ),
+        );
+        document
+          .querySelectorAll("[data-tab]")
+          .forEach((item) =>
+            item.classList.toggle("active", item.dataset.tab === tab),
+          );
+        if (tab !== "manual") {
+          const source = report.sources[tab];
+          canvas.append(
+            node(
+              "p",
+              source.status === "NOT_ASSESSED"
+                ? "NOT_ASSESSED · No report was imported."
+                : source.revision_match === false
+                  ? "Revision mismatch · Treat this input as historical evidence."
+                  : "Imported tool observations · Independent adjudication required.",
+              "warning",
+            ),
+          );
+          if (source.data?.summary)
+            canvas.append(
+              node("pre", JSON.stringify(source.data.summary, null, 2)),
+            );
+        }
+        const tools = node("div", undefined, "tools");
+        const search = node("input");
+        search.placeholder = "Search evidence…";
+        search.setAttribute("aria-label", "Search evidence");
+        search.value = query;
+        const list = node("div");
+        search.addEventListener("input", () => {
+          query = search.value;
+          renderList(list, query);
+        });
+        tools.append(search);
+        if (tab === "manual")
+          tools.append(button("+ Add finding", () => editor(null)));
+        else
+          tools.append(
+            button("Complete input JSON", () =>
+              showDetail(
+                tab + " · Complete input",
+                report.sources[tab].data,
+                false,
+              ),
+            ),
+          );
+        canvas.append(tools, list);
+        renderList(list, query);
+      }
+      document.querySelectorAll("[data-tab]").forEach((item) =>
+        item.addEventListener("click", () => {
+          tab = item.dataset.tab;
+          query = "";
+          render();
+        }),
+      );
+      document.getElementById("export").addEventListener("click", () => {
+        const data = {
+          schema: "vc-forensics.findings.v1",
+          repo: report.repo,
+          head: report.head,
+          exported_at: new Date().toISOString(),
+          findings,
+        };
+        const url = URL.createObjectURL(
+          new Blob([JSON.stringify(data, null, 2)], {
+            type: "application/json",
+          }),
+        );
+        const anchor = node("a");
+        anchor.href = url;
+        anchor.download = "forensics-findings.json";
+        anchor.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        // Download initiation is not proof that the user saved the file.
+        message.textContent =
+          "Download requested. Keep the JSON before closing this tab.";
+      });
+      document
+        .getElementById("import")
+        .addEventListener("click", () =>
+          document.getElementById("import-file").click(),
+        );
+      document
+        .getElementById("import-file")
+        .addEventListener("change", async (event) => {
+          const file = event.target.files[0];
+          if (!file) return;
+          try {
+            const data = JSON.parse(await file.text());
+            const incoming = validFindings(data);
+            if (data.head && data.head !== report.head)
+              throw Error(
+                "Import describes a different head SHA; retain it as historical evidence separately.",
+              );
+            if (data.repo && data.repo !== report.repo)
+              throw Error("Import describes a different repository.");
+            if (
+              dirty &&
+              !window.confirm(
+                "Replace unexported notebook edits with this file?",
+              )
+            )
+              return;
+            findings = structuredClone(incoming);
+            dirty = true;
+            tab = "manual";
+            query = "";
+            message.textContent = "Imported. Export JSON before closing.";
+            render();
+          } catch (error) {
+            message.textContent = error.message;
+          } finally {
+            event.target.value = "";
+          }
+        });
+      window.addEventListener("beforeunload", (event) => {
+        if (dirty) {
+          event.preventDefault();
+          event.returnValue = "";
+        }
+      });
+      renderInspector();
+      render();
+    </script>
+  </body>
+</html>

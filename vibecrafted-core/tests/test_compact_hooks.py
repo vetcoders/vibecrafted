@@ -195,7 +195,7 @@ def test_recall_mode_emits_plain_context_not_postcompact_json(
         json.loads(output)
     except json.JSONDecodeError:
         pass
-    else:  # pragma: no cover - guardrail clarity
+    else:  # guardrail clarity
         raise AssertionError("recall mode must emit plain SessionStart context")
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -134,6 +135,130 @@ def test_commit_contract_is_absent_when_not_required_or_cut_is_read() -> None:
     required = replace(dispatch, policy=replace(dispatch.policy, require_commit=True))
     read_cut = replace(required.cuts[0], mode="read")
     assert "DELIVERY CONTRACT" not in render_cell_prompt(required, read_cut)
+
+
+def test_claim_prompt_uses_dispatch_identity_and_runtime_report_contract() -> None:
+    dispatch = load_dispatch(FIXTURES / "minimal.dispatch.toml")
+    run_id = 'disp-test-"quoted"'
+    prompt = render_cell_prompt(dispatch, dispatch.cuts[0], run_id=run_id)
+    payload = json.loads(prompt.split("```json\n", 1)[1].split("\n```", 1)[0])
+
+    assert payload["run_id"] == run_id
+    assert payload["cut_id"] == dispatch.cuts[0].id
+    assert payload["report_path"] == "$VIBECRAFTED_REPORT_PATH"
+    assert set(payload) == {
+        "run_id",
+        "cut_id",
+        "commit_sha",
+        "report_path",
+        "measurements",
+    }
+    assert "http://127.0.0.1:3024/api/dispatch/claim" in prompt
+    assert "distinct from the worker runtime's VIBECRAFTED_RUN_ID" in prompt
+    assert "canonical Python writer records [~]" in prompt
+    assert "Never write tracker [x]" in prompt
+    assert "Only a passed full VERIFICATION_RULE and all green matchers" in prompt
+    assert "Default verifier timeout is 600s" in prompt
+    assert "DEVELOPER_DIR" in prompt
+    assert "claim not received, verifiers were not run" in prompt
+
+
+def test_claim_closing_rail_overrides_stale_brief_checkbox_instructions() -> None:
+    dispatch = load_dispatch(FIXTURES / "minimal.dispatch.toml")
+    cut = replace(dispatch.cuts[0], source_text="Flip brief Acceptance to [x].")
+
+    prompt = render_cell_prompt(dispatch, cut, run_id="disp-test")
+
+    assert prompt.index("Flip brief Acceptance") < prompt.index("Never write tracker")
+    assert "even if older brief text requests it" in prompt
+    assert "An unflipped [ ] cannot skip verifiers or become a failed test" in prompt
+    assert "--allow-red-baseline admits work and does not count as delivery" in prompt
+
+
+def test_claim_preview_never_guesses_dispatch_run_identity() -> None:
+    dispatch = load_dispatch(FIXTURES / "minimal.dispatch.toml")
+
+    prompt = render_cell_prompt(dispatch, dispatch.cuts[0])
+
+    assert "Do not POST an empty or guessed identity" in prompt
+
+
+def _embargo_plan() -> str:
+    return (
+        (FIXTURES / "minimal.dispatch.toml")
+        .read_text()
+        .replace("critical = true", "critical = true\ncompile_embargo = true")
+        + """
+
+[[cuts]]
+id = "w2-integrator"
+phase = "Foundation"
+agent = "codex"
+workflow = "implement"
+prompt = "Assemble, then run full gates."
+integrator = true
+depends_on = ["d1-schema-parser"]
+closes_embargo = ["d1-schema-parser"]
+
+[[cuts.verify]]
+run = "python -m pytest -q"
+expect = {contains = "passed", exit_code = 0}
+"""
+    )
+
+
+def test_typed_embargo_plan_and_closure_render_phase_obligations() -> None:
+    dispatch = parse_dispatch(_embargo_plan())
+    checkpoint, integrator = dispatch.cuts
+
+    assert checkpoint.compile_embargo is True
+    assert checkpoint.closes_embargo == ()
+    assert integrator.compile_embargo is False
+    assert integrator.closes_embargo == (checkpoint.id,)
+    checkpoint_prompt = render_cell_prompt(dispatch, checkpoint, run_id="disp-test")
+    assert "This cut must POST an unverified checkpoint" in checkpoint_prompt
+    assert "Include security and secret controls" in checkpoint_prompt
+    assert "exact plan-declared verifier command" in checkpoint_prompt
+    assert "writer never executes payload commands" in checkpoint_prompt
+    assert "A worker cannot close embargo through this POST" in checkpoint_prompt
+    closure_prompt = render_cell_prompt(dispatch, integrator, run_id="disp-test")
+    assert "PLAN INTEGRATOR CLOSURE" in closure_prompt
+    assert "exact assembled SHA in measurements" in closure_prompt
+    assert "independently runs full gates against that SHA" in closure_prompt
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "error"),
+    [
+        ("compile_embargo = true", 'compile_embargo = "yes"', "expected a boolean"),
+        ("integrator = true", "integrator = false", "only a WRITE integrator"),
+        (
+            "integrator = true",
+            "integrator = true\ncompile_embargo = true",
+            "only structural WRITE workers",
+        ),
+        (
+            'closes_embargo = ["d1-schema-parser"]',
+            'closes_embargo = ["unknown"]',
+            "must name a compile_embargo cut",
+        ),
+        (
+            "compile_embargo = true",
+            "compile_embargo = false",
+            "must name a compile_embargo cut",
+        ),
+        (
+            'depends_on = ["d1-schema-parser"]',
+            "depends_on = []",
+            "must be declared in depends_on",
+        ),
+    ],
+)
+def test_embargo_plan_refuses_worker_closure_or_unbound_checkpoints(
+    old: str, new: str, error: str
+) -> None:
+    with pytest.raises(DispatchSchemaError, match=error):
+        parse_dispatch(_embargo_plan().replace(old, new))
 
 
 def test_matchers_cover_required_set() -> None:

@@ -1,0 +1,40 @@
+[paths]
+kimi_binary = "~/.kimi-code/bin/kimi"
+sessions_dir = "~/.kimi-code/sessions"
+runtime_dir = "~/.kimi-code/runtime"
+
+[quota]
+poll_interval_s = 30
+startup_timeout_s = 20
+
+[statusline]
+near_limit = 0.85
+desync_ceiling = 0.95
+
+# Per-model pricing per 1M tokens. Fill in real rates to get $ in statusline;
+# leave 0.0 to hide the cost segment.
+[pricing.k3]
+fresh = 3.0
+cache_read = 0.30
+output = 15.0
+
+[pricing.kimi-k3]
+fresh = 3.0
+cache_read = 0.30
+output = 15.0
+
+[pricing.k3-256k]
+fresh = 3.0
+cache_read = 0.30
+output = 15.0
+
+[pricing.kimi-for-coding]
+fresh = 3.0
+cache_read = 0.30
+output = 15.0
+
+[pricing.kimi-for-coding-highspeed]
+fresh = 0.95
+cache_read = 0.19
+output = 4.0
+

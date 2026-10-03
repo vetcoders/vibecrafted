@@ -1,0 +1,56 @@
+# Windows EXE / MSI installers (portable Runtime Pack)
+
+Thin adapters over `scripts/install-runtime-pack.ps1`. One product identity
+(`Identity.wxi`: name, VERSION-driven ProductVersion, stable UpgradeCode) drives
+both the MSI (`Product.wxs`) and the Burn EXE (`Bundle.wxs`).
+
+Per-user portable MSI: `InstallScope=perUser`, payload under `LocalAppDataFolder`
+(`%LOCALAPPDATA%\Vibecrafted\Installer`). MajorUpgrade uses the stable
+UpgradeCode. `scripts/windows_product_code.py` keeps ProductCode stable for a
+given major.minor.patch and rotates it for the next version. Existing 4.3.1
+repair/reinstall retains its original GUID; same-version upgrades are refused.
+Uninstall runs only when
+`REMOVE=ALL` and fails closed (`Return=check`).
+
+License and publisher identity come from the repo `LICENSE` (BUSL-1.1,
+Licensor Libraxis AI Sp. z o.o.). Product display name is
+`Vibecrafted. Framework` (`Identity.wxi`). `scripts/windows_license_rtf.py`
+renders `packaging/windows/License.rtf` before candle; do not hand-edit that
+RTF or replace it with a copy of LICENSE (WiX ScrollableText then shows an
+empty box). MSI shows `WixUI_Minimal` + `WixUILicenseRtf` with near-black
+(`#0a0a0b`) `WixUIBannerBmp` / `WixUIDialogBmp` under `assets/` (no stock
+red-CD WixUI face). Burn uses `RtfLicense` with `LicenseFile` and
+`LogoFile=burn-logo.bmp`.
+ARP help link points at `SECURITY.md` (`hello@vetcoders.io`). After a successful
+interactive install the MSI launches `vc-terminal.cmd` (frame-backed). Silent
+installs (`UILevel` <= 3, including `msiexec /qn`) and `VC_SKIP_TERMINAL_LAUNCH=1`
+do not start it. A double-click of the MSI (full UI) still launches it, and the
+Burn EXE wizard does too because the bundle passes `WixBundleUILevel` (full = 4).
+Quiet Burn uses the WiX 3.14 engine switches this bundle honors: `/quiet`
+(display none, `WixBundleUILevel` 2), `/norestart`, `/log` plus a path, and
+`/uninstall`. The default action is install. `VC_SKIP_TERMINAL_LAUNCH` is a
+string bundle variable (`bal:Overridable="yes"`, default `0`) forwarded into
+the chained MSI, so `VC_SKIP_TERMINAL_LAUNCH=1` with `/quiet` keeps vc-terminal
+off. A double-click still uses full UI and still launches vc-terminal.
+Launch never runs on uninstall. The MSI appends `%LOCALAPPDATA%\Vibecrafted\bin`
+to the per-user HKCU PATH when that directory is not already present, and removes
+that entry on uninstall. It does not write the machine PATH. That is the same
+user-PATH directory `install.ps1` adds. The MSI checks the pack `.sig` with
+`pack-verify.pub`: `ci-signing.pub` or the pack's `.rehearsal.pub` when the
+carrier is rehearsal-signed, otherwise `vibecrafted-signing-v1.pub`. That is
+Runtime Pack signature evidence, not Authenticode.
+
+Limit for this cut: the voc radio is not in this installer cut because tokio's
+Unix socket types are `cfg(unix)` and this cut does not switch mux-agent to a
+Windows AF_UNIX transport.
+
+Build (requires an existing pack tarball + `.sha256` + `.sig`):
+
+```powershell
+powershell -NoProfile -File .\scripts\build-windows-installers.ps1 `
+  -Pack .\build\Vibecrafted_RuntimePack_<version>-win32-x64.tar.gz
+```
+
+WiX 3.14 binaries are fetched into `packaging/windows/.cache` (gitignored).
+Missing `-Pack` fails closed. This script does not install into the operator
+`%LOCALAPPDATA%\Vibecrafted`.

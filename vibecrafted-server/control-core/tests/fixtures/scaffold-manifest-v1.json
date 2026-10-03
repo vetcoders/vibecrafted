@@ -26,6 +26,14 @@
       "editable": true,
       "required": true,
       "dependencies": ["driver", "atlas"]
+    },
+    {
+      "id": "dispatch",
+      "role": "dispatch",
+      "path": "aicx-product-convergence-v1.dispatch.toml",
+      "editable": true,
+      "required": true,
+      "dependencies": ["driver", "atlas", "w0-01"]
     }
   ]
 }

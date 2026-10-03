@@ -1,7 +1,8 @@
 # Install Vibecrafted
 
-Vibecrafted runs on macOS, Linux and Windows-through-WSL2. The channels differ
-in what they give you and in how finished they are, so this page states both.
+Vibecrafted runs on macOS, Linux, and native Windows (win32-x64 Runtime Pack).
+WSL2 remains a POSIX alternative. The channels differ in what they give you
+and in how finished they are, so this page states both.
 
 ## Channel matrix
 
@@ -9,13 +10,14 @@ in what they give you and in how finished they are, so this page states both.
 | ---------------------------- | -------------------- | ------------------------------------------------------------------- | ---------------------------------------- |
 | Signed `Vibecrafted.app` DMG | macOS 14+, arm64     | Full desktop product: terminal, frame, runtime, server              | Build path complete; publication pending |
 | Portable tarball             | Linux, WSL2, macOS   | Command deck, runtime, control plane, skills — pinned to one commit | Build path complete; publication pending |
+| Native Runtime Pack          | Windows win32-x64    | Command deck, pack Python, foundations, vc-server; no WSL           | Built from checkout; publication pending |
 | Bootstrap `install.sh`       | macOS, Linux, WSL2   | Command deck, runtime, control plane, skills                        | Published; CI-gated                      |
-| Source checkout              | macOS, Linux, WSL2   | Everything above plus build, test and release targets               | Published                                |
+| Source checkout              | macOS, Linux, WSL2   | Development tree and targets — not a native Runtime Pack            | Published                                |
 | Container                    | anywhere Docker runs | Isolated operator runtime                                           | Published                                |
-| `install.ps1`                | Windows              | WSL2 detection and handoff — not a native install                   | In repo; not yet served over HTTP        |
+| `install.ps1`                | Windows              | Native Runtime Pack entry (delegates to `install-runtime-pack.ps1`) | In repo; not yet served over HTTP        |
 
 If you want one sentence: **on macOS and Linux use the bootstrap today; on
-Windows install WSL2 first and then use the same bootstrap.**
+Windows install the win32-x64 Runtime Pack with `install.ps1 -Pack`.**
 
 ---
 
@@ -47,9 +49,10 @@ gh release view --json assets -q '.assets[].name'
 
 > **Current status.** The build path is exercised end to end
 > (`make release` → codesign → notarytool → `make publish-release`) and its
-> shape is gated by contract tests; 4.1.0 produces a signed, notarized and
-> stapled DMG with a signed `release-output.json`. No _published_ release
-> carries it yet — until the v4.1.0 release goes out, use a channel below.
+> shape is gated by contract tests; the build produces a signed, notarized and
+> stapled DMG with a signed `release-output.json`. The DMG is an artifact of
+> releases from 4.3.1 on; until such a release is _published_ with the DMG
+> attached, use a channel below.
 > Maintainers building the DMG locally: see
 > [Build from source](#build-from-source-power-users).
 
@@ -79,20 +82,26 @@ does not carry one.
 
 Scope, stated plainly:
 
-- It is a **source distribution**, not a prebuilt-binary bundle. `voc`,
-  `vc-admin` and `vc-server` are compiled locally by `make install`, so the
-  Rust toolchain listed under the Linux prerequisites is still required.
-- Prebuilt per-architecture binaries are not part of this channel and are not
-  claimed to be.
-- On Windows this is what you install _inside_ WSL2. There is no native
-  Windows build; see the `install.ps1` section.
+- It is a **source distribution**, not a prebuilt-binary bundle. Product
+  launchers and native `vc-terminal` / `vc-frame` hosts stay on the Runtime
+  Pack. A source checkout can install skill views with `--skills-only`; it
+  cannot pretend to be a complete native runtime.
+- Linux prebuilt packs (`linux-x64`, `linux-arm64`) are a separate carrier,
+  built natively by `scripts/build-linux-runtime-pack.sh`. They are not
+  produced by macOS `make release`. 4.3.1 does not ship a systemd unit;
+  on Linux the process pair is `vibecrafted server start` (server +
+  guardian), not `systemctl`.
+- On Windows, use the native win32-x64 Runtime Pack (`install.ps1 -Pack`).
+  The portable Linux tarball is what you install _inside_ WSL2 if you choose
+  the POSIX alternative.
 
 Maintainers build it with `make portable`. It needs no signing identity and no
 notary account — only `git` and `python3` — so it builds on Linux too.
 
 > **Current status.** Build path complete and self-verifying (the builder
 > unpacks and re-validates what it just wrote before the bytes may leave the
-> machine). Publication lands with the v4.1.0 release.
+> machine). It is not published yet; it will be attached to the first release that
+> carries it.
 
 ### Runtime boundary
 
@@ -150,15 +159,67 @@ settlement ledger — runs on Linux.
 
 ---
 
-## Windows — WSL2
+## Windows — native Runtime Pack
 
-Vibecrafted has no native Windows build. The installer is POSIX shell, and the
-runtime assumes a POSIX process model. On Windows you install WSL2 once and then
-use the ordinary Linux path inside it.
+The native Windows product is the **win32-x64 Runtime Pack**. It does not
+require WSL. Layout:
 
-### 1. Install WSL2
+- Runtime home: `%LOCALAPPDATA%\Vibecrafted` (`active.json` + `releases/<version>`)
+- Launchers: `%LOCALAPPDATA%\Vibecrafted\bin\*.cmd`
+- Control plane: `%LOCALAPPDATA%\Vibecrafted\home`
+- Product config: `%APPDATA%\Vibecrafted`
+- `tools/vibecrafted-current` is a directory **junction**, not a unix symlink.
 
-From an elevated PowerShell prompt:
+Mandatory payload: pack-owned `python.exe`, `vc-server`, `vc-terminal`, and
+`vc-frame`. Foundations (`loct`, `aicx`, `prview`, `screenscribe`) ship through
+their own channels. `voc` / `vc-o` / `vc-admin` / `vc-procs` / `vc-start` stay
+out of this pack until a Windows AF_UNIX mux transport exists. Rescue/flock,
+PTY/zsh shells, and those omitted radios are **not supported on Windows** —
+`vibecrafted doctor` declares them explicitly; use WSL2 for the POSIX path.
+
+Canonical artifact names (repeatable rebuilds keep the same ProductCode
+`2B1BF36C-C680-48EE-BDCA-648C09D41BB3`):
+
+- Pack: `Vibecrafted_RuntimePack_<ver>-<YYYYMMDD>-<sha8>-win32-x64.tar.gz` (+ `.sha256` + `.sig`)
+- MSI/EXE: `Vibecrafted_<ver>-<YYYYMMDD>-<sha8>-windows-x64.{msi,exe}` (+ `.sha256`)
+
+**Unsigned Authenticode.** The MSI/EXE carriers are not Microsoft-signed.
+SmartScreen will warn. Trust is the same provenance model as the portable
+tarball (checksum + detached signature), not Apple notarization and not a
+self-signed distribution cert.
+
+From a checkout:
+
+```powershell
+powershell -NoProfile -File .\scripts\build-windows-x64-runtime-pack.ps1
+powershell -NoProfile -File .\install.ps1 -Pack .\build\Vibecrafted_RuntimePack_<version>-<YYYYMMDD>-<sha8>-win32-x64.tar.gz
+```
+
+`install.ps1` preflights every missing prerequisite in one pass, does not
+require a developer toolchain, updates User PATH for
+`%LOCALAPPDATA%\Vibecrafted\bin` (or prints that exact directory), and prints a
+human summary — never silent success and never a raw JSON dump as the success
+face. First-run orientation after install:
+
+```powershell
+vibecrafted doctor
+vibecrafted init
+```
+
+Or call the verifier/installer directly:
+
+```powershell
+powershell -NoProfile -File .\scripts\install-runtime-pack.ps1 -Pack <RuntimePack.tar.gz>
+```
+
+Checksum (`.sha256`) and detached signature (`.sig`) are checked **before**
+extract. System32 `tar.exe` unpacks the carrier. Pack Python then runs
+`runtime-install`.
+
+### POSIX alternative — WSL2
+
+WSL2 remains available for the Linux bootstrap. It is not the native Windows
+product. From an elevated PowerShell prompt:
 
 ```powershell
 wsl --install
@@ -185,30 +246,19 @@ install layout.
 
 ### What `install.ps1` is for
 
-The repository ships `install.ps1` as an honest Windows entry point. It is not a
-native installer and does not pretend to be one. It:
-
-1. requires PowerShell 5.1 or newer,
-2. probes whether WSL is installed and healthy (`wsl --status`),
-3. if WSL is available, prints the exact one-liner to bootstrap inside your
-   default distro,
-4. if WSL is missing, prints the canonical WSL2 install path and **exits
-   non-zero** so no caller mistakes the outcome for success.
-
-It never silently succeeds. Either it tells you exactly what to run next, or it
-tells you what is missing.
-
-Run it from a checkout:
+`install.ps1` is the native Windows entry. With `-Pack` (or
+`VIBECRAFTED_RUNTIME_PACK`, or a single `dist/*-win32-x64.tar.gz`) it
+delegates to `scripts/install-runtime-pack.ps1`. Without a pack it prints
+the exact build/install commands and **exits non-zero**.
 
 ```powershell
-.\install.ps1
+.\install.ps1 -Pack .\build\Vibecrafted_RuntimePack_<version>-win32-x64.tar.gz
 ```
 
 > **Current status.** `install.ps1` is not yet served from
-> `https://vibecrafted.io/install.ps1`, so the `iwr -useb … | iex` form in its
-> own header does not work yet. Use the checkout form above, or run the `wsl`
-> one-liner directly. Native Windows binaries are not on the near roadmap;
-> WSL2 is the supported answer.
+> `https://vibecrafted.io/install.ps1`, so do not `iwr | iex` it. Use the
+> checkout form. Publication of signed win32-x64 carriers is still pending;
+> the builder and installer are in-tree.
 
 ---
 
@@ -228,10 +278,12 @@ control-plane wiring.
 
 ## Build from source (power users)
 
-A source checkout is the complete surface: it installs the same runtime the
-bootstrap installs, and it additionally carries every build, test and release
-target. This is the path to take if you want to modify Vibecrafted, run the
-gates, or produce your own signed artifact.
+A source checkout is the complete development surface: it carries every
+build, test and release target. It is not a Runtime Pack. `make install`
+without a bound pack can install skill views (`--skills-only`); native
+`vc-terminal` / `vc-frame` hosts come from a verified Runtime Pack. This is
+the path to take if you want to modify Vibecrafted, run the gates, or
+produce your own signed artifact.
 
 ### Prerequisites
 
@@ -256,6 +308,36 @@ make install
 non-interactively — this is what CI uses. `make install-all` additionally builds
 the Rust binaries (`voc`, `vc-admin`, `vc-server`) as real files into
 `~/.local/bin`.
+
+### Building a Runtime Pack and installing that exact one
+
+```bash
+make runtime-pack && make install
+```
+
+The builder records which carrier it completed, and `make install` installs
+those bytes. `make runtime-pack` prints the same path it recorded.
+
+The record lives in `build/runtime-pack-selection.json`. It is build state, not
+configuration: it names one absolute path with its digest and the source,
+terminal and frame revisions the carrier is required to claim. Historical packs
+in `dist/` stay where they are — selection never ranks them by modification time
+or glob order, and never deletes one to make an answer unambiguous.
+
+The attempt is marked pending before the build starts and published only after
+the archive is packaged, verified and signed. So:
+
+- an interrupted or failed build — including a retry at the same commit —
+  refuses to install, instead of quietly reinstalling the last success;
+- a record from a different checkout, a different platform, or one whose
+  carrier no longer matches its digest fails visibly rather than falling back
+  to some other archive;
+- `RUNTIME_PACK=/path/to/pack.tar.gz` still wins outright, which is how you
+  deliberately install another signed generation.
+
+Selection chooses an artifact; it never authenticates one. The checksum,
+detached signature, archive topology and internal provenance checks are
+unchanged, and the recorded identities are fed into them.
 
 For a browser-guided install surface instead of the terminal one:
 
@@ -311,7 +393,7 @@ release script reads it from `$KEYS` (default `~/.keys`):
 | `Certificates.p12`        | signing certificate       |
 | `cert_password.txt`       | certificate password      |
 | `vibecrafted-signing.key` | detached artifact signing |
-| `.notary.env`             | notarytool credentials    |
+| Keychain profile/API key  | notarytool credentials    |
 
 ```bash
 make app             # build Vibecrafted.app only
@@ -373,8 +455,9 @@ If the CLI is staged in Vibecrafted's own agent bin but is not executable, the
 error says so specifically and gives you the `chmod +x` line for that exact
 path — a different problem gets a different answer.
 
-Vibecrafted appends its bundled agent bin to `PATH` rather than prepending it,
-so a CLI you installed yourself always wins over the bundled copy.
+Vibecrafted appends its own `tools/node/bin` to `PATH` (when that directory
+exists) rather than prepending it, so a CLI you installed yourself always wins.
+Agent CLIs are never bundled.
 
 ### Verify
 
@@ -409,12 +492,67 @@ moving the pointer to the previous generation — sessions already running keep
 owning their live state.
 
 For the desktop app, install a newer `Vibecrafted.app` from the new DMG. The
-app binary can be replaced while session processes continue running; restored
-workspaces re-enter through the new bundled `vc-start`. Roll back by replacing
-the app with the prior notarized release.
+app binary can be replaced while session processes continue running. Opening
+the new app does **not** upgrade the runtime: on launch the app adopts the
+already-active runtime generation and publishes its bundled Runtime Pack only
+when no runtime is installed at all (deliberate protection against a silent
+downgrade). To raise the runtime after replacing the app, install the Runtime
+Pack — the in-app "Repair Runtime…" action or
+`Contents/Resources/runtime-pack/install-runtime-pack.sh` — and the app adopts
+the new generation on its next launch. Roll back by replacing the app with the
+prior notarized release; runtime rollback is the pointer move described above.
 
 See [Update and rollback](public/getting-started/update.md) for the pointer
 mechanics in detail.
+
+### Runtime Pack publication retirement
+
+Successful Runtime Pack publication automatically retires obsolete owned release
+payloads under `releases/` and completed publication/rescue copies. It preserves
+the current generation, live executable/dependency/session/service references,
+pending recovery and one verified previous generation with its configuration
+preimage. It never signals a process to make a generation disposable. The older
+`tools/vibecrafted-generation-*` namespace has a separate owner.
+
+Retirement requires receipt ownership, physical containment and closed content
+identity; foreign children, pointers and identity drift produce exact residuals.
+Missing historical release claims and mistakenly tracked zsh session files are
+reconciled in the receipt; shell session/history bytes remain intact. Deletion
+intents support retry after partial removal, and compact attribution receipts
+remain in `.installer-backups/retirement/`. Original rescue receipts survive
+after their completed snapshot payload is retired. Overwritten human edits stay
+as individual files/pointers in the existing drift archive; retirement does not
+retain an entire publication copy to preserve those edits.
+
+Inspect or retry the existing publication owner's cleanup without rebuilding,
+reinstalling or restarting the server:
+
+```bash
+make runtime-cleanup-plan
+make runtime-cleanup
+```
+
+An isolated installation can be selected explicitly with
+`RUNTIME_HOME=/absolute/path` on either target. The plan lists each generation
+and copy as `retire`, `pinned` or `residual`, with its reasons. A pinned release
+is still needed by a live process, provider configuration, pending worker or
+rollback; cleanup never kills its owner. Settle that owner through its normal
+lifecycle, then repeat the plan. A residual requires repair of its specific
+ownership/content evidence, not manual deletion of a version-named directory.
+
+Both targets call the existing installer owner directly:
+
+```bash
+python3 -B scripts/vetcoders_install.py runtime-repair --retire --plan --json
+python3 -B scripts/vetcoders_install.py runtime-repair --retire --json
+```
+
+The plan is read-only. Apply rechecks pins and identity under the publication
+lease and requires a verified current installation. A pending/failed publication
+retains recovery; cleanup errors report residual/retry without rolling back a
+successful publication. macOS uses stable process identity and open/mapped file
+references; Linux uses open-file references or its process filesystem. Unsupported census platforms
+retain payload and report the missing evidence rather than infer safety.
 
 ### Uninstall
 

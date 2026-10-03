@@ -40,6 +40,7 @@ async fn handle_verify(
         crate::ipc::command::ClientKind::Codex => crate::scan::HostKind::Codex,
         crate::ipc::command::ClientKind::Gemini => crate::scan::HostKind::Gemini,
         crate::ipc::command::ClientKind::Junie => crate::scan::HostKind::Junie,
+        crate::ipc::command::ClientKind::Cursor => crate::scan::HostKind::Cursor,
         crate::ipc::command::ClientKind::Generic { .. } => {
             return Ok(MuxControlResponse::VerifyResult(VerifyResult {
                 ok: true,

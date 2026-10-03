@@ -31,6 +31,27 @@ def test_package_carries_runtime_skills_and_command_deck() -> None:
     assert (
         package_root / "runtime" / "workflows" / "prune" / "default_prompt.md"
     ).is_file()
+    assert (
+        package_root / "runtime" / "telemetry" / "agy-monitor" / "agy_monitor.py"
+    ).is_file()
+    assert (
+        package_root / "runtime" / "telemetry" / "kimi-monitor" / "kimi_monitor.py"
+    ).is_file()
+    assert (package_root / "runtime" / "telemetry" / "fleet_engine.py").is_file()
+    for agent in ("codex", "claude", "grok", "junie", "copilot", "cursor"):
+        assert (
+            package_root
+            / "runtime"
+            / "telemetry"
+            / f"{agent}-monitor"
+            / f"{agent}_monitor.py"
+        ).is_file()
+    assert (
+        package_root
+        / "runtime"
+        / "telemetry"
+        / "com.vetcoders.telemetry.agy.plist.template"
+    ).is_file()
     assert (package_root / "skills" / "vc-justdo" / "SKILL.md").is_file()
     assert (package_root / "deck" / "vibecrafted").is_file()
     assert (package_root / "product_contract.py").is_file()

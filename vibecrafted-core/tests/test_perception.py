@@ -40,7 +40,7 @@ def _recording_spawner(proc: FakeProc):
         calls.append(list(cmd))
         return proc
 
-    spawn.calls = calls  # type: ignore[attr-defined]
+    spawn.calls = calls
     return spawn
 
 
@@ -55,7 +55,7 @@ def _fast_clock():
     return clock
 
 
-def _no_sleep(_seconds: float) -> None:  # pragma: no cover - trivial
+def _no_sleep(_seconds: float) -> None:  # trivial
     return None
 
 
@@ -157,7 +157,7 @@ def test_canonical_root_collapses_trailing_slash(tmp_path: Path) -> None:
 
 
 def test_lock_held_skips_spawn(tmp_path: Path) -> None:
-    def boom(_cmd: Sequence[str]):  # pragma: no cover - must not be called
+    def boom(_cmd: Sequence[str]):  # must not be called
         pytest.fail("ensure_watch must not spawn when a watcher already holds the lock")
 
     outcome = _ensure(tmp_path, lock_probe=lambda _root: True, spawner=boom)
@@ -233,7 +233,7 @@ def test_nonzero_failure_is_reported_not_raised(tmp_path: Path) -> None:
 
 
 def test_missing_loct_is_unavailable_and_does_not_spawn(tmp_path: Path) -> None:
-    def boom(_cmd: Sequence[str]):  # pragma: no cover - must not be called
+    def boom(_cmd: Sequence[str]):  # must not be called
         pytest.fail("must not spawn when loct is unavailable")
 
     outcome = _ensure(tmp_path, resolver=lambda: None, spawner=boom)

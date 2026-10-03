@@ -175,7 +175,7 @@ def grok_transcript() -> list[str]:
     blocks = [
         "4.1.0 · feat/resume-no-implicit-native-session",
         "",
-        "Maciej: floating, Ctrl+P, strzalki. hehe",
+        "Operator: floating, Ctrl+P, strzalki. hehe  ",
         "Jeden talerz. Host: float, rename, PANE, strzalki.",
         "",
         "Pasek talii:  [‹][›]  [Voc]  [Nowy]",

@@ -23,20 +23,23 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::style::Color;
+use ratatui::Terminal;
 use tempfile::tempdir;
 use voc::app::{App, AppTab, DispatchFocus, LaunchFocus, QueueScope};
 use voc::config::AppConfig;
-use voc::launch::{LaunchKind, LaunchRuntime};
+use voc::launch::{Environment, LaunchKind, PermissionPolicy, Presentation, SandboxChoice};
 use voc::mission_control::{
     ActionPriority, ActionQueueItem, ActionQueueKind, ActiveDispatch, AgentStatsRow, DataQuality,
     FailureEntry, FleetHealthSignal, FleetHealthStatus, MissionControlState, SkillStatsRow,
     WaveSegment, WaveState,
 };
 use voc::state::ControlPlaneState;
+mod support;
+use support::{agent_index, fixture_catalog};
+use voc::catalog::CatalogState;
 
 const TERM_WIDTH: u16 = 120;
 const TERM_HEIGHT: u16 = 40;
@@ -188,9 +191,9 @@ fn populated_mission_state() -> MissionControlState {
                 detail: "/fixture/artifacts".to_string(),
             },
             FleetHealthSignal {
-                label: "meta scan".to_string(),
+                label: "derived runs".to_string(),
                 status: FleetHealthStatus::Ok,
-                detail: "128 meta.json scanned".to_string(),
+                detail: "128 derived runs scanned".to_string(),
             },
             FleetHealthSignal {
                 label: "model parity".to_string(),
@@ -268,9 +271,8 @@ fn mission_app(state: MissionControlState) -> App {
             no_verify_gate: false,
             state_root: "/fixture/state".into(),
             command_deck: "/usr/bin/vibecrafted".into(),
-            launch_root: "/fixture/repo".into(),
-            launch_runtime: LaunchRuntime::Terminal,
-            terminal_binary: "vc-frame".into(),
+            repo: "/fixture/repo".into(),
+            presentation: Presentation::Terminal,
             tick_rate: Duration::from_millis(250),
             server: "http://127.0.0.1:3024".into(),
             view: voc::observe::ConsoleView::Full,
@@ -280,9 +282,18 @@ fn mission_app(state: MissionControlState) -> App {
         selected: 0,
         active_tab: AppTab::MissionControl.index(),
         launch_kind: LaunchKind::Workflow,
-        launch_agent: 0,
+        // Pinned by name: the catalog owns the order, so an index would
+        // silently redraw this board whenever the launcher adds an agent.
+        launch_agent: agent_index("claude"),
         launch_prompt: "Ship the operator surface.".to_string(),
-        launch_runtime: LaunchRuntime::Terminal,
+        launch_model: String::new(),
+        launch_presentation: Presentation::Terminal,
+        launch_environment: Environment::LivingTree,
+        launch_permissions: PermissionPolicy::Default,
+        launch_sandbox: SandboxChoice::Default,
+        catalog: CatalogState::Ready(fixture_catalog()),
+        pending_launch: None,
+        launch_outcome: None,
         dispatch_selected: DispatchFocus::Kind as usize,
         focus: LaunchFocus::Browse,
         status_line: String::new(),
@@ -301,6 +312,10 @@ fn mission_app(state: MissionControlState) -> App {
         mission_artifact_root: PathBuf::from("/fixture/artifacts"),
         observe: Default::default(),
         memory: Default::default(),
+        interaction: Default::default(),
+        repo_edit: Default::default(),
+        refresh: Default::default(),
+        home_rows_memo: Default::default(),
     }
 }
 
@@ -455,19 +470,19 @@ fn mission_control_tab_tailscale_probe_snapshot() {
     };
     state.fleet_health = vec![
         FleetHealthSignal {
-            label: "tailscale div0".to_string(),
+            label: "tailscale host-b".to_string(),
             status: FleetHealthStatus::Ok,
-            detail: "online (100.73.193.98)".to_string(),
+            detail: "online (100.64.0.11)".to_string(),
         },
         FleetHealthSignal {
-            label: "tailscale dragon".to_string(),
+            label: "tailscale host-a".to_string(),
             status: FleetHealthStatus::Blocked,
             detail: "dispatch target offline (100.64.0.10)".to_string(),
         },
         FleetHealthSignal {
             label: "tailscale blacky".to_string(),
             status: FleetHealthStatus::Warn,
-            detail: "peer offline (100.64.0.11)".to_string(),
+            detail: "peer offline (100.64.0.12)".to_string(),
         },
         FleetHealthSignal {
             label: "tailscale status".to_string(),
@@ -545,9 +560,9 @@ fn mission_control_tab_fleet_health_overflow_snapshot() {
             detail: "/fixture/artifacts".to_string(),
         },
         FleetHealthSignal {
-            label: "meta scan".to_string(),
+            label: "derived runs".to_string(),
             status: FleetHealthStatus::Ok,
-            detail: "128 meta.json scanned".to_string(),
+            detail: "128 derived runs scanned".to_string(),
         },
         FleetHealthSignal {
             label: "model parity".to_string(),
@@ -670,7 +685,7 @@ fn mission_control_tab_survives_narrow_terminals() {
 
 // ─── vc-admin: standalone snapshot renderer e2e ─────────────────────────
 
-fn write_meta(path: &Path, contents: &str) {
+fn write_snapshot(path: &Path, contents: &str) {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).unwrap();
     }
@@ -692,49 +707,59 @@ fn vc_admin_status_renders_all_panels_from_disk_fixtures() {
     let now = chrono::Utc::now();
     let two_hours_ago = (now - chrono::Duration::hours(2)).to_rfc3339();
     let three_hours_ago = (now - chrono::Duration::hours(3)).to_rfc3339();
+    fs::create_dir_all(&artifact_root).unwrap();
+    // Leftover artifact meta must not feed stats; derived snapshots do.
+    write_snapshot(
+        &artifact_root.join("leftover.meta.json"),
+        r#"{"run_id":"leftover-meta","agent":"gemini","exit_code":2}"#,
+    );
 
-    // Dated bucket must sit inside STATS_WINDOW_DAYS (30d) of wall clock, or
-    // directory_within_window prunes the walk and the snapshot goes silent.
-    let bucket_day = now.format("%Y_%m%d").to_string();
-    let bucket = artifact_root.join(format!("vetcoders/vibecrafted/{bucket_day}/reports"));
-    write_meta(
-        &bucket.join("just-001.meta.json"),
+    write_snapshot(
+        &state_root.join("runs/just-001.json"),
         &format!(
             r#"{{
                 "run_id": "just-001",
                 "agent": "claude",
-                "skill_code": "implement",
+                "skill": "implement",
+                "state": "completed",
+                "status": "completed",
+                "updated_at": "{two_hours_ago}",
+                "latest_report": "/fixture/just-001/report.md",
                 "exit_code": 0,
                 "model": "claude-opus-4-7",
                 "duration_s": 120.0,
                 "completed_at": "{two_hours_ago}",
-                "prompt_id": "wave-a",
-                "report": "/fixture/just-001/report.md"
+                "prompt_id": "wave-a"
             }}"#
         ),
     );
-    write_meta(
-        &bucket.join("just-002.meta.json"),
+    write_snapshot(
+        &state_root.join("runs/just-002.json"),
         &format!(
             r#"{{
                 "run_id": "just-002",
                 "agent": "codex",
-                "skill_code": "marbles",
+                "skill": "marbles",
+                "state": "failed",
+                "status": "failed",
+                "updated_at": "{three_hours_ago}",
                 "exit_code": 1,
                 "model": "unknown",
-                "status": "failed",
                 "completed_at": "{three_hours_ago}",
                 "prompt_id": "wave-a"
             }}"#
         ),
     );
-    write_meta(
-        &bucket.join("just-003.meta.json"),
+    write_snapshot(
+        &state_root.join("runs/just-003.json"),
         &format!(
             r#"{{
                 "run_id": "just-003",
                 "agent": "claude",
-                "skill_code": "implement",
+                "skill": "implement",
+                "state": "completed",
+                "status": "completed",
+                "updated_at": "{two_hours_ago}",
                 "exit_code": 0,
                 "model": "claude-opus-4-7",
                 "duration_s": 45.0,
@@ -745,6 +770,9 @@ fn vc_admin_status_renders_all_panels_from_disk_fixtures() {
     );
 
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_vc-admin"))
+        // This fixture has no quota monitors; never read the host's agent quota files.
+        .env("VIBECRAFTED_AGY_QUOTA_JSON", "")
+        .env("VIBECRAFTED_KIMI_QUOTA_JSON", "")
         .arg("--state-root")
         .arg(&state_root)
         .arg("--artifact-root")
@@ -785,17 +813,18 @@ fn vc_admin_status_renders_all_panels_from_disk_fixtures() {
             "VIBECRAFTED_LOCTREE_SNAPSHOT_FRESHNESS_JSON",
             r#"{"fresh": true, "head_label": "refs/heads/feat/runtime-integration"}"#,
         )
+        .env("VIBECRAFTED_DISPATCH_TARGETS", "host-a,host-b")
         .env(
             "VIBECRAFTED_TAILSCALE_STATUS_JSON",
             r#"{
                 "Peer": {
-                    "node-div0": {
-                        "HostName": "div0",
+                    "node-host-b": {
+                        "HostName": "host-b",
                         "Online": true,
-                        "TailscaleIPs": ["100.73.193.98"]
+                        "TailscaleIPs": ["100.64.0.11"]
                     },
-                    "node-dragon": {
-                        "HostName": "dragon",
+                    "node-host-a": {
+                        "HostName": "host-a",
                         "Online": false,
                         "TailscaleIPs": ["100.64.0.10"]
                     }

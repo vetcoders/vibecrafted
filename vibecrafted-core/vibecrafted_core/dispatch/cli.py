@@ -7,6 +7,7 @@ import json
 import shutil
 import subprocess
 import sys
+import tempfile
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -15,25 +16,96 @@ from typing import Any
 
 from vibecrafted_core.workflow import reserve_run_id
 
-from .doctor import diagnose_file
-from .model import STATE_VERIFIED, Dispatch
-from .receipts import ReceiptContractError
+from .doctor import DoctorError, DoctorReport, DoctorWarning, diagnose_file
+from .model import (
+    BASE_CUT_PREFIX,
+    STATE_VERIFIED,
+    Cut,
+    Dispatch,
+    Matcher,
+    Verify,
+    classify_base,
+)
+from .receipts import DispatchReceiptStore, ReceiptContractError
 from .schema import render_cell_prompt
 from .supervisor import DispatchResult, cleanup_settled_run, run_dispatch
-from .worktrees import canonical_artifact_root
+from .verify import run_verifies
+from .worktrees import WorktreeManager, canonical_artifact_root
+
+# Verbs agents keep inventing for this CLI (observed in the wild: a planning
+# session instructed `vibecrafted dispatch preflight <toml>` / `dispatch launch
+# <toml>`, neither of which exists). Treating such a token as a TOML path
+# yields a misleading "unreadable file" — refuse it loudly with the pilot
+# instead. The canonical surface stays four plan forms; the roster-agent adapter below does not admit verbs.
+_HALLUCINATED_VERBS = {
+    "check",
+    "doctor",
+    "dry-run",
+    "dryrun",
+    "launch",
+    "plan",
+    "preflight",
+    "resume",
+    "run",
+    "start",
+    "status",
+    "validate",
+    "verify",
+}
+
+_PILOT = """canonical dispatch invocations:
+  vibecrafted dispatch <plan.toml> --doctor            # validate and verify baseline
+  vibecrafted dispatch <plan.toml> --dry-run [--json]  # render prompts, launch nothing
+  vibecrafted dispatch <plan.toml>                     # launch the plan
+  vibecrafted dispatch <plan.toml> --resume <run-id>   # resume a recorded run"""
+
+
+def _refuse_hallucinated_verb(argv: Sequence[str]) -> str:
+    """Return a refusal message when argv starts with an invented subcommand."""
+    positionals = [token for token in argv if not token.startswith("-")]
+    if not positionals or positionals[0].lower() not in _HALLUCINATED_VERBS:
+        return ""
+    if Path(positionals[0]).expanduser().exists():
+        # A real file that happens to share a verb's name is still a plan.
+        return ""
+    verb = positionals[0]
+    plan = positionals[1] if len(positionals) > 1 else "<plan.toml>"
+    corrections = {
+        "preflight": f"vibecrafted dispatch {plan} --doctor && vibecrafted dispatch {plan} --dry-run",
+        "doctor": f"vibecrafted dispatch {plan} --doctor",
+        "check": f"vibecrafted dispatch {plan} --doctor",
+        "validate": f"vibecrafted dispatch {plan} --doctor",
+        "verify": f"vibecrafted dispatch {plan} --doctor",
+        "dry-run": f"vibecrafted dispatch {plan} --dry-run",
+        "dryrun": f"vibecrafted dispatch {plan} --dry-run",
+        "resume": f"vibecrafted dispatch {plan} --resume <run-id>",
+    }
+    suggestion = corrections.get(verb.lower(), f"vibecrafted dispatch {plan}")
+    return (
+        f"unknown dispatch subcommand {verb!r} — this CLI takes a plan path,"
+        " not verbs.\n"
+        f"did you mean: {suggestion}\n"
+        f"{_PILOT}"
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
     """Build the argument parser for the ``vibecrafted dispatch`` subcommand."""
     parser = argparse.ArgumentParser(
         prog="vibecrafted dispatch",
-        description="Run or validate a vibecrafted.dispatch.v1 TOML plan.",
+        description="Run a TOML plan or launch one roster agent.",
+        epilog='Single agent: vibecrafted dispatch <agent> "<prompt>" [--skill implement] [--await] [launch flags]',
     )
     parser.add_argument("dispatch_file", help="Path to a .dispatch.toml file")
     parser.add_argument(
         "--doctor",
         action="store_true",
-        help="validate only; exits non-zero when the dispatch is unsafe",
+        help="validate and verify the baseline; exits non-zero when the dispatch is unsafe",
+    )
+    parser.add_argument(
+        "--allow-red-baseline",
+        action="store_true",
+        help="allow failed baseline verifiers; record the override and evidence in the tracker",
     )
     parser.add_argument(
         "--dry-run",
@@ -60,19 +132,49 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Parse argv and run doctor / dry-run / full dispatch; return the process exit code."""
+    raw_argv: Sequence[str] = sys.argv[1:] if argv is None else argv
+    refusal = _refuse_hallucinated_verb(raw_argv)
+    if refusal:
+        print(refusal, file=sys.stderr)
+        return 2
+    from vibecrafted_core import cli as core_cli
+
+    if raw_argv and raw_argv[0] in core_cli.AGENTS and not Path(raw_argv[0]).is_file():
+        alias = argparse.ArgumentParser(
+            prog="vibecrafted dispatch <agent>", add_help=False
+        )
+        alias.add_argument(
+            "--skill",
+            default="implement",
+            choices=[
+                name for name in core_cli.LAUNCHERS if name not in {"paste", "partner"}
+            ],
+        )
+        # The quoted positional prompt is opaque, even if it contains option names.
+        rest = list(raw_argv[1:])
+        prompt_args = []
+        if rest and not rest[0].startswith("-"):
+            prompt_args = ["--prompt=" + rest.pop(0)]
+        options, launch_args = alias.parse_known_args(rest)
+        return core_cli.main([options.skill, raw_argv[0], *prompt_args, *launch_args])
     parser = _build_parser()
     args = parser.parse_args(argv)
     source = Path(args.dispatch_file).expanduser()
 
     report = diagnose_file(source)
-    if args.doctor and not args.dry_run:
-        return _print_doctor(report, json_output=args.json)
     if not report.ok:
         _print_doctor(report, json_output=args.json)
         return 1
     assert report.dispatch is not None
 
     dispatch = _with_runtime_baseline(report.dispatch)
+    report = replace(report, dispatch=dispatch)
+    if not args.dry_run and not args.cleanup_settled:
+        report = _verify_baseline(report, allow_red=args.allow_red_baseline)
+        if not report.ok or args.doctor:
+            return _print_doctor(report, json_output=args.json)
+        assert report.dispatch is not None
+        dispatch = report.dispatch
     if args.cleanup_settled:
         try:
             outcomes = cleanup_settled_run(dispatch, args.cleanup_settled)
@@ -102,6 +204,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     run_id = args.resume or reserve_run_id("dispatch")
     artifacts_dir = _artifacts_dir(dispatch, run_id=run_id)
     _copy_validated_source(source, artifacts_dir)
+    # The supervisor is silent on stdout until the whole DAG settles; its live
+    # surface is tracker.md/journal.md, rewritten from second zero. Say so
+    # BEFORE launching, or every observer concludes the launch hung
+    # (measured: an agent waited on a mute handshake, 2026-08-24).
+    tracker_path = (
+        Path(dispatch.meta.tracker).expanduser()
+        if dispatch.meta.tracker
+        else artifacts_dir / "tracker.md"
+    )
+    if not args.json:
+        print(
+            f"dispatch admission started: run_id={run_id}\n"
+            f"live state: tracker={tracker_path}\n"
+            f"live journal: {artifacts_dir / 'journal.md'}\n"
+            "no worker is accepted until envelope and path-claim admission pass; "
+            "then stdout stays silent until the run settles — watch the tracker, "
+            "not this stream.",
+            flush=True,
+        )
     try:
         dispatch_result = run_dispatch(
             dispatch,
@@ -110,8 +231,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             manage_worktrees=True,
             resume=bool(args.resume),
         )
-    except ReceiptContractError as exc:
-        print(f"dispatch refused: {exc}")
+    # The detached scheduler crosses worker callbacks; any exception must be persisted to its
+    # existing receipt before the owner process exits and its caller disappears.
+    except Exception as exc:  # noqa: BLE001
+        # A parent-side reaper disappears when the initiating terminal/App
+        # exits.  The owner itself therefore records the failure in the ledger
+        # that a fresh lifecycle observer already projects, rather than relying
+        # on a disposable caller thread to notice its non-zero exit.
+        try:
+            DispatchReceiptStore(run_id, (), create=False).update_metadata(
+                scheduler_error=f"{type(exc).__name__}: {exc}",
+                scheduler_error_at=datetime.now(timezone.utc).isoformat(
+                    timespec="seconds"
+                ),
+            )
+        except ReceiptContractError:
+            pass
+        print(f"dispatch failed: {exc}")
         return 1
     if args.json:
         print(json.dumps(dispatch_result.to_dict(), ensure_ascii=False, indent=2))
@@ -129,7 +265,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _print_doctor(report: Any, *, json_output: bool) -> int:
     """Render a doctor report to stdout (JSON or human-readable) and return its exit code."""
     if json_output:
-        print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+        payload = report.to_dict()
+        if report.dispatch and "verification" in report.dispatch.meta.baseline:
+            payload["baseline"] = report.dispatch.meta.baseline
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         for error in report.errors:
             print(f"{error.path}: {error.message}")
@@ -138,6 +277,109 @@ def _print_doctor(report: Any, *, json_output: bool) -> int:
         if report.ok:
             print("dispatch-doctor: ok")
     return 0 if report.ok else 1
+
+
+def _verify_baseline(report: DoctorReport, *, allow_red: bool) -> DoctorReport:
+    """Run unique verifiers in a disposable detached baseline, before admission.
+
+    Reuse the worker executor's sanitized environment, timeout and matchers.
+    Duplicate commands retain all expectations, but execute only once.
+    """
+    assert report.dispatch is not None
+    dispatch = report.dispatch
+    baseline = dict(dispatch.meta.baseline)
+    head = str(baseline.get("head") or "")
+    commands: dict[str, Verify] = {}
+    for cut in dispatch.cuts:
+        for verify in cut.verify:
+            previous = commands.get(verify.run)
+            expectations = verify.matchers
+            if not any(matcher.kind == "exit_code" for matcher in expectations):
+                expectations = (*expectations, Matcher("exit_code", 0))
+            matchers = tuple(
+                dict.fromkeys((*(previous.matchers if previous else ()), *expectations))
+            )
+            commands[verify.run] = Verify(run=verify.run, matchers=matchers)
+
+    def git(*args: str) -> None:
+        proc = subprocess.run(
+            ["git", "-C", dispatch.meta.repo, *args],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if proc.returncode:
+            raise RuntimeError(f"git {' '.join(args)}: {proc.stderr[-4000:]}")
+
+    checks: list[dict[str, Any]] = []
+    failures: list[DoctorError] = []
+    try:
+        if not head:
+            raise RuntimeError("cannot resolve baseline HEAD")
+        root = WorktreeManager(dispatch.meta.repo).worktree_root
+        root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="baseline-", dir=root) as temporary:
+            checkout = Path(temporary) / "checkout"
+            git("worktree", "add", "--detach", str(checkout), head)
+            try:
+                for verify in commands.values():
+                    print(
+                        f"baseline {head}: verify {verify.run!r}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    # Each command starts pristine, even after generated files
+                    # or source mutations by an earlier verifier.
+                    git("-C", str(checkout), "reset", "--hard", head)
+                    git("-C", str(checkout), "clean", "-fdx")
+                    verdict = run_verifies(
+                        (verify,),
+                        repo=str(checkout),
+                        env={
+                            "VIBECRAFTED_HOME": str(Path(temporary) / "runtime-home"),
+                            "CARGO_TARGET_DIR": str(checkout / "target"),
+                        },
+                    )
+                    evidence = verdict.verifiers[0]
+                    checks.append(evidence.to_dict())
+                    if not evidence.ok:
+                        failures.append(
+                            DoctorError(
+                                "baseline.verify",
+                                f"{verify.run!r} failed on baseline {head} "
+                                f"(exit_code={evidence.exit_code}, {evidence.matcher_result}); "
+                                f"output tail:\n{evidence.evidence[-2000:]}",
+                            )
+                        )
+            finally:
+                git("worktree", "remove", "--force", str(checkout))
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        # An override permits red gates, never missing isolation evidence.
+        return replace(
+            report,
+            ok=False,
+            errors=(*report.errors, DoctorError("baseline", str(exc))),
+        )
+
+    baseline["allow_red_baseline"] = allow_red
+    baseline["verification"] = {"ok": not failures, "checks": checks}
+    dispatch = replace(dispatch, meta=replace(dispatch.meta, baseline=baseline))
+    warnings = (
+        tuple(
+            DoctorWarning(error.path, f"--allow-red-baseline: {error.message}")
+            for error in failures
+        )
+        if allow_red
+        else ()
+    )
+    return replace(
+        report,
+        ok=not failures or allow_red,
+        errors=(*report.errors, *(failures if not allow_red else ())),
+        warnings=(*report.warnings, *warnings),
+        dispatch=dispatch,
+    )
 
 
 def _with_runtime_baseline(dispatch: Dispatch) -> Dispatch:
@@ -173,6 +415,7 @@ def _dry_run(
         "run_id": run_id or "",
         "cuts": [cut.id for cut in dispatch.cuts],
         "prompts": prompt_paths,
+        "bases": {cut.id: _dry_run_base(dispatch, cut) for cut in dispatch.cuts},
         "artifacts": {
             "dry_run_dir": str(dry_run_dir),
             "tracker": str(dry_run_dir / "tracker.md"),
@@ -186,6 +429,31 @@ def _dry_run(
         encoding="utf-8",
     )
     return payload
+
+
+def _dry_run_base(dispatch: Dispatch, cut: Cut) -> dict[str, str]:
+    """Show one cut's resolved base the way a launch would see it.
+
+    ``cut:<id>`` bases resolve only after the dependency settles, so a
+    dry-run reports them as pending instead of guessing a commit.
+    """
+    kind = classify_base(cut.base)
+    if kind == "plan":
+        return {
+            "base_ref": "",
+            "base_sha": str(dispatch.meta.baseline.get("head") or ""),
+            "base_source": "plan",
+        }
+    if kind == "cut":
+        target = cut.base[len(BASE_CUT_PREFIX) :].strip()
+        return {
+            "base_ref": cut.base,
+            "base_sha": f"<pending: {target}>",
+            "base_source": "cut",
+        }
+    ref = cut.base if kind == "sha" else f"refs/heads/{cut.base}"
+    resolved = _git(dispatch.meta.repo, ["rev-parse", "--verify", f"{ref}^{{commit}}"])
+    return {"base_ref": cut.base, "base_sha": resolved, "base_source": kind}
 
 
 def _write_dry_run_tracker(
@@ -253,5 +521,5 @@ def _git(repo: str, args: list[str]) -> str:
     return proc.stdout.strip() if proc.returncode == 0 else ""
 
 
-if __name__ == "__main__":  # pragma: no cover
+if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))

@@ -24,24 +24,44 @@ gate.
 
 Must cover (assembled FROM context, not copied from a template):
 
-- [ ] repo path + branch; Living Tree rules (zero worktree, zero branch
-      switching, re-read before edit, never stash/discard others' work)
+- [ ] selected runtime + parent/effective roots + baseline branch/full SHA;
+      respect explicit Founder `local-worktrees` versus `local-native`/Living
+      Tree or VM selection. Typed dispatch supervisor supplies the dedicated
+      worker checkout on `cut/<cut-id>`; no worker-created second worktree,
+      branch switching, parent-tree writes or self-integration
+- [ ] re-read before edit; narrow staging (`git add -- <owned-path>` or owned
+      hunks); never `git add -A`, `git add .`, stash/discard or commit foreign work
 - [ ] structural-truth tool order (loctree-first; fallback report path for
       misses)
 - [ ] architecture invariants (e.g. presentation in app/ never core/) and
       UNTOUCHABLE paths/values, config precedence
 - [ ] language/toolchain footguns relevant to the repo (e.g. Rust 2024
       if-let temp scope: snapshot-into-let before `if let` on locks)
-- [ ] hard prohibitions: ZERO push/PR/release; NEVER --no-verify; repo
+- [ ] current wave's push/PR/install/release boundaries; Charter permits an
+      authored feature-branch fast-forward push unless the wave forbids it.
+      Trunk merges, force-push, PR merge/close, tag/branch deletion and deploy
+      are Founder buttons. `--no-verify` only for a
+      declared Founder-authorized local compile-embargo checkpoint with a
+      skipped-gate receipt; push with it is Founder-only; repo
       linter taboos (no unwrap(), no sleep() in tests, …)
 - [ ] commit contract: format + trailers the hook enforces (worker's own
       agent/runtime identity, real session id, date command)
-- [ ] gates-before-commit line (the worker runs them; the dispatcher won't)
+- [ ] focused gates before commit run synchronously by the headless worker;
+      supervisor runs declared verifiers, integrator owns broad integration gates.
+      Finish report and commit this turn; background completions cannot wake workers
 - [ ] SUBSTRATE_FAILURE escape hatch: poisoned tree → no half-commit, report
       the failure line instead
-- [ ] REPORT path: `<reports_dir>/<cut_id>_report.md` + required sections
+- [ ] REPORT path: launcher-supplied `VIBECRAFTED_REPORT_PATH` beneath the
+      canonical artifact root; preserve machine-owned `run_id`/`session_id`,
+      finalized/status/claim semantics + required sections
       (files, gate evidence, acceptance [x]/[?]/[!], unverified, next step,
       commit SHA + 3 facts)
+- [ ] Operator alone writes ignored `<repo-root>/.vibecrafted/THE_JOURNAL.md`;
+      workers return reports. Worker checkboxes are claims, never signatures for
+      Operator/Founder; source gates do not prove installed/live acceptance
+- [ ] generated skill manifest owner (`scripts/gen_skill_provenance.py`),
+      `make skills-check UPDATE=1` after skill-byte edits, and dependency admission
+      for any generator cut; integrator regenerates combined history after admission
 
 ### 2. BRIEF — the full cut brief
 
@@ -90,6 +110,10 @@ Launch only via file:
 ```bash
 bash -c 'ulimit -f unlimited; vibecrafted <skill> <agent> --file <prompt.md>'
 ```
+
+Pass the declared pin with `--model <pin>` for direct worker launch. For a typed
+plan, use `cuts[].model`; do not silently substitute a different model. Arm the
+supervisor-side `vibecrafted await <agent> --run-id <id>` immediately after launch.
 
 ## Idempotency rule (refire-readiness)
 

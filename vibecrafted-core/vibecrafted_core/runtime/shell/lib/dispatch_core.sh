@@ -54,15 +54,10 @@ _vetcoders_dispatch_skill_prompt() {
   shift 7
 
   (
-    # shellcheck disable=SC2030
     export VIBECRAFTED_RUN_ID="$run_id"
-    # shellcheck disable=SC2030
     export VIBECRAFTED_RUN_LOCK="$run_lock"
-    # shellcheck disable=SC2030
     export VIBECRAFTED_SKILL_CODE="$skill_code"
-    # shellcheck disable=SC2030
     export VIBECRAFTED_LOOP_NR="$loop_nr"
-    # shellcheck disable=SC2030
     export VIBECRAFTED_SKILL_NAME="$skill"
     _vetcoders_prompt_text "$tool" implement "$prompt" "$@"
   )

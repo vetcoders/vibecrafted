@@ -40,11 +40,11 @@ import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from .clock import utc_now_iso
 from .report_contract import validate_report_file
 from .run_mutation import RunMetaMutationError, mutate_run_meta
 from .run_triage import (
@@ -483,11 +483,6 @@ def build_trust_settlement_event(
     )
 
 
-def _now_iso() -> str:
-    """Return the current UTC time as an ISO-8601 string."""
-    return datetime.now(timezone.utc).isoformat()
-
-
 def _as_bool(value: Any) -> bool:
     """Coerce a payload value to bool, treating common truthy strings loosely."""
     if isinstance(value, bool):
@@ -823,7 +818,7 @@ def settle_payload(
     if not _is_terminal(payload):
         return None
 
-    settled_at = now or _now_iso()
+    settled_at = now or utc_now_iso()
     claim_digest = claim_digest_from_payload(payload)
     waived = _has_operator_waive(payload)
 
@@ -1103,7 +1098,7 @@ def orphan_settlement_payloads(
     Used by the board so orphan artifacts are never silent — they always
     contribute to the TUI ``n`` count until cleaned up or waived.
     """
-    stamp = now or _now_iso()
+    stamp = now or utc_now_iso()
     payloads: list[dict[str, Any]] = []
     for path in orphan_markdown_paths(artifacts_root):
         digest = hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:12]
@@ -1231,7 +1226,7 @@ def persist_await_verdict(
     Returns the fields to merge into a board projection even when meta is
     missing (projection-only write).
     """
-    stamp = settled_at or _now_iso()
+    stamp = settled_at or utc_now_iso()
     fields: dict[str, Any] = {
         "await_rc": rc,
         "await_outcome": outcome,

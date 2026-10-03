@@ -2,13 +2,16 @@
 
 `vc-partner` jako skill interaktywny nie uruchamia runtime'u automatycznie.
 
-Runtime startuje dopiero, gdy framework uruchomi:
+Runtime startuje tylko z twarzą TTY (ta sama rodzina co `vc-init`):
 
 ```bash
-vibecrafted partner <agent> --prompt '<intent>'
-vibecrafted partner <agent> --file /path/to/shape.md
-vc-partner <agent> --prompt '<intent>'
+vibecrafted partner <agent>
+vibecrafted partner <agent> --runtime plain
+vc-start   # potem [Nowy] z rytuałem partner, potem /vc-partner
 ```
+
+`vc-partner` bez TTY odmawia. `--prompt` / `--file` na
+`vibecrafted partner` to dodatkowy kontekst seed, nigdy headless worker.
 
 ## Odpowiedzialności runtime'u
 

@@ -99,32 +99,40 @@ or misses a surface, append feedback to `~/.vibecrafted/loctree/loctree-fail.md`
 
 ## Native Delegation Policy
 
-When using native subagents, default to the same frontier as the parent agent.
+Pick each subagent's model by the **subtask's economics** (Founder rule,
+2026-10-03 — supersedes the 2026-04-10 same-tier parity default): choose a
+model with a justified margin above the capability and quality the cut
+requires, then select the most economical option among the models that clear
+that bar. This applies to the whole fleet, not just Codex.
 
-Why:
+In practice:
 
-- Same-named native delegation preserves the closest reasoning style to the parent.
-- It maximizes context locality and cache reuse opportunities.
-- On the same repo and task family, this is usually the best cost-to-quality default.
+- **Mechanical fan-out** (rename sweeps, fixture writing, format probes,
+  bounded file reads, boilerplate tests) → fast/cheap tier. Serializing this
+  work on a frontier model is waste in both directions: slower delivery AND
+  higher cost.
+- **Load-bearing reasoning** (architecture, gnarly debugging, interpreting a
+  Founder canon, high-blast-radius edits) → the parent's tier or stronger.
+  Use a stronger model immediately when ambiguity, dependency depth, or the
+  consequence of error warrants it; never force a cheap-first trial or defend
+  a poor result because it cost less.
+- Escalate after a demonstrated limitation, without automatically redoing
+  every economical result on a stronger model.
 
-Default:
+Tie-breaker, not law: same-family models preserve cache locality and the
+closest reasoning style to the parent — prefer them when two options clear
+the capability bar equally. If you trade down for speed or availability,
+recover quality in the parent orchestration pass.
 
-- Parent model -> the same exact native model, when available.
-- If the exact model is unavailable, use the nearest native equivalent and say so explicitly.
+Runtime availability notes:
 
-> “Parent model" means the same concrete model identity, not merely the same vendor or family.
-
-Exceptions:
-
-- Codex: You may delegate to `gpt-5.3-codex-spark` with `xhigh` when the task benefits from extreme speed. Treat Spark as a fast execution tier; the parent agent remains responsible for final quality.
-- Claude: For extensive long-running tasks, prefer `opus[1m]`; for easier or lighter tasks, prefer `sonnet[1m]`.
-- Gemini: If `gemini-3.1-pro-preview` is unavailable or unstable during peak demand, fallback native delegation to `auto-gemini-3`.
-
-Rule:
-
-- Default to same-named native agents first.
-- Use cross-model exceptions intentionally, never casually.
-- If you trade down for speed or availability, recover quality in the parent orchestration pass.
+- Claude: for extensive long-running tasks prefer `opus[1m]`; for lighter
+  tasks `sonnet[1m]`.
+- Gemini: if `gemini-3.1-pro-preview` is unavailable or unstable during peak
+  demand, fall back to `auto-gemini-3`.
+- A subagent role label alone does not prove the actual model or reasoning
+  effort; when confirming routing, use available runtime metadata, without
+  mandatory polling after every spawn.
 
 ## Escalation Direction
 

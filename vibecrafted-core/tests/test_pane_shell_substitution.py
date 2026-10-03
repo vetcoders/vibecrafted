@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from vibecrafted_core.vc_frame_delivery import substitute_pane_shell
+from vibecrafted_core.vc_frame_staging import substitute_pane_shell
 
 
 def test_counts_match_research_workflow_style() -> None:

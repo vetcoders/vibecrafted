@@ -61,8 +61,8 @@
       "en": "Local host needs no setup — Docker daemon available via Unix socket."
     },
     "tailnet_prompt_hostname": {
-      "pl": "Nazwa hosta w tailnet (np. dragon, ops-linux, silver)",
-      "en": "Tailnet hostname (e.g. dragon, ops-linux, silver)"
+      "pl": "Nazwa hosta w tailnet (np. host-a, host-b)",
+      "en": "Tailnet hostname (e.g. host-a, host-b)"
     },
     "tailnet_test_msg": {
       "pl": "Testowanie połączenia z mesh hostem...",
@@ -153,6 +153,10 @@
         "pl": "~/.gemini/ — sesje Gemini (persistent)",
         "en": "~/.gemini/ — Gemini sessions (persistent)"
       },
+      "cursor_sessions": {
+        "pl": "~/.cursor/ — sesje Cursor (persistent)",
+        "en": "~/.cursor/ — Cursor sessions (persistent)"
+      },
       "vibecrafted_artifacts": {
         "pl": "~/.vibecrafted/ — artefakty vibecrafted (plany, raporty)",
         "en": "~/.vibecrafted/ — vibecrafted artifacts (plans, reports)"
@@ -237,6 +241,18 @@
     "cancelled": {
       "pl": "Anulowane przez użytkownika",
       "en": "Cancelled by user"
+    },
+    "command_bridge_provider_hint": {
+      "pl": "Command bridge wymaga jednego skonfigurowanego dostawcy (claude/codex/grok/kimi) — przygotowanie hosta pozostaje otwarte.",
+      "en": "Command bridge needs one configured provider (claude/codex/grok/kimi) — host preparation stays open."
+    },
+    "command_bridge_ready": {
+      "pl": "Command bridge: gospodarz przygotowany (jednorazowo, dla wszystkich klientów).",
+      "en": "Command bridge: host prepared (once, for every client)."
+    },
+    "command_bridge_deferred": {
+      "pl": "Command bridge: przygotowanie odroczone",
+      "en": "Command bridge: preparation deferred"
     }
   },
   "errors": {

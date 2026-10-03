@@ -1,6 +1,14 @@
 from __future__ import annotations
 
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VC_FRAME_CONFIG = (
@@ -33,18 +41,81 @@ def test_vc_frame_config_uses_plain_ctrl_without_option_layer() -> None:
     payload = VC_FRAME_CONFIG.read_text(encoding="utf-8")
 
     assert 'unbind "Alt f" "Alt n" "Alt i" "Alt o"' in payload
-    assert 'bind "Ctrl n" { NewPane; }' in payload
+    assert 'bind "Ctrl n" { NewTab; }' in payload
     assert "Ctrl Shift" not in payload
+
+
+def test_ctrl_n_opens_a_new_tab() -> None:
+    """Founder 2026-09-24: Ctrl+N opens a real shell tab, matching the Quick cmd banner."""
+
+    payload = VC_FRAME_CONFIG.read_text(encoding="utf-8")
+
+    assert 'bind "Ctrl n" { NewTab; }' in payload
+    assert 'bind "Ctrl n" { NewPane; }' not in payload
+
+
+def test_composer_bind_does_not_enable_line_numbers() -> None:
+    """Composer is prose. A mouse selection copies cells; a gutter rides into paste.
+
+    The Super+e fallback must not resurrect `set number` after 60d9986f dropped
+    the gutter from vc-composer.sh.
+    """
+    payload = VC_FRAME_CONFIG.read_text(encoding="utf-8")
+    composer = (
+        REPO_ROOT
+        / "vibecrafted-core"
+        / "vibecrafted_core"
+        / "config"
+        / "vc-frame"
+        / "vc-composer.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "-c 'set number'" not in payload
+    assert "-c 'set nonumber'" in payload
+    assert "set nonumber" in composer
+    assert "set norelativenumber" in composer
+    assert "Draft in vim with: number," not in composer
 
 
 def test_vc_frame_config_enables_kitty_protocol_for_super_switcher() -> None:
     # Key-contract v3 (8a0f14e65): the global Super/Cmd switcher rides kitty
     # CSI-u sequences. Disabling this strands "Super Left/Right/Up/Down" and
-    # "Super e" as raw escape passthrough in every pane — see kronika
+    # "Super e" as raw escape passthrough in every pane — see doctrine
     # 2026-08-05 for the live-session repro.
     payload = VC_FRAME_CONFIG.read_text(encoding="utf-8")
 
     assert "support_kitty_keyboard_protocol true" in payload
+
+
+def test_quick_cmd_shortcut_reuses_active_compact_bar_including_locked_mode() -> None:
+    """Cmd+Shift+. is a shared message, not a second quick-command launcher."""
+    payload = VC_FRAME_CONFIG.read_text(encoding="utf-8")
+    shared = payload[payload.index("    shared {") : payload.index("    shared_except")]
+    quick_cmd = shared[
+        shared.index('bind "Super Shift ."') : shared.index(
+            "        // Command Composer"
+        )
+    ]
+
+    assert 'bind "Super Shift ."' in quick_cmd
+    assert 'MessagePlugin "compact-bar"' in quick_cmd
+    assert 'name "vc_quick_cmd"' in quick_cmd
+    assert "Run " not in quick_cmd
+
+
+def test_cmd_n_opens_existing_session_manager_not_a_direct_tab() -> None:
+    """Cmd+N is Create new workspace through the existing Session Manager."""
+    payload = VC_FRAME_CONFIG.read_text(encoding="utf-8")
+    shared = payload[payload.index("    shared {") : payload.index("    shared_except")]
+    workspace = shared[
+        shared.index('bind "Super n"') : shared.index('bind "Super Shift ."')
+    ]
+
+    assert 'bind "Super n"' in workspace
+    assert 'LaunchOrFocusPlugin "session-manager"' in workspace
+    assert "floating true" in workspace
+    assert "move_to_focused_tab true" in workspace
+    assert "NewTab" not in workspace
 
 
 def test_vc_frame_config_ctrl_q_closes_focus_not_session() -> None:
@@ -95,6 +166,17 @@ def test_vc_frame_config_session_resilience() -> None:
     assert "serialize_pane_viewport true" in payload
 
 
+def test_host_chrome_is_not_a_product_configuration_asset() -> None:
+    payload = VC_FRAME_CONFIG.read_text(encoding="utf-8")
+    code = "\n".join(line.split("//", 1)[0] for line in payload.splitlines())
+    assert "default_layout" not in code
+    assert not (LAYOUTS_DIR / "host.kdl").exists()
+    assert not (LAYOUTS_DIR / "vibecrafted-host.kdl").exists()
+    operator = LAYOUTS_DIR / "operator.kdl"
+    assert operator.is_file() and not operator.is_symlink()
+    assert 'tab name="Start here"' in operator.read_text(encoding="utf-8")
+
+
 def test_vc_frame_config_has_plugin_aliases() -> None:
     payload = VC_FRAME_CONFIG.read_text(encoding="utf-8")
 
@@ -102,6 +184,7 @@ def test_vc_frame_config_has_plugin_aliases() -> None:
     # zellij: URL scheme; vc-frame: is rejected by the 0.45.x parser.
     assert 'compact-bar location="zellij:compact-bar"' in payload
     assert 'session-manager location="zellij:session-manager"' in payload
+    assert 'frame-host location="zellij:session-manager"' in payload
 
 
 def test_all_layouts_keep_sessions_rail_always_visible() -> None:
@@ -136,9 +219,11 @@ def test_layout_tab_branding_matches_frame_contract() -> None:
     for layout_file in sorted(LAYOUTS_DIR.glob("*.kdl")):
         payload = layout_file.read_text(encoding="utf-8")
         if layout_file.name == "operator.kdl":
-            # Launch alias for default_layout "vibecrafted": Start here + Shell.
+            # Launch alias for default_layout "vibecrafted": product workspace tabs.
             assert 'tab name="Start here"' in payload
+            assert 'tab name="Agents"' in payload
             assert 'tab name="Shell"' in payload
+            assert 'tab name="Voc"' in payload
             continue
         assert "𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍." in payload, f"{layout_file.name} missing branded tab name"
 
@@ -153,17 +238,29 @@ def test_marbles_layout_is_operator_centric() -> None:
 
 
 def test_operator_layout_matches_vibecrafted_standard() -> None:
-    """vc-start operator.kdl is the launch alias of default_layout vibecrafted:
-    Start here + Shell, SESSIONS rail on every tab, no strider, no spaced names."""
+    """vc-start operator.kdl is the Start here / guest workspace layout:
+    Start here + Agents + Shell + Voc, SESSIONS rail on every tab, no strider."""
     payload = (LAYOUTS_DIR / "operator.kdl").read_text(encoding="utf-8")
     assert 'tab name="Start here"' in payload
+    assert 'tab name="Agents"' in payload
     assert 'tab name="Shell"' in payload
-    assert 'guide_mode "mission-control"' in payload
+    assert 'tab name="Voc"' in payload
+    assert "vc-start-here.py" in payload
+    assert "vc-agent-workshop.py" in payload
+    assert "pane-python" in payload
+    assert "VIBECRAFTED_PYTHON" in payload
+    assert "$HOME/.local/bin/voc" in payload
+    assert payload.index(
+        "VIBECRAFTED_RUNTIME_ROOT:+$VIBECRAFTED_RUNTIME_ROOT/bin/vc-o"
+    ) < payload.index("command -v voc")
+    assert "vibecrafted tui" in payload
     assert "session-manager" in payload
     assert "rail true" in payload
     assert "default_tab_template" in payload
     assert "compact-bar" in payload
     assert "status-bar" in payload
+    assert "session_layer" in payload
+    assert 'tab name="Start here" focus=true' in payload
     assert "vibecrafted start" in payload
     # Rejected parallel path (ignore comments).
     active = "\n".join(
@@ -176,9 +273,51 @@ def test_operator_layout_matches_vibecrafted_standard() -> None:
     assert "VibeCrafted" not in active
 
 
-def test_operator_layout_guide_and_shell_tabs() -> None:
+def test_operator_voc_uses_active_generation_before_standalone_voc(
+    tmp_path: Path,
+) -> None:
     payload = (LAYOUTS_DIR / "operator.kdl").read_text(encoding="utf-8")
-    assert 'plugin location="about"' in payload
+    line = next(line for line in payload.splitlines() if 'args "-lc" "for c in' in line)
+    match = re.search(r'args "-lc" (".*")', line)
+    assert match is not None
+    command = json.loads(match.group(1))
+    runtime_bin = tmp_path / "runtime/bin"
+    runtime_bin.mkdir(parents=True)
+    vc_o = runtime_bin / "vc-o"
+    vc_o.write_text("#!/bin/sh\nprintf 'active-generation\\n'\n")
+    vc_o.chmod(0o755)
+    old_bin = tmp_path / "old-bin"
+    old_bin.mkdir()
+    old_voc = old_bin / "voc"
+    old_voc.write_text("#!/bin/sh\nprintf 'old-voc\\n'\n")
+    old_voc.chmod(0o755)
+    env = os.environ.copy()
+    env["VIBECRAFTED_RUNTIME_ROOT"] = str(tmp_path / "runtime")
+    env["PATH"] = f"{old_bin}:/usr/bin:/bin"
+    result = subprocess.run(
+        ["bash", "-lc", command], env=env, capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "active-generation\n"
+
+
+def test_dashboard_and_marbles_probe_packaged_mission_control() -> None:
+    """Runtime Pack helpers live under vibecrafted_core/runtime, not ~/.vibecrafted/runtime."""
+    for name in ("dashboard.kdl", "marbles.kdl"):
+        payload = (LAYOUTS_DIR / name).read_text(encoding="utf-8")
+        assert "vibecrafted-core/vibecrafted_core/runtime" in payload, name
+        assert "vc-operator/mission-control/" in payload, name
+
+
+def test_operator_layout_start_here_and_shell_tabs() -> None:
+    payload = (LAYOUTS_DIR / "operator.kdl").read_text(encoding="utf-8")
+    assert 'command="bash" name="Start Here"' in payload
+    assert 'plugin location="about"' not in payload
+    assert "pane-python" in payload
+    # `config install` is retired (e1d7a791); the Runtime Pack installer owns
+    # product configuration and the repair hint routes through make install.
+    assert "config install" not in payload
+    assert "make install" in payload
     assert 'name="Shell"' in payload
     # Shell wakes with banner then zsh (not bare suspended /bin/zsh).
     assert "exec zsh" in payload or "zsh -l" in payload
@@ -198,3 +337,60 @@ def test_research_layout_synthesis_focused() -> None:
     payload = (LAYOUTS_DIR / "research.kdl").read_text(encoding="utf-8")
     assert 'name="synthesis"' in payload
     assert 'size="55%"' in payload
+
+
+def test_layout_contract_gate_is_fail_closed_on_hash_drift(tmp_path: Path) -> None:
+    layouts = tmp_path / "layouts"
+    shutil.copytree(LAYOUTS_DIR, layouts)
+    config = tmp_path / "config.kdl"
+    shutil.copy2(VC_FRAME_CONFIG, config)
+    lock = tmp_path / "layouts.sha256.json"
+    shutil.copy2(LAYOUTS_DIR.parent / "layouts.sha256.json", lock)
+    command = [
+        sys.executable,
+        str(REPO_ROOT / "scripts/check-layout-contract.py"),
+        "--layouts-dir",
+        str(layouts),
+        "--config",
+        str(config),
+        "--lock",
+        str(lock),
+    ]
+
+    clean = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert clean.returncode == 0, clean.stdout + clean.stderr
+
+    with (layouts / "dashboard.kdl").open("a", encoding="utf-8") as handle:
+        handle.write("\n// unreviewed layout drift\n")
+    drifted = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert drifted.returncode != 0
+    assert "layout hashes drifted" in drifted.stderr
+
+
+@pytest.mark.parametrize("name", ["host.kdl", "vibecrafted-host.kdl"])
+def test_layout_gate_refuses_external_host_even_when_updating_hashes(
+    tmp_path: Path,
+    name: str,
+) -> None:
+    layouts = tmp_path / "layouts"
+    shutil.copytree(LAYOUTS_DIR, layouts)
+    (layouts / name).write_text("layout { pane; }\n")
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts/check-layout-contract.py"),
+            "--layouts-dir",
+            str(layouts),
+            "--config",
+            str(VC_FRAME_CONFIG),
+            "--lock",
+            str(tmp_path / "lock.json"),
+            "--update",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "host chrome belongs to the vc-frame binary" in result.stderr
+    assert not (tmp_path / "lock.json").exists()

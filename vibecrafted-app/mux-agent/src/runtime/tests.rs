@@ -888,6 +888,8 @@ async fn health_check_fails_for_missing_socket() {
 }
 
 #[tokio::test]
+// The transport roundtrip requires the independently installed Loctree MCP executable; make test-
+// full runs this exact test, whereas ordinary unit CI has no authority to install that foundation.
 #[ignore = "opcjonalny test roundtrip z lokalnym ~/.local/bin/loctree-mcp (uruchamiany przez make test-full)"]
 async fn mux_transport_roundtrip_with_loctree_mcp() {
     let loctree = expand_path("~/.local/bin/loctree-mcp");

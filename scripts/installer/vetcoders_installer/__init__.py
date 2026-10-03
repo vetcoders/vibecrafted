@@ -43,7 +43,7 @@ try:
     import tty
 
     _HAS_TERMIOS = True
-except ImportError:  # pragma: no cover - Windows
+except ImportError:  # Windows
     _HAS_TERMIOS = False
 
 try:
@@ -58,14 +58,14 @@ try:
     )
 
     HAS_RICH = True
-except ModuleNotFoundError:  # pragma: no cover - soft fallback path
+except ModuleNotFoundError:  # soft fallback path
     HAS_RICH = False
 
 try:
     from vetcoders_installer.tui import InstallerIntroApp
 
     _HAS_TEXTUAL = True
-except ImportError:  # pragma: no cover - textual not installed
+except ImportError:  # textual not installed
     _HAS_TEXTUAL = False
 
 
@@ -691,6 +691,8 @@ def _show_intro_flow(
                     console.print("\n  [yellow]Cancelled — no changes were made.[/]\n")
                     return "cancelled"
                 return "completed"
+            # The optional Textual renderer may fail inside third-party widgets; this preview must
+            # fall back to ANSI rendering without performing an installation twice.
             except Exception as _textual_exc:  # noqa: BLE001
                 # Textual crashed -- fall through to the manual path.
                 _ = _textual_exc
@@ -1237,6 +1239,8 @@ def main() -> int:
 
     try:
         manifest = Manifest.load(manifest_path)
+    # Manifest loading includes version-dependent parsers and validation; every parse exception must
+    # produce the CLI error and exit 2 before installer execution.
     except Exception as exc:  # noqa: BLE001
         print(f"error: failed to parse {manifest_path}: {exc}", file=sys.stderr)
         return 2

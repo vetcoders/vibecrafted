@@ -2,6 +2,8 @@ import json
 import zipfile
 from pathlib import Path
 
+from vibecrafted_core.cli import LAUNCHERS
+
 from scripts import build_marketplace_bundle as bundle
 
 
@@ -65,6 +67,18 @@ def test_top_level_skill_dirs_are_live_skills_or_foundations() -> None:
             )
 
     assert not offenders, "\n".join(offenders)
+
+
+def test_forensics_documentation_routes_match_the_command_deck() -> None:
+    assert "workflow" in LAUNCHERS
+    assert "forensics" not in LAUNCHERS
+    skills = bundle.REPO_ROOT / "vibecrafted-core/vibecrafted_core/skills"
+    for root in (skills, skills / "pl"):
+        for name in ("SKILL.md", "FLOW.md"):
+            text = (root / "vc-forensics" / name).read_text(encoding="utf-8")
+            assert "`/vc-forensics`" in text
+            assert "`vibecrafted workflow <agent> --file <brief.md>`" in text
+            assert "`vibecrafted forensics <agent>`" not in text
 
 
 def test_write_bundle_uses_current_metadata_and_skill_inventory(tmp_path: Path) -> None:

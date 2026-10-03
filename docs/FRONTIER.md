@@ -1,18 +1,19 @@
-# Frontier Config — Starship, Atuin, Optional vc-frame
+# Frontier Config — Starship, Atuin, vc-frame
 
 ## What This Is
 
-Frontier config is the lightweight operator layer that still belongs inside
-the current framework surface:
+Frontier config is the lightweight operator layer of prompt, history, and
+session presets:
 
 - `starship` for prompt context
 - `atuin` for searchable history
-- optional `vc_frame` config and dashboards for people who want a repo-owned session surface
+- `vc_frame` config and dashboards for a product-owned session surface
 
-The key constraint is non-invasive ownership: the repo can ship vc-frame assets
-without bulldozing the user's terminal setup. Frontier files resolve per asset,
-so an external companion config can override only the vc-frame bits while the repo
-still provides the prompt and history defaults.
+All product configuration lives in one place: `~/.config/vibecrafted/`. The
+installer publishes the active presets there (`starship.toml`,
+`atuin/config.toml`, `vc-frame/`) and preserves your edits on reinstall.
+Vibecrafted reads and writes no other configuration directory, so your own
+terminal setup stays yours.
 
 None of this is required. `vibecrafted` works without any of it.
 
@@ -30,18 +31,20 @@ That gives you:
 
 - a prompt with repo/runtime context
 - searchable shell history tuned for project recall
-- optional vc-frame dashboards that stay dormant until you launch them
+- vc-frame dashboards that stay dormant until you launch them
 
 If you already run your shell inside a `vc_frame` session, spawned agents still
-reuse panes automatically. If you want the repo-owned dashboards too, install
-the frontier presets and launch them explicitly with `vibecrafted dashboard`.
+reuse panes automatically. Launch the dashboards explicitly with
+`vibecrafted dashboard`.
 
 ---
 
 ## Starship
 
 The helper layer auto-detects Starship and points it at
-`config/starship.toml`.
+`~/.config/vibecrafted/starship.toml`, falling back to the shipped
+`config/starship.toml` of the installed generation. An explicit
+`STARSHIP_CONFIG` in your environment wins.
 
 What it shows:
 
@@ -60,7 +63,8 @@ vc-frontier-paths
 
 ## Atuin
 
-The repo keeps an Atuin config at `config/atuin/config.toml` for:
+Preferences live in `~/.config/vibecrafted/atuin/config.toml`, seeded from the
+shipped `config/atuin/config.toml`:
 
 - fuzzy history
 - workspace-first filtering
@@ -68,37 +72,29 @@ The repo keeps an Atuin config at `config/atuin/config.toml` for:
 - preview-enabled recall
 - noise filtering for trivial commands
 
+An explicit `ATUIN_CONFIG` in your environment wins.
+
 Keyboard Up is wired by `config/shell/atuin-up.zsh` (also in
 `vibecrafted-vm/zshrc.template`). Mouse wheel is **not** an Atuin concern —
-the Alacritty host preset splits primary-buffer scrollback from alternate-buffer
-arrows (`config/alacritty/`, canonical source `vc-frame/tools/alacritty/`).
-
-Install or refresh the sidecars with:
-
-```bash
-vc-frontier-install
-```
-
-If `vc_frame` is on your machine, the same command also stages the repo-owned
-`config.kdl` and dashboard layouts. Nothing gets forced on until you run a
-dashboard command or point your shell at those files. The installer places all
-three assets under `$HOME/.config/vetcoders/frontier/`, not into your global
-`$HOME/.config/vc-frame` or `$HOME/.config/starship.toml`.
+the product terminal policy splits primary-buffer scrollback from
+alternate-buffer arrows (`config/vc-terminal/vibecrafted.toml`, canonical
+source `vc-frame/tools/alacritty/`).
 
 ---
 
 ## Config Resolution
 
-The helper layer resolves each artifact independently:
+The helper layer resolves the Starship and Atuin presets per asset, first match
+wins:
 
-1. `$XDG_CONFIG_HOME/vetcoders/frontier/`
-2. `$VIBECRAFTED_HOME/tools/vibecrafted-current/config/`
+1. `~/.config/vibecrafted/` — the installer-owned product config
+2. `${VIBECRAFTED_TOOLS_HOME:-~/.local/share/vibecrafted/tools}/vibecrafted-current/config/` — shipped defaults of the installed generation
 3. `$VIBECRAFTED_ROOT/config/`
 4. `<current vibecrafted repo>/config/`
 
-That means repo-owned `starship` / `atuin` presets can stay local to the core
-framework while a companion repo can provide only `vc-frame/config.kdl` or only a
-single layout without being shadowed by the checkout you are currently in.
+vc-frame config is not searched: it is pinned to `~/.config/vibecrafted/vc-frame/`
+(developer mode on a source checkout pins the checkout's own
+`vibecrafted-core/vibecrafted_core/config/vc-frame/` instead).
 
 Inspect the active paths with:
 
@@ -110,19 +106,13 @@ vc-frontier-paths
 
 ## Shipped Surface
 
-The core repo now ships:
+The core repo ships:
 
-- repo-owned `vc_frame` layouts
-- repo-owned `vc_frame` config
-- repo-owned `starship` and `atuin` presets
+- `vc_frame` layouts and config
+- `starship` and `atuin` presets
+- the product terminal policy (`config/vc-terminal/`)
 
-What stays outside the core repo:
-
-- terminal-emulator presets such as Alacritty
-
-If you prefer `vc_frame`, keep using it. The spawn runtime still detects an
-active session and opens panes there when possible. If a companion repo stages
-`vc-frame/config.kdl` under `$HOME/.config/vetcoders/frontier/`, the helper layer can
-pick it up without changing the core repo contract. The difference is simple:
-the framework owns an optional dashboard surface, not your whole terminal
-identity.
+The installer publishes them into `~/.config/vibecrafted/`. If you prefer
+`vc_frame`, keep using it: the spawn runtime still detects an active session and
+opens panes there when possible. The framework owns an optional dashboard
+surface, not your whole terminal identity.

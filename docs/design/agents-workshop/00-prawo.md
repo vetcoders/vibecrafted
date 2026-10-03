@@ -60,6 +60,17 @@ Nie kopiujemy Tab #6 / Tab #7 — tylko proporcje canvy.
 
 Grok nie powinien był rysować 130 wierszy. Miał poprawić: „to piksele, nie komórki”.
 
+**Korekty 2026-08-19 (operator, na żywym railu):**
+
+1. Nagłówek railu i tytuły mówią projektem — `vibecrafted · Agents (3)` —
+   nigdy surową nazwą sesji (`w-cdfc-r035…`). Prawdziwą nazwę zna
+   control_plane, vc-server i vc-frame; UI pokazuje projekcję dla człowieka.
+   (Runtime: cut `b0c6c624` wprowadził miejsca i twarze; rail Layoutów
+   modeluje ten stan.)
+2. OTWARTE: oś „rytuał" karty to launchery vc-skill „jeśli w ogóle" —
+   operator zaczął korektę, nie domknął. Chipy `[init] [resume] [operator]
+[partner]` stoją do jego decyzji; fabryka nie utrwala ich bez tego.
+
 Poza tym z recenzji użytkownika zostaje:
 
 1. Karta nie przecina słów w tle.

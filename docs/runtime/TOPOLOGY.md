@@ -5,18 +5,21 @@ The Vetcoders operator runtime orchestrates AI-built software delivery across mu
 ## Runtime Surfaces
 
 1. **Recommended (1.4.1): vc-frame Dashboard**
+
    - **Command:** `vibecrafted dashboard` or `vc-start`
    - The primary, stable product experience.
    - It organizes work using the repo-owned vc-frame configuration and layout (e.g., `config/vc-frame/layouts/operator.kdl`).
    - Ensures agents do not "disappear" by providing a visible dashboard where sessions can be tracked, attached, and garbage-collected (`dashboard gc --apply`).
 
 2. **Experimental: Rust Operator Console**
+
    - **Command:** `vibecrafted tui`
    - A dedicated operator terminal built on the `operator-tui` / `vc-operator` crate.
    - Designed to run over shared control-plane state (polling `~/.vibecrafted/control_plane`).
    - Marked as experimental. If not installed, the command directs users to install it via `cargo install vc-operator`.
 
 3. **Fallback: Command Line Interface (CLI)**
+
    - **Command:** `vibecrafted help`, `vibecrafted <skill>`
    - Useful for headless execution and scripting, but not intended as the main interactive product experience.
    - Reverts to standard shell streams when vc-frame or the TUI is unavailable or unneeded.

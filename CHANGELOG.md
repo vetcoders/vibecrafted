@@ -5,6 +5,376 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Added
+
+- Agent quota telemetry on the owned `telemetry` PATH name. Hatch ships
+  `runtime/telemetry/{agy,kimi}-monitor/` (local-only quota/statusline
+  engines; shadow prices stay `api-equiv`). `telemetry agy|kimi
+line|once|daemon` plus `telemetry line` / `telemetry once` run those
+  engines; `telemetry smoke` is unchanged. voc Mission Control reads
+  `~/.gemini/agy-monitor/runtime/quota.json` and
+  `~/.kimi-code/runtime/quota.json` (override with
+  `VIBECRAFTED_AGY_QUOTA_JSON` / `VIBECRAFTED_KIMI_QUOTA_JSON`). Missing
+  files are silent. Optional LaunchAgents are
+  `com.vetcoders.telemetry.{agy,kimi}` — not Google or Moonshot DNS.
+  The usage page (`/usage`) now leads with a live quota board over those
+  same files (`GET /api/usage/quota`). Cost & usage underneath is unchanged.
+
+### Fixed
+
+- Research agents now prefer canonical `~/.config/vibecrafted/config.toml`
+  (`runtime.picking.research.default_agents`, respecting `XDG_CONFIG_HOME`)
+  over deprecated `~/.vibecrafted/config/research.yaml`. Hosts such as Silver
+  with both files now use the TOML roster. Legacy `install.toml` remains below
+  YAML; environment and explicit agent overrides remain above TOML. YAML model
+  and synthesizer settings remain a compatibility fallback. Any existing YAML
+  emits a deprecation warning. String lanes and flow-list agents are accepted;
+  uninterpretable entries are reported on stderr and in Research Lane Selection.
+  Empty or wholly invalid declared rosters fail instead of launching built-in lanes.
+
+- Run-state readers now share one derivation: events + snapshot + liveness at
+  read (`compute_view` / `project_lifecycle_read`). A lifecycle `state.json`
+  stuck on `launching` with no live owner is `abandoned` with age, never
+  `Operator: approve_transition`. voc, web Control/Lifecycle, run detail, and
+  `observe` consume that overlay. When vc-server is down, `observe` shells
+  `control-observe` (same crate as voc) and stamps `source`; without that
+  binary it admits `control_core_observe_unavailable` instead of inventing a
+  second Python classifier. Runtime Pack install scripts now ship
+  `control-observe` beside `scaffold-doctor`. `/api/control/runs` list and
+  transcript search use the same derived set as detail. Mission Control
+  agent/skill/wave/failure stats read derived control-plane snapshots, not a
+  second `*.meta.json` walk. Ctrl-C on a dispatch supervisor marks receipts
+  `stopped`/`interrupted`, and a worktree refuse names the owning `run_id`
+  plus a ready `--resume` command.
+
+- Pruning the **managed symlink views** of a runtime left out of the install now
+  requires that runtime's skills root to be pointer-free. With
+  `~/.codex/skills -> ~/.claude/skills` on a host where only `claude` is active,
+  every one of claude's live views was visible under the inactive `codex` name —
+  same inode, same managed target — and each one was unlinked as codex's
+  leftover, blanking the deck of the runtime that was actually installed. The
+  precondition is checked per runtime rather than per entry, because the entry
+  in front of the pruner is indistinguishable from a view it wrote itself; it is
+  the same gate shadow detection uses, so a root resolving into the store is out
+  of scope for the same reason.
+
+- A per-runtime skill root that is a **link** is now named instead of silently
+  skipped. Shadow detection has always refused to judge
+  `~/.junie/skills -> ~/notes` (`shutil.rmtree` follows the pointer) or
+  `~/.junie/skills -> ~/.vibecrafted/skills` (the store would compare identical
+  with itself), and the refusal is correct — but it left nothing behind. Doctor
+  reported no finding, install printed no line, and the `shadow-dirs` OK line
+  listed the directory among the ones it had just cleared, so a root nobody had
+  looked at read exactly like a clean host. Doctor now warns once per such root
+  as `skill-root:<runtime>` with the path, what it resolves to and the fact that
+  nothing under it is inspected or removed; the action list asks the operator to
+  check it and replace it with a real directory to get that runtime reconciled;
+  the OK line covers only the roots actually inspected; and install/update print
+  the same fact as they write the views. A root that resolves **into the store**
+  additionally gets no views written into it at all — every view there would be
+  a symlink inside the canonical store aimed at its own sibling, and the
+  root-rule sync would drop `*_RULE.md` copies in the store on every run, while
+  nothing is lost by skipping: that root _is_ the store, so
+  `~/.junie/skills/vc-x` already resolves to `~/.vibecrafted/skills/vc-x`
+  without a view.
+
+- Install, update and doctor now see **real directory copies** of bundled
+  skills sitting in per-runtime skill dirs. Installers before 3.x materialized
+  copies instead of views, so hosts carried stale `vc-*` directories in
+  `~/.junie/skills` next to the canonical `~/.agents/skills` symlink view
+  (27 on one host, 17 on another) — an agent that reads both directories saw a
+  stale duplicate, and no install, update or doctor run ever noticed:
+  shadow pruning only covered `claude`/`codex` and only symlinks, and orphan
+  pruning only covered names no longer in the bundle. Doctor reports one
+  `shadow-dir:<runtime>/<skill>` warning per copy with its exact path and
+  provenance class, and install/update quarantine the copy under
+  `~/.vibecrafted/backups/installer/shadowed-views-<timestamp>/` before
+  removing it. Provenance is proven from content, never from the `vc-` name.
+  A copy byte-identical to the store copy of that skill is claimed outright —
+  the store holds the same bytes. Anything else has to be proven by
+  `SKILL_PROVENANCE.json`, a new manifest shipped inside the skill store that
+  records, per skill, the sha256 of every `SKILL.md` Vibecrafted has ever
+  released _and_ every relative file path that has ever existed under that
+  skill's directory in the repository history. Both halves must hold: the
+  copy's `SKILL.md` is one of those releases, and every file it carries sits at
+  a path we shipped. A `SKILL.md` absent from the history was edited by its
+  owner, and a single unexpected file — an operator's own note or script next
+  to a shipped `SKILL.md` — withdraws the claim and is named in the warning.
+  That is what reaches the real-world case: the 27 copies recovered from one
+  host carry no generator marker of any kind, four of them still carry files
+  the current bundle has dropped, and every one of those hashes and paths is
+  still in the repository history. A missing, corrupt or older-schema manifest
+  disables that proof alone and never fails an install. Maintainers regenerate
+  with `scripts/gen_skill_provenance.py` (`--check` is the CI freshness gate);
+  the merge is additive and idempotent, so a shallow clone cannot shrink it. A
+  `vc-*` directory that proves nothing is classified `unknown` and is only
+  reported, never touched. A runtime skill dir that is a symlink, or that
+  resolves into the store, is skipped entirely — otherwise
+  `ln -s ~/.vibecrafted/skills ~/.junie/skills` would make the store compare
+  identical with itself and reconciliation would delete it through the link.
+  The canonical `~/.agents/skills` view is never modified, runtimes that carry
+  a managed view stay owned by the existing symlink checks for reporting, and
+  `--dry-run` mutates nothing.
+
+- The skill-view writer no longer removes a real directory to make room for a
+  symlink, and reconciliation no longer skips the runtimes that carry a managed
+  view. Those two facts were one bug: `~/.claude/skills` and `~/.codex/skills`
+  were excluded from the careful path — quarantine, then remove — precisely
+  because `create_skill_view_symlink` would `shutil.rmtree` whatever sat there
+  on its way to writing the link. So a copy in `~/.junie/skills` was backed up
+  before removal while the operator's own `vc-*` skill in `~/.claude/skills`
+  was deleted without one, on the very run meant to be careful. Reconciliation
+  now runs before the writer and covers every runtime, and the writer keeps any
+  real directory it still finds with a `Keeping real directory …` line; doctor
+  reports it. A link that already resolves to its target is left untouched
+  rather than unlinked and rewritten, which is what kept a runtime skills dir
+  symlinked into the store from having the store copy removed under it.
+
+- A stale copy in a runtime that carries a managed view (`~/.claude/skills`,
+  `~/.codex/skills`) now gets the provenance class and the command that fixes
+  it. Doctor reported it only as `symlink:<rt>/<skill>` "is a COPY", which says
+  nothing about whether the copy can be proven, and the action list then
+  suggested a plain `vibecrafted update` — which stops at "up to date" on a
+  host already at the latest version and never reconciles anything. Shadow
+  detection now runs for those runtimes too, so the `shadow-dir:` finding
+  appears beside the COPY finding, and both name `vibecrafted update --force`.
+
+- Orphan pruning follows the same provenance contract as shadow
+  reconciliation. A `vc-*` directory whose name has left the bundle was
+  `shutil.rmtree`d on sight — and `ask_yn` defaults to yes and returns that
+  default when stdin is not a TTY, so a piped install answered the prompt for
+  the operator. `vc-canvas` is a skill we retired; it is also a name someone
+  could park their own work under. A real orphan directory now has to prove the
+  same thing a shadowing copy proves (`SKILL.md` sha256 plus every file's blob
+  id, which covers retired skills because the manifest is built from all of
+  history), is quarantined under the same
+  `shadowed-views-<timestamp>/<location>/<skill>` layout before removal, and is
+  otherwise kept with a `mv` hint and never offered at the prompt. The two
+  reconciliation rails apply here too: never follow a symlink out of the tree,
+  and never let a runtime entry route a removal into the store. Pointers and
+  stray files are still removed as leftovers of views we wrote.
+
+- Reconciliation no longer needs the canonical `agents` view specifically. It
+  needs the skill to remain readable once the copy is gone, which is satisfied
+  either by `~/.agents/skills/<skill>` pointing at the store or by the copy's
+  own runtime being one the same pass is about to link. An advanced or `--tool`
+  selection can omit `agents` altogether, and then the old precondition was
+  unmeetable by construction: every proven copy stayed on the host for good.
+
+- Doctor now sees a real **file** sitting where a skill view belongs — an
+  operator's own note at `~/.grok/skills/vc-research`, say. Detection only ever
+  examined directories, so that file was invisible to every audit while the
+  view writer stood ready to remove it. It is reported as `unknown` with
+  "regular file, kept" and never touched: a view is a link and a legacy copy is
+  a directory, so a file there is nobody's but yours.
+
+- The view writer no longer trips over a **dangling** pointer. `exists()`
+  follows a link, so one aimed at something gone read as absent, and
+  `symlink_to` then raised `FileExistsError` on the entry that was plainly
+  still there. A junction outliving the generation it pointed into is the
+  realistic case; it is now removed as a pointer, like any other.
+
+- Skill-copy provenance proves **bytes, not names**. `SKILL_PROVENANCE.json`
+  (schema `vibecrafted.skill-provenance.v3`) now records, per skill, the sha256
+  of every `SKILL.md` released and — for every relative path under a directory
+  that has actually held a `SKILL.md` — the git blob id of every version of
+  that file ever committed. A copy is claimed only when its `SKILL.md` is a
+  release and every entry in it is a plain file whose bytes are a version we
+  shipped at that path. A path was never evidence on its own: an operator's own
+  edited `scripts/await.sh`, sitting at a path the bundle does ship, was
+  claimed by name and would have gone into the quarantine. The installer
+  recomputes a blob id locally as `sha1(b"blob <len>\0" + data)`, so nothing
+  needs git, a repository or a network.
+
+  Path scope is fixed in the same cut: `runtime/vc-marbles/` never held a
+  `SKILL.md`, so its files are not `vc-marbles`' files and no longer widen what
+  the installer may delete (13 such paths dropped). And because we have shipped
+  a file as a symlink (`skills/vc-agents/shell/vetcoders.zsh -> vetcoders.sh`)
+  that a copying installer dereferences, the manifest records the target's blob
+  ids under the link's path too — without which the largest recovered copy is
+  unprovable for one file out of 54.
+
+  `--check` now compares the whole rendered document instead of hunting for
+  missing entries, so an unsorted or duplicated manifest fails as well, and it
+  is wired into the Makefile `check` target — the doc called it a CI gate
+  before anything ran it. Manifest: 35 skills, 971 `SKILL.md` hashes, 366
+  paths, 2517 blob ids, 224 KB.
+
+- A stale junction standing where a skill view belongs is now removed as a
+  pointer (`os.rmdir`) instead of through `shutil.rmtree`. A junction reports
+  `is_dir()` and not `is_symlink()`, so it reached the writer's `rmtree`
+  branch, and `rmtree` raises on a junction on Windows — an install that met
+  one aborted with a traceback instead of relinking the view. `shutil.rmtree`
+  no longer appears in the writer at all, which is also what makes the
+  keep-what-is-real rule above impossible to undo by accident.
+
+- The skill-view writer keeps a real _file_ under a `vc-*` name as well as a
+  real directory; it used to remove it. A file had less protection than a
+  directory, not more: shadow detection only ever examines directories, and it
+  skips a runtime whose skills dir is reached through a symlink — so with
+  `~/.grok/skills -> ~/notes`, a note called `vc-research` was removed by the
+  writer with nothing quarantined and nothing reported.
+
+- Install now links the canonical `~/.agents/skills` view _before_ reconciling
+  skill-copy shadows, and the remaining runtime views after. Reconciliation
+  refuses to remove a copy until that view points at the store, so on a
+  first-ever install — where nothing has written it yet — every copy was kept,
+  and the next plain `vibecrafted update` stops at "up to date" without
+  retrying: the runtime would have gone on loading June-2026 copies until the
+  following release. One pass now links, reconciles and links.
+
+- Doctor's fix for a `shadow-dir:` finding is now `vibecrafted update --force`.
+  It used to say `vibecrafted update`, which on a host already on the latest
+  version prints `up to date` and returns before the reconciliation runs — the
+  advice could not fix what the finding reported.
+
+- Server web: the Loctree report opens whole in a browser. The document now
+  lives at the directory-style `/structure/report/` (`/structure/report`
+  redirects there), so Loctree's relative `loctree-*.js` references resolve
+  onto `/structure/report/{asset}` instead of `/structure/*` (404 under the
+  sandbox policy); and because the sandboxed document has an opaque origin
+  where `window.localStorage` throws, the server installs an in-memory Web
+  Storage stand-in as the first script — the report's tabs (Graph included)
+  and theme toggle work again. `allow-same-origin` is still never granted.
+  The stand-in gives `localStorage` and `sessionStorage` two independent
+  stores (an earlier cut shared one store between them, so a key written to
+  one was visible in the other and `clear()` emptied both); the behaviour is
+  pinned by an executable probe evaluated from the crate's tests and by the
+  real-browser acceptance script.
+- Lint: `ruff format --check .` no longer refuses a push over Python fences
+  in Markdown. ruff 0.16 includes `*.md` by default; docs stay on prettier.
+
+### Changed
+
+- CLI: `vibecrafted observe <agent>` is a live watch by default. It prints
+  the run status and a short rendered transcript backlog, then follows
+  appended transcript events (rendered through the agent's stream parser)
+  until the run turns terminal — exit 0 on a success state, 1 on a terminal
+  failure; Ctrl-C detaches and never touches the run. `--tail [N]` and
+  `--head [N]` are the bounded one-shot reads (N defaults to 40),
+  `--interval SECONDS` sets the watch poll cadence (default 1.0), and
+  `--json` emits one `vibecrafted.observe-event.v1` line per rendered event
+  between `begin`/`terminal` markers (`vibecrafted.observe-watch.v1`).
+- Linux source install no longer pretends to be a native Runtime Pack. A
+  checkout without `libexec/vc-terminal` keeps the product wrapper and
+  refuses pack publication; `--runtime-pack-file` still requires the host.
+  `scripts/build-linux-runtime-pack.sh` is the honest multi-arch assembler
+  name (`linux-x64` / `linux-arm64`). The Darwin publisher allowlist stays
+  closed; Linux packs are built on Linux.
+- `install.ps1` names the current `VERSION` and states that Windows native
+  install is not shipped. It no longer advertises a v1.x/v2.x lane or an
+  `iwr | iex` URL that the site does not serve.
+- macOS App: the console window uses one native unified toolbar (Back,
+  Forward, Home, runtime status, Retry/Repair/Terminal/Diagnostics, Open in
+  Browser) instead of a second content-row chrome; the recovery card keeps one
+  primary verb plus Stop Runtime.
+- macOS App: tool and reference views open as native AppKit tabs in the
+  console's tab group, one `WKWebView` per tab; repeated destinations focus the
+  existing tab, and closing a tab never touches the runtime or other tabs.
+- macOS App: a same-origin machine document (JSON endpoint) answering a
+  main-frame navigation is shown in a read-only reference tab; the Scaffold
+  document, its edits and history stay in place. `target=_blank` becomes a
+  tool tab, never a replacement of the current page.
+- macOS App: `View ▸ Open in Tab / Open in Browser` register the Loctree report
+  route (isolated, ephemeral data store) and the generated AICX dashboard file.
+  The Slack agent console is an owner-backed configured destination: the
+  operator names the served `/console` URL in `[tools.slack-console]` of
+  `~/.config/vibecrafted/config.toml`; unset reads as "not configured" with
+  the owner named, never a guessed port. Configured consoles open in a
+  `service`-scoped tab on their own origin.
+- Server web: Scaffold inspector endpoint links open outside the studio
+  document (`target="_blank"`). Global navigation is five views — Overview,
+  Transcripts, Structure, Plans, Frame. Workspaces, Sessions, Agents, Live
+  runs, Control, Activity and Guide stay in the Overview rail (same URLs).
+  AICX search sits on Structure. The artifact index remains the second,
+  document-level navigation. Clickable links keep the arrow cursor; the
+  web pointing-hand (`cursor: pointer`) is gone.
+- macOS App: Repair Runtime on a healthy config reconciles the LaunchAgent
+  instead of offering a Runtime Pack reinstall. Restart that fails because
+  the launcher hash drifted from the LaunchAgent offers reconcile, not only
+  OK. The service CLI keeps `--launcher` on `VIBECRAFTED_DECLARED_LAUNCHER`
+  when the supervisor is generation-private.
+- Server web: **Agent Manager** (`/agents`) stays distinct from **Live runs**
+  (`/runs`); **Sessions** lists canonical run transcripts joined by logical
+  session identity. They are Overview-rail catalogs, not extra primary views.
+- Server web: `/structure/report` serves the canonical Loctree report under a
+  Content-Security-Policy `sandbox` (opaque origin, no `fetch`/forms/frames)
+  with its sibling assets on `/structure/report/{asset}`, so the interactive
+  graph works without control-plane authority. `/api/aicx/search` and
+  `/api/aicx/reference` serve the private AICX corpus to a verified local peer
+  only, with a bounded `aicx` argv, a timeout, projected hits and a
+  server-owned reference route instead of `file://` links; `/aicx` is the
+  search page.
+- control-core: `logical_session_id` (aliases `vibecrafted_session_id`,
+  `workspace_session_id`) is projected from snapshots, runtime meta and the
+  event stream with one alias order and is never borrowed from the provider
+  `session_id`.
+- Configuration owner: `vibecrafted_core.server_config.load_tool_destinations`
+  validates the optional `[tools]` table of `config.toml` with the same
+  contract the App applies.
+- Server web: `GET /api/control/transcripts` streams each canonical
+  `transcript.human.log` from the start (no 256 KiB search window) and
+  paginates matching results (`offset`, `limit`, `has_more`, `total`),
+  including the unfiltered listing. The transcripts page loads pages of 50
+  and re-applies Fleet/Project focus after each fetch. The live run page
+  still shows a tail preview. Overview no longer links a guessed AICX port;
+  `/aicx` remains the deep-link search door and Structure hosts the same
+  form. `POST /api/structure/report` runs `loct report`
+  in a known control-plane workspace (local-peer gated; proven against a real
+  `loct` binary). Plan cards expose `data-focus-repo` and PPM infers a
+  transcript URL only for `data-ppm="run"`.
+- macOS App: when `[tools.vc-frame]` names a loopback `http` origin,
+  AppDelegate starts `vc-frame web` on that host:port while connecting the
+  deck. Tabs still never start the service; no port is guessed.
+
+See `docs/runtime/NATIVE_CONSOLE_TABS.md`.
+
+## 4.3.0 — prepared, not published
+
+### Changed
+
+- The root `VERSION` is the mechanical product-version authority for the core,
+  MCP, server, plugin and staged package metadata; the release gate rejects
+  drift before a carrier is built.
+- `make install` and the non-interactive bootstrap lane consume a signed,
+  provenance-closed Runtime Pack on macOS, Linux and WSL2. Maintainers can
+  still choose the explicitly named `make install-source` compiler lane.
+- Runtime Pack selection is platform/architecture specific and rejects a
+  carrier whose embedded version, platform, architecture or source/donor tuple
+  disagrees with the selected release asset.
+
+### Distribution status
+
+- v4.3.0 carrier metadata covers macOS plus Linux x86_64 and arm64. Publication,
+  production signing/notarization and the live channel update remain release
+  operator actions; this entry does not claim those outward steps occurred.
+
+> **4.2.0 scope — measured truths, finished seams.** Release integrity from the
+> donor snapshot through to the payload a stranger downloads, and one identity
+> order shared by every surface that reads a run.
+
+### Added
+
+- `vibecrafted init` carries unfinished work into every session. Each pass
+  projects this checkout's needs-attention settlement bucket, classifies every
+  run, and prints the exact command that continues it — newest first, with the
+  truncated remainder counted out loud. Silent on a clean checkout; an
+  unreadable ledger degrades to an honest `UNKNOWN` rather than bricking init.
+  Guardian-owned runs are listed without a command, because each holds a single
+  automatic attempt that a hand resume would burn.
+- `--snapshot-donors` on `scripts/build-vibecrafted-release.sh` builds a release
+  from a detached worktree at each donor's `HEAD`, so a dirty donor no longer
+  blocks a cut and never leaves a ghost worktree registration behind. A reaper
+  folded into the release cleanup trap removes and prunes them.
+- `--silence-timeout` on the dispatcher, and a supervisor bound on worker
+  **stdout silence** rather than wall-clock time. A worker that is slow but
+  talking is untouched; one blocked in `wait4` now settles through the existing
+  stall handler, which records `stall_kind=silence|wall_clock` so triage never
+  has to guess which bound fired.
+- `make payload-hygiene` refuses any release payload that names the build host,
+  reporting the topmost still-host-specific ancestor instead of only the exact
+  checkout string.
+
 ## 4.2.4 — 2026-08-22
 
 ### Changed
@@ -103,6 +473,32 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- The delivery proof kernel could not run its own verification subject. The
+  executor scrubs the environment to `_SAFE_ENV_KEYS` — correctly dropping
+  `PYTHONPATH` — while the subject was declared as a `-m` module invocation
+  resolved through the `sys.path` that scrub had just removed. It died with
+  `ModuleNotFoundError`, the kernel wrote `proof.failed`, and **every run it
+  judged settled `failed` regardless of the worker's real outcome.** The package
+  location is now a contract-declared argument instead of ambient state.
+- The supervisor heartbeat pulsed identically at 20 seconds and at 3 hours, so a
+  worker blocked in `wait4` held the supervisor open forever and the finished
+  `RunState.STALLED` handler was unreachable in production.
+- The live dashboard resolved its workspace identity from the repository root
+  alone, while the runtime stamps runs from the exported
+  `VIBECRAFTED_WORKSPACE_ID` first. Two implementations of one question, free to
+  disagree — and a dispatched worker in a worktree, whose root can never equal
+  its dispatcher's, was structurally invisible to the LIVE RUNS filter.
+- `docs/install.sh` exec'd `../install.sh` directly, but that file carries no
+  executable bit by design, so the shim died with exit 126 on every fresh clone.
+  It now execs `bash` explicitly, matching the packer contract.
+- Chained keychain traps under `set -e`: `_ks_trap_cleanup` returns the
+  triggering status on purpose, and that non-zero return tore the shell down
+  before the caller's chained handler ran. Measured on a real failed release
+  that skipped its own reaper and left two worktree registrations behind.
+- Four gates that guarded something real while being structurally unable to see
+  it break are now capable of failing — including the keychain regression suite,
+  which ran every child without `set -e`, the exact condition its target bug
+  requires.
 - The direct Python lifecycle test now owns an isolated `VIBECRAFTED_HOME` and
   clears inherited workspace/session identity before writing metadata. Test
   runs can no longer register `test_write_meta*` sessions in the operator's

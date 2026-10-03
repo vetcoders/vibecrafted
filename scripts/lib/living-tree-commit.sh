@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # living-tree-commit.sh — Plan 07 race-protected commit helper.
 #
-# Captures the kronika 2026-04-16/17 incident learning: under parallel
+# Captures the doctrine 2026-04-16/17 incident learning: under parallel
 # agent activity in a Living Tree checkout, `git commit --only path...`
 # is NOT atomic versus another agent's commit running in the same instant
 # — message of one commit can end up under the envelope of another's tree.
@@ -53,7 +53,7 @@
 #     such race has been observed in 4 plan rounds, (b) the false-positive
 #     it eliminates was hit in 3 of those 4 rounds, (c) the foreign-file
 #     detector still catches concurrent staging via pre-commit hooks (the
-#     actual injection vector from kronika 2026-04-16/17).
+#     actual injection vector from doctrine 2026-04-16/17).
 #
 #   * Limitation #2 (multi-line MSG quoting, 1 confirmation in Plan 06).
 #     `make commit-safe MSG="..."` failed on multi-line bodies due to
@@ -150,7 +150,7 @@ if ! git rev-parse --git-dir >/dev/null 2>&1; then
     exit 2
 fi
 
-# Disallow path arguments that look like add-everything sugar, per kronika
+# Disallow path arguments that look like add-everything sugar, per doctrine
 # safety doctrine (never `git add -A`, never `git add .`).
 for f in "${FILES[@]}"; do
     case "$f" in

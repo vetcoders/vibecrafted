@@ -308,11 +308,13 @@ CI (`.github/workflows/ci.yml`) runs with `--no-default-features` (tray off) so 
 2. **Library-first architecture.** Use `MuxConfig` + `spawn_mux_server` for embedding. CLI is feature-gated.
 
 3. **Feature gating:**
+
    - `cli` → wizard, scan, binaries (`clap`, `ratatui`, `crossterm`, `tracing-subscriber`).
    - `tray` → system tray icon (`tray-icon`, `image`).
    - For library-only consumers, depend with `default-features = false`.
 
 4. **Naming convention:**
+
    - Package name: `rmcp-mux` (crates.io, `Cargo.toml`).
    - Library name: `rmcp_mux` (Rust identifier, `use rmcp_mux::*`).
    - Binary names: `rmcp-mux`, `rmcp-mux-proxy`.
