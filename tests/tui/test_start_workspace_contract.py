@@ -26,11 +26,13 @@ The contract proven here, in the shipped shell sources (not a reimplementation):
 * **exclusive create** -- adapter lock plus inventory, then Frame create;
   two concurrent starts yield exactly one workspace and one refusal.
 * **enter** -- a caller with a terminal outside Frame attaches. Inside a live
-  Frame host, start creates a `--guest-workspace` session and projects it with
-  `vc-frame --session <host> project-workspace <guest> [--tab]`. Host identity
-  is the attached owner, not the repo name. A caller without a TTY *outside*
-  Frame creates first and then opens the VC Terminal; inherited `VC_FRAME_*`
-  *inside* a host is the shared-canvas path, not a nested window.
+  Frame session, start creates a `--guest-workspace` session and projects it
+  with `vc-frame --session <host> project-workspace <guest> [--tab]`. The
+  canvas owner is the attached session when that session is the host, and the
+  singleton live host when the attached session is a guest. A caller without
+  a TTY *outside* Frame creates first and then opens the VC Terminal;
+  inherited `VC_FRAME_*` inside a frame is the shared-canvas path, not a
+  nested window.
 
 Only the catalogue boundary and the Frame engine are stubbed. The stub refuses
 what the real engine refuses, with the real engine's words, keeps an exclusive
@@ -2524,6 +2526,8 @@ def test_tty_inside_an_attached_frame_projects_guest_no_nested_multiplexer(
 def test_inside_non_host_session_refuses_before_guest_create(
     tmp_path: Path,
 ) -> None:
+    """Attached to a guest and the inventory has no live host: nothing to
+    project into. Name that topology and the next move. Do not create."""
     scene = Scene(
         tmp_path,
         project="mlx-batch-runner",
@@ -2540,8 +2544,70 @@ def test_inside_non_host_session_refuses_before_guest_create(
     )
     combined = result.stdout + result.stderr
     assert _rc(result) == EXIT_INVENTORY, combined
-    assert "role: guest" in combined, combined
+    assert "no live Frame host" in combined, combined
+    assert "vc-start --new-host" in combined, combined
+    assert "not a singleton Frame host" not in combined, combined
     assert scene.live() == ["other-place"]
+    assert not _creates(scene.calls()), scene.calls()
+    assert not _projects(scene.calls()), scene.calls()
+
+
+def test_attached_guest_projects_new_workspace_into_live_singleton_host(
+    tmp_path: Path,
+) -> None:
+    """Founder P0 (2026-10-03): a shell attached to a guest, with one live
+    host in the inventory, is an ordinary dispatch. `vc-start --repo X`
+    creates guest X and projects it into that host. The attached guest is
+    not the canvas owner."""
+    scene = Scene(
+        tmp_path,
+        project="codescribe",
+        live=(HOST_SESSION, "vibecrafted"),
+        clients=(HOST_SESSION,),
+        guests=("vibecrafted",),
+    )
+    result = _run(
+        scene,
+        "vc-start --repo " + shlex.quote(str(scene.root)),
+        developer_root=True,
+        extra_env=_inside_host_env(scene, host="vibecrafted"),
+    )
+    assert _rc(result) == 0, result.stdout + result.stderr
+    _assert_projected_into_host(
+        scene, host=HOST_SESSION, guest="codescribe", result=result
+    )
+    assert not _switches(scene.calls()), scene.calls()
+    assert scene.live() == ["codescribe", HOST_SESSION, "vibecrafted"]
+    projected = _projects(scene.calls())[-1]["argv"]
+    assert projected[projected.index("--session") + 1] == HOST_SESSION
+    assert "vibecrafted" not in projected
+
+
+def test_attached_guest_refuses_several_live_hosts_before_create(
+    tmp_path: Path,
+) -> None:
+    """More than one live host is a real ambiguity, even when exactly one of
+    them has a client. A guest pane does not name the canvas."""
+    scene = Scene(
+        tmp_path,
+        project="codescribe",
+        live=(HOST_SESSION, "other-host", "vibecrafted"),
+        clients=(HOST_SESSION,),
+        guests=("vibecrafted",),
+    )
+    result = _run(
+        scene,
+        "vc-start --repo " + shlex.quote(str(scene.root)),
+        developer_root=True,
+        extra_env=_inside_host_env(scene, host="vibecrafted"),
+    )
+    combined = result.stdout + result.stderr
+    assert _rc(result) == EXIT_INVENTORY, combined
+    assert "ambiguous" in combined, combined
+    assert HOST_SESSION in combined and "other-host" in combined, combined
+    assert "project-workspace" in combined, combined
+    assert "not a singleton Frame host" not in combined, combined
+    assert scene.live() == ["other-host", HOST_SESSION, "vibecrafted"]
     assert not _creates(scene.calls()), scene.calls()
     assert not _projects(scene.calls()), scene.calls()
 
