@@ -627,6 +627,7 @@ async fn spawn_child(
     // async-signal-safe and puts only this child in a new group so the
     // parent can signal the group without signalling itself.
     #[cfg(unix)]
+    // SAFETY: pre_exec runs in the forked child before exec, with no locks held. setpgid(0, 0) and Linux prctl(PR_SET_PDEATHSIG, SIGKILL) are async-signal-safe and affect only this child.
     unsafe {
         process.pre_exec(|| {
             // Child-only, before exec, no locks held. On Linux,
@@ -1130,6 +1131,7 @@ fn install_terminate_handler() {
     static INSTALLED: Once = Once::new();
     INSTALLED.call_once(|| {
         #[cfg(unix)]
+        // SAFETY: signal is async-signal-safe. The handler is installed once and only calls kill and _exit.
         unsafe {
             let _ = signal(15, Some(on_terminate));
             let _ = signal(2, Some(on_terminate));
@@ -1143,16 +1145,19 @@ extern "C" fn on_terminate(_signal: i32) {
     if pid > 0 {
         // `kill` is async-signal-safe. Exit without unwinding so a
         // SIGTERM cannot leave the process group behind.
+        // SAFETY: kill and _exit are async-signal-safe. Negative pid signals only that process group. _exit does not unwind.
         unsafe {
             kill(-pid, 9);
             _exit(143);
         }
     }
+    // SAFETY: _exit is async-signal-safe and does not unwind. Used when no process group was published.
     unsafe { _exit(143) }
 }
 
 fn signal_group(pid: i32, sig: i32) {
     #[cfg(unix)]
+    // SAFETY: kill of a negative pid signals that process group only. Callers pass a pgid this bridge created.
     unsafe {
         let _ = kill(-pid, sig);
     }
@@ -1164,6 +1169,7 @@ fn signal_group(pid: i32, sig: i32) {
 
 fn reap_leader(pid: i32) {
     #[cfg(unix)]
+    // SAFETY: waitpid reaps only the leader pid passed in. status is a local mutable int; WNOHANG is the options value 1.
     unsafe {
         let mut status = 0;
         for _ in 0..20 {
@@ -1182,6 +1188,7 @@ fn reap_leader(pid: i32) {
 }
 
 #[cfg(unix)]
+// SAFETY: declarations match the platform libc signatures used by the unix blocks above. They are not called from anywhere else in this module.
 unsafe extern "C" {
     fn kill(pid: i32, sig: i32) -> i32;
     fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
@@ -1190,11 +1197,13 @@ unsafe extern "C" {
 }
 
 #[cfg(all(unix, target_os = "linux"))]
+// SAFETY: declarations match the platform libc signatures used by the unix blocks above. They are not called from anywhere else in this module.
 unsafe extern "C" {
     fn prctl(option: i32, arg2: u64) -> i32;
 }
 
 #[cfg(unix)]
+// SAFETY: declarations match the platform libc signatures used by the unix blocks above. They are not called from anywhere else in this module.
 unsafe extern "C" {
     fn setpgid(pid: i32, pgid: i32) -> i32;
 }
