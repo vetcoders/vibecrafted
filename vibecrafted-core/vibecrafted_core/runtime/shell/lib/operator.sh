@@ -131,7 +131,7 @@ _vetcoders_partner_command_text() {
 # Carry only the admitted command (private file references) across a new window.
 # 0: terminal handoff accepted; 2: caller already has a surface; 1: failed.
 _vetcoders_enter_admitted_interactive() {
-  local command_text="$2" python_spec py import_root
+  local verb="${1:-}" command_text="$2" python_spec py import_root
   python_spec="$(_vetcoders_core_python_spec)" || return 1
   py="${python_spec%%$'\t'*}"
   import_root="${python_spec#*$'\t'}"
@@ -141,6 +141,16 @@ _vetcoders_enter_admitted_interactive() {
   fi
   _vetcoders_contract_root="$("${command[@]}" --root-only)" || return 1
   if _vetcoders_needs_vc_terminal_entry; then
+    # Fork from a resolved live host is a panel in that host. Opening a
+    # second terminal here starts a CLI client that the frame warden can
+    # retire while the child is still coming up (Founder 2026-10-03).
+    if [[ "$verb" == "fork" ]]; then
+      local projection_host=""
+      projection_host="$(_vetcoders_frame_projection_host)"
+      if [[ -n "$projection_host" ]]; then
+        return 2
+      fi
+    fi
     # Array slicing differs between bash and zsh; shift a positional copy.
     set -- "${command[@]}"
     local front_door="$1"

@@ -90,9 +90,10 @@ def test_failed_workspace_entry_leaves_a_live_shell(tmp_path: Path) -> None:
         assert b"workspace entry failed (exit 4)" in banner, banner.decode(
             "utf-8", "replace"
         )
-        assert b"terminal is still available" in banner, banner.decode(
+        assert b"refused the workspace entry" in banner, banner.decode(
             "utf-8", "replace"
         )
+        assert b"List sessions: vc-frame list-sessions" in banner
 
         # The regression: with an interactive intermediate child the final
         # shell died on tty pgrp EIO before it could execute anything. A live
@@ -103,6 +104,11 @@ def test_failed_workspace_entry_leaves_a_live_shell(tmp_path: Path) -> None:
             "utf-8", "replace"
         )
         assert b"can't set tty pgrp" not in banner + probe
+        combined = banner + probe
+        assert b"Your terminal is ready" not in combined
+        assert b"terminal is still available" not in combined
+        assert b"Log:" in combined, combined.decode("utf-8", "replace")
+        assert b"Recovery: vc-frame attach" in combined
 
         os.write(master, b"exit\r")
         _read_until(master, (b"\x00-never-\x00",), time.monotonic() + 5)

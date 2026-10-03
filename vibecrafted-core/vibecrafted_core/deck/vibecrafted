@@ -6480,10 +6480,15 @@ cmd_fork() {
   _vetcoders_enter_admitted_interactive fork "$command_text" || admission_status=$?
   case "$admission_status" in 0) return 0 ;; 1) return 1 ;; esac
   root_dir="$_vetcoders_contract_root"
-  # A stale Frame marker is the environment's claim, not a surface: only an
-  # engine-confirmed pane may host the same-tab fork (fac246a7). Anything else
-  # declares the repository workspace instead of asking a dead session for a pane.
-  if ! _vetcoders_in_vc_frame || ! _vetcoders_has_usable_vc_frame_surface; then
+  # A session name is a projection target only when the engine says that host
+  # is usable. Pane id is not required: a tool shell inside vc-frame often has
+  # VC_FRAME_SESSION_NAME and no TTY, and opening a second terminal there
+  # starts a CLI client the frame warden retires while the child is still
+  # starting (Founder 2026-10-03). A dead, missing, or unattended name is not
+  # a target (2026-09-09 / fac246a7) and keeps the declaration path.
+  local projection_host=""
+  projection_host="$(_vetcoders_frame_projection_host)"
+  if [[ -z "$projection_host" ]]; then
     if [[ "$runtime" == terminal ]]; then
       _vetcoders_init_in_current_terminal "$agent" "$command_text" plain fork
     else
@@ -6494,7 +6499,7 @@ cmd_fork() {
 
   local vc_frame_bin session_name repo_label pane_title cmd_script
   vc_frame_bin="$(_vetcoders_vc_frame_bin)" || return 1
-  session_name="$VC_FRAME_SESSION_NAME"
+  session_name="$projection_host"
   repo_label="$(basename "$(dirname "$root_dir")")/$(basename "$root_dir")"
   pane_title="${agent} fork @${repo_label} ${session_id}"
   cmd_script="$(_vetcoders_tmp_script_path "vc-fork-cmd" "$root_dir")"
@@ -6508,6 +6513,12 @@ cmd_fork() {
   fi
   pane_args+=(-- "$cmd_script")
   local pane_id
+  # Name the CLI client before its TTL window. The timer that retires a
+  # still-live child lives in vc-frame (zellij-client ActionDeadline); this
+  # is the handshake vibecrafted can complete without editing that tree.
+  # Export before the substitution: a prefix on the assignment is expanded
+  # away before the engine process starts.
+  export VC_FRAME_CALLER="${VC_FRAME_CALLER:-vibecrafted-fork}"
   pane_id="$("$vc_frame_bin" --session "$session_name" "${pane_args[@]}")" || {
     echo "vc-frame refused the same-tab fork pane; no replacement session or tab was created." >&2
     return 1
