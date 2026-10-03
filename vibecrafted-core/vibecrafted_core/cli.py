@@ -22,7 +22,7 @@ from .control_plane import (
     resolve_run,
     sync_state,
 )
-from .help_surface import CORE_SURFACE_COMMANDS
+from .help_surface import AGENT_SELECTOR, CORE_SURFACE_COMMANDS
 from .package_resources import deck_path, package_root
 from .repo_selection import (
     RepoSelectionError,
@@ -1232,9 +1232,7 @@ def _continue_launcher_named_session(
 
 def _print_launch_input_error(*, command: str, agent: str | None, message: str) -> None:
     """Print a launch-spec validation failure with usage hints to stderr."""
-    base = f"vibecrafted {command}"
-    if agent:
-        base = f"{base} {agent}"
+    base = f"vibecrafted {command} {agent or AGENT_SELECTOR}"
     print(f"error: {message}", file=sys.stderr)
     print(file=sys.stderr)
     print("Provide work for the agent with one of:", file=sys.stderr)
