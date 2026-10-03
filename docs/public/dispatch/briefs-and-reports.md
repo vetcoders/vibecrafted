@@ -140,7 +140,7 @@ Required keys — missing any of them is an artifact contract error:
 | Key      | Meaning                                                                         |
 | -------- | ------------------------------------------------------------------------------- |
 | `run_id` | The run this report belongs to                                                  |
-| `agent`  | `claude` \| `codex` \| `agy` \| `junie` \| `grok` \| `system`                   |
+| `agent`  | `claude` \| `codex` \| `agy` \| `junie` \| `grok` \| `cursor` \| `system`       |
 | `skill`  | The workflow/skill name                                                         |
 | `status` | `pending` \| `in-progress` \| `completed` \| `failed` \| `blocked` \| `partial` |
 

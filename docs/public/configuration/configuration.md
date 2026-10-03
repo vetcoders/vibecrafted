@@ -14,7 +14,7 @@ Vibecrafted keeps a strict separation between four surfaces: the install manifes
 `install.toml` at the root of the source repository is the manifest consumed by the built-in installer (`make install`, `make setup-dev`, `make wizard`). It declares:
 
 - **Phases** — introduction, diagnostics, installation, onboarding — each with an explicit stated reason before any durable write.
-- **Diagnostics categories** — frameworks, foundations (`loctree-mcp`, `aicx-mcp`, `prview`, `screenscribe`), toolchains (`python3`, `node`, `git`, `rsync`), agents (`claude`, `codex`, `agy`, `junie`, `grok`), and additional tools.
+- **Diagnostics categories** — frameworks, foundations (`loctree-mcp`, `aicx-mcp`, `prview`, `screenscribe`), toolchains (`python3`, `node`, `git`, `rsync`), agents (`claude`, `codex`, `agy`, `junie`, `grok`, `cursor`), and additional tools.
 - **Runtime horses** — optional runtime surfaces selectable at install time: `wezterm`, `vc-apprt`, `locterm`, `microsandbox` (default: `none`).
 - **The installer log** location and the fact that the installer tool persists so `vibecrafted update` can re-run the manifest.
 

@@ -118,7 +118,7 @@ the titles.
 | Key                | Required     | Meaning                                                                                                               |
 | ------------------ | ------------ | --------------------------------------------------------------------------------------------------------------------- |
 | `id`               | yes          | Unique cut id, rendered into `{id}`                                                                                   |
-| `agent`            | no           | Fleet agent (`claude`, `codex`, `agy`, `junie`, `grok`)                                                               |
+| `agent`            | no           | Fleet agent (`claude`, `codex`, `agy`, `junie`, `grok`, `cursor`)                                                     |
 | `workflow`         | yes          | Must resolve (via `workflow_map`) to a supported workflow                                                             |
 | `phase`            | no           | Phase title, when phases are declared                                                                                 |
 | `prompt` / `brief` | one required | Inline prompt, or a brief file path (resolved relative to the plan file; must exist)                                  |

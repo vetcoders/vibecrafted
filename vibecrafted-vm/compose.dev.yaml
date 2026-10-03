@@ -40,7 +40,7 @@ services:
       - claude:/root/.claude
       - codex:/root/.codex
       - gemini:/root/.gemini
-      - kimi:/root/.kimi
+      - kimi:/root/.kimi-code
       # Keep the existing volume identity while persisting the canonical config.
       - vetcoders-config:/root/.config/vibecrafted
       # Tailscale node identity (kept across restarts).

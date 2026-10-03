@@ -22,11 +22,11 @@ One GitHub Release `v4.3.2`. The Darwin publisher
 
 | Asset                                                                 | Proves                                     |
 | --------------------------------------------------------------------- | ------------------------------------------ |
-| `Vibecrafted_4.3.1-<YYYYMMDD>-<sha8>.dmg`                             | signed, notarized desktop product          |
+| `Vibecrafted_4.3.2-<YYYYMMDD>-<sha8>.dmg`                             | signed, notarized desktop product          |
 | that name plus `.dmg.sha256`                                          | checksum a stranger can `shasum -a 256 -c` |
-| `Vibecrafted_RuntimePack_4.3.1-<YYYYMMDD>-<sha8>-darwin-arm64.tar.gz` | same signed binary runtime for macOS CLI   |
+| `Vibecrafted_RuntimePack_4.3.2-<YYYYMMDD>-<sha8>-darwin-arm64.tar.gz` | same signed binary runtime for macOS CLI   |
 | that name plus `.sha256` and `.sig`                                   | checksum plus detached release signature   |
-| `Vibecrafted_4.3.1-<YYYYMMDD>-<sha8>-portable.tar.gz`                 | source fallback for Linux / WSL2 / macOS   |
+| `Vibecrafted_4.3.2-<YYYYMMDD>-<sha8>-portable.tar.gz`                 | source fallback for Linux / WSL2 / macOS   |
 | that name plus `.sha256`                                              | checksum a stranger can `sha256sum -c`     |
 | `release-output.json`                                                 | bound source revisions + DMG path          |
 | `release-output.json.sig`                                             | detached signature over that receipt       |
@@ -40,8 +40,8 @@ Linux Runtime Packs (`linux-x64`, `linux-arm64`) are built natively on Linux
 by `scripts/build-linux-runtime-pack.sh`. They are not produced by macOS
 `make release` and are not in the Darwin publisher allowlist. CI builds and
 installs the `linux-x64` pack on every Linux install gate. A published
-`v4.3.1` may attach those packs as extra assets only through a Linux-built
-upload, never by stretching the Darwin allowlist. 4.3.1 does not ship a systemd unit;
+`v4.3.2` may attach those packs as extra assets only through a Linux-built
+upload, never by stretching the Darwin allowlist. 4.3.2 does not ship a systemd unit;
 Linux service truth is `vibecrafted server start` (server + guardian process pair),
 not a distro init script.
 
@@ -170,8 +170,8 @@ rebuild:
 
 ```bash
 make payload-hygiene ARTIFACT=dist/Vibecrafted.app
-make payload-hygiene ARTIFACT=dist/Vibecrafted_4.3.1-<YYYYMMDD>-<sha8>.dmg
-make payload-hygiene ARTIFACT=dist/Vibecrafted_4.3.1-<YYYYMMDD>-<sha8>-portable.tar.gz
+make payload-hygiene ARTIFACT=dist/Vibecrafted_4.3.2-<YYYYMMDD>-<sha8>.dmg
+make payload-hygiene ARTIFACT=dist/Vibecrafted_4.3.2-<YYYYMMDD>-<sha8>-portable.tar.gz
 ```
 
 A `.dmg` is attached read-only and detached again; a tarball is extracted into a
@@ -213,8 +213,8 @@ Expected outputs under `dist/`:
 
 ```text
 Vibecrafted.app
-Vibecrafted_4.3.1-<YYYYMMDD>-<sha8>.dmg
-Vibecrafted_4.3.1-<YYYYMMDD>-<sha8>.dmg.sha256
+Vibecrafted_4.3.2-<YYYYMMDD>-<sha8>.dmg
+Vibecrafted_4.3.2-<YYYYMMDD>-<sha8>.dmg.sha256
 release-output.json
 release-output.json.sig
 ```
@@ -229,8 +229,8 @@ No signing identity, no notary account, no Xcode: `git` and `python3` are
 enough, which is why this channel can also be built on Linux. It adds:
 
 ```text
-Vibecrafted_4.3.1-<YYYYMMDD>-<sha8>-portable.tar.gz
-Vibecrafted_4.3.1-<YYYYMMDD>-<sha8>-portable.tar.gz.sha256
+Vibecrafted_4.3.2-<YYYYMMDD>-<sha8>-portable.tar.gz
+Vibecrafted_4.3.2-<YYYYMMDD>-<sha8>-portable.tar.gz.sha256
 portable-output.json
 ```
 
@@ -242,10 +242,10 @@ for itself. If any of that fails, no bytes are published.
 
 ```bash
 cd dist
-shasum -a 256 -c Vibecrafted_4.3.1-*.dmg.sha256
-xcrun stapler validate Vibecrafted_4.3.1-*.dmg
+shasum -a 256 -c Vibecrafted_4.3.2-*.dmg.sha256
+xcrun stapler validate Vibecrafted_4.3.2-*.dmg
 spctl --assess --type open --context context:primary-signature --verbose=2 \
-  Vibecrafted_4.3.1-*.dmg
+  Vibecrafted_4.3.2-*.dmg
 
 uv run --project vibecrafted-core verify-vibecrafted-walkaround verify-release \
   --release-output dist/release-output.json \
@@ -254,7 +254,7 @@ uv run --project vibecrafted-core verify-vibecrafted-walkaround verify-release \
 uv run --project vibecrafted-core verify-vibecrafted-walkaround walkaround \
   --release-output dist/release-output.json \
   --signature dist/release-output.json.sig \
-  --output dist/vibecrafted-4.3.1-walkaround.json
+  --output dist/vibecrafted-4.3.2-walkaround.json
 ```
 
 | Command                      | What a pass proves                                       |
@@ -268,9 +268,9 @@ uv run --project vibecrafted-core verify-vibecrafted-walkaround walkaround \
 Portable channel, same idea without an Apple ticket to lean on:
 
 ```bash
-tar -xzf dist/Vibecrafted_4.3.1-*-portable.tar.gz -C "$(mktemp -d)"
+tar -xzf dist/Vibecrafted_4.3.2-*-portable.tar.gz -C "$(mktemp -d)"
 python3 scripts/distribution_manifest.py check \
-  --root <unpacked>/vibecrafted-4.3.1 \
+  --root <unpacked>/vibecrafted-4.3.2 \
   --expected-owner-repo vetcoders/vibecrafted \
   --expected-source-revision "$(git rev-parse HEAD)"
 ```
@@ -333,7 +333,7 @@ never a code defect:
    `tests/tui/test_release_contract.py::test_tag_gate_only_calls_tools_its_own_runner_provides`.
 
 Consequence for whoever pushes the next tag: **treat the first run as an
-experiment, not a formality.** Push `v4.3.1` only from the exact source commit
+experiment, not a formality.** Push `v4.3.2` only from the exact source commit
 that passed this checklist, then verify the tag-triggered gate before any
 publication step depends on it.
 
@@ -373,12 +373,12 @@ notarized, and the mounted app matches the signed receipt.
 ## 7. Public confirmation
 
 ```bash
-gh release view v4.3.1 --json tagName,isDraft,isLatest,assets \
+gh release view v4.3.2 --json tagName,isDraft,isLatest,assets \
   --jq '{tag:.tagName,draft:.isDraft,latest:.isLatest,assets:[.assets[].name]}'
 ```
 
 Expected: `draft=false`, `latest=true`, Darwin allowlist names, one of them
-matching `Vibecrafted_4.3.1-*.dmg`. Linux Runtime Packs appear only if a
+matching `Vibecrafted_4.3.2-*.dmg`. Linux Runtime Packs appear only if a
 Linux-built upload attached them; they are not required for the Darwin
 publisher to pass.
 
@@ -393,7 +393,7 @@ tap exists). See [packaging/homebrew/README.md](../packaging/homebrew/README.md)
 - `release.yml` red or still running
 - Open CodeQL alert on `main`
 - `spctl` or `stapler` fail on either the local or the downloaded DMG
-- Temptation to "just `gh release upload`" a source tarball onto `v4.3.1`
+- Temptation to "just `gh release upload`" a source tarball onto `v4.3.2`
   — `publish-release` will reject unexpected assets
 
 If you only need a local unsigned look, stop after `make dmg` and do not
