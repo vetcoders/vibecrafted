@@ -8,20 +8,14 @@ import threading
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
-from importlib import import_module
 from pathlib import Path
-from types import ModuleType
 from typing import Any, Self
 
+import vibecrafted_core.portable_lock as fcntl
 from vibecrafted_core.control_plane import control_plane_home
 from vibecrafted_core.delivery.store import atomic_write_json
 
 from .model import SCHEDULER_STATES, Cut
-
-try:  # POSIX is the production scheduler substrate; keep importability elsewhere.
-    fcntl: ModuleType | None = import_module("fcntl")
-except ImportError:  # non-POSIX development hosts
-    fcntl = None
 
 
 class ReceiptContractError(RuntimeError):
@@ -417,7 +411,7 @@ class DispatchReceiptStore:
         return payload
 
     def _locked_ledger(self):
-        """Serialize independent scheduler and observer processes on POSIX."""
+        """Serialize scheduler, supervisor, and claim writers on one ledger."""
 
         class _LedgerLock:
             def __init__(inner, store: DispatchReceiptStore) -> None:
@@ -428,15 +422,13 @@ class DispatchReceiptStore:
                 inner.store._lock.acquire()
                 lock_path = inner.store.root / "receipts.lock"
                 inner.handle = lock_path.open("a+")
-                if fcntl is not None:
-                    fcntl.flock(inner.handle.fileno(), fcntl.LOCK_EX)
+                fcntl.flock(inner.handle.fileno(), fcntl.LOCK_EX)
                 return inner
 
             def __exit__(inner, *_args: object) -> None:
                 try:
-                    if inner.handle is not None and fcntl is not None:
-                        fcntl.flock(inner.handle.fileno(), fcntl.LOCK_UN)
                     if inner.handle is not None:
+                        fcntl.flock(inner.handle.fileno(), fcntl.LOCK_UN)
                         inner.handle.close()
                 finally:
                     inner.store._lock.release()
