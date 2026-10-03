@@ -7680,13 +7680,22 @@ def _atomic_symlink(target: Path, link: Path) -> None:
             temporary.unlink()
 
 
-def _atomic_json_file(path: Path, payload: dict[str, Any]) -> None:
+def _atomic_json_file(
+    path: Path, payload: dict[str, Any], *, max_bytes: int | None = None
+) -> None:
     """Write `payload` as pretty JSON to `path` via a temp file + atomic rename + directory
     fsync.
+
+    ``max_bytes`` is checked on the exact bytes about to be published. Refusal
+    happens before the temporary file exists, so a rejected payload cannot
+    replace a document the reader is still able to load.
     """
+    encoded = json.dumps(payload, ensure_ascii=True, sort_keys=True, indent=2) + "\n"
+    raw = encoded.encode("utf-8")
+    if max_bytes is not None and len(raw) > max_bytes:
+        raise RuntimeError(f"{path.name} exceeds the size limit ({max_bytes} bytes)")
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.parent / (f".{path.name}.tmp-{os.getpid()}-{os.urandom(6).hex()}")
-    encoded = json.dumps(payload, ensure_ascii=True, sort_keys=True, indent=2) + "\n"
     try:
         descriptor = os.open(
             temporary,
@@ -7699,7 +7708,7 @@ def _atomic_json_file(path: Path, payload: dict[str, Any]) -> None:
             0o600,
         )
         try:
-            view = memoryview(encoded.encode("utf-8"))
+            view = memoryview(raw)
             while view:
                 written = os.write(descriptor, view)
                 view = view[written:]
@@ -18513,8 +18522,18 @@ def _load_runtime_install_receipt(
 def _checkpoint_runtime_install_receipt(
     runtime_home: Path, receipt: Mapping[str, Any]
 ) -> None:
-    """Persist recoverable ownership after each completed install mutation."""
-    _atomic_json_file(_runtime_receipt_path(runtime_home), dict(receipt))
+    """Persist recoverable ownership after each completed install mutation.
+
+    The reader refuses this document above ``_RUNTIME_LEGACY_DOCUMENT_MAX_BYTES``.
+    The same ceiling applies here. Drift and retirement history append without
+    a count cap, and a publish past the ceiling makes the next resolution fail
+    closed on a file it can no longer load.
+    """
+    _atomic_json_file(
+        _runtime_receipt_path(runtime_home),
+        dict(receipt),
+        max_bytes=_RUNTIME_LEGACY_DOCUMENT_MAX_BYTES,
+    )
 
 
 def _backup_runtime_collision(

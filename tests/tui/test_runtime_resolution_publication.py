@@ -608,6 +608,27 @@ def test_resolution_still_refuses_oversized_generation_manifest(installed, capsy
     assert "size limit" in envelope["reason"]
 
 
+def test_checkpoint_refuses_receipt_the_reader_cannot_load(roots, monkeypatch):
+    """The reader refuses a receipt over its byte budget. The writer must too.
+
+    History lists append without a count cap. Publishing a document the loader
+    will reject bricks runtime resolution on the next read and leaves no prior
+    receipt to fall back to. Refusal has to happen before the atomic replace.
+    """
+
+    runtime_home = roots["runtime_home"]
+    runtime_home.mkdir(parents=True, exist_ok=True)
+    receipt_path = installer._runtime_receipt_path(runtime_home)
+    small = {"schema": installer.RUNTIME_INSTALL_SCHEMA, "version": "1"}
+    installer._checkpoint_runtime_install_receipt(runtime_home, small)
+    kept = receipt_path.read_bytes()
+    monkeypatch.setattr(installer, "_RUNTIME_LEGACY_DOCUMENT_MAX_BYTES", len(kept))
+    oversized = dict(small, pad="x" * 64)
+    with pytest.raises(RuntimeError, match="size limit"):
+        installer._checkpoint_runtime_install_receipt(runtime_home, oversized)
+    assert receipt_path.read_bytes() == kept
+
+
 def test_resolution_receipt_budget_remains_bounded(installed, capsys):
     paths, _, _ = installed
     receipt_path = installer._runtime_receipt_path(paths["runtime_home"])
