@@ -105,6 +105,19 @@ def submit_claim(
     if store.run_id != claim["run_id"]:
         raise ReceiptContractError("dispatch claim identity mismatch")
 
+    snapshot = store.read()
+    observed = snapshot.get("cuts", {}).get(claim["cut_id"])
+    if not isinstance(observed, dict):
+        raise ReceiptContractError(f"unknown receipt cut {claim['cut_id']!r}")
+    observed_root = str(
+        observed.get("worktree_path") or snapshot.get("repo_root") or ""
+    )
+    if not observed_root:
+        raise ReceiptContractError("cut runtime root is missing")
+    # Git runs before the ledger lock. _verify re-reads HEAD on the clean
+    # tree, and record_verification drops a proof whose claim_sequence moved.
+    head, dirty = claim_git_state(observed_root)
+
     def validate(entry: dict[str, Any], ledger: dict[str, Any]) -> None:
         expected_report = str(entry.get("report_path") or "")
         report = Path(claim["report_path"])
@@ -115,9 +128,8 @@ def submit_claim(
         if not report.is_file() or not report.stat().st_size:
             raise ReceiptContractError("worker report is missing or empty")
         root = str(entry.get("worktree_path") or ledger.get("repo_root") or "")
-        if not root:
-            raise ReceiptContractError("cut runtime root is missing")
-        head, dirty = claim_git_state(root)
+        if root != observed_root:
+            raise ReceiptContractError("cut runtime root changed before admission")
         if head != claim["commit_sha"] or dirty:
             raise ReceiptContractError("claim SHA must be the clean runtime HEAD")
         if entry.get("compile_embargo") and "checkpoint" not in claim:
