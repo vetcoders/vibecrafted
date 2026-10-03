@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import threading
 import time
@@ -458,8 +459,9 @@ def test_public_default_dispatches_one_concurrent_fleet_on_the_real_dispatcher(
         assert entry["provider_run_id"] == f"provider-{cut_id}"
         assert entry["worktree_path"] == str(worktrees[cut_id])
         # A mission that only lists cut ids declares nothing to verify, so no
-        # cut may claim a verified state — unverified is reported, not hidden.
-        assert entry["acceptance"] == "failed"
+        # cut may claim a verified state. Missing admission stays unverified
+        # and visible; it is not a red matcher and it is not hidden.
+        assert entry["acceptance"] == "unverified"
         assert entry["gates"] == []
 
     # The lifecycle record binds parent identity to that ledger; it does not
@@ -524,6 +526,7 @@ def _report_writer(launches: list[str]):
     return cell_launcher
 
 
+@pytest.mark.usefixtures("worker_claims")
 def test_mission_referenced_plan_carries_verifiers_and_settles_the_fleet(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -587,6 +590,7 @@ def test_a_plan_that_misses_a_declared_cut_fails_closed(
         )
 
 
+@pytest.mark.usefixtures("worker_claims")
 def test_second_launch_resumes_the_same_dispatch_without_relaunching(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -665,6 +669,7 @@ def _run_fleet(
     )
 
 
+@pytest.mark.usefixtures("worker_claims")
 def test_fleet_obligations_read_identities_back_from_the_dispatcher_ledger(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -759,6 +764,7 @@ def test_a_scheduler_that_dies_before_its_children_is_durably_visible(
     assert progress["scheduler_detached"] is True
 
 
+@pytest.mark.usefixtures("worker_claims")
 def test_recovery_reruns_only_the_failed_cut_and_leaves_its_siblings_alone(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -916,6 +922,46 @@ if [ -n "$VIBECRAFTED_REPORT_PATH" ]; then
   printf -- '---\nstatus: complete\nfinalized: true\nclaim: bounded provider delivery\n---\ndone\n' \
     > "$VIBECRAFTED_REPORT_PATH"
 fi
+# The supervisor registers report_path after launch returns and before await.
+# A fast provider can reach this line first, so admission retries until the
+# ledger names this report. Settlement still belongs to the supervisor.
+if [ -n "$VIBECRAFTED_REPORT_PATH" ] && [ -n "$VIBECRAFTED_DISPATCH_RUN_ID" ] \
+  && [ -n "$VIBECRAFTED_DISPATCH_WORKTREE" ] && [ -n "$VIBECRAFTED_DISPATCH_CUT_ID" ]; then
+  # The dispatcher does not forward the caller's test interpreter. Bake the
+  # pytest interpreter in when the fake binary is written (@VC_CLAIM_PY@).
+  @VC_CLAIM_PY@ - <<'PY'
+import json
+import os
+import subprocess
+import sys
+import time
+
+from vibecrafted_core.dispatch.claims import submit_claim
+from vibecrafted_core.dispatch.receipts import ReceiptContractError
+
+root = os.environ["VIBECRAFTED_DISPATCH_WORKTREE"]
+sha = subprocess.check_output(
+    ["git", "-C", root, "rev-parse", "HEAD"], text=True
+).strip()
+payload = {
+    "run_id": os.environ["VIBECRAFTED_DISPATCH_RUN_ID"],
+    "cut_id": os.environ["VIBECRAFTED_DISPATCH_CUT_ID"],
+    "commit_sha": sha,
+    "report_path": os.environ["VIBECRAFTED_REPORT_PATH"],
+    "measurements": ["bounded provider completed its report"],
+}
+last = "claim was not attempted"
+for _ in range(50):
+    try:
+        print(json.dumps(submit_claim(payload)))
+        raise SystemExit(0)
+    except ReceiptContractError as exc:
+        last = str(exc)
+        time.sleep(0.1)
+print(f"bounded provider claim was not admitted: {last}", file=sys.stderr)
+raise SystemExit(1)
+PY
+fi
 echo "bounded provider done"
 """
 
@@ -956,9 +1002,13 @@ def _bounded_runtime_env(tmp_path: Path) -> dict[str, str]:
     tmp_dir = tmp_path / "tmp"
     for path in (home, fake_bin, tmp_dir):
         path.mkdir(parents=True, exist_ok=True)
+    claim_py = shlex.quote(_sys.executable)
     for agent in ("codex", "claude"):
         binary = fake_bin / agent
-        binary.write_text(_BOUNDED_PROVIDER, encoding="utf-8")
+        binary.write_text(
+            _BOUNDED_PROVIDER.replace("@VC_CLAIM_PY@", claim_py),
+            encoding="utf-8",
+        )
         binary.chmod(0o755)
     package_root = str(Path(vibecrafted_core.__file__).resolve().parents[1])
     return {
