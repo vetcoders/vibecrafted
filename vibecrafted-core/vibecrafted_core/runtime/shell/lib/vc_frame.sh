@@ -638,6 +638,29 @@ _vetcoders_has_usable_vc_frame_surface() {
   return 1
 }
 
+# Prints the session a fork may project a panel into, or nothing.
+# Pane id is not required: a tool shell inside vc-frame often carries only
+# VC_FRAME_SESSION_NAME. The engine must call that name usable (live, and
+# attended or unable to report clients). Dead, missing, and unattended names
+# print nothing — a stale VC_FRAME_SESSION_NAME is not a target (2026-09-09).
+# `unknown` (no engine) is a target only together with a pane id, which is
+# the attached-context claim the pre-engine path already trusted. A bare
+# name with no engine is not a surface.
+_vetcoders_frame_projection_host() {
+  local name="${VC_FRAME_SESSION_NAME:-}"
+  [[ -n "$name" ]] || return 0
+  case "$(_vetcoders_vc_frame_surface_state "$name")" in
+    usable)
+      printf '%s\n' "$name"
+      ;;
+    unknown)
+      if [[ -n "${VC_FRAME_PANE_ID:-}" ]]; then
+        printf '%s\n' "$name"
+      fi
+      ;;
+  esac
+}
+
 # Live (non-EXITED) vc-frame session names. One name per line. Multi-word hosts
 # keep spaces (e.g. "vibecrafted workers"); status tags are stripped.
 _vetcoders_list_live_vc_frame_sessions() {

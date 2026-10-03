@@ -417,18 +417,28 @@ fi
 
 # The command deck is the door of a plain VC Terminal. A Frame pane already has
 # its own chrome (Start here, the tab row, the Shell tab guide), so repeating
-# the deck in every new pane is noise.
+# the deck in every new pane is noise. A failed entry must not wear the
+# success deck: the launcher exports an allowlisted refusal (status, reason,
+# log) and this profile repeats that refusal instead of "ready".
 if [[ -t 1 && -z "${VIBECRAFTED_QUIET_START:-}" && -z "${VC_FRAME_PANE_ID:-}" ]]; then
-  print -P '%F{cyan}Vibecrafted%f · Your terminal is ready.'
-  print '  vc-start --repo <path>    Create a workspace for your project'
-  print '  vc-frame list-sessions   Find an existing workspace'
-  print '  vc-frame attach <name>   Return to a workspace'
-  print '  vibecrafted --help      Explore commands'
-  print '  aliases [text]          List product shortcuts (vcf-* for vc-frame)'
-  print '  reload                  Re-read the installed product profile'
-  print '  personal-shell          Load ~/.zshrc without product Atuin/Starship pins'
-  (( ! $+commands[atuin] )) || print '  Ctrl+R history'
-  (( ! $+commands[zoxide] )) || print '  z <directory> jump'
-  print '  Tab completion'
+  if [[ -n "${VIBECRAFTED_TERMINAL_ENTRY_STATUS:-}" && "${VIBECRAFTED_TERMINAL_ENTRY_STATUS}" != 0 ]]; then
+    print -P '%F{red}Vibecrafted%f · Workspace entry refused.'
+    print -r -- "  failed: ${VIBECRAFTED_TERMINAL_ENTRY_REASON:-workspace entry failed}"
+    [[ -z "${VIBECRAFTED_TERMINAL_ENTRY_LOG:-}" ]] || print -r -- "  log: ${VIBECRAFTED_TERMINAL_ENTRY_LOG}"
+    print -r -- "  recovery: vc-frame attach ${VIBECRAFTED_FRAME_HOST_SESSION:-vc-host}"
+    print -r -- '  list sessions: vc-frame list-sessions'
+  else
+    print -P '%F{cyan}Vibecrafted%f · Your terminal is ready.'
+    print '  vc-start --repo <path>    Create a workspace for your project'
+    print '  vc-frame list-sessions   Find an existing workspace'
+    print '  vc-frame attach <name>   Return to a workspace'
+    print '  vibecrafted --help      Explore commands'
+    print '  aliases [text]          List product shortcuts (vcf-* for vc-frame)'
+    print '  reload                  Re-read the installed product profile'
+    print '  personal-shell          Load ~/.zshrc without product Atuin/Starship pins'
+    (( ! $+commands[atuin] )) || print '  Ctrl+R history'
+    (( ! $+commands[zoxide] )) || print '  z <directory> jump'
+    print '  Tab completion'
+  fi
 fi
 return 0

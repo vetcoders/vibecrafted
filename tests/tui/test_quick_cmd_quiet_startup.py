@@ -541,6 +541,28 @@ def test_product_profile_skips_the_deck_inside_a_frame_pane(tmp_path: Path) -> N
     assert "vc-start --repo" not in text
 
 
+def test_product_profile_refuses_the_deck_after_a_failed_entry(tmp_path: Path) -> None:
+    """A non-zero workspace entry must not wear the success banner."""
+    text = _profile_on_pty(
+        tmp_path,
+        {
+            "VIBECRAFTED_TERMINAL_ENTRY_STATUS": "4",
+            "VIBECRAFTED_TERMINAL_ENTRY_REASON": "workspace entry failed (exit 4)",
+            "VIBECRAFTED_TERMINAL_ENTRY_LOG": str(
+                tmp_path / ".vibecrafted" / "logs" / "terminal-startup.log"
+            ),
+        },
+    )
+    assert "PROFILE_READY" in text
+    assert "Workspace entry refused" in text
+    assert "workspace entry failed (exit 4)" in text
+    assert "terminal-startup.log" in text
+    assert "recovery: vc-frame attach" in text
+    assert "list sessions: vc-frame list-sessions" in text
+    assert "Your terminal is ready" not in text
+    assert "Explore commands" not in text
+
+
 def test_product_profile_keeps_on_request_help_behind_quiet_gate() -> None:
     text = PROFILE.read_text(encoding="utf-8")
     assert "VIBECRAFTED_QUIET_START" in text

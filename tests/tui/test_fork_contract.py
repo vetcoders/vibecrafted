@@ -99,10 +99,14 @@ class _World:
             "#!/usr/bin/env bash\n"
             "set -euo pipefail\n"
             'if [[ "${1:-}" == "ls" || "${1:-}" == "list-sessions" ]]; then\n'
-            '  printf "operator-test (attached)\\n"\n'
+            '  printf "%s\\n" "${VC_FRAME_TEST_LISTING:-operator-test (attached)}"\n'
             "  exit 0\n"
             "fi\n"
-            '{ printf "%s\\n" "$@"; } > "$CAPTURE_FILE"\n',
+            'if [[ " $* " == *" list-clients "* && -n "${VC_FRAME_TEST_CLIENTS+x}" ]]; then\n'
+            '  printf "%s" "$VC_FRAME_TEST_CLIENTS"\n'
+            "  exit 0\n"
+            "fi\n"
+            '{ printf "%s\\n" "$@"; printf "caller=%s\\n" "${VC_FRAME_CALLER:-}"; } > "$CAPTURE_FILE"\n',
         )
         # Fork admission probes each provider's `--help` for the continuity
         # markers its recipe declares (continuity/capabilities.py `probe`,
@@ -146,7 +150,12 @@ class _World:
         runtime_dir.mkdir(parents=True, exist_ok=True)
         (runtime_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
 
-    def env(self) -> dict[str, str]:
+    def env(
+        self,
+        *,
+        extra: dict[str, str] | None = None,
+        drop: tuple[str, ...] = (),
+    ) -> dict[str, str]:
         env = {
             key: value
             for key, value in os.environ.items()
@@ -164,20 +173,30 @@ class _World:
         env["VC_FRAME_PANE_ID"] = "7"
         env["VC_FRAME_SESSION_NAME"] = "operator-test"
         env["CAPTURE_FILE"] = str(self.capture)
+        for key in drop:
+            env.pop(key, None)
+        if extra:
+            env.update(extra)
         return env
 
     def fork(
-        self, *args: str, cwd: Path | None = None
+        self,
+        *args: str,
+        cwd: Path | None = None,
+        extra_env: dict[str, str] | None = None,
+        drop_env: tuple[str, ...] = (),
+        timeout: float | None = None,
     ) -> subprocess.CompletedProcess[str]:
         if self.capture.exists():
             self.capture.unlink()
         return subprocess.run(
             ["bash", str(LAUNCHER), "fork", *args],
             cwd=cwd or self.outside,
-            env=self.env(),
+            env=self.env(extra=extra_env, drop=drop_env),
             capture_output=True,
             text=True,
             check=False,
+            timeout=timeout,
         )
 
     def pane(self) -> list[str]:
@@ -560,6 +579,65 @@ def test_run_recorded_for_another_agent_or_without_session_is_refused(
     missing = world.fork("claude", "--run-id", "work-260908-999999-00000")
     assert missing.returncode == 2
     assert "run_not_found" in missing.stderr
+
+
+def test_fork_without_pane_id_projects_into_the_live_host(world: _World) -> None:
+    """A tool shell inside a watched host has the session name and no pane id.
+
+    That is the Founder path (2026-10-03): fork must open a panel in the live
+    host instead of interactive-handoff in a second terminal.
+    """
+    result = world.fork(
+        "codex",
+        "--session",
+        OTHER_SESSION,
+        "--repo",
+        str(world.repo),
+        drop_env=("VC_FRAME_PANE_ID",),
+        extra_env={
+            "VC_FRAME_TEST_LISTING": "operator-test (attached)",
+            "VC_FRAME_TEST_CLIENTS": "CLIENT_ID\n7\n",
+        },
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Fork process admitted in current vc-frame tab" in result.stdout
+    pane = world.pane()
+    assert "new-pane" in pane
+    assert pane[pane.index("--session") + 1] == "operator-test"
+    assert "caller=vibecrafted-fork" in pane
+    assert "interactive-handoff" not in pane
+    assert "vc-terminal" not in result.stderr
+
+
+def test_fork_does_not_project_into_a_dead_or_unattended_host(world: _World) -> None:
+    """A stale or unattended session name is not a panel target."""
+    cases = (
+        ("stale-host (EXITED - attach to resurrect)", "CLIENT_ID\n9\n", "stale-host"),
+        ("quiet-host (attached)", "CLIENT_ID\n", "quiet-host"),
+    )
+    for listing, clients, name in cases:
+        result = world.fork(
+            "codex",
+            "--session",
+            OTHER_SESSION,
+            "--repo",
+            str(world.repo),
+            drop_env=("VC_FRAME_PANE_ID",),
+            extra_env={
+                "VC_FRAME_SESSION_NAME": name,
+                "VC_FRAME_TEST_LISTING": listing,
+                "VC_FRAME_TEST_CLIENTS": clients,
+            },
+            timeout=60,
+        )
+        captured = (
+            world.capture.read_text(encoding="utf-8") if world.capture.exists() else ""
+        )
+        assert "new-pane" not in captured, (listing, captured, result.stderr)
+        assert result.returncode != 0, (listing, result.stdout, result.stderr)
+        assert "vc-terminal" in result.stderr, (listing, result.stderr)
 
 
 # 591b6dde reworded the capability evidence: the refusal describes the

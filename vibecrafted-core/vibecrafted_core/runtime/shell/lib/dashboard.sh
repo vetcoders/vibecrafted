@@ -1062,6 +1062,12 @@ _vetcoders_start_frame_env() {
   socket_dir="$(_vetcoders_vc_frame_socket_dir 2>/dev/null || true)"
   (
     _vetcoders_start_close_create_lock_fd
+    # Name the client before the frame warden opens its TTL window.
+    # ActionDeadline in vc-frame reads VC_FRAME_CALLER at fire time and
+    # DeclareCaller sends it at connect; an unset value is "anonymous".
+    # The timer itself is not extended here — that change belongs in
+    # vc-frame zellij-client/src/cli_client.rs.
+    export VC_FRAME_CALLER="${VC_FRAME_CALLER:-vibecrafted}"
     if [[ -n "$socket_dir" ]]; then
       VC_FRAME_SOCKET_DIR="$socket_dir" ZELLIJ_SOCKET_DIR="$socket_dir" \
         env -u VC_FRAME -u VC_FRAME_PANE_ID -u VC_FRAME_SESSION_NAME \

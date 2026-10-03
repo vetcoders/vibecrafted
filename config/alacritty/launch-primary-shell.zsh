@@ -121,7 +121,12 @@ report_start_failure() {
     "$timestamp" "$$" "$startup_entry_mode" "$tty_available" "$reason" >>"$log"); then
     log="unavailable (cannot write $log)"
   fi
-  printf '\nVibecrafted: %s. Your terminal is still available.\nRecovery: vc-frame attach %q\nList sessions: vc-frame list-sessions\nLog: %s\n\n' \
+  # The interactive profile must not print the success deck after this.
+  # Status, the allowlisted reason, and the log path only.
+  export VIBECRAFTED_TERMINAL_ENTRY_STATUS=1
+  export VIBECRAFTED_TERMINAL_ENTRY_REASON="$reason"
+  export VIBECRAFTED_TERMINAL_ENTRY_LOG="$log"
+  printf '\nVibecrafted refused the workspace entry: %s.\nRecovery: vc-frame attach %q\nList sessions: vc-frame list-sessions\nLog: %s\n\n' \
     "$reason" "${VIBECRAFTED_FRAME_HOST_SESSION:-vc-host}" "$log" >&2
 }
 
