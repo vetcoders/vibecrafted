@@ -27,9 +27,26 @@ layout {
         }
     }
 
-    // Content-only. The parser mounts this inside session_layer without
-    // copying chrome ownership into the tab contract.
+    // Every host tab mounts a mirror Sessions rail (INWARIANT #0: host chrome
+    // is permanent). A mirror renders the rail but executes nothing locally —
+    // each click pipes the owner's command through the fail-closed
+    // guest-surface route (session-manager host_mirror support shipped in
+    // frame d81af6c4). Workspace opts out via the rail-less workspace-tab
+    // template below and stays the sole projection owner.
     default_tab_template {
+        pane split_direction="vertical" {
+            pane size=24 borderless=true {
+                plugin location="session-manager" {
+                    rail true
+                    host_mirror true
+                    pane_title "Sessions"
+                }
+            }
+            pane { children; }
+        }
+    }
+
+    tab_template name="workspace-tab" {
         pane { children; }
     }
 
@@ -44,7 +61,7 @@ layout {
 
     // session_layer is mounted into every tab. Keep the exclusive frame host
     // beside its single workspace surface so Screen sees exactly one owner.
-    tab name="Workspace" {
+    workspace-tab name="Workspace" {
         pane split_direction="vertical" {
             pane size=24 borderless=true {
                 plugin location="frame-host" {
