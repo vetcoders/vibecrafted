@@ -2,11 +2,14 @@
 //!
 //! The HTTP registry keeps the pilot tools. Everything else under `vc_*`
 //! is listed from this child and `tools/call` is forwarded unchanged.
-//! The child is a new process group: dropping the bridge sends SIGKILL
-//! to that group, and a terminate handler does the same if the server
-//! process is signalled before `Drop` runs. A hard SIGKILL of the server
-//! still closes the stdio pipes, which is the MCP signal for the child
-//! to exit.
+//! The child is a new process group. Drop sends SIGKILL to that group.
+//! SIGTERM and SIGINT of this process do the same from a `sigaction`
+//! handler, then re-raise so the server dies with a real signal status.
+//! SIGKILL of this process cannot run that handler. On Linux the watchdog
+//! is armed with `PR_SET_PDEATHSIG` of SIGTERM (blocked until Python
+//! installs its handler) and then SIGKILLs the group. Elsewhere it polls
+//! `getppid` and does the same. A closed stdio pipe does not kill
+//! grandchildren.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
@@ -623,22 +626,36 @@ async fn spawn_child(
     for (key, value) in &command.env {
         process.env(key, value);
     }
-    // `pre_exec` runs in the forked child before exec. `setpgid(0, 0)` is
-    // async-signal-safe and puts only this child in a new group so the
-    // parent can signal the group without signalling itself.
+    // `pre_exec` runs in the forked child before exec. `setpgid(0, 0)` puts
+    // only this child in a new group so the parent can signal the group
+    // without signalling itself.
     #[cfg(unix)]
-    // SAFETY: pre_exec runs in the forked child before exec, with no locks held. setpgid(0, 0) and Linux prctl(PR_SET_PDEATHSIG, SIGKILL) are async-signal-safe and affect only this child.
+    // SAFETY: called in the forked child before exec, with no locks held.
+    // setpgid, sigprocmask and prctl are async-signal-safe. SIGTERM is
+    // blocked here so Linux parent-death cannot arrive before Python
+    // installs kill_group. The signal is SIGTERM, not SIGKILL: SIGKILL
+    // would prevent the watchdog from killing the rest of the group.
     unsafe {
         process.pre_exec(|| {
-            // Child-only, before exec, no locks held. On Linux,
-            // PR_SET_PDEATHSIG (1) + SIGKILL (9) covers a parent death
-            // that never reaches `Drop`.
-            if setpgid(0, 0) != 0 {
+            if libc::setpgid(0, 0) != 0 {
                 return Err(std::io::Error::last_os_error());
             }
             #[cfg(target_os = "linux")]
             {
-                let _ = prctl(1, 9);
+                let mut blocked = std::mem::zeroed::<libc::sigset_t>();
+                if libc::sigemptyset(&mut blocked) != 0
+                    || libc::sigaddset(&mut blocked, libc::SIGTERM) != 0
+                    || libc::sigprocmask(libc::SIG_BLOCK, &blocked, std::ptr::null_mut()) != 0
+                    || libc::prctl(
+                        libc::PR_SET_PDEATHSIG,
+                        libc::SIGTERM as libc::c_ulong,
+                        0,
+                        0,
+                        0,
+                    ) != 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
             }
             Ok(())
         });
@@ -1105,6 +1122,20 @@ fn watch_parent(command: &BridgeCommand) -> BridgeCommand {
 
 const PARENT_WATCH: &str = r#"
 import os, signal, sys, time
+
+def kill_group(_signum, _frame):
+    try:
+        os.kill(-os.getpid(), signal.SIGKILL)
+    except OSError:
+        pass
+    os._exit(0)
+
+# SIGTERM stays blocked across exec on Linux until this handler exists.
+# PR_SET_PDEATHSIG delivers SIGTERM, not SIGKILL, so the handler can run.
+signal.signal(signal.SIGTERM, kill_group)
+if hasattr(signal, "pthread_sigmask"):
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
+
 program = sys.argv[1]
 args = sys.argv[2:]
 pid = os.fork()
@@ -1116,14 +1147,14 @@ if pid == 0:
 parent = os.getppid()
 while True:
     if os.getppid() != parent:
-        try:
-            os.kill(-os.getpid(), signal.SIGKILL)
-        except OSError:
-            pass
-        os._exit(0)
+        kill_group(0, None)
     waited, status = os.waitpid(pid, os.WNOHANG)
     if waited == pid:
-        os._exit(os.waitstatus_to_exitcode(status))
+        if os.WIFEXITED(status):
+            os._exit(os.WEXITSTATUS(status))
+        if os.WIFSIGNALED(status):
+            os._exit(128 + os.WTERMSIG(status))
+        os._exit(1)
     time.sleep(0.2)
 "#;
 
@@ -1131,35 +1162,45 @@ fn install_terminate_handler() {
     static INSTALLED: Once = Once::new();
     INSTALLED.call_once(|| {
         #[cfg(unix)]
-        // SAFETY: signal is async-signal-safe. The handler is installed once and only calls kill and _exit.
+        // SAFETY: zeroed sigaction is a valid empty mask and null restorer.
+        // The handler only calls kill, sigaction and raise, which are
+        // async-signal-safe. Installed once for the process.
         unsafe {
-            let _ = signal(15, Some(on_terminate));
-            let _ = signal(2, Some(on_terminate));
+            let mut action = std::mem::zeroed::<libc::sigaction>();
+            action.sa_sigaction = on_terminate as *const () as libc::sighandler_t;
+            let _ = libc::sigemptyset(std::ptr::addr_of_mut!(action.sa_mask));
+            let _ = libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut());
+            let _ = libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut());
         }
     });
 }
 
 #[cfg(unix)]
-extern "C" fn on_terminate(_signal: i32) {
+extern "C" fn on_terminate(signal: i32) {
     let pid = TERMINATE_PGID.load(Ordering::Relaxed);
-    if pid > 0 {
-        // `kill` is async-signal-safe. Exit without unwinding so a
-        // SIGTERM cannot leave the process group behind.
-        // SAFETY: kill and _exit are async-signal-safe. Negative pid signals only that process group. _exit does not unwind.
-        unsafe {
-            kill(-pid, 9);
-            _exit(143);
+    // SAFETY: kill, sigaction and raise are async-signal-safe. pid > 1
+    // refuses kill(-1), which would signal every process we can reach.
+    // After the group is signalled, the default disposition is restored
+    // and the original signal is raised so wait status stays WIFSIGNALED.
+    unsafe {
+        if pid > 1 {
+            libc::kill(-pid, libc::SIGKILL);
         }
+        let mut action = std::mem::zeroed::<libc::sigaction>();
+        action.sa_sigaction = libc::SIG_DFL;
+        let _ = libc::sigaction(signal, &action, std::ptr::null_mut());
+        libc::raise(signal);
     }
-    // SAFETY: _exit is async-signal-safe and does not unwind. Used when no process group was published.
-    unsafe { _exit(143) }
 }
 
 fn signal_group(pid: i32, sig: i32) {
     #[cfg(unix)]
-    // SAFETY: kill of a negative pid signals that process group only. Callers pass a pgid this bridge created.
+    // SAFETY: pid > 1 and the child called setpgid(0, 0), so -pid is that
+    // group and not the caller's group or every process (kill(-1)).
     unsafe {
-        let _ = kill(-pid, sig);
+        if pid > 1 {
+            libc::kill(-pid, sig);
+        }
     }
     #[cfg(not(unix))]
     {
@@ -1169,41 +1210,26 @@ fn signal_group(pid: i32, sig: i32) {
 
 fn reap_leader(pid: i32) {
     #[cfg(unix)]
-    // SAFETY: waitpid reaps only the leader pid passed in. status is a local mutable int; WNOHANG is the options value 1.
-    unsafe {
-        let mut status = 0;
-        for _ in 0..20 {
-            let reaped = waitpid(pid, &mut status, 1);
-            if reaped == pid || reaped < 0 {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(10));
+    {
+        if pid <= 1 {
+            return;
         }
-        let _ = waitpid(pid, &mut status, 0);
+        // SAFETY: waitpid reaps only this direct child. WNOHANG comes from
+        // libc, not a guessed constant.
+        unsafe {
+            let mut status = 0;
+            for _ in 0..20 {
+                let reaped = libc::waitpid(pid, &mut status, libc::WNOHANG);
+                if reaped == pid || reaped < 0 {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let _ = libc::waitpid(pid, &mut status, 0);
+        }
     }
     #[cfg(not(unix))]
     {
         let _ = pid;
     }
-}
-
-#[cfg(unix)]
-// SAFETY: declarations match the platform libc signatures used by the unix blocks above. They are not called from anywhere else in this module.
-unsafe extern "C" {
-    fn kill(pid: i32, sig: i32) -> i32;
-    fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
-    fn signal(sig: i32, handler: Option<extern "C" fn(i32)>) -> usize;
-    fn _exit(code: i32) -> !;
-}
-
-#[cfg(all(unix, target_os = "linux"))]
-// SAFETY: declarations match the platform libc signatures used by the unix blocks above. They are not called from anywhere else in this module.
-unsafe extern "C" {
-    fn prctl(option: i32, arg2: u64) -> i32;
-}
-
-#[cfg(unix)]
-// SAFETY: declarations match the platform libc signatures used by the unix blocks above. They are not called from anywhere else in this module.
-unsafe extern "C" {
-    fn setpgid(pid: i32, pgid: i32) -> i32;
 }

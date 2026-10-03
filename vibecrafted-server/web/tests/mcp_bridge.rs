@@ -557,6 +557,59 @@ async fn dropping_the_bridge_kills_the_process_group() {
     );
 }
 
+#[test]
+fn parent_exit_without_drop_kills_the_group() {
+    if let Ok(path) = std::env::var("MCP_BRIDGE_ORPHAN") {
+        orphan_parent(&PathBuf::from(path));
+        return;
+    }
+    let dir = TempDir::new("orphan");
+    let mut child = Command::new(std::env::current_exe().expect("test exe"));
+    child
+        .arg("parent_exit_without_drop_kills_the_group")
+        .arg("--exact")
+        .env("MCP_BRIDGE_ORPHAN", &dir.path)
+        .env("MCP_BRIDGE_TEST_PYTHON", python());
+    let status = child.status().expect("re-exec");
+    assert!(status.success(), "orphan parent failed: {status}");
+    let leader = fs::read_to_string(dir.path.join("leader.pid"))
+        .expect("leader pid")
+        .trim()
+        .parse::<i32>()
+        .expect("leader int");
+    let grandchild = fs::read_to_string(dir.path.join("grandchild.pid"))
+        .expect("grandchild pid")
+        .trim()
+        .parse::<i32>()
+        .expect("grandchild int");
+    assert!(
+        wait_until_dead(leader),
+        "leader {leader} survived parent exit without Drop"
+    );
+    assert!(
+        wait_until_dead(grandchild),
+        "grandchild {grandchild} survived parent exit without Drop"
+    );
+}
+
+fn orphan_parent(dir: &Path) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let bridge = bridge(dir, "ok", Duration::from_secs(2));
+        bridge
+            .list_tools()
+            .await
+            .unwrap_or_else(|error| panic!("{error}\n{:?}", bridge.recent_events()));
+        let leader = bridge.child_pid().expect("leader");
+        fs::write(dir.join("leader.pid"), leader.to_string()).expect("write leader");
+        std::mem::forget(bridge);
+    });
+    std::process::exit(0);
+}
+
 #[tokio::test]
 async fn http_list_prefers_pilots_and_proxies_other_vc_tools() {
     let dir = TempDir::new("http");
