@@ -1256,6 +1256,8 @@ _vetcoders_start_resolve_inventory_host() {
   local exclude="${1:-}" sessions="" valid_hosts="" line="" role=""
   local count=0 chosen="" unique="" attached="" uniq_count=0 vc_frame_bin="" listing_rc=0 role_rc=0
   _vetcoders_start_resolved_host=""
+  _vetcoders_start_resolved_host_count=0
+  _vetcoders_start_resolved_host_names=""
   _vetcoders_start_live_inventory_hosts || listing_rc=$?
   if ((listing_rc != 0)); then
     return 2
@@ -1293,6 +1295,8 @@ _vetcoders_start_resolve_inventory_host() {
       chosen="$line"
     fi
   done <<<"$sessions"
+  _vetcoders_start_resolved_host_count=$count
+  _vetcoders_start_resolved_host_names="$valid_hosts"
   if ((count == 0)); then
     return 1
   fi
@@ -1925,11 +1929,17 @@ _vetcoders_start_create_guest_and_project() {
   return 0
 }
 
-# Inside a live Frame host: exclusive guest create + project through the
-# attached owner. Host canvas stays; switch-session is never used.
+# Inside a live Frame session: exclusive guest create + project into the
+# canvas owner. Typing happens in a guest; that attached session is not the
+# host. A proven attached host stays the owner. A guest pane resolves the
+# singleton live host from the inventory (the same owner the outside door
+# joins) and projects through guest-create + project-workspace. The host
+# canvas stays. switch-session is never used. Zero live hosts, or more than
+# one, are the only topology refusals on the guest-attached door.
 _vetcoders_start_inside_host_guest() {
   local session_name="${1:-}" root="${2:-}"
-  local vc_frame_bin="" host="" role="" role_rc=0
+  local vc_frame_bin="" attached="" host="" role="" role_rc=0 resolve_rc=0
+  local host_count=0 host_names="" quoted_names="" name_line=""
   local PATH="${PATH:-}"
   PATH="$(_vetcoders_path_with_bundled_bin_priority "$PATH")"
   export PATH
@@ -1942,18 +1952,49 @@ _vetcoders_start_inside_host_guest() {
     return 4
   fi
 
-  host="$(_vetcoders_start_resolve_attached_host)" || {
+  attached="$(_vetcoders_start_resolve_attached_host)" || {
     printf 'vc-start: could not determine the live Frame host from the attached owner; refusing before creating %s.\n' \
       "$(_vetcoders_shell_quote "$session_name")" >&2
     return 4
   }
-  role="$(_vetcoders_start_session_projection_role "$host" "$vc_frame_bin")" || role_rc=$?
-  if ((role_rc != 0)) || [[ "$role" != host ]]; then
-    printf 'vc-start: attached session %s is not a singleton Frame host (role: %s); refusing before creating %s. Existing sessions were left untouched.\n' \
-      "$(_vetcoders_shell_quote "$host")" \
-      "$(_vetcoders_shell_quote "${role:-unknown}")" \
-      "$(_vetcoders_shell_quote "$session_name")" >&2
-    return 4
+  role="$(_vetcoders_start_session_projection_role "$attached" "$vc_frame_bin")" || role_rc=$?
+  if ((role_rc == 0)) && [[ "$role" == host ]]; then
+    host="$attached"
+  else
+    # The pane you typed in is not the canvas. Own the singleton live host.
+    _vetcoders_start_resolve_inventory_host "$session_name" || resolve_rc=$?
+    host="${_vetcoders_start_resolved_host:-}"
+    host_count="${_vetcoders_start_resolved_host_count:-0}"
+    host_names="${_vetcoders_start_resolved_host_names:-}"
+    if ((resolve_rc == 2)); then
+      _vetcoders_start_refuse_inventory "$session_name"
+      return $?
+    fi
+    # Unique-client disambiguation among several hosts is an outside
+    # heuristic. From a guest pane only a single live host names the canvas.
+    if [[ "$host" == "$attached" ]]; then
+      host=""
+      host_count=0
+    fi
+    if ((resolve_rc != 0)) || ((host_count != 1)) || [[ -z "$host" ]]; then
+      if ((host_count <= 0)); then
+        printf 'vc-start: attached session %s is a guest workspace and the inventory has no live Frame host, so there is no canvas to project %s into. Existing sessions were left untouched. Next: open the singleton host with vc-start --new-host, then run vc-start %s again from this guest.\n' \
+          "$(_vetcoders_shell_quote "$attached")" \
+          "$(_vetcoders_shell_quote "$session_name")" \
+          "$(_vetcoders_shell_quote "$session_name")" >&2
+        return 4
+      fi
+      while IFS= read -r name_line; do
+        [[ -n "$name_line" ]] || continue
+        quoted_names+="${quoted_names:+, }$(_vetcoders_shell_quote "$name_line")"
+      done <<<"$host_names"
+      printf 'vc-start: attached session %s is a guest workspace and the inventory has %s live Frame hosts (%s), so the canvas owner is ambiguous. Existing sessions were left untouched. Next: project into the host you mean with: vc-frame --session <host> project-workspace %s\n' \
+        "$(_vetcoders_shell_quote "$attached")" \
+        "$host_count" \
+        "$quoted_names" \
+        "$(_vetcoders_shell_quote "$session_name")" >&2
+      return 4
+    fi
   fi
   if [[ "$host" == "$session_name" ]]; then
     printf 'vc-start: host %s cannot project into itself; pass a different workspace name.\n' \
@@ -2625,8 +2666,9 @@ _vetcoders_start_entry() {
       ;;
   esac
 
-  # Inside a live Frame host: create a distinct guest and project it into
-  # this attached owner. Never fall through to switch-session / nested attach.
+  # Inside a live Frame session: create a distinct guest and project it into
+  # the canvas owner (the attached host, or the singleton live host when the
+  # attached session is a guest). Never fall through to switch-session.
   if _vetcoders_in_vc_frame && [[ -z "${VIBECRAFTED_START_CREATED_SESSION:-}" ]]; then
     _vetcoders_start_inside_host_guest "$session_name" "$root"
     return $?
