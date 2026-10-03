@@ -482,6 +482,20 @@ fn draw_home_footer(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(
         Paragraph::new(if app.status_line.is_empty() {
             format!("state root: {}", app.config.state_root.to_string_lossy())
+        } else if app.observe.home.history
+            && app.status_line
+                == format!(
+                    "[{}] live 0  attention 0  failed 0",
+                    app.observe.home.scope.label()
+                )
+        {
+            // Scope changes previously described the History-only collection
+            // as a global live census. Keep real navigation/error messages.
+            format!(
+                "[{}] History · {} visible records",
+                app.observe.home.scope.label(),
+                app.home_counts().history
+            )
         } else {
             app.status_line.clone()
         })
@@ -2363,6 +2377,78 @@ mod tests {
             .map(str::trim_end)
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn history_footer_labels_visible_records_without_claiming_zero_live_runs() {
+        let mut app = home_fixture_app();
+        app.observe.home.history = true;
+        app.toggle_home_scope();
+        app.toggle_home_scope();
+        let rendered = render_home_size(&app, 120, 24);
+        assert!(
+            rendered.contains("[Global] History · 1 visible records"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("[Global] live 0"), "{rendered}");
+        app.observe.home.input = "/no-matching-run".into();
+        let filtered = render_home_size(&app, 120, 24);
+        assert!(
+            filtered.contains("History · 0 visible records"),
+            "{filtered}"
+        );
+        app.status_line = "Goto refused: destination unavailable".into();
+        assert!(render_home_size(&app, 120, 24).contains(&app.status_line));
+        app.observe.home.input.clear();
+        app.observe.home.history = false;
+        app.toggle_home_scope();
+        app.toggle_home_scope();
+        let live = render_home_size(&app, 120, 24);
+        assert!(live.contains("[Global] live 1"), "{live}");
+    }
+
+    #[test]
+    fn history_board_uses_wide_columns_and_keeps_narrow_selection() {
+        let mut app = home_fixture_app();
+        app.observe.home.history = true;
+        let mut run = sample_run("work-261002-235212-20231", "codex", "pane-2").snapshot;
+        run.state = Some("completed".into());
+        run.extra
+            .insert("routing_source".into(), "control-core:runtime-meta".into());
+        run.extra.insert(
+            "workspace_display_label".into(),
+            "runtime-recovery-project".into(),
+        );
+        run.extra.insert(
+            "worker_host_session".into(),
+            "codex-work-261002-235212-20231".into(),
+        );
+        run.extra.insert("cost".into(), "$1.3859".into());
+        app.state.runs = vec![run.clone()];
+        app.state.retained_runs = vec![run];
+        for width in [40, 80, 120, 170] {
+            let rendered = render_home_size(&app, width, 24);
+            assert!(
+                rendered.contains("cost $1.3859"),
+                "width {width}: {rendered}"
+            );
+            assert!(rendered.contains("History"), "{rendered}");
+            assert_eq!(app.observe.home.selected, 0);
+            assert_eq!(home_row_index_at(&app, 1), Some(0));
+            for (_, line, _) in home_board_lines(&app, usize::from(width - 2)) {
+                assert!(Line::from(line).width() <= usize::from(width - 2));
+            }
+            if width >= 120 {
+                assert!(rendered.contains("work-261002-235212-20231"), "{rendered}");
+            }
+            if width == 170 {
+                assert!(rendered.contains("runtime-recovery-project"), "{rendered}");
+                assert!(
+                    rendered.contains("codex-work-261002-235212-20231"),
+                    "{rendered}"
+                );
+            }
+        }
     }
 
     #[test]
