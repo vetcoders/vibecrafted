@@ -23269,7 +23269,9 @@ def cmd_runtime_rescue(args: argparse.Namespace) -> int:
         return _runtime_rescue_apply(args, paths)
 
 
-def _runtime_rescue_apply(args: argparse.Namespace, paths: Mapping[str, Path]) -> int:
+def _runtime_rescue_apply(
+    args: argparse.Namespace, paths: Mapping[str, Path], *, automatic: bool = False
+) -> int:
     envelope: dict[str, Any] = {
         "schema": RUNTIME_RESCUE_RESULT_SCHEMA,
         "status": "unusable",
@@ -23360,7 +23362,7 @@ def _runtime_rescue_apply(args: argparse.Namespace, paths: Mapping[str, Path]) -
                 # never capture/republish the same generation merely to discharge
                 # a verification residual in historical receipt ownership.
                 return _runtime_rescue_finish(
-                    envelope, paths, receipt_path, disk_journal, 0
+                    envelope, paths, receipt_path, disk_journal, 0, automatic=automatic
                 )
             envelope["capacity"] = _runtime_rescue_capacity_preflight(
                 paths, Path(args.payload_root), live, include_snapshot=False
@@ -23387,7 +23389,7 @@ def _runtime_rescue_apply(args: argparse.Namespace, paths: Mapping[str, Path]) -
                 emit_result=False,
             )
             return _runtime_rescue_finish(
-                envelope, paths, receipt_path, owned_journal, code
+                envelope, paths, receipt_path, owned_journal, code, automatic=automatic
             )
         receipt_bytes, receipt, receipt_error = _load_runtime_rescue_receipt(
             receipt_path
@@ -23549,7 +23551,7 @@ def _runtime_rescue_apply(args: argparse.Namespace, paths: Mapping[str, Path]) -
             emit_result=False,
         )
         return _runtime_rescue_finish(
-            envelope, paths, receipt_path, owned_journal, code
+            envelope, paths, receipt_path, owned_journal, code, automatic=automatic
         )
     except PreferenceConflict:
         if publication_owned and owned_journal:
@@ -23622,6 +23624,8 @@ def _runtime_rescue_finish(
     receipt_path: Path,
     journal: Mapping[str, Any],
     code: int,
+    *,
+    automatic: bool = False,
 ) -> int:
     if code != 0:
         residuals = _runtime_rescue_rollback_captured_state(
@@ -23692,6 +23696,7 @@ def _runtime_rescue_finish(
             "pre_rescue_label": "damaged-pre-rescue",
             "healthy_restorepoint": True,
             "verified": True,
+            "automatic": automatic,
         }
     )
     receipt.pop("rescue_pending", None)
@@ -23718,7 +23723,14 @@ def _runtime_rescue_finish(
         residuals=[],
         retirement=retirement,
     )
-    print(json.dumps(envelope, sort_keys=True))
+    if automatic:
+        install_result: dict[str, Any] = dict(result)
+        install_result["recovery"] = {
+            key: value for key, value in envelope.items() if key != "runtime"
+        }
+        print(json.dumps(install_result, sort_keys=True))
+    else:
+        print(json.dumps(envelope, sort_keys=True))
     return 0
 
 
@@ -26705,7 +26717,39 @@ def _install_runtime_pack(
         raise RuntimeError(
             "existing runtime install receipt belongs to different install roots"
         )
-    _validate_runtime_backup_receipts(previous, paths)
+    try:
+        _validate_runtime_backup_receipts(previous, paths)
+    except FileNotFoundError:
+        if rescue_record:
+            raise
+        # A verified new pack can replace missing rollback history through the
+        # same capture/archive/publication owner used by explicit rescue. The
+        # install lease remains held; unknown occupants still require a choice.
+        receipt_bytes, live_receipt, receipt_error = _load_runtime_rescue_receipt(
+            receipt_path
+        )
+        plan = _build_runtime_rescue_plan(
+            paths=paths,
+            payload_root=payload_root,
+            receipt_bytes=receipt_bytes,
+            receipt=live_receipt,
+            receipt_error=receipt_error,
+        )
+        if (
+            plan["status"] != "rescueable"
+            or not plan["missing_backups"]
+            or any(
+                action["action"] == "replace_nonregular_owned_path"
+                and action.get("current_type") != "absent"
+                for action in plan["repair_actions"]
+            )
+        ):
+            raise RuntimeError(
+                "missing rollback history recovery refused: " + plan["reason"]
+            ) from None
+        recovery_args = argparse.Namespace(**vars(args))
+        recovery_args.plan_digest = plan["plan_digest"]
+        return _runtime_rescue_apply(recovery_args, paths, automatic=True)
     _rollback_runtime_config_transaction(paths, previous)
     if previous.get("install_phase") == "preparing":
         saved = previous.get("preparing_previous_receipt")

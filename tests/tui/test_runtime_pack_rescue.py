@@ -317,18 +317,60 @@ def installed(tmp_path: Path, roots, capsys):
     return roots, payload, result
 
 
-def test_normal_install_still_refuses_missing_historical_backups(
+def test_normal_install_recovers_missing_historical_backups(
     tmp_path, installed, capsys
 ):
-    paths, _payload, _ = installed
+    paths, _, result = installed
     planted = _plant_missing_historical(paths)
-    newer = seed_runtime_pack(tmp_path / "pack-b", version="9.9.9+b")
-    with pytest.raises(FileNotFoundError):
-        installer.cmd_runtime_install(_ns(newer))
-    capsys.readouterr()
+    archived = _receipt(paths).read_bytes()
+    shutil.rmtree(Path(result["root"]))
+
+    def change_release_asset(pack):
+        source = pack / "vibecrafted-core/vibecrafted_core/config/vc-frame/layouts"
+        layout = next(source.glob("*.kdl"))
+        layout.write_text(layout.read_text() + "// new release asset\n")
+
+    newer = seed_runtime_pack(
+        tmp_path / "pack-b", version="9.9.9+b", before_source_seal=change_release_asset
+    )
+    _seal_runtime_pack_for_admission(newer)
+    result = _install(newer, capsys)
+    assert Path(result["root"]).name == "9.9.9+b"
+    assert result["recovery"]["healthy_restorepoint"] is True
+    assert Path(result["recovery"]["archived_receipt"]["path"]).read_bytes() == archived
+    assert result["recovery"]["missing_history"]
     for backup in planted:
         assert not Path(backup).exists()
-    assert "rescue" not in _load_receipt(paths)
+    assert _load_receipt(paths)["rescue"]["automatic"] is True
+
+    assert any(
+        "// new release asset" in path.read_text()
+        for path in (paths["product_config"] / "vc-frame/layouts").glob("*.kdl")
+    )
+
+
+@pytest.mark.parametrize("occupant", ["alias", "foreign-file"])
+def test_normal_missing_history_recovery_refuses_foreign_or_aliased_launcher(
+    tmp_path, installed, capsys, occupant
+):
+    paths, _, _ = installed
+    _plant_missing_historical(paths)
+    launcher = paths["launcher_home"] / "vibecrafted"
+    launcher.unlink()
+    foreign = tmp_path / "foreign"
+    foreign.write_text("untouched")
+    if occupant == "alias":
+        launcher.symlink_to(foreign)
+    else:
+        launcher.write_text("unknown user launcher")
+    original_receipt = _receipt(paths).read_bytes()
+    newer = seed_runtime_pack(tmp_path / "pack-b", version="9.9.9+b")
+    _seal_runtime_pack_for_admission(newer)
+    with pytest.raises(RuntimeError, match="recovery refused"):
+        installer.cmd_runtime_install(_ns(newer))
+    assert _receipt(paths).read_bytes() == original_receipt
+    assert foreign.read_text() == "untouched"
+    assert not (paths["runtime_home"] / "releases/9.9.9+b").exists()
 
 
 def test_plan_inventories_missing_history_and_live_damage_without_writes(
@@ -2084,3 +2126,31 @@ def test_rescue_recognizes_exact_receipted_frame_assets_without_old_generation(
         assert code == 0, outcome
         assert outcome["healthy_restorepoint"] is True
         assert "// new release asset" in asset.read_text()
+
+
+@pytest.mark.parametrize("user_change", ["preference", "frame-asset"])
+def test_normal_missing_history_recovery_preserves_unknown_user_configuration(
+    tmp_path, installed, capsys, user_change
+):
+    paths, _, result = installed
+    if user_change == "preference":
+        path = paths["product_config"] / "starship.toml"
+    else:
+        path = next((paths["product_config"] / "vc-frame/layouts").glob("*.kdl"))
+    path.write_text(
+        path.read_text() + "\n# user custom content\n"
+        if user_change == "preference"
+        else path.read_text() + "\n// user custom content\n"
+    )
+    before = path.read_bytes()
+    _plant_missing_historical(paths)
+    shutil.rmtree(Path(result["root"]))
+    newer = seed_runtime_pack(tmp_path / "pack-b", version="9.9.9+b")
+    _seal_runtime_pack_for_admission(newer)
+    if user_change == "preference":
+        with pytest.raises(installer.PreferenceConflict):
+            installer.cmd_runtime_install(_ns(newer))
+    else:
+        with pytest.raises(RuntimeError, match="recovery refused"):
+            installer.cmd_runtime_install(_ns(newer))
+    assert path.read_bytes() == before
