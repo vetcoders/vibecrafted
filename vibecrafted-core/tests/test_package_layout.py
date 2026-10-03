@@ -37,6 +37,15 @@ def test_package_carries_runtime_skills_and_command_deck() -> None:
     assert (
         package_root / "runtime" / "telemetry" / "kimi-monitor" / "kimi_monitor.py"
     ).is_file()
+    assert (package_root / "runtime" / "telemetry" / "fleet_engine.py").is_file()
+    for agent in ("codex", "claude", "grok", "junie", "copilot", "cursor"):
+        assert (
+            package_root
+            / "runtime"
+            / "telemetry"
+            / f"{agent}-monitor"
+            / f"{agent}_monitor.py"
+        ).is_file()
     assert (
         package_root
         / "runtime"

@@ -1387,8 +1387,14 @@ cmd_telemetry_help() {
   printf '%bUsage:%b\n' "$_bold" "$_reset"
   printf '  telemetry agy line|once|sessions|daemon\n'
   printf '  telemetry kimi line|once|daemon\n'
-  printf '  telemetry line                        Both statuslines (present engines)\n'
-  printf '  telemetry once                        JSON union { "agy": …, "kimi": … }\n'
+  printf '  telemetry codex line|once|sessions|daemon\n'
+  printf '  telemetry claude line|once|sessions|daemon\n'
+  printf '  telemetry grok line|once|sessions|daemon\n'
+  printf '  telemetry junie line|once|sessions|daemon\n'
+  printf '  telemetry copilot line|once|sessions|daemon\n'
+  printf '  telemetry cursor line|once|sessions|daemon\n'
+  printf '  telemetry line                        Statuslines of present engines\n'
+  printf '  telemetry once                        JSON union of agy, kimi, codex, claude, grok, junie, copilot, cursor\n'
   printf '  telemetry smoke [--agent <claude|codex|agy|junie|grok|cursor|kimi|copilot>] [--count <n>] [--repo <path>] [--no-watch|--watch]\n'
   printf '  vibecrafted telemetry <same>\n'
   printf '  (--root is the legacy spelling of --repo; the smoke root may be created on demand)\n'
@@ -1396,6 +1402,8 @@ cmd_telemetry_help() {
   printf '%bExamples:%b\n' "$_bold" "$_reset"
   printf '  telemetry agy line\n'
   printf '  telemetry kimi daemon\n'
+  printf '  telemetry codex sessions\n'
+  printf '  telemetry once\n'
   printf '  telemetry line\n'
   printf '  telemetry smoke --count 1 --no-watch\n'
   printf '\n'
@@ -1405,7 +1413,7 @@ _telemetry_engine_script() {
   local engine="${1:-}"
   local package_root script
   case "$engine" in
-    agy|kimi) ;;
+    agy|kimi|codex|claude|grok|junie|copilot|cursor) ;;
     *) return 1 ;;
   esac
   package_root="$(_package_resource_root 2>/dev/null || true)"
@@ -1454,11 +1462,24 @@ _telemetry_run_engine() {
 _telemetry_engine_mode_ok() {
   local engine="$1"
   local mode="$2"
-  case "$engine:$mode" in
-    agy:line|agy:once|agy:sessions|agy:daemon) return 0 ;;
-    kimi:line|kimi:once|kimi:daemon|kimi:tui) return 0 ;;
-    *) return 1 ;;
+  case "$engine" in
+    agy)
+      case "$mode" in
+        line|once|sessions|daemon) return 0 ;;
+      esac
+      ;;
+    kimi)
+      case "$mode" in
+        line|once|daemon|tui) return 0 ;;
+      esac
+      ;;
+    codex|claude|grok|junie|copilot|cursor)
+      case "$mode" in
+        line|once|sessions|daemon) return 0 ;;
+      esac
+      ;;
   esac
+  return 1
 }
 
 cmd_telemetry_engine() {
@@ -1489,7 +1510,7 @@ cmd_telemetry_engine() {
 
 cmd_telemetry_line() {
   local engine ran=0 rc=0
-  for engine in agy kimi; do
+  for engine in agy kimi codex claude grok junie copilot cursor; do
     _telemetry_engine_script "$engine" >/dev/null 2>&1 || continue
     ran=1
     _telemetry_run_engine "$engine" line "$@" || rc=$?
@@ -1502,49 +1523,52 @@ cmd_telemetry_line() {
 }
 
 cmd_telemetry_once() {
-  local python_bin tmpdir agy_script kimi_script ran=0
+  local python_bin tmpdir engine script
   python_bin="$(_telemetry_python)" || return 1
   mkdir -p "$crafted_home/tmp"
   tmpdir="$(mktemp -d "$crafted_home/tmp/telemetry-once.XXXXXX")"
-  printf 'null\n' > "$tmpdir/agy.json"
-  printf 'null\n' > "$tmpdir/kimi.json"
-  if agy_script="$(_telemetry_engine_script agy)"; then
-    ran=1
-    "$python_bin" "$agy_script" once "$@" > "$tmpdir/agy.json" 2>/dev/null || true
-    [[ -s "$tmpdir/agy.json" ]] || printf 'null\n' > "$tmpdir/agy.json"
-  fi
-  if kimi_script="$(_telemetry_engine_script kimi)"; then
-    ran=1
-    "$python_bin" "$kimi_script" once "$@" > "$tmpdir/kimi.json" 2>/dev/null || true
-    [[ -s "$tmpdir/kimi.json" ]] || printf 'null\n' > "$tmpdir/kimi.json"
-  fi
-  if ((ran == 0)); then
-    rm -rf "$tmpdir"
-    printf '%b✗%b telemetry engines not installed in this generation.\n' "$_red" "$_reset" >&2
-    return 1
-  fi
-  AGY_FILE="$tmpdir/agy.json" KIMI_FILE="$tmpdir/kimi.json" "$python_bin" - <<'PY'
+  for engine in agy kimi codex claude grok junie copilot cursor; do
+    if script="$(_telemetry_engine_script "$engine")"; then
+      "$python_bin" "$script" once "$@" > "$tmpdir/$engine.json" 2>"$tmpdir/$engine.err" || true
+      if [[ ! -s "$tmpdir/$engine.json" ]]; then
+        printf '{"agent":"%s","status":"error","reason":"engine failed","cache_semantics":null,"last_session":null,"metrics":null,"quota":{"status":"error"}}\n' "$engine" > "$tmpdir/$engine.json"
+      fi
+    else
+      printf '{"agent":"%s","status":"absent","reason":"engine not installed in this generation","cache_semantics":null,"last_session":null,"metrics":null,"quota":{"status":"absent"}}\n' "$engine" > "$tmpdir/$engine.json"
+    fi
+  done
+  ONCE_DIR="$tmpdir" "$python_bin" - <<'PY'
 import json, os, pathlib
 
-def load(path: str):
-    raw = pathlib.Path(path).read_text(encoding="utf-8").strip()
+order = ["agy", "kimi", "codex", "claude", "grok", "junie", "copilot", "cursor"]
+root = pathlib.Path(os.environ["ONCE_DIR"])
+union = {}
+for agent in order:
+    raw = (root / f"{agent}.json").read_text(encoding="utf-8").strip()
     if not raw or raw == "null":
-        return None
+        union[agent] = {
+            "agent": agent,
+            "status": "absent",
+            "reason": "engine not installed in this generation",
+            "cache_semantics": None,
+            "last_session": None,
+            "metrics": None,
+            "quota": {"status": "absent"},
+        }
+        continue
     try:
-        return json.loads(raw)
+        union[agent] = json.loads(raw)
     except json.JSONDecodeError:
-        return {"error": "invalid engine output"}
-
-print(
-    json.dumps(
-        {
-            "agy": load(os.environ["AGY_FILE"]),
-            "kimi": load(os.environ["KIMI_FILE"]),
-        },
-        indent=2,
-        ensure_ascii=False,
-    )
-)
+        union[agent] = {
+            "agent": agent,
+            "status": "error",
+            "reason": "invalid engine output",
+            "cache_semantics": None,
+            "last_session": None,
+            "metrics": None,
+            "quota": {"status": "error"},
+        }
+print(json.dumps(union, indent=2, ensure_ascii=False))
 PY
   local rc=$?
   rm -rf "$tmpdir"
@@ -1725,7 +1749,7 @@ cmd_telemetry() {
     smoke)
       cmd_telemetry_smoke "$@"
       ;;
-    agy|kimi)
+    agy|kimi|codex|claude|grok|junie|copilot|cursor)
       cmd_telemetry_engine "$subcommand" "$@"
       ;;
     line)
@@ -5087,8 +5111,14 @@ cmd_help_full() {
   printf '\n'
   printf '  %btelemetry agy%b line|once|sessions|daemon   Google Antigravity quota / statusline\n' "$_cyan" "$_reset"
   printf '  %btelemetry kimi%b line|once|daemon           Kimi Code quota / statusline\n' "$_cyan" "$_reset"
-  printf '  %btelemetry line%b                            Both statuslines (present engines)\n' "$_cyan" "$_reset"
-  printf '  %btelemetry once%b                            JSON union of both quota snapshots\n' "$_cyan" "$_reset"
+  printf '  %btelemetry codex%b line|once|sessions|daemon Codex session ledger\n' "$_cyan" "$_reset"
+  printf '  %btelemetry claude%b line|once|sessions|daemon Claude session ledger\n' "$_cyan" "$_reset"
+  printf '  %btelemetry grok%b line|once|sessions|daemon  Grok session ledger\n' "$_cyan" "$_reset"
+  printf '  %btelemetry junie%b line|once|sessions|daemon Junie session ledger\n' "$_cyan" "$_reset"
+  printf '  %btelemetry copilot%b line|once|sessions|daemon Copilot session ledger\n' "$_cyan" "$_reset"
+  printf '  %btelemetry cursor%b line|once|sessions|daemon Cursor has no local token ledger\n' "$_cyan" "$_reset"
+  printf '  %btelemetry line%b                            Statuslines of present engines\n' "$_cyan" "$_reset"
+  printf '  %btelemetry once%b                            JSON union of agy, kimi, codex, claude, grok, junie, copilot, cursor\n' "$_cyan" "$_reset"
   printf '  %btelemetry smoke%b [flags]                   Smoke the headless marbles telemetry path\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted telemetry%b <same>               Same entrypoint through the main deck\n' "$_cyan" "$_reset"
   printf '\n'
