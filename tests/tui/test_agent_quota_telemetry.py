@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -53,6 +54,8 @@ def test_telemetry_help_lists_quota_engines(tmp_path: Path) -> None:
     out = ANSI.sub("", result.stdout)
     assert "telemetry agy line|once|sessions|daemon" in out
     assert "telemetry kimi line|once|daemon" in out
+    for agent in ("codex", "claude", "grok", "junie", "copilot", "cursor"):
+        assert f"telemetry {agent} line|once|sessions|daemon" in out
     assert "telemetry line" in out
     assert "telemetry once" in out
     assert "telemetry smoke" in out
@@ -70,6 +73,26 @@ def test_telemetry_line_runs_present_engines(tmp_path: Path) -> None:
     out = result.stdout.lower()
     assert "agy" in out
     assert "kimi" in out or "quota" in out
+
+
+def test_telemetry_once_union_covers_the_fleet(tmp_path: Path) -> None:
+    result = _run_telemetry("once", env=_launcher_env(tmp_path))
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert set(payload) >= {
+        "agy",
+        "kimi",
+        "codex",
+        "claude",
+        "grok",
+        "junie",
+        "copilot",
+        "cursor",
+    }
+    cursor = payload["cursor"]
+    assert cursor["status"] == "unavailable"
+    assert cursor["reason"] == "usage lives in Cursor cloud"
+    assert cursor["metrics"] is None
 
 
 def test_telemetry_unknown_subcommand_fails(tmp_path: Path) -> None:
