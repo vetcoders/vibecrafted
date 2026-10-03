@@ -13,6 +13,8 @@ The server exposes the control plane as a small JSON API on
 writes durable run state. Observation may ask the canonical Python writer to
 revalidate qualified process identity; only that writer may issue a receipted
 `active -> failed` transition.
+The claim door likewise delegates to the canonical Python dispatch writer;
+HTTP acceptance never certifies a cut or updates the tracker.
 
 ## Endpoints
 
@@ -26,6 +28,7 @@ revalidate qualified process identity; only that writer may issue a receipted
 | GET    | `/api/control/runs/{run_id}/await`   | Shared blocking subscription for the run.                                                                             |
 | GET    | `/api/control/transcripts?q=`        | Host-wide human-log search. Paginated (`offset`, `limit`, `has_more`, `total`); each file is streamed from the start. |
 | POST   | `/api/structure/report`              | Local-peer: run `loct report --output .loctree/report.html` in a known control-plane workspace root.                  |
+| POST   | `/api/dispatch/claim`                | Loopback headless peer: hand an unverified worker claim to the canonical Python writer.                               |
 | GET    | `/api/control/lifecycle`             | Lifecycle run summaries, newest-first.                                                                                |
 | GET    | `/api/control/lifecycle/{run_id}`    | Full nested lifecycle state with per-run and per-stage axes.                                                          |
 | GET    | `/api/control/events`                | Server-Sent Events stream of the control-plane event log.                                                             |
@@ -35,6 +38,55 @@ Run payloads serialise the delivery-proof axes (`execution_state`,
 `proof_state`, `delivery_state`) and `seal` only when the snapshot or kernel
 receipt carries them. Absent axes stay absent — a `completed` state is never
 promoted into a delivery claim.
+
+## Dispatch claim door
+
+`POST /api/dispatch/claim` rings the dispatch doorbell. Send JSON with the
+dispatch `run_id`, `cut_id`, exact `commit_sha`, registered absolute
+`report_path`, and a nonempty `measurements` array describing the worker's
+self-checks. The Python writer validates the registered dispatch/cut and
+claimed SHA in its runtime root before recording `[~]` in existing dispatch
+receipts. Rust transports the request; it never writes those receipts or the
+tracker.
+
+```bash
+curl --fail-with-body -X POST http://127.0.0.1:3024/api/dispatch/claim \
+  -H 'content-type: application/json' \
+  -d '{"run_id":"disp-example","cut_id":"w1-01","commit_sha":"<full-SHA>","report_path":"/absolute/registered/report.md","measurements":["Owned scope self-check passed"]}'
+```
+
+Successful recording returns HTTP `202` with `status: "claim_received"`,
+`marker: "[~]"`, `verification: "unverified"`, and
+`writer: "vibecrafted_core.dispatch.claims"`. This acknowledges recording
+only. The canonical writer subsequently runs the cut's full
+`VERIFICATION_RULE` and declared verifiers in the registered runtime root
+against the claimed SHA. Only every matcher passing permits tracker `[x]`;
+a red matcher stays `[!]` and journal evidence includes the verifier cwd.
+Missing claims leave verification unrun and require dispatch resume, not a
+synthetic failed-test verdict.
+The worker measures with the tools its own shell permits; the writer executes
+declared verifier commands on its separate shell. Verifiers default to a
+600-second timeout and a sanitized environment, so keys such as
+`DEVELOPER_DIR` are absent unless the declared command inlines them.
+
+Under a compile embargo, include
+`"checkpoint":{"owned_scope":["src/editor.rs"],"skipped_controls":["cargo test","semgrep"]}`,
+enumerating every actually skipped control, including security hooks. The
+checkpoint stays unverified. `W2_STRUCTURALLY_CLOSED` means assembled and
+ready to check; the integrator must run all gates and skipped controls on
+the assembled SHA before settlement. The POST cannot close an embargo.
+
+The transport requires verified loopback `ConnectInfo`, JSON content type,
+and a body of at most 64 KiB. Browser `Origin` headers (including `null`)
+and cross-site fetches are refused. The server selects Python from its own
+`VIBECRAFTED_PYTHON` or `VIBECRAFTED_RUNTIME_ROOT/bin/python3`, requires an
+absolute executable, clears `PYTHONPATH`, and invokes the module in isolated
+Python mode. Runtime packs use a fixed bootstrap adding only their selected
+generation's `vibecrafted-core` and `python-site` directories. There is no
+request-selected executable, module root, or shell command.
+Recording has a 30-second timeout; a timeout may follow a durable write,
+so inspect the receipt before retrying. Writer rejection returns `400`,
+unavailable generation `503`, and transport failure `502`/`504`.
 
 ## Run observation v1
 

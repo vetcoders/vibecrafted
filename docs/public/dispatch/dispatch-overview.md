@@ -9,7 +9,7 @@ order: 10
 
 `vibecrafted dispatch` runs a `vibecrafted.dispatch.v1` TOML plan through a
 deterministic, dependency-aware supervisor. It launches all ready cuts up to
-the declared concurrency limit, runs machine-checkable verifiers after each,
+the declared concurrency limit, accepts their claim POSTs, runs declared verifiers,
 and applies explicit repair and failure policies. Where the
 [lifecycle](/docs/lifecycle-overview/) relays one mission through eleven
 generic stages, dispatch executes a plan you already decomposed — every cut
@@ -77,10 +77,14 @@ For each ready `[[cut]]`, the supervisor:
 3. Launches the cut's agent through the named workflow as a tracked run, with
    `CARGO_TARGET_DIR=<worker-checkout>/target`.
 4. Awaits the worker (poll and timeout from `[policy.await]`).
-5. Runs the cut's verifiers in that same checkout and matches their output
+5. Requires a claim POST containing dispatch run id, cut id, exact commit SHA,
+   runtime report path, and measurements. The canonical Python writer records
+   `[~]`; the HTTP handler cannot write durable state or tracker `[x]`.
+6. Independently runs the cut's full verification in that same runtime root
+   against the claimed SHA and matches every declared verifier's output
    against the declared expectations (`contains`, `equals`, `matches`, `not_contains`,
    `exit_code`).
-6. Records a verdict with verifier evidence, appends it to the baton, and
+7. Records a verdict with verifier evidence, appends it to the baton, and
    applies policy: repair rounds on failure, `recovery` jumps when declared,
    and `on_critical_fail` / `on_timeout` behavior.
 
@@ -96,6 +100,17 @@ settles successfully; integrators are exclusive. The baton accumulates one
 state per cut (`[x]` verified, `[!]` failed,
 `[~]` worker done but unverified, `[ ]` pending) — later cuts see the full
 history in their prompt, so an audit cut can read what actually happened.
+Neither report text nor brief checkboxes settle `[x]`; only the writer's passed
+full VERIFICATION_RULE and all green matchers do. A missing claim records
+"claim not received, verifiers were not run" with the resume command. A red
+matcher records `[!]` and its cwd.
+
+Plan-owned `compile_embargo = true` cuts POST unverified checkpoints, including
+owned scope and every skipped hook or security control. A named integrator's
+`closes_embargo` lists checkpoint dependencies that it may assemble while
+still unverified. `W2_STRUCTURALLY_CLOSED` means ready to check. Full gates on
+the assembled SHA, including those skipped controls, must pass before the
+writer can close embargo and settle `[x]`.
 
 ## Artifacts
 

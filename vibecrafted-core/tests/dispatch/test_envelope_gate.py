@@ -17,10 +17,18 @@ from pathlib import Path
 
 import pytest
 from vibecrafted_core.delivery.model import ExecutionEnvelope
-from vibecrafted_core.dispatch.model import STATE_FAILED, STATE_VERIFIED, Dispatch
+from vibecrafted_core.dispatch.model import (
+    STATE_FAILED,
+    STATE_UNKNOWN,
+    STATE_VERIFIED,
+    Dispatch,
+)
 from vibecrafted_core.dispatch.schema import DispatchSchemaError, parse_dispatch
 from vibecrafted_core.dispatch.supervisor import CellRun, DispatchSupervisor
 from vibecrafted_core.repository_claims import RepositoryClaimRegistry
+
+pytestmark = pytest.mark.usefixtures("worker_claims")
+
 
 FAST_AWAIT = "await = { poll_s = 0.02, timeout_min = 1.0 }"
 ORIGIN_URL = "git@github.com:vetcoders/fixture.git"
@@ -378,7 +386,9 @@ def test_dirty_outside_owned_paths_admits_spawn(gate_env: dict[str, Path]) -> No
     _supervisor, result = run_gate(gate_env, envelope, launcher)
 
     assert launcher.launches == [("c1", "initial")]
-    assert result.states["c1"] == STATE_VERIFIED
+    assert result.states["c1"] == STATE_UNKNOWN
+    journal = (gate_env["artifacts"] / "journal.md").read_text(encoding="utf-8")
+    assert "claim not received, verifiers were not run" in journal
 
 
 def test_dirty_inside_owned_paths_blocks_before_spawn(

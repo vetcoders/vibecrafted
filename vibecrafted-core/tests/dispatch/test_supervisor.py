@@ -30,6 +30,9 @@ from vibecrafted_core.dispatch.supervisor import (
     workflow_cell_launcher,
 )
 
+pytestmark = pytest.mark.usefixtures("worker_claims")
+
+
 FAST_AWAIT = "await = { poll_s = 0.02, timeout_min = 1.0 }"
 
 
@@ -281,6 +284,8 @@ def build_dispatch(
 ) -> tuple[Dispatch, Path, Path]:
     repo_dir = repo if repo is not None else tmp_path / "repo"
     repo_dir.mkdir(exist_ok=True)
+    if repo is None:
+        init_git_repo(repo_dir)
     reports_dir = tmp_path / "reports"
     reports_dir.mkdir(exist_ok=True)
     artifacts_dir = tmp_path / "artifacts"
@@ -570,6 +575,17 @@ prompt = "create the marker"
         policy="repair_rounds = 1",
     )
     repo_dir = Path(dispatch.meta.repo)
+    # This marker models generated runtime evidence, not uncommitted source.
+    (repo_dir / ".gitignore").write_text("/marker.txt\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", ".gitignore"], cwd=repo_dir, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-qm", "ignore generated repair marker"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+    )
     launcher = FakeCells(reports_dir=reports_dir)
     launcher.cells[("c1", "initial")] = FakeCell(bash="true")
     launcher.cells[("c1", "repair1")] = FakeCell(
@@ -812,7 +828,7 @@ prompt = "writes report elsewhere"
 def test_supervisor_default_artifacts_follow_tracker_path(tmp_path: Path) -> None:
     plans_dir = tmp_path / "plans"
     repo_dir = tmp_path / "repo"
-    repo_dir.mkdir()
+    init_git_repo(repo_dir)
     reports_dir = tmp_path / "reports"
     reports_dir.mkdir()
     text = f"""
@@ -1093,9 +1109,11 @@ prompt = "repair and commit"
     result = run_dispatch(dispatch, launcher=launcher, artifacts_dir=artifacts_dir)
 
     assert result.line_broken is True
-    assert result.states == {"c1": STATE_FAILED}
+    assert result.states == {"c1": STATE_UNKNOWN}
     assert result.baton.last is not None
-    assert any("uncommitted changes" in f for f in result.baton.last.failures)
+    assert any("claim" in f for f in result.baton.last.failures)
+    journal = (artifacts_dir / "journal.md").read_text(encoding="utf-8")
+    assert "claim not received, verifiers were not run" in journal
 
 
 def test_committed_repair_verifies_clean_final_head(tmp_path: Path) -> None:
@@ -1221,7 +1239,8 @@ prompt = "fails normally"
         policy="repair_rounds = 0\nrequire_commit = true",
     )
 
-    marker = repo_dir / "uncommitted.txt"
+    # A failed matcher may have generated evidence without changing source.
+    marker = tmp_path / "uncommitted.txt"
     launcher = FakeCells(reports_dir=reports_dir)
     launcher.cells[("ordinary-failure", "initial")] = FakeCell(
         bash=f"printf dirty > {shlex.quote(str(marker))}"
@@ -1300,6 +1319,7 @@ prompt = "must identify the cut"
 
 def test_fleet_worktree_cut_delivery_commit_comes_from_cut_branch(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Living Tree Rule v3, Mode B: a WRITE cut delivered in its own worktree on
     ``cut/<id>`` never moves the main checkout's HEAD. The supervisor must judge
@@ -1312,6 +1332,13 @@ def test_fleet_worktree_cut_delivery_commit_comes_from_cut_branch(
     """
     repo_dir = tmp_path / "repo"
     init_git_repo(repo_dir)
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/vetcoders/fixture.git"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+    )
     baseline = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=repo_dir,
@@ -1319,15 +1346,6 @@ def test_fleet_worktree_cut_delivery_commit_comes_from_cut_branch(
         text=True,
         check=True,
     ).stdout.strip()
-    worktree_bash = (
-        f"cd {shlex.quote(str(repo_dir))}"
-        " && git worktree add -q -b cut/wt-cut .claude/worktrees/wt-cut"
-        " && cd .claude/worktrees/wt-cut"
-        " && printf 'delivered\\n' > delivered.txt"
-        " && git add delivered.txt"
-        " && git -c user.email=agents@vetcoders.io -c user.name=fake"
-        " commit -qm '[codex/vc-implement] feat: wt-cut delivered'"
-    )
     dispatch, reports_dir, artifacts_dir = build_dispatch(
         tmp_path,
         """
@@ -1344,9 +1362,25 @@ prompt = "deliver in a fleet worktree"
         policy="repair_rounds = 0\nrequire_commit = true",
     )
     cells = FakeCells(reports_dir=reports_dir)
-    cells.cells[("wt-cut", "initial")] = FakeCell(bash=worktree_bash)
 
-    result = run_dispatch(dispatch, launcher=cells, artifacts_dir=artifacts_dir)
+    def launcher(cut, prompt, kind):
+        cells.cells[(cut.id, kind)] = FakeCell(
+            bash=(
+                f"cd {shlex.quote(cut.runtime_root)}"
+                " && printf 'delivered\\n' > delivered.txt"
+                " && git add delivered.txt"
+                " && git -c user.email=agents@vetcoders.io -c user.name=fake"
+                " commit -qm '[codex/vc-implement] feat: wt-cut delivered'"
+            )
+        )
+        return cells(cut, prompt, kind)
+
+    result = run_dispatch(
+        dispatch,
+        launcher=launcher,
+        artifacts_dir=artifacts_dir,
+        manage_worktrees=True,
+    )
 
     branch_tip = subprocess.run(
         ["git", "rev-parse", "cut/wt-cut"],
@@ -1453,7 +1487,7 @@ def test_admission_refuses_under_the_same_lock_that_records_the_fence(
 
 
 def test_explicit_resume_lifts_the_fence_and_reruns_only_the_failed_cut(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, verified_history
 ) -> None:
     """Recovery clears the interrupt it inherited, and nothing else."""
     monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
@@ -1462,8 +1496,18 @@ def test_explicit_resume_lifts_the_fence_and_reruns_only_the_failed_cut(
     )
     run_id = "resume-fence-run"
     store = DispatchReceiptStore(run_id, dispatch.cuts, repo_root=str(tmp_path))
-    store.update(
-        "first", "settled", acceptance="verified", provider_run_id="provider-first"
+    historical = DispatchSupervisor(
+        dispatch,
+        launcher=FakeCells(reports_dir=reports_dir),
+        artifacts_dir=artifacts_dir,
+        run_id=run_id,
+        resume=True,
+    )
+    verified_history(
+        historical,
+        dispatch.cuts[0],
+        reports_dir / "first-history.md",
+        provider_run_id="provider-first",
     )
     store.update("second", "failed", acceptance="failed")
     store.update_metadata(
@@ -1536,13 +1580,8 @@ def _acceptance_brief(tmp_path: Path, body: str) -> Path:
     return brief
 
 
-def test_unflipped_acceptance_boxes_refute_the_cut(tmp_path: Path) -> None:
-    """Founder 2026-09-15: an untouched `[ ]` marks an undelivered requirement.
-
-    The worker reported done but never flipped its Acceptance checkboxes, so
-    the supervisor refuses the cut before spending verifier time — the `[ ]`
-    is treated as non-delivery, not as a formatting nit.
-    """
+def test_unflipped_acceptance_boxes_do_not_skip_claim_verifiers(tmp_path: Path) -> None:
+    """An admitted claim triggers verifiers regardless of Markdown checkbox state."""
     brief = _acceptance_brief(
         tmp_path,
         "# W1-01\n\n## Mission\n\nDo it.\n\n## Acceptance\n\n"
@@ -1567,13 +1606,14 @@ brief = "{brief}"
 
     result = run_dispatch(dispatch, launcher=launcher, artifacts_dir=artifacts_dir)
 
-    assert result.states == {"c1": STATE_FAILED}
+    assert result.states == {"c1": STATE_VERIFIED}
     journal = (artifacts_dir / "journal.md").read_text(encoding="utf-8")
-    assert "acceptance checkbox never flipped by the worker" in journal
-    assert "A1 behavior holds" in journal
+    assert "verifier pass:" in journal
+    assert "acceptance checkbox never flipped" not in journal
+    assert "- [ ] A1 behavior holds" in brief.read_text()
 
 
-def test_flipped_acceptance_is_still_only_a_claim_verifiers_run(
+def test_worker_checkbox_flip_cannot_override_red_claim_verifiers(
     tmp_path: Path,
 ) -> None:
     """A worker that flips every box is not believed: verifiers still decide."""

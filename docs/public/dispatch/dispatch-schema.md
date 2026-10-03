@@ -133,6 +133,21 @@ the titles.
 | `depends_on`       | no           | Cut id array. A cut becomes ready only after every dependency settles successfully; cycles and unknown ids fail parse |
 | `base`             | no           | Per-cut worktree base: `"<sha>"`, `"<branch>"`, or `"cut:<cut-id>"`. Absent = the plan baseline (below)               |
 | `integrator`       | no           | `true` names an exclusive WRITE cut that alone may modify the main checkout                                           |
+| `compile_embargo`  | no           | Boolean, default `false`. Structural WRITE worker posts an unverified checkpoint and defers all executable gates      |
+| `closes_embargo`   | no           | Checkpoint cut ids; only a WRITE integrator may declare closure, and every id must be a `compile_embargo` dependency  |
+
+Embargo is plan-owned. An integrator cannot itself declare `compile_embargo`.
+Checkpoint claims include SHA, owned scope, and every skipped hook or security
+control. They remain `[~]`; their declared commands are deferred, not certified.
+Each skipped control must map to an exact declared verifier command. An unknown
+hook obligation blocks closure until the plan declares that command. The writer
+uses the union of integrator and checkpoint declared verifiers in the assembled
+runtime root; a claim cannot supply executable commands.
+A closure integrator may assemble its named checkpoint dependencies while they
+are unverified. It records `W2_STRUCTURALLY_CLOSED` for the exact assembled SHA
+and restores full gates. Only the canonical writer's full verification against
+that SHA can close the embargo and settle `[x]`. Payloads cannot grant closure
+authority or choose a smaller set of gates.
 
 ## Scheduling and checkout contract
 

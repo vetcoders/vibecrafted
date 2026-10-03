@@ -23,6 +23,8 @@ from vibecrafted_core.dispatch.worktrees import (
     canonical_artifact_root,
 )
 
+pytestmark = pytest.mark.usefixtures("worker_claims")
+
 
 def _git(repo: Path, *args: str) -> str:
     proc = subprocess.run(
