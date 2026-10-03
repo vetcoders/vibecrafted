@@ -23755,15 +23755,59 @@ def _stage_runtime_product_config(
         # Whole-tree replacement must not silently discard a custom layout,
         # theme, script, or extra asset. A changed managed tree is a conflict.
         current = _runtime_config_inventory(frame) or {}
-        expected = (
-            _runtime_config_inventory(Path(old_generation) / generated_relative)
-            if old_generation
-            else None
-        )
+        if old_generation:
+            old_root = Path(old_generation)
+            if (
+                not old_root.is_absolute()
+                or old_root.parent != paths["runtime_home"] / "releases"
+            ):
+                raise RuntimeError(
+                    "previous frame assets escape the receipted release root"
+                )
+            old_assets = old_root / generated_relative
+            if any(path.is_symlink() for path in (old_assets, *old_assets.parents)):
+                raise RuntimeError("previous frame assets are aliased")
+            expected = _runtime_config_inventory(old_assets)
+        else:
+            expected = None
         incoming = _runtime_config_inventory(generation / generated_relative) or {}
         for inventory in (current, expected, incoming):
             if inventory is not None:
                 inventory.pop("config.kdl", None)
+        if expected is None and old_generation:
+            # Generated frame assets are installer-owned postimages. When their
+            # old generation is gone, a closed receipt file set still proves
+            # untouched installed bytes. Unlike preferences, these leaves never
+            # go through a user merge. Extra/missing/edited files stay conflicts.
+            receipted_files = {
+                Path(raw).relative_to(frame).as_posix(): digest
+                for raw, digest in previous.get("owned_files", {}).items()
+                if Path(raw).is_relative_to(frame) and Path(raw) != frame / "config.kdl"
+            }
+            current_files = {
+                name: entry[2] for name, entry in current.items() if entry[0] == "file"
+            }
+            known_directories = {"."}
+            for name in receipted_files:
+                known_directories.update(
+                    parent.as_posix() for parent in Path(name).parents
+                )
+            for raw in (
+                *previous.get("owned_dirs", []),
+                *previous.get("owned_empty_dirs", []),
+            ):
+                path = Path(raw)
+                if path.is_relative_to(frame):
+                    known_directories.add(path.relative_to(frame).as_posix())
+            current_directories = {
+                name for name, entry in current.items() if entry[0] == "directory"
+            }
+            if (
+                receipted_files
+                and current_files == receipted_files
+                and current_directories <= known_directories
+            ):
+                expected = current
         if current != expected and current != incoming:
             _backup_runtime_drift(
                 frame,

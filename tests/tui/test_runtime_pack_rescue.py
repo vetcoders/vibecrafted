@@ -2039,3 +2039,48 @@ def test_rescue_republishes_when_old_generation_and_backup_history_were_removed(
     receipt = _load_receipt(paths)
     assert receipt["version"] == "9.9.9+b"
     assert not receipt.get("install_pending")
+
+
+@pytest.mark.parametrize(
+    "user_change", [None, "edit", "extra-file", "missing-file", "extra-directory"]
+)
+def test_rescue_recognizes_exact_receipted_frame_assets_without_old_generation(
+    tmp_path, installed, capsys, user_change
+):
+    paths, _, result = installed
+    frame = paths["product_config"] / "vc-frame"
+    asset = next((frame / "layouts").glob("*.kdl"))
+    if user_change == "edit":
+        asset.write_text(asset.read_text() + "// user edit\n")
+    elif user_change == "extra-file":
+        (frame / "personal.kdl").write_text("layout { pane }\n")
+    elif user_change == "missing-file":
+        asset.unlink()
+    elif user_change == "extra-directory":
+        (frame / "personal-empty").mkdir()
+    before = installer._runtime_config_inventory(frame)
+    _plant_missing_historical(paths)
+    shutil.rmtree(Path(result["root"]))
+
+    def new_asset(pack):
+        source = pack / "vibecrafted-core/vibecrafted_core/config/vc-frame/layouts"
+        layout = next(source.glob("*.kdl"))
+        layout.write_text(layout.read_text() + "// new release asset\n")
+
+    newer = seed_runtime_pack(
+        tmp_path / "pack-b", version="9.9.9+b", before_source_seal=new_asset
+    )
+    _seal_runtime_pack_for_admission(newer)
+    code, plan = _plan(newer, capsys)
+    if code != 0:
+        assert user_change
+        assert installer._runtime_config_inventory(frame) == before
+        return
+    code, outcome = _apply(newer, capsys, plan["plan_digest"])
+    if user_change:
+        assert code == 2, outcome
+        assert installer._runtime_config_inventory(frame) == before
+    else:
+        assert code == 0, outcome
+        assert outcome["healthy_restorepoint"] is True
+        assert "// new release asset" in asset.read_text()
