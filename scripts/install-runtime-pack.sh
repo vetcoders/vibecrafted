@@ -388,6 +388,12 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 pack="${VIBECRAFTED_RUNTIME_PACK:-}"
+checksum_path=""
+signature_path=""
+carrier_basename=""
+bootstrap_installer=""
+bootstrap_installer_sha256=""
+archive_sha256=""
 temporary=""
 _rescue_lock_fd=""
 rescue_staging=""
@@ -510,9 +516,14 @@ while (($#)); do
       verify_only="1"
       shift
       ;;
-    --app-root|--terminal-host|--frame-helper|--expected-source-revision|--expected-terminal-revision|--expected-frame-revision|--expected-version|--expected-platform|--expected-architecture|--resolve-preference|--preference-current-sha256|--preference-incoming-sha256|--preference-path)
+    --checksum|--signature|--carrier-basename|--bootstrap-installer|--bootstrap-installer-sha256|--app-root|--terminal-host|--frame-helper|--expected-source-revision|--expected-terminal-revision|--expected-frame-revision|--expected-version|--expected-platform|--expected-architecture|--resolve-preference|--preference-current-sha256|--preference-incoming-sha256|--preference-path)
       (($# >= 2)) || die "$1 requires a path or revision"
       case "$1" in
+        --checksum) checksum_path="$2" ;;
+        --signature) signature_path="$2" ;;
+        --carrier-basename) carrier_basename="$2" ;;
+        --bootstrap-installer) bootstrap_installer="$2" ;;
+        --bootstrap-installer-sha256) bootstrap_installer_sha256="$2" ;;
         --app-root) app_root="$2" ;;
         --terminal-host) terminal_host="$2" ;;
         --frame-helper) frame_helper="$2" ;;
@@ -564,6 +575,7 @@ while (($#)); do
       ;;
     --help|-h)
       printf 'usage: %s [--pack <RuntimePack.tar.gz>] [--verify-only] [--expected-*-revision <sha>] [--app-root <Vibecrafted.app> --terminal-host <path> --frame-helper <path>] [--allow-older-runtime] [--resolve-preference keep-current|use-incoming --preference-current-sha256 <hex> --preference-incoming-sha256 <hex>] [--rescue --plan|--apply [--plan-digest <hex>]] [--uninstall [--dry-run]]\n' "$0"
+      printf 'Explicit recovery: --checksum PATH --signature PATH --carrier-basename ORIGINAL_NAME for renamed downloads; --bootstrap-installer ABSOLUTE_PATH --bootstrap-installer-sha256 VERIFIED_SHA selects a trusted installer explicitly. The App never searches a checkout.\n'
       printf 'Rescue: explicit plan/apply when historical rollback bytes are missing. Plan and apply reuse a private extract bound to the signed archive digest so the same verified pack keeps the same payload-root. If this pack installer lacks --rescue, bootstrap with a source installer that includes it against the verified --payload-root. Do not rewrite the signed payload.\n'
       printf 'Older-runtime recovery: --allow-older-runtime is the explicit downgrade admission. If this pack installer lacks that flag, bootstrap with a source installer that includes it against the verified --payload-root. Do not rewrite the signed payload or invent publication evidence.\n'
       exit 0
@@ -745,8 +757,8 @@ payload_root=""
 if [[ -f "$pack" && "$pack" == *.tar.gz ]]; then
   command -v tar >/dev/null 2>&1 \
     || die "tar is required to extract a Runtime Pack archive"
-  checksum="$pack.sha256"
-  signature="$pack.sig"
+  checksum="${checksum_path:-$pack.sha256}"
+  signature="${signature_path:-$pack.sig}"
   public_key="$SCRIPT_DIR/vibecrafted-signing-v1.pub"
   if [[ ! -f "$public_key" ]]; then
     public_key="${VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY:-$REPO_ROOT/vibecrafted-core/vibecrafted_core/trust/vibecrafted-signing-v1.pub}"
@@ -754,15 +766,8 @@ if [[ -f "$pack" && "$pack" == *.tar.gz ]]; then
   [[ -f "$checksum" ]] || die "Runtime Pack checksum is missing: $checksum"
   [[ -f "$signature" ]] || die "Runtime Pack signature is missing: $signature"
   [[ -f "$public_key" ]] || die "trusted Runtime Pack public key is missing: $public_key"
-  if command -v shasum >/dev/null 2>&1; then
-    (cd "$(dirname "$pack")" && shasum -a 256 -c "$(basename "$checksum")" >/dev/null) \
-      || die "Runtime Pack checksum mismatch"
-  elif command -v sha256sum >/dev/null 2>&1; then
-    (cd "$(dirname "$pack")" && sha256sum -c "$(basename "$checksum")" >/dev/null) \
-      || die "Runtime Pack checksum mismatch"
-  else
-    die "cannot verify Runtime Pack checksum (shasum/sha256sum missing)"
-  fi
+  # Hash the selected archive itself. The sidecar's filename is metadata,
+  # never a request to open another file when a browser renamed the download.
   command -v openssl >/dev/null 2>&1 \
     || die "openssl is required to verify the Runtime Pack signature"
   openssl dgst -sha256 -verify "$public_key" -signature "$signature" "$pack" >/dev/null 2>&1 \
@@ -774,7 +779,11 @@ if [[ -f "$pack" && "$pack" == *.tar.gz ]]; then
   fi
   [[ "$archive_sha256" =~ ^[0-9a-f]{64}$ ]] \
     || die "Runtime Pack digest is not a sha256"
+  [[ "$(wc -l < "$checksum" | tr -d '[:space:]')" == "1" ]] \
+    || die "Runtime Pack checksum must contain exactly one record"
   checksum_hex="$(awk '{print $1; exit}' "$checksum")"
+  [[ "$checksum_hex" =~ ^[0-9a-f]{64}$ ]] \
+    || die "Runtime Pack checksum is not a sha256"
   [[ "$archive_sha256" == "$checksum_hex" ]] \
     || die "Runtime Pack checksum digest mismatch"
   tar -tzf "$pack" >/dev/null \
@@ -842,7 +851,7 @@ pack_installer="$payload_root/scripts/vetcoders_install.py"
 contract_arguments=(
   -m vibecrafted_core.runtime_pack_contract verify
   --root "$payload_root"
-  --carrier-basename "$pack_name"
+  --carrier-basename "${carrier_basename:-$pack_name}"
 )
 [[ -n "$expected_source_revision" ]] \
   && contract_arguments+=(--expected-source-revision "$expected_source_revision")
@@ -864,20 +873,17 @@ if [[ "$verify_only" == "1" ]]; then
 fi
 
 installer_entry="$pack_installer"
-if [[ "$rescue" == "1" ]]; then
-  if ! grep -Fq 'RUNTIME_RESCUE_PLAN_SCHEMA' "$pack_installer" \
-    || ! grep -Fq -- '--rescue' "$pack_installer"; then
-    source_installer="$SCRIPT_DIR/vetcoders_install.py"
-    if [[ -f "$source_installer" ]] \
-      && grep -Fq 'RUNTIME_RESCUE_PLAN_SCHEMA' "$source_installer" \
-      && grep -Fq -- '--rescue' "$source_installer"; then
-      installer_entry="$source_installer"
-      printf 'Runtime Pack installer lacks --rescue; bootstrapping with source installer %s against the verified payload-root. Do not rewrite the signed payload.\n' \
-        "$source_installer" >&2
-    else
-      die "This Runtime Pack installer does not support --rescue. Bootstrap with a source/version whose installer includes runtime-install --rescue (compatibility: tests/tui/test_runtime_pack_rescue.py) targeting this verified pack via --payload-root. Do not rewrite the signed payload."
-    fi
-  fi
+if [[ -n "$bootstrap_installer" || -n "$bootstrap_installer_sha256" ]]; then
+  [[ -n "$bootstrap_installer" && "$bootstrap_installer_sha256" =~ ^[0-9a-f]{64}$ ]] \
+    || die "explicit bootstrap requires --bootstrap-installer and --bootstrap-installer-sha256"
+  [[ "$bootstrap_installer" == /* && -f "$bootstrap_installer" && ! -L "$bootstrap_installer" ]] \
+    || die "bootstrap installer must be an absolute physical file"
+  installer_entry="$bootstrap_installer"
+  printf 'Explicit bootstrap installer %s sha256=%s; signed payload remains immutable.\n' \
+    "$installer_entry" "$bootstrap_installer_sha256" >&2
+fi
+if [[ "$rescue" == "1" ]] && ! grep -Fq -- '--rescue' "$installer_entry"; then
+  die "This installer does not support --rescue. Select an explicit --bootstrap-installer PATH --bootstrap-installer-sha256 SHA against this verified archive. Do not rewrite the signed payload."
 fi
 if [[ "$operation" == "uninstall" ]]; then
   arguments=(runtime-uninstall)
@@ -894,31 +900,7 @@ fi
 if [[ "$allow_older_runtime" == "1" ]]; then
   arguments+=(--allow-older-runtime)
   if ! grep -Fq -- '--allow-older-runtime' "$installer_entry"; then
-    source_installer=""
-    for candidate in \
-      "${VIBECRAFTED_SOURCE_INSTALLER:-}" \
-      "$SCRIPT_DIR/vetcoders_install.py"
-    do
-      [[ -n "$candidate" ]] || continue
-      if [[ -f "$candidate" ]] && grep -Fq -- '--allow-older-runtime' "$candidate"; then
-        source_installer="$candidate"
-        break
-      fi
-    done
-    if [[ -z "$source_installer" && -n "$app_root" ]]; then
-      bundled_installer="$app_root/Contents/Resources/runtime/scripts/vetcoders_install.py"
-      if [[ -f "$bundled_installer" ]] \
-        && grep -Fq -- '--allow-older-runtime' "$bundled_installer"; then
-        source_installer="$bundled_installer"
-      fi
-    fi
-    if [[ -n "$source_installer" ]]; then
-      installer_entry="$source_installer"
-      printf 'Runtime Pack installer lacks --allow-older-runtime; bootstrapping with source installer %s against the verified payload-root. Do not rewrite the signed payload.\n' \
-        "$source_installer" >&2
-    else
-      die "This Runtime Pack installer does not support --allow-older-runtime. Bootstrap with a source/version whose installer includes runtime-install --allow-older-runtime targeting this verified pack via --payload-root. Do not rewrite the signed payload."
-    fi
+    die "This installer does not support --allow-older-runtime; select an explicit hash-bound --bootstrap-installer."
   fi
 fi
 if [[ "$operation" == "install" && -n "$app_root" ]]; then
@@ -967,8 +949,41 @@ if [[ "$operation" == "install" && -n "$resolve_preference" ]]; then
   [[ -n "$preference_path" ]] && arguments+=(--preference-path "$preference_path")
 fi
 
+run_selected_installer() {
+  if [[ -z "$bootstrap_installer" ]]; then
+    exec "$pack_python" "$installer_entry" "${arguments[@]}"
+  fi
+  # Read, bind and compile the exact source bytes once. __file__ retains the
+  # explicitly selected owner's path for its existing relative dependencies.
+  exec "$pack_python" -c '
+import hashlib, os, pathlib, stat, sys
+source, expected, archive = sys.argv[1:4]
+path = pathlib.Path(source)
+try:
+    if not path.is_absolute() or path != path.resolve() or any(p.is_symlink() for p in (path, *path.parents)):
+        raise ValueError("bootstrap installer path is aliased or not normalized")
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(fd, "rb") as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise ValueError("bootstrap installer is not a regular file")
+        body = stream.read()
+    if hashlib.sha256(body).hexdigest() != expected:
+        raise ValueError("bootstrap installer sha256 mismatch")
+except (OSError, ValueError) as exc:
+    print("Runtime Pack install failed: " + str(exc), file=sys.stderr)
+    sys.exit(2)
+sys.argv = [source, *sys.argv[4:]]
+sys.path[0] = str(path.parent)
+scope = globals()
+scope.update({"__name__": "__main__", "__file__": source,
+         "INSTALLER_BOOTSTRAP_PROVENANCE": {"mode": "explicit-bootstrap", "path": source, "sha256": expected,
+                                            "signed_archive_sha256": archive}})
+exec(compile(body, source, "exec"), scope)
+' "$installer_entry" "$bootstrap_installer_sha256" "$archive_sha256" "${arguments[@]}"
+}
+
 if [[ -n "$temporary" || -n "$rescue_staging" ]]; then
-  "$pack_python" "$installer_entry" "${arguments[@]}" &
+  run_selected_installer &
   installer_child_pid="$!"
   wait "$installer_child_pid"
   installer_status=$?
@@ -985,8 +1000,11 @@ if [[ -n "$temporary" || -n "$rescue_staging" ]]; then
   fi
   exit "$installer_status"
 fi
-"$pack_python" "$installer_entry" "${arguments[@]}"
+run_selected_installer &
+installer_child_pid="$!"
+wait "$installer_child_pid"
 installer_status=$?
+installer_child_pid=""
 if [[ "$installer_status" -eq 0 && "$fail_after" == "published" ]]; then
   printf 'harness injected failure after published\n' >&2
   exit 42

@@ -223,6 +223,40 @@ make install RUNTIME_PACK=../Vibecrafted_RuntimePack_<version>-<YYYYMMDD>-<sha8>
 make uninstall  # same installer, same receipt
 ```
 
+An ordinary upgrade preserves local preferences and additional Frame themes
+and layouts. Missing historical generation or backup bytes are recorded as
+unavailable history; the installer captures the present state before replacing
+the selected generation. A modified managed asset or an ambiguous preference
+remains a visible conflict.
+
+For an **existing signed archive with an older installer**, recovery can
+explicitly select a reviewed installer from a trusted checkout. Obtain its SHA
+from the reviewed commit or handoff receipt; do not guess it or modify the
+archive:
+
+```bash
+make install RUNTIME_PACK=/absolute/path/RuntimePack.tar.gz \
+  RUNTIME_PACK_BOOTSTRAP_INSTALLER=/absolute/trusted/checkout/scripts/vetcoders_install.py \
+  RUNTIME_PACK_BOOTSTRAP_SHA256=<reviewed-installer-sha256>
+```
+
+The wrapper verifies the signed payload first, reads and executes only the
+hash-bound installer bytes, and reports the installer path, SHA and signed
+archive SHA alongside the selected runtime root. This is an explicit recovery
+operation. The App uses its delivered installer and does not search checkouts.
+A bootstrap SHA identifies that installer file; its trusted checkout still
+owns relative dependencies. Future packs include the updated installer.
+
+If a browser renamed the archive or sidecars, pass their exact paths using
+`RUNTIME_PACK_CHECKSUM` and `RUNTIME_PACK_SIGNATURE`, plus
+`RUNTIME_PACK_CARRIER_BASENAME` containing the original release archive name.
+The explicit name must agree with the signed payload provenance. These are
+also available as wrapper flags `--checksum`, `--signature`, and
+`--carrier-basename`. Neither checksum nor signature validation is disabled.
+For a read-only recovery plan, invoke the same wrapper and add
+`--rescue --plan`; apply the reported plan with `--rescue --apply
+--plan-digest <digest>` using the same archive and bootstrap identity.
+
 Maintainers who intentionally want local compilation use the explicit source
 lane:
 

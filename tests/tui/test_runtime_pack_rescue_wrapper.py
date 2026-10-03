@@ -548,7 +548,16 @@ def test_public_wrapper_plan_then_apply_same_verified_pack(
     expected = _expected_payload_root(_cache_home(), archive)
 
     planned = _run_wrapper(
-        "--pack", str(archive), "--rescue", "--plan", *flags, env=env
+        "--pack",
+        str(archive),
+        "--rescue",
+        "--plan",
+        "--bootstrap-installer",
+        str(Path(installer.__file__).resolve()),
+        "--bootstrap-installer-sha256",
+        hashlib.sha256(Path(installer.__file__).read_bytes()).hexdigest(),
+        *flags,
+        env=env,
     )
     assert planned.returncode == 0, planned.stderr
     plan = _json_out(planned)
@@ -986,11 +995,20 @@ def test_public_wrapper_bootstraps_source_installer_without_rewriting_pack(
     flags = _wrapper_flags("9.9.9+old")
 
     planned = _run_wrapper(
-        "--pack", str(archive), "--rescue", "--plan", *flags, env=env
+        "--pack",
+        str(archive),
+        "--rescue",
+        "--plan",
+        "--bootstrap-installer",
+        str(Path(installer.__file__).resolve()),
+        "--bootstrap-installer-sha256",
+        hashlib.sha256(Path(installer.__file__).read_bytes()).hexdigest(),
+        *flags,
+        env=env,
     )
     assert planned.returncode == 0, planned.stderr
-    assert "bootstrapping with source installer" in planned.stderr
-    assert "Do not rewrite the signed payload" in planned.stderr
+    assert "Explicit bootstrap installer" in planned.stderr
+    assert "signed payload remains immutable" in planned.stderr
     plan = _json_out(planned)
     expected = _expected_payload_root(_cache_home(), archive).resolve()
     assert plan["target"]["payload_root"] == str(expected)
@@ -1166,3 +1184,119 @@ def test_public_rescue_plan_never_reconciles_installed_service(tmp_path, install
     )
     assert _json_out(result)["mode"] == "plan"
     assert not marker.exists(), "read-only plan executed the installed service launcher"
+
+
+def test_renamed_download_uses_explicit_sidecars_and_carrier_identity(tmp_path, roots):
+    payload = seed_runtime_pack(tmp_path / "pack", version="9.9.9+a")
+    _seal_runtime_pack_for_admission(payload)
+    archive, key = _sign_payload_archive(tmp_path / "signed", payload)
+    renamed = archive.with_name(archive.name.replace(".tar.gz", " 2.tar.gz"))
+    archive.rename(renamed)
+    checksum = Path(str(archive) + ".sha256")
+    signature = Path(str(archive) + ".sig")
+    result = _run_wrapper(
+        "--pack",
+        str(renamed),
+        "--checksum",
+        str(checksum),
+        "--signature",
+        str(signature),
+        "--carrier-basename",
+        CARRIER,
+        "--verify-only",
+        *_wrapper_flags("9.9.9+a"),
+        env=_wrapper_env(key),
+    )
+    assert result.returncode == 0, result.stderr
+    assert not installer._runtime_receipt_path(roots["runtime_home"]).exists()
+    checksum.write_text("0" * 64 + "  " + CARRIER + "\n")
+    refused = _run_wrapper(
+        "--pack",
+        str(renamed),
+        "--checksum",
+        str(checksum),
+        "--signature",
+        str(signature),
+        "--carrier-basename",
+        CARRIER,
+        "--verify-only",
+        *_wrapper_flags("9.9.9+a"),
+        env=_wrapper_env(key),
+    )
+    assert refused.returncode != 0 and "checksum" in refused.stderr
+
+
+@pytest.mark.parametrize("choice", ["explicit", "wrong-hash", "alias", "implicit"])
+def test_old_signed_pack_requires_explicit_bound_bootstrap(tmp_path, installed, choice):
+    roots, _, _ = installed
+    _plant_missing_historical(roots)
+    receipt_before = installer._runtime_receipt_path(roots["runtime_home"]).read_bytes()
+    payload = seed_runtime_pack(tmp_path / "old-pack", version="9.9.10+b")
+    packed = payload / "scripts/vetcoders_install.py"
+    packed.write_text("# historical installer without rescue\n")
+    _seal_runtime_pack_for_admission(payload)
+    archive, key = _sign_payload_archive(tmp_path / "signed", payload)
+    original = archive.read_bytes()
+    source = Path(installer.__file__).resolve()
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    flags = []
+    if choice == "alias":
+        alias = tmp_path / "aliased-installer.py"
+        alias.symlink_to(source)
+        source = alias
+    if choice != "implicit":
+        flags = [
+            "--bootstrap-installer",
+            str(source),
+            "--bootstrap-installer-sha256",
+            "0" * 64 if choice == "wrong-hash" else digest,
+        ]
+    result = _run_wrapper(
+        "--pack",
+        str(archive),
+        "--rescue",
+        "--plan",
+        *flags,
+        *_wrapper_flags("9.9.10+b"),
+        env=_wrapper_env(key),
+    )
+    assert archive.read_bytes() == original
+    assert (
+        installer._runtime_receipt_path(roots["runtime_home"]).read_bytes()
+        == receipt_before
+    )
+    if choice == "explicit":
+        assert result.returncode == 0, result.stderr
+    else:
+        assert result.returncode != 0
+        assert "bootstrap" in result.stderr
+
+
+def test_public_bootstrap_install_reports_selected_owner(tmp_path, roots):
+    payload = seed_runtime_pack(tmp_path / "old-pack", version="9.9.9+a")
+    (payload / "scripts/vetcoders_install.py").write_text("# old owner\n")
+    _seal_runtime_pack_for_admission(payload)
+    archive, key = _sign_payload_archive(tmp_path / "signed", payload)
+    source = Path(installer.__file__).resolve()
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    original = archive.read_bytes()
+    result = _run_wrapper(
+        "--pack",
+        str(archive),
+        "--bootstrap-installer",
+        str(source),
+        "--bootstrap-installer-sha256",
+        digest,
+        *_wrapper_flags("9.9.9+a"),
+        env=_wrapper_env(key),
+    )
+    assert result.returncode == 0, result.stderr
+    outcome = _json_out(result)
+    assert outcome["installer"] == {
+        "mode": "explicit-bootstrap",
+        "path": str(source),
+        "sha256": digest,
+        "signed_archive_sha256": hashlib.sha256(original).hexdigest(),
+    }
+    assert Path(outcome["root"]).name == "9.9.9+a"
+    assert archive.read_bytes() == original

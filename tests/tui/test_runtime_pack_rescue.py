@@ -6,6 +6,8 @@ import hashlib
 import json
 import re
 import shutil
+import subprocess
+import sys
 from argparse import Namespace
 from collections import namedtuple
 from datetime import datetime, timezone
@@ -2119,13 +2121,145 @@ def test_rescue_recognizes_exact_receipted_frame_assets_without_old_generation(
         assert installer._runtime_config_inventory(frame) == before
         return
     code, outcome = _apply(newer, capsys, plan["plan_digest"])
-    if user_change:
+    if user_change in {"edit", "missing-file"}:
         assert code == 2, outcome
         assert installer._runtime_config_inventory(frame) == before
     else:
         assert code == 0, outcome
         assert outcome["healthy_restorepoint"] is True
         assert "// new release asset" in asset.read_text()
+
+
+def test_custom_frame_assets_survive_missing_history_upgrade_and_repeat(
+    tmp_path, installed, capsys
+):
+    paths, _, result = installed
+    frame = paths["product_config"] / "vc-frame"
+    custom = frame / "themes/monochrome.kdl"
+    custom.write_bytes(b"themes { monochrome {} }\n")
+    layout = frame / "layouts/founder.kdl"
+    layout.write_bytes(b"layout { pane }\n")
+    empty = frame / "personal-empty"
+    empty.mkdir()
+    user = paths["product_config"] / "personal.toml"
+    user.write_bytes(b"private = true\n")
+    before = {p: p.read_bytes() for p in (custom, layout, user)}
+    _plant_missing_historical(paths)
+    shutil.rmtree(Path(result["root"]))
+    newer = seed_runtime_pack(tmp_path / "pack-b", version="9.9.10+b")
+    _seal_runtime_pack_for_admission(newer)
+    outcome = _install(newer, capsys)
+    assert Path(outcome["root"]).name == "9.9.10+b"
+    for _ in range(2):
+        for path, body in before.items():
+            assert path.read_bytes() == body
+            assert str(path) not in _load_receipt(paths)["owned_files"]
+        assert empty.is_dir()
+        assert str(empty) not in _load_receipt(paths)["owned_dirs"]
+        code, plan = _plan(newer, capsys)
+        assert code == 0 and plan["status"] == "healthy", plan
+        _install(newer, capsys)
+
+
+def test_custom_assets_survive_publication_failure_rollback_and_retry(
+    tmp_path, installed, capsys, monkeypatch
+):
+    paths, _, result = installed
+    custom = paths["product_config"] / "vc-frame/themes/monochrome.kdl"
+    custom.write_bytes(b"themes { monochrome {} }\n")
+    before = installer._runtime_config_inventory(paths["product_config"])
+    _plant_missing_historical(paths)
+    shutil.rmtree(Path(result["root"]))
+    receipt_before = _receipt(paths).read_bytes()
+    newer = seed_runtime_pack(tmp_path / "pack-b", version="9.9.10+b")
+    _seal_runtime_pack_for_admission(newer)
+    replace = installer._replace_runtime_transaction_entry
+    failed = False
+
+    def fail_after_replacement(entry, source):
+        nonlocal failed
+        replace(entry, source)
+        if not failed and Path(entry["path"]) == paths["product_config"]:
+            failed = True
+            raise OSError("injected interruption after effective config replacement")
+
+    with monkeypatch.context() as fault:
+        fault.setattr(
+            installer, "_replace_runtime_transaction_entry", fail_after_replacement
+        )
+        assert installer.cmd_runtime_install(_ns(newer)) == 2
+        failure = json.loads(capsys.readouterr().out.splitlines()[-1])
+        assert not failure["healthy_restorepoint"]
+        assert failed
+    assert installer._runtime_config_inventory(paths["product_config"]) == before
+    assert _receipt(paths).read_bytes() == receipt_before
+    outcome = _install(newer, capsys)
+    assert Path(outcome["root"]).name == "9.9.10+b"
+    assert custom.read_bytes() == b"themes { monochrome {} }\n"
+    assert str(custom) not in _load_receipt(paths)["owned_files"]
+
+
+@pytest.mark.parametrize(
+    "bad_state", ["receipt", "malformed-roots", "alias", "missing-version"]
+)
+def test_expected_install_refusal_is_actionable_public_cli(tmp_path, roots, bad_state):
+    payload = seed_runtime_pack(tmp_path / "pack", version="9.9.9+a")
+    if bad_state in {"receipt", "malformed-roots"}:
+        _receipt(roots).parent.mkdir(parents=True)
+        _receipt(roots).write_bytes(
+            b"not-json\n"
+            if bad_state == "receipt"
+            else json.dumps(
+                {"schema": installer.RUNTIME_INSTALL_SCHEMA, "roots": []}
+            ).encode()
+        )
+    elif bad_state == "alias":
+        roots["product_config"].parent.mkdir(parents=True)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        roots["product_config"].symlink_to(outside)
+    else:
+        (payload / "VERSION").unlink()
+    result = subprocess.run(
+        [
+            sys.executable,
+            installer.__file__,
+            "runtime-install",
+            "--payload-root",
+            str(payload),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 2
+    envelope = json.loads(result.stdout)
+    assert envelope["status"] == "refused"
+    assert envelope["reason"] and envelope["next_action"]
+    assert "Traceback" not in result.stderr
+
+
+def test_normal_same_version_missing_generation_is_reconstructed(installed, capsys):
+    paths, payload, outcome = installed
+    custom = paths["product_config"] / "vc-frame/themes/monochrome.kdl"
+    custom.write_bytes(b"themes { monochrome {} }\n")
+    _plant_missing_historical(paths)
+    shutil.rmtree(Path(outcome["root"]))
+    installed_again = _install(payload, capsys)
+    assert Path(installed_again["root"]).is_dir()
+    assert installed_again["recovery"]["healthy_restorepoint"] is True
+    assert custom.read_bytes() == b"themes { monochrome {} }\n"
+    assert str(custom) not in _load_receipt(paths)["owned_files"]
+    _install(payload, capsys)
+
+
+def test_unexpected_installer_programming_error_remains_visible(monkeypatch):
+    def broken(_args):
+        raise RuntimeError("unexpected programmer fault")
+
+    monkeypatch.setattr(installer, "cmd_runtime_install", broken)
+    with pytest.raises(RuntimeError, match="unexpected programmer fault"):
+        installer.main(["runtime-install", "--payload-root", "/unused"])
 
 
 @pytest.mark.parametrize("user_change", ["preference", "frame-asset"])

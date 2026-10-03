@@ -99,6 +99,11 @@ installer-kit:
 # re-deriving a filename from the current HEAD, date and a hard-coded dist.
 RUNTIME_PACK_SELECTION_LIB := scripts/lib/runtime-pack-selection.sh
 RUNTIME_PACK ?=
+RUNTIME_PACK_CHECKSUM ?=
+RUNTIME_PACK_SIGNATURE ?=
+RUNTIME_PACK_CARRIER_BASENAME ?=
+RUNTIME_PACK_BOOTSTRAP_INSTALLER ?=
+RUNTIME_PACK_BOOTSTRAP_SHA256 ?=
 KEYS ?= $(HOME)/.keys
 # Extra builder flags, e.g. RELEASE_FLAGS=--snapshot-donors to build from
 # detached worktrees at each donor HEAD instead of refusing a dirty donor.
@@ -401,7 +406,7 @@ install-auto: install
 # public candidate's pack over as RUNTIME_PACK together with the source
 # revision it proved (RUNTIME_PACK_EXPECTED_SOURCE_REVISION).
 install:
-	@VIBECRAFTED_RUNTIME_PACK="$(RUNTIME_PACK)" bash "$(RUNTIME_PACK_INSTALLER)" $(if $(RUNTIME_PACK_EXPECTED_SOURCE_REVISION),--expected-source-revision "$(RUNTIME_PACK_EXPECTED_SOURCE_REVISION)")
+	@VIBECRAFTED_RUNTIME_PACK="$(RUNTIME_PACK)" bash "$(RUNTIME_PACK_INSTALLER)" $(if $(RUNTIME_PACK_EXPECTED_SOURCE_REVISION),--expected-source-revision "$(RUNTIME_PACK_EXPECTED_SOURCE_REVISION)") $(if $(RUNTIME_PACK_CHECKSUM),--checksum "$(RUNTIME_PACK_CHECKSUM)") $(if $(RUNTIME_PACK_SIGNATURE),--signature "$(RUNTIME_PACK_SIGNATURE)") $(if $(RUNTIME_PACK_CARRIER_BASENAME),--carrier-basename "$(RUNTIME_PACK_CARRIER_BASENAME)") $(if $(RUNTIME_PACK_BOOTSTRAP_INSTALLER),--bootstrap-installer "$(RUNTIME_PACK_BOOTSTRAP_INSTALLER)") $(if $(RUNTIME_PACK_BOOTSTRAP_SHA256),--bootstrap-installer-sha256 "$(RUNTIME_PACK_BOOTSTRAP_SHA256)")
 	@bash scripts/install-foundations.sh loctree aicx prview screenscribe
 	@$(MAKE) --no-print-directory reconcile-server-service
 
