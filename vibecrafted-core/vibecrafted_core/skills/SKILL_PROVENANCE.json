@@ -2016,6 +2016,8 @@
       "sha256": [
         "1da7e8794386a7a3f42e5082c8deb6c0f9a08dd13948c41e7d2eee69ef936fc1",
         "462002285cc0e2f8b3aa512271912afbf5a2eccaaddc823550f3239fb46e5a4f",
+        "4d6cc8eff8abc707db6005648b52e9955dba53269d8af1597982def88064fe27",
+        "82e04a810912986d4ebd3ca5878d9b98a2c30019047a926b7a7333308ff9e449",
         "8d7fe936ea1107017c755f0bb2302400f09084b2299363645abfb57f2d538d80",
         "a3f03215187999b85149ecff3dbed3dd6a9139c6fbf93ff71ba507d7a546d26f",
         "a85869a6878db2b03f355ba7eddc3c51a7db0095a6740b66c69acd77ccaba6e1",
@@ -2025,33 +2027,50 @@
       ],
       "files": {
         ".claude-plugin/plugin.json": [
+          "58654a4d5e9ea1e214e8d675cc333a8c1e24810f",
           "c8bcdeb7fdfdaaa521e65bdaf30572be88fd7e51"
         ],
         "FLOW.md": [
+          "1b4c7b8cd5109166bc9f38f8be98fd78534f8e67",
           "1b9ed317e745bdb68730ea1c9123f0b7536c6eeb",
           "44edb18b577c0062ab16cc73d8b43501ec4f0036",
           "4cd0913cdeb285424b179cfb2f00dc9afaf3c77a",
-          "52ca6199cfbdbbbee19cdd04f16b441345d997c7"
+          "52ca6199cfbdbbbee19cdd04f16b441345d997c7",
+          "b8cc282d30571c370497a2f4a1fc663a160d4216"
         ],
         "SKILL.md": [
+          "2083e49162e464fe4c1bc10cd303309d8668c2f6",
           "28637e82d74a990697f1baa2297bb7d4ffc2304e",
           "427f80acc9c937ed8597fd82bed0e2d34dcb0540",
           "8bf204b94932eefec91083fd88d1d084a6d4564c",
           "a04816b1ab272ccd019a16063c458b146fd12904",
+          "acadeb803530e3807b9801068476e34938a3fbf4",
           "ad1e854391e12c0cefb6ef0f3a087c2fd6bc4fae",
           "d80a7861357016ccc8390b936cd95b96135e4f43",
           "dcaffb59daaef31314e0bcf11f90626b3362800d",
           "fa0513953758736059056860dd3f16d7b0bd8e35"
         ],
         "agents/openai.yaml": [
+          "a04fdc2dca483715bd728c545e8a8302c887e58c",
           "f5c5e0cb0e53a2236de36c5a5c396400cc20e92b"
         ],
+        "assets/report.html": [
+          "6d5153819b8468ad0f71a5e7661c24b30a76500b"
+        ],
         "references/forensics-evidence-spec.md": [
+          "9213951188a0f65e138009291f8e953a26ac8a58",
           "c308a4b06dc8f20539a10c5f4bfe76dd051c68e8"
         ],
         "references/forensics-journal-template.md": [
           "3210fd918f792b19f47ce601b8adf6e8079412d1",
-          "4d709855bcb89fdc046aa98cc860491140b0da5c"
+          "4d709855bcb89fdc046aa98cc860491140b0da5c",
+          "7d05cf034b5fe2343a7b94a76bef6bf48fc67548"
+        ],
+        "references/report-notebook.md": [
+          "b127038d21581b4932c6b4c456df9f8a6cdb44f7"
+        ],
+        "scripts/render_report.py": [
+          "fa6fa31a3419a3a2bf8b5abad8690efc5e920aae"
         ]
       }
     },

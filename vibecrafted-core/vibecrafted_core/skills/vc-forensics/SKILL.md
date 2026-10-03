@@ -1,11 +1,10 @@
 ---
 name: forensics
-version: 1.0.0
+version: 1.1.0
 description: >
-  Autonomous investigative and preflight fixer. Explores codebases to find and
-  radically eliminate safety-critical bugs, race conditions, truth multi-authority,
-  and data leaks using Loctree organs, regression proofs, radical cuts (git rm,
-  no shims), and strict DoU verification.
+  Investigate product failures through real execution paths, falsify root-cause
+  hypotheses and coordinate independently verified repairs. Produces a portable
+  evidence notebook joining Loctree, PRView and manual findings.
 aliases:
   - vc-forensics
 compatibility:
@@ -27,7 +26,7 @@ loctree_value: "primary anatomical map for structural inspection, blast radius, 
 aicx_value: "intent, session, and decision-context retrieval"
 dogfooding: "required for repo-impacting work"
 metadata:
-  short-description: Autonomous preflight bug detection and radical fix agent.
+  short-description: Execution-path investigation and independently verified repairs.
   trigger phrases:
     - "run forensics"
     - "vc-forensics"
@@ -37,151 +36,108 @@ metadata:
     - "eliminate multi-authority"
 ---
 
-<!-- fleet-imperative: v3 -->
+# vc-forensics — investigation with independent proof
 
-> **Invocation for `vc-forensics` (interactive skill; worker route: `workflow`)**
->
-> | Path                    | Literal                                                                                              |
-> | ----------------------- | ---------------------------------------------------------------------------------------------------- |
-> | 1. User-launched worker | `vibecrafted workflow <agent> --file <brief.md>`; the bounded brief explicitly loads this `SKILL.md` |
-> | 2. Interactive          | `/vc-forensics` — execute **in this session**                                                        |
-> | 3. Agent-Operator       | the existing workflow dispatch route above, within the assigned scope                                |
->
-> The dedicated `vibecrafted forensics` command is unavailable in the current
-> command deck. Skill presence does not register a launcher. The workflow route
-> keeps its workflow run identity while the brief selects this investigation protocol.
-> Default root is **`$PWD`**.
+## Routes and scope
 
-<!-- /fleet-imperative -->
-
-# vc-forensics — Autonomous Investigation & Radical Fix
-
-## Mission
-
-Agent-generated software does not fail due to a shortage of code — it fails due to **truth identity poisoning** and local symptom-patching. This breeds multi-authority: five concepts of identity, two document reducers, five configuration sources, and dozens of non-atomic operations between capture and delivery (the hard lesson from Codescribe documented in `AGENT_CANARY.md`).
-
-`vc-forensics` is an autonomous engineering agent (Inspect & Patch) that:
-
-1. Conducts uncompromising investigation across real execution paths.
-2. Proves defects via falsified regression tests (MUST FAIL before the fix).
-3. Eliminates the root cause via **radical cutting** (`git rm` of the competitor, zero shims).
-4. Confirms DoU, installation integrity, and runtime truth.
-
----
+- `/vc-forensics` runs in this session.
+- `vibecrafted workflow <agent> --file <brief.md>` dispatches a bounded brief
+  explicitly loading this skill. There is no dedicated `vibecrafted forensics`
+  launcher; skill installation does not register a CLI verb.
+- Honor the current repository, runtime, requested paths and permissions.
+  Diagnosis alone does not authorize repair, capture, installation or deployment.
+  When investigation and repair are requested, carry the authorized work through
+  independent verification and admission. Honor an explicit dispatch batch rule;
+  do not silently turn it into a default for every invocation.
 
 ## Canonical Orientation Gate
 
-Before this workflow performs repo-specific analysis, planning, implementation, review, release, or delegation, it MUST run or consume the `vc-init` procedure for the assigned repo. If fresh `vc-init` evidence is absent, perform the init pass first and treat workflow-specific work as blocked until repo truth exists.
+Consume fresh `vc-init` evidence for the investigated repository; refresh only
+what drifted. `Loctree:loctree` provides the Code-Derived Application Map:
+entry points, dependencies, owners and blast radius. Use slice before edits,
+impact before removal and find before new symbols. A zero-consumer result is a
+candidate, not deletion proof: check scan coverage and actual runtime call sites.
+If mapping is incomplete, record the limitation and use bounded source inspection.
+AICX retrieves intent history; distinguish Founder decisions from agent proposals
+and verify older statements against current source/runtime evidence.
 
-`Loctree:loctree` is the default structural perception skill for that pass. Use Loctree before grep or docs-driven claims to produce or refresh the Code-Derived Application Map: repo-view, focus, slice, impact, find, and follow as relevant. Search for existing symbols and contracts before creating new ones; run impact before delete or major refactor; run slice before editing.
+## Trace the failure, not the test suite
 
-The point is to find the hooks: load-bearing hubs, twins, dead code, drift, runtime entrypoints, and blast-radius traps. If the task is explicitly non-repo or no-code, state the no-repo exception in the report. Otherwise, missing `vc-init`/Loctree evidence is a process failure.
+1. Pin repository root, branch, full SHA, dirty ownership and the reported artifact
+   or process version. Source, build, installed artifact and running process may
+   describe different generations.
+2. Record the trigger, expected behavior and actual symptom. Trace input → state
+   mutation → committed result → delivery → cleanup through the real callers.
+   Inspect late replies, stop/drain boundaries, mode changes and concurrent paths.
+   A preview is not proof of committed or delivered data; retain provenance across
+   each boundary. A successful receipt is not proof of the user's resulting text.
+3. Try the strongest alternative explanation: intentional mode split, stale
+   installation, mismatched input, missing fixture, test instrumentation error or
+   unsupported scan surface. Preserve falsified hypotheses instead of reporting
+   them as additional bugs. Duplicate symbols alone do not prove competing owners.
+4. State the smallest causal defect supported by evidence. Separate hypotheses,
+   proven defects, source repairs, verification, integration and live acceptance.
+   Read [the evidence contract](references/forensics-evidence-spec.md) for details.
 
----
+For performance, count the actual expensive work and bound the affected range;
+measure latency/resource use separately on the stated device and workload. Fewer
+calls or green tests alone do not prove cooler hardware. Compare matched inputs
+and include positive controls: a repair must preserve valid edits, late evidence,
+terminal delivery and provenance, not merely suppress the failing event.
 
-## 1. Scope of Investigation (What We Hunt)
+## Investigator, worker and integrator
 
-Focus strictly on critical defects. Discard cosmetic issues and loose guesses:
+Follow the repository's assigned roles. In a source-only worker / compile-embargo
+workflow, the investigator maps and narrows defects; a bounded worker writes only
+its source cut; the integrator owns independent acceptance tests, builds and
+admission. Workers must not run gates or inspect private acceptance fixtures.
+Do not personally implement a discovered repair when the current Operator contract
+requires dispatch. Outside that contract, authorized single-agent repair is valid.
 
-- **Multi-authority & truth collisions:** two or more components deciding the same class of state (identity, reducer, seal, delivery, config).
-- **Races and non-atomicity:** late writes overwriting fresher state, thread races, unsynchronized shared mutable state.
-- **Data loss:** silent text truncation, dropped audio samples, swallowed errors in streaming pipelines.
-- **Security:** credentials in logs, missing authorization checks on incoming actions.
-- **Resources and lifecycle:** deadlocks, leaked handles/memory, runaway event loops.
-- **Core user journey breakdown:** e.g., broken transcript insertion or frozen UI in Codescribe.
+- The integrator designs tests from the product contract and raw evidence, not
+  from the worker implementation. Keep private tests out of worker briefs while
+  making the required behavior clear. A missing dependency or compile failure is
+  not the intended behavioral RED; selected test counts must be nonzero.
+- Run the same acceptance case on the pinned baseline and candidate. Add positive
+  controls for adjacent valid behavior. Record logs, selected counts and SHAs.
+- A terminal worker report or provider success is delivery, not integration.
+  Record runtime class, parent/effective roots, baseline branch/SHA, worker branch,
+  terminal tip and report path. Verify the destination independently through exact
+  ancestry, merge-parent identity or explicit patch equivalence.
+- An await/observe timeout is not worker termination. Resume the existing run;
+  verify identity before retrying, restarting or launching a replacement.
 
----
+## Repair and acceptance
 
-## 2. Loctree-First Protocol (Map Before Magnifying Glass)
+Choose the coherent root-cause repair. If two live authorities compete, remove
+or rewire the unauthorized owner rather than adding a synchronization layer.
+Use `git rm` for tracked dead files after impact and caller checks. Do not force a
+rewrite, deletion or vocabulary ban when a bounded repair solves the defect.
+If the choice requires an unresolved product decision, expose the evidence and
+request that decision while continuing independent work.
 
-Per Vetcoders customs, Loctree is the sole anatomical instrument. Tools like `rg` and grep serve only as a local magnifying glass for details, never for repository inventory.
+Run applicable security, lint and test gates as the designated integrator.
+Separate new failures from clean-baseline failures and unrelated concurrent edits.
+Stage only authored files/hunks. A commit is source progress; source admission,
+installation and real product acceptance need their own receipts. Use the actual
+repository install contract only within current authorization, preserve active
+sessions and verify artifact/launch identity before any success ping. Record any
+required acceptance still open; do not certify completion from source tests alone.
 
-1. **Orientation:** `vc-init` at startup. If fresh context is missing, execute `vc-init`.
-2. **High-scale map:** Build the structural picture via `loct repo-view`.
-3. **Execution trace:** Reconstruct the complete path: input → validation → configuration → execution → state commit → result delivery → cleanup. Use `loct focus` and `loct slice` on examined nodes.
-4. **Absence falsification:** Never claim "this does not exist in the repo" from a superficial search. Use `find --literal` and `loct occurrences <symbol>`. Count call sites and consumers, never declarations alone.
-5. **Intents:** Query `aicx intents` to understand historical decisions and rationale.
-6. **Tool failure logging:** If Loctree fails or lacks language support, append the failure to `~/.vibecrafted/loctree/loctree-fail.md` and continue while noting the limitation.
+## Durable handoff and notebook
 
-See [references/forensics-evidence-spec.md](references/forensics-evidence-spec.md) for the complete evidence schema.
+The Operator appends material decisions to `<repo-root>/.vibecrafted/THE_JOURNAL.md`
+(private, Git-ignored). Workers return reports to the Operator; they do not create
+a second journal. Use [the entry template](references/forensics-journal-template.md).
+Before ownership transfer record exact roots/SHA/status, authored changes, checks,
+known failures, active run handles, remaining acceptance and the next instruction.
 
----
+Produce a portable HTML notebook combining actual Loctree/PRView JSON and manually
+adjudicated findings. Read [the notebook contract](references/report-notebook.md)
+and run `scripts/render_report.py` from this skill directory. Missing inputs stay
+NOT_ASSESSED; tool signals do not become proven bugs automatically. The HTML is a
+projection of imported receipts, not a second control plane or verification engine.
+Manual edits require JSON export; regenerating does not silently retain browser state.
 
-## 3. Radical Cut — Zero Shims
-
-The primary sin of agent repairs is creating a "6th layer" — adapters, bridges, and synchronization shims between competing sources of truth.
-
-In Vetcoders, one law stands:
-
-- **A competitor to a throne is removed (`git rm`), never wrapped.**
-- If the throne is clear, delete the dead or inferior competitor and rewire call sites directly to the true authority.
-- **Forbidden words in diffs, commit subjects, and plans:** `shim`, `compat`, `legacy`, `adapter-for-old`, `fallback-to-previous`, `bridge-until`, `TODO remove`.
-- **QC Stop:** If the throne is ambiguous and requires a product/architectural decision from the Founder, stop immediately and present the collision proof in the report.
-
----
-
-## 4. Blast Radius Before Cutting
-
-Before modifying or deleting any file:
-
-1. Run `loct impact <file>` to precisely identify dependent modules.
-2. Inspect consumers with `loct slice`.
-3. Ensure the deletion leaves zero dangling imports or orphaned symbols.
-
----
-
-## 5. Fix Protocol and DoU Verification
-
-A repair is valid only when proven in execution.
-
-1. **Regression Test (Red Gate):**
-   Write or pin an automated test reproducing the defect. The test **MUST FAIL** before applying the fix.
-2. **Surgical Fix:**
-   Apply the smallest coherent change addressing the root cause. No incidental refactoring!
-3. **Green Gate:**
-   The exact same regression test **MUST PASS** after the fix.
-4. **Repository Quality Gate:**
-   Execute standard repo checks:
-   - Rust: `cargo clippy -- -D warnings` and `cargo test`.
-   - Python / generic repos: `make check` (ruff, prettier, semgrep) and the relevant test module.
-5. **Real Runtime Verification:**
-   Verify the actual product workflow, not a synthetic mock or helper.
-6. **Installable App Handoff (e.g., Codescribe, Screenscribe):**
-   If the change affects an installable desktop application:
-   - Build and verify the idle-safe install target (`make installable-safe` or equivalent).
-   - Verify installed artifact launch, version, and signature.
-   - Only after verified execution, trigger:
-     `/usr/bin/afplay /System/Library/Sounds/Ping.aiff`.
-   - No ping for failed or unverified installations!
-
----
-
-## 6. Forensics Journal (Append-Only)
-
-Every investigation and modification must leave a durable trail in the repository:
-`./.loctree/forensics/JOURNAL.md`
-
-- **Never overwrite or truncate the journal.** Append new entries at the end.
-- Record: baseline SHA, examined axes, Loctree evidence, removed competitors (`git rm`), regression tests, and the new commit SHA.
-- See [references/forensics-journal-template.md](references/forensics-journal-template.md) for the entry template.
-
----
-
-## 7. Git, Attribution, and Authority Boundaries
-
-- **Founder vs Operator:** Founder refers exclusively to the human Founders — their voice, decisions, and ultimate buttons. Operator is strictly an agent role (`vc-operator`, integrator). Never call a Founder an operator.
-- **Commit discipline:** Stage only files modified for the bounded cut (`git add <file>`). Never sweep the dirty tree (`git commit -am` and `git add .` are forbidden).
-- **Branch pushing:** Pushing the current working/feature branch (fast-forward, never `--force`) is a free move following an authored commit (Founder decision 2026-08-18).
-- **Founder buttons:** Trunk merges, force-pushes, tag/branch deletions, and production deployments remain Founder buttons.
-
----
-
-## 8. Final Reporting
-
-Upon run completion, deliver a concise report in the conversation:
-
-- **Defect and trigger:** preconditions and failure mechanics.
-- **Loctree evidence:** conflicting symbols and blast radius.
-- **Radical cut / Fix:** what was removed (`git rm`), what was patched.
-- **Verification result:** regression test log (FAIL -> PASS), quality gates, install test.
-- **Status & commit:** 40-character commit SHA, branch push status, and journal link.
+Report concisely: defect and trigger, causal evidence, repair/admission SHA, actual
+verification, remaining install/runtime acceptance, and artifact links.

@@ -1,6 +1,6 @@
 {
   "name": "vc-forensics",
-  "description": "Autonomous investigative and preflight fixer. Explores codebases to find and radically eliminate safety-critical bugs, race conditions, truth multi-authority, and data leaks using Loctree organs, regression proofs, radical cuts (git rm, no shims), and strict DoU verification.",
+  "description": "Investigate real execution and delivery paths, falsify hypotheses, coordinate independently verified repairs, and join Loctree, PRView and manual findings in an offline evidence notebook.",
   "author": {
     "name": "Vetcoders",
     "email": "hello@vetcoders.io"

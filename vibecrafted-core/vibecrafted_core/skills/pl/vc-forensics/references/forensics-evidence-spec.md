@@ -1,72 +1,79 @@
-# vc-forensics — Schemat Dowodowy i Falsyfikacja
+# Evidence contract
 
-Ten dokument definiuje standard dowodu dla skilla `vc-forensics`. Każdy zgłoszony błąd poprawności, wyścig lub kolizja wielowładzy musi spełniać poniższy rygor, zanim agent przystąpi do cięcia i naprawy.
+A finding needs a trigger, a violated product contract and a reachable causal
+path. Tool confidence, a dead-export suggestion or a duplicate name is a lead.
+Prioritize data loss, unauthorized mutation, delivery corruption, races,
+crashes/deadlocks, resource growth and broken core user journeys. Record cosmetic
+or speculative observations separately instead of padding the proven bug count.
 
----
+## Finding record
 
-## 1. Kryteria Istotności Błędu (Severity Threshold)
+Use a stable id, title and recorded state. Preserve additional evidence fields;
+the notebook imports them losslessly. Example shape (replace example values):
 
-`vc-forensics` bada wyłącznie wady krytyczne dla integralności i stabilności:
-
-1. **Wielowładza i kolizja prawdy** — dwa lub więcej komponentów konkurujących o tę samą klasę decyzji (identity, reducer, konfiguracja, seal, delivery).
-2. **Race conditions i brak współbieżnej atomowości** — spóźnione zapisy nadpisujące nowszy stan, wyścigi między wątkami/taskami, niechroniony stan współdzielony.
-3. **Utrata, zniekształcenie lub ciche obcięcie danych** — utrata próbek audio, obcięcie tekstu w pipeline, ciche połykanie błędów.
-4. **Naruszenie autoryzacji i wycieki poświadczeń** — wykonywanie akcji bez uprawnień, tokeny w logach/wyjątkach, niezgodność odbiorcy żądania.
-5. **Crash, deadlock, wyciek zasobów** — zawieszenie pętli zdarzeń, niezwolnione uchwyty plików/pamięci, nieskończony wzrost zużycia zasobów.
-6. **Uszkodzenie podstawowego przepływu użytkownika (core user journey)** — np. brak możliwości wklejenia transkrypcji w Codescribe, zamrożenie GUI.
-
-Kosmetyka, styl, formatowanie i hipotetyczne scenariusze bez ścieżki wywołania są odrzucane.
-
----
-
-## 2. Schemat Raportu Dowodowego (Evidence Record)
-
-Dla każdego potwierdzonego problemu agent generuje w pamięci i journalu rekord:
-
-```yaml
-finding_id: "FORENSIC-YYYYMMDD-01"
-title: "Krótki, precyzyjny tytuł wskazujący istotę błędu"
-classification: "CUT_BLOCKER | CUT_COHERENT | FOLLOW_UP"
-legend_mark: "🔥 | ⚠ | ◌" # 🔥 runtime collision, ⚠ phase/mode split, ◌ test/offline
-affected_components:
-  - path: "sciezka/do/pliku.rs"
-    lines: "120-145"
-    symbol: "nazwa_funkcji_lub_typu"
-  - path: "sciezka/do/konkurenta.rs"
-    lines: "80-110"
-    symbol: "konkurencyjny_symbol"
-root_cause:
-  mechanism: "Opis mechanizmu błędu w kodzie (np. nieatomowy update, podwójny reducer)"
-  loctree_evidence:
-    slice: "Wynik loct slice wskazujący wywołania"
-    occurrences: "Liczba i lokalizacja odwołań z loct occurrences"
-    impact: "Wynik loct impact przed wykonaniem cięcia"
-trigger_scenario:
-  preconditions: "Stan wejściowy systemu"
-  steps:
-    - "Krok 1 wywołania"
-    - "Krok 2 wywołania"
-  expected_behavior: "Zachowanie poprawne zgodnie z kontraktem"
-  actual_behavior: "Zachowanie wadliwe (z dowodem/logiem/błędem)"
-regression_test:
-  path: "tests/sciezka/test_regresji.rs"
-  failing_output_before_fix: "Log z wykonania testu wykazujący FAIL"
-  passing_output_after_fix: "Log z wykonania testu wykazujący PASS"
-falsification_attempt:
-  hypothesis_tested: "Czy to może być legalny wariant (np. replay vs runtime)?"
-  rebuttal_proof: "Dowód, dlaczego to jest rzeczywisty błąd (np. wspólna ścieżka wykonania)"
-resolution:
-  disposition: "RADICAL_CUT | SURGICAL_FIX | QC_STOP"
-  removed_competitor: "sciezka/do/usunietego_pliku (jeśli git rm)"
-  commit_sha: "Pełny 40-znakowy SHA commitu po poprawce"
+```json
+{
+  "id": "F-01",
+  "title": "Tail visible in preview disappears from delivery",
+  "state": "proven",
+  "severity": "major",
+  "path": "app/controller/delivery.rs:120",
+  "mechanism": "Stop closes the preview before pending evidence reaches the committed projection.",
+  "trigger": "Release the key immediately after the last word.",
+  "expected": "All authenticated source spans reach delivery exactly once.",
+  "actual": "The preview tail is closed without a delivery receipt.",
+  "evidence": ["repro.json", "trace.md", "loct-slice.json"],
+  "falsification": "Matched audio and artifact generation ruled out a different input or stale install.",
+  "verification": {
+    "regression": {
+      "baseline_sha": "full SHA",
+      "candidate_sha": "full SHA",
+      "selected": 8,
+      "before": "3 intended RED",
+      "after": "8 PASS",
+      "log": "gate.log"
+    },
+    "integration": "STILL_ISOLATED",
+    "installation": "NOT_ASSESSED",
+    "runtime": "NOT_ASSESSED"
+  }
+}
 ```
 
----
+States: `hypothesis`, `proven`, `source_fixed`, `verified`, `integrated`,
+`installed`, `live_accepted`, `refuted`. They are recorded claims, not a single
+completion ladder: tests, integration, installation and real acceptance remain
+separate fields with receipts. A source repair must not erase the original
+symptom, provenance or unverified live obligation.
 
-## 3. Falsyfikacja Braku (Absence Falsification)
+## Falsification and proof
 
-Nie wolno twierdzić, że coś „nie występuje w repozytorium” na podstawie powierzchownego zapytania tekstowego.
+- Pin exact input identity, source SHA, runtime generation and consumer. Compare
+  matched inputs; word counts are descriptive, not a reference transcript or a
+  proof that every source span survived. Use provenance relations for split/merge
+  operations and receipt chains for delivery.
+- Trace actual production callers and mutation authority. Distinguish preview,
+  diagnostics, committed projections and delivered output. Do not hide failed
+  delivery behind a successful preview close or intermediate acknowledgment.
+- Test alternative explanations, including legal mode/offline splits. State scan
+  completeness and limits for absence claims; count actual call sites, not just
+  declarations. Incomplete coverage cannot establish that a live path is absent.
+- Tests belong to the designated integrator in compile-embargo workflows. Record
+  the exact same test's behavioral failure before and pass after the repair,
+  nonzero selected counts and positive controls. A compiler error or broken
+  fixture is an unsuccessful experiment, not proof of the intended defect.
+- Performance: instrument actual costly work after cache guards; unchanged work
+  should not traverse all historical owners. Preserve valid predecessor edits,
+  new/late evidence, same-revision derived events and exactly-once terminal paths.
+  Counts establish work scaling; latency/thermal claims need device measurements
+  and explicit absolute budgets. A hot baseline does not authorize further heat.
+- Verify worker-to-destination integration through exact ancestry, merge-parent
+  identity or explicit patch equivalence. Reports, clean trees and matching
+  subjects alone prove neither admission nor installed behavior.
 
-- Zamiast luźnego `rg`, używaj `find --literal` oraz `loct occurrences <symbol>`.
-- Sprawdzaj liczbę przeskanowanych plików i kompletność skanu (`scan_complete == true`).
-- Pamiętaj: zliczamy **odwołania i miejsca wywołań (call sites)**, a nie same definicje typów!
+## Evidence hygiene
+
+Preserve immutable source reports and log paths/digests. Export only the bounded
+material needed to assess findings; do not import full private prompts, audio,
+credentials, customer data or huge live event buses into the notebook. Respect
+capture/device permissions and current repository ownership.

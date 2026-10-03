@@ -1,43 +1,26 @@
 # `vc-forensics` Flow
 
-## Flow
-
 ```mermaid
 flowchart TD
-    A[vc-init: map, intent, Git and security baseline] --> B[Trace the real execution path with Loctree]
-    B --> C[Prove the defect with a failing regression]
-    C --> D{Is the authority clear?}
-    D -->|no| E[Report the collision for a Founder decision]
-    D -->|yes| F[Cut the root cause and rewire consumers]
-    F --> G[Run the same regression, quality gates and real product path]
-    G --> H[Record evidence and bounded commit in the forensics journal]
-    H --> I[Report the highest verified state and remaining acceptance]
+    A[Consume fresh vc-init map, intent and Git baseline] --> B[Trace input through committed result and delivery]
+    B --> C[Falsify hypotheses and record causal evidence]
+    C --> D{Repair authorized and authority resolved?}
+    D -->|diagnosis only| E[Report findings and open decisions]
+    D -->|yes| F[Integrator designs independent acceptance; bounded worker writes source]
+    F --> G[Integrator checks baseline RED, candidate GREEN and positive controls]
+    G --> H[Verify admission; separately verify installed and live behavior]
+    E --> I[Canonical journal, HTML notebook and durable handoff]
+    H --> I
 ```
 
-## Routes
+- `/vc-forensics`: interactive investigation in this session.
+- `vibecrafted workflow <agent> --file <brief.md>`: bounded external workflow;
+  brief explicitly loads this skill, respecting current role and compile embargo.
+- No dedicated `vibecrafted forensics` launcher.
 
-| Entry                                            | Args                                             | Produces                                     | Exit             |
-| ------------------------------------------------ | ------------------------------------------------ | -------------------------------------------- | ---------------- |
-| `/vc-forensics`                                  | bounded investigation and repair                 | evidence, regression and authored commit     | report           |
-| `vibecrafted workflow <agent> --file <brief.md>` | bounded brief explicitly loading this `SKILL.md` | workflow report, transcript and run metadata | dispatch receipt |
-
-The dedicated `vibecrafted forensics` command is unavailable in the current
-command deck. The existing workflow route retains workflow run identity; its
-brief selects the forensics protocol. An installed skill alone does not add a
-CLI verb.
-
-## Evidence and boundaries
-
-[SKILL.md](SKILL.md) owns the protocol. Use
-[references/forensics-evidence-spec.md](references/forensics-evidence-spec.md)
-for the proof shape and
-[references/forensics-journal-template.md](references/forensics-journal-template.md)
-for append-only entries in `./.loctree/forensics/JOURNAL.md`.
-
-- Pin the baseline and inspect `slice` / `impact` before changing a source owner.
-- The same regression must fail before the repair and pass after it.
-- An ambiguous authority requires a Founder decision; do not add another owner.
-- Repository gates do not prove runtime, installation, or delivery. Report each
-  acceptance surface at its actual verified level.
-- Stage the bounded cut only. Integration, install and release follow the current
-  run's authorization and the canonical skill's boundaries.
+[SKILL.md](SKILL.md) owns the protocol. Read the
+[evidence contract](references/forensics-evidence-spec.md) for causal proof,
+[journal template](references/forensics-journal-template.md) for append-only
+`<repo-root>/.vibecrafted/THE_JOURNAL.md`, and
+[notebook contract](references/report-notebook.md) for offline HTML imports.
+A terminal worker report, green gate or exported notebook is not live acceptance.
