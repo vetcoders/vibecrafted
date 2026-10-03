@@ -98,35 +98,84 @@ impl HomeRow {
             .attention_reason
             .as_deref()
             .unwrap_or(self.state_label.as_str());
-        let when = truncate(&self.when_label, 11);
         let tail = format!("cost {}", self.cost_label);
-        let prefix = format!(
-            "{} {when:<11} {:<7} {:<9} {:<8} {:<8}",
-            self.band.marker(),
-            truncate(&self.agent, 7),
-            truncate(&self.workspace, 9),
-            truncate(&self.frame_session, 8),
-            truncate(&self.run_id, 8),
-        );
-        let reason_width = if width == 0 {
-            19
-        } else {
-            width
-                .saturating_sub(prefix.chars().count() + tail.chars().count() + 2)
-                .min(19)
-        };
-        let line = if reason_width == 0 {
-            format!("{prefix} {tail}")
-        } else {
-            format!(
-                "{prefix} {:<reason_width$} {tail}",
-                truncate(reason, reason_width)
-            )
-        };
-        if width == 0 || line.chars().count() <= width {
-            return line;
+        let values = [
+            self.when_label.as_str(),
+            self.agent.as_str(),
+            self.workspace.as_str(),
+            self.frame_session.as_str(),
+            self.run_id.as_str(),
+            reason,
+            tail.as_str(),
+        ];
+        let cells = |value: &str| ratatui::text::Span::raw(value).width();
+        if width == 0 {
+            return format!("{} {}", self.band.marker(), values.join(" "));
         }
-        truncate(&line, width)
+        if width < 8 {
+            return truncate(&format!("{} {}", self.band.marker(), self.run_id), width);
+        }
+        let mut columns = [11, 7, 9, 8, 8, 19, cells(&tail)];
+        let used = |columns: &[usize; 7]| {
+            2 + columns.iter().sum::<usize>()
+                + columns
+                    .iter()
+                    .filter(|&&column| column > 0)
+                    .count()
+                    .saturating_sub(1)
+        };
+        // Remove padding before dropping information. In narrow panes, routing
+        // labels yield to the run identity and honest cost, rather than letting
+        // a final whole-line clip silently remove the receipt at the right.
+        for index in [0, 1, 5] {
+            if used(&columns) > width {
+                columns[index] = columns[index].min(cells(values[index]));
+            }
+        }
+        for index in [3, 2, 0, 5, 1] {
+            if used(&columns) > width {
+                columns[index] = 0;
+            }
+        }
+        if used(&columns) > width {
+            columns[4] = width.saturating_sub(3 + columns[6]).max(1);
+            if used(&columns) > width {
+                columns[6] = width.saturating_sub(4);
+            }
+        }
+        // A full run id is the first use of newly available space. Then both
+        // routing columns grow together; wide terminals no longer stop at the
+        // old 9/8/8-character caps while leaving half the board empty.
+        let extra = width.saturating_sub(used(&columns));
+        columns[4] += extra.min(cells(values[4]).saturating_sub(columns[4]));
+        while used(&columns) < width {
+            let mut grew = false;
+            for index in [2, 3, 5] {
+                if used(&columns) < width
+                    && columns[index] > 0
+                    && columns[index] < cells(values[index])
+                {
+                    columns[index] += 1;
+                    grew = true;
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+        let filler = if columns[5] > 0 { 5 } else { 4 };
+        columns[filler] += width.saturating_sub(used(&columns));
+        let fields = values
+            .iter()
+            .zip(columns)
+            .filter(|(_, column)| *column > 0)
+            .map(|(value, column)| {
+                let value = truncate(value, column);
+                let padding = column.saturating_sub(cells(&value));
+                format!("{value}{}", " ".repeat(padding))
+            })
+            .collect::<Vec<_>>();
+        format!("{} {}", self.band.marker(), fields.join(" "))
     }
 }
 
@@ -640,17 +689,27 @@ fn display_token(value: Option<&str>) -> String {
 }
 
 fn truncate(value: &str, width: usize) -> String {
+    use ratatui::{style::Style, text::Span};
+
     if width == 0 {
         return String::new();
     }
-    if value.chars().count() <= width {
+    if Span::raw(value).width() <= width {
         return value.to_string();
     }
-    value
-        .chars()
-        .take(width.saturating_sub(1))
-        .collect::<String>()
-        + "…"
+    let span = Span::raw(value);
+    let mut shortened = String::new();
+    let mut used = 0;
+    for grapheme in span.styled_graphemes(Style::default()) {
+        let cells = Span::raw(grapheme.symbol).width();
+        if used + cells > width - 1 {
+            break;
+        }
+        shortened.push_str(grapheme.symbol);
+        used += cells;
+    }
+    shortened.push('…');
+    shortened
 }
 
 #[cfg(test)]
@@ -1005,6 +1064,63 @@ mod tests {
         assert!(quiet_line.contains("cost —"), "{quiet_line}");
         assert!(!quiet_line.contains("01-01"), "{quiet_line}");
         assert!(!quiet_line.contains("cost 0"), "{quiet_line}");
+    }
+
+    fn width_fixture() -> HomeRow {
+        HomeRow {
+            run_id: "work-261002-235212-20231".into(),
+            agent: "codex".into(),
+            title: "workflow · codex".into(),
+            band: HomeBand::History,
+            attention_reason: None,
+            workspace: "vibecrafted-runtime-recovery".into(),
+            frame_session: "codex-work-261002-235212-20231".into(),
+            panel: Some("pane-2".into()),
+            cost_label: "$1.3859".into(),
+            when_label: "2h ago".into(),
+            state_label: "completed".into(),
+            timestamp: None,
+            full_date: "date unknown".into(),
+        }
+    }
+
+    #[test]
+    fn list_line_wide_preserves_run_and_workspace_identity() {
+        let row = width_fixture();
+        let line = row.list_line(170);
+        for value in [&row.run_id, &row.workspace, &row.frame_session] {
+            assert!(line.contains(value), "missing {value}: {line}");
+        }
+        assert!(line.contains("completed"), "{line}");
+        assert!(line.ends_with("cost $1.3859"), "{line}");
+        assert_eq!(ratatui::text::Span::raw(&line).width(), 170);
+    }
+
+    #[test]
+    fn list_line_narrow_retains_cost_instead_of_clipping_the_tail() {
+        let row = width_fixture();
+        for width in [32, 40, 60, 80, 100] {
+            let line = row.list_line(width);
+            assert!(line.ends_with("cost $1.3859"), "width {width}: {line}");
+            assert!(ratatui::text::Span::raw(&line).width() <= width);
+        }
+    }
+
+    #[test]
+    fn list_line_fits_terminal_cells_and_preserves_combining_sequences() {
+        let mut row = width_fixture();
+        row.workspace = "診療所👩‍⚕️-cafe\u{301}-runtime".into();
+        row.frame_session = "動物病院-👨‍👩‍👧‍👦-workspace".into();
+        for width in 1..=200 {
+            let line = row.list_line(width);
+            assert!(
+                ratatui::text::Span::raw(&line).width() <= width,
+                "overflow at {width}: {line}"
+            );
+        }
+        let line = row.list_line(170);
+        assert!(line.contains(&row.workspace), "{line}");
+        assert!(line.contains(&row.frame_session), "{line}");
     }
 
     #[test]
