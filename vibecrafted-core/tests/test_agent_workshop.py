@@ -857,6 +857,62 @@ def test_missing_project_refuses_storage_root_before_creator(
     assert calls == []
 
 
+@pytest.mark.parametrize("denied_root", ["runtime-home", "projects-lobby"])
+def test_catalog_owned_live_storage_root_refuses_all_launch_side_effects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, denied_root: str
+) -> None:
+    import json
+
+    from vibecrafted_core.workspace_catalog import (
+        catalog_path,
+        create_workspace,
+        operator_session_name,
+    )
+
+    runtime_home = Path(os.environ["VIBECRAFTED_HOME"]).resolve()
+    blocked = (
+        runtime_home if denied_root == "runtime-home" else runtime_home / "projects"
+    )
+    blocked.mkdir(parents=True, exist_ok=True)
+    record = create_workspace(root=tmp_path, display_label=blocked.name)
+    # Model a durable record admitted before storage-root denial existed.
+    path = catalog_path()
+    payload = json.loads(path.read_text())
+    payload["workspaces"][record.workspace_id]["canonical_root"] = str(blocked)
+    path.write_text(json.dumps(payload))
+    destination = operator_session_name(
+        record.workspace_id, display_label=record.display_label
+    )
+    workshop = _load()
+    original_ownership = workshop.catalog_owns_destination
+    original_destination = workshop.destination_session_for_workspace
+    assert original_ownership(blocked, destination)
+    launched, calls = _prepare_launch(
+        workshop,
+        blocked,
+        monkeypatch,
+        destination=destination,
+        live=[destination],
+        current=destination,
+    )
+    monkeypatch.setattr(workshop, "catalog_owns_destination", original_ownership)
+    monkeypatch.setattr(
+        workshop, "destination_session_for_workspace", original_destination
+    )
+
+    launched.launch()
+
+    assert launched.mode == "launcher"
+    assert "Project could not be opened" in launched.error
+    reason = (
+        "VIBECRAFTED_HOME cannot be a workspace root"
+        if denied_root == "runtime-home"
+        else "projects lobby has no project"
+    )
+    assert reason in launched.error
+    assert calls == []
+
+
 def test_launch_refuses_when_session_listing_is_unavailable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

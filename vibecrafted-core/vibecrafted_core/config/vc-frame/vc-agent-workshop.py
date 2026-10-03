@@ -110,6 +110,7 @@ from vibecrafted_core.aicx_session_chain import (
     SessionRecord,
     project_filter_for_root,
 )
+from vibecrafted_core.repo_selection import RepoSelectionError, validate_workspace_root
 from vibecrafted_core.runtime_paths import selected_runtime_environment
 from vibecrafted_core.spawn import (
     CONTINUITY_MODES,
@@ -300,6 +301,10 @@ def ensure_live_destination(
     workshop's current seat are never destination authority. Bind its child to
     one canonical WES identity so recovery can be read from that exact receipt.
     """
+    try:
+        workspace = validate_workspace_root(workspace)
+    except RepoSelectionError as exc:
+        raise ValueError(f"Project could not be opened: {exc}") from exc
     session = str(session or "").strip()
     if not session:
         raise ValueError("could not resolve a Frame session for that project")
