@@ -44,30 +44,15 @@ def _hashes(layouts_dir: Path) -> dict[str, str]:
 
 
 def _guard_host_guest(layouts_dir: Path, config_path: Path) -> None:
-    host = _code((layouts_dir / "host.kdl").read_text(encoding="utf-8"))
+    # Host chrome is a versioned vc-frame binary contract. The Runtime Pack
+    # only carries guest/tool layouts; even --update cannot admit a host copy.
+    for name in ("host.kdl", "vibecrafted-host.kdl"):
+        if (layouts_dir / name).exists() or (layouts_dir / name).is_symlink():
+            raise ValueError(f"{name}: host chrome belongs to the vc-frame binary")
     operator = _code((layouts_dir / "operator.kdl").read_text(encoding="utf-8"))
     config = _code(config_path.read_text(encoding="utf-8"))
-
-    host_layer = _block(host, "session_layer")
-    host_workspace = _block(host, 'tab name="Workspace"')
-    if host.count("frame_host true") != 1:
-        raise ValueError("host.kdl must declare exactly one frame_host owner")
-    if "frame_host true" in host_layer:
-        raise ValueError("host.kdl session_layer is cloned and cannot own frame_host")
-    if "frame_host true" not in host_workspace:
-        raise ValueError("host.kdl Workspace tab must own frame_host")
-    if host_workspace.count("workspace_surface true") != 1:
-        raise ValueError("host.kdl must expose exactly one guest workspace surface")
-    host_home = _block(host, 'tab name="Home" focus=true')
-    if not all(
-        token in host_home
-        for token in ('command="vc-o"', 'args "--view" "host"', "start_suspended=false")
-    ):
-        raise ValueError("host.kdl must start the global Dashboard through PATH")
-    if "cwd=" in host_home or "/releases/" in host_home:
-        raise ValueError("host Dashboard must not retain creator cwd or generation")
-    if host.count("focus=true") != 1:
-        raise ValueError("host.kdl must focus only the Home landing tab")
+    if "default_layout" in config:
+        raise ValueError("config.kdl cannot select Frame host chrome")
 
     operator_layer = _block(operator, "session_layer")
     operator_content = operator.replace(operator_layer, "", 1)
@@ -77,11 +62,9 @@ def _guard_host_guest(layouts_dir: Path, config_path: Path) -> None:
         raise ValueError("operator.kdl fallback host owner must stay in session_layer")
     if "frame_host true" in operator_content:
         raise ValueError("operator.kdl guest content cannot retain host ownership")
-    if 'default_layout "host"' not in config:
-        raise ValueError("config.kdl must boot the dedicated host layout")
 
     for path in sorted(layouts_dir.glob("*.kdl")):
-        if path.name in {"host.kdl", "operator.kdl"}:
+        if path.name == "operator.kdl":
             continue
         if "frame_host true" in _code(path.read_text(encoding="utf-8")):
             raise ValueError(f"{path.name} cannot claim frame_host ownership")

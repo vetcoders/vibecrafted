@@ -2,9 +2,8 @@
   "algorithm": "sha256",
   "layouts": {
     "dashboard.kdl": "ddb06918307ec683bf7ceed73ada57a42d4796ee376785a3d26bed3cfaa9fb22",
-    "host.kdl": "a3702c871ae29ba1978abc159adba7c8fde1a47c9e2462481e982e5a64ea5c6d",
     "marbles.kdl": "e1e6f0148f59c4c05bfb69a34c7c4e3c2a0954a7465642b289b3a7f903f845bf",
-    "operator.kdl": "ad1096564d2c9ddfffb9d4aa0d7e50b921fa4a22bbed7b7be1cfb4e60b26a232",
+    "operator.kdl": "29c82dcc5e5e8120b0fe86de2e62db6a99abf86b08005faa58ea0c0b3a6ce67a",
     "research.kdl": "cb784ffb2070a2076a089c578fa4f67a652a2d74bc4bb18eeba02ebf0d899ccd",
     "workflow.kdl": "d5b11b6b6e468a217530a854beb7f72eb76d0e74f2417751bc33aeb1be56f2f1"
   },

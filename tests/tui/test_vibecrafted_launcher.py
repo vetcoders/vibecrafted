@@ -2956,10 +2956,7 @@ def test_dashboard_subcommand_launches_repo_owned_vc_frame_layout(
     )
     assert len(expected_session) <= 24
     layouts = home / ".config" / "vibecrafted" / "vc-frame" / "layouts"
-    host_create = (
-        f"--new-session-with-layout {layouts / 'host.kdl'} "
-        "attach --create-background vc-host"
-    )
+    host_create = "VC_FRAME attach --create-background vc-host"
     guest_create = (
         f"--guest-workspace --new-session-with-layout {layouts / 'operator.kdl'} "
         f"attach --create-background {expected_session}"

@@ -2107,12 +2107,11 @@ def test_stale_operator_session_does_not_override_live_host_routing(
     workspace through the guest path instead of opening a second terminal."""
     live = tmp_path / "live-sessions.txt"
     live.write_text("host-a\n", encoding="utf-8")
-    # host-a is a Frame host by runtime role (7ecb2b2a): its materialized
-    # layout carries the singleton projection owner, the shipped host.kdl.
+    # Model a live engine dump, independent of removed product host assets.
+    host_dump = tmp_path / "host-dump.kdl"
+    host_dump.write_text("layout { frame_host true; workspace_surface true; }\n")
     (tmp_path / "frame-layouts.json").write_text(
-        json.dumps(
-            {"host-a": str(gen.SHIPPED_VC_FRAME_CONFIG / "layouts" / "host.kdl")}
-        ),
+        json.dumps({"host-a": str(host_dump)}),
         encoding="utf-8",
     )
     result, launch = _run_entry(

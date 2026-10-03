@@ -1,6 +1,6 @@
 // operator — Start here / guest workspace content for vc-start
 // Path kept as operator.kdl for: vibecrafted start | dashboard operator
-// The first product session is layouts/host.kdl (default_layout "host").
+// The first product session uses chrome embedded in the vc-frame binary.
 // This file is the guest workspace surface (Start here, Agents, Shell, Voc).
 // The Sessions rail carries frame_host true so a first vc-start that still
 // creates this layout as kind=host is a frame host, not a black-frame client.
