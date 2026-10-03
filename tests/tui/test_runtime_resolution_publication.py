@@ -3289,3 +3289,87 @@ def test_keep_current_starship_preserves_exact_multiline_bytes_after_success(
     assert kept != incoming_starship
     selected = (roots["runtime_home"] / "tools/vibecrafted-current").resolve()
     assert selected.name == "9.9.10+b"
+
+
+@pytest.mark.parametrize(
+    "case", ["receipted-default", "identical-incoming", "user-edit", "owned-file-only"]
+)
+def test_missing_previous_generation_reconciles_only_proven_defaults(
+    tmp_path, roots, case
+):
+    destination = roots["product_config"] / "starship.toml"
+    destination.parent.mkdir(parents=True)
+    before = "add_newline = true\n"
+    incoming = "add_newline = false\n"
+    current = incoming if case == "identical-incoming" else before
+    if case in {"user-edit", "owned-file-only"}:
+        current = "# my preference\nadd_newline = true\n"
+    destination.write_text(current)
+    relative = Path("config/starship.toml")
+    generation = roots["runtime_home"] / "releases/new"
+    (generation / relative).parent.mkdir(parents=True)
+    (generation / relative).write_text(incoming)
+    old = {"generation": str(roots["runtime_home"] / "releases/removed")}
+    if case != "owned-file-only":
+        old["sha256"] = hashlib.sha256(before.encode()).hexdigest()
+    outcome = installer._reconcile_runtime_preference(
+        destination,
+        relative,
+        generation,
+        runtime_home=roots["runtime_home"],
+        previous={
+            "config_defaults": {str(destination): old},
+            "owned_files": {
+                str(destination): hashlib.sha256(current.encode()).hexdigest()
+            },
+        },
+    )
+    if case in {"user-edit", "owned-file-only"}:
+        assert outcome["error"]
+        assert outcome["body"] is None
+    else:
+        assert outcome["error"] is None, outcome
+        assert outcome["body"] == incoming
+    assert destination.read_text() == current
+
+
+@pytest.mark.parametrize("choice", ["keep-current", "use-incoming"])
+@pytest.mark.parametrize("bad_hash", [None, "current", "incoming"])
+def test_missing_previous_generation_bound_choices(tmp_path, roots, choice, bad_hash):
+    destination = roots["product_config"] / "starship.toml"
+    destination.parent.mkdir(parents=True)
+    current = "# my preference\nadd_newline = true\n"
+    incoming = "add_newline = false\n"
+    destination.write_text(current)
+    relative = Path("config/starship.toml")
+    generation = roots["runtime_home"] / "releases/new"
+    (generation / relative).parent.mkdir(parents=True)
+    (generation / relative).write_text(incoming)
+    outcome = installer._reconcile_runtime_preference(
+        destination,
+        relative,
+        generation,
+        runtime_home=roots["runtime_home"],
+        previous={
+            "config_defaults": {
+                str(destination): {
+                    "generation": str(roots["runtime_home"] / "releases/removed"),
+                    "sha256": "f" * 64,
+                }
+            }
+        },
+        choice=choice,
+        expected_current_sha256="0" * 64
+        if bad_hash == "current"
+        else hashlib.sha256(current.encode()).hexdigest(),
+        expected_incoming_sha256="0" * 64
+        if bad_hash == "incoming"
+        else hashlib.sha256(incoming.encode()).hexdigest(),
+    )
+    if bad_hash:
+        assert "changed during retry" in outcome["error"], outcome
+        assert outcome["body"] is None
+    else:
+        assert outcome["error"] is None, outcome
+        assert outcome["body"] == (current if choice == "keep-current" else incoming)
+    assert destination.read_text() == current

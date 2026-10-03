@@ -20207,37 +20207,61 @@ def _reconcile_runtime_preference(
             ):
                 raise ValueError("previous shipped defaults are aliased")
             if not baseline_source.is_file():
-                raise ValueError("previous shipped defaults are missing")
-            manifest, manifest_error = _load_runtime_generation_manifest(old_root)
-            if manifest is None:
-                raise ValueError(
-                    manifest_error or "previous generation manifest is invalid"
-                )
-            raw = baseline_source.read_bytes()
-            digest = hashlib.sha256(raw).hexdigest()
-            expected_digest = (
-                old.get("sha256")
-                or manifest["hashes"].get(relative.as_posix())
-                or previous.get("owned_files", {}).get(str(destination))
-            )
-            bound_digest = manifest["hashes"].get(relative.as_posix())
-            trusted = bool(expected_digest) and digest == expected_digest
-            if bound_digest and digest != bound_digest:
-                trusted = False
-            if trusted:
-                baseline = raw.decode("utf-8")
-            elif choice in PREFERENCE_CHOICES:
-                # Historical receipts omit hashes for some preference files,
-                # and some generations hold user copies of those defaults.
-                # Unproven bytes cannot be a three-way baseline; a bound
-                # keep-current/use-incoming retry still resolves the user file.
-                baseline = None
-            elif expected_digest and digest != expected_digest:
-                raise ValueError("previous shipped defaults differ from their receipt")
-            elif bound_digest and digest != bound_digest:
-                raise ValueError("previous shipped defaults differ from their manifest")
+                # The receipt digest can prove the live default even after the
+                # old immutable generation has been removed. owned_files hashes
+                # describe installed postimages and cannot prove shipped defaults.
+                if outcome["current_sha256"] == old.get("sha256"):
+                    baseline = current_raw.decode("utf-8")
+                elif current_raw == incoming.encode("utf-8"):
+                    baseline = incoming
+                elif choice not in PREFERENCE_CHOICES:
+                    raise ValueError("previous shipped defaults are missing")
+                # A deliberate choice consumes no historical bytes, but its
+                # bindings must hold even when automatic merging would succeed.
+                if choice:
+                    if outcome["current_sha256"] != expected_current_sha256:
+                        raise ValueError(
+                            "preference changed during retry; concurrent edit refused"
+                        )
+                    if outcome["incoming_sha256"] != expected_incoming_sha256:
+                        raise ValueError(
+                            "incoming defaults changed during retry; concurrent edit refused"
+                        )
             else:
-                raise ValueError("previous shipped defaults are unavailable")
+                manifest, manifest_error = _load_runtime_generation_manifest(old_root)
+                if manifest is None:
+                    raise ValueError(
+                        manifest_error or "previous generation manifest is invalid"
+                    )
+                raw = baseline_source.read_bytes()
+                digest = hashlib.sha256(raw).hexdigest()
+                expected_digest = (
+                    old.get("sha256")
+                    or manifest["hashes"].get(relative.as_posix())
+                    or previous.get("owned_files", {}).get(str(destination))
+                )
+                bound_digest = manifest["hashes"].get(relative.as_posix())
+                trusted = bool(expected_digest) and digest == expected_digest
+                if bound_digest and digest != bound_digest:
+                    trusted = False
+                if trusted:
+                    baseline = raw.decode("utf-8")
+                elif choice in PREFERENCE_CHOICES:
+                    # Historical receipts omit hashes for some preference files,
+                    # and some generations hold user copies of those defaults.
+                    # Unproven bytes cannot be a three-way baseline; a bound
+                    # keep-current/use-incoming retry still resolves the user file.
+                    baseline = None
+                elif expected_digest and digest != expected_digest:
+                    raise ValueError(
+                        "previous shipped defaults differ from their receipt"
+                    )
+                elif bound_digest and digest != bound_digest:
+                    raise ValueError(
+                        "previous shipped defaults differ from their manifest"
+                    )
+                else:
+                    raise ValueError("previous shipped defaults are unavailable")
         if choice:
             if choice not in PREFERENCE_CHOICES:
                 raise ValueError("unsupported preference choice")

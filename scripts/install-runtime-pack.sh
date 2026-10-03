@@ -356,7 +356,8 @@ _release_rescue_extract() {
 # install/update transaction for a bounded wait instead of failing the whole
 # install: the mutation lease stays exclusive, only the refusal is deferred.
 reconcile_server_service() {
-  [[ "${operation:-install}" == "install" && "${dry_run:-0}" != "1" ]] || return 0
+  [[ "${operation:-install}" == "install" && "${dry_run:-0}" != "1" \
+    && "${rescue_plan:-0}" != "1" ]] || return 0
   [[ "$(uname -s)" == "Darwin" ]] || return 0
   local plist="$HOME/Library/LaunchAgents/io.vetcoders.vibecrafted.server.plist"
   [[ -f "$plist" ]] || return 0

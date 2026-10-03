@@ -2012,3 +2012,30 @@ def test_completed_journal_is_not_an_owned_resume(installed, capsys):
     assert code == 2
     assert refused["status"] == "refused"
     assert "historical" in refused["reason"] or "completed" in refused["reason"]
+
+
+def test_rescue_republishes_when_old_generation_and_backup_history_were_removed(
+    tmp_path, installed, capsys
+):
+    paths, _, result = installed
+    preferences = {
+        path: path.read_bytes()
+        for path in installer._runtime_preference_sources(paths["product_config"])
+    }
+    _plant_missing_historical(paths)
+    shutil.rmtree(Path(result["root"]))
+    newer = seed_runtime_pack(tmp_path / "pack-b", version="9.9.9+b")
+    _seal_runtime_pack_for_admission(newer)
+    code, plan = _plan(newer, capsys)
+    assert code == 0, plan
+    code, outcome = _apply(newer, capsys, plan["plan_digest"])
+    assert code == 0, outcome
+    assert outcome["status"] == "rescued"
+    assert outcome["healthy_restorepoint"] is True
+    assert outcome["missing_history"]
+    assert Path(outcome["archived_receipt"]["path"]).is_file()
+    for path, before in preferences.items():
+        assert path.read_bytes() == before
+    receipt = _load_receipt(paths)
+    assert receipt["version"] == "9.9.9+b"
+    assert not receipt.get("install_pending")

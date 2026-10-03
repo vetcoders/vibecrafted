@@ -1128,3 +1128,41 @@ def test_rescue_lock_refuses_foreign_malformed_lock(
     assert refused_link.returncode == 1, refused_link.stdout
     assert "symlink" in refused_link.stderr
     assert as_link.is_symlink()
+
+
+def test_public_rescue_plan_never_reconciles_installed_service(tmp_path, installed):
+    paths, payload, _ = installed
+    _plant_missing_historical(paths)
+    marker = tmp_path / "service-called"
+    launcher = paths["launcher_home"] / "vibecrafted"
+    launcher.write_text(f'#!/bin/sh\nprintf called > "{marker}"\n')
+    launcher.chmod(0o755)
+    receipt = _load_receipt(paths)
+    receipt["owned_files"][str(launcher)] = hashlib.sha256(
+        launcher.read_bytes()
+    ).hexdigest()
+    _write_receipt(paths, receipt)
+    plist = Path.home() / "Library/LaunchAgents/io.vetcoders.vibecrafted.server.plist"
+    plist.parent.mkdir(parents=True)
+    plist.write_text("fixture")
+    host_bin = tmp_path / "host-bin"
+    host_bin.mkdir()
+    uname = host_bin / "uname"
+    uname.write_text('#!/bin/sh\nprintf "Darwin\\n"\n')
+    uname.chmod(0o755)
+    archive, key = _sign_payload_archive(tmp_path / "carrier", payload)
+    result = _run_wrapper(
+        "--pack",
+        str(archive),
+        *_wrapper_flags("9.9.9+a"),
+        "--rescue",
+        "--plan",
+        env=_wrapper_env(key, {"PATH": f"{host_bin}{os.pathsep}{os.environ['PATH']}"}),
+    )
+    assert result.returncode == 0, (
+        _json_out(result).get("reason"),
+        _json_out(result).get("collisions"),
+        result.stderr,
+    )
+    assert _json_out(result)["mode"] == "plan"
+    assert not marker.exists(), "read-only plan executed the installed service launcher"
