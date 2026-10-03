@@ -519,3 +519,106 @@ def test_start_refreshes_previous_shell_invocation_inventory(tmp_path: Path) -> 
     assert _rc(result) == 4, result.stdout + result.stderr
     assert "--new-host" in result.stderr
     assert not _creates(scene.calls())
+
+
+def _fault_created_host_role(scene: Scene, fault: str, failures: int) -> Path:
+    """Model a live socket whose host canvas has not finished materializing."""
+    count = scene.table / "created-host-role-probes"
+    response = {
+        "empty": "sys.exit(0)",
+        "guest": 'print("layout { pane; }"); sys.exit(0)',
+        "invalid": 'print("not a layout"); sys.exit(0)',
+        "rpc": 'sys.stderr.write("host canvas unavailable\\n"); sys.exit(1)',
+        "slow-rpc": 'time.sleep(11); sys.stderr.write("host canvas unavailable\\n"); sys.exit(1)',
+    }[fault]
+    injection = f"""    if verb == "dump-layout" and target.startswith("vc-host@"):
+        counter = {str(count)!r}
+        probes = int(open(counter).read()) if os.path.exists(counter) else 0
+        with open(counter, "w") as handle:
+            handle.write(str(probes + 1))
+        if {failures} < 0 or probes < {failures}:
+            {response}
+"""
+    for frame in (
+        scene.generation / "bin/vc-frame",
+        scene.generation / "libexec/vc-frame",
+    ):
+        source = frame.read_text()
+        needle = '    if verb == "dump-layout":'
+        assert source.count(needle) == 1
+        frame.write_text(source.replace(needle, injection + needle))
+    return count
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+@pytest.mark.parametrize("fault", ["empty", "guest", "rpc"])
+def test_new_host_waits_for_its_host_canvas(
+    tmp_path: Path, shell: str, fault: str
+) -> None:
+    scene = Scene(tmp_path, live=("vc-host", "research"), guests=("research",))
+    (scene.generation / "VERSION").write_text("4.3.2+gba7de3c9\n")
+    before = {p.name: p.read_bytes() for p in (scene.table / "live").iterdir()}
+    probes = _fault_created_host_role(scene, fault, failures=2)
+    result = _run(scene, "vc-start --new-host", shell=shell)
+    assert _rc(result) == 0, result.stdout + result.stderr
+    assert int(probes.read_text()) == 3
+    assert len(_creates(scene.calls())) == 1
+    assert len(scene.terminal_launches()) == 1
+    assert scene.live() == ["research", "vc-host", "vc-host@ba7de3c9"]
+    for name, body in before.items():
+        assert (scene.table / "live" / name).read_bytes() == body
+    assert all(not c["argv"][0].startswith(("kill", "delete")) for c in scene.calls())
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+@pytest.mark.parametrize("fault", ["invalid", "rpc", "guest"])
+def test_new_host_unready_canvas_refuses_with_detached_attach_hint(
+    tmp_path: Path, shell: str, fault: str
+) -> None:
+    scene = Scene(tmp_path, live=("vc-host", "research"), guests=("research",))
+    (scene.generation / "VERSION").write_text("4.3.2+gba7de3c9\n")
+    before = {p.name: p.read_bytes() for p in (scene.table / "live").iterdir()}
+    probes = _fault_created_host_role(scene, fault, failures=-1)
+    result = _run(scene, "vc-start --new-host", shell=shell, timeout=35)
+    assert _rc(result) == 4, result.stdout + result.stderr
+    assert 1 < int(probes.read_text()) <= 40
+    assert "remains detached" in result.stderr
+    assert "vc-host@ba7de3c9" in result.stderr
+    assert "attach vc-host@ba7de3c9" in result.stderr
+    assert (
+        "no frame_host true marker" if fault == "guest" else "host-role probe failed"
+    ) in result.stderr
+    assert len(_creates(scene.calls())) == 1
+    assert not scene.terminal_launches()
+    assert scene.live() == ["research", "vc-host", "vc-host@ba7de3c9"]
+    for name, body in before.items():
+        assert (scene.table / "live" / name).read_bytes() == body
+    assert all(not c["argv"][0].startswith(("kill", "delete")) for c in scene.calls())
+
+
+def test_owned_terminal_child_invalid_role_is_not_polled(tmp_path: Path) -> None:
+    scene = Scene(tmp_path, live=("vc-host", "vc-host@ba7de3c9"))
+    probes = _fault_created_host_role(scene, "rpc", failures=-1)
+    result = _run(
+        scene,
+        "_vetcoders_start_is_owned_terminal_child() { return 0; }; vc-start --new-host",
+        tty=True,
+        extra_env={"VIBECRAFTED_START_CREATED_HOST": "vc-host@ba7de3c9"},
+    )
+    assert _rc(result) == 4, result.stdout + result.stderr
+    assert int(probes.read_text()) == 1
+    assert not _creates(scene.calls())
+    assert not scene.terminal_launches()
+
+
+def test_new_host_stops_retrying_after_a_slow_failed_role_probe(tmp_path: Path) -> None:
+    scene = Scene(tmp_path, live=("vc-host",))
+    (scene.generation / "VERSION").write_text("4.3.2+gba7de3c9\n")
+    probes = _fault_created_host_role(scene, "slow-rpc", failures=-1)
+    result = _run(scene, "vc-start --new-host", timeout=25)
+    assert _rc(result) == 4, result.stdout + result.stderr
+    assert int(probes.read_text()) == 1
+    assert "host-role probe failed" in result.stderr
+    assert "attach vc-host@ba7de3c9" in result.stderr
+    assert len(_creates(scene.calls())) == 1
+    assert not scene.terminal_launches()

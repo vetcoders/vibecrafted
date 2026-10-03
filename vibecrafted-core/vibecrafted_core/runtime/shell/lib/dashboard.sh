@@ -2445,6 +2445,7 @@ PY_HOST_GENERATION
 _vetcoders_start_new_host() (
   local root="${1:-}" active="" owner="" generation="" short="" base="vc-host" host="" rc=0 index=1
   local vc_frame_bin="" role="" front_door="" existing="" sessions=""
+  local created_here=0 role_rc=0 role_attempts=0 role_deadline=0
   local entry_args=(--new-host)
   if ! _vetcoders_start_is_lobby "$root"; then
     entry_args+=(--repo "$root")
@@ -2511,9 +2512,35 @@ _vetcoders_start_new_host() (
     done
     ((rc == 0)) || return "$rc"
     printf 'vc-start: created host %s on generation %s; existing sessions remain untouched.\n' "$host" "$generation"
+    created_here=1
   fi
-  role="$(_vetcoders_start_session_projection_role "$host" "$vc_frame_bin")" || return 4
-  [[ "$role" == host ]] || return 4
+  if ((created_here)); then
+    # A live socket precedes materialized host plugins. Retry only the host
+    # this invocation exclusively created; never adopt another live session.
+    # Both limits are fixed. The engine bounds each individual action RPC;
+    # stop scheduling probes after ten seconds or forty calls, whichever first.
+    role_deadline=$((SECONDS + 10))
+    while ((role_attempts < 40 && SECONDS < role_deadline)); do
+      role_attempts=$((role_attempts + 1))
+      role="$(_vetcoders_start_session_projection_role "$host" "$vc_frame_bin")" && role_rc=0 || role_rc=$?
+      [[ "$role" == host ]] && break
+      ((SECONDS < role_deadline)) || break
+      sleep 0.25
+    done
+    if [[ "$role" != host ]]; then
+      if ((role_rc != 0)); then
+        printf 'vc-start: host %s remains detached: host-role probe failed (exit %s).\n' "$host" "$role_rc" >&2
+      else
+        printf 'vc-start: host %s remains detached: its layout has no frame_host true marker.\n' "$host" >&2
+      fi
+      printf 'Enter it explicitly with: %s attach %s\n' \
+        "$(_vetcoders_shell_quote "$vc_frame_bin")" "$(_vetcoders_shell_quote "$host")" >&2
+      return 4
+    fi
+  else
+    role="$(_vetcoders_start_session_projection_role "$host" "$vc_frame_bin")" || return 4
+    [[ "$role" == host ]] || return 4
+  fi
   if _vetcoders_in_vc_frame || [[ ! -t 0 || ! -t 1 ]]; then
     # Inside-host requests need another terminal even with a TTY. Reuse the
     # canonical PTY supplier, which clears inherited Frame markers.
