@@ -583,7 +583,7 @@ if [[ "$operation" == "install" && "$verify_only" != "1" ]]; then
   # stable-only gate remains a BUILD contract in build-vibecrafted-release.sh.
   # shellcheck source=lib/xcode-channel.sh
   . "$SCRIPT_DIR/lib/xcode-channel.sh"
-  vibecrafted_xcode_report_channel
+  vibecrafted_xcode_report_channel >&2
 fi
 
 if [[ -z "$expected_platform" ]]; then

@@ -155,9 +155,8 @@ def _run_wrapper(
 
 
 def _json_out(result: subprocess.CompletedProcess[str]) -> dict:
-    lines = [line for line in result.stdout.splitlines() if line.strip()]
-    assert lines, (result.returncode, result.stdout, result.stderr)
-    return json.loads(lines[-1])
+    assert result.stdout.strip(), (result.returncode, result.stdout, result.stderr)
+    return json.loads(result.stdout)
 
 
 def _expected_payload_root(cache_home: Path, archive: Path) -> Path:
@@ -402,11 +401,11 @@ def test_public_wrapper_names_beta_xcode_and_does_not_refuse_install(
         },
     )
     assert "refusing beta Xcode" not in result.stderr
-    assert f"Xcode: beta ({beta})" in result.stdout
+    assert f"Xcode: beta ({beta})" in result.stderr
+    assert "Xcode:" not in result.stdout
     # The run still fails — downstream of the channel line (this fixture's
     # fake uname breaks architecture resolution first), never on Xcode.
     assert result.returncode != 0
-    assert "Xcode" not in result.stderr
     lock = installer._tools_install_lease_path(
         roots["runtime_home"] / "tools" / "vibecrafted-current"
     )
@@ -440,7 +439,8 @@ def test_public_wrapper_installs_without_any_xcode_developer_dir(
     )
     assert "refusing beta Xcode" not in result.stderr
     assert "no usable Xcode developer dir" not in result.stderr
-    assert "Xcode: none (not required for install)" in result.stdout
+    assert "Xcode: none (not required for install)" in result.stderr
+    assert "Xcode:" not in result.stdout
     assert result.returncode != 0  # the missing pack, not the toolchain
 
 
