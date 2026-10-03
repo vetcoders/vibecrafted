@@ -1,6 +1,6 @@
 {
   "schema": "vibecrafted.skill-provenance.v3",
-  "generated_at": "2026-10-02",
+  "generated_at": "2026-10-03",
   "skills": {
     "vc-agents": {
       "sha256": [
@@ -38,6 +38,7 @@
         "8b4e237b77800efb8855c5238a0c2b80510ba3a225686bb6ced11e1bc80964d3",
         "8d30d22477dc622d74d479020d42d3c9c0c44f5529663b85538be12f59ed8075",
         "8df0c9652914b2f0a4c02dd317cfbd3df268610912be71f4f2bbb8e4bd098739",
+        "90cf58fed57dc5f40b1404f07b9b2dafa2938c1b1698700f482ff190a63c268f",
         "91253fd45b6eb62618d38959e7a56009f810b05c0db48bbfc718048370e929e6",
         "946a467b12a79bc6916a1ca7b3856bd14f262b27a4360a412f0860baa816327d",
         "9809edf172b0ea55986e17fd21925434b0b99589e91a752718ccc555667e7d12",
@@ -137,7 +138,8 @@
           "ea810b95254493b238ae416c5e0e973d0415b408",
           "f3adc4c2a9526051e62e4a0da946da1136a5ac9d",
           "f5a972dd6359c4bf61f46910a0861e3dae722b00",
-          "f77e59889b8b589d60ef10d50c86f145ef677b9d"
+          "f77e59889b8b589d60ef10d50c86f145ef677b9d",
+          "fe8c85013f7be17ef66cc7222e73473b8f4f0a7f"
         ],
         "agents/openai.yaml": [
           "1c12c134c2afdf1ba529a1aec872d9f49bbfdcc0",
@@ -145,6 +147,15 @@
           "8e64f62693ff8e77c72c7588fffdd6814c854019",
           "bd20a97acfd0f77187bf4678e28e58547ec5218b",
           "cbaca860471958a7587046d95504408e12e53061"
+        ],
+        "references/plan-template.md": [
+          "175e563e5221f1d79ef9967d44b763a32e34abec"
+        ],
+        "references/runbook.md": [
+          "d05c4afc91675770e2e2537fb1d4556ed351c4e7"
+        ],
+        "references/why-matrix.md": [
+          "e9075ca1d012c19c748f0911dc89161a4edede64"
         ],
         "scripts/agy_spawn.sh": [
           "9f2d2d6be1fc8601d1002d789078420b97be6df2",
@@ -1608,6 +1619,7 @@
         "a90935c82fbf94b7c485d76361e8802306948de18519e13017eb61309ea454e4",
         "aace0e3417b1bcf04facbe77cbe3d3aded9836d753a91793ec5552ec0a1052e9",
         "ab9ea12791755db823de45a7b0ee590b4b039a9e32a97465c701c7ad7ca980a1",
+        "c7811fc7d826aaf869ad67c6f535ce480a74ea28b6946242574e622924b6dc64",
         "ca92d7079066a39247efda5028d9bb27d1fd3367807b6d912d191b46732a658d",
         "cbf736f32c69807488d01ffd5c6793962ca01773a759e345cbb6af7de3661edb",
         "dbbe8585a0e89c5c92e289bfd6af1b917d3589a874d4ae00c4b458fefeee1e75",
@@ -1651,6 +1663,7 @@
           "5b5e9d30640e9b05a60884fe51627be2d14e78a1",
           "5eb2f00748d940d65c771f4821681e0373f96fbd",
           "709667c4bfe1039e41c6243d8174e9d2325382d3",
+          "7426cacb275201067480ce0a0108f3b9368a0521",
           "7871a084486e0f00d3c75513d3a160a103ceafbe",
           "7b7e4e8839ebf1be27665a86c2eb594e347b30f9",
           "8872becffc44b24f42fc1abce8de6c4fb1e68fcd",
@@ -4586,6 +4599,7 @@
         "9543e851ef93c1eafa544a8d33a0aeb455362a204f7f832fc59faaef07d13fc8",
         "973e83b6af9265d7f25756751ba284aeb9b6f721c46fe82ad54b142ffd6f7e10",
         "9a9187a76db5dde7781eff2031711c014d9b86a28cce8f734e310e6925592135",
+        "a0af7d8a64ef6d07fd5739bd3e7cd2bcae909c333730a2ae4df86ddd79aaa2d7",
         "a54426b8c6effca3956cf3a2a575a3cece44b4c93351539febb2967384744789",
         "ae0451e92570ba85139cac38a22284ef338f8badea63cf5c6c37876b00043029",
         "aededf1188235a2199b9a70c065a83a9a993232416566fd7664826dff0747da6",
@@ -4643,6 +4657,7 @@
           "284eb98f469d2a24e1b89ec3d2a5c94843490955",
           "29166d0d2d4b523ce7ea8f4d7814d789fcfce1b3",
           "387e519b767241340f1fad68769e35fe72e17af0",
+          "421bf36747ceae6d49a0fd523c4f0bb0d10a90f8",
           "42829892ce8d50c7c9689fd64b2a2b1b7594fe67",
           "46b037b85a1c2a8ef25555d05e808c2f40d0120e",
           "4977fc77e3b66db4c871ebd6b529c5ef48aea6c6",
@@ -4688,6 +4703,9 @@
         "agents/openai.yaml": [
           "2ddb2606d40b1d5c35ce86f6807a83876bd53a20",
           "4eb2e161cd929aacbbbb7956406451a983312abd"
+        ],
+        "references/output-templates.md": [
+          "c0699a274fad09f107382c0914dab7b14a1aed72"
         ],
         "references/phase-examine.md": [
           "27943cbc6e2829ece4746bab7e53b0019abd021f",
