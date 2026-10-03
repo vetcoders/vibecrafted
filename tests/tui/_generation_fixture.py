@@ -110,7 +110,7 @@ def product_vc_frame_config_dir(home: Path) -> Path:
 
 
 def install_product_vc_frame_config(
-    home: Path, *, layouts: tuple[str, ...] = ("host", "operator")
+    home: Path, *, layouts: tuple[str, ...] = ("operator",)
 ) -> Path:
     """Installer-owned Frame config at the pinned product home.
 
@@ -155,7 +155,7 @@ def read_terminal_launch(capture: Path, *, timeout: float = 10.0) -> dict | None
 
 
 # A session-table Frame stub for the one-host start (Founder P0, 2026-09-23):
-# the host (`vc-host`, host.kdl) and each workspace guest are separate rows.
+# the host (`vc-host`, embedded chrome) and each workspace guest are separate rows.
 # Environment: CAPTURE_FILE (every argv is appended as `VC_FRAME ...`),
 # SESSION_STATE_FILE (`live` / `dead` / `missing` for the seeded session),
 # FAKE_VC_FRAME_SESSION (the seeded session's name), FAKE_VC_FRAME_CREATE_FAILURE
@@ -257,7 +257,13 @@ if "action" in args and "dump-layout" in args:
         print("There is no active session!", file=sys.stderr)
         sys.exit(1)
     path = Path(row["layout"]) if row["layout"] else None
-    print(path.read_text(encoding="utf-8") if path and path.is_file() else "layout {\n}")
+    if path and path.is_file():
+        print(path.read_text(encoding="utf-8"))
+    elif not row["layout"]:
+        # Required native Frame contract: a host has no external layout.
+        print("layout { frame_host true; workspace_surface true; }")
+    else:
+        print("layout {\n}")
     sys.exit(0)
 if "action" in args and ("new-pane" in args or "new-tab" in args):
     row = table.get(target or seed)

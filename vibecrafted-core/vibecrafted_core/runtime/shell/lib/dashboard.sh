@@ -1458,7 +1458,7 @@ _vetcoders_start_release_create_lock() {
 # was taken meanwhile -- the caller re-reads the inventory and refuses), or 4
 # (any other engine refusal / the session never came up). Never waits a real
 # refusal out, never treats "already exists" as success.
-# $4 = host (default; singleton chrome from the selected host.kdl) or guest
+# $4 = chrome (Frame-owned host), host (legacy explicit layout), or guest
 # (--guest-workspace so Frame strips nested rail/tab chrome). Guest
 # create keeps the selected File. Frame `from_cli` treats a path with an
 # extension as File; `guest_workspace_layout_info` → `stringified_from_dir`
@@ -1469,24 +1469,16 @@ _vetcoders_start_create_workspace_session() {
   local vc_frame_bin="${1:-}" session_name="${2:-}" layout_file="${3:-}" kind="${4:-host}" out="" rc=0
   local create_argv=() state=""
   [[ -n "$vc_frame_bin" && -n "$session_name" ]] || return 4
-  if [[ -z "$layout_file" || ! -f "$layout_file" ]]; then
-    # Name the file this create needed. The host is created from host.kdl,
-    # a guest from its selected layout (operator.kdl unless a layout alias
-    # chose another); "operator layout missing" for a missing host.kdl sent
-    # the reader after a file that was there.
+  if [[ "$kind" != chrome && ( -z "$layout_file" || ! -f "$layout_file" ) ]]; then
     local layouts_dir=""
     layouts_dir="$(_vetcoders_vc_frame_config_dir 2>/dev/null || printf '?')/layouts"
-    if [[ "$kind" == chrome ]]; then
-      printf 'vc-start: Frame host layout missing: %s\n' "${layout_file:-$layouts_dir/host.kdl}" >&2
-    else
-      printf 'vc-start: workspace layout missing: %s\n' "${layout_file:-$layouts_dir/operator.kdl}" >&2
-    fi
+    printf 'vc-start: workspace layout missing: %s\n' "${layout_file:-$layouts_dir/operator.kdl}" >&2
     printf 'Install explicitly: python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack>\n' >&2
     return 4
   fi
   if [[ "$kind" == guest ]]; then
     create_argv+=(--guest-workspace --new-session-with-layout "$layout_file")
-  else
+  elif [[ "$kind" != chrome ]]; then
     create_argv+=(--new-session-with-layout "$layout_file")
   fi
   create_argv+=(attach --create-background "$session_name")
@@ -2113,7 +2105,7 @@ _vetcoders_start_host_session_name() {
   printf '%s\n' "${VIBECRAFTED_FRAME_HOST_SESSION:-vc-host}"
 }
 
-# Make the one host exist and be live: create it (host.kdl, kind=chrome) when
+# Make the one host exist and be live: create it (Frame-owned chrome) when
 # missing, resurrect it when dead (it holds chrome only, nothing to preserve),
 # then prove its runtime role. $2 is the workspace the host is for; the host
 # can never carry that name.
@@ -2134,8 +2126,7 @@ _vetcoders_start_ensure_host() {
       ;;
     missing)
       printf 'vc-start: starting host %s...\n' "$(_vetcoders_shell_quote "$host")" >&2
-      _vetcoders_start_create_workspace_session "$vc_frame_bin" "$host" \
-        "$(_vetcoders_host_layout_file 2>/dev/null || true)" chrome || rc=$?
+      _vetcoders_start_create_workspace_session "$vc_frame_bin" "$host" "" chrome || rc=$?
       # 3: a concurrent start created the host first — that host is ours too.
       if ((rc != 0 && rc != 3)); then
         return "$rc"
@@ -2508,8 +2499,7 @@ _vetcoders_start_new_host() (
     while ((index <= 9999)); do
       host="$base"
       ((index == 1)) || host="$base-$index"
-      _vetcoders_start_create_workspace_session "$vc_frame_bin" "$host" \
-        "$(_vetcoders_host_layout_file 2>/dev/null || true)" chrome && rc=0 || rc=$?
+      _vetcoders_start_create_workspace_session "$vc_frame_bin" "$host" "" chrome && rc=0 || rc=$?
       ((rc == 3)) || break
       index=$((index + 1))
     done

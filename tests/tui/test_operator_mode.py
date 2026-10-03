@@ -52,7 +52,7 @@ def _start_generation(tmp_path: Path, home: Path) -> tuple[Path, Path]:
     generation = gen.fake_generation(tmp_path, front_doors=("vc-start", "vibecrafted"))
     terminal_capture = tmp_path / "terminal-launch.json"
     gen.install_vc_terminal(generation, terminal_capture)
-    gen.install_product_vc_frame_config(home, layouts=("host", "operator", "marbles"))
+    gen.install_product_vc_frame_config(home, layouts=("operator", "marbles"))
     gen.install_primary_shell_launcher(home)
     return generation, terminal_capture
 
@@ -502,18 +502,14 @@ def test_vc_start_launches_operator_entrypoint_layout(tmp_path: Path) -> None:
     )
 
     # Create-only start under the one-host contract (Founder P0, 2026-09-23):
-    # the Frame host is created first with host.kdl, then the workspace follows
+    # the Frame host is created without a layout, then the workspace follows
     # as a guest with the pinned operator layout (3d9da4dc) — both detached
     # (`attach --create-background`, the one create that needs no PTY). The
     # caller without a terminal then gets the product terminal, which enters
     # that very session.
     payload = capture_file.read_text(encoding="utf-8")
     layout = gen.product_vc_frame_config_dir(home) / "layouts" / "operator.kdl"
-    host_layout = gen.product_vc_frame_config_dir(home) / "layouts" / "host.kdl"
-    host_create = (
-        f"VC_FRAME --new-session-with-layout {host_layout} "
-        f"attach --create-background vc-host"
-    )
+    host_create = "VC_FRAME attach --create-background vc-host"
     guest_create = (
         f"VC_FRAME --guest-workspace --new-session-with-layout {layout} "
         f"attach --create-background {expected_session}"
@@ -1998,7 +1994,7 @@ def test_vc_dashboard_recreates_dead_run_id_session_without_layout_suffix(
     fake_bin.mkdir()
     session_state_file.write_text("dead", encoding="utf-8")
     generation = gen.fake_generation(tmp_path)
-    gen.install_product_vc_frame_config(home, layouts=("host", "operator", "marbles"))
+    gen.install_product_vc_frame_config(home, layouts=("operator", "marbles"))
     _write_stateful_vc_frame(generation / "bin", capture_file, session_state_file)
 
     env = os.environ.copy()

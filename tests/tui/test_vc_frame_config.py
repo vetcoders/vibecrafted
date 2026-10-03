@@ -8,6 +8,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VC_FRAME_CONFIG = (
     REPO_ROOT
@@ -164,21 +166,14 @@ def test_vc_frame_config_session_resilience() -> None:
     assert "serialize_pane_viewport true" in payload
 
 
-def test_native_default_names_the_packaged_operator_layout() -> None:
-    """First product session is the frame host; operator.kdl stays Start here.
-
-    Repointed from default_layout "operator": Start here stays on operator.kdl
-    as guest/workspace content. The native default is layouts/host.kdl.
-    """
+def test_host_chrome_is_not_a_product_configuration_asset() -> None:
     payload = VC_FRAME_CONFIG.read_text(encoding="utf-8")
-    host = LAYOUTS_DIR / "host.kdl"
+    code = "\n".join(line.split("//", 1)[0] for line in payload.splitlines())
+    assert "default_layout" not in code
+    assert not (LAYOUTS_DIR / "host.kdl").exists()
+    assert not (LAYOUTS_DIR / "vibecrafted-host.kdl").exists()
     operator = LAYOUTS_DIR / "operator.kdl"
-
-    assert 'default_layout "host"' in payload
-    assert host.is_file()
-    assert not host.is_symlink()
-    assert operator.is_file()
-    assert not operator.is_symlink()
+    assert operator.is_file() and not operator.is_symlink()
     assert 'tab name="Start here"' in operator.read_text(encoding="utf-8")
 
 
@@ -344,51 +339,6 @@ def test_research_layout_synthesis_focused() -> None:
     assert 'size="55%"' in payload
 
 
-def _layout_declares_frame_host(payload: str) -> bool:
-    return "frame_host true" in payload or 'frame_host "true"' in payload
-
-
-def _kdl_block(payload: str, declaration: str) -> str:
-    start = payload.index(declaration)
-    opening_brace = payload.index("{", start)
-    depth = 0
-    for offset, character in enumerate(payload[opening_brace:], start=opening_brace):
-        if character == "{":
-            depth += 1
-        elif character == "}":
-            depth -= 1
-            if depth == 0:
-                return payload[opening_brace + 1 : offset]
-    raise AssertionError(f"unterminated KDL block: {declaration}")
-
-
-def test_product_layout_declares_frame_host() -> None:
-    """A1: a shipped product layout carries rail frame_host true."""
-    host = LAYOUTS_DIR / "host.kdl"
-    assert host.is_file()
-    assert not host.is_symlink()
-    payload = host.read_text(encoding="utf-8")
-    assert _layout_declares_frame_host(payload)
-    assert "rail true" in payload or 'rail "true"' in payload
-    assert "session-manager" in payload
-    assert 'plugin location="frame-host"' in payload
-    config = VC_FRAME_CONFIG.read_text(encoding="utf-8")
-    assert "frame-host location=" in config
-    assert "frame_host true" in config
-
-
-def test_host_layout_has_exactly_one_projection_owner_outside_session_layer() -> None:
-    """The session layer is cloned per tab and cannot own the host projection."""
-    payload = (LAYOUTS_DIR / "host.kdl").read_text(encoding="utf-8")
-    session_layer = _kdl_block(payload, "session_layer")
-    workspace_tab = _kdl_block(payload, 'tab name="Workspace"')
-
-    assert "frame_host true" not in session_layer
-    assert payload.count("frame_host true") == 1
-    assert "frame_host true" in workspace_tab
-    assert "workspace_surface true" in workspace_tab
-
-
 def test_layout_contract_gate_is_fail_closed_on_hash_drift(tmp_path: Path) -> None:
     layouts = tmp_path / "layouts"
     shutil.copytree(LAYOUTS_DIR, layouts)
@@ -417,31 +367,30 @@ def test_layout_contract_gate_is_fail_closed_on_hash_drift(tmp_path: Path) -> No
     assert "layout hashes drifted" in drifted.stderr
 
 
-def test_first_session_is_the_frame_host() -> None:
-    """A2: the first product session uses the host layout (config default)."""
-    payload = VC_FRAME_CONFIG.read_text(encoding="utf-8")
-    assert 'default_layout "host"' in payload
-    host = LAYOUTS_DIR / "host.kdl"
-    assert host.is_file()
-    host_text = host.read_text(encoding="utf-8")
-    assert _layout_declares_frame_host(host_text)
-    # vc-start still creates operator.kdl as kind=host when outside a frame;
-    # that rail must also be a frame host so the first Start here session
-    # switches through activate_session_request.
-    operator = (LAYOUTS_DIR / "operator.kdl").read_text(encoding="utf-8")
-    assert _layout_declares_frame_host(operator)
-    assert "rail true" in operator or 'rail "true"' in operator
-
-
-def test_host_lands_on_running_global_dashboard_without_losing_guest_anchor() -> None:
-    payload = (LAYOUTS_DIR / "host.kdl").read_text(encoding="utf-8")
-    home = _kdl_block(payload, 'tab name="Home" focus=true')
-    assert 'command="vc-o"' in home
-    assert 'args "--view" "host"' in home
-    assert "start_suspended=false" in home
-    assert "cwd=" not in home
-    assert "/releases/" not in home
-    workspace = _kdl_block(payload, 'tab name="Workspace"')
-    assert "workspace_surface true" in workspace
-    assert "frame_host true" in workspace
-    assert payload.count("focus=true") == 1
+@pytest.mark.parametrize("name", ["host.kdl", "vibecrafted-host.kdl"])
+def test_layout_gate_refuses_external_host_even_when_updating_hashes(
+    tmp_path: Path,
+    name: str,
+) -> None:
+    layouts = tmp_path / "layouts"
+    shutil.copytree(LAYOUTS_DIR, layouts)
+    (layouts / name).write_text("layout { pane; }\n")
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts/check-layout-contract.py"),
+            "--layouts-dir",
+            str(layouts),
+            "--config",
+            str(VC_FRAME_CONFIG),
+            "--lock",
+            str(tmp_path / "lock.json"),
+            "--update",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "host chrome belongs to the vc-frame binary" in result.stderr
+    assert not (tmp_path / "lock.json").exists()

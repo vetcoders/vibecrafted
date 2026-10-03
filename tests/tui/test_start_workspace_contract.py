@@ -34,8 +34,9 @@ The contract proven here, in the shipped shell sources (not a reimplementation):
   inherited `VC_FRAME_*` inside a frame is the shared-canvas path, not a
   nested window.
 
-Only the catalogue boundary and the Frame engine are stubbed. The stub refuses
-what the real engine refuses, with the real engine's words, keeps an exclusive
+Only the catalogue boundary and the Frame engine are stubbed. Host creation
+models the required embedded-chrome contract; the paired Frame change still
+needs native acceptance before integration. The stub keeps an exclusive
 on-disk session table so a race is a real race, and RESURRECTS an EXITED record
 on `--create-background` exactly like the engine does -- so a start that skips
 the inventory check fails here the way it would fail for the Founder. Unknown
@@ -347,7 +348,8 @@ if rest[:2] == ["attach", "--create-background"]:
             sys.stderr.write("Session already exists\\n")
             sys.exit(1)
         raise
-    layout_text = ""
+    # Model the required Frame-owned host contract, not a product KDL copy.
+    layout_text = "layout { frame_host true; workspace_surface true; }" if layout is None and not guest_workspace else ""
     if layout and os.path.isfile(layout):
         with open(layout, encoding="utf-8") as handle:
             layout_text = handle.read()
@@ -680,10 +682,6 @@ class Scene:
         _write(self.config_dir / "layouts" / "operator.kdl", "layout {\n}\n")
         for alias in ("dashboard", "marbles", "research", "workflow"):
             _write(self.config_dir / "layouts" / f"{alias}.kdl", "layout {\n}\n")
-        _write(
-            self.config_dir / "layouts" / "host.kdl",
-            "layout { frame_host true; workspace_surface true; }\n",
-        )
         self.terminal_log = tmp_path / "terminal-launches.jsonl"
         self.generation = self._generation(tmp_path)
         self.owner_log = tmp_path / "owner-calls.log"
@@ -1232,7 +1230,7 @@ def _wait_for_projection(
 
 
 def _assert_host_first(scene: Scene, guest: str) -> None:
-    """One host per machine: the host (host.kdl, no --guest-workspace) is
+    """One host per machine: the host (no layout override or --guest-workspace) is
     created before the workspace, which is always a guest (operator.kdl)."""
     created = [c for c in scene.calls() if c.get("created")]
     names = [c["created"] for c in created]
@@ -1240,7 +1238,7 @@ def _assert_host_first(scene: Scene, guest: str) -> None:
     host = created[names.index(HOST_SESSION)]
     workspace = created[names.index(guest)]
     assert host["guest_workspace"] is False, host
-    assert Path(host["layout"]).name == "host.kdl", host
+    assert host["layout"] is None, host
     assert workspace["guest_workspace"] is True, workspace
     assert Path(workspace["layout"]).name == "operator.kdl", workspace
     assert names.index(HOST_SESSION) < names.index(guest), names
@@ -1859,21 +1857,22 @@ def test_legacy_role_from_mixed_shell_generation_is_not_silently_skipped(
     _assert_nothing_mutated(scene.calls())
 
 
-def test_missing_host_layout_names_the_host_layout(tmp_path: Path) -> None:
-    """With no host the start creates the host first from layouts/host.kdl.
-    When that file is missing the refusal names it; "operator layout missing"
-    sent the Founder after a file that was present."""
+@pytest.mark.parametrize("host_layout", [None, "broken external host chrome"])
+def test_host_creation_never_reads_or_passes_external_layout(
+    tmp_path: Path, host_layout: str | None
+) -> None:
+    """The public door delegates host chrome to Frame, even with stale config."""
     scene = Scene(tmp_path, project="mlx-batch-runner")
-    (scene.config_dir / "layouts" / "host.kdl").unlink()
+    path = scene.config_dir / "layouts" / "host.kdl"
+    if host_layout is None:
+        path.unlink(missing_ok=True)
+    else:
+        path.write_text(host_layout)
     result = _run(scene, "vc-start")
-
-    assert _rc(result) == EXIT_INVENTORY, result.stdout + result.stderr
-    err = result.stderr
-    host_layout = scene.config_dir / "layouts" / "host.kdl"
-    assert f"Frame host layout missing: {host_layout}" in err, err
-    assert "operator layout missing" not in err, err
-    assert scene.live() == []
-    assert scene.terminal_launches(wait=0.5) == []
+    assert _rc(result) == 0, result.stdout + result.stderr
+    _assert_host_first(scene, "mlx-batch-runner")
+    host = next(c for c in scene.calls() if c.get("created") == HOST_SESSION)
+    assert host["argv"] == ["attach", "--create-background", HOST_SESSION]
 
 
 def test_missing_engine_is_an_inventory_failure_not_a_terminal(tmp_path: Path) -> None:
@@ -2488,7 +2487,7 @@ def test_layout_alias_without_a_host_creates_the_host_first(
     created = [c for c in scene.calls() if c.get("created")]
     assert created[0]["created"] == HOST_SESSION, created
     assert created[0]["guest_workspace"] is False, created[0]
-    assert Path(created[0]["layout"]).name == "host.kdl", created[0]
+    assert created[0]["layout"] is None, created[0]
     assert len(created) == 2 and created[1]["guest_workspace"] is True, created
     assert Path(created[1]["layout"]).name == f"{alias}.kdl", created[1]
     attaches = _attaches(scene.calls())
