@@ -1526,14 +1526,9 @@ def test_single_stage_wrapper_preserves_console_argv_and_exit(
 
 
 def test_scaffold_main_uses_supervised_skill_not_lifecycle(monkeypatch) -> None:
-    """vc-scaffold binary must share the cli skill path, not a second lifecycle CLI."""
-    called: list[tuple[str, list[str] | None]] = []
-
-    def fake_supervised(skill: str, argv=None):
-        called.append((skill, list(argv) if argv is not None else None))
-        return 0
-
-    monkeypatch.setattr(wrappers, "supervised_skill_main", fake_supervised)
+    """vc-scaffold shares the public cli skill path and does not open a second lifecycle CLI."""
+    seen: list[list[str]] = []
+    monkeypatch.setattr(cli, "main", lambda argv: seen.append(list(argv)) or 0)
     monkeypatch.setattr(
         wrappers,
         "_lifecycle_main",
@@ -1541,7 +1536,7 @@ def test_scaffold_main_uses_supervised_skill_not_lifecycle(monkeypatch) -> None:
     )
     rc = wrappers.scaffold_main(["codex", "--prompt", "plan auth"])
     assert rc == 0
-    assert called == [("scaffold", ["codex", "--prompt", "plan auth"])]
+    assert seen == [["scaffold", "codex", "--prompt", "plan auth"]]
 
 
 def test_lifecycle_console_scripts_are_packaged() -> None:

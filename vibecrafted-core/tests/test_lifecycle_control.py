@@ -516,7 +516,15 @@ _FLEET_STAGE = "implement"
 
 
 def _settled_fleet(tmp_path: Path, monkeypatch) -> tuple[Path, Path, list[str]]:
-    """Run one real three-cut fleet to settlement; return repo, plan, launches."""
+    """Run one real three-cut fleet to settlement; return repo, plan, launches.
+
+    The fake launcher still only writes the report. Settlement is the canonical
+    claim the worker posts after that report, the same opt-in as dispatch
+    doubles. Callers that need an open fleet mutate the settled ledger after.
+    """
+    from claim_doubles import install_worker_claims
+
+    install_worker_claims(monkeypatch)
     monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
     repo = tmp_path / "repo"
     _seed_repo(repo)

@@ -15,6 +15,10 @@ _HELPER_DIR = str(Path(__file__).resolve().parents[2] / "tests")
 if _HELPER_DIR not in sys.path:
     sys.path.append(_HELPER_DIR)
 
+_CORE_TESTS = str(Path(__file__).resolve().parent)
+if _CORE_TESTS not in sys.path:
+    sys.path.append(_CORE_TESTS)
+
 _home_isolation = importlib.import_module("_home_isolation")
 
 
@@ -48,3 +52,19 @@ def _isolate_vibecrafted_runtime_env(
         strip_prefixes=("VIBECRAFTED_", "VC_FRAME", "ZELLIJ"),
         restore={"VIBECRAFTED_LIVE_VIEWER": "0"},
     )
+
+
+@pytest.fixture
+def worker_claims(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Opt-in canonical claim for one launcher double. Never autouse."""
+    from claim_doubles import install_worker_claims
+
+    install_worker_claims(monkeypatch)
+
+
+@pytest.fixture
+def verified_history():
+    """Opt-in resume seed through the real claim and settlement path."""
+    from claim_doubles import make_verified_history
+
+    return make_verified_history()
