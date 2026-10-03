@@ -295,7 +295,7 @@ def plan_tab_cleanup(
 
     for proof in proofs.values():
         origin = proof.origin_identity
-        if origin is None:
+        if origin is None or origin.name in PROTECTED_TAB_NAMES:
             continue
         matches = [
             tab

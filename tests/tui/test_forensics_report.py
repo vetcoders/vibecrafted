@@ -165,7 +165,8 @@ def test_viewer_edits_exports_and_rejects_invalid_import_without_data_loss(
 ):
     report = renderer.build_report("repo", "a" * 40, None, None, None, None)
     html = renderer.render_html(report)
-    script = re.findall(r"<script>(.*?)</script>", html, re.DOTALL)[0]
+    script_start = html.index("<script>") + len("<script>")
+    script = html[script_start : html.index("</script>", script_start)]
     # Run the shipped script against a minimal DOM, exercising its event handlers.
     # No browser, live app, external scripts or page capture is needed.
     harness = r"""

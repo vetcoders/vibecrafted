@@ -6,7 +6,7 @@
 //! be reached, `initialize` still completes and `tools/list` is empty; the
 //! next message tries again.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -16,6 +16,7 @@ const DEFAULT_URL: &str = "http://127.0.0.1:3024/mcp";
 const DEFAULT_PROTOCOL: &str = "2025-03-26";
 const SUPPORTED_PROTOCOLS: [&str; 2] = ["2025-03-26", "2025-06-18"];
 const MAX_LINE: usize = 1024 * 1024;
+const MAX_RESPONSE: usize = 8 * 1024 * 1024;
 const MAX_ANCESTORS: usize = 16;
 
 struct Bridge {
@@ -68,11 +69,16 @@ fn main() -> ExitCode {
         run_id,
     };
     let stdin = std::io::stdin();
-    let mut lines = BufReader::new(stdin.lock());
-    let mut line = String::new();
+    let mut reader = BufReader::new(stdin.lock());
+    let mut line: Vec<u8> = Vec::new();
     loop {
         line.clear();
-        match lines.read_line(&mut line) {
+        // Bounded accumulation: never retain more than MAX_LINE + 1 bytes of a
+        // line, even when the peer streams an unterminated multi-gigabyte one.
+        match Read::by_ref(&mut reader)
+            .take(MAX_LINE as u64 + 1)
+            .read_until(b'\n', &mut line)
+        {
             Ok(0) => return ExitCode::SUCCESS,
             Ok(_) => {}
             Err(err) => {
@@ -82,9 +88,16 @@ fn main() -> ExitCode {
         }
         if line.len() > MAX_LINE {
             write_stdout(&rpc_err(Value::Null, -32600, "invalid request"));
+            if line.last() != Some(&b'\n') && !drain_oversized_line(&mut reader) {
+                return ExitCode::SUCCESS;
+            }
             continue;
         }
-        let trimmed = line.trim();
+        let Ok(text) = std::str::from_utf8(&line) else {
+            write_stdout(&rpc_err(Value::Null, -32700, "parse error"));
+            continue;
+        };
+        let trimmed = text.trim();
         if trimmed.is_empty() {
             continue;
         }
@@ -193,7 +206,18 @@ impl Bridge {
             .and_then(|value| value.to_str().ok())
             .unwrap_or("")
             .to_string();
-        let text = response.text().map_err(|_| ())?;
+        // Bounded body: the peer URL is configurable, so never buffer an
+        // unbounded response (JSON or SSE) before parsing it.
+        let mut body_bytes = Vec::new();
+        response
+            .take(MAX_RESPONSE as u64 + 1)
+            .read_to_end(&mut body_bytes)
+            .map_err(|_| ())?;
+        if body_bytes.len() > MAX_RESPONSE {
+            debug("response exceeds MAX_RESPONSE; refusing");
+            return Err(());
+        }
+        let text = String::from_utf8(body_bytes).map_err(|_| ())?;
         if text.trim().is_empty() {
             return Ok(None);
         }
@@ -298,6 +322,29 @@ fn rpc_err(id: Value, code: i32, message: &str) -> Value {
         "id": id,
         "error": {"code": code, "message": message}
     })
+}
+
+/// Discard the remainder of an oversized stdin line in bounded chunks.
+///
+/// Returns false when EOF arrives before the newline, so the caller can exit
+/// instead of spinning on a closed pipe. At most 64 KiB is retained at a time.
+fn drain_oversized_line(reader: &mut impl BufRead) -> bool {
+    let mut chunk = Vec::new();
+    loop {
+        chunk.clear();
+        match Read::by_ref(reader)
+            .take(64 * 1024)
+            .read_until(b'\n', &mut chunk)
+        {
+            Ok(0) => return false,
+            Ok(_) => {
+                if chunk.last() == Some(&b'\n') {
+                    return true;
+                }
+            }
+            Err(_) => return false,
+        }
+    }
 }
 
 fn rpc_err_data(id: Value, code: i32, message: &str, data: Value) -> Value {
