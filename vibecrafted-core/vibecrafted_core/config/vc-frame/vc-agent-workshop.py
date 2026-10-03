@@ -110,6 +110,8 @@ from vibecrafted_core.aicx_session_chain import (
     SessionRecord,
     project_filter_for_root,
 )
+from vibecrafted_core.repo_selection import RepoSelectionError, validate_workspace_root
+from vibecrafted_core.runtime_paths import selected_runtime_environment
 from vibecrafted_core.spawn import (
     CONTINUITY_MODES,
     OPERATOR_POLICIES,
@@ -120,7 +122,15 @@ from vibecrafted_core.spawn import (
     resolve_provider_policy,
     runtime_policy_capabilities,
 )
-from vibecrafted_core.workspace_catalog import resolve_operator_place_session
+from vibecrafted_core.workspace_catalog import (
+    WORKSPACE_STATUS_ACTIVE,
+    WorkspaceCatalogError,
+    operator_session_name,
+    read_catalog,
+    read_workspace_session,
+    resolve_operator_place_session,
+    resolve_run_workspace_identity,
+)
 
 AGENTS = ("agy", "claude", "codex", "cursor", "grok", "junie", "kimi", "copilot")
 LAUNCH_MODES = ("init", "resume", "partner", "operator")
@@ -256,19 +266,126 @@ def destination_session_for_workspace(
     return name
 
 
-def require_live_destination(session: str, live_names: list[str]) -> None:
-    """Refuse to launch when the destination session is not live.
-
-    Missing or wrong context must not fall back to the current session.
-    """
-    dest = str(session or "").strip()
-    if not dest:
-        raise ValueError("could not resolve a Frame session for that project")
-    if dest not in live_names:
-        raise ValueError(
-            f"No live Frame session for that project (expected {dest!r}). "
-            "Open the project first."
+def catalog_owns_destination(workspace: Path, session: str) -> bool:
+    """A fallback basename is not evidence that a live seat belongs to this root."""
+    try:
+        catalog = read_catalog()
+        return any(
+            record.status == WORKSPACE_STATUS_ACTIVE
+            and Path(record.canonical_root).resolve() == workspace
+            and operator_session_name(
+                record.workspace_id, display_label=record.display_label, catalog=catalog
+            )
+            == session
+            for record in catalog.workspaces.values()
         )
+    except (OSError, WorkspaceCatalogError):
+        return False
+
+
+PROJECT_OPEN_TIMEOUT = 45
+PROJECT_LIVE_TIMEOUT = 3.0
+
+
+class LiveDestination(NamedTuple):
+    session: str
+    environment: dict[str, str] | None
+
+
+def ensure_live_destination(
+    workspace: Path, session: str, live_names: list[str]
+) -> LiveDestination:
+    """Let the selected product entry open a missing project, then admit its WES seat.
+
+    vc-start owns creation, resurrection and host projection. Its stdout and the
+    workshop's current seat are never destination authority. Bind its child to
+    one canonical WES identity so recovery can be read from that exact receipt.
+    """
+    try:
+        workspace = validate_workspace_root(workspace)
+    except RepoSelectionError as exc:
+        raise ValueError(f"Project could not be opened: {exc}") from exc
+    session = str(session or "").strip()
+    if not session:
+        raise ValueError("could not resolve a Frame session for that project")
+    if session in live_names:
+        if catalog_owns_destination(workspace, session):
+            return LiveDestination(session, None)
+        raise ValueError(
+            "Project could not be opened: a live Frame session has this name, "
+            "but the workspace catalog does not bind it to this project"
+        )
+    try:
+        env = selected_runtime_environment()
+        root = env.get("VIBECRAFTED_RUNTIME_ROOT", "")
+        if not root:
+            raise ValueError("a selected Runtime Pack is required to open this project")
+        creator = Path(root) / "bin" / "vc-start"
+        if not creator.is_file() or not os.access(creator, os.X_OK):
+            raise ValueError("vc-start is missing from the selected Runtime Pack")
+        frame = creator.parent / "vc-frame"
+        if not frame.is_file() or not os.access(frame, os.X_OK):
+            raise ValueError("vc-frame is missing from the selected Runtime Pack")
+        identity = resolve_run_workspace_identity(root=workspace, env=env)
+        env.update(identity.to_env())
+        env["VIBECRAFTED_WORKSPACE_ROOT"] = str(workspace)
+        # The selected generation owns both its public entry and the Frame it probes.
+        env["PATH"] = os.pathsep.join((str(creator.parent), env.get("PATH", "")))
+        result = subprocess.run(
+            [str(creator), "resume", "--repo", str(workspace)],
+            cwd=str(workspace),
+            env=env,
+            stdin=subprocess.DEVNULL,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=PROJECT_OPEN_TIMEOUT,
+        )
+        if result.returncode != 0:
+            reason = (
+                result.stderr or result.stdout or "vc-start refused the project"
+            ).strip()
+            raise ValueError(reason)
+        deadline = time.monotonic() + PROJECT_LIVE_TIMEOUT
+        while True:
+            names, error = list_live_frame_sessions(env=env)
+            if error:
+                raise ValueError(error)
+            try:
+                receipt = read_workspace_session(identity.vibecrafted_session_id)
+            except WorkspaceCatalogError:
+                receipt = None
+            if receipt is not None:
+                if (
+                    receipt.workspace_id != identity.workspace_id
+                    or receipt.workspace_instance_id != identity.workspace_instance_id
+                    or receipt.session_id != identity.vibecrafted_session_id
+                ):
+                    raise ValueError(
+                        "Frame receipt does not belong to the selected project"
+                    )
+                destinations = {
+                    item.runtime_session_id
+                    for item in receipt.attachments
+                    if item.runtime == "vc-frame"
+                    and item.state == "live"
+                    and item.runtime_session_id in names
+                }
+                if len(destinations) == 1:
+                    return LiveDestination(destinations.pop(), env)
+                if len(destinations) > 1:
+                    raise ValueError(
+                        "multiple live Frame destinations belong to this project"
+                    )
+            if time.monotonic() >= deadline:
+                raise ValueError(
+                    "vc-start returned without an owned live Frame destination"
+                )
+            time.sleep(0.1)
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("Project could not be opened: vc-start timed out") from exc
+    except (OSError, ValueError, WorkspaceCatalogError) as exc:
+        raise ValueError(f"Project could not be opened: {exc}") from exc
 
 
 def launch_pane_argv(
@@ -392,6 +509,8 @@ def public_reason(reason: str) -> str:
     if not text:
         return ""
     low = text.casefold()
+    if low.startswith("project could not be opened:"):
+        return text
     # Parent-session and project reasons are not provider policy; keep them
     # out of the provider buckets below (an origin-less checkout is not an
     # uninstalled provider).
@@ -417,7 +536,7 @@ def public_reason(reason: str) -> str:
     ):
         if "coming" in low or "h2b" in low:
             return "Not available yet"
-        return "Needs live usage metering; only claude today"
+        return "Needs live usage metering"
     if any(token in low for token in ("canonical", "admission")):
         if "coming" in low or "h2b" in low:
             return "Not available yet"
@@ -434,12 +553,6 @@ def public_reason(reason: str) -> str:
         return "Starts without earlier memory"
     if "git/dispatch manage_worktrees" in low:
         return "Separate working copies are not available here"
-    if "no live frame session" in low:
-        return (
-            text
-            if len(text) <= 96
-            else ("No live Frame session for that project. Open it first.")
-        )
     if "could not resolve a frame session" in low:
         return "Could not resolve a Frame session for that project"
     if "destination frame session is missing" in low:
@@ -631,11 +744,20 @@ def session_names_from_listing(text: str) -> list[str]:
     return names
 
 
-def list_live_frame_sessions() -> tuple[list[str], str]:
+def list_live_frame_sessions(
+    *, env: Mapping[str, str] | None = None
+) -> tuple[list[str], str]:
     """Live Frame session names. Destination routing never guesses this list."""
     try:
         result = subprocess.run(
-            ["vc-frame", "list-sessions", "--no-formatting"],
+            [
+                str(Path(env["VIBECRAFTED_RUNTIME_BIN"]) / "vc-frame")
+                if env is not None
+                else "vc-frame",
+                "list-sessions",
+                "--no-formatting",
+            ],
+            **({"env": dict(env)} if env is not None else {}),
             check=False,
             capture_output=True,
             text=True,
@@ -830,6 +952,7 @@ class Workshop:
         self.parent_error = ""
         self.path = str(Path.cwd())
         self.error = ""
+        self.notice = ""
         self.mouse_targets: list[tuple[int, int, int, int, str]] = []
         self.presence_schedule = PresenceSchedule()
         self.faces: list[str] = []
@@ -1072,7 +1195,9 @@ class Workshop:
             _clip(f"Project  {self.path}", inner),
             0,
         )
-        toggle = "▾ Advanced options" if self.advanced else "▸ Advanced options"
+        toggle = (
+            "▾" if self.advanced else "▸"
+        ) + " Advanced options · click or press a"
         toggle_row = path_row + 2
         _safe_addstr(self.window, toggle_row, left, _clip(toggle, inner), curses.A_BOLD)
         self.mouse_targets.append(
@@ -1214,6 +1339,8 @@ class Workshop:
             _safe_addstr(
                 self.window, height - 1, left, public_reason(self.error) or self.error
             )
+        elif self.notice:
+            _safe_addstr(self.window, height - 1, left, self.notice, curses.A_BOLD)
 
     def handle_home_key(self, key: int) -> None:
         if key in (curses.KEY_LEFT, ord("h")):
@@ -1570,14 +1697,28 @@ class Workshop:
         if listing_error:
             self.error = listing_error
             return
+        if destination not in live:
+            self.error = ""
+            self.notice = "Opening project…"
+            self.draw()
         try:
-            require_live_destination(destination, live)
+            admitted = ensure_live_destination(workspace, destination, live)
+            destination = admitted.session
             pane = launch_pane_argv(title, workspace, argv, session=destination)
+            frame_kwargs = {"env": admitted.environment} if admitted.environment else {}
+            if admitted.environment:
+                pane[0] = str(
+                    Path(admitted.environment["VIBECRAFTED_RUNTIME_BIN"]) / "vc-frame"
+                )
         except ValueError as exc:
-            self.error = public_reason(str(exc)) or str(exc)
+            self.error = str(exc)
             return
+        finally:
+            self.notice = ""
         try:
-            result = subprocess.run(pane, check=False, capture_output=True, text=True)
+            result = subprocess.run(
+                pane, check=False, capture_output=True, text=True, **frame_kwargs
+            )
         except FileNotFoundError:
             self.error = "vc-frame is not available in this Runtime Pack"
             return
@@ -1590,10 +1731,11 @@ class Workshop:
         if current != destination:
             try:
                 attached = subprocess.run(
-                    attach_session_argv(destination),
+                    [pane[0], *attach_session_argv(destination)[1:]],
                     check=False,
                     capture_output=True,
                     text=True,
+                    **frame_kwargs,
                 )
             except FileNotFoundError:
                 self.error = "vc-frame is not available in this Runtime Pack"

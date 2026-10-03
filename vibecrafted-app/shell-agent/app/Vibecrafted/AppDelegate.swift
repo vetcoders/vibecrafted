@@ -271,8 +271,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   }
 
   func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+    lifecycleLog("window.restore reason=application-reopen hadVisibleWindows=\(hasVisibleWindows)")
     showMainWindowIfNeeded()
     return true
+  }
+
+  func applicationDidHide(_ notification: Notification) {
+    lifecycleLog("window.hide reason=application-hide session=retained")
+  }
+
+  func applicationDidUnhide(_ notification: Notification) {
+    lifecycleLog("window.restore reason=application-unhide session=retained")
   }
 
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

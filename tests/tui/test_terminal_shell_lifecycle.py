@@ -261,6 +261,115 @@ def test_terminal_remains_a_shell_without_frame(
     )
 
 
+@pytest.mark.parametrize("entry_kind", ["release", "symlink", "copied-profile"])
+@pytest.mark.parametrize("override", [False, True])
+@pytest.mark.parametrize("conflicting_path", [False, True])
+def test_primary_shell_resolves_own_release(
+    tmp_path: Path, entry_kind: str, override: bool, conflicting_path: bool
+) -> None:
+    """The physical terminal shell finds its release without launchd PATH help."""
+    release = tmp_path / "release with spaces"
+    entry = release / "config/alacritty" / ENTRY.name
+    entry.parent.mkdir(parents=True)
+    shutil.copy2(ENTRY, entry)
+    home = tmp_path / "home"
+    home.mkdir()
+    state = tmp_path / "state"
+    capture = tmp_path / "selected-entry"
+    for name in ("release", "override", "path"):
+        directory = release / "bin" if name == "release" else tmp_path / name
+        directory.mkdir()
+        command = directory / "vc-start"
+        command.write_text(
+            f"#!/bin/sh\nprintf '%s:%s\\n' {name} \"$*\" > "
+            + shlex.quote(str(capture))
+            + "\n"
+        )
+        command.chmod(0o700)
+    if entry_kind == "symlink":
+        linked = home / "shell-entry"
+        linked.symlink_to(entry)
+        entry = linked
+    elif entry_kind == "copied-profile":
+        copied = home / ".config/vibecrafted/vc-terminal" / ENTRY.name
+        copied.parent.mkdir(parents=True)
+        shutil.copy2(entry, copied)
+        entry = copied
+    env = {
+        "HOME": str(home),
+        "VIBECRAFTED_HOME": str(state),
+        "PATH": "/usr/bin:/bin",
+        "TERM": "dumb",
+        "ENTRY": str(entry),
+    }
+    # A conflicting PATH command must not redirect a release-owned entry.
+    if entry_kind == "copied-profile" or conflicting_path:
+        env["PATH"] = f"{tmp_path / 'path'}:/usr/bin:/bin"
+    if override:
+        env["VIBECRAFTED_RUNTIME_BIN"] = str(tmp_path / "override")
+    result = subprocess.run(
+        ["/bin/sh", "-c", 'exec "$ENTRY"'],
+        input="printf 'SHELL_%s\\n' READY; exit\n",
+        env=env,
+        cwd=home,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    expected = (
+        "override"
+        if override
+        else ("path" if entry_kind == "copied-profile" else "release")
+    )
+    assert capture.read_text() == f"{expected}:resume\n"
+    assert "SHELL_READY" in result.stdout
+    assert not (state / "logs/terminal-startup.log").exists()
+
+
+def test_primary_shell_failure_log_has_timestamp_and_safe_context(
+    tmp_path: Path,
+) -> None:
+    """Repeated failures retain distinct receipts without argv or env payloads."""
+    command = tmp_path / "vc-start"
+    state = tmp_path / "state"
+    env = {
+        "HOME": str(tmp_path),
+        "VIBECRAFTED_HOME": str(state),
+        "PATH": "/usr/bin:/bin",
+        "TERM": "dumb",
+        "PRIVATE_TOKEN": "ENV_SECRET_MUST_NOT_APPEAR",
+    }
+    for entry_status in (2, 4):
+        command.write_text(f"#!/bin/sh\nexit {entry_status}\n")
+        command.chmod(0o700)
+        result = subprocess.run(
+            [str(ENTRY), str(command), "--token", "ARGV_SECRET_MUST_NOT_APPEAR"],
+            input="printf 'SHELL_%s\\n' READY; exit\n",
+            env=env,
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "SHELL_READY" in result.stdout
+    log = state / "logs/terminal-startup.log"
+    lines = log.read_text().splitlines()
+    assert len(lines) == 2
+    for line, entry_status in zip(lines, (2, 4), strict=True):
+        assert re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z ", line)
+        assert re.search(r"\bpid=\d+\b", line)
+        assert "entry=explicit" in line
+        assert "tty=no" in line
+        assert f"workspace entry failed (exit {entry_status})" in line
+        assert "SECRET_MUST_NOT_APPEAR" not in line
+        assert str(tmp_path) not in line
+    assert log.stat().st_mode & 0o777 == 0o600
+
+
 def test_terminal_policy_isolates_startup_before_user_login_files(
     tmp_path: Path,
 ) -> None:

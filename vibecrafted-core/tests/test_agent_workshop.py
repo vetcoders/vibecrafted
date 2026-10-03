@@ -339,6 +339,10 @@ def _prepare_launch(
     launched.permissions = workshop.PERMISSION_POLICIES.index("bypass")
     launched.continuity = workshop.CONTINUITY_MODES.index("fresh")
     calls: list[object] = []
+    monkeypatch.setattr(launched, "draw", lambda: None)
+    monkeypatch.setattr(
+        workshop, "catalog_owns_destination", lambda *_args: True, raising=False
+    )
     monkeypatch.setattr(
         workshop,
         "runtime_policy_capabilities",
@@ -424,18 +428,6 @@ def test_destination_session_uses_catalog_place_session_not_current_seat(
     assert workshop.destination_session_for_workspace(vibe) == "vibecrafted"
     assert workshop.current_frame_session() == "loctree"
     assert workshop.destination_session_for_workspace(loctree) == "loctree"
-
-
-def test_require_live_destination_refuses_missing_and_wrong_context() -> None:
-    workshop = _load()
-    live = ["loctree", "vibecrafted"]
-    workshop.require_live_destination("vibecrafted", live)
-    with pytest.raises(ValueError, match="No live Frame session"):
-        workshop.require_live_destination("codescribe", live)
-    with pytest.raises(ValueError, match="No live Frame session"):
-        workshop.require_live_destination("vibecrafted", [])
-    with pytest.raises(ValueError, match="could not resolve"):
-        workshop.require_live_destination("  ", live)
 
 
 def test_session_names_from_listing_skip_exited_sessions() -> None:
@@ -552,7 +544,372 @@ def test_launch_refuses_missing_destination_without_current_session_fallback(
     launched.launch()
 
     assert launched.mode == "launcher"
-    assert "No live Frame session" in launched.error
+    assert "selected Runtime Pack" in launched.error
+    assert calls == []
+
+
+def _prepare_project_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    recovery: bool = False,
+) -> tuple[ModuleType, object, list[object], Path]:
+    from vibecrafted_core.workspace_catalog import (
+        record_runtime_session_attachment,
+        resolve_run_workspace_identity,
+    )
+
+    project = tmp_path / "project"
+    project.mkdir()
+    identity = resolve_run_workspace_identity(root=project)
+    generation = tmp_path / "selected-generation"
+    (generation / "bin").mkdir(parents=True)
+    (generation / "VERSION").write_text("0.0.0+g00000000\n")
+    for name in ("python3", "vc-start", "vc-frame"):
+        binary = generation / "bin" / name
+        binary.write_text("#!/bin/sh\nexit 0\n")
+        binary.chmod(0o755)
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_ROOT", str(generation))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_BIN", "/foreign-generation/bin")
+    monkeypatch.setenv("VIBECRAFTED_PYTHON", "/foreign-generation/python3")
+    monkeypatch.setenv("VC_FRAME_SESSION_NAME", "source-host")
+    workshop = _load()
+    launched, calls = _prepare_launch(
+        workshop,
+        project,
+        monkeypatch,
+        destination="target",
+        live=["source-host"],
+        current="source-host",
+    )
+    monkeypatch.setattr(
+        workshop,
+        "resolve_run_workspace_identity",
+        lambda **_kwargs: identity,
+        raising=False,
+    )
+    progress_draws: list[str] = []
+    monkeypatch.setattr(
+        launched, "draw", lambda: progress_draws.append(launched.notice)
+    )
+    target = "target-recovery" if recovery else "target"
+    inventory = iter([(["source-host"], ""), (["source-host"], ""), ([target], "")])
+    monkeypatch.setattr(
+        workshop, "list_live_frame_sessions", lambda **_kwargs: next(inventory)
+    )
+    monkeypatch.setattr(workshop.time, "sleep", lambda _seconds: None)
+
+    def run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        calls.append(command)
+        if command[0] == str(generation / "bin" / "vc-start"):
+            assert progress_draws == ["Opening project…"]
+            assert launched.notice == "Opening project…"
+            assert launched.error == ""
+            assert command == [command[0], "resume", "--repo", str(project)]
+            assert kwargs["cwd"] == str(project)
+            child = kwargs["env"]
+            assert isinstance(child, dict)
+            assert child["VIBECRAFTED_SESSION_ID"] == identity.vibecrafted_session_id
+            assert child["VIBECRAFTED_WORKSPACE_ROOT"] == str(project)
+            assert child["VIBECRAFTED_RUNTIME_BIN"] == str(generation / "bin")
+            assert child["VIBECRAFTED_PYTHON"] == str(generation / "bin" / "python3")
+            assert str(child["PATH"]).split(os.pathsep)[0] == str(generation / "bin")
+            assert kwargs["timeout"] <= 60
+            if recovery:
+                record_runtime_session_attachment(
+                    workspace_id=identity.workspace_id,
+                    vibecrafted_session_id=identity.vibecrafted_session_id,
+                    workspace_instance_id=identity.workspace_instance_id,
+                    runtime="vc-frame",
+                    runtime_session_id="target",
+                    state="dead",
+                )
+            record_runtime_session_attachment(
+                workspace_id=identity.workspace_id,
+                vibecrafted_session_id=identity.vibecrafted_session_id,
+                workspace_instance_id=identity.workspace_instance_id,
+                runtime="vc-frame",
+                runtime_session_id=target,
+                state="live",
+                replaces_runtime_session_id="target" if recovery else None,
+            )
+            # Text is not routing authority, even if it names another live session.
+            return SimpleNamespace(returncode=0, stdout="source-host", stderr="")
+        assert command[0] == str(generation / "bin" / "vc-frame")
+        assert kwargs["env"]["VIBECRAFTED_RUNTIME_ROOT"] == str(generation)
+        assert kwargs["env"]["VIBECRAFTED_HOME"] == os.environ["VIBECRAFTED_HOME"]
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(workshop.subprocess, "run", run)
+    return workshop, launched, calls, generation
+
+
+@pytest.mark.parametrize("recovery", [False, True])
+def test_launch_opens_missing_project_before_agent_and_admits_wes_live_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recovery: bool
+) -> None:
+    _workshop, launched, calls, generation = _prepare_project_creation(
+        tmp_path, monkeypatch, recovery=recovery
+    )
+
+    launched.launch()
+
+    assert launched.mode == "home"
+    assert launched.error == ""
+    assert launched.notice == ""
+    assert calls[0][0] == str(generation / "bin" / "vc-start")
+    destination = "target-recovery" if recovery else "target"
+    assert calls[1][:5] == [
+        str(generation / "bin" / "vc-frame"),
+        "--session",
+        destination,
+        "action",
+        "new-tab",
+    ]
+    assert calls[2] == [str(generation / "bin" / "vc-frame"), "attach", destination]
+
+
+@pytest.mark.parametrize(
+    "failure", ["creator", "timeout", "missing-binary", "missing-frame"]
+)
+def test_missing_project_creation_failure_never_launches_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    workshop, launched, calls, generation = _prepare_project_creation(
+        tmp_path, monkeypatch
+    )
+    if failure in {"missing-binary", "missing-frame"}:
+        name = "vc-frame" if failure == "missing-frame" else "vc-start"
+        (generation / "bin" / name).unlink()
+    else:
+
+        def failed(command: list[str], **_kwargs: object) -> SimpleNamespace:
+            calls.append(command)
+            if failure == "timeout":
+                raise subprocess.TimeoutExpired(command, 45)
+            return SimpleNamespace(returncode=4, stdout="", stderr="host is ambiguous")
+
+        monkeypatch.setattr(workshop.subprocess, "run", failed)
+
+    launched.launch()
+
+    assert launched.mode == "launcher"
+    assert "Project could not be opened" in launched.error
+    assert not any("new-tab" in command for command in calls)
+    if failure == "creator":
+        assert "host is ambiguous" in launched.error
+    if failure == "timeout":
+        assert "timed out" in launched.error
+    if failure in {"missing-binary", "missing-frame"}:
+        assert calls == []
+    assert launched.notice == ""
+    assert workshop.public_reason(launched.error) == launched.error
+
+
+@pytest.mark.parametrize("wrong_receipt", [False, True])
+def test_project_creator_success_requires_owned_live_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wrong_receipt: bool
+) -> None:
+    workshop, launched, calls, _generation = _prepare_project_creation(
+        tmp_path, monkeypatch
+    )
+    monkeypatch.setattr(
+        workshop, "list_live_frame_sessions", lambda **_kwargs: (["source-host"], "")
+    )
+    monkeypatch.setattr(workshop, "PROJECT_LIVE_TIMEOUT", 0, raising=False)
+    if wrong_receipt:
+        monkeypatch.setattr(
+            workshop,
+            "read_workspace_session",
+            lambda _session: SimpleNamespace(workspace_id="foreign-project"),
+            raising=False,
+        )
+
+    launched.launch()
+
+    assert launched.mode == "launcher"
+    assert "Project could not be opened" in launched.error
+    assert len(calls) == 1
+    assert "new-tab" not in calls[0]
+
+
+def test_live_inventory_probes_pinned_frame_with_same_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workshop = _load()
+    env = {
+        "VIBECRAFTED_RUNTIME_BIN": "/selected-generation/bin",
+        "VIBECRAFTED_HOME": "/isolated-runtime-home",
+        "PATH": "/foreign-generation/bin",
+    }
+    calls: list[object] = []
+
+    def run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        calls.append(command)
+        assert kwargs["env"] == env
+        return SimpleNamespace(returncode=0, stdout="target\n", stderr="")
+
+    monkeypatch.setattr(workshop.subprocess, "run", run)
+    names, error = workshop.list_live_frame_sessions(env=env)
+
+    assert calls == [
+        ["/selected-generation/bin/vc-frame", "list-sessions", "--no-formatting"]
+    ]
+    assert names == ["target"]
+    assert error == ""
+
+
+def test_fresh_project_basename_collision_is_not_an_owned_live_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workshop = _load()
+    original_ownership = getattr(
+        workshop, "catalog_owns_destination", lambda *_args: False
+    )
+    launched, calls = _prepare_launch(
+        workshop,
+        tmp_path,
+        monkeypatch,
+        destination=tmp_path.name,
+        live=[tmp_path.name],
+        current="source-host",
+    )
+    monkeypatch.setattr(workshop, "catalog_owns_destination", original_ownership)
+
+    launched.launch()
+
+    assert launched.mode == "launcher"
+    assert "workspace catalog does not bind it" in launched.error
+    assert calls == []
+
+
+def test_registered_live_project_preserves_its_catalog_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vibecrafted_core.workspace_catalog import (
+        create_workspace,
+        operator_session_name,
+    )
+
+    record = create_workspace(root=tmp_path, display_label="chosen-project")
+    destination = operator_session_name(
+        record.workspace_id, display_label=record.display_label
+    )
+    workshop = _load()
+    original_ownership = getattr(
+        workshop, "catalog_owns_destination", lambda *_args: False
+    )
+    launched, calls = _prepare_launch(
+        workshop,
+        tmp_path,
+        monkeypatch,
+        destination=destination,
+        live=[destination],
+        current=destination,
+    )
+    monkeypatch.setattr(workshop, "catalog_owns_destination", original_ownership)
+
+    launched.launch()
+
+    assert launched.mode == "home"
+    assert launched.error == ""
+    assert len(calls) == 1
+    assert calls[0][:5] == ["vc-frame", "--session", destination, "action", "new-tab"]
+
+
+def test_empty_destination_refuses_before_project_or_agent_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workshop = _load()
+    launched, calls = _prepare_launch(
+        workshop,
+        tmp_path,
+        monkeypatch,
+        destination=" ",
+        live=["foreign"],
+        current="foreign",
+    )
+
+    launched.launch()
+
+    assert launched.mode == "launcher"
+    assert "could not resolve a Frame session" in launched.error
+    assert calls == []
+
+
+def test_missing_project_refuses_storage_root_before_creator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vibecrafted_core.workspace_catalog import resolve_run_workspace_identity
+
+    workshop, launched, calls, _generation = _prepare_project_creation(
+        tmp_path, monkeypatch
+    )
+    launched.path = os.environ["VIBECRAFTED_HOME"]
+    monkeypatch.setattr(
+        workshop, "resolve_run_workspace_identity", resolve_run_workspace_identity
+    )
+
+    launched.launch()
+
+    assert launched.mode == "launcher"
+    assert "Project could not be opened" in launched.error
+    assert calls == []
+
+
+@pytest.mark.parametrize("denied_root", ["runtime-home", "projects-lobby"])
+def test_catalog_owned_live_storage_root_refuses_all_launch_side_effects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, denied_root: str
+) -> None:
+    import json
+
+    from vibecrafted_core.workspace_catalog import (
+        catalog_path,
+        create_workspace,
+        operator_session_name,
+    )
+
+    runtime_home = Path(os.environ["VIBECRAFTED_HOME"]).resolve()
+    blocked = (
+        runtime_home if denied_root == "runtime-home" else runtime_home / "projects"
+    )
+    blocked.mkdir(parents=True, exist_ok=True)
+    record = create_workspace(root=tmp_path, display_label=blocked.name)
+    # Model a durable record admitted before storage-root denial existed.
+    path = catalog_path()
+    payload = json.loads(path.read_text())
+    payload["workspaces"][record.workspace_id]["canonical_root"] = str(blocked)
+    path.write_text(json.dumps(payload))
+    destination = operator_session_name(
+        record.workspace_id, display_label=record.display_label
+    )
+    workshop = _load()
+    original_ownership = workshop.catalog_owns_destination
+    original_destination = workshop.destination_session_for_workspace
+    assert original_ownership(blocked, destination)
+    launched, calls = _prepare_launch(
+        workshop,
+        blocked,
+        monkeypatch,
+        destination=destination,
+        live=[destination],
+        current=destination,
+    )
+    monkeypatch.setattr(workshop, "catalog_owns_destination", original_ownership)
+    monkeypatch.setattr(
+        workshop, "destination_session_for_workspace", original_destination
+    )
+
+    launched.launch()
+
+    assert launched.mode == "launcher"
+    assert "Project could not be opened" in launched.error
+    reason = (
+        "VIBECRAFTED_HOME cannot be a workspace root"
+        if denied_root == "runtime-home"
+        else "projects lobby has no project"
+    )
+    assert reason in launched.error
     assert calls == []
 
 
@@ -614,7 +971,7 @@ def test_launch_refuses_unadmittable_worktree_before_invoking_launcher(
     # The gate still refuses before any pane exists; the User reads the plain
     # sentence instead of the internal admission wording.
     assert launched.error == workshop.public_reason(message)
-    assert launched.error == "Needs live usage metering; only claude today"
+    assert launched.error == "Needs live usage metering"
     assert launched.mode == "launcher"
 
 
@@ -1338,7 +1695,7 @@ def test_public_reason_strips_policy_jargon() -> None:
         workshop.public_reason(
             "codex exposes no verified live child-attributable monotonic usage side channel"
         )
-        == "Needs live usage metering; only claude today"
+        == "Needs live usage metering"
     )
     assert (
         workshop.public_reason(
@@ -1685,9 +2042,7 @@ def test_public_reason_worktrees_name_the_usage_gap() -> None:
         "codex exposes no verified live, child-attributable, monotonic usage "
         "side channel compatible with inherited interactive TTY"
     )
-    assert workshop.public_reason(message) == (
-        "Needs live usage metering; only claude today"
-    )
+    assert workshop.public_reason(message) == ("Needs live usage metering")
 
 
 def test_selected_advanced_choice_uses_reverse_not_only_a_dot(
@@ -1779,14 +2134,21 @@ def test_advanced_toggle_is_visible_clickable_and_keyed(
         },
     )
     form = workshop.Workshop(FakeWindow(), mode="launcher")
+    form.notice = "Opening project…"
     form.draw_launcher()
-    assert any(text == "▸ Advanced options" for _, _, text, _ in writes)
+    assert any(text == "Opening project…" for _, _, text, _ in writes)
+    assert form.error == ""
+    assert any(
+        text == "▸ Advanced options · click or press a" for _, _, text, _ in writes
+    )
     assert any(kind == "advanced" for *_, kind in form.mouse_targets)
     form.handle_launcher_key(ord("a"))
     assert form.advanced is True
     writes.clear()
     form.draw_launcher()
-    assert any(text == "▾ Advanced options" for _, _, text, _ in writes)
+    assert any(
+        text == "▾ Advanced options · click or press a" for _, _, text, _ in writes
+    )
 
     form.row = 1
     form.path = "/tmp/project"

@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -231,6 +232,237 @@ def _org_repo() -> str:
     return f"{match.group(1)}/{match.group(2)}"
 
 
+def test_vc_start_lobby_opens_host_without_project_identity(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    crafted_home = home / ".vibecrafted"
+    lobby = crafted_home / "projects"
+    lobby.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(crafted_home)], check=True)
+    capture_file = tmp_path / "frame.log"
+    session_state_file = tmp_path / "session-state.txt"
+    session_state_file.write_text("missing", encoding="utf-8")
+    generation, terminal_capture = _start_generation(tmp_path, home)
+    _write_stateful_vc_frame(generation / "bin", capture_file, session_state_file)
+    env = os.environ.copy()
+    env.update(
+        HOME=str(home),
+        VIBECRAFTED_HOME=str(crafted_home),
+        VIBECRAFTED_ROOT=str(REPO_ROOT),
+        CAPTURE_FILE=str(capture_file),
+        SESSION_STATE_FILE=str(session_state_file),
+        VIBECRAFTED_WORKSPACE_ID="inherited-project",
+        VIBECRAFTED_WORKSPACE_ROOT=str(REPO_ROOT),
+        VIBECRAFTED_SESSION_ID="inherited-session",
+        VIBECRAFTED_WORKSPACE_INSTANCE_ID="inherited-instance",
+        VIBECRAFTED_BUILD_ID="inherited-build",
+        VIBECRAFTED_OPERATOR_SESSION="inherited-operator",
+    )
+    for key in (
+        "VC_FRAME",
+        "VC_FRAME_PANE_ID",
+        "VC_FRAME_SESSION_NAME",
+        "VIBECRAFTED_PREFER_REPO_VC_FRAME",
+    ):
+        env.pop(key, None)
+    result = subprocess.run(
+        [
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-c",
+            (
+                f'source "{HELPER_SCRIPT}"; {gen.loaded_root_prelude(generation)}; '
+                'git() { printf "unexpected Git probe\\n" >&2; return 71; }; '
+                '_vetcoders_product_core_cli() { printf "unexpected workspace registration\\n" >&2; return 72; }; '
+                "vc-start || exit $?; vc-start || exit $?; "
+                "for key in VIBECRAFTED_WORKSPACE_ID VIBECRAFTED_WORKSPACE_ROOT VIBECRAFTED_SESSION_ID "
+                "VIBECRAFTED_WORKSPACE_INSTANCE_ID VIBECRAFTED_BUILD_ID VIBECRAFTED_OPERATOR_SESSION; do "
+                '[[ -z "${!key}" ]] || { printf "leaked %s\\n" "$key" >&2; exit 73; }; done'
+            ),
+        ],
+        cwd=lobby,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "unexpected Git probe" not in result.stderr
+    assert "unexpected workspace registration" not in result.stderr
+    calls = capture_file.read_text()
+    assert calls.count("attach --create-background vc-host") == 1
+    assert "--guest-workspace" not in calls
+    assert not (crafted_home / "control_plane" / "workspaces" / "catalog.json").exists()
+    launch = gen.read_terminal_launch(terminal_capture)
+    assert launch is not None
+    assert launch["cwd"] == str(lobby.resolve())
+    assert "--repo" not in _hosted_entry(launch)
+    assert launch["created"] == ""
+
+
+def test_vc_start_refuses_storage_and_explicit_lobby_before_git(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    crafted_home = home / ".vibecrafted"
+    lobby = crafted_home / "projects"
+    lobby.mkdir(parents=True)
+    env = os.environ.copy()
+    env.update(
+        HOME=str(home),
+        VIBECRAFTED_HOME=str(crafted_home),
+        VIBECRAFTED_ROOT=str(REPO_ROOT),
+    )
+    for cwd, entry, reason in (
+        (crafted_home, "vc-start", "VIBECRAFTED_HOME cannot be a workspace root"),
+        (lobby, f'vc-start --repo "{lobby}"', "projects lobby has no project"),
+    ):
+        result = subprocess.run(
+            [
+                "bash",
+                "--noprofile",
+                "--norc",
+                "-c",
+                f'source "{HELPER_SCRIPT}"; '
+                'git() { printf "unexpected Git probe\\n" >&2; return 71; }; ' + entry,
+            ],
+            cwd=cwd,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 2, result.stderr
+        assert reason in result.stderr
+        assert "unexpected Git probe" not in result.stderr
+
+
+def test_compiled_vc_start_enters_lobby_through_bundled_shell(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    crafted_home = home / ".vibecrafted"
+    lobby = crafted_home / "projects"
+    lobby.mkdir(parents=True)
+    capture_file = tmp_path / "frame.log"
+    session_state_file = tmp_path / "session-state.txt"
+    session_state_file.write_text("missing", encoding="utf-8")
+    generation, terminal_capture = _start_generation(tmp_path, home)
+    _write_stateful_vc_frame(generation / "bin", capture_file, session_state_file)
+    core_source = REPO_ROOT / "vibecrafted-core" / "vibecrafted_core"
+    core_target = generation / "vibecrafted-core" / "vibecrafted_core"
+    shutil.copytree(
+        core_source,
+        core_target,
+        ignore=shutil.ignore_patterns("__pycache__", "runtime", "skills", "config"),
+    )
+    shutil.copytree(core_source / "runtime", core_target / "runtime")
+    # Explicit synthetic generation identity, independent of editable/source Git.
+    for version_file in (generation / "VERSION", core_target / "VERSION"):
+        version_file.write_text("0.0.0+g00000000\n", encoding="utf-8")
+    gen.write_executable(
+        generation / "bin" / "python3",
+        # An owned runtime does not inherit the test runner's editable installs.
+        # Keep stdlib, then let the facade prove its selected core import root.
+        f'#!/bin/bash\nexec {shlex.quote(sys.executable)} -S "$@"\n',
+    )
+    binary = generation / "bin" / "vc-start"
+    subprocess.run(
+        [
+            "rustc",
+            "--edition=2021",
+            str(
+                REPO_ROOT
+                / "vibecrafted-app"
+                / "tui-agent"
+                / "src"
+                / "bin"
+                / "vc_start.rs"
+            ),
+            "-o",
+            str(binary),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    git_probe = tmp_path / "unexpected-git-probe"
+    host_bin = home / ".local" / "bin"
+    gen.write_executable(
+        host_bin / "git",
+        f"#!/bin/bash\nprintf '%s\\n' \"$PWD: $*\" >> {shlex.quote(str(git_probe))}\nexit 71\n",
+    )
+    env = os.environ.copy()
+    env.update(
+        HOME=str(home),
+        VIBECRAFTED_HOME=str(crafted_home),
+        VIBECRAFTED_RUNTIME_ROOT=str(generation),
+        VIBECRAFTED_VC_FRAME_BIN=str(generation / "bin" / "vc-frame"),
+        CAPTURE_FILE=str(capture_file),
+        SESSION_STATE_FILE=str(session_state_file),
+        PATH=f"{host_bin}:{os.environ.get('PATH', '')}",
+    )
+    for key in (
+        "VIBECRAFTED_APP_ROOT",
+        "VIBECRAFTED_PREFER_REPO_VC_FRAME",
+        "VC_FRAME",
+        "VC_FRAME_PANE_ID",
+        "VC_FRAME_SESSION_NAME",
+    ):
+        env.pop(key, None)
+    result = subprocess.run(
+        [str(binary)],
+        cwd=lobby,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "opening Home in host vc-host" in result.stderr
+    assert not git_probe.exists(), git_probe.read_text() if git_probe.exists() else ""
+    calls = capture_file.read_text()
+    assert "attach --create-background vc-host" in calls
+    assert f"VC_FRAME_EXECUTABLE {generation / 'bin' / 'vc-frame'}" in calls
+    assert "--guest-workspace" not in calls
+    launch = gen.read_terminal_launch(terminal_capture)
+    assert launch is not None
+    assert _hosted_entry(launch)[1] == str(binary)
+    assert "--repo" not in _hosted_entry(launch)
+
+
+def test_vc_start_reports_progress_before_workspace_resolution(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["VIBECRAFTED_HOME"] = str(home / ".vibecrafted")
+    env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
+    # Model the expensive catalogue/digest stage at its existing entry seam.
+    # A failed resolution must still have shown life before entering it.
+    result = subprocess.run(
+        [
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-c",
+            (
+                f'source "{HELPER_SCRIPT}"; '
+                "_vetcoders_start_default_workspace_name() { "
+                "printf 'workspace resolution began\\n' >&2; return 23; }; vc-start"
+            ),
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 23, result.stderr
+    assert result.stderr.splitlines()[0] == (
+        "vc-start: checking your workspace and available host..."
+    )
+    assert "workspace resolution began" in result.stderr
+
+
 def test_vc_start_launches_operator_entrypoint_layout(tmp_path: Path) -> None:
     home = tmp_path / "home"
     capture_file = tmp_path / "vc_frame-args.txt"
@@ -289,6 +521,83 @@ def test_vc_start_launches_operator_entrypoint_layout(tmp_path: Path) -> None:
     assert host_create in payload
     assert guest_create in payload
     assert payload.index(host_create) < payload.index(guest_create)
+    launch = gen.read_terminal_launch(terminal_capture)
+    assert launch is not None, payload
+    hosted = _hosted_entry(launch)
+    assert hosted[1] == str(generation / "bin" / "vc-start")
+    assert hosted[hosted.index("--repo") + 1] == str(REPO_ROOT)
+    assert launch["created"] == expected_session
+
+
+def test_vc_start_reports_host_workspace_and_terminal_progress(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    capture_file = tmp_path / "vc_frame-args.txt"
+    session_state_file = tmp_path / "session-state.txt"
+
+    home.mkdir()
+    session_state_file.write_text("missing", encoding="utf-8")
+    generation, terminal_capture = _start_generation(tmp_path, home)
+    _write_stateful_vc_frame(generation / "bin", capture_file, session_state_file)
+
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg")
+    env["VIBECRAFTED_HOME"] = str(home / ".vibecrafted")
+    env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
+    env["CAPTURE_FILE"] = str(capture_file)
+    env["SESSION_STATE_FILE"] = str(session_state_file)
+    env["VIBECRAFTED_TEST_ALLOW_NON_TTY_VC_FRAME"] = "1"
+    env.pop("VC_FRAME_CONFIG_DIR", None)
+    env.pop("VC_FRAME", None)
+    env.pop("VC_FRAME_PANE_ID", None)
+    env.pop("VC_FRAME_SESSION_NAME", None)
+    env.pop("VIBECRAFTED_PREFER_REPO_VC_FRAME", None)
+
+    expected_session = "entry-seam"
+    env["FAKE_VC_FRAME_SESSION"] = expected_session
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-lc",
+            (
+                f'source "{HELPER_SCRIPT}"; {gen.loaded_root_prelude(generation)}; '
+                f'vc-start {expected_session} --repo "{REPO_ROOT}"'
+            ),
+        ],
+        check=True,
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    # Create-only start under the one-host contract (Founder P0, 2026-09-23):
+    # the Frame host is created first with host.kdl, then the workspace follows
+    # as a guest with the pinned operator layout (3d9da4dc) — both detached
+    # (`attach --create-background`, the one create that needs no PTY). The
+    # caller without a terminal then gets the product terminal, which enters
+    # that very session.
+    payload = capture_file.read_text(encoding="utf-8")
+    layout = gen.product_vc_frame_config_dir(home) / "layouts" / "operator.kdl"
+    host_layout = gen.product_vc_frame_config_dir(home) / "layouts" / "host.kdl"
+    host_create = (
+        f"VC_FRAME --new-session-with-layout {host_layout} "
+        f"attach --create-background vc-host"
+    )
+    guest_create = (
+        f"VC_FRAME --guest-workspace --new-session-with-layout {layout} "
+        f"attach --create-background {expected_session}"
+    )
+    assert host_create in payload
+    assert guest_create in payload
+    assert payload.index(host_create) < payload.index(guest_create)
+    progress = result.stderr
+    host_progress = "vc-start: starting host vc-host..."
+    guest_progress = f"vc-start: opening workspace {expected_session}..."
+    terminal_progress = "vc-start: opening terminal..."
+    assert progress.index(host_progress) < progress.index(guest_progress)
+    assert progress.index(guest_progress) < progress.index(terminal_progress)
     launch = gen.read_terminal_launch(terminal_capture)
     assert launch is not None, payload
     hosted = _hosted_entry(launch)

@@ -93,12 +93,45 @@ def _normalize(raw: str) -> Path:
     return Path(raw).expanduser().resolve(strict=False)
 
 
-def git_toplevel(path: Path, *, env: Mapping[str, str] | None = None) -> str:
+def _workspace_home(env: Mapping[str, str] | None = None) -> Path:
+    from .runtime_paths import vibecrafted_home
+
+    configured = (env or {}).get("VIBECRAFTED_HOME")
+    return _normalize(configured) if configured else vibecrafted_home().resolve()
+
+
+def is_workspace_lobby(
+    path: str | os.PathLike[str], *, env: Mapping[str, str] | None = None
+) -> bool:
+    """The projects entry directory carries no project identity."""
+    return _normalize(str(path)) == _workspace_home(env) / "projects"
+
+
+def validate_workspace_root(
+    path: str | os.PathLike[str], *, env: Mapping[str, str] | None = None
+) -> Path:
+    """Refuse runtime storage and the identity-free entry lobby as projects."""
+    resolved = _normalize(str(path))
+    if resolved == _workspace_home(env):
+        raise RepoSelectionError("VIBECRAFTED_HOME cannot be a workspace root")
+    if is_workspace_lobby(resolved, env=env):
+        raise RepoSelectionError("projects lobby has no project; select --repo <path>")
+    return resolved
+
+
+def git_toplevel(
+    path: Path,
+    *,
+    env: Mapping[str, str] | None = None,
+    raise_on_timeout: bool = False,
+) -> str:
     """Return the Git work-tree root that contains ``path``, or ``""``.
 
     A missing ``git`` binary is the same as "not a repository": repository
     independence must never turn into a crash.
     """
+    if path.resolve() == _workspace_home(env) or is_workspace_lobby(path, env=env):
+        return ""
     try:
         proc = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
@@ -106,8 +139,13 @@ def git_toplevel(path: Path, *, env: Mapping[str, str] | None = None) -> str:
             capture_output=True,
             text=True,
             check=False,
+            timeout=1,
             env=dict(env) if env is not None else None,
         )
+    except subprocess.TimeoutExpired:
+        if raise_on_timeout:
+            raise
+        return ""
     except (OSError, ValueError):
         return ""
     # Callers stub subprocess.run in tests with bare namespaces; a missing
@@ -117,7 +155,10 @@ def git_toplevel(path: Path, *, env: Mapping[str, str] | None = None) -> str:
     top = str(getattr(proc, "stdout", "") or "").strip()
     if not top:
         return ""
-    return str(Path(top).expanduser().resolve(strict=False))
+    resolved = _normalize(top)
+    if resolved == _workspace_home(env):
+        return ""
+    return str(resolved)
 
 
 def select_repository(
@@ -172,6 +213,11 @@ def select_repository(
         raise RepoSelectionError(
             f"{prefix}{flag or 'repository'} is not a directory: {chosen}"
         )
+    if source != "fallback" or not is_workspace_lobby(path, env=env):
+        try:
+            validate_workspace_root(path, env=env)
+        except RepoSelectionError as exc:
+            raise RepoSelectionError(f"{prefix}{exc}") from exc
     toplevel = git_toplevel(path, env=env)
     if require_git and not toplevel:
         raise RepoSelectionError(
@@ -386,9 +432,11 @@ __all__ = [
     "RepoSelectionError",
     "add_repo_arguments",
     "git_toplevel",
+    "is_workspace_lobby",
     "parse_worktree_flag",
     "select_repository",
     "selected_root",
+    "validate_workspace_root",
 ]
 
 

@@ -101,7 +101,7 @@ private final class CommandDeckHostingView<Content: View>: NSHostingView<Content
 /// The console tab. The App retains this controller after close; reopen
 /// mounts the same session, so no runtime state is ever lost to a window.
 @MainActor
-final class MainWindowController: NSWindowController, CommandDeckNavigationHandling {
+final class MainWindowController: NSWindowController, CommandDeckNavigationHandling, NSWindowDelegate {
   let session: WebConsoleSession
   private let openExternally: @MainActor (URL) -> Void
   /// Configured `vc-frame web` origin, when `[tools.vc-frame]` names one.
@@ -121,6 +121,7 @@ final class MainWindowController: NSWindowController, CommandDeckNavigationHandl
     let window = CommandDeckWindowFactory.makeWindow(
       title: "Vibecrafted", frameAutosaveName: frameAutosaveName)
     super.init(window: window)
+    window.delegate = self
     CommandDeckWindowFactory.mount(
       CommandDeckRootView(
         model: model, session: session, actions: actions, navigationHandler: self,
@@ -174,6 +175,28 @@ final class MainWindowController: NSWindowController, CommandDeckNavigationHandl
 
   @available(*, unavailable)
   required init?(coder: NSCoder) { fatalError("Use the App-owned session initializer") }
+
+  override func showWindow(_ sender: Any?) {
+    let wasVisible = window?.isVisible == true
+    super.showWindow(sender)
+    lifecycleLog("window.show owner=command-deck reason=present restored=\(!wasVisible) visible=\(window?.isVisible == true)")
+  }
+
+  func windowWillClose(_ notification: Notification) {
+    lifecycleLog("window.hide owner=command-deck reason=close session=retained")
+  }
+
+  func windowDidResignKey(_ notification: Notification) {
+    lifecycleLog("window.focus-lost owner=command-deck visible=\(window?.isVisible == true) appHidden=\(NSApp.isHidden)")
+  }
+
+  func windowDidMiniaturize(_ notification: Notification) {
+    lifecycleLog("window.hide owner=command-deck reason=minimize session=retained")
+  }
+
+  func windowDidDeminiaturize(_ notification: Notification) {
+    lifecycleLog("window.restore owner=command-deck reason=unminimize session=retained")
+  }
 
   /// History moves apply to this window's session only.
   func navigate(_ action: CommandDeckNavigationAction) {
