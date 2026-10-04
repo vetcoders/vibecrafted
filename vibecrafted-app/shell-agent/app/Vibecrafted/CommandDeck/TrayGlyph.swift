@@ -90,21 +90,34 @@ enum TrayGlyph {
       base = (activity.isRunning ? workingSource : source) ?? fallbackImage(size: size)
     }
     let rotation = activity.isRunning ? (step % 6) * 60 : 0
-    let image = NSImage(size: size, flipped: false) { rect in
+    let image = renderMask(source: base, side: side, rotation: rotation)
+    image.isTemplate = true
+    image.accessibilityDescription = "\(accessibilityLabel(for: health)) — \(activity.description)"
+    return image
+  }
+
+  /// All states share one centered viewport. The original 88px mask has
+  /// contour pixels 45.1px from its canvas center; a three-source-pixel inset
+  /// retains the complete mark through every 60-degree orientation.
+  static func renderMask(source: NSImage, side: CGFloat, rotation: Int,
+    canvasPadding: CGFloat = 0) -> NSImage {
+    let canvas = side + canvasPadding * 2
+    let image = NSImage(size: NSSize(width: canvas, height: canvas), flipped: false) { rect in
       NSGraphicsContext.saveGraphicsState()
       defer { NSGraphicsContext.restoreGraphicsState() }
-      let transform = AffineTransform(
-        translationByX: rect.midX, byY: rect.midY)
-      var rotationTransform = transform
-      rotationTransform.rotate(byDegrees: CGFloat(rotation))
-      rotationTransform.translate(x: -rect.midX, y: -rect.midY)
-      (rotationTransform as NSAffineTransform).concat()
-      base.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1,
+      let transform = NSAffineTransform()
+      transform.translateX(by: rect.midX, yBy: rect.midY)
+      transform.rotate(byDegrees: CGFloat(rotation))
+      transform.translateX(by: -rect.midX, yBy: -rect.midY)
+      transform.concat()
+      let inset = side * 3 / 88
+      let viewport = NSRect(x: canvasPadding + inset, y: canvasPadding + inset,
+        width: side - inset * 2, height: side - inset * 2)
+      source.draw(in: viewport, from: .zero, operation: .sourceOver, fraction: 1,
         respectFlipped: true, hints: [.interpolation: NSImageInterpolation.high])
       return true
     }
     image.isTemplate = true
-    image.accessibilityDescription = "\(accessibilityLabel(for: health)) — \(activity.description)"
     return image
   }
 

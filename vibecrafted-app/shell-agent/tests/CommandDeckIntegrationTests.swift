@@ -1424,6 +1424,48 @@ struct CommandDeckIntegrationTests {
       && alpha(filled, 63, 61) == 0,
       "Activity filled more than the lower-left circle")
     try require(source.tiffRepresentation == originalData, "Source image was mutated")
+    func bitmap(_ image: NSImage, pixels: Int) throws -> NSBitmapImageRep {
+      guard let result = NSBitmapImageRep(bitmapDataPlanes: nil,
+        pixelsWide: pixels, pixelsHigh: pixels, bitsPerSample: 8, samplesPerPixel: 4,
+        hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+        bytesPerRow: pixels * 4, bitsPerPixel: 32),
+        let context = NSGraphicsContext(bitmapImageRep: result)
+      else { throw Failure(message: "Cannot rasterize tray witness") }
+      NSGraphicsContext.saveGraphicsState()
+      NSGraphicsContext.current = context
+      image.draw(in: NSRect(x: 0, y: 0, width: pixels, height: pixels))
+      context.flushGraphics()
+      NSGraphicsContext.restoreGraphicsState()
+      return result
+    }
+    let working = TrayGlyph.fillingActivityCircle(in: source)
+    for side in [18, 36, 88] {
+      let padding = 8
+      for step in 0..<6 {
+        let normal = try bitmap(TrayGlyph.renderMask(source: working,
+          side: CGFloat(side), rotation: step * 60), pixels: side)
+        let expanded = try bitmap(TrayGlyph.renderMask(source: working,
+          side: CGFloat(side), rotation: step * 60, canvasPadding: CGFloat(padding)),
+          pixels: side + padding * 2)
+        var outside = 0
+        var edge = 0
+        for y in 0..<expanded.pixelsHigh {
+          for x in 0..<expanded.pixelsWide {
+            let a = alpha(expanded, x, y)
+            if x < padding || x >= padding + side || y < padding || y >= padding + side {
+              if a != 0 { outside += 1 }
+            } else {
+              try require(a == alpha(normal, x - padding, y - padding),
+                "Clipped and expanded viewport rasters differ")
+              if a != 0 && (x == padding || x == padding + side - 1
+                || y == padding || y == padding + side - 1) { edge += 1 }
+            }
+          }
+        }
+        try require(outside == 0, "A rotated circle contour was cropped")
+        print("Tray viewport side=\(side) rotation=\(step * 60) outside=\(outside) edge=\(edge)")
+      }
+    }
     var rotations = Set<Data>()
     for step in 0..<6 {
       let image = TrayGlyph.statusImage(health: .healthy,
