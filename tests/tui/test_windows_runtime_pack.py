@@ -681,8 +681,8 @@ def test_windows_pack_builder_builds_terminal_and_frame_honestly() -> None:
     builder = (REPO_ROOT / "scripts" / "build-windows-x64-runtime-pack.ps1").read_text(
         encoding="utf-8"
     )
-    assert "c5bb229673401742bf22d05e2caa17337e3e20de" in builder
-    assert "5436995ed643def9e827c0f9ceed7378d4613d6f" in builder
+    assert "f64b5c15a029a0b3cb8845ea6056142247d2f48b" in builder
+    assert "9484c3b57f11b7f06a438ffd5c27c8637602b47e" in builder
     assert "cargo build --release --bin alacritty" in builder
     assert "cargo xtask build --release" in builder
     assert "libexec\\vc-terminal.exe" in builder

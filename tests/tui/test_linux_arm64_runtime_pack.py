@@ -22,6 +22,47 @@ def _executable(path: Path, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
+@pytest.mark.parametrize(
+    ("donor", "revision", "archive_sha256"),
+    [
+        (
+            "terminal",
+            "f64b5c15a029a0b3cb8845ea6056142247d2f48b",
+            "9974295fea86696750a36118af679a2b4ef86442cda2bb131dff07dd235556ea",
+        ),
+        (
+            "frame",
+            "9484c3b57f11b7f06a438ffd5c27c8637602b47e",
+            "211a6a93e4b17ea73b4fbfcb8bb7d10dee8c0316eb59772c81bbfcc8fc7c74ec",
+        ),
+    ],
+)
+def test_platform_builders_share_exact_donor_inputs(
+    donor: str, revision: str, archive_sha256: str
+) -> None:
+    """Pin parity includes the archive digest, not only the commit label."""
+    for filename, names in (
+        (
+            "build-linux-arm64-runtime-pack.sh",
+            (f"{donor}_revision", f"{donor}_archive_sha256"),
+        ),
+        (
+            "build-windows-x64-runtime-pack.ps1",
+            (f"{donor}Revision", f"{donor}ArchiveSha256"),
+        ),
+    ):
+        source = (REPO_ROOT / "scripts" / filename).read_text(encoding="utf-8")
+        actual = []
+        for name in names:
+            prefix = r"\$" if filename.endswith(".ps1") else ""
+            match = re.search(
+                rf'^{prefix}{name}\s*=\s*"([0-9a-f]+)"$', source, re.MULTILINE
+            )
+            assert match is not None, (filename, name)
+            actual.append(match.group(1))
+        assert actual == [revision, archive_sha256], filename
+
+
 @pytest.mark.parametrize("builder", ["linux", "windows"])
 @pytest.mark.parametrize("changed_pin", [False, True])
 def test_runtime_inventory_uses_verified_donor_archive_digests(
@@ -246,8 +287,8 @@ def test_linux_builder_uses_pinned_public_inputs_for_arm64_and_x64() -> None:
         "WORKDIR /src/vibecrafted"
     )
     assert "69616218470b2ad053617efb9e7027b1518ea38918d933c2791e113d99cec507" in builder
-    assert "c5bb229673401742bf22d05e2caa17337e3e20de" in assembler
-    assert "5436995ed643def9e827c0f9ceed7378d4613d6f" in assembler
+    assert "f64b5c15a029a0b3cb8845ea6056142247d2f48b" in assembler
+    assert "9484c3b57f11b7f06a438ffd5c27c8637602b47e" in assembler
     assert "git clone" not in assembler
     assert "VIBECRAFTED_SOURCE_OWNER_REPO" in assembler
     assert 'export VIBECRAFTED_SOURCE_REVISION="$source_revision"' in assembler

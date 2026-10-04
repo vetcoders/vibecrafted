@@ -41,10 +41,10 @@ if (-not $env:VIBECRAFTED_SOURCE_OWNER_REPO) {
 $version = (Get-Content -LiteralPath (Join-Path $repoRoot "VERSION") -Raw).Trim()
 # Same donor revisions the Linux assembler builds. Provenance records these
 # only after this Windows builder actually compiles them (fail closed below).
-$terminalRevision = "c5bb229673401742bf22d05e2caa17337e3e20de"
-$terminalArchiveSha256 = "d61c3b1dab39b33c5494d77f118f0a2cc1fb5a3173d9f66aac3dd6af19cd0835"
-$frameRevision = "5436995ed643def9e827c0f9ceed7378d4613d6f"
-$frameArchiveSha256 = "bee9fe63b89e273d888f93ea6e9803af0d26f37668e0ef6eebe1254217738312"
+$terminalRevision = "f64b5c15a029a0b3cb8845ea6056142247d2f48b"
+$terminalArchiveSha256 = "9974295fea86696750a36118af679a2b4ef86442cda2bb131dff07dd235556ea"
+$frameRevision = "9484c3b57f11b7f06a438ffd5c27c8637602b47e"
+$frameArchiveSha256 = "211a6a93e4b17ea73b4fbfcb8bb7d10dee8c0316eb59772c81bbfcc8fc7c74ec"
 # Canonical carrier name matches Linux/darwin Runtime Pack shape:
 # Vibecrafted_RuntimePack_<ver>-<YYYYMMDD>-<sha8>-win32-x64.tar.gz
 # (platform token stays win32-x64 for install-runtime-pack.ps1 contract).
