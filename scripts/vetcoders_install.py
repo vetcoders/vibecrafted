@@ -20747,6 +20747,23 @@ def _runtime_config_inventory(path: Path) -> dict[str, list[Any]] | None:
     return entries
 
 
+def _runtime_frame_managed_leaves(
+    installed: Mapping[str, list[Any]], defaults: Mapping[str, list[Any]]
+) -> tuple[dict[str, list[Any] | None], dict[str, list[Any]]]:
+    """Compare generation-owned leaves after full physical-tree validation.
+
+    config.kdl is reconciled as a preference. Other physical files and empty
+    directories belong to the Founder; neither this projection nor its callers
+    adopt them. Missing managed leaves remain visible as None.
+    """
+    owned = {
+        name: item
+        for name, item in defaults.items()
+        if name != "config.kdl" and item[0] == "file"
+    }
+    return {name: installed.get(name) for name in owned}, owned
+
+
 def _runtime_config_digest(path: Path) -> str | None:
     inventory = _runtime_config_inventory(path)
     if inventory is None:
@@ -25109,8 +25126,8 @@ def cmd_runtime_resolve(args: argparse.Namespace) -> int:
                 raise RuntimeError(
                     "selected terminal entry differs from its generation source"
                 )
-            # Compare managed trees with generation defaults, permitting only
-            # config.kdl to carry intentional user preference bytes.
+            # Fully inspect physical config trees before projecting Frame-owned
+            # leaves; the shell tree still matches generation defaults exactly.
             for relative, source in (
                 (
                     "vc-frame",
@@ -25131,8 +25148,9 @@ def cmd_runtime_resolve(args: argparse.Namespace) -> int:
                         f"required product config is missing: {relative}"
                     )
                 if relative == "vc-frame":
-                    installed.pop("config.kdl", None)
-                    defaults.pop("config.kdl", None)
+                    installed, defaults = _runtime_frame_managed_leaves(
+                        installed, defaults
+                    )
                 if installed != defaults:
                     raise RuntimeError(
                         f"managed product config differs from selected generation: {relative}"
@@ -25345,17 +25363,7 @@ def _runtime_managed_config_plan(
             )
             continue
         if relative == "vc-frame":
-            # config.kdl is the user's; it is reconciled as a preference above.
-            installed.pop("config.kdl", None)
-            defaults.pop("config.kdl", None)
-            installed = {
-                name: installed.get(name)
-                for name, item in defaults.items()
-                if item[0] == "file"
-            }
-            defaults = {
-                name: item for name, item in defaults.items() if item[0] == "file"
-            }
+            installed, defaults = _runtime_frame_managed_leaves(installed, defaults)
 
         if installed != defaults:
             entries.append(

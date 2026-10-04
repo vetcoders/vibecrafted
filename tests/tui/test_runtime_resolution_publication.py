@@ -26,12 +26,14 @@ from vibecrafted_core.vc_frame_staging import (
 
 from scripts import vetcoders_install as installer
 
-# The shipped `default_layout` scalar, alone or with the comment run above it.
-# Anchored on shape, not on today's value: 0ca89db1 renamed "operator" to
-# "host" and silently turned the upgrade edits below into no-op replacements.
-_DEFAULT_LAYOUT_SCALAR = re.compile(r'^default_layout "[^"\n]+"$', re.MULTILINE)
-_DEFAULT_LAYOUT_BLOCK = re.compile(
-    r'(?:^//[^\n]*\n)*^default_layout "[^"\n]+"$', re.MULTILINE
+# The shipped advanced mouse-action scalar, alone or with its preceding comment run.
+# The embedded host owns its layout; product config no longer sets default_layout.
+# Require the current scalar to match before constructing either upgrade fixture.
+_ADVANCED_MOUSE_ACTIONS_SCALAR = re.compile(
+    r"^advanced_mouse_actions (?:true|false)$", re.MULTILINE
+)
+_ADVANCED_MOUSE_ACTIONS_BLOCK = re.compile(
+    r"(?:^//[^\n]*\n)*^advanced_mouse_actions (?:true|false)$", re.MULTILINE
 )
 
 
@@ -189,7 +191,7 @@ def _resolve(paths: dict, capsys, *, status: str) -> dict:
             Namespace(runtime_home=str(paths["runtime_home"]))
         )
         envelope = json.loads(capsys.readouterr().out)
-        assert code == (2 if status == "unusable" else 0)
+        assert code == (2 if status == "unusable" else 0), envelope
         assert envelope["schema"] == "vibecrafted.runtime-resolution.v1"
         assert envelope["status"] == status, envelope
         assert (envelope["runtime"] is None) == (status != "ready")
@@ -732,6 +734,11 @@ def test_runtime_install_projects_quick_cmd_binding_to_active_compact_bar(
         "pending-uninstall",
         "transaction",
         "managed-layout",
+        "missing-managed-layout",
+        "symlink-managed-layout",
+        "symlink-custom-layout",
+        "fifo-custom-layout",
+        "shell-extra",
         "manifest",
         "lineage",
         "launcher",
@@ -771,6 +778,20 @@ def test_resolution_rejects_corrupt_or_pending_install_without_writes(
         (paths["product_config"] / "vc-frame/layouts/operator.kdl").write_text(
             "// edited\n"
         )
+    elif mutation == "missing-managed-layout":
+        (paths["product_config"] / "vc-frame/layouts/operator.kdl").unlink()
+    elif mutation == "symlink-managed-layout":
+        layout = paths["product_config"] / "vc-frame/layouts/operator.kdl"
+        layout.unlink()
+        layout.symlink_to(paths["product_config"] / "vc-frame/config.kdl")
+    elif mutation == "symlink-custom-layout":
+        (paths["product_config"] / "vc-frame/layouts/personal.kdl").symlink_to(
+            paths["product_config"] / "vc-frame/config.kdl"
+        )
+    elif mutation == "fifo-custom-layout":
+        os.mkfifo(paths["product_config"] / "vc-frame/layouts/personal.kdl")
+    elif mutation == "shell-extra":
+        (paths["product_config"] / "shell/personal.zsh").write_text("# user file\n")
     elif mutation == "manifest":
         (Path(result["root"]) / "runtime-manifest.json").write_text("{}\n")
     elif mutation == "lineage":
@@ -778,7 +799,15 @@ def test_resolution_rejects_corrupt_or_pending_install_without_writes(
     elif mutation == "launcher":
         (paths["launcher_home"] / "vibecrafted").write_text("#!/bin/sh\nexit 0\n")
     receipt_path.write_text(json.dumps(receipt))
-    _resolve(paths, capsys, status="unusable")
+    resolution = _resolve(paths, capsys, status="unusable")
+    if mutation in {"managed-layout", "missing-managed-layout", "shell-extra"}:
+        assert "managed product config differs" in resolution["reason"]
+    elif mutation in {
+        "symlink-managed-layout",
+        "symlink-custom-layout",
+        "fifo-custom-layout",
+    }:
+        assert "non-physical configuration asset" in resolution["reason"]
 
 
 def test_upgrade_preserves_user_kdl_policy_and_exact_theme_bytes(
@@ -850,12 +879,12 @@ def test_non_overlapping_kdl_upgrade_merges_user_preference_and_new_defaults(
         Path(__file__).resolve().parents[2]
         / "vibecrafted-core/vibecrafted_core/config/vc-frame/config.kdl"
     ).read_text()
-    shipped_block = _DEFAULT_LAYOUT_BLOCK.search(incoming)
+    shipped_block = _ADVANCED_MOUSE_ACTIONS_BLOCK.search(incoming)
     assert shipped_block is not None
     assert shipped_block.group(0).count("\n") >= 1, "comment run above the scalar"
     previous = incoming.replace(
         shipped_block.group(0),
-        '// Previous layout default.\ndefault_layout "vibecrafted"',
+        "// Previous advanced mouse-action default.\nadvanced_mouse_actions false",
     )
     assert previous != incoming
     initial = _install(
@@ -1061,8 +1090,8 @@ def test_unsupported_changed_kdl_scalar_syntax_refuses_publication(
         / "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame/config.kdl"
     )
     shipped = source.read_text()
-    changed_upstream = _DEFAULT_LAYOUT_SCALAR.sub(
-        'default_layout "changed-upstream"', shipped, count=1
+    changed_upstream = _ADVANCED_MOUSE_ACTIONS_SCALAR.sub(
+        "advanced_mouse_actions false", shipped, count=1
     )
     assert changed_upstream != shipped
     payload_b = seed_runtime_pack(
@@ -1268,27 +1297,27 @@ def test_independent_toml_changes_merge_user_preference_with_new_default(
     _resolve(paths, capsys, status="ready")
 
 
-def test_custom_frame_asset_refuses_upgrade_and_keeps_snapshot(
+def test_custom_frame_asset_survives_upgrade_without_installer_ownership(
     installed, tmp_path, capsys
 ):
-    paths, _, _ = installed
+    paths, _, initial = installed
     custom = paths["product_config"] / "vc-frame/layouts/personal.kdl"
     custom.write_text("layout { pane }\n")
-    before = _snapshot(paths["product_config"])
-    active = (paths["runtime_home"] / "active.json").read_bytes()
+    before = _snapshot(custom)
     payload = seed_runtime_pack(tmp_path / "pack-b", version="9.9.10+b")
-    with pytest.raises(RuntimeError, match="frame layouts/themes/scripts changed"):
-        _install(payload, capsys)
-    capsys.readouterr()
-    assert _snapshot(paths["product_config"]) == before
-    assert (paths["runtime_home"] / "active.json").read_bytes() == active
+    upgraded = _install(payload, capsys)
+    assert upgraded["root"] != initial["root"]
+    assert _snapshot(custom) == before
     receipt = json.loads(
         (paths["runtime_home"] / installer.RUNTIME_INSTALL_RECEIPT).read_text()
     )
-    preserved = Path(
-        receipt["drift_backups"][str(paths["product_config"] / "vc-frame")]
-    )
-    assert (preserved / "layouts/personal.kdl").read_bytes() == custom.read_bytes()
+    assert receipt["version"] == "9.9.10+b"
+    assert str(custom) not in receipt["owned_files"]
+    assert str(custom) not in receipt["config_defaults"]
+    _resolve(paths, capsys, status="ready")
+    _install(payload, capsys)
+    assert _snapshot(custom) == before
+    _resolve(paths, capsys, status="ready")
 
 
 @pytest.mark.parametrize("preference", ["vc-frame/config.kdl", "terminal-policy.toml"])
