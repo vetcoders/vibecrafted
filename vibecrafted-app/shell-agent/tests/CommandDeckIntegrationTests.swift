@@ -1360,8 +1360,170 @@ struct CommandDeckIntegrationTests {
       "Footer titles drifted from the sidebar labels")
   }
 
+
+  static func trayActivityContract(sourceURL: URL) async throws {
+    func decode(_ summary: String, schema: String = "vibecrafted.lifecycle-activity.v1",
+      status: Int32 = 0) -> TrayWorkActivity {
+      decodeTrayWorkActivity(data: Data("{\"schema_version\":\"\(schema)\",\"summary\":\(summary)}".utf8),
+        terminationStatus: status)
+    }
+    try require(decode("{\"lanes\":3,\"running\":1}") == .running(1), "Owner running count was lost")
+    try require(decode("{\"lanes\":300,\"running\":0}") == .idle,
+      "Retained stalled lanes caused activity")
+    for payload in ["{}", "{\"lanes\":3}", "{\"lanes\":1,\"running\":2}",
+      "{\"lanes\":1,\"running\":-1}", "{\"lanes\":1,\"running\":true}"] {
+      try require(decode(payload) == .unavailable, "Invalid/old owner count became idle or running")
+    }
+    try require(decode("{\"lanes\":1,\"running\":1}", schema: "other") == .unavailable,
+      "Unknown schema became work evidence")
+    try require(decode("{\"lanes\":1,\"running\":1}", status: 2) == .unavailable,
+      "Failed owner invocation became work evidence")
+    let observation = TrayWorkObservation(activity: .running(1), observedAt: 100)
+    try require(observation.current(at: 109.9) == .running(1)
+      && observation.current(at: 110) == .unavailable
+      && observation.current(at: 99) == .unavailable, "Work observation did not expire")
+    var frame = TrayActivityFrame()
+    for step in 1...6 {
+      frame.advance(activity: .running(1), reduceMotion: false)
+      try require(frame.step == step % 6, "Animation did not advance by exactly one 60-degree step")
+    }
+    frame.advance(activity: .running(1), reduceMotion: false)
+    frame.advance(activity: .idle, reduceMotion: false)
+    try require(frame.step == 0, "Idle did not reset base orientation")
+    frame.advance(activity: .running(1), reduceMotion: false)
+    frame.advance(activity: .unavailable, reduceMotion: false)
+    try require(frame.step == 0, "Unknown work kept animating")
+    frame.advance(activity: .running(1), reduceMotion: true)
+    try require(frame.step == 0, "Reduced Motion animated work")
+
+    guard let source = NSImage(contentsOf: sourceURL),
+      let originalData = source.tiffRepresentation,
+      let original = NSBitmapImageRep(data: originalData),
+      let filledData = TrayGlyph.fillingActivityCircle(in: source).tiffRepresentation,
+      let filled = NSBitmapImageRep(data: filledData)
+    else { throw Failure(message: "Canonical tray mask could not be decoded") }
+    func alpha(_ bitmap: NSBitmapImageRep, _ x: Int, _ y: Int) -> Int {
+      var pixel = [Int](repeating: 0, count: bitmap.samplesPerPixel)
+      bitmap.getPixel(&pixel, atX: x, y: y)
+      return pixel[bitmap.bitmapFormat.contains(.alphaFirst) ? 0 : bitmap.samplesPerPixel - 1]
+    }
+    var changed = Set<Int>()
+    for y in 0..<original.pixelsHigh {
+      for x in 0..<original.pixelsWide {
+        let before = alpha(original, x, y)
+        let after = alpha(filled, x, y)
+        if before != after {
+          try require(before == 0 && after == 255, "Existing contour/antialias was changed")
+          changed.insert(y * original.pixelsWide + x)
+        }
+      }
+    }
+    try require(changed.count == 570, "One original eye interior did not fill exactly")
+    try require(alpha(filled, 25, 61) == 255
+      && alpha(filled, 44, 28) == 0
+      && alpha(filled, 63, 61) == 0,
+      "Activity filled more than the lower-left circle")
+    try require(source.tiffRepresentation == originalData, "Source image was mutated")
+    func bitmap(_ image: NSImage, pixels: Int) throws -> NSBitmapImageRep {
+      guard let result = NSBitmapImageRep(bitmapDataPlanes: nil,
+        pixelsWide: pixels, pixelsHigh: pixels, bitsPerSample: 8, samplesPerPixel: 4,
+        hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+        bytesPerRow: pixels * 4, bitsPerPixel: 32),
+        let context = NSGraphicsContext(bitmapImageRep: result)
+      else { throw Failure(message: "Cannot rasterize tray witness") }
+      NSGraphicsContext.saveGraphicsState()
+      NSGraphicsContext.current = context
+      image.draw(in: NSRect(x: 0, y: 0, width: pixels, height: pixels))
+      context.flushGraphics()
+      NSGraphicsContext.restoreGraphicsState()
+      return result
+    }
+    let working = TrayGlyph.fillingActivityCircle(in: source)
+    for side in [18, 36, 88] {
+      let padding = 8
+      for step in 0..<6 {
+        let normal = try bitmap(TrayGlyph.renderMask(source: working,
+          side: CGFloat(side), rotation: step * 60), pixels: side)
+        let expanded = try bitmap(TrayGlyph.renderMask(source: working,
+          side: CGFloat(side), rotation: step * 60, canvasPadding: CGFloat(padding)),
+          pixels: side + padding * 2)
+        var outside = 0
+        var edge = 0
+        for y in 0..<expanded.pixelsHigh {
+          for x in 0..<expanded.pixelsWide {
+            let a = alpha(expanded, x, y)
+            if x < padding || x >= padding + side || y < padding || y >= padding + side {
+              if a != 0 { outside += 1 }
+            } else {
+              try require(a == alpha(normal, x - padding, y - padding),
+                "Clipped and expanded viewport rasters differ")
+              if a != 0 && (x == padding || x == padding + side - 1
+                || y == padding || y == padding + side - 1) { edge += 1 }
+            }
+          }
+        }
+        try require(outside == 0, "A rotated circle contour was cropped")
+        print("Tray viewport side=\(side) rotation=\(step * 60) outside=\(outside) edge=\(edge)")
+      }
+    }
+    var rotations = Set<Data>()
+    for step in 0..<6 {
+      let image = TrayGlyph.statusImage(health: .healthy,
+        activity: .running(1), step: step, source: source)
+      try require(image.isTemplate && image.size == NSSize(width: 18, height: 18),
+        "Work glyph bypassed system appearance or menu-bar size")
+      try require(image.accessibilityDescription!.contains("online")
+        && image.accessibilityDescription!.contains("executing dispatched"),
+        "Health and work labels were conflated")
+      rotations.insert(image.tiffRepresentation!)
+    }
+    try require(rotations.count == 6, "Rendered 60-degree orientations did not differ")
+    let idle = TrayGlyph.statusImage(health: .healthy, activity: .idle, step: 3, source: source)
+    let unknown = TrayGlyph.statusImage(health: .failed, activity: .unavailable, step: 4, source: source)
+    try require(idle.tiffRepresentation == unknown.tiffRepresentation,
+      "Service health or old rotation changed idle contours")
+    try require(idle.isTemplate && unknown.isTemplate, "Idle image ignores system appearance")
+    var now: TimeInterval = 100
+    var motionReduced = false
+    let controller = StatusItemController(activityClock: { now }, reduceMotion: { motionReduced }) { _ in }
+    controller.install()
+    defer { controller.uninstall() }
+    var presentation = StatusItemPresentation.bootstrapping
+    presentation.work = observation
+    controller.update(presentation)
+    try require(controller.isAnimatingActivity && controller.isAwaitingActivityExpiry,
+      "Confirmed work failed to schedule animation and expiry")
+    try await waitFor { controller.activityStep == 1 }
+    presentation.work = TrayWorkObservation(activity: .idle, observedAt: now)
+    controller.update(presentation)
+    try require(!controller.isAnimatingActivity && controller.activityStep == 0,
+      "Idle did not cancel timer and reset orientation")
+    presentation.work = observation
+    motionReduced = true
+    controller.update(presentation)
+    try require(!controller.isAnimatingActivity && controller.isAwaitingActivityExpiry,
+      "Reduced Motion either animated or forgot the observation expiry")
+    now = 109.9
+    controller.update(presentation)
+    now = 110
+    try await waitFor { !controller.isAwaitingActivityExpiry }
+    try require(!controller.isAnimatingActivity && !controller.isAwaitingActivityExpiry,
+      "Expired work retained a timer")
+    now = 100
+    motionReduced = false
+    controller.update(presentation)
+    controller.uninstall()
+    try require(!controller.isAnimatingActivity && !controller.isAwaitingActivityExpiry
+      && controller.activityStep == 0, "Uninstall left activity timers running")
+    print("Tray activity owner, expiry, discrete motion and exact mask passed")
+  }
+
   static func main() async throws {
     _ = NSApplication.shared
+    if CommandLine.arguments.dropFirst().first == "--tray" {
+      try await trayActivityContract(sourceURL: URL(fileURLWithPath: CommandLine.arguments[2]))
+      return
+    }
     try windowGeometryContract()
     if CommandLine.arguments.dropFirst().first == "--geometry" { return }
     let endpoint = URL(string: CommandLine.arguments[1])!

@@ -60,6 +60,7 @@ struct StatusItemPresentation: Equatable, Sendable {
   var detailLine: String
   var availability: StatusItemAvailability
   var toolTip: String
+  var work: TrayWorkObservation? = nil
 
   static let bootstrapping = StatusItemPresentation(
     health: .checking,
@@ -78,8 +79,17 @@ final class StatusItemController: NSObject, NSMenuDelegate {
   typealias Handler = (StatusItemAction) -> Void
 
   private let handler: Handler
+  private let activityClock: () -> TimeInterval
+  private let reduceMotion: () -> Bool
   private var statusItem: NSStatusItem?
   private var presentation: StatusItemPresentation
+  private var activityExpiryTimer: Timer?
+  private var activityTimer: Timer?
+  private var activityFrame = TrayActivityFrame()
+
+  var activityStep: Int { activityFrame.step }
+  var isAnimatingActivity: Bool { activityTimer?.isValid == true }
+  var isAwaitingActivityExpiry: Bool { activityExpiryTimer?.isValid == true }
   private static weak var installedController: StatusItemController?
 
   private weak var statusLineItem: NSMenuItem?
@@ -110,9 +120,13 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
   init(
     presentation: StatusItemPresentation = .bootstrapping,
+    activityClock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+    reduceMotion: @escaping () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion },
     handler: @escaping Handler
   ) {
     self.presentation = presentation
+    self.activityClock = activityClock
+    self.reduceMotion = reduceMotion
     self.handler = handler
     super.init()
   }
@@ -166,12 +180,21 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     item.menu = menu
     statusItem = item
+    NSWorkspace.shared.notificationCenter.addObserver(self,
+      selector: #selector(accessibilityOptionsChanged(_:)),
+      name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
     Self.installedController = self
     applyPresentation()
   }
 
   /// Remove the status item from the system status bar.
   func uninstall() {
+    activityExpiryTimer?.invalidate()
+    activityExpiryTimer = nil
+    activityTimer?.invalidate()
+    activityTimer = nil
+    activityFrame.reset()
+    NSWorkspace.shared.notificationCenter.removeObserver(self)
     guard let item = statusItem else { return }
     NSStatusBar.system.removeStatusItem(item)
     statusItem = nil
@@ -184,6 +207,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
   func update(_ presentation: StatusItemPresentation) {
     self.presentation = presentation
+    activityExpiryTimer?.invalidate()
+    activityExpiryTimer = nil
     guard statusItem != nil else { return }
     applyPresentation()
   }
@@ -195,9 +220,43 @@ final class StatusItemController: NSObject, NSMenuDelegate {
   // MARK: - Presentation
 
   private func applyPresentation() {
-    let glyph = TrayGlyph.statusImage(health: presentation.health)
+    let activity = presentation.work?.current(at: activityClock())
+      ?? .unavailable
+    if let observation = presentation.work, activity != .unavailable, activityExpiryTimer == nil {
+      let timer = Timer(timeInterval: max(0.01,
+        observation.observedAt + 10 - activityClock()), repeats: false) { [weak self] _ in
+        Task { @MainActor [weak self] in
+          guard let self else { return }
+          self.activityExpiryTimer = nil
+          self.applyPresentation()
+        }
+      }
+      RunLoop.main.add(timer, forMode: .common)
+      activityExpiryTimer = timer
+    }
+    let reduceMotion = self.reduceMotion()
+    if !activity.isRunning || reduceMotion { activityFrame.reset() }
+    if activity.isRunning && !reduceMotion && activityTimer == nil {
+      let timer = Timer(timeInterval: 0.6, repeats: true) { [weak self] _ in
+        Task { @MainActor [weak self] in
+          guard let self else { return }
+          let current = self.presentation.work?.current(at: self.activityClock())
+            ?? .unavailable
+          self.activityFrame.advance(activity: current,
+            reduceMotion: self.reduceMotion())
+          self.applyPresentation()
+        }
+      }
+      RunLoop.main.add(timer, forMode: .common)
+      activityTimer = timer
+    } else if !activity.isRunning || reduceMotion {
+      activityTimer?.invalidate()
+      activityTimer = nil
+    }
+    let glyph = TrayGlyph.statusImage(health: presentation.health,
+      activity: activity, step: activityFrame.step)
     statusItem?.button?.image = glyph
-    statusItem?.button?.toolTip = presentation.toolTip
+    statusItem?.button?.toolTip = "\(presentation.toolTip). \(activity.description)"
     statusItem?.button?.setAccessibilityLabel(glyph.accessibilityDescription)
 
     statusLineItem?.title = presentation.statusLine
@@ -206,6 +265,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     for (action, item) in actionItems {
       item.isEnabled = Self.isEnabled(action, availability: availability)
     }
+  }
+
+  @objc private func accessibilityOptionsChanged(_ notification: Notification) {
+    applyPresentation()
   }
 
   private func add(_ command: StatusItemMenuCommand, to menu: NSMenu) {

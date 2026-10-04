@@ -151,6 +151,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   /// the diagnostics alert and the action in-flight state all render from this
   /// one reading — never from a second, privately-fused source.
   private var lastCaretakerData: Data?
+  private var trayWorkProcess: Process?
+  private var lastTrayWork: TrayWorkObservation?
   private var canonicalInstall: CanonicalRuntimeInstall?
   private var canonicalRuntimeEnvironment: [String: String]?
   private var workspaceLaunchFailureReported = false
@@ -342,6 +344,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     }
     lifecycleLog("applicationWillTerminate; \(terminalState)")
     statusRefreshTimer?.invalidate()
+    tray?.uninstall()
     terminalRegistrationTimer?.invalidate()
     NotificationManager.shared.clearHeartbeat(craftedHome: craftedHomeURL())
   }
@@ -1124,6 +1127,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       if changed {
         runtimeResolveEpoch &+= 1
         lastCaretakerData = nil
+        lastTrayWork = nil
         serverActionInFlight = nil
         runtimeAdvisory = nil
         // A newly adopted generation is allowed to report its own failures.
@@ -1158,6 +1162,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     canonicalInstall = nil
     canonicalRuntimeEnvironment = nil
     lastCaretakerData = nil
+    lastTrayWork = nil
     serverActionInFlight = nil
     runtimeAdvisory = nil
     runtimeResolutionFailure = failure
@@ -1622,7 +1627,38 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
         self.renderServerStatus()
         return
       }
+      self.renderServerStatus()
       self.pollCaretaker(install: install, environment: environment)
+      self.pollTrayWork(install: install, environment: environment)
+    }
+  }
+
+  /// Read the existing lifecycle owner through the same bounded async bridge.
+  /// Only the additive running count drives motion. Service health, retained
+  /// stalled lanes, CPU and mere terminal/process existence never do.
+  private func pollTrayWork(install: CanonicalRuntimeInstall, environment: [String: String]) {
+    guard trayWorkProcess == nil else { return }
+    let epoch = runtimeResolveEpoch
+    let process = Process()
+    process.executableURL = install.root.appendingPathComponent("bin/vibecrafted")
+    process.arguments = ["status", "--activity", "--json"]
+    process.environment = environment
+    do {
+      try runBounded(process, timeout: 3, label: "tray work activity") { [weak self] result in
+        guard let self else { return }
+        self.trayWorkProcess = nil
+        guard epoch == self.runtimeResolveEpoch else { return }
+        let activity = result.clean && !result.timedOut
+          ? decodeTrayWorkActivity(data: result.stdout, terminationStatus: result.terminationStatus)
+          : .unavailable
+        self.lastTrayWork = TrayWorkObservation(activity: activity,
+          observedAt: ProcessInfo.processInfo.systemUptime)
+        self.updateDeckPresentation()
+      }
+      trayWorkProcess = process
+    } catch {
+      lastTrayWork = nil
+      updateDeckPresentation()
     }
   }
 
@@ -1732,7 +1768,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
         canRepairRuntime: actions.contains(.repairRuntime),
         canStopRuntime: actions.contains(.requestStopRuntime),
         canShowDiagnostics: true, canQuitApp: true, runtimeActions: utilities),
-      toolTip: "Vibecrafted — \(presentation.phase.rawValue). \(detail). \(runtimePack.header). \(runtimePack.detail)"))
+      toolTip: "Vibecrafted — \(presentation.phase.rawValue). \(detail). \(runtimePack.header). \(runtimePack.detail)",
+      work: lastTrayWork))
     // The open server status window consumes the same derivation as the tray,
     // so a poll, a transition or a repair is reflected there immediately.
     renderServerStatusWindow()

@@ -128,11 +128,20 @@ def collect_lifecycle_activity() -> dict[str, Any]:
                 continue
             seen.add(run_id)
             lanes.append(run)
+    # Work indication is a projection of the owner's current active bucket,
+    # not all retained lanes, worker PID existence, or server availability.
+    # Launch windows and paused/stalled lanes cannot prove executing work.
+    running_ids = {
+        str(run.get("run_id") or "")
+        for run in board.get("active_runs") or []
+        if run.get("state") in {"active", "running"} and run.get("run_id")
+    }
     lanes.sort(key=_sort_key, reverse=True)
     return {
         "schema_version": _LIFECYCLE_ACTIVITY_SCHEMA,
         "summary": {
             "lanes": len(lanes),
+            "running": len(running_ids),
             "worktrees": sum(_is_canonical_worktree_lane(run) for run in lanes),
         },
         "lanes": lanes,
