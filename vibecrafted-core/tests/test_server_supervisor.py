@@ -674,18 +674,45 @@ exit 0
     assert result.abort_reason is None
 
 
-def test_run_child_timeout_preserves_raw_streams(tmp_path: Path) -> None:
+def test_run_child_timeout_preserves_raw_streams(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ready = tmp_path / "launcher.ready"
     launcher = _executable(
         tmp_path / "bin" / "launcher",
         """#!/bin/sh
 printf 'launcher stdout\n'
 printf 'launcher stderr\n' >&2
-sleep 5
+: > "$1"
+exec sleep 60
 """,
     )
 
+    real_popen = subprocess.Popen
+
+    def start_ready_child(argv: list[str], **kwargs: object) -> subprocess.Popen[str]:
+        process = real_popen(argv, **kwargs)
+        # The timeout starts when Popen returns. Confirm the real child wrote
+        # both streams first, independent of scheduling during a busy release.
+        deadline = time.monotonic() + 5
+        while not ready.exists() and process.poll() is None:
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.01)
+        if not ready.exists():
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+            pytest.fail("launcher did not write both streams before readiness deadline")
+        return process
+
+    monkeypatch.setattr(supervisor.subprocess, "Popen", start_ready_child)
     result = supervisor._run_child(
-        [str(launcher)],
+        [str(launcher), str(ready)],
         env=dict(os.environ),
         timeout=0.2,
         stop_event=threading.Event(),
