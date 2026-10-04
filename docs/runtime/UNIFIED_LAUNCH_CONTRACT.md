@@ -174,28 +174,44 @@ Inventory failures refuse rather than treating uncertainty as an empty list.
 Outside Frame, creation is exclusive; a no-TTY caller opens VC Terminal only
 after successful creation, carrying the exact root and created-session marker.
 
-Inside a live Frame host, `vc-start` creates a distinct guest session with
-`--guest-workspace` (chrome stripped by Frame) and projects it through the
-admitted public API:
+Inside Frame, `vc-start` creates an ordinary project session from
+`operator.kdl`, retaining its Start here, Agents, Shell and Voc tabs plus one
+session canvas. Entry switches the calling client through the native action:
 
 ```text
-vc-frame --session <host> project-workspace <guest> [--tab <one-based>]
+vc-frame --session <attached-session> action switch-session <project>
 ```
 
-Host identity is the attached owner (`VC_FRAME_SESSION_NAME`) verified live
-with exactly one interactive client — never the repository basename and never
-a silent `switch-session`. Success is the Frame CLI exiting 0 together with
-exactly one correlated `WorkspaceProjectionReceipt` (`status=Handled`,
-`pane_id` set, guest/tab/request match). fd14 emits that receipt as one
-compact `serde_json::to_string` document. `list-panes` has no public guest
-binding: a title, command, or name that merely contains the guest is not
-projection proof, and a nonzero engine status is not ordinary success.
-A missing or older Frame binary, an unresolvable host, or an ambiguous client
-refuses before create (exit 4). A confirmed rejection or an unchanged owner
-snapshot reports created-but-not-projected and that the previous canvas was
-left unchanged. An unparseable, uncorrelated, duplicate, drifted, or
-status/ACK-disagreeing outcome is indeterminate: the launcher must not claim
-the canvas stayed put. Name collisions remain exit 3.
+The source session is the live attached owner (`VC_FRAME_SESSION_NAME`). The
+launcher forwards inherited pane identity; the engine must resolve the calling
+client even when multiple clients view the same pane. A session name alone must
+not choose another client. Outside Frame, entry uses
+`attach <project>`; no-TTY entry delegates to VC Terminal with the exact created
+session. Creation and entry are separate: an entry failure must leave the created
+session available and report it honestly. Name collisions remain exit 3;
+inventory and creation failures exit 4. Native entry propagates the engine's
+exit status without a projection or terminal fallback.
+
+Operator Frame is an ordinary standalone session, displayed as 00, with
+Dashboard, Active runs, Config, Doctor and Projects. Its layout is embedded in
+the Frame binary. The `frame_host` marker identifies that session's rail role;
+it does not turn project sessions into guests. Project layouts carry neither
+`frame_host` nor `workspace_surface`. The retained physical `vc-host` name does
+not define the role. `--new-host` explicitly creates an additional Operator
+Frame session for a generation transition while existing sessions remain intact.
+
+Projects are displayed from 01 with their separate tabs. Cmd-Up/Down changes
+the client's session; Cmd-Left/Right changes only that session's tabs. The active
+session must be visible on the rail. Selected tab and focus belong to each
+client and survive leaving and rejoining; another client's selection must not
+replace them. There is no nested Frame terminal, guest readiness gate or
+`connected_clients == 1` requirement for entering a project.
+
+The acceptance boundary is two projects and two clients of one project,
+switching both ways while preserving state and exactly one chrome per client.
+Close buttons, informational status/GitHub panels and arbitrary client counts
+remain part of the contract. Configuration and launcher tests alone do not prove
+this native multi-client behavior or installed runtime acceptance.
 
 ## Reserved integration interfaces
 
@@ -219,8 +235,8 @@ the canvas stayed put. Name collisions remain exit 3.
   and model-source/source-reference fields without reordering the provider
   catalog or changing rendering. Display unsupported VM/cloud and Agy private
   transport explicitly. Existing `workflow-capabilities` region is reserved.
-- **Frame:** inside-host start uses `project-workspace` on the attached host.
-  Closing a viewer must not own the worker lifecycle.
+- **Frame:** entry uses native per-client session switching or external attach.
+  Closing a client must not own the worker lifecycle.
 
 Interactive admission now reserves a fresh run identity before a provider starts,
 materializes the original source and admission at mode 0600, passes only private
@@ -237,8 +253,8 @@ admission; the launcher preserves the bytes it actually receives, including CRLF
 Dispatch stores the admitted original source independently of its assembled runtime
 instructions. Research model pins belong to the selected provider role, not swarm.
 
-Remaining acceptance includes native Frame viewer detachment and cold-start host
-handoff, supervised transcript echo filtering, other-provider native fork acceptance, complete native-
+Remaining acceptance includes native Frame viewer detachment and cold-start Operator Frame
+entry, supervised transcript echo filtering, other-provider native fork acceptance, complete native-
 session mutual exclusion across interactive and noninteractive paths, and all-surface
 idempotency/crash/cleanup. Explicit provider-session resume without a recorded run
 still cannot accept an unrecorded baseline override. These are not passes.

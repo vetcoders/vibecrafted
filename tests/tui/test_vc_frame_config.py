@@ -238,8 +238,7 @@ def test_marbles_layout_is_operator_centric() -> None:
 
 
 def test_operator_layout_matches_vibecrafted_standard() -> None:
-    """vc-start operator.kdl is the Start here / guest workspace layout:
-    Start here + Agents + Shell + Voc, SESSIONS rail on every tab, no strider."""
+    """Projects are ordinary sessions with their own content and single chrome."""
     payload = (LAYOUTS_DIR / "operator.kdl").read_text(encoding="utf-8")
     assert 'tab name="Start here"' in payload
     assert 'tab name="Agents"' in payload
@@ -271,6 +270,10 @@ def test_operator_layout_matches_vibecrafted_standard() -> None:
     assert "strider" not in active
     assert 'tab name="Operator"' not in active
     assert "VibeCrafted" not in active
+    assert "frame_host" not in active
+    assert "workspace_surface" not in active
+    for kind in ("compact-bar", "session-manager", "status-bar"):
+        assert active.count(f'session_canvas_kind "{kind}"') == 1
 
 
 def test_operator_voc_uses_active_generation_before_standalone_voc(
@@ -394,3 +397,38 @@ def test_layout_gate_refuses_external_host_even_when_updating_hashes(
     assert result.returncode != 0
     assert "host chrome belongs to the vc-frame binary" in result.stderr
     assert not (tmp_path / "lock.json").exists()
+
+
+@pytest.mark.parametrize("name", ["operator.kdl", "dashboard.kdl"])
+@pytest.mark.parametrize("marker", ["frame_host true", "workspace_surface true"])
+def test_layout_gate_refuses_projection_roles_even_when_updating_hashes(
+    tmp_path: Path, name: str, marker: str
+) -> None:
+    layouts = tmp_path / "layouts"
+    shutil.copytree(LAYOUTS_DIR, layouts)
+    layout = layouts / name
+    layout.write_text(
+        layout.read_text().replace(
+            "session_layer {", f"session_layer {{\n    {marker}", 1
+        )
+    )
+    lock = tmp_path / "lock.json"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts/check-layout-contract.py"),
+            "--layouts-dir",
+            str(layouts),
+            "--config",
+            str(VC_FRAME_CONFIG),
+            "--lock",
+            str(lock),
+            "--update",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "ordinary session" in result.stderr
+    assert not lock.exists()

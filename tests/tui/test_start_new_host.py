@@ -70,19 +70,26 @@ def test_new_host_fails_closed_on_inventory_error(tmp_path: Path) -> None:
     assert not _creates(scene.calls())
 
 
-def test_split_noninteractive_offers_new_host_without_joining(tmp_path: Path) -> None:
+def test_split_noninteractive_creates_project_without_joining_old_host(
+    tmp_path: Path,
+) -> None:
     scene = Scene(tmp_path, live=("vc-host",), clients=("vc-host",))
     (scene.generation / "VERSION").write_text("4.3.1+g7a69d24d\n")
+    before = (scene.table / "live/vc-host").read_bytes()
     result = _run(
         scene,
         "_vetcoders_start_host_generation() { printf '4.3.1+gf8debfd6\\n'; }; vc-start",
     )
-    assert _rc(result) == 4, result.stdout + result.stderr
-    assert "--new-host" in result.stderr
-    assert "4.3.1+gf8debfd6" in result.stderr
-    assert "4.3.1+g7a69d24d" in result.stderr
-    assert not _creates(scene.calls())
-    assert scene.live() == ["vc-host"]
+    assert _rc(result) == 0, result.stdout + result.stderr
+    assert scene.live() == sorted(["vc-host", scene.root.name])
+    assert (scene.table / "live/vc-host").read_bytes() == before
+    assert len(_creates(scene.calls())) == 1
+    assert "--guest-workspace" not in _creates(scene.calls())[0]["argv"]
+    assert not any("project-workspace" in c["argv"] for c in scene.calls())
+    launches = scene.terminal_launches()
+    assert len(launches) == 1
+    assert launches[0]["created"] == scene.root.name
+    assert "--new-host" not in result.stderr
 
 
 def test_created_host_terminal_child_attaches_exact_host(tmp_path: Path) -> None:
@@ -197,65 +204,31 @@ def test_stale_shell_reenters_verified_active_front_door(
     assert not scene.calls()
 
 
-@pytest.mark.parametrize("answer, expected", [("y", 0), ("n", 4)])
-def test_split_tty_choice_preserves_old_host(
-    tmp_path: Path, answer: str, expected: int
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+def test_split_tty_enters_project_without_prompting_or_changing_old_host(
+    tmp_path: Path, shell: str
 ) -> None:
-    import os
-    import pty
-    import select
-    import subprocess
-    import time
-
-    from tests.tui.test_start_workspace_contract import _entry_script, _shell_argv
-
     scene = Scene(tmp_path, live=("vc-host",))
     (scene.generation / "VERSION").write_text("4.3.1+g7a69d24d\n")
-    master, slave = pty.openpty()
-    script = _entry_script(
+    before = (scene.table / "live/vc-host").read_bytes()
+    result = _run(
         scene,
         "_vetcoders_start_host_generation() { printf '4.3.1+gf8debfd6\\n'; }; vc-start",
+        shell=shell,
+        tty=True,
+        developer_root=True,
+        extra_env={
+            "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
+            "VIBECRAFTED_VC_FRAME_BIN": str(scene.generation / "bin/vc-frame"),
+        },
     )
-    proc = subprocess.Popen(
-        _shell_argv("bash", script),
-        env=scene.env(),
-        cwd=scene.root,
-        stdin=slave,
-        stdout=slave,
-        stderr=slave,
-        start_new_session=True,
-    )
-    os.close(slave)
-    output = b""
-    replied = False
-    try:
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
-            if select.select([master], [], [], 0.1)[0]:
-                try:
-                    data = os.read(master, 65536)
-                except OSError:
-                    break
-                if not data:
-                    break
-                output += data
-            if not replied and b"[y/N]" in output:
-                os.write(master, (answer + "\n").encode())
-                replied = True
-            if proc.poll() is not None:
-                break
-        proc.wait(timeout=5)
-    finally:
-        if proc.poll() is None:
-            proc.kill()
-            proc.wait()
-        os.close(master)
-    assert replied, output
-    assert f"RC=[{expected}]".encode() in output, output
-    assert (
-        scene.table / "live/vc-host"
-    ).read_text() == "layout { frame_host true; pane; }\n"
-    assert ("vc-host@7a69d24d" in scene.live()) == (answer == "y")
+    assert _rc(result) == 0, result.stdout + result.stderr
+    assert "[y/N]" not in result.stdout + result.stderr
+    assert scene.live() == sorted(["vc-host", scene.root.name])
+    assert (scene.table / "live/vc-host").read_bytes() == before
+    assert len(_creates(scene.calls())) == 1
+    assert any(c["argv"] == ["attach", scene.root.name] for c in scene.calls())
+    assert not scene.terminal_launches(wait=0)
 
 
 def _installed_pair() -> tuple[Path, Path] | None:
@@ -489,36 +462,67 @@ def test_inside_host_with_tty_opens_separate_terminal(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("shell", ["bash", "zsh"])
-def test_parallel_hosts_keep_attached_resume_owner(tmp_path: Path, shell: str) -> None:
+def test_parallel_operators_resume_project_from_calling_client(
+    tmp_path: Path, shell: str
+) -> None:
     current = "vc-host@7a69d24d"
-    scene = Scene(tmp_path, live=("vc-host", current), clients=("vc-host", current))
+    scene = Scene(
+        tmp_path,
+        live=("vc-host", current, "existing-project"),
+        clients=("vc-host", current, current, "existing-project"),
+        guests=("existing-project",),
+    )
+    before = {p.name: p.read_bytes() for p in (scene.table / "live").iterdir()}
     result = _run(
         scene,
-        '_vetcoders_start_resolve_inventory_host; printf "HOST=[%s]\\n" "$_vetcoders_start_resolved_host"',
+        "_vetcoders_resume_workspace existing-project",
         shell=shell,
+        developer_root=True,
         extra_env={
             "VC_FRAME": "1",
             "VC_FRAME_PANE_ID": "2",
             "VC_FRAME_SESSION_NAME": current,
+            "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
+            "VIBECRAFTED_VC_FRAME_BIN": str(scene.generation / "bin/vc-frame"),
         },
     )
     assert _rc(result) == 0, result.stdout + result.stderr
-    assert f"HOST=[{current}]" in result.stdout
+    switches = [c for c in scene.calls() if c.get("switched")]
+    assert len(switches) == 1
+    assert switches[0]["argv"] == [
+        "--session",
+        current,
+        "action",
+        "switch-session",
+        "existing-project",
+    ]
+    assert switches[0]["VC_FRAME_SESSION_NAME"] == current
+    assert switches[0]["VC_FRAME_PANE_ID"] == "2"
     assert not _creates(scene.calls())
+    for name, body in before.items():
+        assert (scene.table / "live" / name).read_bytes() == body
+    assert not scene.terminal_launches(wait=0)
 
 
-def test_start_refreshes_previous_shell_invocation_inventory(tmp_path: Path) -> None:
-    scene = Scene(tmp_path, live=("vc-host",))
-    (scene.generation / "VERSION").write_text("4.3.1+g7a69d24d\n")
+def test_start_refreshes_previous_shell_inventory_and_preserves_existing_project(
+    tmp_path: Path,
+) -> None:
+    scene = Scene(
+        tmp_path, live=("vc-host", "existing-project"), guests=("existing-project",)
+    )
+    before = {p.name: p.read_bytes() for p in (scene.table / "live").iterdir()}
     result = _run(
         scene,
         "_vetcoders_start_inventory_cache_valid=1; "
         '_vetcoders_start_cached_live_hosts=""; '
-        "_vetcoders_start_host_generation() { printf '4.3.1+gf8debfd6\\n'; }; vc-start",
+        "vc-start existing-project",
     )
-    assert _rc(result) == 4, result.stdout + result.stderr
-    assert "--new-host" in result.stderr
+    assert _rc(result) == 3, result.stdout + result.stderr
     assert not _creates(scene.calls())
+    assert scene.live() == sorted(before)
+    for name, body in before.items():
+        assert (scene.table / "live" / name).read_bytes() == body
+    assert not scene.terminal_launches(wait=0)
 
 
 def _fault_created_host_role(scene: Scene, fault: str, failures: int) -> Path:

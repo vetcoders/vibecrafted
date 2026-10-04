@@ -178,8 +178,7 @@ def refuse_without_tty():
 session = None
 layout = None
 rest = argv
-# Leading global options in any order: `--session S`, `--guest-workspace`
-# (a guest create), `--new-session-with-layout L`.
+# Leading global options: `--session S`, `--new-session-with-layout L`.
 while rest:
     if rest[0] == "--session" and len(rest) > 1:
         session = rest[1]
@@ -187,8 +186,6 @@ while rest:
     elif rest[0] == "--new-session-with-layout" and len(rest) > 1:
         layout = rest[1]
         rest = rest[2:]
-    elif rest[0] == "--guest-workspace":
-        rest = rest[1:]
     else:
         break
 
@@ -198,7 +195,9 @@ if rest[:1] == ["action"]:
             sys.stderr.write("There is no active session!\\n")
             sys.exit(1)
         path = layouts().get(session, "")
-        if path and os.path.isfile(path):
+        if path == "builtin:operator":
+            print("layout { frame_host true; pane; }")
+        elif path and os.path.isfile(path):
             print(open(path).read(), end="")
     sys.exit(0)
 
@@ -217,7 +216,7 @@ if rest[:2] == ["attach", "--create-background"]:
     if name in live_sessions():
         sys.stderr.write("Session already exists\\n")
         sys.exit(1)
-    remember(name, layout)
+    remember(name, layout or "builtin:operator")
     sys.exit(0)
 
 if rest[:1] == ["attach"]:
@@ -361,9 +360,8 @@ def _run_entry(
     if with_canonical_launcher:
         _install_canonical_launcher(home)
     # Create-only start (2026-09-09): a caller without a TTY creates the
-    # workspace session BEFORE opening the terminal. Since the one-host start
-    # (e8cd9de7) that is the Frame host from host.kdl first, then the guest
-    # from operator.kdl, so the pinned product config carries both, shipped.
+    # workspace session BEFORE opening the terminal. Session 00 uses embedded
+    # Operator chrome and the project keeps its complete operator.kdl layout.
     gen.install_product_vc_frame_config(home)
 
     env = os.environ.copy()
@@ -2034,15 +2032,13 @@ def test_owned_reentry_boundary_stops_a_terminal_launch_loop(
     assert launch is None, "the owned terminal child opened another terminal"
 
 
-def test_start_projects_into_a_live_named_operator_session(tmp_path: Path) -> None:
-    """vc-start inside a live Frame host projects a guest into that host.
-
-    Distinct from the resume declaration below: a live named operator session
-    is start's guest-projection route, not a terminal it owes the caller.
-    """
+def test_start_refuses_an_existing_project_before_terminal_entry(
+    tmp_path: Path,
+) -> None:
+    """Inherited targeting metadata does not turn create-only start into resume."""
     live = tmp_path / "live-sessions.txt"
     live.write_text("mlx-batch-runner\n", encoding="utf-8")
-    _result, launch = _run_entry(
+    result, launch = _run_entry(
         tmp_path,
         "vc-start",
         extra_env={
@@ -2052,7 +2048,9 @@ def test_start_projects_into_a_live_named_operator_session(tmp_path: Path) -> No
         expect_launch=False,
     )
 
-    assert launch is None, "start opened a terminal instead of projecting a guest"
+    assert launch is None, "a create-only collision opened a terminal"
+    assert result.returncode == 3, result.stderr
+    assert "already exists" in result.stderr
 
 
 @pytest.mark.parametrize("invocation", ["vc-resume codex"])
@@ -2099,12 +2097,11 @@ def test_explicit_operator_session_the_engine_does_not_know_is_not_trusted(
     assert result.returncode == 0, result.stderr
 
 
-def test_stale_operator_session_does_not_override_live_host_routing(
+def test_stale_operator_session_does_not_block_new_peer_terminal(
     tmp_path: Path,
 ) -> None:
-    """Start treats inventory as host truth even when inherited env names a
-    missing session. It must keep the existing canvas and route the requested
-    workspace through the guest path instead of opening a second terminal."""
+    """An inherited dispatch label is not an attached client. An external
+    caller creates its peer project and opens its own terminal directly."""
     live = tmp_path / "live-sessions.txt"
     live.write_text("host-a\n", encoding="utf-8")
     # Model a live engine dump, independent of removed product host assets.
@@ -2121,13 +2118,11 @@ def test_stale_operator_session_does_not_override_live_host_routing(
             "VIBECRAFTED_OPERATOR_SESSION": "mlx-batch-runner",
             "VC_FRAME_LIVE": str(live),
         },
-        expect_launch=False,
     )
 
-    assert launch is None, "start opened a second terminal beside the live host"
-    assert result.returncode == 4, result.stderr
-    assert "live host host-a exists" in result.stderr
-    assert "project-workspace mlx-batch-runner" in result.stderr
+    assert launch is not None, result.stdout + result.stderr
+    assert result.returncode == 0, result.stderr
+    assert "project-workspace" not in result.stderr
 
 
 def test_real_tty_is_not_rerouted(tmp_path: Path) -> None:

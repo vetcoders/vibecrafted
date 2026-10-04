@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed hash and host/guest checks for shipped vc-frame layouts."""
+"""Fail-closed hash and ordinary-session checks for shipped vc-frame layouts."""
 
 from __future__ import annotations
 
@@ -43,9 +43,9 @@ def _hashes(layouts_dir: Path) -> dict[str, str]:
     }
 
 
-def _guard_host_guest(layouts_dir: Path, config_path: Path) -> None:
-    # Host chrome is a versioned vc-frame binary contract. The Runtime Pack
-    # only carries guest/tool layouts; even --update cannot admit a host copy.
+def _guard_peer_sessions(layouts_dir: Path, config_path: Path) -> None:
+    # Operator Frame session 00 belongs to the vc-frame binary. The Runtime
+    # Pack carries ordinary project/tool layouts, each with its own chrome.
     for name in ("host.kdl", "vibecrafted-host.kdl"):
         if (layouts_dir / name).exists() or (layouts_dir / name).is_symlink():
             raise ValueError(f"{name}: host chrome belongs to the vc-frame binary")
@@ -56,18 +56,18 @@ def _guard_host_guest(layouts_dir: Path, config_path: Path) -> None:
 
     operator_layer = _block(operator, "session_layer")
     operator_content = operator.replace(operator_layer, "", 1)
-    if operator.count("frame_host true") != 1:
-        raise ValueError("operator.kdl must declare exactly one fallback host owner")
-    if "frame_host true" not in operator_layer:
-        raise ValueError("operator.kdl fallback host owner must stay in session_layer")
-    if "frame_host true" in operator_content:
-        raise ValueError("operator.kdl guest content cannot retain host ownership")
+    for kind in ("compact-bar", "session-manager", "status-bar"):
+        marker = f'session_canvas_kind "{kind}"'
+        if operator_layer.count(marker) != 1 or marker in operator_content:
+            raise ValueError(f"operator.kdl must own one {kind} in session_layer")
 
     for path in sorted(layouts_dir.glob("*.kdl")):
-        if path.name == "operator.kdl":
-            continue
-        if "frame_host true" in _code(path.read_text(encoding="utf-8")):
-            raise ValueError(f"{path.name} cannot claim frame_host ownership")
+        code = _code(path.read_text(encoding="utf-8"))
+        for marker in ("frame_host", "workspace_surface"):
+            if marker in code:
+                raise ValueError(
+                    f"{path.name}: ordinary session cannot declare {marker}"
+                )
 
 
 def main() -> int:
@@ -79,7 +79,7 @@ def main() -> int:
     args = parser.parse_args()
 
     observed = _hashes(args.layouts_dir)
-    _guard_host_guest(args.layouts_dir, args.config)
+    _guard_peer_sessions(args.layouts_dir, args.config)
     payload = {
         "schema": "io.vetcoders.vibecrafted.layout-hashes.v1",
         "algorithm": "sha256",
@@ -96,7 +96,7 @@ def main() -> int:
     expected = json.loads(args.lock.read_text(encoding="utf-8"))
     if expected != payload:
         raise SystemExit(
-            "layout hashes drifted; inspect the host/guest change, then run make layouts-check UPDATE=1"
+            "layout hashes drifted; inspect the session layout change, then run make layouts-check UPDATE=1"
         )
     print(f"layout contract OK ({len(observed)} locked layouts)")
     return 0

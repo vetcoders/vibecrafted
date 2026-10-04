@@ -25,24 +25,15 @@ The contract proven here, in the shipped shell sources (not a reimplementation):
   with exit 4. Nothing is killed, deleted, switched, attached or renamed.
 * **exclusive create** -- adapter lock plus inventory, then Frame create;
   two concurrent starts yield exactly one workspace and one refusal.
-* **enter** -- a caller with a terminal outside Frame attaches. Inside a live
-  Frame session, start creates a `--guest-workspace` session and projects it
-  with `vc-frame --session <host> project-workspace <guest> [--tab]`. The
-  canvas owner is the attached session when that session is the host, and the
-  singleton live host when the attached session is a guest. A caller without
-  a TTY *outside* Frame creates first and then opens the VC Terminal;
-  inherited `VC_FRAME_*` inside a frame is the shared-canvas path, not a
-  nested window.
+* **enter** -- outside Frame, attach directly to the project. Inside Frame,
+  create an ordinary full-chrome project and switch the caller's client using
+  its session/pane markers. Session 00 has embedded Operator chrome; project
+  sessions retain their own tabs/status and accept any number of clients.
 
-Only the catalogue boundary and the Frame engine are stubbed. Host creation
-models the required embedded-chrome contract; the paired Frame change still
-needs native acceptance before integration. The stub keeps an exclusive
-on-disk session table so a race is a real race, and RESURRECTS an EXITED record
-on `--create-background` exactly like the engine does -- so a start that skips
-the inventory check fails here the way it would fail for the Founder. Unknown
-verbs exit 2; `project-workspace` is an explicit command that emits one
-compact `WorkspaceProjectionReceipt` and exits 0 only for Handled. The last
-cases run against the REAL admitted or installed engine in an isolated sandbox.
+Only the catalogue and Frame process are stubbed. The stub keeps exclusive
+on-disk session creation and rejects unknown verbs, including retired nested
+projection. Native acceptance separately exercises the admitted engine in an
+isolated sandbox; fixture success does not prove keyboard or client focus.
 
 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
 """
@@ -58,7 +49,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import uuid
 from pathlib import Path
 
 import pytest
@@ -165,9 +155,6 @@ def _strip_identity_env(env: dict[str, str]) -> dict[str, str]:
 #   * `--session S action switch-session NAME` needs both live;
 #   * `--session S action list-clients` prints a header and one row when S is
 #     listed in VC_FRAME_CLIENTS;
-#   * `project-workspace` requires `--session HOST`, refuses self/missing guest,
-#     and prints one JSON WorkspaceProjectionReceipt (Handled only on a unique
-#     host client). Unknown verbs exit 2 — never a silent accept.
 # Fault injection: VC_FRAME_INVENTORY_ERROR (list-sessions fails with that
 # text), VC_FRAME_INVENTORY_GARBAGE (list-sessions prints an unparsable line),
 # VC_FRAME_CREATE_ERROR (create refuses with that text).
@@ -194,6 +181,11 @@ def record(extra=None):
         "ZELLIJ_SESSION_NAME": os.environ.get("ZELLIJ_SESSION_NAME"),
         "VC_FRAME_PANE_ID": os.environ.get("VC_FRAME_PANE_ID"),
         "VC_FRAME_SOCKET_DIR": os.environ.get("VC_FRAME_SOCKET_DIR"),
+        "workspace_identity": {key: os.environ.get(key) for key in (
+            "VIBECRAFTED_WORKSPACE_ID", "VIBECRAFTED_SESSION_ID",
+            "VIBECRAFTED_WORKSPACE_INSTANCE_ID", "VIBECRAFTED_BUILD_ID",
+            "VIBECRAFTED_OPERATOR_SESSION", "VIBECRAFTED_WORKSPACE_ROOT",
+        )},
     }
     entry.update(extra or {})
     with open(log, "a") as handle:
@@ -239,24 +231,9 @@ def panic_if_current(target):
 
 record()
 
-no_guest_api = bool(os.environ.get("VC_FRAME_NO_PROJECT_WORKSPACE"))
-
 if "--help" in argv:
-    if no_guest_api and "project-workspace" in argv:
-        sys.stderr.write("error: Found argument 'project-workspace' which wasn't expected\\n")
-        sys.exit(2)
-    if "project-workspace" in argv:
-        print("Project an existing guest into a running host's VC Guest pane")
-        print("Target the host with `--session <host>`.")
-        print("USAGE:")
-        print("    vc-frame project-workspace [OPTIONS] <SESSION_NAME>")
-        print("        --tab <TAB>")
-        sys.exit(0)
     print("Commands: action attach delete-session kill-session list-sessions")
-    if not no_guest_api:
-        print("         project-workspace")
-        print("        --guest-workspace")
-        print("        --session <SESSION>")
+    print("        --session <SESSION>")
     sys.exit(0)
 
 if argv[:1] in (["ls"], ["list-sessions"]):
@@ -280,7 +257,6 @@ if argv[:1] in (["ls"], ["list-sessions"]):
 
 session = None
 layout = None
-guest_workspace = False
 tab = None
 rest = list(argv)
 i = 0
@@ -297,10 +273,6 @@ while i < len(rest):
     if token == "--layout" and i + 1 < len(rest):
         layout = rest[i + 1]
         i += 2
-        continue
-    if token == "--guest-workspace":
-        guest_workspace = True
-        i += 1
         continue
     if token == "--tab" and i + 1 < len(rest):
         tab = rest[i + 1]
@@ -320,7 +292,6 @@ if rest[:2] == ["attach", "--create-background"]:
         "default",
         "vibecrafted",
         "vibecrafted-host",
-        "vibecrafted-guest",
         "vc-workflow",
         "vc-marbles",
         "vc-research",
@@ -349,7 +320,7 @@ if rest[:2] == ["attach", "--create-background"]:
             sys.exit(1)
         raise
     # Model the required Frame-owned host contract, not a product KDL copy.
-    layout_text = "layout { frame_host true; workspace_surface true; }" if layout is None and not guest_workspace else ""
+    layout_text = "layout { frame_host true; workspace_surface true; }" if layout is None else ""
     if layout and os.path.isfile(layout):
         with open(layout, encoding="utf-8") as handle:
             layout_text = handle.read()
@@ -357,7 +328,6 @@ if rest[:2] == ["attach", "--create-background"]:
     os.close(fd)
     record({
         "created": name,
-        "guest_workspace": guest_workspace,
         "layout": layout,
         "layout_bytes": len(layout_text) if layout_text else 0,
     })
@@ -374,8 +344,7 @@ if rest[:1] == ["attach"]:
     if not sys.stdin.isatty():
         sys.stderr.write("vc-frame: stdin is not a terminal (TTY); cannot start an interactive session.\\n")
         sys.exit(1)
-    # A real attach is a connected client for as long as the terminal stays
-    # open; that client is what makes a host accept a guest projection.
+    # Track attached clients independently from the session content.
     if clients_file:
         with open(clients_file, "a") as handle:
             handle.write(target + "\\n")
@@ -396,6 +365,9 @@ if rest[:1] == ["action"]:
         wanted = rest[2] if len(rest) > 2 else ""
         if wanted not in names("live"):
             not_found(wanted)
+        if os.environ.get("VC_FRAME_SWITCH_ERROR"):
+            sys.stderr.write(os.environ["VC_FRAME_SWITCH_ERROR"] + "\\n")
+            sys.exit(2)
         record({"switched": [target, wanted]})
         sys.exit(0)
     if verb == "list-clients":
@@ -425,127 +397,8 @@ if rest[:1] == ["action"]:
         else:
             print("TAB_ID  POSITION  NAME")
         sys.exit(0)
-    if verb == "list-panes":
-        projected_dir = os.path.join(table, "projected")
-        projected = sorted(os.listdir(projected_dir)) if os.path.isdir(projected_dir) else []
-        marker = os.path.join(table, "panes-seen")
-        drifted = bool(os.environ.get("VC_FRAME_PANES_DRIFT")) and os.path.exists(marker)
-        open(marker, "w").write("1")
-        panes = [
-            {"title": "session-manager", "id": 1, "is_plugin": True, "tab_name": "Tab"},
-            {"title": "VC Guest", "id": 2, "is_plugin": True, "tab_name": "Tab"},
-            {
-                "title": target,
-                "id": 3,
-                "terminal_command": "zsh",
-                "tab_name": "Tab",
-                "cursor_coordinates_in_pane": [1, 1],
-            },
-        ]
-        if drifted:
-            panes[2]["cursor_coordinates_in_pane"] = [8, 4]
-            panes.append({"title": "unrelated-drift", "id": 4, "tab_name": "Tab"})
-        for name in projected:
-            panes.append({
-                "title": name,
-                "id": 9,
-                "terminal_command": "--workspace-projection " + name,
-                "tab_name": "Tab",
-            })
-        if os.environ.get("VC_FRAME_RECONCILE_GUEST") and os.environ.get("VC_FRAME_PROJECT_MALFORMED"):
-            forced = os.environ.get("VC_FRAME_RECONCILE_GUEST")
-            if forced and not any(p.get("title") == forced for p in panes):
-                panes.append({
-                    "title": forced,
-                    "id": 9,
-                    "terminal_command": "--workspace-projection " + forced,
-                    "tab_name": "Tab",
-                })
-        if "--json" in rest:
-            print(json.dumps(panes))
-        else:
-            print("ID TITLE")
-            for pane in panes:
-                print("%s %s" % (pane.get("id"), pane.get("title")))
-        sys.exit(0)
     sys.stderr.write("error: Found argument '%s' which wasn't expected\\n" % verb)
     sys.exit(2)
-
-if rest[:1] == ["project-workspace"]:
-    if no_guest_api:
-        sys.stderr.write("error: Found argument 'project-workspace' which wasn't expected\\n")
-        sys.exit(2)
-    guest = None
-    i = 1
-    while i < len(rest):
-        if rest[i] == "--tab" and i + 1 < len(rest):
-            tab = rest[i + 1]
-            i += 2
-            continue
-        if not str(rest[i]).startswith("-") and guest is None:
-            guest = rest[i]
-            i += 1
-            continue
-        i += 1
-    if not session:
-        sys.stderr.write("project-workspace requires --session <host>\\n")
-        sys.exit(2)
-    if guest is None:
-        sys.stderr.write("project-workspace requires a guest session\\n")
-        sys.exit(2)
-    if session == guest:
-        sys.stderr.write(
-            "Refused: `%s` cannot project into itself. Zero process/pane mutation.\\n" % guest
-        )
-        sys.exit(2)
-    if guest not in names("live"):
-        sys.stderr.write(
-            "Refused: guest `%s` is missing. Zero process/pane mutation.\\n" % guest
-        )
-        sys.exit(2)
-    if session not in names("live"):
-        sys.stderr.write("No session with the name '%s' found!\\n" % session)
-        sys.exit(1)
-    tab_zero = None
-    if tab is not None:
-        tab_n = int(tab)
-        if tab_n < 1:
-            sys.stderr.write("--tab is one-based and must be at least 1\\n")
-            sys.exit(2)
-        tab_zero = tab_n - 1
-    status = os.environ.get("VC_FRAME_PROJECT_STATUS", "")
-    if not status:
-        status = "Handled" if len(clients_of(session)) == 1 else "Refused"
-    request_id = os.environ.get("VC_FRAME_PROJECT_REQUEST_ID") or ("req-%s" % time.time())
-    receipt_guest = "someone-else" if os.environ.get("VC_FRAME_PROJECT_WRONG_GUEST") else guest
-    receipt = {
-        "request_id": request_id,
-        "client_id": 1,
-        "plugin_id": 2,
-        "guest": receipt_guest,
-        "tab": tab_zero,
-        "pane_id": 9 if status == "Handled" else None,
-        "status": status,
-        "detail": "stub",
-    }
-    record({"projected": [session, guest], "tab": tab, "receipt": receipt})
-    if os.environ.get("VC_FRAME_PROJECT_NO_RECEIPT"):
-        sys.stderr.write(
-            "Unavailable: no unique correlated projection receipt for request %s; the surface may have changed.\\n"
-            % request_id
-        )
-        sys.exit(2)
-    if os.environ.get("VC_FRAME_PROJECT_MALFORMED"):
-        print("{this is not a WorkspaceProjectionReceipt")
-        sys.exit(0)
-    if status == "Handled" and receipt_guest == guest:
-        os.makedirs(os.path.join(table, "projected"), exist_ok=True)
-        open(os.path.join(table, "projected", guest), "w").write("1")
-    print(json.dumps(receipt, separators=(",", ":")))
-    forced = os.environ.get("VC_FRAME_PROJECT_EXIT")
-    if forced:
-        sys.exit(int(forced))
-    sys.exit(0 if status == "Handled" and receipt_guest == guest else 2)
 
 sys.stderr.write(
     "error: Found argument '%s' which wasn't expected\\n" % (rest[0] if rest else "")
@@ -705,8 +558,7 @@ class Scene:
             elif name in guests:
                 body = "layout { pane; }\n"
             else:
-                # A projected host has replaced its workspace_surface
-                # placeholder but remains the singleton projection owner.
+                # Explicit Operator role is layout metadata, not its display name.
                 body = "layout { frame_host true; pane; }\n"
             (self.table / "live" / name).write_text(body, encoding="utf-8")
         for name in dead:
@@ -1210,47 +1062,18 @@ def _creates(calls: list[dict]) -> list[dict]:
     ]
 
 
-def _wait_for_projection(
-    scene: Scene, host: str, guest: str, wait: float = 8.0
-) -> dict:
-    """The guest projector runs detached after the host attach; poll its record."""
-    deadline = time.monotonic() + wait
-    while True:
-        handled = [
-            c
-            for c in _projects(scene.calls())
-            if c.get("projected") == [host, guest]
-            and (c.get("receipt") or {}).get("status") == "Handled"
-        ]
-        if handled:
-            return handled[0]
-        if time.monotonic() > deadline:
-            raise AssertionError(("no Handled projection", host, guest, scene.calls()))
-        time.sleep(0.1)
-
-
 def _assert_host_first(scene: Scene, guest: str) -> None:
-    """One host per machine: the host (no layout override or --guest-workspace) is
-    created before the workspace, which is always a guest (operator.kdl)."""
+    """Session 00 uses embedded chrome; every project keeps its full layout."""
     created = [c for c in scene.calls() if c.get("created")]
     names = [c["created"] for c in created]
     assert HOST_SESSION in names and guest in names, names
     host = created[names.index(HOST_SESSION)]
     workspace = created[names.index(guest)]
-    assert host["guest_workspace"] is False, host
+    assert "--guest-workspace" not in host["argv"], host
     assert host["layout"] is None, host
-    assert workspace["guest_workspace"] is True, workspace
+    assert "--guest-workspace" not in workspace["argv"], workspace
     assert Path(workspace["layout"]).name == "operator.kdl", workspace
     assert names.index(HOST_SESSION) < names.index(guest), names
-
-
-def _standalone_chrome_creates(calls: list[dict]) -> list[dict]:
-    """Create attempts that did not pass --guest-workspace (a second canvas)."""
-    return [
-        c
-        for c in calls
-        if "--create-background" in c["argv"] and "--guest-workspace" not in c["argv"]
-    ]
 
 
 def _attaches(calls: list[dict]) -> list[dict]:
@@ -1269,108 +1092,11 @@ def _projects(calls: list[dict]) -> list[dict]:
     ]
 
 
-def _workspace_projection_receipts(text: str) -> list[dict]:
-    """Collect WorkspaceProjectionReceipt objects from engine/launcher text.
-
-    fd14 prints one compact serde_json document; the stub now matches that
-    representation. Pretty and log-prefixed forms are accepted so a test can
-    feed the real function, not a Python mirror of its parser.
-    """
-    decoder = json.JSONDecoder()
-    rows: list[dict] = []
-    idx = 0
-    while idx < len(text):
-        while idx < len(text) and text[idx] not in "{[":
-            idx += 1
-        if idx >= len(text):
-            break
-        try:
-            obj, end = decoder.raw_decode(text, idx)
-        except json.JSONDecodeError:
-            idx += 1
-            continue
-        idx = end
-        candidates = obj if isinstance(obj, list) else [obj]
-        for item in candidates:
-            if (
-                isinstance(item, dict)
-                and "request_id" in item
-                and "guest" in item
-                and "status" in item
-            ):
-                rows.append(item)
-    return rows
-
-
 def _list_panes_payload(text: str):
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         return None
-
-
-def _pane_by_id(panes, pane_id, *, is_plugin: bool = False):
-    """Typed pane identity: terminal0 is not plugin0."""
-    if not isinstance(panes, list) or pane_id in (None, ""):
-        return None
-    want_plugin = bool(is_plugin)
-    for pane in panes:
-        if not isinstance(pane, dict):
-            continue
-        if pane.get("id") != pane_id:
-            continue
-        if bool(pane.get("is_plugin")) == want_plugin:
-            return pane
-    return None
-
-
-def _typed_terminal_rows(rows):
-    if not isinstance(rows, list):
-        return []
-    found = []
-    for pane in rows:
-        if not isinstance(pane, dict):
-            continue
-        if bool(pane.get("is_plugin")):
-            continue
-        if pane.get("id") in (None, ""):
-            continue
-        if pane.get("exited"):
-            continue
-        found.append(pane)
-    return found
-
-
-def _typed_write_chars(run, session: str, pane_id, text: str) -> None:
-    written = run(
-        "--session",
-        session,
-        "action",
-        "write-chars",
-        "--pane-id",
-        f"terminal_{pane_id}",
-        text,
-    )
-    submitted = run(
-        "--session",
-        session,
-        "action",
-        "send-keys",
-        "--pane-id",
-        f"terminal_{pane_id}",
-        "Enter",
-    )
-    assert written.returncode == 0, written.stdout + written.stderr
-    assert submitted.returncode == 0, submitted.stdout + submitted.stderr
-
-
-def _assert_pid_identity(path: Path, expected_pid: str, expected_identity: str) -> None:
-    assert path.read_text(encoding="utf-8").strip() == expected_pid, path
-    assert _pid_alive(path), expected_pid
-    assert _pid_file_start_identity(path) == expected_identity, (
-        expected_identity,
-        _pid_file_start_identity(path),
-    )
 
 
 def _destroys(calls: list[dict]) -> list[dict]:
@@ -1770,28 +1496,30 @@ def test_unreadable_inventory_refuses_instead_of_creating(
     assert scene.terminal_launches(wait=0.5) == []
 
 
-def test_unreadable_host_role_names_the_session_in_the_refusal(
+def test_unreadable_default_operator_role_refuses_before_project_create(
     tmp_path: Path,
 ) -> None:
-    """A live session whose materialized layout cannot be read has no provable
-    role. Start refuses (a duplicate host cannot be ruled out) and says which
-    session and which probe failed -- never "unknown reason"."""
-    scene = Scene(tmp_path, project="mlx-batch-runner", live=("host-a",))
-    (scene.table / "live" / "host-a").write_text("", encoding="utf-8")
+    scene = Scene(tmp_path, live=(HOST_SESSION,))
+    (scene.table / "live" / HOST_SESSION).write_text("")
     result = _run(scene, "vc-start")
-
     assert _rc(result) == EXIT_INVENTORY, result.stdout + result.stderr
-    err = result.stderr
-    assert (
-        "could not read the live vc-frame session inventory "
-        "(the runtime role of live session host-a is unreadable"
-    ) in err, err
-    assert "action dump-layout" in err, err
-    assert "unknown reason" not in err, err
-    assert "refusing to create mlx-batch-runner" in err, err
+    assert HOST_SESSION in result.stderr and "role:" in result.stderr
     _assert_nothing_mutated(scene.calls())
-    assert scene.live() == ["host-a"]
-    assert scene.terminal_launches(wait=0.5) == []
+    assert scene.terminal_launches(wait=0.1) == []
+
+
+def test_unrelated_session_role_is_not_a_project_entry_prerequisite(
+    tmp_path: Path,
+) -> None:
+    scene = Scene(tmp_path, live=(HOST_SESSION, "unrelated"))
+    (scene.table / "live" / "unrelated").write_text("")
+    result = _run(scene, "vc-start")
+    assert _rc(result) == 0, result.stdout + result.stderr
+    assert (scene.table / "live" / "unrelated").read_text() == ""
+    assert not any(
+        c["argv"] == ["--session", "unrelated", "action", "dump-layout"]
+        for c in scene.calls()
+    )
 
 
 @pytest.mark.parametrize(
@@ -1829,31 +1557,11 @@ def test_session_role_uses_declared_identity_not_display_strings(
 def test_unparsable_live_role_warns_and_blocks_duplicate_host(
     tmp_path: Path, layout: str
 ) -> None:
-    scene = Scene(tmp_path, live=("old-operator",))
-    (scene.table / "live" / "old-operator").write_text(layout, encoding="utf-8")
+    scene = Scene(tmp_path, live=(HOST_SESSION,))
+    (scene.table / "live" / HOST_SESSION).write_text(layout, encoding="utf-8")
     result = _run(scene, "vc-start")
     assert _rc(result) == EXIT_INVENTORY, result
-    assert "WARN:" in result.stderr and "old-operator" in result.stderr
-    _assert_nothing_mutated(scene.calls())
-
-
-def test_legacy_role_from_mixed_shell_generation_is_not_silently_skipped(
-    tmp_path: Path,
-) -> None:
-    scene = Scene(tmp_path, live=("old-operator",))
-    result = _eval_start_fn(
-        '_vetcoders_start_session_projection_role() { printf "legacy\\n"; }\n'
-        "_vetcoders_start_resolve_inventory_host new-project",
-        extra_env=scene.env(
-            {
-                "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
-                "VIBECRAFTED_VC_FRAME_BIN": str(scene.generation / "bin" / "vc-frame"),
-            }
-        ),
-    )
-    assert "RC=[2]" in result.stdout, result
-    assert "WARN:" in result.stderr and "old-operator" in result.stderr
-    assert "legacy" in result.stderr
+    assert "role: unknown" in result.stderr and HOST_SESSION in result.stderr
     _assert_nothing_mutated(scene.calls())
 
 
@@ -1942,7 +1650,7 @@ def test_same_basename_from_a_different_repository_is_a_conflict_with_a_rename_o
     third = _run(scene, "vc-start mlx-b", cwd=repo_b)
     assert _rc(third) == 0, third.stderr
     assert scene.workspaces() == ["mlx", "mlx-b"]
-    # One host for both: the second workspace joins it as a guest.
+    # One Operator session remains available alongside both projects.
     assert [c["created"] for c in scene.calls() if c.get("created")].count(
         HOST_SESSION
     ) == 1
@@ -1995,52 +1703,200 @@ def _inside_host_env(scene: Scene, host: str = "other-place") -> dict[str, str]:
     }
 
 
-def _assert_projected_into_host(
-    scene: Scene, *, host: str, guest: str, result: subprocess.CompletedProcess[str]
-) -> dict:
-    combined = result.stdout + result.stderr
-    assert "created workspace " + guest in combined, combined
-    assert "projected workspace " + guest in combined, combined
-    receipts = _workspace_projection_receipts(result.stdout)
-    assert len(receipts) == 1, result.stdout
-    receipt = receipts[0]
-    assert receipt.get("status") == "Handled", receipt
-    assert receipt.get("guest") == guest, receipt
-    assert receipt.get("pane_id") not in (None, ""), receipt
-    assert str(receipt.get("request_id") or "").strip(), receipt
-    assert "confirmed by host list-panes" not in combined
-    assert not _switches(scene.calls()), scene.calls()
-    assert not _attaches(scene.calls()), scene.calls()
-    assert scene.terminal_launches(wait=0.3) == []
-    projects = _projects(scene.calls())
-    assert projects, scene.calls()
-    argv = projects[-1]["argv"]
-    assert argv[argv.index("--session") + 1] == host, argv
-    assert "project-workspace" in argv and guest in argv
-    assert host != guest
-    assert argv[argv.index("--session") + 1] != guest
-    recorded = projects[-1].get("receipt") or {}
-    assert recorded.get("pane_id") == receipt.get("pane_id"), (recorded, receipt)
-    guest_creates = [
+def _assert_peer_switch(scene: Scene, current: str, project: str) -> None:
+    calls = scene.calls()
+    switches = _switches(calls)
+    request = next(c for c in switches if not c.get("switched"))
+    assert request["argv"] == [
+        "--session",
+        current,
+        "action",
+        "switch-session",
+        project,
+    ], request
+    assert request["VC_FRAME_SESSION_NAME"] == current, request
+    assert request["VC_FRAME_PANE_ID"] == "2", request
+    assert request["VC_FRAME_SOCKET_DIR"], request
+    created = next(c for c in calls if c.get("created") == project)
+    assert "--guest-workspace" not in created["argv"], created
+    selected = Path(created["layout"])
+    assert selected.name == "operator.kdl"
+    assert (scene.table / "live" / project).read_text() == selected.read_text()
+    assert not _attaches(calls), calls
+    assert not _projects(calls), calls
+    assert not any("list-clients" in c["argv"] for c in calls), calls
+    assert scene.terminal_launches(wait=0.1) == []
+
+
+@pytest.mark.parametrize("tty", [False, True])
+@pytest.mark.parametrize("current", [HOST_SESSION, "project-a"])
+def test_peer_start_keeps_existing_session_contents_with_multiple_clients(
+    tmp_path: Path, tty: bool, current: str
+) -> None:
+    scene = Scene(
+        tmp_path,
+        live=(HOST_SESSION, "project-a"),
+        clients=(HOST_SESSION, HOST_SESSION, "project-a", "project-a"),
+        guests=("project-a",),
+    )
+    before = {p.name: p.read_bytes() for p in (scene.table / "live").iterdir()}
+    result = _run(
+        scene,
+        "vc-start",
+        tty=tty,
+        developer_root=True,
+        extra_env=_inside_host_env(scene, current),
+    )
+    assert _rc(result) == 0, result.stdout + result.stderr
+    _assert_peer_switch(scene, current, "mlx-batch-runner")
+    for name, content in before.items():
+        assert (scene.table / "live" / name).read_bytes() == content
+    assert len(_creates(scene.calls())) == 1
+
+
+@pytest.mark.parametrize(
+    "entry", ["vc-start operator", f"{shlex.quote(str(DECK))} start"]
+)
+def test_peer_public_aliases_share_native_switch(tmp_path: Path, entry: str) -> None:
+    scene = Scene(tmp_path, live=(HOST_SESSION,), clients=(HOST_SESSION,) * 2)
+    result = _run(
+        scene,
+        entry,
+        developer_root=True,
+        extra_env=_inside_host_env(scene, HOST_SESSION),
+    )
+    assert _rc(result) == 0, result.stdout + result.stderr
+    _assert_peer_switch(scene, HOST_SESSION, "mlx-batch-runner")
+
+
+@pytest.mark.parametrize("tty", [False, True])
+def test_external_peer_entry_allows_busy_operator_and_project_sessions(
+    tmp_path: Path, tty: bool
+) -> None:
+    scene = Scene(
+        tmp_path,
+        live=(HOST_SESSION, "project-a"),
+        clients=(HOST_SESSION,) * 2 + ("project-a",) * 2,
+        guests=("project-a",),
+    )
+    result = _run(
+        scene,
+        "vc-start",
+        tty=tty,
+        developer_root=tty,
+        extra_env={
+            "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
+            "VIBECRAFTED_VC_FRAME_BIN": str(scene.generation / "bin" / "vc-frame"),
+        }
+        if tty
+        else None,
+    )
+    assert _rc(result) == 0, result.stdout + result.stderr
+    assert len(_creates(scene.calls())) == 1
+    assert not _projects(scene.calls())
+    assert not _switches(scene.calls())
+    assert not any("list-clients" in c["argv"] for c in scene.calls())
+    if tty:
+        assert [c["attached"] for c in _attaches(scene.calls())] == ["mlx-batch-runner"]
+    else:
+        assert scene.terminal_launches()[0]["created"] == "mlx-batch-runner"
+
+
+def test_peer_start_preserves_customized_layout_and_full_chrome(tmp_path: Path) -> None:
+    scene = Scene(tmp_path)
+    layout = scene.config_dir / "layouts" / "operator.kdl"
+    content = (
+        'layout { session_layer { pane { plugin location="frame-host"; } } '
+        'tab name="Custom" { pane; } }\n'
+    )
+    layout.write_text(content)
+    result = _run(scene, "vc-start")
+    assert _rc(result) == 0, result.stdout + result.stderr
+    created = next(c for c in scene.calls() if c.get("created") == "mlx-batch-runner")
+    assert "--guest-workspace" not in created["argv"]
+    assert (scene.table / "live" / "mlx-batch-runner").read_text() == content
+
+
+def test_peer_switch_failure_keeps_created_project_without_fallback(
+    tmp_path: Path,
+) -> None:
+    scene = Scene(tmp_path, live=(HOST_SESSION,), clients=(HOST_SESSION,) * 2)
+    env = _inside_host_env(scene, HOST_SESSION)
+    env["VC_FRAME_SWITCH_ERROR"] = "ambiguous caller: two clients share this pane"
+    result = _run(scene, "vc-start", developer_root=True, extra_env=env)
+    assert _rc(result) != 0, result.stdout + result.stderr
+    assert env["VC_FRAME_SWITCH_ERROR"] in result.stderr
+    assert "entry into mlx-batch-runner failed (exit 2)" in result.stderr
+    assert "Retry with: vc-frame attach mlx-batch-runner" in result.stderr
+    assert scene.live() == ["mlx-batch-runner", HOST_SESSION]
+    assert not any(c.get("switched") for c in scene.calls())
+    assert not _attaches(scene.calls()) and not _projects(scene.calls())
+    assert not _destroys(scene.calls())
+    assert scene.terminal_launches(wait=0.1) == []
+
+
+def test_lobby_preserves_legacy_project_and_enters_recovered_operator(
+    tmp_path: Path,
+) -> None:
+    scene = Scene(tmp_path, live=(HOST_SESSION,), guests=(HOST_SESSION,))
+    lobby = scene.home / ".vibecrafted" / "projects"
+    lobby.mkdir(parents=True)
+    before = (scene.table / "live" / HOST_SESSION).read_bytes()
+    result = _run(
+        scene,
+        "vc-start",
+        cwd=lobby,
+        tty=True,
+        developer_root=True,
+        extra_env={
+            "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
+            "VIBECRAFTED_VC_FRAME_BIN": str(scene.generation / "bin" / "vc-frame"),
+        },
+    )
+    assert _rc(result) == 0, result.stdout + result.stderr
+    assert (scene.table / "live" / HOST_SESSION).read_bytes() == before
+    assert [c["attached"] for c in _attaches(scene.calls())] == ["vc-host-recovered"]
+    assert scene.live() == [HOST_SESSION, "vc-host-recovered"]
+    assert not _destroys(scene.calls())
+
+
+@pytest.mark.parametrize("resurrect", [False, True])
+def test_operator_creation_does_not_inherit_project_identity(
+    tmp_path: Path, resurrect: bool
+) -> None:
+    scene = Scene(
+        tmp_path,
+        live=("project-a",),
+        guests=("project-a",),
+        dead=(HOST_SESSION,) if resurrect else (),
+    )
+    if resurrect:
+        (scene.table / "dead" / HOST_SESSION).write_text(
+            "layout { frame_host true; pane; }\n"
+        )
+    result = _run(
+        scene,
+        "vc-start",
+        developer_root=True,
+        extra_env=_inside_host_env(scene, "project-a"),
+    )
+    assert _rc(result) == 0, result.stdout + result.stderr
+    operator = next(
         c
         for c in scene.calls()
-        if c.get("created") == guest and c.get("guest_workspace") is True
-    ]
-    assert guest_creates, scene.calls()
-    assert "--guest-workspace" in guest_creates[0]["argv"]
-    guest_argv = guest_creates[0]["argv"]
-    assert "--new-session-with-layout" in guest_argv
-    selected = guest_argv[guest_argv.index("--new-session-with-layout") + 1]
-    assert selected != "vibecrafted"
-    assert Path(selected).is_file(), selected
-    selected_text = Path(selected).read_text(encoding="utf-8")
-    assert "layout {" in selected_text
-    recorded_layout = guest_creates[0].get("layout")
-    if recorded_layout:
-        assert recorded_layout == selected
-    live_blob = (scene.table / "live" / guest).read_text(encoding="utf-8")
-    assert live_blob == selected_text
-    return projects[-1]
+        if c.get("created") == HOST_SESSION or c.get("resurrected") == HOST_SESSION
+    )
+    project = next(c for c in scene.calls() if c.get("created") == "mlx-batch-runner")
+    assert all(value is None for value in operator["workspace_identity"].values()), (
+        operator
+    )
+    assert (
+        project["workspace_identity"]["VIBECRAFTED_WORKSPACE_ID"]
+        == "ws-mlx-batch-runner"
+    )
+    assert project["workspace_identity"]["VIBECRAFTED_WORKSPACE_ROOT"] == str(
+        scene.root.resolve()
+    )
 
 
 # --------------------------------------------------------------------------
@@ -2050,33 +1906,26 @@ def _assert_projected_into_host(
 
 
 @pytest.mark.parametrize("shell", ["bash", "zsh"])
-def test_no_tty_inside_an_attached_frame_creates_guest_and_projects(
-    tmp_path: Path, shell: str
+@pytest.mark.parametrize("client_count", [1, 2, 3])
+def test_no_tty_inside_attached_frame_creates_peer_and_switches(
+    tmp_path: Path, shell: str, client_count: int
 ) -> None:
-    """Agent-tool P0: markers present, host live and watched, no TTY.
-    Shared-canvas create+project — not a nested terminal and not switch-session."""
     scene = Scene(
         tmp_path,
-        project="mlx-batch-runner",
-        live=("other-place",),
-        clients=("other-place",),
+        live=(HOST_SESSION, "other-place"),
+        clients=("other-place",) * client_count,
+        guests=("other-place",),
     )
-    env = _inside_host_env(scene)
-    env["VC_FRAME_PANE_ID"] = "7"
-    env["VIBECRAFTED_OPERATOR_SESSION"] = "other-place"
     result = _run(
         scene,
         "vc-start",
         shell=shell,
         developer_root=True,
-        extra_env=env,
+        extra_env=_inside_host_env(scene),
     )
-
     assert _rc(result) == 0, result.stdout + result.stderr
-    _assert_projected_into_host(
-        scene, host="other-place", guest="mlx-batch-runner", result=result
-    )
-    assert scene.live() == ["mlx-batch-runner", "other-place"]
+    _assert_peer_switch(scene, "other-place", "mlx-batch-runner")
+    assert scene.live() == ["mlx-batch-runner", "other-place", HOST_SESSION]
 
 
 def test_the_terminal_child_enters_the_session_its_parent_created(
@@ -2178,7 +2027,7 @@ def test_rejected_terminal_host_is_reported_and_the_workspace_is_named(
 
 
 # --------------------------------------------------------------------------
-# 6. TTY entry: attach outside a frame; project a guest inside one
+# 6. TTY entry: direct project attachment outside Frame
 # --------------------------------------------------------------------------
 
 
@@ -2205,16 +2054,16 @@ def test_tty_outside_a_frame_creates_and_attaches_without_a_terminal(
     calls = scene.calls()
     assert len(_creates(calls)) == 2
     attaches = _attaches(calls)
-    # The client enters the HOST; the workspace arrives in it as a guest.
+    # The external client attaches directly to its ordinary project session.
     assert len(attaches) == 1 and attaches[0]["stdin_tty"] is True, calls
-    assert attaches[0]["attached"] == HOST_SESSION, attaches[0]
+    assert attaches[0]["attached"] == "mlx-batch-runner", attaches[0]
     assert attaches[0]["VC_FRAME_SESSION_NAME"] is None, attaches[0]
     assert not _switches(calls)
     assert scene.terminal_launches(wait=0.5) == []
     assert calls.index(_creates(calls)[-1]) < calls.index(attaches[0]), (
         "attach before create"
     )
-    _wait_for_projection(scene, HOST_SESSION, "mlx-batch-runner")
+    assert not _projects(scene.calls())
     binds = [c for c in scene.owner_calls() if "session-attach" in c]
     assert any(
         "--state live" in b and "--runtime-session-id mlx-batch-runner" in b
@@ -2222,807 +2071,6 @@ def test_tty_outside_a_frame_creates_and_attaches_without_a_terminal(
     ), binds
     # The catalogue's own label never becomes the Frame name.
     assert not any("catalog-" in n for n in scene.live()), scene.live()
-
-
-@pytest.mark.parametrize("tty", [False, True])
-def test_outside_caller_with_live_host_gets_no_standalone_chrome(
-    tmp_path: Path, tty: bool
-) -> None:
-    """A live product host already occupies the canvas. An outside vc-start
-    (no attached Frame env) must not raise a second operator.kdl chrome
-    session — it projects a guest into that host and names the host."""
-    scene = Scene(
-        tmp_path,
-        project="mlx-batch-runner",
-        live=("other-place",),
-        clients=("other-place",),
-    )
-    result = _run(
-        scene,
-        "vc-start",
-        tty=tty,
-        developer_root=True,
-        extra_env={
-            "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
-            "VIBECRAFTED_VC_FRAME_BIN": str(scene.generation / "bin" / "vc-frame"),
-        },
-    )
-    combined = result.stdout + result.stderr
-    if tty:
-        assert "RC=[0]" in result.stdout, combined
-    else:
-        assert _rc(result) == 0, combined
-    _assert_projected_into_host(
-        scene, host="other-place", guest="mlx-batch-runner", result=result
-    )
-    assert "live host other-place" in combined or "into host other-place" in combined, (
-        combined
-    )
-    assert not _standalone_chrome_creates(scene.calls()), scene.calls()
-    assert scene.terminal_launches(wait=0.5) == []
-    assert scene.live() == ["mlx-batch-runner", "other-place"]
-    assert not _attaches(scene.calls()), scene.calls()
-    assert not _switches(scene.calls()), scene.calls()
-
-
-def test_outside_caller_refuses_two_hosts_including_legacy_operator(
-    tmp_path: Path,
-) -> None:
-    scene = Scene(
-        tmp_path,
-        project="mlx-batch-runner",
-        live=("legacy-operator", "product-host"),
-        clients=("legacy-operator", "product-host"),
-        legacy=("legacy-operator",),
-    )
-    result = _run(
-        scene,
-        "vc-start",
-        tty=True,
-        developer_root=True,
-        extra_env={
-            "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
-            "VIBECRAFTED_VC_FRAME_BIN": str(scene.generation / "bin" / "vc-frame"),
-        },
-    )
-    assert _rc(result) == EXIT_INVENTORY, result.stdout + result.stderr
-    assert "live Frame host already exists" in result.stdout + result.stderr
-    _assert_nothing_mutated(scene.calls())
-
-
-@pytest.mark.parametrize("shell", ["bash", "zsh"])
-@pytest.mark.parametrize("tty", [False, True])
-def test_only_legacy_operator_is_adopted_without_second_host(
-    tmp_path: Path,
-    shell: str,
-    tty: bool,
-) -> None:
-    scene = Scene(
-        tmp_path,
-        project="mlx-batch-runner",
-        live=("legacy-operator",),
-        clients=("legacy-operator",),
-        legacy=("legacy-operator",),
-    )
-    result = _run(
-        scene,
-        "vc-start",
-        tty=tty,
-        shell=shell,
-        developer_root=True,
-        extra_env={
-            "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
-            "VIBECRAFTED_VC_FRAME_BIN": str(scene.generation / "bin" / "vc-frame"),
-        },
-    )
-    assert "RC=[0]" in result.stdout, result.stdout + result.stderr
-    _assert_projected_into_host(
-        scene, host="legacy-operator", guest="mlx-batch-runner", result=result
-    )
-    assert len(_creates(scene.calls())) == 1, scene.calls()
-    assert not _standalone_chrome_creates(scene.calls()), scene.calls()
-    assert scene.live() == ["legacy-operator", "mlx-batch-runner"]
-    assert not _attaches(scene.calls()), scene.calls()
-
-
-@pytest.mark.parametrize(
-    "project", ["vibecrafted", "operator", "Workflow", "Research", "Vibecrafted"]
-)
-def test_repository_named_like_a_role_is_a_guest_of_the_one_host(
-    tmp_path: Path, project: str
-) -> None:
-    """Founder P0 (2026-09-23): one host, every workspace a guest. A repo
-    whose basename reads like a role or layout alias never becomes the host;
-    the host is a product identity created first."""
-    scene = Scene(tmp_path, project=project)
-    result = _run(
-        scene,
-        "vc-start",
-        tty=True,
-        developer_root=True,
-        extra_env={
-            "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
-            "VIBECRAFTED_VC_FRAME_BIN": str(scene.generation / "bin" / "vc-frame"),
-        },
-    )
-    assert "RC=[0]" in result.stdout, result.stdout + result.stderr
-    assert scene.workspaces() == [project], scene.live()
-    _assert_host_first(scene, project)
-    attaches = _attaches(scene.calls())
-    assert [a["attached"] for a in attaches] == [HOST_SESSION], attaches
-    _wait_for_projection(scene, HOST_SESSION, project)
-
-
-def test_the_host_name_is_not_a_workspace_name(tmp_path: Path) -> None:
-    scene = Scene(tmp_path, project="mlx-batch-runner")
-    result = _run(scene, "vc-start " + HOST_SESSION)
-    assert _rc(result) == EXIT_USAGE, result.stdout + result.stderr
-    assert "is the Frame host name" in result.stderr, result.stderr
-    assert scene.live() == [], scene.live()
-    assert scene.terminal_launches(wait=0.5) == []
-
-
-def test_resume_preserves_guest_under_host_name_and_creates_sibling_host(
-    tmp_path: Path,
-) -> None:
-    scene = Scene(
-        tmp_path,
-        project="mlx-batch-runner",
-        live=(HOST_SESSION,),
-        guests=(HOST_SESSION,),
-    )
-    result = _run(
-        scene,
-        "vc-start resume",
-        tty=True,
-        developer_root=True,
-        extra_env={
-            "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
-            "VIBECRAFTED_VC_FRAME_BIN": str(scene.generation / "bin/vc-frame"),
-        },
-    )
-    assert "RC=[0]" in result.stdout, result.stdout + result.stderr
-    assert HOST_SESSION in scene.live()
-    recovered = HOST_SESSION + "-recovered"
-    assert [a["attached"] for a in _attaches(scene.calls())] == [recovered]
-    _wait_for_projection(scene, recovered, "catalog-mlx-batch-runner-a1b2c3")
-    assert "vc-frame attach vc-host" in result.stdout + result.stderr
-    assert (
-        "vc-frame kill-session vc-host && vc-frame delete-session vc-host"
-        in result.stdout + result.stderr
-    )
-
-
-@pytest.mark.parametrize("tty", [False, True])
-def test_detached_host_is_entered_and_the_new_guest_opens_in_it(
-    tmp_path: Path, tty: bool
-) -> None:
-    """A live host nobody is looking at: no second host, no instruction-only
-    exit. The workspace is created as a guest and the caller enters the host
-    (TTY attach, or the terminal child), where the guest is projected."""
-    scene = Scene(tmp_path, project="mlx-batch-runner", live=(HOST_SESSION,))
-    if tty:
-        result = _run(
-            scene,
-            "vc-start",
-            tty=True,
-            developer_root=True,
-            extra_env={
-                "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
-                "VIBECRAFTED_VC_FRAME_BIN": str(scene.generation / "bin" / "vc-frame"),
-            },
-        )
-    else:
-        result = _run(scene, "vc-start")
-    combined = result.stdout + result.stderr
-    if tty:
-        assert "RC=[0]" in result.stdout, combined
-    else:
-        assert _rc(result) == 0, combined
-    created = [c for c in scene.calls() if c.get("created")]
-    assert [c["created"] for c in created] == ["mlx-batch-runner"], scene.calls()
-    assert created[0]["guest_workspace"] is True, created[0]
-    assert not _standalone_chrome_creates(scene.calls()), scene.calls()
-    assert scene.live() == ["mlx-batch-runner", HOST_SESSION]
-    if tty:
-        attaches = _attaches(scene.calls())
-        assert [a["attached"] for a in attaches] == [HOST_SESSION], attaches
-        _wait_for_projection(scene, HOST_SESSION, "mlx-batch-runner")
-    else:
-        launches = scene.terminal_launches()
-        assert len(launches) == 1, launches
-        assert launches[0]["created"] == "mlx-batch-runner", launches[0]
-
-
-@pytest.mark.parametrize("alias", ["dashboard", "marbles", "research", "workflow"])
-def test_layout_alias_respects_live_host(tmp_path: Path, alias: str) -> None:
-    """Layouts are always guests (Founder P0, 2026-09-23). A layout alias
-    with a live, viewed host becomes a guest projected into that host:
-    never a standalone chrome session, never a second client."""
-    scene = Scene(
-        tmp_path,
-        project="mlx-batch-runner",
-        live=("other-place",),
-        clients=("other-place",),
-    )
-    result = _run(
-        scene,
-        f"vc-dashboard {alias}",
-        extra_env={
-            "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
-            "VIBECRAFTED_VC_FRAME_BIN": str(scene.generation / "bin" / "vc-frame"),
-        },
-    )
-    combined = result.stdout + result.stderr
-    assert _rc(result) == 0, combined
-    assert not _standalone_chrome_creates(scene.calls()), scene.calls()
-    created = [c for c in scene.calls() if c.get("created")]
-    assert len(created) == 1 and created[0]["guest_workspace"] is True, created
-    assert Path(created[0]["layout"]).name == f"{alias}.kdl", created[0]
-    guest = created[0]["created"]
-    projects = _projects(scene.calls())
-    assert projects and projects[-1]["projected"] == ["other-place", guest], projects
-    assert "into host other-place" in combined, combined
-    assert not _attaches(scene.calls()), scene.calls()
-    assert not _switches(scene.calls()), scene.calls()
-    assert scene.terminal_launches(wait=0.5) == []
-
-
-@pytest.mark.parametrize("alias", ["dashboard", "marbles"])
-def test_layout_alias_without_a_host_creates_the_host_first(
-    tmp_path: Path, alias: str
-) -> None:
-    scene = Scene(tmp_path, project="mlx-batch-runner")
-    result = _run(
-        scene,
-        f"vc-dashboard {alias}",
-        tty=True,
-        developer_root=True,
-        extra_env={
-            "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
-            "VIBECRAFTED_VC_FRAME_BIN": str(scene.generation / "bin" / "vc-frame"),
-        },
-    )
-    assert "RC=[0]" in result.stdout, result.stdout + result.stderr
-    created = [c for c in scene.calls() if c.get("created")]
-    assert created[0]["created"] == HOST_SESSION, created
-    assert created[0]["guest_workspace"] is False, created[0]
-    assert created[0]["layout"] is None, created[0]
-    assert len(created) == 2 and created[1]["guest_workspace"] is True, created
-    assert Path(created[1]["layout"]).name == f"{alias}.kdl", created[1]
-    attaches = _attaches(scene.calls())
-    assert [a["attached"] for a in attaches] == [HOST_SESSION], attaches
-    _wait_for_projection(scene, HOST_SESSION, created[1]["created"])
-
-
-@pytest.mark.parametrize("legacy", [False, True])
-def test_tty_inside_an_attached_frame_projects_guest_no_nested_multiplexer(
-    tmp_path: Path,
-    legacy: bool,
-) -> None:
-    scene = Scene(
-        tmp_path,
-        project="mlx-batch-runner",
-        live=("other-place",),
-        clients=("other-place",),
-        legacy=("other-place",) if legacy else (),
-    )
-    result = _run(
-        scene,
-        "vc-start",
-        tty=True,
-        developer_root=True,
-        extra_env=_inside_host_env(scene),
-    )
-    assert "RC=[0]" in result.stdout, result.stdout + result.stderr
-    _assert_projected_into_host(
-        scene, host="other-place", guest="mlx-batch-runner", result=result
-    )
-    assert scene.live() == ["mlx-batch-runner", "other-place"]
-    assert "TARGET=[mlx-batch-runner]" in result.stdout
-
-
-def test_inside_non_host_session_refuses_before_guest_create(
-    tmp_path: Path,
-) -> None:
-    """Attached to a guest and the inventory has no live host: nothing to
-    project into. Name that topology and the next move. Do not create."""
-    scene = Scene(
-        tmp_path,
-        project="mlx-batch-runner",
-        live=("other-place",),
-        clients=("other-place",),
-        guests=("other-place",),
-    )
-    result = _run(
-        scene,
-        "vc-start",
-        tty=True,
-        developer_root=True,
-        extra_env=_inside_host_env(scene),
-    )
-    combined = result.stdout + result.stderr
-    assert _rc(result) == EXIT_INVENTORY, combined
-    assert "no live Frame host" in combined, combined
-    assert "vc-start --new-host" in combined, combined
-    assert "not a singleton Frame host" not in combined, combined
-    assert scene.live() == ["other-place"]
-    assert not _creates(scene.calls()), scene.calls()
-    assert not _projects(scene.calls()), scene.calls()
-
-
-def test_attached_guest_projects_new_workspace_into_live_singleton_host(
-    tmp_path: Path,
-) -> None:
-    """Founder P0 (2026-10-03): a shell attached to a guest, with one live
-    host in the inventory, is an ordinary dispatch. `vc-start --repo X`
-    creates guest X and projects it into that host. The attached guest is
-    not the canvas owner."""
-    scene = Scene(
-        tmp_path,
-        project="codescribe",
-        live=(HOST_SESSION, "vibecrafted"),
-        clients=(HOST_SESSION,),
-        guests=("vibecrafted",),
-    )
-    result = _run(
-        scene,
-        "vc-start --repo " + shlex.quote(str(scene.root)),
-        developer_root=True,
-        extra_env=_inside_host_env(scene, host="vibecrafted"),
-    )
-    assert _rc(result) == 0, result.stdout + result.stderr
-    _assert_projected_into_host(
-        scene, host=HOST_SESSION, guest="codescribe", result=result
-    )
-    assert not _switches(scene.calls()), scene.calls()
-    assert scene.live() == ["codescribe", HOST_SESSION, "vibecrafted"]
-    projected = _projects(scene.calls())[-1]["argv"]
-    assert projected[projected.index("--session") + 1] == HOST_SESSION
-    assert "vibecrafted" not in projected
-
-
-def test_attached_guest_refuses_several_live_hosts_before_create(
-    tmp_path: Path,
-) -> None:
-    """More than one live host is a real ambiguity, even when exactly one of
-    them has a client. A guest pane does not name the canvas."""
-    scene = Scene(
-        tmp_path,
-        project="codescribe",
-        live=(HOST_SESSION, "other-host", "vibecrafted"),
-        clients=(HOST_SESSION,),
-        guests=("vibecrafted",),
-    )
-    result = _run(
-        scene,
-        "vc-start --repo " + shlex.quote(str(scene.root)),
-        developer_root=True,
-        extra_env=_inside_host_env(scene, host="vibecrafted"),
-    )
-    combined = result.stdout + result.stderr
-    assert _rc(result) == EXIT_INVENTORY, combined
-    assert "ambiguous" in combined, combined
-    assert HOST_SESSION in combined and "other-host" in combined, combined
-    assert "project-workspace" in combined, combined
-    assert "not a singleton Frame host" not in combined, combined
-    assert scene.live() == ["other-host", HOST_SESSION, "vibecrafted"]
-    assert not _creates(scene.calls()), scene.calls()
-    assert not _projects(scene.calls()), scene.calls()
-
-
-def test_inside_host_refuses_older_frame_before_create(tmp_path: Path) -> None:
-    scene = Scene(
-        tmp_path,
-        project="mlx-batch-runner",
-        live=("other-place",),
-        clients=("other-place",),
-    )
-    env = _inside_host_env(scene)
-    env["VC_FRAME_NO_PROJECT_WORKSPACE"] = "1"
-    result = _run(scene, "vc-start", extra_env=env)
-    assert _rc(result) == EXIT_INVENTORY, result.stdout + result.stderr
-    assert "guest API" in result.stderr
-    assert scene.live() == ["other-place"]
-    _assert_nothing_mutated(scene.calls())
-
-
-def test_inside_host_refuses_stale_host_env_before_create(tmp_path: Path) -> None:
-    scene = Scene(
-        tmp_path,
-        project="mlx-batch-runner",
-        live=("decoy",),
-        clients=("decoy",),
-    )
-    result = _run(
-        scene,
-        "vc-start",
-        extra_env=_inside_host_env(scene, host="ghost-host"),
-    )
-    assert _rc(result) == EXIT_INVENTORY, result.stdout + result.stderr
-    assert "attached owner" in result.stderr
-    assert scene.live() == ["decoy"]
-    _assert_nothing_mutated(scene.calls())
-
-
-def test_inside_host_refuses_ambiguous_clients_before_create(tmp_path: Path) -> None:
-    scene = Scene(
-        tmp_path,
-        project="mlx-batch-runner",
-        live=("other-place",),
-        clients=("other-place", "other-place"),
-    )
-    result = _run(scene, "vc-start", extra_env=_inside_host_env(scene))
-    assert _rc(result) == EXIT_INVENTORY, result.stdout + result.stderr
-    assert "exactly one attached client" in result.stderr
-    assert scene.live() == ["other-place"]
-    _assert_nothing_mutated(scene.calls())
-
-
-def test_inside_host_targets_attached_owner_not_repo_or_decoy(tmp_path: Path) -> None:
-    scene = Scene(
-        tmp_path,
-        project="mlx-batch-runner",
-        live=("other-place", "decoy"),
-        clients=("other-place",),
-    )
-    result = _run(
-        scene,
-        "vc-start",
-        developer_root=True,
-        extra_env=_inside_host_env(scene),
-    )
-    assert _rc(result) == 0, result.stdout + result.stderr
-    projected = _assert_projected_into_host(
-        scene, host="other-place", guest="mlx-batch-runner", result=result
-    )
-    argv = projected["argv"]
-    assert "decoy" not in argv
-    assert argv[argv.index("--session") + 1] != "mlx-batch-runner"
-    assert scene.live() == ["decoy", "mlx-batch-runner", "other-place"]
-
-
-def test_inside_host_created_but_not_projected_keeps_host_canvas(
-    tmp_path: Path,
-) -> None:
-    """Valid correlated Refused ACK may state unchanged. Unavailable is
-    unclassified — that path is the sibling negative below, not this case."""
-    scene = Scene(
-        tmp_path,
-        project="mlx-batch-runner",
-        live=("other-place",),
-        clients=("other-place",),
-    )
-    env = _inside_host_env(scene)
-    env["VC_FRAME_PROJECT_STATUS"] = "Refused"
-    result = _run(
-        scene,
-        "vc-start",
-        developer_root=True,
-        extra_env=env,
-    )
-    combined = result.stdout + result.stderr
-    assert _rc(result) == EXIT_INVENTORY, combined
-    assert "created but not projected" in result.stderr
-    assert "previous canvas was left unchanged" in result.stderr
-    assert "not known to be unchanged" not in result.stderr
-    assert "projected workspace mlx-batch-runner" not in combined
-    receipts = _workspace_projection_receipts(combined)
-    assert receipts and receipts[0].get("status") == "Refused", combined
-    assert not _switches(scene.calls())
-    assert scene.live() == ["mlx-batch-runner", "other-place"]
-    assert any(c.get("created") == "mlx-batch-runner" for c in scene.calls())
-
-
-def test_inside_host_unavailable_receipt_does_not_claim_unchanged(
-    tmp_path: Path,
-) -> None:
-    """A well-formed Unavailable receipt is indeterminate, not a confirmed
-    refusal. The launcher must not imply unchanged or success."""
-    scene = Scene(
-        tmp_path,
-        project="mlx-batch-runner",
-        live=("other-place",),
-        clients=("other-place",),
-    )
-    env = _inside_host_env(scene)
-    env["VC_FRAME_PROJECT_STATUS"] = "Unavailable"
-    result = _run(
-        scene,
-        "vc-start",
-        developer_root=True,
-        extra_env=env,
-    )
-    combined = result.stdout + result.stderr
-    assert _rc(result) == EXIT_INVENTORY, combined
-    assert "created workspace mlx-batch-runner" in combined
-    assert "not confirmed" in result.stderr
-    assert "not known to be unchanged" in result.stderr
-    assert "created but not projected" not in result.stderr
-    assert "previous canvas was left unchanged" not in result.stderr
-    assert "projected workspace mlx-batch-runner" not in combined
-    receipts = _workspace_projection_receipts(combined)
-    assert receipts and receipts[0].get("status") == "Unavailable", combined
-    assert not _switches(scene.calls())
-    assert scene.live() == ["mlx-batch-runner", "other-place"]
-
-
-def test_inside_host_does_not_treat_pipe_exit_as_adoption(tmp_path: Path) -> None:
-    scene = Scene(
-        tmp_path,
-        project="mlx-batch-runner",
-        live=("other-place",),
-        clients=("other-place",),
-    )
-    env = _inside_host_env(scene)
-    env["VC_FRAME_PROJECT_NO_RECEIPT"] = "1"
-    result = _run(
-        scene,
-        "vc-start",
-        developer_root=True,
-        extra_env=env,
-    )
-    assert _rc(result) == EXIT_INVENTORY, result.stdout + result.stderr
-    combined = result.stdout + result.stderr
-    assert "created workspace mlx-batch-runner" in combined
-    assert not [
-        receipt
-        for receipt in _workspace_projection_receipts(combined)
-        if receipt.get("status") == "Handled"
-    ], combined
-    assert "projected workspace mlx-batch-runner" not in combined
-    assert scene.live() == ["mlx-batch-runner", "other-place"]
-
-
-def test_inside_host_malformed_ack_does_not_claim_unchanged_without_owner(
-    tmp_path: Path,
-) -> None:
-    """Parse failure is not proof the canvas stayed put. Drift the owner
-    list-panes so reconcile cannot attest identity, and refuse the
-    unchanged guarantee."""
-    scene = Scene(
-        tmp_path,
-        project="mlx-batch-runner",
-        live=("other-place",),
-        clients=("other-place",),
-    )
-    env = _inside_host_env(scene)
-    env["VC_FRAME_PROJECT_MALFORMED"] = "1"
-    env["VC_FRAME_PANES_DRIFT"] = "1"
-    result = _run(
-        scene,
-        "vc-start",
-        developer_root=True,
-        extra_env=env,
-    )
-    assert _rc(result) == EXIT_INVENTORY, result.stdout + result.stderr
-    assert "not confirmed" in result.stderr
-    assert "not known to be unchanged" in result.stderr
-    assert "previous canvas was left unchanged" not in result.stderr
-    assert scene.live() == ["mlx-batch-runner", "other-place"]
-
-
-def test_inside_host_guest_named_pane_is_not_projection_proof(
-    tmp_path: Path,
-) -> None:
-    """list-panes has no public guest binding. A pane titled the guest, or a
-    command that echoes the guest, must not certify a missing ACK."""
-    scene = Scene(
-        tmp_path,
-        project="mlx-batch-runner",
-        live=("other-place",),
-        clients=("other-place",),
-    )
-    env = _inside_host_env(scene)
-    env["VC_FRAME_PROJECT_MALFORMED"] = "1"
-    env["VC_FRAME_RECONCILE_GUEST"] = "mlx-batch-runner"
-    result = _run(
-        scene,
-        "vc-start",
-        developer_root=True,
-        extra_env=env,
-    )
-    combined = result.stdout + result.stderr
-    assert _rc(result) == EXIT_INVENTORY, combined
-    assert "projected workspace mlx-batch-runner" not in combined
-    assert "confirmed by host list-panes" not in combined
-    assert "not confirmed" in result.stderr
-    assert scene.live() == ["mlx-batch-runner", "other-place"]
-
-
-def test_inside_host_nonzero_engine_status_is_not_ordinary_success(
-    tmp_path: Path,
-) -> None:
-    """A Handled-looking body with a nonzero Frame exit is not adoption."""
-    scene = Scene(
-        tmp_path,
-        project="mlx-batch-runner",
-        live=("other-place",),
-        clients=("other-place",),
-    )
-    env = _inside_host_env(scene)
-    env["VC_FRAME_PROJECT_STATUS"] = "Handled"
-    env["VC_FRAME_PROJECT_EXIT"] = "2"
-    result = _run(
-        scene,
-        "vc-start",
-        developer_root=True,
-        extra_env=env,
-    )
-    combined = result.stdout + result.stderr
-    assert _rc(result) == EXIT_INVENTORY, combined
-    assert "projected workspace mlx-batch-runner" not in combined
-    assert "created workspace mlx-batch-runner" in combined
-    assert scene.live() == ["mlx-batch-runner", "other-place"]
-
-
-def test_inside_host_operator_layout_alias_projects(tmp_path: Path) -> None:
-    scene = Scene(
-        tmp_path,
-        project="mlx-batch-runner",
-        live=("other-place",),
-        clients=("other-place",),
-    )
-    result = _run(
-        scene,
-        "vc-start operator",
-        developer_root=True,
-        extra_env=_inside_host_env(scene),
-    )
-    assert _rc(result) == 0, result.stdout + result.stderr
-    _assert_projected_into_host(
-        scene, host="other-place", guest="mlx-batch-runner", result=result
-    )
-
-
-def test_inside_host_deck_start_projects(tmp_path: Path) -> None:
-    scene = Scene(
-        tmp_path,
-        project="mlx-batch-runner",
-        live=("other-place",),
-        clients=("other-place",),
-    )
-    result = _run(
-        scene,
-        f"{shlex.quote(str(DECK))} start --repo {shlex.quote(str(scene.root))}",
-        developer_root=True,
-        extra_env=_inside_host_env(scene),
-    )
-    assert _rc(result) == 0, result.stdout + result.stderr
-    _assert_projected_into_host(
-        scene, host="other-place", guest="mlx-batch-runner", result=result
-    )
-
-
-def test_two_concurrent_inside_host_starts_create_exactly_one_guest(
-    tmp_path: Path,
-) -> None:
-    scene = Scene(
-        tmp_path,
-        project="mlx-batch-runner",
-        live=("other-place",),
-        clients=("other-place",),
-    )
-    env = scene.env(_inside_host_env(scene))
-    script = _entry_script(scene, "vc-start", developer_root=True)
-    procs = [
-        subprocess.Popen(
-            _shell_argv("bash", script),
-            cwd=scene.cwd,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        for _ in range(2)
-    ]
-    outs = [p.communicate(timeout=120) for p in procs]
-    rcs = sorted(int(o[0].split("RC=[", 1)[1].split("]", 1)[0]) for o in outs)
-    assert rcs == [0, EXIT_EXISTS], outs
-    assert scene.live() == ["mlx-batch-runner", "other-place"]
-    assert not _switches(scene.calls())
-    created = [c for c in scene.calls() if c.get("created") == "mlx-batch-runner"]
-    assert len(created) == 1, scene.calls()
-    winner = next(o for o in outs if "RC=[0]" in o[0])
-    assert "projected workspace mlx-batch-runner" in winner[0] + winner[1]
-
-
-SHIPPED_OPERATOR_LAYOUT = (
-    REPO_ROOT
-    / "vibecrafted-core"
-    / "vibecrafted_core"
-    / "config"
-    / "vc-frame"
-    / "layouts"
-    / "operator.kdl"
-)
-
-
-def test_inside_host_guest_uses_shipped_operator_layout_content(
-    tmp_path: Path,
-) -> None:
-    scene = Scene(
-        tmp_path,
-        project="mlx-batch-runner",
-        live=("other-place",),
-        clients=("other-place",),
-    )
-    result = _run(
-        scene,
-        "vc-start",
-        developer_root=True,
-        extra_env=_inside_host_env(scene),
-    )
-    assert _rc(result) == 0, result.stdout + result.stderr
-    projected = _assert_projected_into_host(
-        scene, host="other-place", guest="mlx-batch-runner", result=result
-    )
-    guest_creates = [
-        c
-        for c in scene.calls()
-        if c.get("created") == "mlx-batch-runner" and c.get("guest_workspace") is True
-    ]
-    selected = Path(
-        guest_creates[0]["argv"][
-            guest_creates[0]["argv"].index("--new-session-with-layout") + 1
-        ]
-    )
-    assert selected.resolve() == SHIPPED_OPERATOR_LAYOUT.resolve()
-    text = selected.read_text(encoding="utf-8")
-    assert "session_layer" in text
-    assert "session-manager" in text
-    assert "VC Guest" in text or "pane_title" in text
-    assert (scene.table / "live" / "mlx-batch-runner").read_text(
-        encoding="utf-8"
-    ) == text
-    assert "--guest-workspace" in guest_creates[0]["argv"]
-    assert projected
-
-
-def test_guest_create_preserves_customized_selected_layout_marker(
-    tmp_path: Path,
-) -> None:
-    """Public start in developer mode selects shipped operator.kdl. The same
-    create owner must also pass a customized File through --guest-workspace
-    so Frame can strip session_layer from that content, not a builtin."""
-    scene = Scene(
-        tmp_path,
-        project="guest-layout",
-        live=("other-place",),
-        clients=("other-place",),
-    )
-    marker = "VC_START_LAYOUT_MARKER_" + uuid.uuid4().hex
-    layout = tmp_path / "custom-operator.kdl"
-    layout.write_text(
-        f"// {marker}\nlayout {{\n    session_layer {{\n        pane size=1\n    }}\n    pane\n}}\n",
-        encoding="utf-8",
-    )
-    frame = scene.generation / "bin" / "vc-frame"
-    result = _eval_start_fn(
-        f'_vetcoders_start_create_workspace_session "{frame}" guest-layout "{layout}" guest',
-        extra_env=scene.env(
-            {
-                "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
-                "VIBECRAFTED_VC_FRAME_BIN": str(frame),
-            }
-        ),
-        cwd=scene.root,
-    )
-    assert _rc(result) == 0, result.stdout + result.stderr
-    guest_creates = [
-        c
-        for c in scene.calls()
-        if c.get("created") == "guest-layout" and c.get("guest_workspace") is True
-    ]
-    assert guest_creates, scene.calls()
-    argv = guest_creates[0]["argv"]
-    assert "--guest-workspace" in argv
-    selected = Path(argv[argv.index("--new-session-with-layout") + 1])
-    assert selected.resolve() == layout.resolve()
-    assert marker in selected.read_text(encoding="utf-8")
-    assert marker in (scene.table / "live" / "guest-layout").read_text(encoding="utf-8")
-    assert "vibecrafted" not in argv[argv.index("--new-session-with-layout") + 1]
 
 
 @pytest.mark.parametrize("shell", ["bash", "zsh"])
@@ -3290,283 +2338,6 @@ def test_every_command_the_refusal_offers_exists_in_the_shipped_shell() -> None:
     }, offered
 
 
-def test_start_entry_owns_inside_host_projection_not_switch_session() -> None:
-    text = DASHBOARD_SH.read_text(encoding="utf-8")
-    entry = text.split("_vetcoders_start_entry()")[1]
-    assert "_vetcoders_start_inside_host_guest" in entry
-    assert "_vetcoders_start_maybe_join_outside_live_host" in entry
-    assert "action switch-session" not in entry
-    assert "_vetcoders_start_projection_receipt_ok" in text
-    assert "_vetcoders_start_classify_projection" in text
-    assert "_vetcoders_start_reconcile_host_projection" in text
-    assert "project-workspace" in text
-    enter = text.split("_vetcoders_start_enter_workspace_session()")[1].split("\n}\n")[
-        0
-    ]
-    assert "action switch-session" not in enter
-
-
-# --------------------------------------------------------------------------
-# 7b. function-level: execute the real shell parsers (compact ACK, no argv leak)
-# --------------------------------------------------------------------------
-
-_HANDLED_RECEIPT = {
-    "request_id": "pipe-1",
-    "client_id": 1,
-    "plugin_id": 2,
-    "guest": "mlx-batch-runner",
-    "tab": 0,
-    "pane_id": 9,
-    "status": "Handled",
-    "detail": "projected",
-}
-
-
-def test_start_resolve_host_tab_reads_real_list_tabs_json(tmp_path: Path) -> None:
-    """Pretty-printed TabInfo array on the engine's stdout. JSON is stdin
-    to python -c; putting the listing on python argv is the leak this
-    cut closes."""
-    fake = tmp_path / "vc-frame"
-    fake.write_text(
-        "#!/usr/bin/env python3\n"
-        "import json, sys\n"
-        "print(json.dumps([\n"
-        "    {\n"
-        '        "name": "Tab",\n'
-        '        "position": 1,\n'
-        '        "active": True,\n'
-        '        "tab_id": 1,\n'
-        '        "panes_to_hide": 0,\n'
-        '        "viewport_rows": 24,\n'
-        '        "viewport_columns": 80,\n'
-        "    }\n"
-        "], indent=2))\n",
-        encoding="utf-8",
-    )
-    fake.chmod(0o755)
-    result = _eval_start_fn(
-        "\n".join(
-            [
-                f'tab="$(_vetcoders_start_resolve_host_tab host {shlex.quote(str(fake))})"',
-                "fn_rc=$?",
-                'printf "TAB=[%s]\\n" "$tab"',
-                'printf "FN_RC=[%s]\\n" "$fn_rc"',
-            ]
-        )
-    )
-    assert "FN_RC=[0]" in result.stdout, result.stdout + result.stderr
-    assert "TAB=[2]" in result.stdout, result.stdout + result.stderr
-
-
-def test_start_projection_receipt_ok_accepts_real_handled_receipt() -> None:
-    compact = json.dumps(_HANDLED_RECEIPT, separators=(",", ":"))
-    pretty = json.dumps(_HANDLED_RECEIPT, indent=2)
-    for receipt in (compact, pretty):
-        result = _eval_start_fn(
-            "\n".join(
-                [
-                    f"_vetcoders_start_projection_receipt_ok {shlex.quote(receipt)} mlx-batch-runner 1",
-                    'printf "FN_RC=[%s]\\n" "$?"',
-                ]
-            )
-        )
-        assert "FN_RC=[0]" in result.stdout, receipt + result.stdout + result.stderr
-
-
-def test_start_projection_receipt_ok_rejects_refused_and_malformed() -> None:
-    refused = dict(_HANDLED_RECEIPT)
-    refused["status"] = "Refused"
-    refused["pane_id"] = None
-    for payload, guest, tab in (
-        (json.dumps(refused, separators=(",", ":")), "mlx-batch-runner", "1"),
-        ("{this is not a WorkspaceProjectionReceipt", "mlx-batch-runner", "1"),
-        (json.dumps(_HANDLED_RECEIPT, separators=(",", ":")), "someone-else", "1"),
-    ):
-        result = _eval_start_fn(
-            "\n".join(
-                [
-                    f"_vetcoders_start_projection_receipt_ok {shlex.quote(payload)} {guest} {tab}",
-                    'printf "FN_RC=[%s]\\n" "$?"',
-                ]
-            )
-        )
-        assert "FN_RC=[0]" not in result.stdout, (
-            payload,
-            result.stdout + result.stderr,
-        )
-        assert "FN_RC=[1]" in result.stdout, result.stdout + result.stderr
-
-
-def test_start_classify_projection_accepts_real_receipt_representations() -> None:
-    """Execute the shipped classifier. Compact is the fd14 emission; pretty
-    and log-prefixed must not be double-counted into indeterminate."""
-    compact = json.dumps(_HANDLED_RECEIPT, separators=(",", ":"))
-    pretty = json.dumps(_HANDLED_RECEIPT, indent=2)
-    prefixed = "vc-frame[host]: " + compact
-    cases = (
-        (compact, "handled"),
-        (pretty, "handled"),
-        (prefixed, "handled"),
-        (
-            json.dumps(
-                {**_HANDLED_RECEIPT, "status": "Refused", "pane_id": None},
-                separators=(",", ":"),
-            ),
-            "refused",
-        ),
-        (
-            "Refused: guest `gone` is missing. Zero process/pane mutation.\n",
-            "refused",
-        ),
-        (
-            "Unavailable: no unique correlated projection receipt for request x; the surface may have changed.\n",
-            "indeterminate",
-        ),
-        (
-            json.dumps(
-                {**_HANDLED_RECEIPT, "status": "Unavailable", "pane_id": None},
-                separators=(",", ":"),
-            ),
-            "indeterminate",
-        ),
-        ("{this is not a WorkspaceProjectionReceipt", "indeterminate"),
-        (compact + "\n" + compact, "indeterminate"),
-        (
-            compact
-            + "\n"
-            + json.dumps(
-                {**_HANDLED_RECEIPT, "request_id": "pipe-2"}, separators=(",", ":")
-            ),
-            "indeterminate",
-        ),
-        (
-            json.dumps(
-                {**_HANDLED_RECEIPT, "guest": "someone-else"}, separators=(",", ":")
-            ),
-            "indeterminate",
-        ),
-        (
-            json.dumps({**_HANDLED_RECEIPT, "tab": 4}, separators=(",", ":")),
-            "indeterminate",
-        ),
-        (
-            json.dumps({**_HANDLED_RECEIPT, "request_id": ""}, separators=(",", ":")),
-            "indeterminate",
-        ),
-    )
-    for text, expected in cases:
-        result = _eval_start_fn(
-            "\n".join(
-                [
-                    f'printf "CLASS=[%s]\\n" "$(_vetcoders_start_classify_projection {shlex.quote(text)} mlx-batch-runner 1)"',
-                ]
-            )
-        )
-        assert f"CLASS=[{expected}]" in result.stdout, (
-            expected,
-            text,
-            result.stdout + result.stderr,
-        )
-
-
-def test_start_reconcile_host_projection_ignores_guest_substrings() -> None:
-    """Unrelated title/command mentions are not Frame guest binding."""
-    guest = "mlx-batch-runner"
-    host_pane = {
-        "id": 3,
-        "title": guest,
-        "terminal_command": "echo " + guest,
-        "name": guest,
-        "cursor_coordinates_in_pane": [1, 1],
-    }
-    same = json.dumps([host_pane])
-    drifted = json.dumps(
-        [
-            {
-                **host_pane,
-                "cursor_coordinates_in_pane": [8, 4],
-                "title": "echo " + guest,
-            },
-            {
-                "id": 4,
-                "title": guest,
-                "terminal_command": "echo " + guest,
-            },
-        ]
-    )
-    cases = (
-        (same, same, "unchanged"),
-        (same, drifted, "unknown"),
-        ("", drifted, "unknown"),
-    )
-    for before, after, expected in cases:
-        result = _eval_start_fn(
-            "\n".join(
-                [
-                    f'printf "REC=[%s]\\n" "$(_vetcoders_start_reconcile_host_projection {shlex.quote(before)} {shlex.quote(after)} {guest})"',
-                ]
-            )
-        )
-        assert f"REC=[{expected}]" in result.stdout, (
-            expected,
-            result.stdout + result.stderr,
-        )
-        assert "REC=[projected]" not in result.stdout, result.stdout
-
-
-def test_start_parsers_keep_private_json_off_python_argv(tmp_path: Path) -> None:
-    secret = "private-pane-cmd-" + uuid.uuid4().hex
-    log = tmp_path / "python-argv.json"
-    real = shutil.which("python3")
-    assert real
-    spy = tmp_path / "spy-python"
-    spy.write_text(
-        "#!/usr/bin/env python3\n"
-        "import json, os, sys\n"
-        f"log = {str(log)!r}\n"
-        "try:\n"
-        "    prev = json.loads(open(log, encoding='utf-8').read())\n"
-        "except Exception:\n"
-        "    prev = []\n"
-        "prev.append(list(sys.argv[1:]))\n"
-        "open(log, 'w', encoding='utf-8').write(json.dumps(prev))\n"
-        f"os.execv({real!r}, [{real!r}] + sys.argv[1:])\n",
-        encoding="utf-8",
-    )
-    spy.chmod(0o755)
-    receipt = dict(_HANDLED_RECEIPT)
-    receipt["detail"] = secret
-    panes = json.dumps([{"id": 3, "title": "host", "terminal_command": secret}])
-    fake = tmp_path / "vc-frame"
-    fake.write_text(
-        "#!/usr/bin/env python3\n"
-        "import json\n"
-        "print(json.dumps([{"
-        '"name":"Tab","position":0,"active":True,"tab_id":0,'
-        '"panes_to_hide":0,"viewport_rows":24,"viewport_columns":80'
-        "}], indent=2))\n",
-        encoding="utf-8",
-    )
-    fake.chmod(0o755)
-    result = _eval_start_fn(
-        "\n".join(
-            [
-                f'printf "CLASS=[%s]\\n" "$(_vetcoders_start_classify_projection {shlex.quote(json.dumps(receipt, separators=(",", ":")))} mlx-batch-runner 1)"',
-                f'printf "REC=[%s]\\n" "$(_vetcoders_start_reconcile_host_projection {shlex.quote(panes)} {shlex.quote(panes)} mlx-batch-runner)"',
-                f'tab="$(_vetcoders_start_resolve_host_tab host {shlex.quote(str(fake))})"',
-                'printf "TAB=[%s]\\n" "$tab"',
-            ]
-        ),
-        extra_env={"VIBECRAFTED_PYTHON": str(spy)},
-    )
-    assert "CLASS=[handled]" in result.stdout, result.stdout + result.stderr
-    assert "REC=[unchanged]" in result.stdout, result.stdout + result.stderr
-    assert "TAB=[1]" in result.stdout, result.stdout + result.stderr
-    logged = json.loads(log.read_text(encoding="utf-8"))
-    blob = json.dumps(logged)
-    assert secret not in blob, logged
-
-
 # --------------------------------------------------------------------------
 # 8. native evidence: the REAL engine, isolated
 # --------------------------------------------------------------------------
@@ -3592,19 +2363,12 @@ def _installed_frame() -> Path | None:
 
 _REAL_FRAME = _installed_frame()
 
-_ADMITTED_FRAME_DEFAULT = Path(
-    "/Volumes/vc-workspace/vetcoders/vibecrafted-suite/vc-frame/target/release/vc-frame"
-)
-
 
 def _admitted_frame() -> Path | None:
-    """Donor fd14 public binary. Not the installed generation (may be older)."""
-    for candidate in (
-        os.environ.get("VC_FRAME_ADMITTED_BIN", ""),
-        str(_ADMITTED_FRAME_DEFAULT),
-    ):
-        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return Path(candidate)
+    """Explicit paired engine: an old installed projection build is not admission."""
+    candidate = os.environ.get("VC_FRAME_ADMITTED_BIN", "")
+    if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+        return Path(candidate)
     return None
 
 
@@ -3931,7 +2695,16 @@ with open(screen_path, "wb") as screen:
         sys.stderr.write("pty attach produced no output\n")
         sys.exit(2)
 
+    input_offset = 0
     while not os.path.exists(release_path):
+        keys_path = attached_path + ".keys"
+        if os.path.isfile(keys_path):
+            with open(keys_path, "rb") as keys:
+                keys.seek(input_offset)
+                pending = keys.read()
+            if pending:
+                os.write(fd, pending)
+                input_offset += len(pending)
         ready, _, _ = select.select([fd], [], [], 0.25)
         if ready:
             try:
@@ -3959,18 +2732,14 @@ except ChildProcessError:
 """
 
 
-# Persistent session_layer chrome is owned by plugin_url, not titles.
-# Real vibecrafted-host rails: vc-frame:link, vc-frame:vc-tab-title,
-# frame-host ("Sessions"). session-manager ("VC Guest") is the replaceable
-# workspace_surface placeholder, not chrome. A plugin title is rendered
-# asynchronously and legitimately starts out equal to the plugin name, so
-# identity is typed id + plugin_url + plugin_runtime_id + geometry.
+# Persistent peer-session chrome is identified by resolved plugin URLs.
+# Titles render asynchronously; runtime identity and geometry must survive
+# leaving/rejoining the session with another client still attached.
 _SESSION_LAYER_PLUGIN_URLS = (
     "vc-frame:link",
     "vc-frame:vc-tab-title",
     "frame-host",
 )
-_WORKSPACE_SURFACE_PLUGIN_URL = "session-manager"
 _SHORT_TEMP_ROOT = "/tmp"
 
 
@@ -4016,24 +2785,6 @@ def _session_layer_plugins(rows) -> dict[str, dict]:
     return _plugins_by_url(rows, _SESSION_LAYER_PLUGIN_URLS)
 
 
-def _workspace_surface_pane(rows):
-    """The workspace surface is the session-manager pane that shares the
-    frame-host's tab. The host's Home tab carries its own session-manager
-    (the dashboard), so plugin_url alone is ambiguous; tab identity is not."""
-    host = _plugins_by_url(rows, ("frame-host",)).get("frame-host")
-    if host is None or not isinstance(rows, list):
-        return None
-    for pane in rows:
-        if (
-            isinstance(pane, dict)
-            and bool(pane.get("is_plugin"))
-            and _pane_plugin_url(pane) == _WORKSPACE_SURFACE_PLUGIN_URL
-            and pane.get("tab_id") == host.get("tab_id")
-        ):
-            return pane
-    return None
-
-
 def _session_layer_geometry(rows) -> dict[str, tuple]:
     return {
         url: (
@@ -4058,20 +2809,8 @@ def _session_layer_ready(rows):
     return []
 
 
-def _host_chrome_ready(rows):
-    """Initial host: persistent session_layer plus the VC Guest placeholder."""
-    if not _session_layer_ready(rows):
-        return []
-    surface = _workspace_surface_pane(rows)
-    if surface is None:
-        return []
-    if surface.get("title") != "VC Guest":
-        return []
-    return rows
-
-
 def _assert_session_layer(rows, *, previous_geometry=None):
-    """Stable session-layer identity across every projection: exactly one
+    """Stable session-layer identity across peer-session switching: exactly one
     owner per plugin_url, each keeping its typed pane id, plugin_runtime_id
     and geometry. Plugin-rendered titles are never identity."""
     assert _session_layer_ready(rows), rows
@@ -4091,25 +2830,9 @@ def _assert_session_layer(rows, *, previous_geometry=None):
     return geometry
 
 
-def _assert_placeholder_present(rows) -> None:
-    surface = _workspace_surface_pane(rows)
-    assert surface is not None, rows
-    assert bool(surface.get("is_plugin")) is True, surface
-    assert surface.get("title") == "VC Guest", surface
-
-
-def _assert_placeholder_replaced(rows) -> None:
-    assert _workspace_surface_pane(rows) is None, rows
-
-
 def _exclusive_sandbox(prefix: str = "vcs-") -> Path:
     """Short exclusive socket-capable root. Default $TMPDIR is too long on macOS."""
     return Path(tempfile.mkdtemp(prefix=prefix, dir=_SHORT_TEMP_ROOT))
-
-
-def _short_token(prefix: str) -> str:
-    token = prefix + uuid.uuid4().hex
-    return token[:12]
 
 
 def _cli_frame_env(base: dict[str, str]) -> dict[str, str]:
@@ -4130,40 +2853,6 @@ def _cli_frame_env(base: dict[str, str]) -> dict[str, str]:
     return env
 
 
-def _pid_alive(path: Path) -> bool:
-    try:
-        pid = int(path.read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
-        return False
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
-
-
-def _process_start_identity(pid: int) -> str | None:
-    """Kernel start time plus command for one PID. A recycled PID differs."""
-    result = subprocess.run(
-        ["ps", "-p", str(pid), "-o", "pid=,lstart=,command="],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        return None
-    value = " ".join(result.stdout.split())
-    return value or None
-
-
-def _pid_file_start_identity(path: Path) -> str | None:
-    try:
-        pid = int(path.read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
-        return None
-    return _process_start_identity(pid)
-
-
 def _wait_until(probe, timeout: float = 20.0):
     deadline = time.monotonic() + timeout
     last = None
@@ -4175,685 +2864,176 @@ def _wait_until(probe, timeout: float = 20.0):
     return last
 
 
-def _count_list_clients(text: str) -> int:
-    header_seen = False
-    rows = 0
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        if not header_seen:
-            if line.startswith("CLIENT_ID"):
-                header_seen = True
-            continue
-        rows += 1
-    return rows
+@pytest.mark.skipif(
+    _ADMITTED_FRAME is None,
+    reason="set VC_FRAME_ADMITTED_BIN to the paired peer-session engine",
+)
+def test_admitted_frame_peer_keyboard_roundtrip_with_two_clients() -> None:
+    """Opt-in real PTY proof: two projects, two clients in A, Cmd navigation.
 
-
-@pytest.mark.skipif(_ADMITTED_FRAME is None, reason="admitted vc-frame binary missing")
-def test_admitted_frame_project_workspace_is_a_real_verb_not_a_stub() -> None:
-    """Help / unknown / missing-guest / self-project against the fd14 binary.
-
-    Isolated exclusive tempdir — never a PID-modulo path that is recursively
-    deleted if it already exists. No Founder session mutation.
+    No build/install is performed. This gate deliberately requires an explicit
+    engine artifact. Fixture tests above cannot certify these runtime claims.
     """
     assert _ADMITTED_FRAME is not None
-    bin_path = _ADMITTED_FRAME
-
-    def helptext(*args: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [str(bin_path), *args, "--help"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            stdin=subprocess.DEVNULL,
-        )
-
-    project_help = helptext("project-workspace")
-    assert project_help.returncode == 0, project_help.stderr
-    combined = project_help.stdout + project_help.stderr
-    assert "project-workspace" in combined
-    assert "--session" in combined
-    assert "--tab" in combined
-    top = helptext()
-    assert top.returncode == 0, top.stderr
-    assert "--guest-workspace" in top.stdout + top.stderr
-
-    bogus = subprocess.run(
-        [str(bin_path), "definitely-not-a-frame-verb"],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        stdin=subprocess.DEVNULL,
-    )
-    assert bogus.returncode != 0, "unknown verb must not be accepted"
-
-    sandbox = _exclusive_sandbox("vcs-v-")
-    sock = sandbox / "sock"
-    home = sandbox / "home"
-    sock.mkdir()
+    binary = str(_ADMITTED_FRAME)
+    sandbox = _exclusive_sandbox("vcs-peer-")
+    owned = [HOST_SESSION, "project-a", "project-b"]
+    ptys: list[tuple[subprocess.Popen[str], Path]] = []
+    home, sock = sandbox / "home", sandbox / "sock"
     home.mkdir()
-    host = _short_token("h")
-    guest = _short_token("g")
-    env = os.environ.copy()
-    _strip_identity_env(env)
+    sock.mkdir()
+    config = SOURCE_CORE_DIR / "vibecrafted_core" / "config" / "vc-frame"
+    env = _cli_frame_env(_strip_identity_env(os.environ.copy()))
     env.update(
         {
             "HOME": str(home),
-            "VC_FRAME_SOCKET_DIR": str(sock),
-            "ZELLIJ_SOCKET_DIR": str(sock),
+            "VIBECRAFTED_HOME": str(home / ".vibecrafted"),
             "XDG_CONFIG_HOME": str(home / "config"),
             "XDG_DATA_HOME": str(home / "data"),
-            "VC_FRAME_SERVER_FOREGROUND": "1",
+            "XDG_CACHE_HOME": str(home / "cache"),
+            "VC_FRAME_SOCKET_DIR": str(sock),
+            "ZELLIJ_SOCKET_DIR": str(sock),
+            "VC_FRAME_CONFIG_DIR": str(config),
+            "VC_FRAME_CONFIG_FILE": str(config / "config.kdl"),
         }
     )
-    cli_env = _cli_frame_env(env)
+    script = _write(home / "pty_attach.py", _PTY_ATTACH_PY)
 
-    def frame(*args: str, timeout: int = 40) -> subprocess.CompletedProcess[str]:
+    def frame(*args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [str(bin_path), *args],
+            [binary, *args],
             check=False,
-            env=cli_env,
+            env=env,
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
-            timeout=timeout,
+            timeout=40,
         )
 
-    owned = []
-    try:
-        missing_session = frame("project-workspace", guest)
-        assert missing_session.returncode != 0
-        assert "requires --session" in (missing_session.stdout + missing_session.stderr)
-
-        missing_guest = frame("--session", host, "project-workspace", guest)
-        assert missing_guest.returncode != 0
-        receipts = [
-            json.loads(line)
-            for line in missing_guest.stdout.splitlines()
-            if line.startswith("{")
+    def clients(session: str) -> list[str]:
+        result = frame("--session", session, "action", "list-clients")
+        assert result.returncode == 0, result.stderr
+        return [
+            line.split()[1]
+            for line in result.stdout.splitlines()
+            if line.strip() and not line.startswith("CLIENT_ID")
         ]
-        assert not [
-            r
-            for r in receipts
-            if r.get("status") == "Handled" and r.get("pane_id") not in (None, "")
-        ], missing_guest.stdout
 
-        owned.append(guest)
-        created = frame(
-            "--guest-workspace",
-            "--layout",
-            "vibecrafted-guest",
-            "attach",
-            "--create-background",
-            guest,
+    def panes(session: str) -> list[dict]:
+        result = frame(
+            "--session", session, "action", "list-panes", "--json", "--command"
         )
+        assert result.returncode == 0, result.stderr
+        parsed = _list_panes_payload(result.stdout)
+        assert isinstance(parsed, list), result.stdout
+        return parsed
+
+    def attach(token: str) -> Path:
+        attached, release = home / token, home / (token + ".release")
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                str(script),
+                binary,
+                "project-a",
+                str(attached),
+                str(release),
+            ],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        ptys.append((proc, release))
+        assert _wait_until(lambda: attached.exists() and proc.poll() is None, 30), token
+        return Path(str(attached) + ".keys")
+
+    def press(path: Path, sequence: bytes) -> None:
+        with path.open("ab") as handle:
+            handle.write(sequence)
+
+    try:
+        created = frame("attach", "--create-background", HOST_SESSION)
         assert created.returncode == 0, created.stderr
-        self_project = frame("--session", guest, "project-workspace", guest)
-        assert self_project.returncode != 0
-        assert "cannot project into itself" in (
-            self_project.stdout + self_project.stderr
+        for name in owned[1:]:
+            created = frame(
+                "--new-session-with-layout",
+                str(config / "layouts" / "operator.kdl"),
+                "attach",
+                "--create-background",
+                name,
+            )
+            assert created.returncode == 0, created.stderr
+        # Unique per-session tabs must remain confined to that session.
+        for name in owned[1:]:
+            created = frame(
+                "--session", name, "action", "new-tab", "--name", name + "-only"
+            )
+            assert created.returncode == 0, created.stderr
+        for name, other in (("project-a", "project-b"), ("project-b", "project-a")):
+            tabs = frame("--session", name, "action", "list-tabs", "--json")
+            assert tabs.returncode == 0, tabs.stderr
+            names = {tab["name"] for tab in json.loads(tabs.stdout)}
+            assert name + "-only" in names and other + "-only" not in names, names
+        first = attach("client-one")
+        attach("client-two")
+        assert _wait_until(lambda: len(clients("project-a")) == 2)
+        original = clients("project-a")
+        assert original[0] == original[1], original
+        # The exact bytes emitted by the shipped VC Terminal Cmd bindings.
+        press(first, b"\x1b[1;9C")
+        assert _wait_until(lambda: len(set(clients("project-a"))) == 2), clients(
+            "project-a"
+        )
+        selected = next(p for p in clients("project-a") if p != original[0])
+        baseline = {name: panes(name) for name in owned[1:]}
+        for rows in baseline.values():
+            assert _session_layer_ready(rows), rows
+            assert not any(
+                "--workspace-projection" in str(p.get("terminal_command", ""))
+                for p in rows
+            ), rows
+        press(first, b"\x1b[1;9D")
+        assert _wait_until(lambda: clients("project-a") == original)
+        press(first, b"\x1b[1;9C")
+        assert _wait_until(lambda: len(set(clients("project-a"))) == 2)
+        before_switch = clients("project-a")
+        press(first, b"\x1b[1;9B")
+        assert _wait_until(
+            lambda: len(clients("project-a")) == 1 and len(clients("project-b")) == 1
+        )
+        remaining = clients("project-a")
+        press(first, b"\x1b[1;9A")
+        assert _wait_until(
+            lambda: len(clients("project-a")) == 2 and not clients("project-b")
+        )
+        assert sorted(clients("project-a")) == sorted(before_switch), (
+            before_switch,
+            clients("project-a"),
+        )
+        assert remaining[0] in before_switch
+        assert selected in {
+            "terminal_" + str(p["id"])
+            for p in panes("project-a")
+            if not p.get("is_plugin")
+        }
+        for name in owned[1:]:
+            _assert_session_layer(
+                panes(name), previous_geometry=_session_layer_geometry(baseline[name])
+            )
+        assert all(proc.poll() is None for proc, _ in ptys), (
+            "a client died during switching"
         )
     finally:
+        for _, release in ptys:
+            release.touch()
+        for proc, _ in ptys:
+            try:
+                proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.terminate()
+                proc.communicate(timeout=5)
         for name in owned:
             frame("kill-session", name)
             frame("delete-session", name, "--force")
         shutil.rmtree(sandbox, ignore_errors=True)
-
-
-@pytest.mark.skipif(_ADMITTED_FRAME is None, reason="admitted vc-frame binary missing")
-def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -> None:
-    """W2 acceptance: public vc-start inside a PTY-backed admitted host.
-
-    Creates an isolated exclusive short sandbox, a vibecrafted-host session,
-    one attached PTY client, and a prior pane whose process records PID plus
-    start identity and then reads commands (`exec sh -s`). Invokes public
-    `vc-start --repo` with attached-host markers. Guest/alias/other dirs are
-    committed repositories. Success requires a compact Handled receipt whose
-    typed terminal pane_id exists on the host, persistent session-layer
-    chrome (not the replaceable VC Guest placeholder), the same prior pane
-    id / PID / start identity, and a harmless command completed in that
-    same prior pane via public `action write-chars --pane-id` — not
-    sleep-alive or guest dump-screen alone. Offered `operator` layout
-    alias projects on the same canvas (A/B); real Frame project-workspace
-    returns the original guest (A/B/A). An owned guest `sh -s` pane
-    records PID/start identity and a completed command; both survive
-    the viewport swap, and that same process answers a fresh correlated
-    command after B and again after A. The prior pane accepts a second
-    command after B. One current viewport —
-    leftover visitors are not required. `--layout` stays usage-refused.
-    Then client-ambiguity refuses before another create. Cleanup
-    identities are registered before ops that can throw.
-    """
-    assert _ADMITTED_FRAME is not None
-    bin_path = _ADMITTED_FRAME
-    sandbox = _exclusive_sandbox("vcs-a-")
-    ptys: list[tuple[subprocess.Popen[str], Path]] = []
-    owned: list[str] = []
-    cli_env: dict[str, str] | None = None
-    try:
-        home = sandbox / "home"
-        sock = sandbox / "sock"
-        home.mkdir()
-        sock.mkdir()
-        (home / "config" / "vc-frame").mkdir(parents=True)
-        (home / "data").mkdir()
-        host = _short_token("h")
-        guest = _short_token("g")
-        alias = _short_token("a")
-        other = _short_token("o")
-        guest_repo = sandbox / guest
-        alias_repo = sandbox / alias
-        other_repo = sandbox / other
-        _seed_committed_git(guest_repo, home=home)
-        _seed_committed_git(alias_repo, home=home)
-        _seed_committed_git(other_repo, home=home)
-        prior_pid = home / "prior.pid"
-        prior_lstart = home / "prior.lstart"
-        prior_done = home / "prior.done"
-        prior_done_b = home / "prior-b.done"
-        prior_token = "prior-ok-" + uuid.uuid4().hex[:12]
-        prior_token_b = "prior-b-" + uuid.uuid4().hex[:12]
-        guest_pid = home / "guest.pid"
-        guest_lstart = home / "guest.lstart"
-        guest_done = home / "guest.done"
-        guest_done_b = home / "guest-b.done"
-        guest_done_a = home / "guest-a.done"
-        guest_token = "guest-ok-" + uuid.uuid4().hex[:12]
-        guest_token_b = "guest-b-" + uuid.uuid4().hex[:12]
-        guest_token_a = "guest-a-" + uuid.uuid4().hex[:12]
-        owner = _write(sandbox / "owner-cli", OWNER_CLI)
-        env = os.environ.copy()
-        _strip_identity_env(env)
-        env.update(
-            {
-                "HOME": str(home),
-                "VIBECRAFTED_HOME": str(home / "vibecrafted"),
-                "XDG_CONFIG_HOME": str(home / "config"),
-                "XDG_DATA_HOME": str(home / "data"),
-                "XDG_CACHE_HOME": str(home / "cache"),
-                "VC_FRAME_SOCKET_DIR": str(sock),
-                "ZELLIJ_SOCKET_DIR": str(sock),
-                "VC_FRAME_CONFIG_DIR": str(home / "config" / "vc-frame"),
-                "VC_FRAME_SERVER_FOREGROUND": "1",
-                "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
-                "VIBECRAFTED_VC_FRAME_BIN": str(bin_path),
-                "VIBECRAFTED_PRODUCT_CORE_CLI": str(owner),
-                "OWNER_CLI_LOG": str(sandbox / "owner.log"),
-            }
-        )
-        cli_env = _cli_frame_env(env)
-        script_path = home / "pty_attach.py"
-        script_path.write_text(_PTY_ATTACH_PY, encoding="utf-8")
-        owned.append(host)
-
-        def frame(*args: str, timeout: int = 40) -> subprocess.CompletedProcess[str]:
-            return subprocess.run(
-                [str(bin_path), *args],
-                check=False,
-                env=cli_env,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-
-        def listing() -> str:
-            return frame("list-sessions", "--no-formatting").stdout
-
-        def panes() -> str:
-            return frame(
-                "--session", host, "action", "list-panes", "--json", "--command"
-            ).stdout
-
-        def pane_rows() -> list:
-            payload = _list_panes_payload(panes())
-            return payload if isinstance(payload, list) else []
-
-        def attach(token: str) -> subprocess.Popen[str]:
-            attached = home / f"pty-attached-{token}"
-            release = home / f"pty-release-{token}"
-            attached.unlink(missing_ok=True)
-            release.unlink(missing_ok=True)
-            proc = subprocess.Popen(
-                [
-                    sys.executable,
-                    str(script_path),
-                    str(bin_path),
-                    host,
-                    str(attached),
-                    str(release),
-                ],
-                env=cli_env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            ptys.append((proc, release))
-            assert _wait_until(
-                lambda: attached.is_file() and proc.poll() is None, 30
-            ), attached
-            return proc
-
-        def public_start(
-            repo: Path, invocation: str
-        ) -> subprocess.CompletedProcess[str]:
-            start_env = env.copy()
-            start_env.update(
-                {
-                    "VC_FRAME": "1",
-                    "VC_FRAME_PANE_ID": "1",
-                    "VC_FRAME_SESSION_NAME": host,
-                }
-            )
-            start_env.pop("VC_FRAME_CONFIG_FILE", None)
-            script = "\n".join(
-                [
-                    f'source "{SHELL_SH}"',
-                    f'_vetcoders_vc_frame_loaded_root="{REPO_ROOT}"',
-                    invocation,
-                    'printf "RC=[%s]\\n" "$?"',
-                ]
-            )
-            return subprocess.run(
-                ["bash", "--noprofile", "--norc", "-c", script],
-                check=False,
-                cwd=repo,
-                env=start_env,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                timeout=180,
-            )
-
-        created = frame(
-            "--layout",
-            "vibecrafted-host",
-            "attach",
-            "--create-background",
-            host,
-        )
-        assert created.returncode == 0, created.stderr
-        assert _wait_until(
-            lambda: host in listing() and "(EXITED" not in listing(), 20
-        ), listing()
-
-        attach("host")
-
-        def unique_client_listing(expected: int):
-            text = frame("--session", host, "action", "list-clients").stdout
-            return text if _count_list_clients(text) == expected else ""
-
-        clients = _wait_until(lambda: unique_client_listing(1), 20)
-        assert clients and _count_list_clients(clients) == 1, frame(
-            "--session", host, "action", "list-clients"
-        ).stdout
-
-        def host_chrome_rows():
-            return _host_chrome_ready(pane_rows())
-
-        chrome = _wait_until(host_chrome_rows, 25)
-        assert chrome, panes()
-        chrome_geometry = _assert_session_layer(chrome)
-        _assert_placeholder_present(chrome)
-
-        pane = frame(
-            "--session",
-            host,
-            "action",
-            "new-pane",
-            "--",
-            "sh",
-            "-c",
-            (
-                f"echo $$ > {prior_pid}; "
-                f"ps -p $$ -o lstart= > {prior_lstart}; "
-                "exec sh -s"
-            ),
-        )
-        assert pane.returncode == 0, pane.stderr
-        assert _wait_until(
-            lambda: _pid_alive(prior_pid) and prior_lstart.is_file(),
-            15,
-        ), (prior_pid, prior_lstart)
-        prior_pid_value = prior_pid.read_text(encoding="utf-8").strip()
-        prior_lstart_value = " ".join(prior_lstart.read_text(encoding="utf-8").split())
-        prior_identity = _pid_file_start_identity(prior_pid)
-        assert prior_pid_value.isdigit() and prior_identity, prior_pid_value
-        assert prior_lstart_value and prior_lstart_value in prior_identity, (
-            prior_lstart_value,
-            prior_identity,
-        )
-
-        def find_prior_pane():
-            marker = str(prior_pid)
-            for row in _typed_terminal_rows(pane_rows()):
-                command = str(row.get("terminal_command") or "")
-                if marker in command or "sh -s" in command:
-                    return row
-            return None
-
-        def guest_session_rows(name: str) -> list:
-            payload = _list_panes_payload(
-                frame(
-                    "--session",
-                    name,
-                    "action",
-                    "list-panes",
-                    "--json",
-                    "--command",
-                ).stdout
-            )
-            return payload if isinstance(payload, list) else []
-
-        prior_pane = _wait_until(find_prior_pane, 15)
-        assert isinstance(prior_pane, dict) and prior_pane.get("id") not in (
-            None,
-            "",
-        ), panes()
-        prior_pane_id = prior_pane["id"]
-        prior_command = str(prior_pane.get("terminal_command") or "")
-
-        refused_layout = public_start(
-            guest_repo,
-            f"vc-start --layout vibecrafted-guest --repo {shlex.quote(str(guest_repo))}",
-        )
-        assert "RC=[2]" in refused_layout.stdout, (
-            refused_layout.stdout + refused_layout.stderr
-        )
-        assert guest not in listing(), listing()
-
-        owned.append(guest)
-        started = public_start(
-            guest_repo,
-            f"vc-start --repo {shlex.quote(str(guest_repo))}",
-        )
-        combined = started.stdout + started.stderr
-        assert "RC=[0]" in started.stdout, combined
-        assert f"created workspace {guest}" in combined, combined
-        assert f"projected workspace {guest}" in combined, combined
-        assert "switch-session" not in combined
-        assert host in listing() and "(EXITED" not in listing()
-        assert guest in listing()
-        receipts = _workspace_projection_receipts(started.stdout)
-        assert len(receipts) == 1, started.stdout
-        receipt = receipts[0]
-        assert receipt.get("status") == "Handled", receipt
-        assert receipt.get("guest") == guest, receipt
-        assert receipt.get("pane_id") not in (None, ""), receipt
-        assert str(receipt.get("request_id") or "").strip(), receipt
-        after_rows = pane_rows()
-        _assert_session_layer(after_rows, previous_geometry=chrome_geometry)
-        _assert_placeholder_replaced(after_rows)
-        guest_pane = _pane_by_id(after_rows, receipt["pane_id"], is_plugin=False)
-        assert guest_pane is not None, (receipt, after_rows)
-        surviving = _pane_by_id(after_rows, prior_pane_id, is_plugin=False)
-        assert surviving is not None, (prior_pane_id, after_rows)
-        assert unique_client_listing(1)
-        guest_created = frame(
-            "--session",
-            guest,
-            "action",
-            "new-pane",
-            "--",
-            "sh",
-            "-c",
-            (
-                f"echo $$ > {guest_pid}; "
-                f"ps -p $$ -o lstart= > {guest_lstart}; "
-                "exec sh -s"
-            ),
-        )
-        assert guest_created.returncode == 0, guest_created.stderr
-        assert _wait_until(
-            lambda: _pid_alive(guest_pid) and guest_lstart.is_file(),
-            15,
-        ), (guest_pid, guest_lstart)
-
-        def find_guest_pane():
-            marker = str(guest_pid)
-            for row in _typed_terminal_rows(guest_session_rows(guest)):
-                command = str(row.get("terminal_command") or "")
-                if marker in command or "sh -s" in command:
-                    return row
-            return None
-
-        guest_term = _wait_until(find_guest_pane, 15)
-        assert isinstance(guest_term, dict) and guest_term.get("id") not in (
-            None,
-            "",
-        ), guest_session_rows(guest)
-        guest_term_id = guest_term["id"]
-        guest_command = str(guest_term.get("terminal_command") or "")
-        guest_pid_value = guest_pid.read_text(encoding="utf-8").strip()
-        guest_identity = _pid_file_start_identity(guest_pid)
-        assert guest_pid_value.isdigit() and guest_identity, guest_pid_value
-        _typed_write_chars(
-            frame,
-            guest,
-            guest_term_id,
-            f"echo {guest_token} > {guest_done}",
-        )
-        assert _wait_until(
-            lambda: (
-                guest_done.is_file()
-                and guest_token in guest_done.read_text(encoding="utf-8")
-            ),
-            15,
-        ), guest_done
-        _assert_pid_identity(guest_pid, guest_pid_value, guest_identity)
-        later_guest = find_guest_pane()
-        assert later_guest is not None and later_guest.get("id") == guest_term_id
-        assert str(later_guest.get("terminal_command") or "") == guest_command or (
-            "sh -s" in str(later_guest.get("terminal_command") or "")
-        ), (guest_command, later_guest)
-        assert str(surviving.get("terminal_command") or "") == prior_command or (
-            "sh -s" in str(surviving.get("terminal_command") or "")
-        ), (prior_command, surviving)
-        _assert_pid_identity(prior_pid, prior_pid_value, prior_identity)
-
-        _typed_write_chars(
-            frame,
-            host,
-            prior_pane_id,
-            f"echo {prior_token} > {prior_done}",
-        )
-        assert _wait_until(
-            lambda: (
-                prior_done.is_file()
-                and prior_token in prior_done.read_text(encoding="utf-8")
-            ),
-            15,
-        ), prior_done
-        _assert_pid_identity(prior_pid, prior_pid_value, prior_identity)
-        prior_dump = frame(
-            "--session",
-            host,
-            "action",
-            "dump-screen",
-            "--pane-id",
-            f"terminal_{prior_pane_id}",
-        )
-        assert prior_dump.returncode == 0, prior_dump.stdout + prior_dump.stderr
-        assert "not found" not in (prior_dump.stdout + prior_dump.stderr).lower()
-        dumped = frame(
-            "--session",
-            host,
-            "action",
-            "dump-screen",
-            "--pane-id",
-            f"terminal_{receipt['pane_id']}",
-        )
-        dump = dumped.stdout + dumped.stderr
-        assert dumped.returncode == 0, dump
-        assert "not found" not in dump.lower(), dump
-
-        owned.append(alias)
-        alias_started = public_start(
-            alias_repo,
-            f"vc-start operator --repo {shlex.quote(str(alias_repo))}",
-        )
-        alias_combined = alias_started.stdout + alias_started.stderr
-        assert "RC=[0]" in alias_started.stdout, alias_combined
-        assert f"created workspace {alias}" in alias_combined, alias_combined
-        assert f"projected workspace {alias}" in alias_combined, alias_combined
-        assert "switch-session" not in alias_combined
-        assert host in listing() and "(EXITED" not in listing()
-        assert alias in listing()
-        alias_receipts = _workspace_projection_receipts(alias_started.stdout)
-        assert len(alias_receipts) == 1, alias_started.stdout
-        assert alias_receipts[0].get("status") == "Handled", alias_receipts[0]
-        assert alias_receipts[0].get("guest") == alias, alias_receipts[0]
-        assert alias_receipts[0].get("pane_id") not in (None, ""), alias_receipts[0]
-        alias_rows = pane_rows()
-        _assert_session_layer(alias_rows, previous_geometry=chrome_geometry)
-        _assert_placeholder_replaced(alias_rows)
-        assert unique_client_listing(1)
-        current_b = _pane_by_id(
-            alias_rows, alias_receipts[0]["pane_id"], is_plugin=False
-        )
-        assert current_b is not None, (alias_receipts[0], alias_rows)
-        assert _pane_by_id(alias_rows, prior_pane_id, is_plugin=False) is not None
-        guest_after_b = find_guest_pane()
-        assert guest_after_b is not None and guest_after_b.get("id") == guest_term_id
-        _assert_pid_identity(guest_pid, guest_pid_value, guest_identity)
-        assert guest_token in guest_done.read_text(encoding="utf-8")
-        # Re-reading the pre-swap guest.done proves nothing about the process
-        # now: drive a fresh correlated command through the same guest pane.
-        _typed_write_chars(
-            frame,
-            guest,
-            guest_term_id,
-            f"echo {guest_token_b} > {guest_done_b}",
-        )
-        assert _wait_until(
-            lambda: (
-                guest_done_b.is_file()
-                and guest_token_b in guest_done_b.read_text(encoding="utf-8")
-            ),
-            15,
-        ), guest_done_b
-        _assert_pid_identity(guest_pid, guest_pid_value, guest_identity)
-        _assert_pid_identity(prior_pid, prior_pid_value, prior_identity)
-        assert prior_token in prior_done.read_text(encoding="utf-8")
-        _typed_write_chars(
-            frame,
-            host,
-            prior_pane_id,
-            f"echo {prior_token_b} > {prior_done_b}",
-        )
-        assert _wait_until(
-            lambda: (
-                prior_done_b.is_file()
-                and prior_token_b in prior_done_b.read_text(encoding="utf-8")
-            ),
-            15,
-        ), prior_done_b
-        _assert_pid_identity(prior_pid, prior_pid_value, prior_identity)
-        _assert_pid_identity(guest_pid, guest_pid_value, guest_identity)
-
-        return_argv = ["--session", host, "project-workspace", guest]
-        if receipt.get("tab") not in (None, ""):
-            # The receipt persists the engine's zero-based tab index; the
-            # public `project-workspace --tab` contract is one-based. Return
-            # to the explicit original tab, never by omitting the flag.
-            return_argv.extend(["--tab", str(int(receipt["tab"]) + 1)])
-        returned = frame(*return_argv)
-        assert returned.returncode == 0, returned.stdout + returned.stderr
-        returned_receipts = _workspace_projection_receipts(returned.stdout)
-        assert len(returned_receipts) == 1, returned.stdout
-        assert returned_receipts[0].get("status") == "Handled", returned_receipts[0]
-        assert returned_receipts[0].get("guest") == guest, returned_receipts[0]
-        assert unique_client_listing(1)
-        aba_rows = pane_rows()
-        _assert_session_layer(aba_rows, previous_geometry=chrome_geometry)
-        _assert_placeholder_replaced(aba_rows)
-        current_a = _pane_by_id(
-            aba_rows, returned_receipts[0]["pane_id"], is_plugin=False
-        )
-        assert current_a is not None, (returned_receipts[0], aba_rows)
-        assert _pane_by_id(aba_rows, prior_pane_id, is_plugin=False) is not None
-        guest_after_a = find_guest_pane()
-        assert guest_after_a is not None and guest_after_a.get("id") == guest_term_id
-        _assert_pid_identity(guest_pid, guest_pid_value, guest_identity)
-        assert guest_token in guest_done.read_text(encoding="utf-8")
-        assert guest_token_b in guest_done_b.read_text(encoding="utf-8")
-        _typed_write_chars(
-            frame,
-            guest,
-            guest_term_id,
-            f"echo {guest_token_a} > {guest_done_a}",
-        )
-        assert _wait_until(
-            lambda: (
-                guest_done_a.is_file()
-                and guest_token_a in guest_done_a.read_text(encoding="utf-8")
-            ),
-            15,
-        ), guest_done_a
-        _assert_pid_identity(guest_pid, guest_pid_value, guest_identity)
-        assert guest in listing() and alias in listing()
-        _assert_pid_identity(prior_pid, prior_pid_value, prior_identity)
-        assert prior_token in prior_done.read_text(encoding="utf-8")
-        assert prior_token_b in prior_done_b.read_text(encoding="utf-8")
-
-        attach("host-second")
-        two = _wait_until(lambda: unique_client_listing(2), 20)
-        assert two and _count_list_clients(two) == 2, frame(
-            "--session", host, "action", "list-clients"
-        ).stdout
-        owned.append(other)
-        ambiguous = public_start(
-            other_repo,
-            f"vc-start --repo {shlex.quote(str(other_repo))}",
-        )
-        assert "RC=[4]" in ambiguous.stdout, ambiguous.stdout + ambiguous.stderr
-        assert "exactly one attached client" in ambiguous.stderr
-        assert other not in listing(), listing()
-        _assert_pid_identity(prior_pid, prior_pid_value, prior_identity)
-        _assert_pid_identity(guest_pid, guest_pid_value, guest_identity)
-        assert prior_token in prior_done.read_text(encoding="utf-8")
-        assert prior_token_b in prior_done_b.read_text(encoding="utf-8")
-        assert guest_token in guest_done.read_text(encoding="utf-8")
-        assert guest_token_b in guest_done_b.read_text(encoding="utf-8")
-        assert guest_token_a in guest_done_a.read_text(encoding="utf-8")
-        final_rows = pane_rows()
-        _assert_session_layer(final_rows, previous_geometry=chrome_geometry)
-        _assert_placeholder_replaced(final_rows)
-        assert _pane_by_id(final_rows, prior_pane_id, is_plugin=False) is not None
-    finally:
-        for proc, release in ptys:
-            try:
-                release.write_text("1", encoding="utf-8")
-            except OSError:
-                pass
-            try:
-                proc.wait(timeout=8)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=5)
-        leftover = ""
-        if cli_env is not None:
-
-            def _cleanup_frame(
-                *args: str, timeout: int = 40
-            ) -> subprocess.CompletedProcess[str]:
-                return subprocess.run(
-                    [str(bin_path), *args],
-                    check=False,
-                    env=cli_env,
-                    stdin=subprocess.DEVNULL,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                )
-
-            for name in owned:
-                _cleanup_frame("kill-session", name)
-                _cleanup_frame("delete-session", name, "--force")
-            leftover = _cleanup_frame("list-sessions", "--no-formatting").stdout
-        shutil.rmtree(sandbox, ignore_errors=True)
-        for name in owned:
-            assert name not in leftover, leftover

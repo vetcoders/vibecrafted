@@ -1,10 +1,8 @@
-// operator — Start here / guest workspace content for vc-start
+// operator — ordinary project session for vc-start
 // Path kept as operator.kdl for: vibecrafted start | dashboard operator
-// The first product session uses chrome embedded in the vc-frame binary.
-// This file is the guest workspace surface (Start here, Agents, Shell, Voc).
-// The Sessions rail carries frame_host true so a first vc-start that still
-// creates this layout as kind=host is a frame host, not a black-frame client.
-//
+// Operator Frame session 00 is embedded in the vc-frame binary.
+// This layout gives each project its own Start here, Agents, Shell and Voc
+// tabs with one session canvas, shared by any number of attached clients.
 //
 // Tabs:
 //   "Start here"  — first-run product map
@@ -34,7 +32,6 @@ layout {
                     session_canvas true
                     session_canvas_kind "session-manager"
                     rail true
-                    frame_host true
                     pane_title "Sessions"
                 }
             }
