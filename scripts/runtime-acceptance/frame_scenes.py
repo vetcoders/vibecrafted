@@ -201,8 +201,14 @@ def main():
 
     c = Client(bin_, sock, "accept-a")
     try:
+        # gotowość chrome'u nie zależy od glifu ✕ (starsze generacje go nie
+        # rysują): rail + niepusty topbar i statusbar wystarczą
         up = c.wait_for(
-            lambda r: any(CLOSE in x for x in r[:2]) and "SESSIONS" in "\n".join(r)
+            lambda r: (
+                "SESSIONS" in "\n".join(r)
+                and bool(r[0].strip())
+                and bool(r[ROWS - 1].strip())
+            )
         )
         top = c.rows()[0]
         status = c.rows()[ROWS - 1]

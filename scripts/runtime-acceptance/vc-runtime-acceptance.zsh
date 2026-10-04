@@ -96,7 +96,8 @@ SUMMARY="$OUT/SUMMARY.txt"
     echo; echo "### ${f:t:r}"
     awk '/^######## /{bin=$2} /NIEOBECNE w PATH/{printf "  %-20s BRAK\n",bin}
          /^Result:/{printf "  %-20s %s\n",bin,$0} /^Version:/{printf "  %-20s %s\n",bin,$0}
-         /^Release container:/{printf "  %-20s %s\n",bin,$0}' "$f"
+         /^Release container:/{printf "  %-20s %s\n",bin,$0}
+         /diagnose-which niedostępny/{getline v; printf "  %-20s (fallback) %s\n",bin,v}' "$f"
   done
   echo; echo "== Sceny =="
   grep -E '^\[(PASS|FAIL|WARN)\]|^== scenes' "$OUT/scenes.log" 2>/dev/null || echo "(sceny nie pobiegły)"
