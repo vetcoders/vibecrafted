@@ -1571,6 +1571,72 @@ def test_root_cli_doctor_returns_failure_for_failed_findings(monkeypatch) -> Non
     assert cli.main(["doctor"]) == 1
 
 
+def test_root_cli_doctor_text_is_summary_first(monkeypatch, capsys) -> None:
+    """Humans get the verdict and the problems; the passing ledger is a count.
+
+    The ok-flood (dozens of `ok:` lines burying one failure) is exactly what
+    CLI_PRODUCT_SPEC §6.4 forbids — this test fails on the old flood output."""
+    monkeypatch.setattr(
+        cli.doctor_module,
+        "doctor_run",
+        lambda **_kwargs: [
+            SimpleNamespace(level="ok", component="version", message="4.3.3+gtest"),
+            SimpleNamespace(level="ok", component="store", message="present"),
+            SimpleNamespace(
+                level="warn", component="shadow-dirs", message="stale copy"
+            ),
+            SimpleNamespace(
+                level="fail", component="runtime-receipt", message="drifted"
+            ),
+        ],
+    )
+
+    assert cli.main(["doctor"]) == 1
+
+    out = capsys.readouterr().out
+    first = out.strip().splitlines()[0]
+    assert "4 checks" in first
+    assert "1 failures" in first
+    assert "fail: runtime-receipt - drifted" in out
+    assert "warn: shadow-dirs - stale copy" in out
+    assert "ok: store - present" not in out
+    assert "doctor --verbose" in out
+
+
+def test_root_cli_doctor_all_ok_is_a_one_line_verdict(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        cli.doctor_module,
+        "doctor_run",
+        lambda **_kwargs: [
+            SimpleNamespace(level="ok", component="version", message="4.3.3+gtest"),
+            SimpleNamespace(level="ok", component="store", message="present"),
+        ],
+    )
+
+    assert cli.main(["doctor"]) == 0
+
+    out = capsys.readouterr().out
+    assert "all ok" in out
+    assert "vibecrafted 4.3.3+gtest" in out
+    assert "ok: store - present" not in out
+
+
+def test_root_cli_doctor_verbose_keeps_the_full_ledger(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        cli.doctor_module,
+        "doctor_run",
+        lambda **_kwargs: [
+            SimpleNamespace(level="ok", component="store", message="present"),
+        ],
+    )
+
+    assert cli.main(["doctor", "--verbose"]) == 0
+
+    out = capsys.readouterr().out
+    assert "ok: store - present" in out
+    assert "summary: 1 ok, 0 warnings, 0 failures" in out
+
+
 def test_root_cli_doctor_release_forwards_the_flag(monkeypatch) -> None:
     seen: dict[str, object] = {}
 

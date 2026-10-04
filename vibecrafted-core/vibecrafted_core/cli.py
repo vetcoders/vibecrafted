@@ -434,6 +434,11 @@ def _build_parser() -> argparse.ArgumentParser:
     doctor = sub.add_parser("doctor", help="verify installed Vibecrafted runtime")
     doctor.add_argument("--json", action="store_true")
     doctor.add_argument(
+        "--verbose",
+        action="store_true",
+        help="list every passing check too; the default shows the verdict and problems only",
+    )
+    doctor.add_argument(
         "--release",
         action="store_true",
         help=(
@@ -2462,7 +2467,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         summary["delivery_receipt"] = delivery_receipt
         if args.json:
             print(json.dumps(summary, ensure_ascii=False, indent=2))
-        else:
+        elif getattr(args, "verbose", False):
             for finding in summary["findings"]:
                 print(
                     f"{finding['level']}: {finding['component']} - {finding['message']}"
@@ -2471,6 +2476,41 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"summary: {summary['ok']} ok, {summary['warnings']} warnings, "
                 f"{summary['failures']} failures"
             )
+            print()
+            print(render_receipt_text(delivery_receipt), end="")
+        else:
+            # Summary-first for humans (CLI_PRODUCT_SPEC §6.4): the verdict and
+            # the problems carry the answer; the passing ledger lives under
+            # --verbose and the machine shape under --json.
+            problems = [
+                f for f in summary["findings"] if f["level"] in ("fail", "warn")
+            ]
+            checks = len(summary["findings"])
+            version = next(
+                (
+                    f["message"]
+                    for f in summary["findings"]
+                    if f["component"] == "version" and f["level"] == "ok"
+                ),
+                "",
+            )
+            if problems:
+                print(
+                    f"⚒ doctor — {checks} checks: {summary['ok']} ok · "
+                    f"{summary['warnings']} warnings · {summary['failures']} failures"
+                )
+                print()
+                for finding in problems:
+                    print(
+                        f"{finding['level']}: {finding['component']} - {finding['message']}"
+                    )
+            else:
+                verdict = f"⚒ doctor — {checks} checks, all ok"
+                if version:
+                    verdict += f" · vibecrafted {version}"
+                print(verdict)
+            print()
+            print("details: vibecrafted doctor --verbose")
             print()
             print(render_receipt_text(delivery_receipt), end="")
         return 0 if summary["failures"] == 0 else 1

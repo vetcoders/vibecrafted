@@ -5671,7 +5671,7 @@ cmd_doctor() {
     return $?
   fi
   case "${1:-}" in
-    ""|--json|--release)
+    ""|--json|--release|--verbose)
       core_dir="$(_core_module_dir 2>/dev/null || true)"
       if [[ -n "$core_dir" ]]; then
         python_bin="$(_vibecrafted_python)"
