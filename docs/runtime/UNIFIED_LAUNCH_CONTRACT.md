@@ -180,17 +180,21 @@ session canvas. CLI entry uses the native action, subject to the source-client
 restriction below:
 
 ```text
-vc-frame --session <attached-session> action switch-session <project>
+vc-frame --session <attached-session> --client-id <source-client-id> action switch-session <project>
 ```
 
-The source session is the live attached owner (`VC_FRAME_SESSION_NAME`). Current
-Frame CLI actions carry no client ID and can select the last active client;
-forwarding pane markers does not identify the caller. The launcher therefore
-requires exactly one observed client on the source session and refuses ambiguous
-or unreadable source-client inventory with exit 4. The destination may already
-have any number of clients. With multiple source clients, use the native Sessions
-rail or Cmd-Up/Down, which carry the actual client identity. A client count is
-a temporary CLI restriction, not proof of an atomic client-identity handoff.
+The source session is the live attached owner (`VC_FRAME_SESSION_NAME`).
+The launcher reads `list-clients` and forwards the sole observed numeric client ID
+through the global `--client-id` argument. Frame validates that exact attached
+frontend when admitting the action: a concurrent attach or input cannot redirect
+it to the last active client, and a stale ID refuses without an untargeted retry.
+Forwarding pane markers does not identify the caller because clients may share a
+pane. Ambiguous, malformed or unreadable source inventory therefore refuses with
+exit 4. The destination may already have any number of clients. With multiple
+source clients, use the native Sessions rail or Cmd-Up/Down, which carry the actual
+frontend identity. This shell-origin restriction does not constrain native keys
+or rail navigation.
+
 Outside Frame, entry uses
 `attach <project>`; no-TTY entry delegates to VC Terminal with the exact created
 session. Creation and entry are separate: an entry failure must leave the created

@@ -1395,10 +1395,10 @@ _vetcoders_start_create_workspace_session() {
   return 0
 }
 
-# Enter a peer session. The current CLI cannot carry a frontend client ID.
-# Refuse known ambiguity in the source; destination client count is irrelevant.
-# This snapshot check is not atomic identity admission: native rail/key actions
-# carry real client identity and are the multi-client navigation path.
+# Enter a peer session, addressing the sole observed source frontend explicitly.
+# A shell pane can be shared, so multiple source clients remain ambiguous.
+# The engine validates that exact client at action admission; a concurrent attach
+# cannot borrow the request. Destination client count is irrelevant.
 _vetcoders_start_enter_workspace_session() {
   local vc_frame_bin="${1:-}" session_name="${2:-}" current="" socket_dir="" rc=0
   local listing="" line="" client_id="" header_seen=0 rows=0
@@ -1418,7 +1418,12 @@ _vetcoders_start_enter_workspace_session() {
           continue
         fi
         client_id="${line%%[[:space:]]*}"
-        if [[ -z "$client_id" || "$client_id" == *[!0-9]* ]]; then
+        if [[ -z "$client_id" || "$client_id" == *[!0-9]* || ${#client_id} -gt 5 ]]; then
+          header_seen=0
+          break
+        fi
+        # Frame client identities are nonzero u16 values, not pane IDs.
+        if ((10#$client_id < 1 || 10#$client_id > 65535)); then
           header_seen=0
           break
         fi
@@ -1435,7 +1440,7 @@ _vetcoders_start_enter_workspace_session() {
       _vetcoders_start_close_create_lock_fd
       export VC_FRAME_SOCKET_DIR="$socket_dir" ZELLIJ_SOCKET_DIR="$socket_dir"
       VC_FRAME_CALLER="${VC_FRAME_CALLER:-vibecrafted}" \
-        "$vc_frame_bin" --session "$current" action switch-session "$session_name"
+        "$vc_frame_bin" --session "$current" --client-id "$client_id" action switch-session "$session_name"
     ) || rc=$?
     if ((rc != 0)); then
       printf 'vc-start: entry into %s failed (exit %s). Retry with: vc-frame attach %s\n' \

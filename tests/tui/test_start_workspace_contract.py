@@ -157,7 +157,8 @@ def _strip_identity_env(env: dict[str, str]) -> dict[str, str]:
 #   * `attach NAME` panics (101, src/commands.rs:844) when the inherited
 #     session marker equals NAME, refuses a missing session, refuses a non-TTY
 #     stdin, and otherwise blocks briefly;
-#   * `--session S action switch-session NAME` needs both live;
+#   * `--session S --client-id N action switch-session NAME` needs both live
+#     and validates the requested source frontend at action admission;
 #   * `--session S action list-clients` prints a header and one row when S is
 #     listed in VC_FRAME_CLIENTS;
 # Fault injection: VC_FRAME_INVENTORY_ERROR (list-sessions fails with that
@@ -172,6 +173,7 @@ argv = sys.argv[1:]
 log = os.environ.get("VC_FRAME_LOG", "")
 table = os.environ.get("VC_FRAME_TABLE", "")
 clients_file = os.environ.get("VC_FRAME_CLIENTS", "")
+client_state_file = os.environ.get("VC_FRAME_CLIENT_STATE", "")
 marker = os.environ.get("ZELLIJ_SESSION_NAME") or os.environ.get("VC_FRAME_SESSION_NAME")
 
 
@@ -208,6 +210,15 @@ def clients_of(name):
     if not clients_file or not os.path.exists(clients_file):
         return []
     return [n for n in open(clients_file).read().splitlines() if n.strip() == name]
+
+
+def client_state_of(name):
+    if client_state_file and os.path.exists(client_state_file):
+        state = json.loads(open(client_state_file).read())
+        if name in state:
+            return state[name]
+    ids = list(range(1, len(clients_of(name)) + 1))
+    return {"client_ids": ids, "last_active_client_id": ids[-1] if ids else None}
 
 
 def not_found(name):
@@ -261,6 +272,7 @@ if argv[:1] in (["ls"], ["list-sessions"]):
     sys.exit(0)
 
 session = None
+client_id = None
 layout = None
 tab = None
 rest = list(argv)
@@ -269,6 +281,10 @@ while i < len(rest):
     token = rest[i]
     if token == "--session" and i + 1 < len(rest):
         session = rest[i + 1]
+        i += 2
+        continue
+    if token == "--client-id" and i + 1 < len(rest):
+        client_id = int(rest[i + 1])
         i += 2
         continue
     if token == "--new-session-with-layout" and i + 1 < len(rest):
@@ -373,7 +389,12 @@ if rest[:1] == ["action"]:
         if os.environ.get("VC_FRAME_SWITCH_ERROR"):
             sys.stderr.write(os.environ["VC_FRAME_SWITCH_ERROR"] + "\\n")
             sys.exit(2)
-        record({"switched": [target, wanted]})
+        state = client_state_of(target)
+        selected = client_id if client_id is not None else state["last_active_client_id"]
+        if selected not in state["client_ids"]:
+            sys.stderr.write("vc-frame: requested client is not attached to source session\\n")
+            sys.exit(2)
+        record({"switched": [target, wanted], "switched_client_id": selected})
         sys.exit(0)
     if verb == "list-clients":
         if os.environ.get("VC_FRAME_CLIENTS_ERROR"):
@@ -383,8 +404,13 @@ if rest[:1] == ["action"]:
             print(os.environ["VC_FRAME_CLIENTS_MALFORMED"])
             sys.exit(0)
         print("CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND")
-        for index, _ in enumerate(clients_of(target), 1):
-            print("%s         terminal_1     zsh " % index)
+        for attached_id in client_state_of(target)["client_ids"]:
+            print("%s         terminal_1     zsh " % attached_id)
+        # Deterministic concurrent attach/input between the inventory and action.
+        replacement = os.environ.get("VC_FRAME_CLIENT_STATE_AFTER_LIST")
+        if replacement:
+            with open(client_state_file, "w") as handle:
+                handle.write(replacement)
         sys.exit(0)
     if verb == "dump-layout":
         with open(os.path.join(table, "live", target), encoding="utf-8") as handle:
@@ -621,6 +647,7 @@ class Scene:
         env["VC_FRAME_LOG"] = str(self.frame_log)
         env["VC_FRAME_TABLE"] = str(self.table)
         env["VC_FRAME_CLIENTS"] = str(self.clients_file)
+        env["VC_FRAME_CLIENT_STATE"] = str(self.tmp_path / "client-state.json")
         env.update(extra or {})
         return env
 
@@ -1721,6 +1748,8 @@ def _assert_peer_switch(scene: Scene, current: str, project: str) -> None:
     assert request["argv"] == [
         "--session",
         current,
+        "--client-id",
+        "1",
         "action",
         "switch-session",
         project,
@@ -1811,6 +1840,57 @@ def test_peer_switch_allows_multiple_target_clients(
     assert not _projects(scene.calls())
 
 
+@pytest.mark.parametrize("replacement_ids", [[7, 11], [11]])
+def test_peer_switch_keeps_observed_origin_during_concurrent_attach_or_disconnect(
+    tmp_path: Path, replacement_ids: list[int]
+) -> None:
+    scene = Scene(
+        tmp_path,
+        live=("project-a", "project-b"),
+        guests=("project-a", "project-b"),
+        clients=("project-a",),
+    )
+    initial = {"project-a": {"client_ids": [7], "last_active_client_id": 7}}
+    (scene.tmp_path / "client-state.json").write_text(json.dumps(initial))
+    replacement = {
+        "project-a": {
+            "client_ids": replacement_ids,
+            "last_active_client_id": 11,
+        }
+    }
+    frame = scene.generation / "bin" / "vc-frame"
+    result = _eval_start_fn(
+        f'_vetcoders_start_enter_workspace_session "{frame}" project-b',
+        extra_env=scene.env(
+            {
+                **_inside_host_env(scene, "project-a"),
+                "VC_FRAME_CLIENT_STATE_AFTER_LIST": json.dumps(replacement),
+            }
+        ),
+    )
+    requests = [c for c in _switches(scene.calls()) if not c.get("switched")]
+    assert len(requests) == 1, scene.calls()
+    switched = [c for c in scene.calls() if c.get("switched")]
+    if 7 in replacement_ids:
+        assert _rc(result) == 0, result.stdout + result.stderr
+        assert [c["switched_client_id"] for c in switched] == [7]
+    else:
+        assert _rc(result) == 2, result.stdout + result.stderr
+        assert "requested client is not attached" in result.stderr
+        assert not switched, switched
+    assert requests[0]["argv"] == [
+        "--session",
+        "project-a",
+        "--client-id",
+        "7",
+        "action",
+        "switch-session",
+        "project-b",
+    ]
+    assert not _attaches(scene.calls()) and not _projects(scene.calls())
+    assert json.loads((scene.tmp_path / "client-state.json").read_text()) == replacement
+
+
 @pytest.mark.parametrize(
     "fault",
     [
@@ -1819,6 +1899,12 @@ def test_peer_switch_allows_multiple_target_clients(
         {
             "VC_FRAME_CLIENTS_MALFORMED": "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\nnot-a-client terminal_1 zsh"
         },
+        *[
+            {
+                "VC_FRAME_CLIENTS_MALFORMED": f"CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n{invalid_id} terminal_1 zsh"
+            }
+            for invalid_id in ("0", "-1", "65536", "999999999999999999999999")
+        ],
     ],
 )
 def test_peer_switch_refuses_unreadable_source_client_inventory(
