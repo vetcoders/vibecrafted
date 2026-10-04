@@ -1867,6 +1867,36 @@ def _mock_pack_repo(tmp_path: Path, *, body: str) -> Path:
         encoding="utf-8",
     )
     stub_ld.chmod(0o755)
+    for tool in ("rustc", "cargo"):
+        binary = toolchain / tool
+        binary.write_text(
+            f"#!/bin/sh\nprintf '%s\\n' '{tool} 1.96.0 (fixture)'\n",
+            encoding="utf-8",
+        )
+        binary.chmod(0o755)
+    rustup = toolchain / "rustup"
+    rustup.write_text(
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$*" >> "$FAKE_RUSTUP_STATE/calls"\n'
+        'case "$1" in\n'
+        '  which) [ -f "$FAKE_RUSTUP_STATE/provisioned" ] || exit 1; '
+        'printf "%s/%s\\n" "$FAKE_RUSTUP_STATE" "$4" ;;\n'
+        '  toolchain) touch "$FAKE_RUSTUP_STATE/provisioned"; '
+        "echo 'unchanged (error reading rustc version)' ;;\n"
+        "  target) printf '%s\\n' wasm32-wasip1 wasm32-unknown-unknown ;;\n"
+        "  *) exit 39 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    rustup.chmod(0o755)
+    uname = toolchain / "uname"
+    uname.write_text('#!/bin/sh\necho "${FAKE_KERNEL:-Darwin}"\n', encoding="utf-8")
+    uname.chmod(0o755)
+    xcode_select = toolchain / "xcode-select"
+    xcode_select.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$FAKE_RUSTUP_STATE"\n', encoding="utf-8"
+    )
+    xcode_select.chmod(0o755)
     contract = (REPO_ROOT / "scripts/lib/release-toolchain-contract.sh").read_text(
         encoding="utf-8"
     )
@@ -1907,6 +1937,15 @@ def _make_runtime_pack(repo: Path) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
         check=False,
+        env={
+            **{
+                key: value
+                for key, value in os.environ.items()
+                if key != "DEVELOPER_DIR"
+            },
+            "PATH": f"{repo / 'mock-toolchain'}:{os.environ['PATH']}",
+            "FAKE_RUSTUP_STATE": str(repo / "mock-toolchain"),
+        },
     )
 
 
@@ -1927,6 +1966,11 @@ def test_make_runtime_pack_reports_the_path_the_builder_recorded(
     result = _make_runtime_pack(repo)
 
     assert result.returncode == 0, result.stderr
+    assert "Release prerequisites ready: Rust 1.96.0" in result.stdout
+    calls = (repo / "mock-toolchain/calls").read_text(encoding="utf-8")
+    for tool in ("rustc", "cargo"):
+        assert f"which --toolchain 1.96.0 {tool}" in calls
+    assert "target list --installed --toolchain 1.96.0" in calls
     printed = result.stdout.strip().splitlines()[-1]
     assert printed == str(
         repo
@@ -2036,3 +2080,78 @@ def test_semgrep_gates_scan_large_installer_and_refuse_large_source_finding(
     assert {target.resolve() for target in targets} <= scanned, data["paths"]
     assert len(data["results"]) == 1, data["results"]
     assert Path(data["results"][0]["path"]).resolve() == source.resolve()
+
+
+@pytest.mark.parametrize("tool", ["rustc", "cargo"])
+@pytest.mark.parametrize(
+    "damage", ["missing", "not-executable", "broken", "wrong-version"]
+)
+def test_release_prereqs_verifies_provisioned_rust_binaries(
+    tmp_path: Path, tool: str, damage: str
+) -> None:
+    repo = _mock_pack_repo(tmp_path, body="exit 0\n")
+    toolchain = repo / "mock-toolchain"
+    binary = toolchain / tool
+    if damage == "missing":
+        binary.unlink()
+    elif damage == "not-executable":
+        binary.chmod(0o644)
+    elif damage == "broken":
+        binary.write_text("#!/bin/sh\nexit 37\n", encoding="utf-8")
+    else:
+        binary.write_text(
+            f"#!/bin/sh\necho '{tool} 0.0.0 (fixture)'\n", encoding="utf-8"
+        )
+    result = subprocess.run(
+        ["make", "--no-print-directory", "release-prereqs"],
+        cwd=repo,
+        env={
+            **{
+                key: value
+                for key, value in os.environ.items()
+                if key != "DEVELOPER_DIR"
+            },
+            "PATH": f"{toolchain}:{os.environ['PATH']}",
+            "FAKE_RUSTUP_STATE": str(toolchain),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+    assert (
+        "toolchain install 1.96.0 --profile minimal"
+        in (toolchain / "calls").read_text()
+    )
+    assert "unchanged (error reading rustc version)" in result.stdout
+    assert result.returncode != 0, result.stdout
+    assert "Release prerequisites ready" not in result.stdout
+    assert f"FATAL: pinned release {tool}" in result.stderr
+
+
+def test_release_prereqs_is_a_noop_on_linux(tmp_path: Path) -> None:
+    repo = _mock_pack_repo(tmp_path, body="exit 0\n")
+    toolchain = repo / "mock-toolchain"
+    for tool in ("rustc", "cargo", "clang", "ld-classic"):
+        (toolchain / tool).unlink()
+    result = subprocess.run(
+        ["make", "--no-print-directory", "release-prereqs"],
+        cwd=repo,
+        env={
+            **{
+                key: value
+                for key, value in os.environ.items()
+                if key != "DEVELOPER_DIR"
+            },
+            "PATH": f"{toolchain}:{os.environ['PATH']}",
+            "FAKE_KERNEL": "Linux",
+            "FAKE_RUSTUP_STATE": str(toolchain),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Linux assembler provisions its own" in result.stdout
+    assert not (toolchain / "calls").exists()

@@ -144,6 +144,21 @@ release-prereqs:
 		printf '==> Installing pinned release toolchain %s\n' "$$toolchain"; \
 		rustup toolchain install "$$toolchain" --profile minimal; \
 	fi; \
+	for tool in rustc cargo; do \
+		tool_path="$$(rustup which --toolchain "$$toolchain" "$$tool" 2>/dev/null)" || { \
+			printf 'FATAL: pinned release %s %s is unavailable after toolchain provisioning\n' "$$tool" "$$toolchain" >&2; exit 1; \
+		}; \
+		[ -x "$$tool_path" ] || { \
+			printf 'FATAL: pinned release %s is not executable: %s\n' "$$tool" "$$tool_path" >&2; exit 1; \
+		}; \
+		tool_version="$$("$$tool_path" --version 2>&1)" || { \
+			printf 'FATAL: pinned release %s %s cannot run from %s: %s\n' "$$tool" "$$toolchain" "$$tool_path" "$$tool_version" >&2; exit 1; \
+		}; \
+		case "$$tool_version" in \
+			"$$tool $$toolchain "*) ;; \
+			*) printf 'FATAL: pinned release %s version drift: expected %s, got [%s] from %s\n' "$$tool" "$$toolchain" "$$tool_version" "$$tool_path" >&2; exit 1;; \
+		esac; \
+	done; \
 	installed="$$(rustup target list --installed --toolchain "$$toolchain")"; \
 	for target in $$VIBECRAFTED_RELEASE_RUST_TARGETS; do \
 		if ! printf '%s\n' "$$installed" | grep -Fx "$$target" >/dev/null; then \
