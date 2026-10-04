@@ -4064,16 +4064,20 @@ def test_terminal_policy_uses_operator_toml_and_primary_shell_chain() -> None:
     ).read_text(encoding="utf-8")
     installer = (REPO_ROOT / "scripts/vetcoders_install.py").read_text(encoding="utf-8")
 
-    assert 'family = "Spot Mono"' in terminal
-    assert "size = 19.5" in terminal
-    assert "x = -3" in terminal
-    assert "y = -8" in terminal
+    terminal_policy = tomllib.loads(terminal)
+    assert terminal_policy["font"] == {
+        "size": 19.5,
+        "offset": {"x": 0, "y": 0},
+        "normal": {"family": "Source Code Pro", "style": "Regular"},
+        "bold": {"family": "Source Code Pro", "style": "Bold"},
+        "italic": {"family": "Source Code Pro", "style": "Italic"},
+        "bold_italic": {"family": "Source Code Pro", "style": "Bold Italic"},
+    }
     assert 'style = { shape = "Underline", blinking = "On" }' in terminal
     assert 'cyan    = "#7dc4e4"' in dark
     assert 'cyan    = "#56949f"' in light
     assert "live_config_reload = true" in terminal
     assert "save_to_clipboard = true" in terminal
-    terminal_policy = tomllib.loads(terminal)
     enabled_hints = terminal_policy["hints"]["enabled"]
     assert enabled_hints[0]["command"] == "/usr/bin/open"
     assert enabled_hints[0]["hyperlinks"] is True
