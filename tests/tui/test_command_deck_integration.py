@@ -384,3 +384,50 @@ def test_native_session_state_routes_and_reopen(tmp_path: Path) -> None:
         reconnect_server.shutdown()
         reconnect_server.server_close()
         reconnect_thread.join(timeout=5)
+
+
+def test_native_tray_activity_uses_owner_count_and_exact_template(
+    tmp_path: Path,
+) -> None:
+    sources = sorted((APP / "CommandDeck").glob("*.swift"))
+    sources += [
+        APP / "ServerMenuPolicy.swift",
+        APP / "LifecycleLog.swift",
+        APP / "Views/MainWindowController.swift",
+        SHELL / "tests/CommandDeckIntegrationTests.swift",
+    ]
+    binary = _compile(tmp_path, "tray-activity-contract", sources)
+    result = subprocess.run(
+        [str(binary), "--tray", str(APP / "TrayIcon.png")],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+    assert (
+        "Tray activity owner, expiry, discrete motion and exact mask passed"
+        in result.stdout
+    )
+
+
+def test_tray_poll_is_bounded_generation_owned_and_asynchronous() -> None:
+    delegate = (APP / "AppDelegate.swift").read_text()
+    poll = delegate[
+        delegate.index("private func pollTrayWork(") : delegate.index(
+            "private func pollCaretaker("
+        )
+    ]
+    assert "guard trayWorkProcess == nil" in poll
+    assert 'install.root.appendingPathComponent("bin/vibecrafted")' in poll
+    assert 'process.arguments = ["status", "--activity", "--json"]' in poll
+    assert 'runBounded(process, timeout: 3, label: "tray work activity")' in poll
+    assert "epoch == self.runtimeResolveEpoch" in poll
+    assert "waitUntilExit" not in poll and "usleep" not in poll
+    assert "decodeTrayWorkActivity" in poll
+    tray = (APP / "CommandDeck/StatusItemController.swift").read_text()
+    uninstall = tray[tray.index("func uninstall()") : tray.index("func update(")]
+    assert "activityTimer?.invalidate()" in uninstall
+    assert "activityExpiryTimer?.invalidate()" in uninstall
+    assert "activityFrame.reset()" in uninstall
+    assert "accessibilityDisplayShouldReduceMotion" in tray
+    assert "accessibilityDisplayOptionsDidChangeNotification" in tray

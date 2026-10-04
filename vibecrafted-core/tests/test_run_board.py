@@ -33,7 +33,7 @@ def test_lifecycle_activity_ignores_today_and_display_limit(monkeypatch) -> None
     activity = run_board.collect_lifecycle_activity()
 
     assert [lane["run_id"] for lane in activity["lanes"]] == ["old-active"]
-    assert activity["summary"] == {"lanes": 1, "worktrees": 0}
+    assert activity["summary"] == {"lanes": 1, "worktrees": 0, "running": 1}
 
 
 def test_lifecycle_activity_includes_stalled_and_worktree_lanes(
@@ -66,7 +66,7 @@ def test_lifecycle_activity_includes_stalled_and_worktree_lanes(
         "worktree-active",
         "stalled",
     }
-    assert activity["summary"] == {"lanes": 2, "worktrees": 1}
+    assert activity["summary"] == {"lanes": 2, "worktrees": 1, "running": 1}
 
 
 def test_status_activity_json_is_the_unfiltered_machine_contract(
@@ -85,5 +85,48 @@ def test_status_activity_json_is_the_unfiltered_machine_contract(
     assert run_board.status_main(["--activity", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["schema_version"] == "vibecrafted.lifecycle-activity.v1"
-    assert payload["summary"] == {"lanes": 0, "worktrees": 0}
+    assert payload["summary"] == {"lanes": 0, "worktrees": 0, "running": 0}
     assert payload["lanes"] == []
+
+
+def test_work_count_requires_current_owner_execution_state(monkeypatch) -> None:
+    def lane(run_id, state):
+        return {"run_id": run_id, "state": state, "worker_alive": True}
+
+    running = lane("running", "running")
+    monkeypatch.setattr(
+        run_board,
+        "sync_state",
+        lambda: {
+            "active_runs": [running, running, lane("active", "active")]
+            + [
+                lane(state, state)
+                for state in (
+                    "paused",
+                    "stalled",
+                    "launching",
+                    "created",
+                    "initialized",
+                    "process_spawned",
+                    "promise",
+                    "confirmed",
+                    "unknown",
+                )
+            ],
+            "stalled_runs": [lane("old-running", "running")],
+            "recent_runs": [lane("recent-running", "running")],
+        },
+    )
+    result = run_board.collect_lifecycle_activity()
+    assert result["summary"]["running"] == 2
+    # Completing the same owner snapshots returns the work indicator to idle.
+    monkeypatch.setattr(
+        run_board,
+        "sync_state",
+        lambda: {
+            "active_runs": [],
+            "stalled_runs": [lane("old-running", "running")],
+            "recent_runs": [running],
+        },
+    )
+    assert run_board.collect_lifecycle_activity()["summary"]["running"] == 0
