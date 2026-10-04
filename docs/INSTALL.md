@@ -47,12 +47,12 @@ Check what a given release actually carries before you plan around it:
 gh release view --json assets -q '.assets[].name'
 ```
 
-> **Current status.** The build path is exercised end to end
-> (`make release` → codesign → notarytool → `make publish-release`) and its
-> shape is gated by contract tests; the build produces a signed, notarized and
-> stapled DMG with a signed `release-output.json`. The DMG is an artifact of
-> releases from 4.3.1 on; until such a release is _published_ with the DMG
-> attached, use a channel below.
+> **Release status.** Use the assets actually attached to a published release.
+> `make release` builds a signed, notarized and stapled DMG plus a signed
+> `release-output.json`; a local build does not establish publication or a
+> successful cold installation. The publisher checks downloaded carriers before
+> making the release public. If the latest release has no DMG, use a channel
+> below.
 > Maintainers building the DMG locally: see
 > [Build from source](#build-from-source-power-users).
 

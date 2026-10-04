@@ -5,6 +5,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## [4.3.3] - 2026-10-04
+
 ### Added
 
 - Agent quota telemetry on the owned `telemetry` PATH name. Hatch ships
@@ -21,6 +23,19 @@ line|once|daemon` plus `telemetry line` / `telemetry once` run those
   same files (`GET /api/usage/quota`). Cost & usage underneath is unchanged.
 
 ### Fixed
+
+- Runtime Pack recovery preserves Founder configuration, custom themes and
+  layouts, accepts missing historical rollback files during an ordinary
+  reinstall, and rebuilds an absent receipt-owned generation. Recovery from
+  an older signed pack requires an explicit bootstrap path and SHA-256;
+  checkout discovery no longer selects executable installation code.
+- Fresh hosts publish their session only after their canvas is ready.
+- VC Terminal carries the canonical Source Code Pro variable fonts, including
+  italic and the SIL Open Font License, privately in both App and Runtime Pack
+  bundles. Release builds no longer require the licensed Spot Mono secret.
+- VC Terminal has a filled, static navy Dock icon. Hosted macOS, Linux and
+  Windows builders select the same immutable terminal and Frame donor commits
+  and verify the public donor archives against their pinned SHA-256 digests.
 
 - Research agents now prefer canonical `~/.config/vibecrafted/config.toml`
   (`runtime.picking.research.default_agents`, respecting `XDG_CONFIG_HOME`)

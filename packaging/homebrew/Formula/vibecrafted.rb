@@ -6,7 +6,7 @@
 class Vibecrafted < Formula
   desc "Release engine for AI-built software"
   homepage "https://vibecrafted.io"
-  version "4.3.2"
+  version "4.3.3"
   license "BUSL-1.1"
 
   # GitHub source archive of the annotated tag. The product does not yet
