@@ -991,7 +991,6 @@ def test_hosted_notary_materialization_accepts_complete_credentials_only(
         "VC_CERT_PASSWORD": "fixture-password",
         "VC_SIGNING_IDENTITY": "fixture-identity",
         "VC_SIGNING_KEY": "fixture-key",
-        "VC_FONT_PASSPHRASE": "fixture-font-passphrase",
         "VC_NOTARY_API_KEY_B64": "Zml4dHVyZQ==" if mechanism == "api" else "",
         "VC_NOTARY_API_KEY_ID": "fixture-key-id" if mechanism == "api" else "",
         "VC_NOTARY_API_ISSUER": "fixture-issuer" if mechanism == "api" else "",
@@ -1179,9 +1178,6 @@ def test_release_binds_canonical_terminal_policy_and_private_fonts() -> None:
     assert 'background = "#fafafa"' in light
     assert 'chars = "\\u001b[101;9u"' in terminal
     assert "/Users/" not in terminal
-    # The Source Code Pro policy does not prove its font is carried: the
-    # builder still supplies legacy Spot Mono resources until redistribution
-    # is migrated. Keep that existing ownership boundary covered here.
     # Font ownership belongs to the process that draws the glyphs. The app used
     # to register SpotMono.ttc for the whole login session on its way to
     # spawning the terminal, which reached unrelated processes and outranked the
@@ -1213,12 +1209,15 @@ def test_release_binds_canonical_terminal_policy_and_private_fonts() -> None:
     )
     assert "vc-terminal-product-entry.sh" in builder
     assert (
-        'install -m 0644 "$SPOT_MONO_FONT" "$resources/fonts/SpotMono.ttc"' in builder
+        'install -m 0644 "$TERMINAL_FONT_DIR/$font" "$resources/fonts/$font"' in builder
     )
+    assert "SourceCodePro[wght].ttf" in builder
+    assert "SourceCodePro-Italic[wght].ttf" in builder
+    assert "OFL.txt" in builder
     assert 'embed_terminal_font_resources "$terminal_app"' in builder
     assert "Add :ATSApplicationFontsPath string fonts" in builder
-    assert "missing licensed Spot Mono input" in builder
-    assert "(OpenType|TrueType) font collection data" in builder
+    assert "missing Source Code Pro input" in builder
+    assert "(OpenType|TrueType) [Ff]ont" in builder
 
 
 def test_mission_control_failure_board_exposes_absolute_failure_time() -> None:

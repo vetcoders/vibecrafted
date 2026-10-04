@@ -8,6 +8,7 @@
 // Usage:
 //   font_probe <family>          resolve a family in THIS process, emit JSON
 //   font_probe --families <path> name the families a font file declares
+//   font_probe --style <path> <weight> resolve a variable instance from that file
 //
 // Reads fonts. Registers nothing outside the caller. Writes no font store.
 //
@@ -56,8 +57,45 @@ static int EmitFamilies(const char *path) {
   return 0;
 }
 
+static int EmitStyle(const char *path, const char *weight) {
+  NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path]];
+  CTFontDescriptorRef descriptor = CTFontDescriptorCreateWithAttributes(
+      (__bridge CFDictionaryRef) @{
+        (id)kCTFontURLAttribute : url,
+        (id)kCTFontVariationAttribute : @{@(0x77676874) : @(atoi(weight))},
+      });
+  CTFontRef font = CTFontCreateWithFontDescriptor(descriptor, 19.5, NULL);
+  CTFontDescriptorRef resolved = CTFontCopyFontDescriptor(font);
+  CFStringRef family = CTFontCopyFamilyName(font);
+  CFStringRef postscript = CTFontCopyPostScriptName(font);
+  CFDictionaryRef traits = CTFontCopyTraits(font);
+  NSDictionary *result = @{
+    @"family" : (__bridge NSString *)family,
+    @"postscript" : (__bridge NSString *)postscript,
+    @"source" : DescriptorPath(resolved) ?: [NSNull null],
+    @"traits" : (__bridge NSDictionary *)traits,
+    @"italic" : @((CTFontGetSymbolicTraits(font) & kCTFontItalicTrait) != 0),
+    @"weight" : ((__bridge NSDictionary *)traits)[(id)kCTFontWeightTrait] ?: @0,
+    @"ascent" : @(CTFontGetAscent(font)),
+    @"descent" : @(CTFontGetDescent(font)),
+  };
+  NSData *json = [NSJSONSerialization dataWithJSONObject:result options:0 error:NULL];
+  fwrite(json.bytes, 1, json.length, stdout);
+  fputc('\n', stdout);
+  CFRelease(traits);
+  CFRelease(postscript);
+  CFRelease(family);
+  CFRelease(resolved);
+  CFRelease(font);
+  CFRelease(descriptor);
+  return 0;
+}
+
 int main(int argc, const char *argv[]) {
   @autoreleasepool {
+    if (argc == 4 && strcmp(argv[1], "--style") == 0) {
+      return EmitStyle(argv[2], argv[3]);
+    }
     if (argc == 3 && strcmp(argv[1], "--families") == 0) {
       return EmitFamilies(argv[2]);
     }

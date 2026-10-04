@@ -266,7 +266,7 @@ EMBEDDED_RUNTIME_PACK_CHECKSUM="$EMBEDDED_RUNTIME_PACK.sha256"
 EMBEDDED_RUNTIME_PACK_SIGNATURE="$EMBEDDED_RUNTIME_PACK.sig"
 RUNTIME_PAYLOAD="$BUILD_DIR/runtime-pack-payload/VibecraftedRuntime"
 KEYS="${KEYS:-$HOME/.keys}"
-SPOT_MONO_FONT="${VIBECRAFTED_SPOT_MONO_FONT:-$KEYS/fonts/SpotMono.ttc}"
+TERMINAL_FONT_DIR="$SOURCE_ROOT/assets/fonts/source-code-pro"
 SIGNING_IDENTITY_FILE="$KEYS/signing-identity.txt"
 CERT_P12="$KEYS/Certificates.p12"
 CERT_PASSWORD_FILE="$KEYS/cert_password.txt"
@@ -491,20 +491,20 @@ if [[ "$MODE" != "runtime-pack" ]]; then
   done
 fi
 [[ -f "$SIGNING_IDENTITY_FILE" ]] || die "missing $SIGNING_IDENTITY_FILE"
-# Every payload that materializes a Darwin vc-terminal.app consumes the
-# licensed family, because embed_terminal_font_resources is inside
-# materialize_vc_terminal_app_bundle and both callers reach it. The App build
-# always does; a Runtime Pack does when its platform is Darwin, which is the
-# very condition materialize_runtime_payload branches on. Exempting
-# MODE=runtime-pack here stopped being true the moment the pack grew its own
-# bundle: the build would run the whole native compile and then die inside the
-# payload walk instead of in this one-line preflight. Linux packs ship the flat
-# native host, have no .app identity, and need no font.
+# Darwin terminal bundles carry the canonical OFL family from the captured
+# source commit. SOURCE_ROOT is materialized later: preflight its Git blobs,
+# rather than reading a missing snapshot or mutable Living Tree font files.
 if [[ "$MODE" != "runtime-pack" || "$RUNTIME_PACK_PLATFORM" == darwin-* ]]; then
-  [[ -f "$SPOT_MONO_FONT" ]] || die "missing licensed Spot Mono input: $SPOT_MONO_FONT"
-  LC_ALL=C file -b "$SPOT_MONO_FONT" \
-    | grep -Eq '(OpenType|TrueType) font collection data' \
-    || die "Spot Mono input is not an OpenType/TrueType font collection"
+  for font in 'SourceCodePro[wght].ttf' 'SourceCodePro-Italic[wght].ttf'; do
+    git -C "$REPO_ROOT" cat-file -e "$ROOT_SHA:assets/fonts/source-code-pro/$font" \
+      || die "missing Source Code Pro input at $ROOT_SHA: $font"
+    git -C "$REPO_ROOT" show "$ROOT_SHA:assets/fonts/source-code-pro/$font" \
+      | LC_ALL=C file -b - | grep -Eq '(OpenType|TrueType) [Ff]ont' \
+      || die "Source Code Pro input is not an OpenType/TrueType font: $font"
+  done
+  git -C "$REPO_ROOT" show "$ROOT_SHA:assets/fonts/source-code-pro/OFL.txt" \
+    | grep -Fq 'SIL OPEN FONT LICENSE Version 1.1' \
+    || die "missing Source Code Pro OFL license at $ROOT_SHA"
 fi
 prepare_signing_identity
 
@@ -900,15 +900,15 @@ embed_runtime_pack() {
 
 # embed_terminal_font_resources <vc-terminal.app>
 #
-# Give the process that actually draws the glyphs its own copy of the licensed
-# terminal family, declared the way Apple documents for a consuming app:
+# Give the process that actually draws the glyphs its own copy of the OFL
+# Source Code Pro family, declared the way Apple documents for a consuming app:
 # ATSApplicationFontsPath names a Resources-relative directory and CoreText
 # registers it privately for that bundle's process.
 #
 # Measured on macOS 27 with an isolated probe (see
 # tests/tui/test_terminal_font_ownership.py):
 #   * a family absent from the host resolves inside the declaring bundle and
-#     stays invisible to every other process, so a user without Spot Mono
+#     stays invisible to every other process, so a user without Source Code Pro
 #     installed still gets it;
 #   * a family already registered from /System/Library/Fonts or /Library/Fonts
 #     keeps winning inside the declaring process, so for those stores the
@@ -924,13 +924,16 @@ embed_terminal_font_resources() {
   local plist="$terminal_app/Contents/Info.plist"
   [[ -f "$plist" ]] || die "vc-terminal bundle has no Info.plist: $terminal_app"
   mkdir -p "$resources/fonts"
-  install -m 0644 "$SPOT_MONO_FONT" "$resources/fonts/SpotMono.ttc"
+  for font in 'SourceCodePro[wght].ttf' 'SourceCodePro-Italic[wght].ttf' 'OFL.txt'; do
+    install -m 0644 "$TERMINAL_FONT_DIR/$font" "$resources/fonts/$font"
+  done
   /usr/libexec/PlistBuddy -c "Set :ATSApplicationFontsPath fonts" "$plist" 2>/dev/null \
     || /usr/libexec/PlistBuddy -c "Add :ATSApplicationFontsPath string fonts" "$plist"
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :ATSApplicationFontsPath' "$plist")" == "fonts" ]] \
     || die "vc-terminal bundle does not declare its private font directory"
-  [[ -s "$resources/fonts/SpotMono.ttc" ]] \
-    || die "vc-terminal bundle is missing the bundled Spot Mono fallback"
+  for font in 'SourceCodePro[wght].ttf' 'SourceCodePro-Italic[wght].ttf' 'OFL.txt'; do
+    [[ -s "$resources/fonts/$font" ]] || die "vc-terminal bundle is missing $font"
+  done
 }
 
 materialize_runtime_payload() {

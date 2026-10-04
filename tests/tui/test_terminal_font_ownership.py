@@ -158,14 +158,18 @@ def test_parent_app_does_not_register_fonts_for_the_login_session() -> None:
 
 
 def test_builder_binds_the_font_to_the_bundle_that_draws_it() -> None:
-    """Legacy font resources remain private until the packaging migration."""
+    """Canonical OFL font resources belong to the rendering process."""
     builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
         encoding="utf-8"
     )
     assert "embed_terminal_font_resources() {" in builder
     assert (
-        'install -m 0644 "$SPOT_MONO_FONT" "$resources/fonts/SpotMono.ttc"' in builder
+        'install -m 0644 "$TERMINAL_FONT_DIR/$font" "$resources/fonts/$font"' in builder
     )
+    assert "SourceCodePro[wght].ttf" in builder
+    assert "SourceCodePro-Italic[wght].ttf" in builder
+    assert "OFL.txt" in builder
+    assert "SPOT_MONO_FONT" not in builder
     assert "Add :ATSApplicationFontsPath string fonts" in builder
     assert 'embed_terminal_font_resources "$terminal_app"' in builder
     # The font is bound before any signature is spent on the helper bundle.
@@ -270,7 +274,7 @@ def _licensed_font_preflight_condition() -> str:
     failure = next(
         index
         for index, line in enumerate(lines)
-        if "missing licensed Spot Mono input" in line
+        if "missing Source Code Pro input" in line
     )
     guard = next(
         lines[index]
@@ -291,7 +295,7 @@ def _licensed_font_preflight_condition() -> str:
 def test_licensed_font_preflight_covers_every_darwin_payload(
     mode: str, platform_: str, required: bool
 ) -> None:
-    """A Runtime Pack that materializes a .app consumes the licensed family.
+    """A Runtime Pack that materializes a .app consumes the canonical OFL family.
 
     Evaluated, not read: the shipped condition is handed to bash under each
     payload shape. While it was `MODE != runtime-pack` the Darwin pack built
@@ -321,7 +325,7 @@ def test_both_materializer_roles_receive_the_font_before_any_signature(
 
     One function assembles the App helper and the Runtime Pack's own bundle, so
     the proof has to be that the shipped body — not a second copy of it — puts
-    SpotMono.ttc and ATSApplicationFontsPath into whichever bundle it is given.
+    Source Code Pro and ATSApplicationFontsPath into whichever bundle it is given.
     Nothing is signed here: the materializer runs before any signature is
     spent, and the absence of Contents/_CodeSignature is part of the claim.
     """
@@ -355,8 +359,7 @@ def test_both_materializer_roles_receive_the_font_before_any_signature(
     binary = tmp_path / "alacritty"
     binary.write_bytes(b"terminal-binary-fixture")
     binary.chmod(0o755)
-    font = tmp_path / "SpotMono.ttc"
-    font.write_bytes(b"spot-mono-fixture")
+    font_directory = REPO_ROOT / "assets/fonts/source-code-pro"
 
     driver = "".join(
         (
@@ -380,7 +383,7 @@ def test_both_materializer_roles_receive_the_font_before_any_signature(
                 "PATH": "/usr/bin:/bin",
                 "TERMINAL_REPO": str(terminal_repo),
                 "SOURCE_ROOT": str(source_root),
-                "SPOT_MONO_FONT": str(font),
+                "TERMINAL_FONT_DIR": str(font_directory),
             },
             check=False,
             capture_output=True,
@@ -388,11 +391,138 @@ def test_both_materializer_roles_receive_the_font_before_any_signature(
         )
         assert result.returncode == 0, f"{role}: {result.stdout}{result.stderr}"
 
-        bundled = bundle / "Contents/Resources/fonts/SpotMono.ttc"
-        assert bundled.read_bytes() == font.read_bytes(), role
+        for name in (
+            "SourceCodePro[wght].ttf",
+            "SourceCodePro-Italic[wght].ttf",
+            "OFL.txt",
+        ):
+            bundled = bundle / "Contents/Resources/fonts" / name
+            assert bundled.read_bytes() == (font_directory / name).read_bytes(), role
         with (bundle / "Contents/Info.plist").open("rb") as handle:
             info = plistlib.load(handle)
         assert info["ATSApplicationFontsPath"] == "fonts", role
         assert info["CFBundleName"] == "VC Terminal", role
         assert info["CFBundleDisplayName"] == "VC Terminal", role
         assert not (bundle / "Contents/_CodeSignature").exists(), role
+
+
+def test_hosted_release_uses_repository_font_inputs_without_a_private_font_secret():
+    workflow = (REPO_ROOT / ".github/workflows/release-dmg.yml").read_text()
+    assert "VC_FONT_PASSPHRASE" not in workflow
+    assert "SpotMono.ttc.enc" not in workflow
+    assert "tests/tui/test_terminal_font_ownership.py" in workflow
+
+
+@pytest.mark.parametrize("damage", [None, "normal", "italic", "license"])
+def test_font_preflight_reads_captured_commit_before_snapshot_exists(tmp_path, damage):
+    source = tmp_path / "source"
+    fonts = source / "assets/fonts/source-code-pro"
+    shutil.copytree(REPO_ROOT / "assets/fonts/source-code-pro", fonts)
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    if damage:
+        name = {
+            "normal": "SourceCodePro[wght].ttf",
+            "italic": "SourceCodePro-Italic[wght].ttf",
+            "license": "OFL.txt",
+        }[damage]
+        (fonts / name).write_bytes(b"invalid input\n")
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source),
+            "-c",
+            "user.name=fixture",
+            "-c",
+            "user.email=fixture@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        check=True,
+    )
+    revision = subprocess.check_output(
+        ["git", "-C", str(source), "rev-parse", "HEAD"], text=True
+    ).strip()
+    # Repair or damage live files after capture: preflight must still inspect
+    # exactly the captured commit, independently of this mutable checkout.
+    for name in (
+        "SourceCodePro[wght].ttf",
+        "SourceCodePro-Italic[wght].ttf",
+        "OFL.txt",
+    ):
+        (fonts / name).write_bytes(b"uncommitted live bytes\n")
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text()
+    preflight = builder.split("# Darwin terminal bundles carry", 1)[1].split(
+        "\nprepare_signing_identity", 1
+    )[0]
+    preflight = preflight[preflight.index('if [[ "$MODE"') :]
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'set -euo pipefail\ndie() { echo "$*" >&2; exit 2; }\n' + preflight,
+        ],
+        env={
+            "PATH": "/usr/bin:/bin",
+            "MODE": "app",
+            "RUNTIME_PACK_PLATFORM": "darwin-arm64",
+            "REPO_ROOT": str(source),
+            "ROOT_SHA": revision,
+            "SOURCE_ROOT": str(tmp_path / "not-yet-materialized"),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == (0 if damage is None else 2), result.stderr
+    if damage:
+        assert "Source Code Pro" in result.stderr
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="CoreText is macOS")
+def test_packaged_source_code_pro_resolves_four_native_variable_instances(tmp_path):
+    """Constrain each descriptor to bundled bytes, even on hosts with the family.
+
+    Generic tests above establish process-private registration. This case proves
+    that the actual shipped normal and italic variable inputs supply all four
+    usable styles, without mistaking an already-installed font for our payload.
+    """
+    directory = REPO_ROOT / "assets/fonts/source-code-pro"
+    probe = _probe_binary(tmp_path)
+    executable = _make_bundle(
+        tmp_path,
+        "source-code-pro",
+        probe,
+        directory / "SourceCodePro[wght].ttf",
+        declare_fonts=True,
+    )
+    bundled = executable.parents[1] / "Resources/fonts"
+    shutil.copyfile(
+        directory / "SourceCodePro-Italic[wght].ttf",
+        bundled / "SourceCodePro-Italic[wght].ttf",
+    )
+    for style, name, weight, postscript, italic in (
+        ("Regular", "SourceCodePro[wght].ttf", 400, "SourceCodePro-Regular", False),
+        ("Bold", "SourceCodePro[wght].ttf", 700, "SourceCodePro-Bold", False),
+        ("Italic", "SourceCodePro-Italic[wght].ttf", 400, "SourceCodePro-Italic", True),
+        (
+            "Bold Italic",
+            "SourceCodePro-Italic[wght].ttf",
+            700,
+            "SourceCodePro-BoldItalic",
+            True,
+        ),
+    ):
+        result = _ask(executable, "--style", str(bundled / name), str(weight))
+        assert result["family"] == "Source Code Pro", (style, result)
+        assert result["postscript"] == postscript, (style, result)
+        assert _same_file(result["source"], bundled / name), (style, result)
+        assert result["italic"] == italic, (style, result)
+        assert result["ascent"] > 0 and result["descent"] > 0
+        assert result["weight"] > 0.2 if weight == 700 else abs(result["weight"]) < 0.1

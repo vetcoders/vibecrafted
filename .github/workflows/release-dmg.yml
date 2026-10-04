@@ -17,7 +17,6 @@ name: Release DMG (hosted macOS)
 #   VC_NOTARY_API_KEY_B64 / VC_NOTARY_API_KEY_ID / VC_NOTARY_API_ISSUER  notarytool
 #   Or VC_NOTARY_APPLE_ID / VC_NOTARY_PASSWORD / VC_NOTARY_TEAM_ID, stored
 #   in a temporary runner Keychain profile before invoking the builder.
-#   VC_FONT_PASSPHRASE     decrypts assets/fonts/SpotMono.ttc.enc (licensed font, AES-256-CBC/PBKDF2)
 #
 # 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
 
@@ -124,6 +123,11 @@ jobs:
           # Vibecrafted Server shell (leptos); version matches the operator machine
           cargo install --locked cargo-leptos@0.3.7
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+      - name: Verify packaged terminal fonts and private CoreText resolution
+        working-directory: vibecrafted
+        env:
+          VIBECRAFTED_HOME: ${{ runner.temp }}/vibecrafted-font-contract
+        run: env -u PYTHONPATH uv run pytest tests/tui/test_terminal_font_ownership.py -q
       - name: Materialize signing keys from secrets
         env:
           VC_CERT_P12_B64: ${{ secrets.VC_CERT_P12_B64 }}
@@ -136,16 +140,15 @@ jobs:
           VC_NOTARY_APPLE_ID: ${{ secrets.VC_NOTARY_APPLE_ID }}
           VC_NOTARY_PASSWORD: ${{ secrets.VC_NOTARY_PASSWORD }}
           VC_NOTARY_TEAM_ID: ${{ secrets.VC_NOTARY_TEAM_ID }}
-          VC_FONT_PASSPHRASE: ${{ secrets.VC_FONT_PASSPHRASE }}
         run: |
           set -euo pipefail
-          for v in VC_CERT_P12_B64 VC_CERT_PASSWORD VC_SIGNING_IDENTITY VC_SIGNING_KEY VC_FONT_PASSPHRASE; do
+          for v in VC_CERT_P12_B64 VC_CERT_PASSWORD VC_SIGNING_IDENTITY VC_SIGNING_KEY; do
             [[ -n "${!v:-}" ]] || { echo "::error::missing secret $v"; exit 1; }
           done
           [[ -n "${PAYLOAD_HYGIENE_EXTRA_LITERALS//[[:space:]]/}" ]] \
             || { echo "::error::repository variable PAYLOAD_HYGIENE_EXTRA_LITERALS is empty; the hygiene gate would prove nothing about the operator"; exit 1; }
           umask 077
-          mkdir -p "$KEYS/fonts"
+          mkdir -p "$KEYS"
           printf '%s' "$VC_CERT_P12_B64" | base64 --decode > "$KEYS/Certificates.p12"
           printf '%s\n' "$VC_CERT_PASSWORD" > "$KEYS/cert_password.txt"
           printf '%s\n' "$VC_SIGNING_IDENTITY" > "$KEYS/signing-identity.txt"
@@ -161,10 +164,7 @@ jobs:
             echo "::error::provide a complete notary API key or Apple ID credential set"
             exit 1
           fi
-          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 \
-            -in vibecrafted/assets/fonts/SpotMono.ttc.enc -out "$KEYS/fonts/SpotMono.ttc" \
-            -pass env:VC_FONT_PASSPHRASE
-          file "$KEYS/Certificates.p12" "$KEYS/fonts/SpotMono.ttc"
+          file "$KEYS/Certificates.p12"
 
       - name: Trust the Developer ID intermediate on the runner
         # The .p12 carries the leaf; codesign still has to chain it to Apple's
