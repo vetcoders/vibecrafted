@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -150,6 +151,8 @@ def _write_trap(directory: Path, name: str, capture: Path) -> Path:
 def _isolate_world(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, providers: tuple[str, ...]
 ) -> dict[str, Path]:
+    git_binary = shutil.which("git")
+    assert git_binary, "real Git is required to create isolated proof repositories"
     home = tmp_path / "home"
     vc_home = home / ".vibecrafted"
     trap = tmp_path / "trap-bin"
@@ -158,6 +161,9 @@ def _isolate_world(
     home.mkdir()
     vc_home.mkdir()
     trap.mkdir()
+    # Keep the Git that initialized the fixture; isolating provider discovery
+    # must not switch repository admission to an unvalidated system Git.
+    (trap / "git").symlink_to(git_binary)
     for name in providers:
         _write_trap(trap, name, capture)
     monkeypatch.setenv("HOME", str(home))
@@ -343,6 +349,37 @@ def test_disjoint_helper_refuses_parent_copy() -> None:
 
 def _honest_unknown(value: str) -> str:
     return value.strip() or UNKNOWN_NATIVE_IDENTITY
+
+
+def test_isolated_world_keeps_validated_git_authority(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from vibecrafted_core.repo_selection import select_repository
+
+    real_git = shutil.which("git")
+    assert real_git, "real Git is required for repository admission proof"
+    inherited_bin = tmp_path / "inherited-bin"
+    inherited_bin.mkdir()
+    calls = tmp_path / "git-calls.jsonl"
+    recorder = inherited_bin / "git"
+    recorder.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        f"with open({str(calls)!r}, 'a', encoding='utf-8') as log:\n"
+        "    log.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+        f"os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])\n",
+        encoding="utf-8",
+    )
+    recorder.chmod(recorder.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", os.pathsep.join((str(inherited_bin), os.defpath)))
+
+    world = _isolate_world(monkeypatch, tmp_path, ("claude",))
+    selection = select_repository(str(world["repo"]), require_git=True)
+
+    assert selection.git_toplevel == str(world["repo"].resolve())
+    recorded = [json.loads(line) for line in calls.read_text().splitlines()]
+    assert ["init", "-q"] in recorded
+    assert ["rev-parse", "--show-toplevel"] in recorded
 
 
 @pytest.mark.parametrize("skill", ["init", "partner", "operator", "resume"])
