@@ -949,6 +949,32 @@ def test_tag_release_builds_all_carriers_from_a_commit_on_main() -> None:
         assert artifact in workflow
 
 
+@pytest.mark.parametrize(
+    ("donor", "revision"),
+    [
+        ("terminal", "f64b5c15a029a0b3cb8845ea6056142247d2f48b"),
+        ("frame", "9484c3b57f11b7f06a438ffd5c27c8637602b47e"),
+    ],
+)
+def test_hosted_dmg_donor_defaults_and_fallbacks_use_approved_revisions(
+    donor: str, revision: str
+) -> None:
+    workflow = (REPO_ROOT / ".github/workflows/release-dmg.yml").read_text()
+    dispatch_default = re.search(
+        rf"      {donor}_ref:\n(?:        [^\n]+\n)*?        default: ([0-9a-f]{{40}})\n",
+        workflow,
+    )
+    assert dispatch_default is not None
+    assert dispatch_default.group(1) == revision
+    checkout = re.search(
+        rf"          repository: vetcoders/vc-{donor}\n"
+        rf"          ref: \$\{{\{{ inputs\.{donor}_ref \|\| '([0-9a-f]{{40}})' \}}\}}",
+        workflow,
+    )
+    assert checkout is not None
+    assert checkout.group(1) == revision
+
+
 def test_tag_dmg_donors_match_the_public_cross_platform_source_pins() -> None:
     workflow = (REPO_ROOT / ".github/workflows/release-dmg.yml").read_text()
     linux = (REPO_ROOT / "scripts/build-linux-arm64-runtime-pack.sh").read_text()
