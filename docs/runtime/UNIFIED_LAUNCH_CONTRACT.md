@@ -176,20 +176,26 @@ after successful creation, carrying the exact root and created-session marker.
 
 Inside Frame, `vc-start` creates an ordinary project session from
 `operator.kdl`, retaining its Start here, Agents, Shell and Voc tabs plus one
-session canvas. Entry switches the calling client through the native action:
+session canvas. CLI entry uses the native action, subject to the source-client
+restriction below:
 
 ```text
 vc-frame --session <attached-session> action switch-session <project>
 ```
 
-The source session is the live attached owner (`VC_FRAME_SESSION_NAME`). The
-launcher forwards inherited pane identity; the engine must resolve the calling
-client even when multiple clients view the same pane. A session name alone must
-not choose another client. Outside Frame, entry uses
+The source session is the live attached owner (`VC_FRAME_SESSION_NAME`). Current
+Frame CLI actions carry no client ID and can select the last active client;
+forwarding pane markers does not identify the caller. The launcher therefore
+requires exactly one observed client on the source session and refuses ambiguous
+or unreadable source-client inventory with exit 4. The destination may already
+have any number of clients. With multiple source clients, use the native Sessions
+rail or Cmd-Up/Down, which carry the actual client identity. A client count is
+a temporary CLI restriction, not proof of an atomic client-identity handoff.
+Outside Frame, entry uses
 `attach <project>`; no-TTY entry delegates to VC Terminal with the exact created
 session. Creation and entry are separate: an entry failure must leave the created
 session available and report it honestly. Name collisions remain exit 3;
-inventory and creation failures exit 4. Native entry propagates the engine's
+inventory, creation and ambiguous CLI source-client failures exit 4. Native entry propagates the engine's
 exit status without a projection or terminal fallback.
 
 Operator Frame is an ordinary standalone session, displayed as 00, with
@@ -204,8 +210,9 @@ Projects are displayed from 01 with their separate tabs. Cmd-Up/Down changes
 the client's session; Cmd-Left/Right changes only that session's tabs. The active
 session must be visible on the rail. Selected tab and focus belong to each
 client and survive leaving and rejoining; another client's selection must not
-replace them. There is no nested Frame terminal, guest readiness gate or
-`connected_clients == 1` requirement for entering a project.
+replace them. There is no nested Frame terminal or guest readiness gate. A second
+client on the destination never blocks entry; the temporary CLI restriction
+applies only to identifying the source client.
 
 The acceptance boundary is two projects and two clients of one project,
 switching both ways while preserving state and exactly one chrome per client.

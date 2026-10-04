@@ -462,14 +462,15 @@ def test_inside_host_with_tty_opens_separate_terminal(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("shell", ["bash", "zsh"])
+@pytest.mark.parametrize("source_clients", [1, 2])
 def test_parallel_operators_resume_project_from_calling_client(
-    tmp_path: Path, shell: str
+    tmp_path: Path, shell: str, source_clients: int
 ) -> None:
     current = "vc-host@7a69d24d"
     scene = Scene(
         tmp_path,
         live=("vc-host", current, "existing-project"),
-        clients=("vc-host", current, current, "existing-project"),
+        clients=("vc-host",) + (current,) * source_clients + ("existing-project",) * 2,
         guests=("existing-project",),
     )
     before = {p.name: p.read_bytes() for p in (scene.table / "live").iterdir()}
@@ -486,18 +487,23 @@ def test_parallel_operators_resume_project_from_calling_client(
             "VIBECRAFTED_VC_FRAME_BIN": str(scene.generation / "bin/vc-frame"),
         },
     )
-    assert _rc(result) == 0, result.stdout + result.stderr
+    assert _rc(result) == (0 if source_clients == 1 else 4), (
+        result.stdout + result.stderr
+    )
     switches = [c for c in scene.calls() if c.get("switched")]
-    assert len(switches) == 1
-    assert switches[0]["argv"] == [
-        "--session",
-        current,
-        "action",
-        "switch-session",
-        "existing-project",
-    ]
-    assert switches[0]["VC_FRAME_SESSION_NAME"] == current
-    assert switches[0]["VC_FRAME_PANE_ID"] == "2"
+    if source_clients == 1:
+        assert len(switches) == 1
+        assert switches[0]["argv"] == [
+            "--session",
+            current,
+            "action",
+            "switch-session",
+            "existing-project",
+        ]
+        assert switches[0]["VC_FRAME_SESSION_NAME"] == current
+        assert switches[0]["VC_FRAME_PANE_ID"] == "2"
+    else:
+        assert not switches
     assert not _creates(scene.calls())
     for name, body in before.items():
         assert (scene.table / "live" / name).read_bytes() == body

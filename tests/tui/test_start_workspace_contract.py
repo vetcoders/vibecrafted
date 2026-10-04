@@ -26,9 +26,14 @@ The contract proven here, in the shipped shell sources (not a reimplementation):
 * **exclusive create** -- adapter lock plus inventory, then Frame create;
   two concurrent starts yield exactly one workspace and one refusal.
 * **enter** -- outside Frame, attach directly to the project. Inside Frame,
-  create an ordinary full-chrome project and switch the caller's client using
-  its session/pane markers. Session 00 has embedded Operator chrome; project
-  sessions retain their own tabs/status and accept any number of clients.
+  create an ordinary full-chrome project; CLI switching requires a snapshot
+  containing exactly one source client because pane markers do not address a
+  client. An ambiguous source refuses safely and leaves the project available
+  to attach.
+  Targets accept any number of clients. Session 00 owns Operator chrome;
+  project sessions retain their own tabs/status. Native keyboard/rail events
+  carry client identity and can switch with multiple source clients. The shell
+  snapshot is not an atomic guarantee against a concurrent client attachment.
 
 Only the catalogue and Frame process are stubbed. The stub keeps exclusive
 on-disk session creation and rejects unknown verbs, including retired nested
@@ -371,9 +376,15 @@ if rest[:1] == ["action"]:
         record({"switched": [target, wanted]})
         sys.exit(0)
     if verb == "list-clients":
+        if os.environ.get("VC_FRAME_CLIENTS_ERROR"):
+            sys.stderr.write(os.environ["VC_FRAME_CLIENTS_ERROR"] + "\\n")
+            sys.exit(1)
+        if os.environ.get("VC_FRAME_CLIENTS_MALFORMED"):
+            print(os.environ["VC_FRAME_CLIENTS_MALFORMED"])
+            sys.exit(0)
         print("CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND")
-        for _ in clients_of(target):
-            print("1         terminal_1     zsh ")
+        for index, _ in enumerate(clients_of(target), 1):
+            print("%s         terminal_1     zsh " % index)
         sys.exit(0)
     if verb == "dump-layout":
         with open(os.path.join(table, "live", target), encoding="utf-8") as handle:
@@ -1724,13 +1735,15 @@ def _assert_peer_switch(scene: Scene, current: str, project: str) -> None:
     assert (scene.table / "live" / project).read_text() == selected.read_text()
     assert not _attaches(calls), calls
     assert not _projects(calls), calls
-    assert not any("list-clients" in c["argv"] for c in calls), calls
+    assert [c["argv"] for c in calls if "list-clients" in c["argv"]] == [
+        ["--session", current, "action", "list-clients"]
+    ], calls
     assert scene.terminal_launches(wait=0.1) == []
 
 
 @pytest.mark.parametrize("tty", [False, True])
 @pytest.mark.parametrize("current", [HOST_SESSION, "project-a"])
-def test_peer_start_keeps_existing_session_contents_with_multiple_clients(
+def test_peer_start_refuses_ambiguous_source_and_preserves_session_contents(
     tmp_path: Path, tty: bool, current: str
 ) -> None:
     scene = Scene(
@@ -1747,8 +1760,11 @@ def test_peer_start_keeps_existing_session_contents_with_multiple_clients(
         developer_root=True,
         extra_env=_inside_host_env(scene, current),
     )
-    assert _rc(result) == 0, result.stdout + result.stderr
-    _assert_peer_switch(scene, current, "mlx-batch-runner")
+    assert _rc(result) == EXIT_INVENTORY, result.stdout + result.stderr
+    assert not _switches(scene.calls()), scene.calls()
+    assert not _attaches(scene.calls()) and not _projects(scene.calls())
+    assert "vc-frame attach mlx-batch-runner" in result.stdout + result.stderr
+    assert "mlx-batch-runner" in scene.live()
     for name, content in before.items():
         assert (scene.table / "live" / name).read_bytes() == content
     assert len(_creates(scene.calls())) == 1
@@ -1758,7 +1774,7 @@ def test_peer_start_keeps_existing_session_contents_with_multiple_clients(
     "entry", ["vc-start operator", f"{shlex.quote(str(DECK))} start"]
 )
 def test_peer_public_aliases_share_native_switch(tmp_path: Path, entry: str) -> None:
-    scene = Scene(tmp_path, live=(HOST_SESSION,), clients=(HOST_SESSION,) * 2)
+    scene = Scene(tmp_path, live=(HOST_SESSION,), clients=(HOST_SESSION,))
     result = _run(
         scene,
         entry,
@@ -1767,6 +1783,56 @@ def test_peer_public_aliases_share_native_switch(tmp_path: Path, entry: str) -> 
     )
     assert _rc(result) == 0, result.stdout + result.stderr
     _assert_peer_switch(scene, HOST_SESSION, "mlx-batch-runner")
+
+
+@pytest.mark.parametrize("target_clients", [0, 1, 2, 3])
+def test_peer_switch_allows_multiple_target_clients(
+    tmp_path: Path, target_clients: int
+) -> None:
+    scene = Scene(
+        tmp_path,
+        live=("project-a", "project-b"),
+        guests=("project-a", "project-b"),
+        clients=("project-a",) + ("project-b",) * target_clients,
+    )
+    frame = scene.generation / "bin" / "vc-frame"
+    result = _eval_start_fn(
+        f'_vetcoders_start_enter_workspace_session "{frame}" project-b',
+        extra_env=scene.env(_inside_host_env(scene, "project-a")),
+    )
+    assert _rc(result) == 0, result.stdout + result.stderr
+    assert [c["switched"] for c in scene.calls() if c.get("switched")] == [
+        ["project-a", "project-b"]
+    ]
+    assert [c["argv"] for c in scene.calls() if "list-clients" in c["argv"]] == [
+        ["--session", "project-a", "action", "list-clients"]
+    ]
+    assert not _creates(scene.calls()) and not _attaches(scene.calls())
+    assert not _projects(scene.calls())
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        {"VC_FRAME_CLIENTS_ERROR": "client inventory unavailable"},
+        {"VC_FRAME_CLIENTS_MALFORMED": "not a client inventory"},
+        {
+            "VC_FRAME_CLIENTS_MALFORMED": "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\nnot-a-client terminal_1 zsh"
+        },
+    ],
+)
+def test_peer_switch_refuses_unreadable_source_client_inventory(
+    tmp_path: Path, fault: dict[str, str]
+) -> None:
+    scene = Scene(tmp_path, live=(HOST_SESSION,), clients=(HOST_SESSION,))
+    env = {**_inside_host_env(scene, HOST_SESSION), **fault}
+    result = _run(scene, "vc-start", developer_root=True, extra_env=env)
+    assert _rc(result) == EXIT_INVENTORY, result.stdout + result.stderr
+    assert not _switches(scene.calls()), scene.calls()
+    assert not _attaches(scene.calls()) and not _projects(scene.calls())
+    assert "mlx-batch-runner" in scene.live()
+    assert "vc-frame attach mlx-batch-runner" in result.stderr
+    assert scene.terminal_launches(wait=0.1) == []
 
 
 @pytest.mark.parametrize("tty", [False, True])
@@ -1820,9 +1886,9 @@ def test_peer_start_preserves_customized_layout_and_full_chrome(tmp_path: Path) 
 def test_peer_switch_failure_keeps_created_project_without_fallback(
     tmp_path: Path,
 ) -> None:
-    scene = Scene(tmp_path, live=(HOST_SESSION,), clients=(HOST_SESSION,) * 2)
+    scene = Scene(tmp_path, live=(HOST_SESSION,), clients=(HOST_SESSION,))
     env = _inside_host_env(scene, HOST_SESSION)
-    env["VC_FRAME_SWITCH_ERROR"] = "ambiguous caller: two clients share this pane"
+    env["VC_FRAME_SWITCH_ERROR"] = "injected native switch failure"
     result = _run(scene, "vc-start", developer_root=True, extra_env=env)
     assert _rc(result) != 0, result.stdout + result.stderr
     assert env["VC_FRAME_SWITCH_ERROR"] in result.stderr
@@ -1867,6 +1933,7 @@ def test_operator_creation_does_not_inherit_project_identity(
     scene = Scene(
         tmp_path,
         live=("project-a",),
+        clients=("project-a",),
         guests=("project-a",),
         dead=(HOST_SESSION,) if resurrect else (),
     )
@@ -1906,8 +1973,8 @@ def test_operator_creation_does_not_inherit_project_identity(
 
 
 @pytest.mark.parametrize("shell", ["bash", "zsh"])
-@pytest.mark.parametrize("client_count", [1, 2, 3])
-def test_no_tty_inside_attached_frame_creates_peer_and_switches(
+@pytest.mark.parametrize("client_count", [0, 1, 2, 3])
+def test_no_tty_peer_start_switches_only_for_unique_source_client(
     tmp_path: Path, shell: str, client_count: int
 ) -> None:
     scene = Scene(
@@ -1923,8 +1990,15 @@ def test_no_tty_inside_attached_frame_creates_peer_and_switches(
         developer_root=True,
         extra_env=_inside_host_env(scene),
     )
-    assert _rc(result) == 0, result.stdout + result.stderr
-    _assert_peer_switch(scene, "other-place", "mlx-batch-runner")
+    if client_count == 1:
+        assert _rc(result) == 0, result.stdout + result.stderr
+        _assert_peer_switch(scene, "other-place", "mlx-batch-runner")
+    else:
+        assert _rc(result) == EXIT_INVENTORY, result.stdout + result.stderr
+        assert not _switches(scene.calls()), scene.calls()
+        assert not _attaches(scene.calls()) and not _projects(scene.calls())
+        assert "vc-frame attach mlx-batch-runner" in result.stderr
+        assert scene.terminal_launches(wait=0.1) == []
     assert scene.live() == ["mlx-batch-runner", "other-place", HOST_SESSION]
 
 

@@ -1395,16 +1395,41 @@ _vetcoders_start_create_workspace_session() {
   return 0
 }
 
-# Enter a peer session. Creation/attach RPCs clear pane markers, but a native
-# switch must retain them so Frame can identify the requesting client. Never
-# infer its identity from the number of attached clients or another pane.
+# Enter a peer session. The current CLI cannot carry a frontend client ID.
+# Refuse known ambiguity in the source; destination client count is irrelevant.
+# This snapshot check is not atomic identity admission: native rail/key actions
+# carry real client identity and are the multi-client navigation path.
 _vetcoders_start_enter_workspace_session() {
   local vc_frame_bin="${1:-}" session_name="${2:-}" current="" socket_dir="" rc=0
+  local listing="" line="" client_id="" header_seen=0 rows=0
   [[ -n "$vc_frame_bin" && -n "$session_name" ]] || return 4
   if _vetcoders_in_vc_frame; then
     current="$(_vetcoders_current_vc_frame_session_name)"
     [[ -n "$current" ]] || return 4
     [[ "$current" != "$session_name" ]] || return 0
+    listing="$(_vetcoders_start_frame_env "$vc_frame_bin" --session "$current" action list-clients 2>/dev/null)" || rc=$?
+    if ((rc == 0)); then
+      while IFS= read -r line; do
+        line="$(printf '%s' "$line" | _vetcoders_strip_ansi)"
+        [[ -n "${line//[[:space:]]/}" ]] || continue
+        if ((header_seen == 0)); then
+          [[ "$line" == CLIENT_ID*PANE_ID*RUNNING_COMMAND* ]] || break
+          header_seen=1
+          continue
+        fi
+        client_id="${line%%[[:space:]]*}"
+        if [[ -z "$client_id" || "$client_id" == *[!0-9]* ]]; then
+          header_seen=0
+          break
+        fi
+        rows=$((rows + 1))
+      done <<<"$listing"
+    fi
+    if ((rc != 0 || header_seen != 1 || rows != 1)); then
+      printf 'vc-start: cannot identify the calling client of %s; shell switching requires exactly one source client. Use the Sessions rail, or from another terminal: vc-frame attach %s\n' \
+        "$(_vetcoders_shell_quote "$current")" "$(_vetcoders_shell_quote "$session_name")" >&2
+      return 4
+    fi
     socket_dir="$(_vetcoders_vc_frame_socket_dir)" || return 4
     (
       _vetcoders_start_close_create_lock_fd
