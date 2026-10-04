@@ -2379,7 +2379,7 @@ def test_deck_help_documents_the_contract_and_exit_codes() -> None:
         "0 entered",
         "2 usage/name/root",
         "3 workspace exists",
-        "4 inventory/engine",
+        "4 inventory/create",
         "vc-start resume",
     ):
         assert needle in out, (needle, out)
