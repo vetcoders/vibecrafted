@@ -388,11 +388,12 @@ def test_invalid_or_unknown_claim_fails_closed(tmp_path, bad):
 def test_verifier_env_is_writer_owned_and_inline_toolchain_setting_works(
     tmp_path, monkeypatch
 ):
-    monkeypatch.setenv("DEVELOPER_DIR", "worker-only-setting")
     supervisor, cut, claim, _root = writer_fixture(
         tmp_path,
         'test -z "$DEVELOPER_DIR" && DEVELOPER_DIR=inline bash -c \'test "$DEVELOPER_DIR" = inline\' && command -v git && echo green',
     )
+    # Exercise verifier isolation after fixture setup: macOS git is an xcrun shim.
+    monkeypatch.setenv("DEVELOPER_DIR", "worker-only-setting")
     submit_claim(claim)
     assert supervisor._verify(cut).ok
 
