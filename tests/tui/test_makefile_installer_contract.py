@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1955,3 +1957,82 @@ def test_make_runtime_pack_reports_a_build_that_never_completed(
     # test_interrupted_build_cannot_publish_the_previous_success.
     record = repo / "build/runtime-pack-selection.json"
     assert '"status": "pending"' in record.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "gate_path", ["Makefile", "scripts/hooks/pre-commit", "scripts/hooks/pre-push"]
+)
+def test_semgrep_gates_scan_large_installer_and_refuse_large_source_finding(
+    tmp_path: Path, gate_path: str
+) -> None:
+    """Exercise each gate's real flags with offline rules, including >1 MB input."""
+    semgrep = shutil.which("semgrep")
+    if semgrep is None:
+        pytest.skip("actual Semgrep engine unavailable")
+    gate = (REPO_ROOT / gate_path).read_text(encoding="utf-8")
+    if gate_path == "Makefile":
+        command = next(
+            line.strip()
+            for line in gate.splitlines()
+            if line.strip().startswith("semgrep scan ")
+        )
+        tokens = shlex.split(command.split(";", 1)[0])
+        assert tokens[-1] == "."
+        args = tokens[1:-1]
+    else:
+        command = next(
+            line for line in gate.splitlines() if line.startswith("SEMGREP_ARGS=(")
+        )
+        args = shlex.split(command.removeprefix("SEMGREP_ARGS=(").removesuffix(")"))
+    assert args[args.index("--config") + 1] == "auto"
+    assert "--error" in args
+    assert args[args.index("--exclude-rule") + 1] == (
+        "html.security.audit.missing-integrity.missing-integrity"
+    )
+    rules = tmp_path / "coverage.yaml"
+    rules.write_text(
+        "rules:\n"
+        "  - id: large-source-finding\n"
+        "    languages: [python]\n"
+        "    pattern: dangerous_call(...)\n"
+        "    message: large source must be scanned\n"
+        "    severity: ERROR\n",
+        encoding="utf-8",
+    )
+    source = tmp_path / "large_source.py"
+    source.write_text(
+        "# padding to exceed the default limit\n" * 30_000 + "dangerous_call()\n"
+    )
+    assert 1_000_000 < source.stat().st_size < 3_000_000
+    args[args.index("--config") + 1] = str(rules)
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"PYTHONPATH", "PYTHONHOME"}
+    }
+    env["SEMGREP_SETTINGS_FILE"] = str(tmp_path / "semgrep-settings.yml")
+    targets = [source, REPO_ROOT / "scripts/vetcoders_install.py"]
+    result = subprocess.run(
+        [
+            semgrep,
+            *args,
+            "--json",
+            "--metrics",
+            "off",
+            "--disable-version-check",
+            *map(str, targets),
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=90,
+    )
+    data = json.loads(result.stdout)
+    assert result.returncode == 1, result.stderr
+    assert args[args.index("--max-target-bytes") + 1] == "3000000"
+    scanned = {Path(path).resolve() for path in data["paths"]["scanned"]}
+    assert {target.resolve() for target in targets} <= scanned, data["paths"]
+    assert len(data["results"]) == 1, data["results"]
+    assert Path(data["results"][0]["path"]).resolve() == source.resolve()

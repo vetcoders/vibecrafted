@@ -719,9 +719,9 @@ bump-major:
 
 semgrep:
 	@if command -v semgrep >/dev/null 2>&1; then \
-		semgrep scan --config auto --error --quiet --exclude-rule html.security.audit.missing-integrity.missing-integrity .; \
+		semgrep scan --config auto --error --quiet --max-target-bytes 3000000 --exclude-rule html.security.audit.missing-integrity.missing-integrity .; \
 	else \
-		uvx semgrep scan --config auto --error --quiet --exclude-rule html.security.audit.missing-integrity.missing-integrity .; \
+		uvx semgrep scan --config auto --error --quiet --max-target-bytes 3000000 --exclude-rule html.security.audit.missing-integrity.missing-integrity .; \
 	fi
 
 test: test-keychain-session

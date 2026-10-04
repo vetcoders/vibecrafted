@@ -60,7 +60,7 @@ echo "▸ semgrep"
 # Staged-only, same contract as shellcheck/ruff above. A Living Tree often
 # has unrelated dirty files; whole-repo `semgrep --config auto` attributes
 # those findings to this commit and blocks it.
-SEMGREP_ARGS=(scan --config auto --error --quiet --exclude-rule html.security.audit.missing-integrity.missing-integrity)
+SEMGREP_ARGS=(scan --config auto --error --quiet --max-target-bytes 3000000 --exclude-rule html.security.audit.missing-integrity.missing-integrity)
 # A worker's VIBECRAFTED_ROOT/python-site on PYTHONPATH poisons Homebrew
 # pysemgrep (jsonschema/rpds clash). Isolate the scanner.
 if command -v semgrep >/dev/null 2>&1; then
