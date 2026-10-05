@@ -52,7 +52,9 @@ poisoned. Full rule: [../LIVING_TREE_RULE.md](../LIVING_TREE_RULE.md).
 
 Before repo-specific analysis, planning, implementation, review, release, or
 delegation, run or consume `vc-init` for the assigned repo — fresh evidence or
-the work is blocked. Loctree is the perception layer (repo-view/focus/slice/
+the work is blocked. `Loctree:loctree` is the structural perception layer:
+materialize and read the Code-Derived Application Map through MCP or `loct`
+(repo-view/focus/slice/
 impact/find/follow; search before creating, impact before deleting, slice
 before editing). Missing `vc-init`/Loctree evidence is a process failure; the
 full gate text lives in [../vc-init/SKILL.md](../vc-init/SKILL.md).

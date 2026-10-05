@@ -1140,7 +1140,11 @@ def test_runtime_prompt_includes_vc_agents_worker_charter(tmp_path: Path) -> Non
     # Native in-process delegation (Task tool / vc-delegate) must be explicitly
     # permitted so worker agents do not over-compress the charter into a
     # blanket "no delegation" rule.
-    assert "Native in-process delegation is allowed" in payload
+    assert (
+        "Native in-process fan-out is your right and your default for parallel work"
+        in payload
+    )
+    assert "When the plan contains disjoint subcuts" in payload
     assert "vc-delegate" in payload
     assert "External fleet escalation is forbidden" in payload
     # Scope is bounded by the dispatched plan, not by the charter — workers on

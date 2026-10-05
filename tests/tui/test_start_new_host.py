@@ -496,10 +496,13 @@ def test_parallel_operators_resume_project_from_calling_client(
         assert switches[0]["argv"] == [
             "--session",
             current,
+            "--client-id",
+            "1",
             "action",
             "switch-session",
             "existing-project",
         ]
+        assert switches[0]["switched_client_id"] == 1
         assert switches[0]["VC_FRAME_SESSION_NAME"] == current
         assert switches[0]["VC_FRAME_PANE_ID"] == "2"
     else:

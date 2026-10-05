@@ -51,6 +51,8 @@ Zobacz [Reguła Living Tree](../LIVING_TREE_RULE.md).
 
 ## Checkpoint orientacji
 
+Mapę materializuj i przeczytaj przez MCP lub `loct`; sama obecność atlasu nie dowodzi jego przeczytania.
+
 Zanim ten workflow wykona analizę specyficzną dla repo, planowanie, implementację, review, release lub delegację, MUSI uruchomić lub skonsumować procedurę `vc-init` dla przydzielonego repo. Jeśli brakuje świeżych dowodów (evidence) z `vc-init`, najpierw wykonaj przebieg init i traktuj pracę specyficzną dla workflow jako zablokowaną, dopóki nie ma aktualnej prawdy repo.
 
 `Loctree:loctree` to domyślny skill do mapowania struktury repo dla tego przebiegu. Użyj Loctree przed grepem lub twierdzeniami z dokumentacji, aby wyprodukować lub odświeżyć Mapę Aplikacji Wyprowadzoną z Kodu (Code-Derived Application Map): repo-view, focus, slice, impact, find i follow w odpowiednim zakresie. Szukaj istniejących symboli i kontraktów, zanim utworzysz nowe; uruchom impact przed delete lub dużym refaktorem; uruchom slice przed edycją.

@@ -727,6 +727,44 @@ def test_shell_wrapper_entrypoints_preserve_their_deck_verb(
     assert seen["argv"] == [str(deck), verb, "sentinel"]
 
 
+@pytest.mark.parametrize("verb", ["dashboard", "start", "telemetry"])
+@pytest.mark.parametrize("wrapper", [False, True])
+def test_windows_shell_surfaces_refuse_without_spawning_deck(
+    monkeypatch, capsys, verb: str, wrapper: bool
+) -> None:
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+
+    def forbidden_spawn(*_args, **_kwargs):
+        pytest.fail("a native Windows command tried to execute a POSIX deck")
+
+    monkeypatch.setattr(cli.subprocess, "run", forbidden_spawn)
+    entrypoint = "telemetry" if verb == "telemetry" else f"vc-{verb}"
+    monkeypatch.setattr(cli.sys, "argv", [entrypoint, "--help"])
+
+    assert cli.main(None if wrapper else [verb, "--help"]) == 2
+    error = capsys.readouterr().err
+    assert "not supported on Windows" in error
+    assert "WSL2" in error
+    assert "Traceback" not in error
+
+
+def test_windows_python_wrapper_keeps_native_owner(monkeypatch, capsys) -> None:
+    from vibecrafted_core import runtime_receipt
+
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+    monkeypatch.setattr(cli.sys, "argv", ["vc-doctor"])
+    monkeypatch.setattr(cli.doctor_module, "doctor_run", lambda **_kwargs: [])
+    monkeypatch.setattr(runtime_receipt, "build_receipt", dict)
+    monkeypatch.setattr(runtime_receipt, "render_receipt_text", lambda _receipt: "")
+
+    def forbidden_spawn(*_args, **_kwargs):
+        pytest.fail("native doctor must not launch the POSIX compatibility deck")
+
+    monkeypatch.setattr(cli.subprocess, "run", forbidden_spawn)
+    assert cli.main() == 0
+    assert "0 checks, all ok" in capsys.readouterr().out
+
+
 def test_shell_wrapper_missing_deck_fails_loudly(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:

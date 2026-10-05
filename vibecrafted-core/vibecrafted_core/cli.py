@@ -2300,6 +2300,20 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         return windows_server_main(raw_args[1:])
 
+    if sys.platform == "win32" and is_lifecycle:
+        # Native aliases keep their Python owner. POSIX-only verbs cannot
+        # execute the bash deck through Windows CreateProcess (WinError 193).
+        if raw_args[0] in python_commands:
+            is_lifecycle = False
+        else:
+            print(
+                f"error: {raw_args[0]} uses the POSIX command deck and is not "
+                "supported on Windows. Use WSL2 for this command; native "
+                "Runtime Pack commands include doctor and server.",
+                file=sys.stderr,
+            )
+            return 2
+
     if is_lifecycle:
         from .runtime_paths import vibecrafted_tools_home
 

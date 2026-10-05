@@ -4,17 +4,22 @@ Vibecrafted runs on macOS, Linux, and native Windows (win32-x64 Runtime Pack).
 WSL2 remains a POSIX alternative. The channels differ in what they give you
 and in how finished they are, so this page states both.
 
+Native Windows supports Python-owned commands such as `doctor` and `server`.
+POSIX command-deck surfaces such as `dashboard`, `start`, and `telemetry`
+return exit code 2 with a WSL2 next step on native Windows. Run those commands
+inside WSL2; the native CLI does not start WSL2 automatically.
+
 ## Channel matrix
 
-| Channel                      | Platform             | What you get                                                        | Status                                   |
-| ---------------------------- | -------------------- | ------------------------------------------------------------------- | ---------------------------------------- |
-| Signed `Vibecrafted.app` DMG | macOS 14+, arm64     | Full desktop product: terminal, frame, runtime, server              | Build path complete; publication pending |
-| Portable tarball             | Linux, WSL2, macOS   | Command deck, runtime, control plane, skills — pinned to one commit | Build path complete; publication pending |
-| Native Runtime Pack          | Windows win32-x64    | Command deck, pack Python, foundations, vc-server; no WSL           | Built from checkout; publication pending |
-| Bootstrap `install.sh`       | macOS, Linux, WSL2   | Command deck, runtime, control plane, skills                        | Published; CI-gated                      |
-| Source checkout              | macOS, Linux, WSL2   | Development tree and targets — not a native Runtime Pack            | Published                                |
-| Container                    | anywhere Docker runs | Isolated operator runtime                                           | Published                                |
-| `install.ps1`                | Windows              | Native Runtime Pack entry (delegates to `install-runtime-pack.ps1`) | In repo; not yet served over HTTP        |
+| Channel                      | Platform             | What you get                                                        | Status                                         |
+| ---------------------------- | -------------------- | ------------------------------------------------------------------- | ---------------------------------------------- |
+| Signed `Vibecrafted.app` DMG | macOS 14+, arm64     | Full desktop product: terminal, frame, runtime, server              | Build path complete; publication pending       |
+| Portable tarball             | Linux, WSL2, macOS   | Command deck, runtime, control plane, skills — pinned to one commit | Build path complete; publication pending       |
+| Native Runtime Pack          | Windows win32-x64    | Command deck, pack Python, foundations, vc-server; no WSL           | Built from checkout; publication pending       |
+| Bootstrap `install.sh`       | macOS, Linux, WSL2   | Command deck, runtime, control plane, skills                        | Published; CI-gated                            |
+| Source checkout              | macOS, Linux, WSL2   | Development tree and targets — not a native Runtime Pack            | Published                                      |
+| Container                    | anywhere Docker runs | Isolated operator runtime                                           | Published                                      |
+| `install.ps1`                | Windows              | Native Runtime Pack entry (delegates to `install-runtime-pack.ps1`) | In repo; public URL still serves WSL2 launcher |
 
 If you want one sentence: **on macOS and Linux use the bootstrap today; on
 Windows install the win32-x64 Runtime Pack with `install.ps1 -Pack`.**
@@ -255,8 +260,10 @@ the exact build/install commands and **exits non-zero**.
 .\install.ps1 -Pack .\build\Vibecrafted_RuntimePack_<version>-win32-x64.tar.gz
 ```
 
-> **Current status.** `install.ps1` is not yet served from
-> `https://vibecrafted.io/install.ps1`, so do not `iwr | iex` it. Use the
+> **Current status (verified 2026-10-05).**
+> `https://vibecrafted.io/install.ps1` serves the older WSL2-only launcher,
+> not this native Runtime Pack installer. Do not `iwr | iex` it for a native
+> installation. Use the
 > checkout form. Publication of signed win32-x64 carriers is still pending;
 > the builder and installer are in-tree.
 

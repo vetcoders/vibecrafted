@@ -1,12 +1,13 @@
 {
   "schema": "vibecrafted.skill-provenance.v3",
-  "generated_at": "2026-10-03",
+  "generated_at": "2026-10-05",
   "skills": {
     "vc-agents": {
       "sha256": [
         "037949b5315184870cf67fc6ef13d74f293c84bad1aeaee25544aa2ce2d58f88",
         "06a65d4d06a09f17b1ba8d91d6f25c46c90a577387d33c0b2de014ffb641b39a",
         "0f1f85ba0dde8040b85dd338e0e48fc7517ff54b497bdfff65d527919dd3c08f",
+        "1193459d7f18c6dbd559c718cffd38dae093d69bf1a132528e26d7b6d49e9475",
         "1204d7e497b9ea832576d9aeaf6407ecf9bbf7a9ac91f00fb00dc7034d5112c3",
         "1273b5bd6900f6f54d8ea6637869f0c1d0b3e2433479b269e6c1a0cbeb26e327",
         "13ff38068d5263a3a0c33c999a8bd2bfb3d446b96252da5acc17655e318c49c9",
@@ -29,6 +30,7 @@
         "7009724b85ded1957c4fb5b5929d46aca09fa881757554877f9e651c98992090",
         "711e31bb41338b95a5259418e3e777b4c9adf31b54519bd4bc5847f3e2603906",
         "7351cbf9019e004db28f8ed595bc67565e554852a3494fbd20fc6d4f11573ce1",
+        "7473c0c822e681ba4db42c44f47abf1a179c82af29bee4cc6c67874f91c45872",
         "7498c086d9e20bd7d34a4a95f221ae9b854bf3f829d831c3ac92778e63ca861b",
         "7611cc53b5bb0580c556e096c9b48ddb8cddfacba9c7f15410fa37bbcdaf3e7d",
         "7abc3d638df60a1f2589b76191abcf17f20dedf1eb8bb8796bdb2e55e5286acc",
@@ -97,6 +99,7 @@
           "1d40e091285dd2a19a92dc97921077ce4446c99a",
           "2196544cafd1b3ff75cd079003f620a3f27656aa",
           "21d5ad335dc4b3ad768369519a397a7ad4a5b1e2",
+          "274c68bd18f69c02228c13953fd2d654fff34385",
           "2896b1e7496780a457302e5415e02d72a77eab3f",
           "2bc41b54dfb4b5ceede1271966d69bfbcb66861d",
           "3499d008fb5adc58f3c2271fdf7d9a76117017ed",
@@ -132,6 +135,7 @@
           "b5028b40391fdeb57b84642c609c27d434cd8d1a",
           "c5555356c8e2fc994bf361f7a66bf4616834d8e3",
           "ce461db349da0ad59ab5a3a7b31b342896a2e735",
+          "db03828c742033bb7f08a4b5c19bae7fe90df2d4",
           "de45426035086b9cf8e9fee1b2d94d07465d68be",
           "e5281f263d4f44ce14622985cc3f0af62c9df8c1",
           "e89f1a5e0179c82380dc2e4a5a36e36f6c1e9a20",
@@ -149,13 +153,16 @@
           "cbaca860471958a7587046d95504408e12e53061"
         ],
         "references/plan-template.md": [
-          "175e563e5221f1d79ef9967d44b763a32e34abec"
+          "175e563e5221f1d79ef9967d44b763a32e34abec",
+          "877e800de5c1c56e00ffbb4a63970e7302e41e47"
         ],
         "references/runbook.md": [
+          "c9e7033c3f133a9ce9f8561431352320e9ac78ae",
           "d05c4afc91675770e2e2537fb1d4556ed351c4e7"
         ],
         "references/why-matrix.md": [
-          "e9075ca1d012c19c748f0911dc89161a4edede64"
+          "e9075ca1d012c19c748f0911dc89161a4edede64",
+          "f4453adfa3966a520988f60285ee67e1c6098eee"
         ],
         "scripts/agy_spawn.sh": [
           "9f2d2d6be1fc8601d1002d789078420b97be6df2",
@@ -4608,6 +4615,7 @@
         "6dd624fffbdeb23ef46f526c4c314added663141196e8dcbba0e7812790f3d8f",
         "7b6e9f495e93d4ca2e92e0c137bb8d7998ef5fd464915b7ca715aff09abca5ca",
         "7ce9e50d96fd5d5a56094744372e5281e1c985d4fc2c975fa0b5ad8f6e477f01",
+        "7dabfab2d236de8e3fd3b935fa9899ee5b63faeb162c14d8733ad2d888b6b1c6",
         "8253504fdf5a828016ed73450ccb4f611b9968c4c0b0b4ad4edc4e9f19da8e14",
         "87c9b6b9fff53317a67292ce8043adb8c4713a2fbbc6151e6c07733f4bb48da2",
         "88d9a3af1673c6c2c7ce7e069d27c088fcd5319298bff20b79d17bd721dbb3ff",
@@ -4638,6 +4646,7 @@
         "ebb2e6f6342bc70769de906db8ca2036d45ff10e4b765d35722a874c49435c8c",
         "eca46ef7882af9c440de69ac0829bc483a2722d1ebcedbc40484cd32f043db1c",
         "f0aed169d64073b06def60a26a6687c70a545b974bc59ac978a1794156edc737",
+        "f8123b0184c7c2bbc9954b2a54630cf3f522ed8934d7e83856e5f6d8ccb68819",
         "f8870e339ea42c4878798f450845c769dcac239dc4c637ec706bea0a3056f7e1",
         "f9b304718cf2a2465a7a8af24a5e1229da7eba001f0cd98d4ac0b9bb023ba382",
         "fb2b27dede1f39cca74858f372168d10b21f4d84db87a8ee54be9c7a63b8d85a"
@@ -4680,7 +4689,9 @@
           "42829892ce8d50c7c9689fd64b2a2b1b7594fe67",
           "46b037b85a1c2a8ef25555d05e808c2f40d0120e",
           "4977fc77e3b66db4c871ebd6b529c5ef48aea6c6",
+          "4c21587d276e1ce9f90847b1f763f47e77c1b549",
           "50eddd9746f9b2896ef4a629d20750e6f6773e88",
+          "5528fa9b0ba7a588ee45bda95b0549d197d28f25",
           "553eebc15582a4efc06d1d83ab72ba2460ffd980",
           "5861c0752321e31381f0c2d1bb7d11a3254ebf36",
           "58cf8c409556495a1912956c0723859056d8c3a3",
@@ -4724,6 +4735,7 @@
           "4eb2e161cd929aacbbbb7956406451a983312abd"
         ],
         "references/output-templates.md": [
+          "1da8f8c2e19ff36d5cb2ec07bbeea2f2b3403270",
           "c0699a274fad09f107382c0914dab7b14a1aed72"
         ],
         "references/phase-examine.md": [

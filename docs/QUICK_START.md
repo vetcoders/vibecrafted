@@ -2,9 +2,13 @@
 
 ## 1. Install
 
-Find versioned DMG, Runtime Pack, Windows MSI/EXE and portable source assets
-on [GitHub Releases](https://github.com/vetcoders/vibecrafted/releases/latest).
-Each carrier has an adjacent checksum; Runtime Packs also have detached signatures.
+Check the assets actually attached to
+[GitHub Releases](https://github.com/vetcoders/vibecrafted/releases/latest).
+As verified on 2026-10-05, latest is the legacy `v3.5.0` release; it has no
+4.x DMG, Runtime Pack or Windows MSI/EXE carriers. The versioned carrier
+instructions below describe the pending publication. Each new carrier must
+have an adjacent checksum; Runtime Packs also require detached signatures.
+The POSIX bootstrap below is currently public.
 
 **macOS and Linux:**
 
@@ -17,6 +21,9 @@ required). Artifact names look like
 `Vibecrafted_RuntimePack_<version>-<YYYYMMDD>-<sha8>-win32-x64.tar.gz`. The
 MSI/EXE carriers are unsigned; SmartScreen will warn; trust is `.sha256` +
 `.sig`. See [INSTALL.md](INSTALL.md#windows--native-runtime-pack).
+Until those carriers are published, this requires a locally built pack and
+the checkout installer. The public `https://vibecrafted.io/install.ps1`
+still serves the older WSL2-only launcher.
 
 **Windows (POSIX alternative)** — install WSL2 once, then use the same
 bootstrap inside it:
