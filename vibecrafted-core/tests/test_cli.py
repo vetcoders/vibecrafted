@@ -1603,6 +1603,39 @@ def test_root_cli_doctor_text_is_summary_first(monkeypatch, capsys) -> None:
     assert "doctor --verbose" in out
 
 
+def test_root_cli_doctor_keeps_windows_unsupported_declarations(
+    monkeypatch, capsys
+) -> None:
+    """install-windows.yml matches this phrase in the default doctor text.
+
+    Summary-first still hides ordinary ok lines. The Windows omission
+    declaration is not an ordinary pass: a native pack that swallows it
+    looks complete.
+    """
+    monkeypatch.setattr(
+        cli.doctor_module,
+        "doctor_run",
+        lambda **_kwargs: [
+            SimpleNamespace(level="ok", component="store", message="present"),
+            SimpleNamespace(
+                level="ok",
+                component="windows:pty",
+                message=(
+                    "PTY host shells: not supported on Windows "
+                    "(use WSL2 for the POSIX path, or stay on the native Runtime Pack surfaces)"
+                ),
+            ),
+        ],
+    )
+
+    assert cli.main(["doctor"]) == 0
+
+    out = capsys.readouterr().out
+    assert "not supported on Windows" in out
+    assert "ok: windows:pty - PTY host shells: not supported on Windows" in out
+    assert "ok: store - present" not in out
+
+
 def test_root_cli_doctor_all_ok_is_a_one_line_verdict(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         cli.doctor_module,

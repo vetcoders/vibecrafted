@@ -2485,6 +2485,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             problems = [
                 f for f in summary["findings"] if f["level"] in ("fail", "warn")
             ]
+            # Cold Windows install reads the default text, not --verbose.
+            # These ok lines are the publication declaration that POSIX
+            # surfaces are absent. Hiding them makes a native pack look complete.
+            declarations = [
+                f
+                for f in summary["findings"]
+                if f["level"] == "ok" and "not supported on Windows" in f["message"]
+            ]
             checks = len(summary["findings"])
             version = next(
                 (
@@ -2509,6 +2517,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if version:
                     verdict += f" · vibecrafted {version}"
                 print(verdict)
+            for finding in declarations:
+                print(
+                    f"{finding['level']}: {finding['component']} - {finding['message']}"
+                )
             print()
             print("details: vibecrafted doctor --verbose")
             print()

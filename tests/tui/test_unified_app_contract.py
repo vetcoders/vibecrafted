@@ -4065,13 +4065,15 @@ def test_terminal_policy_uses_operator_toml_and_primary_shell_chain() -> None:
     installer = (REPO_ROOT / "scripts/vetcoders_install.py").read_text(encoding="utf-8")
 
     terminal_policy = tomllib.loads(terminal)
+    # Pixel-counted Spot Mono grid restored in config/vc-terminal/vibecrafted.toml
+    # (size 19.5, offset -3/-8, one Regular face). Source Code Pro stays the
+    # bundled app font; it is not this operator terminal policy.
     assert terminal_policy["font"] == {
         "size": 19.5,
-        "offset": {"x": 0, "y": 0},
-        "normal": {"family": "Source Code Pro", "style": "Regular"},
-        "bold": {"family": "Source Code Pro", "style": "Bold"},
-        "italic": {"family": "Source Code Pro", "style": "Italic"},
-        "bold_italic": {"family": "Source Code Pro", "style": "Bold Italic"},
+        "offset": {"x": -3, "y": -8},
+        "normal": {"family": "Spot Mono", "style": "Regular"},
+        "bold": {"family": "Spot Mono", "style": "Regular"},
+        "italic": {"family": "Spot Mono", "style": "Regular"},
     }
     assert 'style = { shape = "Underline", blinking = "On" }' in terminal
     assert 'cyan    = "#7dc4e4"' in dark

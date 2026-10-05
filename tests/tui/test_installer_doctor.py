@@ -357,6 +357,28 @@ def test_print_doctor_default_is_summary_first_and_bounded(
     assert "START_HERE.md" in output
 
 
+def test_print_doctor_keeps_windows_unsupported_declarations(
+    capsys, tmp_path: Path
+) -> None:
+    findings = [
+        installer.DoctorFinding("ok", "store", "ready"),
+        installer.DoctorFinding(
+            "ok",
+            "windows:pty",
+            "PTY host shells: not supported on Windows "
+            "(use WSL2 for the POSIX path, or stay on the native Runtime Pack surfaces)",
+        ),
+    ]
+
+    exit_code = installer.print_doctor(findings, guide_path=tmp_path / "START_HERE.md")
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert "not supported on Windows" in output
+    assert "windows:pty:" in output
+    assert "store: ready" not in output
+
+
 def test_print_doctor_verbose_lists_every_check_and_golden_paths(
     capsys, tmp_path: Path
 ) -> None:

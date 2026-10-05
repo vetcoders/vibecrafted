@@ -14449,7 +14449,14 @@ def print_doctor(
         f"{red(f'✗ {len(fails)} failures')}\n"
     )
 
-    shown = findings if verbose else fails + warns
+    # Same publication contract as the root CLI: the default summary still
+    # names POSIX surfaces that the native Windows pack does not ship.
+    declared = [
+        f
+        for f in findings
+        if f.level == "ok" and "not supported on Windows" in f.message
+    ]
+    shown = findings if verbose else fails + warns + declared
     for f in shown:
         icon = OK if f.level == "ok" else WARN if f.level == "warn" else MISS
         print(f"{icon} {f.component}: {f.message}")
