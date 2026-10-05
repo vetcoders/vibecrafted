@@ -23,35 +23,31 @@ title = "𝓥𝓲𝓫𝓮𝓬𝓻𝓪𝓯𝓽𝓮𝓭."
 # install; a first-time user reported the window could not be moved at all.
 decorations = "Transparent"
 startup_mode = "Maximized"
-# Zero inset keeps the Frame chrome aligned with the terminal canvas.
+# Zero inset: the Founder's pixel-counted Spot Mono grid (size 19.5, offset
+# -3/-8 below) already clears the transparent title controls.
 padding = { x = 0, y = 0 }
 dynamic_padding = true
 option_as_alt = "Both"
 
 [font]
-# Canonical terminal family: Source Code Pro, using native cell metrics.
-# The family must be available to the terminal process; real faces carry styles.
+# Founder's pixel-counted Spot Mono grid (laptop + desktop-host policy, 2026-09-15).
 size = 19.5
 
 [font.offset]
-x = 0
-y = 0
+x = -3
+y = -8
 
 [font.normal]
-family = "Source Code Pro"
+family = "Spot Mono"
 style = "Regular"
 
 [font.bold]
-family = "Source Code Pro"
-style = "Bold"
+family = "Spot Mono"
+style = "Regular"
 
 [font.italic]
-family = "Source Code Pro"
-style = "Italic"
-
-[font.bold_italic]
-family = "Source Code Pro"
-style = "Bold Italic"
+family = "Spot Mono"
+style = "Regular"
 
 [cursor]
 style = { shape = "Underline", blinking = "On" }

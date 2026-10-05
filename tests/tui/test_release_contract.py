@@ -1179,7 +1179,7 @@ def test_release_bundle_binds_the_vibecrafted_app_icon() -> None:
     assert 'cmp -s "$ICONSET/icon_128x128.png" "$REFERENCE"' in icon_builder
 
 
-def test_release_binds_canonical_terminal_policy_and_private_fonts() -> None:
+def test_release_bundle_binds_the_canonical_terminal_policy_and_font() -> None:
     terminal = (REPO_ROOT / "config/vc-terminal/vibecrafted.toml").read_text(
         encoding="utf-8"
     )
@@ -1197,7 +1197,7 @@ def test_release_binds_canonical_terminal_policy_and_private_fonts() -> None:
     )
     installer = (REPO_ROOT / "scripts/vetcoders_install.py").read_text(encoding="utf-8")
 
-    assert 'family = "Source Code Pro"' in terminal
+    assert 'family = "Spot Mono"' in terminal
     assert "size = 19.5" in terminal
     assert "live_config_reload = true" in terminal
     assert 'background = "#0b0b12"' in dark
