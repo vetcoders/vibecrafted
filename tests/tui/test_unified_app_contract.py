@@ -4067,11 +4067,10 @@ def test_terminal_policy_uses_operator_toml_and_primary_shell_chain() -> None:
     terminal_policy = tomllib.loads(terminal)
     assert terminal_policy["font"] == {
         "size": 19.5,
-        "offset": {"x": 0, "y": 0},
-        "normal": {"family": "Source Code Pro", "style": "Regular"},
-        "bold": {"family": "Source Code Pro", "style": "Bold"},
-        "italic": {"family": "Source Code Pro", "style": "Italic"},
-        "bold_italic": {"family": "Source Code Pro", "style": "Bold Italic"},
+        "offset": {"x": -3, "y": -8},
+        "normal": {"family": "Spot Mono", "style": "Regular"},
+        "bold": {"family": "Spot Mono", "style": "Regular"},
+        "italic": {"family": "Spot Mono", "style": "Regular"},
     }
     assert 'style = { shape = "Underline", blinking = "On" }' in terminal
     assert 'cyan    = "#7dc4e4"' in dark

@@ -166,7 +166,9 @@ jobs:
           }
           $env:Path = "$bin;$env:Path"
           $doctorLog = Join-Path $sandbox "doctor.log"
-          & (Join-Path $bin "vibecrafted.cmd") doctor *>&1 | Tee-Object -FilePath $doctorLog
+          # --verbose keeps the full ledger: Windows-unsupported surfaces are level "ok"
+          # findings, which the summary-first default report does not list.
+          & (Join-Path $bin "vibecrafted.cmd") doctor --verbose *>&1 | Tee-Object -FilePath $doctorLog
           if ($LASTEXITCODE -ne 0) {
             Get-Content -LiteralPath $doctorLog
             throw "vibecrafted doctor failed with exit $LASTEXITCODE"
