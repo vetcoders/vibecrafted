@@ -20475,6 +20475,42 @@ def _preference_choice_for_path(
     return None
 
 
+def _recovery_receipt_snapshot(previous: Mapping[str, Any]) -> dict[str, Any]:
+    """Pre-publication recovery snapshot of the previous receipt, slimmed.
+
+    `_restore_runtime_publication_receipt` unconditionally overwrites
+    `backups`/`drift_backups`/`drift_backup_history` from the live layer, and
+    a rollback receipt is only ever read for light attribution keys
+    (`owned_dirs`, `generation`, `publication`). Embedding the full per-file
+    backup ledger here put one 75k-entry map into the receipt four times and
+    breached the 128 MiB checkpoint limit (fail-ledger 2026-10-04/05):
+    recovery needs identity and ownership, never the backup history.
+    """
+    snapshot = json.loads(json.dumps(previous))
+    snapshot["drift_backup_history"] = {}
+    snapshot.pop("preparing_previous_receipt", None)
+    rollback = snapshot.get("retirement_rollback")
+    if isinstance(rollback, dict) and isinstance(rollback.get("receipt"), dict):
+        rollback["receipt"].pop("drift_backup_history", None)
+        rollback["receipt"].pop("preparing_previous_receipt", None)
+    return snapshot
+
+
+def _rollback_receipt_snapshot(previous: Mapping[str, Any]) -> dict[str, Any]:
+    """Attribution receipt for the single-healthy-rollback generation.
+
+    Consumers read it only for `owned_dirs` and light identity; the backup
+    ledger and any nested recovery snapshot stay out (same bloat class as
+    `_recovery_receipt_snapshot`).
+    """
+    return {
+        key: value
+        for key, value in previous.items()
+        if not key.startswith("retirement_")
+        and key not in ("drift_backup_history", "preparing_previous_receipt")
+    }
+
+
 def _published_previous_receipt(receipt: Mapping[str, Any]) -> dict[str, Any] | None:
     saved = receipt.get("preparing_previous_receipt")
     if not isinstance(saved, dict) or saved.get("schema") != RUNTIME_INSTALL_SCHEMA:
@@ -26911,7 +26947,7 @@ def _install_runtime_pack(
         "schema": RUNTIME_INSTALL_SCHEMA,
         "install_pending": True,
         "install_phase": "preparing",
-        "preparing_previous_receipt": json.loads(json.dumps(previous)),
+        "preparing_previous_receipt": _recovery_receipt_snapshot(previous),
         "installed_at": datetime.now(timezone.utc).isoformat(),
         "version": version,
         "payload_root": str(payload_root),
@@ -27257,11 +27293,7 @@ def _install_runtime_pack(
             receipt["retirement_rollback"] = {
                 "generation": str(runtime_home / "releases" / previous["version"]),
                 "publication": str(staging_root),
-                "receipt": {
-                    key: value
-                    for key, value in previous.items()
-                    if not key.startswith("retirement_")
-                },
+                "receipt": _rollback_receipt_snapshot(previous),
                 "verified_before_publication": True,
             }
     except (OSError, RuntimeError, ValueError) as exc:
