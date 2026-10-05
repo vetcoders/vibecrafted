@@ -154,7 +154,14 @@ if "action" in args and "dump-layout" in args:
     target = option("--session") or ""
     table = json.loads(layouts_file.read_text(encoding="utf-8")) if layouts_file.exists() else {}
     path = Path(table.get(target) or "")
-    print(path.read_text(encoding="utf-8") if path.is_file() else "layout {\\n}")
+    if path.is_file():
+        print(path.read_text(encoding="utf-8"))
+    elif target in table and not table[target]:
+        # A bare create chooses no layout: Frame supplies the embedded
+        # Operator host layout (8764a248 removed the product host.kdl).
+        print("layout { frame_host true; workspace_surface true; }")
+    else:
+        print("layout {\\n}")
     sys.exit(0)
 if args[:1] == ["ls"]:
     if state_file.exists():
@@ -417,7 +424,10 @@ def test_compiled_vc_start_enters_lobby_through_bundled_shell(tmp_path: Path) ->
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert "opening Home in host vc-host" in result.stderr
+    # No-project entry opens the independent Operator Frame session, never a
+    # project (dashboard.sh `_vetcoders_start_enter_lobby`).
+    assert "starting host vc-host..." in result.stderr
+    assert "opening Operator Frame; choose a project when ready." in result.stderr
     assert not git_probe.exists(), git_probe.read_text() if git_probe.exists() else ""
     calls = capture_file.read_text()
     assert "attach --create-background vc-host" in calls
@@ -458,7 +468,7 @@ def test_vc_start_reports_progress_before_workspace_resolution(tmp_path: Path) -
     )
     assert result.returncode == 23, result.stderr
     assert result.stderr.splitlines()[0] == (
-        "vc-start: checking your workspace and available host..."
+        "vc-start: checking your workspace and available sessions..."
     )
     assert "workspace resolution began" in result.stderr
 
@@ -501,21 +511,22 @@ def test_vc_start_launches_operator_entrypoint_layout(tmp_path: Path) -> None:
         env=env,
     )
 
-    # Create-only start under the one-host contract (Founder P0, 2026-09-23):
-    # the Frame host is created without a layout, then the workspace follows
-    # as a guest with the pinned operator layout (3d9da4dc) — both detached
-    # (`attach --create-background`, the one create that needs no PTY). The
-    # caller without a terminal then gets the product terminal, which enters
-    # that very session.
+    # Create-only start (7f9d30d6 + 8764a248): the independent Operator host is
+    # created bare (Frame owns its embedded layout), then the project follows
+    # as an ordinary full-chrome session from the pinned operator layout, never
+    # a `--guest-workspace` — both detached (`attach --create-background`).
+    # The caller without a terminal then gets the product terminal, which
+    # enters that very session.
     payload = capture_file.read_text(encoding="utf-8")
     layout = gen.product_vc_frame_config_dir(home) / "layouts" / "operator.kdl"
     host_create = "VC_FRAME attach --create-background vc-host"
     guest_create = (
-        f"VC_FRAME --guest-workspace --new-session-with-layout {layout} "
+        f"VC_FRAME --new-session-with-layout {layout} "
         f"attach --create-background {expected_session}"
     )
     assert host_create in payload
     assert guest_create in payload
+    assert "--guest-workspace" not in payload
     assert payload.index(host_create) < payload.index(guest_create)
     launch = gen.read_terminal_launch(terminal_capture)
     assert launch is not None, payload
@@ -568,23 +579,20 @@ def test_vc_start_reports_host_workspace_and_terminal_progress(tmp_path: Path) -
         text=True,
     )
 
-    # Create-only start under the one-host contract (Founder P0, 2026-09-23):
-    # the Frame host is created first with host.kdl, then the workspace follows
-    # as a guest with the pinned operator layout (3d9da4dc) — both detached
-    # (`attach --create-background`, the one create that needs no PTY). The
-    # caller without a terminal then gets the product terminal, which enters
-    # that very session.
+    # Create-only start (7f9d30d6 + 8764a248): the Operator host is created
+    # bare (host.kdl is retired; Frame supplies the embedded layout), then the
+    # project follows as an ordinary session from the pinned operator layout
+    # -- both detached (`attach --create-background`). The caller without a
+    # terminal then gets the product terminal, which enters that very session.
     payload = capture_file.read_text(encoding="utf-8")
     layout = gen.product_vc_frame_config_dir(home) / "layouts" / "operator.kdl"
-    host_layout = gen.product_vc_frame_config_dir(home) / "layouts" / "host.kdl"
-    host_create = (
-        f"VC_FRAME --new-session-with-layout {host_layout} "
-        f"attach --create-background vc-host"
-    )
+    host_create = "VC_FRAME attach --create-background vc-host"
     guest_create = (
-        f"VC_FRAME --guest-workspace --new-session-with-layout {layout} "
+        f"VC_FRAME --new-session-with-layout {layout} "
         f"attach --create-background {expected_session}"
     )
+    assert "host.kdl" not in payload
+    assert "--guest-workspace" not in payload
     assert host_create in payload
     assert guest_create in payload
     assert payload.index(host_create) < payload.index(guest_create)
@@ -1690,7 +1698,8 @@ def test_vc_start_resume_resurrects_dead_session(tmp_path: Path) -> None:
     guest_create = f"attach --create-background {recovery_session}"
     assert host_create in payload and guest_create in payload
     assert payload.index(host_create) < payload.index(guest_create)
-    assert "--guest-workspace --new-session-with-layout" in payload
+    assert "--guest-workspace" not in payload
+    assert "--new-session-with-layout" in payload
 
 
 def test_dead_session_recovery_failure_is_not_reported_as_prepared(
@@ -2046,7 +2055,8 @@ def test_vc_dashboard_recreates_dead_run_id_session_without_layout_suffix(
     guest_create = f"attach --create-background {recovery_session}"
     assert host_create in payload and guest_create in payload
     assert payload.index(host_create) < payload.index(guest_create)
-    assert "--guest-workspace --new-session-with-layout" in payload
+    assert "--guest-workspace" not in payload
+    assert "--new-session-with-layout" in payload
     assert f"{expected_session}-marbles" not in payload
     assert run_scoped_session not in payload
 
@@ -2234,10 +2244,13 @@ def test_dashboard_alt_layout_reuses_live_repo_session_instead_of_layout_session
 
     payload = capture_file.read_text(encoding="utf-8")
     expected_session = _expected_operator_session()
-    # The live repo guest gains the marbles tabs in place; the missing host is
-    # created first and entered (Founder P0, 23.09: layouts are always guests).
+    # The live repo session gains the marbles tabs in place and is entered
+    # directly (outside Frame: `attach <project>`). The Operator host is an
+    # independent session and no longer a prerequisite of project entry
+    # (7f9d30d6), so nothing creates or attaches it here.
     assert f"--session {expected_session} action new-tab --layout" in payload
-    assert "attach --create-background vc-host" in payload
-    assert "VC_FRAME attach vc-host" in payload
+    assert "--create-background" not in payload
+    assert f"VC_FRAME attach {expected_session}" in payload
+    assert "VC_FRAME attach vc-host" not in payload
     assert f"--create-background {expected_session}" not in payload
     assert f"{expected_session}-marbles" not in payload

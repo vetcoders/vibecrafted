@@ -167,7 +167,12 @@ The `//` is not decoration. It is the mark.
 
 ## Install
 
-Download installable carriers from [GitHub Releases](https://github.com/vetcoders/vibecrafted/releases/latest):
+Check the [latest GitHub Release](https://github.com/vetcoders/vibecrafted/releases/latest)
+for the assets it actually carries. The latest public release is `v3.5.0` and
+does not include the 4.x DMG, Runtime Packs, portable archive, or native Windows
+installers. For the current public install path, use the bootstrap on macOS or
+Linux, and WSL2 on Windows. Versioned carrier names below describe the 4.x
+release contract and become usable when those assets are published:
 
 - macOS desktop: `Vibecrafted_<version>-<YYYYMMDD>-<sha8>.dmg`
 - macOS CLI: `Vibecrafted_RuntimePack_<version>-<YYYYMMDD>-<sha8>-darwin-<arch>.tar.gz`

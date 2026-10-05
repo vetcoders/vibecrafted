@@ -134,10 +134,16 @@ print("pinned" if flag is True else "unpinned")
 PY
 }
 
+# Closed exactly once: the one-shot path closes explicitly (zsh on Linux does
+# not reliably run zshexit for an `exit` issued inside a precmd hook), and the
+# zshexit hook then finds the pane already released.
+typeset -g _vc_quick_closed=0
 _vc_quick_close_self() {
   if [[ -z "${VC_QUICK_PANE_ID:-}" ]]; then
     return 0
   fi
+  (( _vc_quick_closed )) && return 0
+  _vc_quick_closed=1
   command -v vc-frame >/dev/null 2>&1 || return 0
   vc-frame action close-pane --pane-id "${VC_QUICK_PANE_ID}" >/dev/null 2>&1 || true
 }
@@ -161,6 +167,7 @@ _vc_quick_precmd() {
   local state
   state="$(_vc_quick_pin_state)" || state=unpinned
   if [[ "${state}" != pinned ]]; then
+    _vc_quick_close_self
     exit 0
   fi
 }

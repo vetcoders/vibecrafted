@@ -99,32 +99,33 @@ zawiedzie lub przeoczy jakąś powierzchnię, dopisz feedback do `~/.vibecrafted
 
 ## Polityka natywnej delegacji
 
-Używając natywnych subagentów, domyślnie trzymaj ten sam frontier co agent rodzic.
+Dobieraj model każdego subagenta według ekonomii podzadania (reguła Foundera,
+2026-10-03, zastępująca domyślną zgodność tieru z 2026-04-10). Wybierz model
+z uzasadnionym marginesem ponad wymagane możliwości i jakość, a potem najbardziej
+ekonomiczną opcję spełniającą próg. Reguła dotyczy całej floty, nie tylko Codexa.
 
-Dlaczego:
+- Mechaniczny fan-out (rename, fixture'y, format probes, ograniczone odczyty,
+  boilerplate testów): szybki/tani tier. Szeregowa praca na frontier kosztuje
+  jednocześnie więcej czasu i pieniędzy.
+- Rozumowanie nośne (architektura, trudny debugging, interpretacja kanonu Foundera,
+  duży blast radius): tier rodzica lub mocniejszy. Od razu sięgnij po mocniejszy
+  model, gdy uzasadnia to niejednoznaczność, głębokość zależności lub skutki błędu.
+  Nie wymuszaj próby cheap-first ani nie broń słabego wyniku niższą ceną.
+- Eskaluj po wykazanym ograniczeniu, bez automatycznego powtarzania każdego
+  ekonomicznego wyniku na mocniejszym modelu.
 
-- Delegacja natywna do tak samo nazwanego modelu zachowuje styl rozumowania najbliższy rodzicowi.
-- Maksymalizuje lokalność kontekstu i szanse na ponowne użycie cache'u.
-- Na tym samym repo i tej samej rodzinie tasków to zwykle najlepszy domyślny stosunek kosztu do jakości.
+Ta sama rodzina jest tie-breakerem, nie prawem: zachowuje cache i najbliższy
+styl rozumowania. Preferuj ją przy równych możliwościach. Przy zejściu w dół
+dla szybkości/dostępności odzyskaj jakość w orkiestracji rodzica.
 
-Domyślnie:
+Dostępność runtime'ów:
 
-- Model rodzica -> dokładnie ten sam natywny model, gdy dostępny.
-- Jeśli dokładny model jest niedostępny, użyj najbliższego natywnego odpowiednika i powiedz to wprost.
-
-> „Model rodzica" oznacza tę samą konkretną tożsamość modelu, nie po prostu tego samego dostawcę czy rodzinę.
-
-Wyjątki:
-
-- Tylko Codex: Ten wyjątek zastępuje dla Codexa domyślne reguły same-parent powyżej i same-named-first poniżej. Przestrzegaj zatwierdzonego przez operatora routingu modelu lub poziomu rozumowania. Jeśli go nie ma, wybierz model o możliwościach wystarczających do wymaganego poziomu jakości, z uzasadnionym marginesem, a następnie najbardziej ekonomiczną opcję spośród modeli spełniających ten próg. Od razu użyj mocniejszego modelu, gdy uzasadniają to niejednoznaczność, głębokość zależności lub konsekwencje błędu; nie wymuszaj próby cheap-first ani nie broń słabego wyniku jego niższą ceną. Eskaluj po wykazanym ograniczeniu, bez automatycznego wymagania, by mocniejszy model powtarzał każdy wynik modelu ekonomicznego. Sama etykieta roli subagenta nie dowodzi faktycznego modelu ani poziomu rozumowania; potwierdzając routing, użyj dostępnych metadanych runtime'u, bez obowiązkowego sprawdzania statusu po każdym uruchomieniu subagenta.
-- Claude: Do rozległych, długotrwałych tasków preferuj `opus[1m]`; do łatwiejszych lub lżejszych preferuj `sonnet[1m]`.
-- Gemini: Jeśli `gemini-3.1-pro-preview` jest niedostępny lub niestabilny w szczycie obciążenia, fallback delegacji natywnej na `auto-gemini-3`.
-
-Reguła:
-
-- Domyślnie najpierw natywni agenci o tej samej nazwie.
-- Wyjątki cross-model stosuj intencjonalnie, nigdy od niechcenia.
-- Jeśli schodzisz w dół dla szybkości lub dostępności, odzyskaj jakość w przebiegu orkiestracji rodzica.
+- Claude: dla rozległych, długich zadań preferuj opus[1m], dla lżejszych sonnet[1m].
+- Gemini: gdy gemini-3.1-pro-preview jest niedostępny lub niestabilny w szczycie,
+  użyj auto-gemini-3.
+- Etykieta roli subagenta nie dowodzi modelu ani reasoning effort. Potwierdzając
+  routing, korzystaj z dostępnych metadanych runtime'u; nie wymagaj pollingu
+  po każdym spawnie.
 
 ## Kierunek eskalacji
 
