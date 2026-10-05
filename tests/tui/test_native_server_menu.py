@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -320,8 +321,8 @@ def test_resolver_cache_recovers_without_publication_or_permanent_failure(
 
 def test_native_resolver_process_timeout_and_recovery(tmp_path):
     compiler = shutil.which("swiftc")
-    if compiler is None:
-        pytest.skip("swiftc is required for the native resolver contract")
+    if compiler is None or sys.platform != "darwin":
+        pytest.skip("swiftc on macOS is required for the native resolver contract")
     shell = REPO_ROOT / "vibecrafted-app/shell-agent"
     binary = tmp_path / "native-resolver-recovery"
     subprocess.run(

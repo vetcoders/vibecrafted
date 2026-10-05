@@ -2950,21 +2950,23 @@ def test_dashboard_subcommand_launches_repo_owned_vc_frame_layout(
 
     payload = capture_file.read_text(encoding="utf-8")
     # dashboard (default layout) uses the canonical operator session, no suffix,
-    # as a GUEST of the one host, which is created first (Founder P0, 23.09).
+    # as an ordinary full-chrome project session (7f9d30d6: no nested guest
+    # projection), after the one bare Frame-owned host is created (8764a248).
     expected_session = _resolved_workspace_session(
         env, generation / "bin" / "vibecrafted"
     )
     assert len(expected_session) <= 24
     layouts = home / ".config" / "vibecrafted" / "vc-frame" / "layouts"
     host_create = "VC_FRAME attach --create-background vc-host"
-    guest_create = (
-        f"--guest-workspace --new-session-with-layout {layouts / 'operator.kdl'} "
+    project_create = (
+        f"VC_FRAME --new-session-with-layout {layouts / 'operator.kdl'} "
         f"attach --create-background {expected_session}"
     )
     assert host_create in payload
-    assert guest_create in payload
-    assert payload.index(host_create) < payload.index(guest_create)
-    assert "VC_FRAME attach vc-host" in payload
+    assert project_create in payload
+    assert payload.index(host_create) < payload.index(project_create)
+    assert "--guest-workspace" not in payload
+    assert f"VC_FRAME attach {expected_session}" in payload
     assert (
         f"VC_FRAME_CONFIG_DIR={home / '.config' / 'vibecrafted' / 'vc-frame'}"
         in payload

@@ -672,9 +672,9 @@ def test_legacy_hundreds_of_leaves_use_bounded_receipt_writes(
         checkpoints.append(1)
         return real_checkpoint(runtime, receipt)
 
-    def write(path, document):
+    def write(path, document, **kwargs):
         writes.append((path, len(json.dumps(document).encode())))
-        return real_json(path, document)
+        return real_json(path, document, **kwargs)
 
     monkeypatch.setattr(installer, "_checkpoint_runtime_install_receipt", checkpoint)
     monkeypatch.setattr(installer, "_atomic_json_file", write)

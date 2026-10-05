@@ -361,10 +361,9 @@ def test_real_generations_parallel_host_preserves_old_pid_and_panes(
         )
         assert before_panes.returncode == 0, before_panes.stderr
         assert "preserved" in before_panes.stdout
-        # Prove the shell detects a real split using lsof/ps, not stubbed generation text.
-        detection = shell('_vetcoders_start_offer_generation_host "$PWD"')
-        assert _rc(detection) == 4, detection.stdout + detection.stderr
-        assert older.name in detection.stderr and active.name in detection.stderr
+        # 7f9d30d6 retired the split offer (_vetcoders_start_offer_generation_host):
+        # a generation split is no longer detected or prompted. Parallel hosts are
+        # now only opened explicitly via `vc-start --new-host`, below.
         new_host = "vc-host@" + active.name.split("+g")[-1][:8]
         names.append(new_host)
         started = shell("vc-start --new-host")
@@ -496,6 +495,10 @@ def test_parallel_operators_resume_project_from_calling_client(
         assert switches[0]["argv"] == [
             "--session",
             current,
+            # 1e9ae0f8: the sole observed source client id is forwarded so Frame
+            # validates the exact attached frontend (UNIFIED_LAUNCH_CONTRACT.md).
+            "--client-id",
+            "1",
             "action",
             "switch-session",
             "existing-project",

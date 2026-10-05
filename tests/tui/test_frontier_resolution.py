@@ -298,15 +298,17 @@ def test_vc_dashboard_repo_layout_arrives_with_the_repo_frame_config(
     payload = capture_file.read_text(encoding="utf-8")
     session = _expected_operator_session()
     layouts = REPO_VC_FRAME_CONFIG / "layouts"
-    # One Frame-owned host first, then the place session as a guest carrying
-    # the marbles layout -- both from the repo's own Frame config.
+    # One bare Frame-owned host first (8764a248), then the place session as an
+    # ordinary full-chrome project session carrying the marbles layout (7f9d30d6,
+    # no nested guest projection) -- both from the repo's own Frame config.
     host_create = "VC_FRAME attach --create-background vc-host"
-    guest_create = (
-        f"--guest-workspace --new-session-with-layout {layouts / 'marbles.kdl'} "
+    project_create = (
+        f"VC_FRAME --new-session-with-layout {layouts / 'marbles.kdl'} "
         f"attach --create-background {session}"
     )
-    assert host_create in payload and guest_create in payload
-    assert payload.index(host_create) < payload.index(guest_create)
+    assert host_create in payload and project_create in payload
+    assert payload.index(host_create) < payload.index(project_create)
+    assert "--guest-workspace" not in payload
     assert f"{session}-marbles" not in payload
     assert f"VC_FRAME_CONFIG_DIR={REPO_VC_FRAME_CONFIG}" in payload
     assert str(vc_frame_config.parent) not in payload
@@ -362,7 +364,8 @@ def test_vc_dashboard_uses_place_session_without_layout_suffix(
 
     payload = capture_file.read_text(encoding="utf-8")
     session = _expected_operator_session()
-    assert "--guest-workspace --new-session-with-layout" in payload
+    assert "--guest-workspace" not in payload
+    assert "--new-session-with-layout" in payload
     assert f"attach --create-background {session}\n" in payload
     assert env["VIBECRAFTED_RUN_ID"] not in payload
     assert f"{session}-marbles" not in payload
