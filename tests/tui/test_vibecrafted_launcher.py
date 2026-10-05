@@ -3539,8 +3539,20 @@ def test_vc_dashboard_wrapper_dispatches_to_dashboard(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     payload = capture_file.read_text(encoding="utf-8")
-    assert "attach --create-background vc-host" in payload
-    assert "--guest-workspace --new-session-with-layout" in payload
+    expected_session = _resolved_workspace_session(
+        env, generation / "bin" / "vibecrafted"
+    )
+    layouts = home / ".config" / "vibecrafted" / "vc-frame" / "layouts"
+    host_create = "VC_FRAME attach --create-background vc-host"
+    project_create = (
+        f"VC_FRAME --new-session-with-layout {layouts / 'operator.kdl'} "
+        f"attach --create-background {expected_session}"
+    )
+    assert host_create in payload
+    assert project_create in payload
+    assert payload.index(host_create) < payload.index(project_create)
+    assert "--guest-workspace" not in payload
+    assert f"VC_FRAME attach {expected_session}" in payload
 
 
 def test_dashboard_ls_delegates_to_vc_frame_list_sessions(tmp_path: Path) -> None:
