@@ -315,7 +315,18 @@ fi
 # Starship without the product toml, or with a leftover `$python` format,
 # probes host python3 (macOS 3.9.6) and paints it as product chrome. Skip
 # init; the offline two-line prompt stays. Do not change PATH here.
+#
+# Quick cmd lane (VC_QUICK_CMD=1): the pane keeps this profile's completion
+# and highlighting base but none of the tool chrome — no Atuin daemon, no
+# Starship prompt, no zoxide hooks (decyzja Macieja 2026-10-05: ta sama baza
+# autocompletions i highlighting, bez Atuina w Quick cmd). The Atuin key
+# bindings below then fall to the built-in history branch on their own.
+vc_quick_lane=0
+[[ -z "${VC_QUICK_CMD:-}" ]] || vc_quick_lane=1
 for vc_tool in zoxide atuin starship; do
+  if (( vc_quick_lane )); then
+    continue
+  fi
   if (( ! $+commands[$vc_tool] )); then
     _VC_TERMINAL_WARNINGS+=("$vc_tool is not installed; install it with its upstream installer")
     continue
@@ -338,7 +349,7 @@ for vc_tool in zoxide atuin starship; do
     _VC_TERMINAL_WARNINGS+=("$vc_tool initialization failed")
   fi
 done
-unset vc_tool vc_tool_args vc_tool_init
+unset vc_tool vc_tool_args vc_tool_init vc_quick_lane
 
 # Atuin owns the interactive search widgets it exports from `init zsh`; keep
 # the Up binding explicit because init ran with its stock Up binding disabled.
