@@ -66,6 +66,11 @@ def test_install_foundations_default_treats_agent_cli_bootstrap_as_best_effort(
         "loct",
         "loctree",
         "loctree-mcp",
+        # aicx_ready probes BOTH binaries; without a fake `aicx` the aicx leg
+        # (a channel foundation, hard-fail by default) turns red on hosts
+        # without a real aicx on BASE_PATH and hides this test's actual
+        # subjects: the cockpit defer and the best-effort agents leg.
+        "aicx",
         "aicx-mcp",
         "vc-frame",
         "node",
