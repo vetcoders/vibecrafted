@@ -471,7 +471,10 @@ def test_quick_cmd_wrapper_is_the_product_zsh_lane_with_one_shot_hooks() -> None
     assert "add-zsh-hook preexec" in text
     assert "add-zsh-hook precmd" in text
     assert "zshexit" in text
-    assert "exec zsh -l -i" in text
+    # -d: skip distribution /etc zsh files — a global compinit can prompt about
+    # insecure host completions and eat the ephemeral lane's first keystrokes
+    # (CI ubuntu runners; same decision as launch-primary-shell).
+    assert "exec zsh -d -l -i" in text
     assert "ZDOTDIR=" in text
     assert 'exec "${SHELL:-/bin/zsh}" -l' not in text
     assert "action close-pane\n" not in text

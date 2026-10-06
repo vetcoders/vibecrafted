@@ -179,4 +179,7 @@ add-zsh-hook precmd _vc_quick_precmd
 zshexit() { _vc_quick_close_self }
 ZSHRC
 
-ZDOTDIR="${_zdot}" exec zsh -l -i
+# -d skips distribution /etc zsh files (same decision as launch-primary-shell):
+# a global compinit may prompt about insecure host completions and consume the
+# first keystrokes of the ephemeral lane. ZDOTDIR startup still loads.
+ZDOTDIR="${_zdot}" exec zsh -d -l -i
