@@ -70,13 +70,15 @@ LAUNCHER_PREFIX="${VIBECRAFTED_LAUNCHER_BIN:-$HOME/.local/bin}"
 CHECK_ONLY=0
 INSTALL_ALL=0
 AGENTS_REQUIRED=0
-# Product foundations install from their own channels (npm, GitHub releases,
-# PyPI). A channel can be unreachable (no npm, no network), so a foundation
-# that stays missing is an ADVISORY, not an install failure — consistent with
-# `make install-vendored-binaries`, which keeps its "external fallback" path
-# non-fatal. Set REQUIRE_FOUNDATIONS=1 (e.g. release validation) to make a
-# missing product foundation fail the run instead.
-REQUIRE_FOUNDATIONS="${REQUIRE_FOUNDATIONS:-0}"
+# Product foundations install from their own public channels (npm, GitHub
+# releases, PyPI) — the Runtime Pack never carries them, precisely so an
+# install can never deliver a stale vendored copy. The channels exist to make
+# strictness safe: a foundation the channel cannot deliver is a HARD FAIL by
+# default (decyzja Macieja 2026-10-06; the 2026-09-25 "advisory" softening was
+# an agent rationalization, not a product decision). Set REQUIRE_FOUNDATIONS=0
+# only for environments that knowingly run without the product spine, e.g.
+# hermetic CI exercising the installer itself.
+REQUIRE_FOUNDATIONS="${REQUIRE_FOUNDATIONS:-1}"
 TARGETS=()
 
 # ---------------------------------------------------------------------------
@@ -844,26 +846,26 @@ printf '  ─────────────────────\n'
 printf '  Runtime bin:  %s\n' "$PREFIX"
 printf '  Launcher bin: %s\n\n' "$LAUNCHER_PREFIX"
 
-# Product foundations are externally managed; a missing binary is advisory
-# unless the caller opted into strict validation via REQUIRE_FOUNDATIONS=1.
-foundation_optional_fail() {
+# Product foundations are externally channeled; a missing binary fails the
+# install. REQUIRE_FOUNDATIONS=0 is the explicit, caller-owned waiver.
+foundation_channel_fail() {
   local name="$1"
-  if [[ "$REQUIRE_FOUNDATIONS" == "1" ]]; then
-    exit_code=1
+  if [[ "$REQUIRE_FOUNDATIONS" == "0" ]]; then
+    warn "$name unavailable — REQUIRE_FOUNDATIONS=0 waives the product spine for this run; install it from its channel later."
   else
-    warn "$name unavailable — install it from its channel later (non-fatal). Set REQUIRE_FOUNDATIONS=1 to enforce."
+    exit_code=1
   fi
 }
 
 exit_code=0
 for target in "${TARGETS[@]}"; do
   case "$target" in
-    loctree)  install_loctree  || foundation_optional_fail loctree ;;
-    aicx)     install_aicx     || foundation_optional_fail aicx ;;
+    loctree)  install_loctree  || foundation_channel_fail loctree ;;
+    aicx)     install_aicx     || foundation_channel_fail aicx ;;
     # vc-frame is a donor installed only by the Vibecrafted owner. There is no
     # separate vc-frame release or installer fallback.
     vc-frame)
-      install_vcframe  || foundation_optional_fail vc-frame
+      install_vcframe  || foundation_channel_fail vc-frame
       ;;
     agents)
       if ! install_agents; then
@@ -874,8 +876,8 @@ for target in "${TARGETS[@]}"; do
         fi
       fi
       ;;
-    prview)  install_prview  || foundation_optional_fail prview ;;
-    screenscribe) install_screenscribe || foundation_optional_fail screenscribe ;;
+    prview)  install_prview  || foundation_channel_fail prview ;;
+    screenscribe) install_screenscribe || foundation_channel_fail screenscribe ;;
     sandbox) install_sandbox || exit_code=1 ;;
     iterm2-plugin) install_iterm2_integration || exit_code=1 ;;
   esac

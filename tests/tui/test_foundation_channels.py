@@ -466,6 +466,20 @@ def test_uv_channel_failure_keeps_foundation_admission_explicit(
     assert "uv failed to install screenscribe from PyPI." in result.stdout
 
 
+def test_the_default_run_refuses_a_missing_foundation(tmp_path: Path) -> None:
+    # Maciej's decision (2026-10-06): the public channels (npm, GitHub
+    # releases, PyPI) exist precisely so a missing foundation can hard-fail —
+    # an install that "succeeds" without the product spine is the stale-
+    # vendored-copy failure mode the channels were built to kill. No
+    # REQUIRE_FOUNDATIONS in the environment: the default decides.
+    fake_bin = tmp_path / "bin"
+    _executable(fake_bin / "uv", "#!/bin/sh\nexit 1\n")
+    result = _run_installer(tmp_path, "screenscribe", path=[fake_bin])
+    output = result.stdout + result.stderr
+    assert result.returncode != 0, output
+    assert "uv failed to install screenscribe from PyPI." in output
+
+
 def _run_screenscribe_install_with_failing_pipx(
     tmp_path: Path, *, require_foundations: str
 ) -> subprocess.CompletedProcess[str]:
