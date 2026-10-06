@@ -68,7 +68,10 @@ struct NativeInstallerProcessTests {
       #!/usr/bin/env bash
       trap '' TERM
       printf '%s' "$$" > "${CHILD_PID}"
-      sleep 2
+      # Pre-mutation window: settlement (TERM ignored -> 1 s grace -> KILL)
+      # lands ~1.6 s after spawn on a fast host; loaded CI runners need the
+      # wider margin or the child wins the race and the contract reads red.
+      sleep 8
       printf mutation > "${MARKER}"
       sleep 20
       """)
