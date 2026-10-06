@@ -117,6 +117,12 @@ jobs:
     env:
       # `cargo install aicx` is memory-heavy; keep CI runners from OOM-killing rustc.
       CARGO_BUILD_JOBS: "1"
+      # Named waiver under the hard-fail foundations contract (Maciej,
+      # 2026-10-06): prebuilt Loctree channel binaries do not run on jammy's
+      # glibc 2.35 ("missing or broken" right after a successful npm install).
+      # Waive ONLY 22.04; 24.04 keeps the hard default and proves the
+      # channels. Channel gap tracked in ~/.vibecrafted/vibecrafted-fail.md.
+      REQUIRE_FOUNDATIONS: ${{ matrix.runner-version == 'ubuntu-22.04' && '0' || '1' }}
     strategy:
       fail-fast: false
       matrix:
@@ -245,6 +251,11 @@ jobs:
     env:
       # debian:bookworm-slim runs with limited memory inside the job container.
       CARGO_BUILD_JOBS: "1"
+      # Named waiver under the hard-fail foundations contract (Maciej,
+      # 2026-10-06): bookworm's glibc 2.36 cannot run the prebuilt Loctree and
+      # prview channel binaries. Channel gap (glibc baseline of the Rust
+      # builds) tracked in ~/.vibecrafted/vibecrafted-fail.md.
+      REQUIRE_FOUNDATIONS: "0"
     container:
       image: debian:bookworm-slim
     # bare debian:bookworm-slim ships dash as /bin/sh and no bash. The first

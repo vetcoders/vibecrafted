@@ -77,7 +77,10 @@ AGENTS_REQUIRED=0
 # default (decyzja Macieja 2026-10-06; the 2026-09-25 "advisory" softening was
 # an agent rationalization, not a product decision). Set REQUIRE_FOUNDATIONS=0
 # only for environments that knowingly run without the product spine, e.g.
-# hermetic CI exercising the installer itself.
+# hermetic CI exercising the installer itself. vc-frame is the one spine leg
+# WITHOUT a public channel yet: its hard gate arms only on an EXPLICIT
+# REQUIRE_FOUNDATIONS=1, so the was-set marker is captured before defaulting.
+REQUIRE_FOUNDATIONS_WAS_SET="${REQUIRE_FOUNDATIONS+1}"
 REQUIRE_FOUNDATIONS="${REQUIRE_FOUNDATIONS:-1}"
 TARGETS=()
 
@@ -850,7 +853,9 @@ printf '  Launcher bin: %s\n\n' "$LAUNCHER_PREFIX"
 # install. REQUIRE_FOUNDATIONS=0 is the explicit, caller-owned waiver.
 foundation_channel_fail() {
   local name="$1"
-  if [[ "$REQUIRE_FOUNDATIONS" == "0" ]]; then
+  if (( CHECK_ONLY )); then
+    warn "$name missing — --check reports only; a real install fails here."
+  elif [[ "$REQUIRE_FOUNDATIONS" == "0" ]]; then
     warn "$name unavailable — REQUIRE_FOUNDATIONS=0 waives the product spine for this run; install it from its channel later."
   else
     exit_code=1
@@ -863,9 +868,17 @@ for target in "${TARGETS[@]}"; do
     loctree)  install_loctree  || foundation_channel_fail loctree ;;
     aicx)     install_aicx     || foundation_channel_fail aicx ;;
     # vc-frame is a donor installed only by the Vibecrafted owner. There is no
-    # separate vc-frame release or installer fallback.
+    # separate vc-frame release or installer fallback — no public channel means
+    # the hard gate arms only on an EXPLICIT REQUIRE_FOUNDATIONS=1; the default
+    # defers a failed cockpit install with a loud warn.
     vc-frame)
-      install_vcframe  || foundation_channel_fail vc-frame
+      if ! install_vcframe; then
+        if [[ -n "$REQUIRE_FOUNDATIONS_WAS_SET" && "$REQUIRE_FOUNDATIONS" == "1" ]]; then
+          exit_code=1
+        else
+          warn "vc-frame cockpit incomplete — deferred (no public channel yet); REQUIRE_FOUNDATIONS=1 re-arms the hard gate."
+        fi
+      fi
       ;;
     agents)
       if ! install_agents; then
