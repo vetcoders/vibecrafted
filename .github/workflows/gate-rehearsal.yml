@@ -71,6 +71,12 @@ jobs:
         run: make test-source
         env:
           PYTEST_ADDOPTS: "-vv -o faulthandler_timeout=120"
+          # macos-latest images stopped shipping a rustup default toolchain
+          # (first seen 2026-10-06): test_voc_core_contract and
+          # test_operator_mode shell out to cargo/rustc through rustup shims,
+          # which then refuse to pick a version. Pin the resolution instead of
+          # depending on image-global `rustup default`.
+          RUSTUP_TOOLCHAIN: stable
 
       - name: Build the portable release channel
         run: make portable
