@@ -340,7 +340,18 @@ def test_native_resolver_process_timeout_and_recovery(tmp_path):
         timeout=90,
     )
     completed = subprocess.run(
-        [str(binary)], capture_output=True, text=True, timeout=30, check=True
+        # check=True swallowed the harness output: a Swift fatalError dies
+        # with SIGTRAP and CalledProcessError's repr carries no stderr, so
+        # consecutive macos-latest failures produced zero diagnostics.
+        [str(binary)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert completed.returncode == 0, (
+        f"harness exited {completed.returncode}\n"
+        f"--- stdout ---\n{completed.stdout}\n--- stderr ---\n{completed.stderr}"
     )
     assert "NativeInstallerProcessTests passed" in completed.stdout
 

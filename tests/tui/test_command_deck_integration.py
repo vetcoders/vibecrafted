@@ -370,7 +370,14 @@ def test_native_session_state_routes_and_reopen(tmp_path: Path) -> None:
             capture_output=True,
             text=True,
             timeout=150,
-            check=True,
+            # check=True swallowed the harness output: a Swift fatalError dies
+            # with SIGTRAP and CalledProcessError's repr carries no stderr, so
+            # six consecutive macos-latest failures produced zero diagnostics.
+            check=False,
+        )
+        assert result.returncode == 0, (
+            f"harness exited {result.returncode}\n"
+            f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
         )
         assert "CommandDeckIntegrationTests passed" in result.stdout
         assert Fixture.first_stall_started.is_set()
