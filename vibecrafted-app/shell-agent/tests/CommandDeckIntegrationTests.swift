@@ -102,7 +102,13 @@ struct CommandDeckIntegrationTests {
       try require(visible.contains(window.frame), "Resized ready shell escaped the screen")
     }
     // A valid user-sized saved frame survives the mounted native chrome.
-    let userFrame = NSRect(x: floor(visible.midX - 500), y: floor(visible.midY - 350), width: 1000, height: 700)
+    // "Valid" means it fits this display: hosted CI runners expose a
+    // 1024x768 screen (681pt visible), where a fixed 1000x700 request is
+    // clamped by AppKit and the equality contract would test the window
+    // server, not the shell.
+    let userWidth = min(CGFloat(1000), floor(visible.width) - 24)
+    let userHeight = min(CGFloat(700), floor(visible.height) - 20)
+    let userFrame = NSRect(x: floor(visible.midX - userWidth / 2), y: floor(visible.midY - userHeight / 2), width: userWidth, height: userHeight)
     window.setFrame(userFrame, display: false)
     window.saveFrame(usingName: autosaveName)
     try await Task.sleep(for: .milliseconds(300))
