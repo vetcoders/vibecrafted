@@ -11,18 +11,20 @@ it, the roadmap is aspirational.
 Vibecrafted is the release engine for AI-built repos. It sits after agents have already produced code and before real
 users have to trust the result.
 
-The product has six working layers:
+The product has these working layers:
 
 | Layer                 | Current source of truth                                                                                       |
 | --------------------- | ------------------------------------------------------------------------------------------------------------- |
 | Public promise        | `README.md`, `docs/QUICK_START.md`, `docs/FAQ.md`                                                             |
-| Operator runbook      | `docs/RUNBOOK.md` — terminal-first: cold start, dispatch, supervision, recovery                               |
+| Entry book            | `docs/ENTRY_BOOK.md` · `docs/pl/ENTRY_BOOK.md` — Linux/Windows cold start, output and failure repairs         |
+| Developer builds      | `docs/public/getting-started/build-from-source.md` — source-backed Linux/Windows build/install recipes        |
+| Operator runbook      | `docs/RUNBOOK.md` · `docs/pl/RUNBOOK.md` — terminal-first: cold start, dispatch, supervision, recovery        |
 | Install and support   | `docs/INSTALL.md` (channel matrix + status), `docs/DOCKER.md`, `make help`, `make help-dev`                   |
 | Release cut           | `docs/RELEASE_KICKOFF.md` (identity), `docs/RELEASE_CHECKLIST.md` (4.3.1 DMG command sequence)                |
 | Package-manager stage | `packaging/` (Homebrew formula + cask; winget skipped — no published win32-x64 carrier yet)                   |
 | Install (public docs) | `docs/public/getting-started/`: `install.md` · `build-from-source.md` · `first-run.md` · `update.md`          |
 | Command deck          | `scripts/vibecrafted`, `docs/WORKFLOWS.md`, `docs/SKILLS.md`                                                  |
-| Runtime and artifacts | `runtime/README.md`, `docs/runtime/README.md`, `docs/runtime/TOPOLOGY.md`                                     |
+| Runtime and artifacts | `vibecrafted-core/vibecrafted_core/runtime/README.md`, `docs/runtime/README.md`, `docs/runtime/TOPOLOGY.md`   |
 | Skill behavior        | `vibecrafted-core/vibecrafted_core/skills/<skill>/SKILL.md` plus `FLOW.md` and nearby contracts               |
 | Architecture doctrine | `docs/adr/` — ADR-0002 ownership matrix (`ownership-matrix.json`) gated by `tests/test_ownership_contract.py` |
 
@@ -54,9 +56,10 @@ vibecrafted dou claude --prompt "Audit launch readiness"
 
 Compatibility aliases may be mentioned once, never taught as the primary path:
 
-- `vibecrafted justdo` -> `vibecrafted implement`
-- `vc-justdo` -> `vc-implement`
 - `vc-<skill>` wrappers -> installed shell shortcuts for people who already live in the operator shell
+
+`vibecrafted justdo` / `vc-justdo` carry the standalone Just Do posture and
+their own skill identity. They are not `implement` aliases.
 
 Agent-mode grammar also exists and is intentionally power-user material:
 
@@ -71,19 +74,19 @@ Keep it in `help --all`, runtime docs, or `vc-agents` docs. Do not make it the f
 
 Current runtime is not a future scaffold. It is active.
 
-| Surface                                 | Status                                                                                                             |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `scripts/vibecrafted`                   | Live command deck and routing layer                                                                                |
-| `runtime/scripts/`                      | Active spawn, await, meta, watcher, marbles, and installer scripts                                                 |
-| `runtime/scripts/lib/`                  | Shared launcher/session/path/meta library                                                                          |
-| `runtime/shell/lib/`                    | Installed shell facade modules                                                                                     |
-| `runtime/vc-marbles/`                   | Extracted per-workflow runtime pattern                                                                             |
-| `runtime/vc-research/`                  | Extracted research shell runtime                                                                                   |
-| `runtime/vc-operator/`                  | Mission-control helpers behind the public `vibecrafted operator <agent>` command                                   |
-| `vibecrafted dispatch`                  | Deterministic dispatch supervisor and async lifecycle lane                                                         |
-| `vibecrafted gui` / `tui` / `dashboard` | Operator surfaces, second-visit tools                                                                              |
-| Run observability ownership             | Server/VOC canonical browsing; terminal triage is manual compatibility — see `docs/runtime/TRIAGE_AND_SESSIONS.md` |
-| Tools home vs checkout                  | Daily CLI runs staged `vibecrafted-current`, not floating git HEAD                                                 |
+| Surface                                                  | Status                                                                                                             |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `scripts/vibecrafted`                                    | Live command deck and routing layer                                                                                |
+| `vibecrafted-core/vibecrafted_core/runtime/scripts/`     | Active spawn, await, meta, watcher, marbles, and installer scripts                                                 |
+| `vibecrafted-core/vibecrafted_core/runtime/scripts/lib/` | Shared launcher/session/path/meta library                                                                          |
+| `vibecrafted-core/vibecrafted_core/runtime/shell/lib/`   | Installed shell facade modules                                                                                     |
+| `vibecrafted-core/vibecrafted_core/runtime/vc-marbles/`  | Extracted per-workflow runtime pattern                                                                             |
+| `vibecrafted-core/vibecrafted_core/runtime/vc-research/` | Extracted research shell runtime                                                                                   |
+| `vibecrafted-core/vibecrafted_core/runtime/vc-operator/` | Mission-control helpers behind the public `vibecrafted operator <agent>` command                                   |
+| `vibecrafted dispatch`                                   | Deterministic dispatch supervisor and async lifecycle lane                                                         |
+| `vibecrafted gui` / `tui` / `dashboard`                  | Operator surfaces, second-visit tools                                                                              |
+| Run observability ownership                              | Server/VOC canonical browsing; terminal triage is manual compatibility — see `docs/runtime/TRIAGE_AND_SESSIONS.md` |
+| Tools home vs checkout                                   | Daily CLI runs staged `vibecrafted-current`, not floating git HEAD                                                 |
 
 When docs need to discuss what is planned, say "planned" or "partial." Do not leave old design language that says a live
 directory is reserved for later.

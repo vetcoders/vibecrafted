@@ -1,7 +1,8 @@
 # Install Vibecrafted
 
 Vibecrafted runs on macOS, Linux, and native Windows (win32-x64 Runtime Pack).
-WSL2 remains a POSIX alternative. The channels differ in what they give you
+WSL2 remains a POSIX alternative. Cold-machine steps: [Entry book](ENTRY_BOOK.md)
+([Polski](pl/ENTRY_BOOK.md)); developer recipes: [Build from source](public/getting-started/build-from-source.md). The channels differ in what they give you
 and in how finished they are, so this page states both.
 
 Native Windows supports Python-owned commands such as `doctor` and `server`.
@@ -74,8 +75,12 @@ curl -fsSLO https://github.com/vetcoders/vibecrafted/releases/latest/download/Vi
 curl -fsSLO https://github.com/vetcoders/vibecrafted/releases/latest/download/Vibecrafted_<version>-<YYYYMMDD>-<sha8>-portable.tar.gz.sha256
 sha256sum -c Vibecrafted_<version>-<YYYYMMDD>-<sha8>-portable.tar.gz.sha256
 tar -xzf Vibecrafted_<version>-<YYYYMMDD>-<sha8>-portable.tar.gz
-bash vibecrafted-<version>/install.sh
+bash vibecrafted-<version>/install.sh --runtime-pack-file /absolute/path/to/matching-pack.tar.gz install
 ```
+
+Supply the matching binary Runtime Pack with its checksum and signature; this
+source archive is not the native carrier. Source: `install.sh` → local portable
+carrier preflight / `--runtime-pack-file`.
 
 Why this exists next to the bootstrap: `curl | bash` pins you to whatever a
 branch holds at the moment you run it. The tarball pins you to one commit and
@@ -144,19 +149,35 @@ bash install.sh
 
 ### Linux support
 
-Linux is a first-class runtime, not a side effect. The install path is gated in
-CI on every push and pull request by `.github/workflows/install-linux.yml`,
-which runs two deliberately different jobs:
+**Full foundation baseline: Ubuntu 24.04 / glibc ≥ 2.39.** On glibc 2.35/2.36
+(Ubuntu 22.04/jammy, Debian 12/bookworm), public prebuilt Loctree and PRView
+binaries do not start. npm can succeed and the executable still reports
+`missing or broken`. Today use a newer system or explicitly waive foundations:
 
-- **Ubuntu on the GitHub-hosted runner** — exercises real `/etc/os-release`
-  detection and the apt-family prerequisite hints.
-- **`debian:bookworm-slim` in a container** — exercises the bare-minimum case
-  with no pre-baked tooling, which is the failure mode a real Debian user hits.
+```bash
+REQUIRE_FOUNDATIONS=0 make install RUNTIME_PACK=/absolute/path/to/your-pack.tar.gz
+```
 
-Both jobs assert that `vibecrafted doctor` reports green afterwards. In headless
-CI, externally-managed foundations (loctree, aicx, vc-frame) that are absent are
-reported as warnings rather than failures, so a green doctor on a minimal box is
-a real signal and not a relaxed one.
+That accepts the absence of those tools; it does not fix their ABI.
+`scripts/install-foundations.sh` defaults `REQUIRE_FOUNDATIONS` to **1**, so
+missing/broken requested foundations hard-fail POSIX installation. Channels:
+npm `@loctree/loctree`, npm `@loctree/aicx`, GitHub releases
+`vetcoders/prview-rs`, PyPI `screenscribe`. `=0` is a caller-owned waiver.
+
+`.github/workflows/install-linux.yml` builds the owned pack on Ubuntu 22.04,
+then installs on 22.04, 24.04 and `debian:bookworm-slim`. The 22.04/Debian jobs
+explicitly waive foundations; 24.04 retains the hard gate. A green doctor with
+warnings on an old-libc host is not full foundation acceptance.
+`Dockerfile` uses `node:22-bookworm-slim`, with foundations off by default.
+
+Python must be ≥ 3.11 (`tomllib`); Linux CI uses 3.11. Node 22 and the Linux
+stable Rust pin 1.97.0, its WASM targets and exact apt development dependencies
+are covered step-by-step in Build from source. Runtime-only installs consume
+prebuilt binaries; do not infer a compiler requirement from stale CI comments.
+
+<!-- Sources: install-linux.yml linux-runtime-pack, ubuntu-native,
+     debian-bookworm-container; install-foundations.sh foundation_channel_fail;
+     Dockerfile FROM/ARG; Makefile install. -->
 
 The macOS-only pieces are the desktop app, notarization, and the `locterm`
 runtime. Everything else — command deck, control plane, dispatch, skills,
@@ -182,8 +203,8 @@ out of this pack until a Windows AF_UNIX mux transport exists. Rescue/flock,
 PTY/zsh shells, and those omitted radios are **not supported on Windows** —
 `vibecrafted doctor` declares them explicitly; use WSL2 for the POSIX path.
 
-Canonical artifact names (repeatable rebuilds keep the same ProductCode
-`2B1BF36C-C680-48EE-BDCA-648C09D41BB3`):
+Canonical artifact names (ProductCode is version-derived by
+`scripts/windows_product_code.py`; repeatable builds of one version share it):
 
 - Pack: `Vibecrafted_RuntimePack_<ver>-<YYYYMMDD>-<sha8>-win32-x64.tar.gz` (+ `.sha256` + `.sig`)
 - MSI/EXE: `Vibecrafted_<ver>-<YYYYMMDD>-<sha8>-windows-x64.{msi,exe}` (+ `.sha256`)
@@ -204,12 +225,15 @@ powershell -NoProfile -File .\install.ps1 -Pack .\build\Vibecrafted_RuntimePack_
 require a developer toolchain, updates User PATH for
 `%LOCALAPPDATA%\Vibecrafted\bin` (or prints that exact directory), and prints a
 human summary — never silent success and never a raw JSON dump as the success
-face. First-run orientation after install:
+face. First-run verification after install:
 
 ```powershell
 vibecrafted doctor
-vibecrafted init
 ```
+
+Native `init` is a POSIX deck surface and returns exit 2. For the first native
+agent session, use its CLI in PowerShell; for a managed workspace, use WSL2.
+See the Entry book.
 
 Or call the verifier/installer directly:
 
@@ -285,36 +309,23 @@ control-plane wiring.
 
 ## Build from source (power users)
 
-A source checkout is the complete development surface: it carries every
-build, test and release target. It is not a Runtime Pack. `make install`
-without a bound pack can install skill views (`--skills-only`); native
-`vc-terminal` / `vc-frame` hosts come from a verified Runtime Pack. This is
-the path to take if you want to modify Vibecrafted, run the gates, or
-produce your own signed artifact.
-
-### Prerequisites
-
-| Tool            | Why                                                       |
-| --------------- | --------------------------------------------------------- |
-| `git`           | checkout                                                  |
-| `bash` 4+       | installer and command deck                                |
-| `uv`            | Python toolchain and the pinned `vibecrafted` tool env    |
-| Rust toolchain  | `voc`, `vc-admin`, `vc-server`, `vc-terminal`, `vc-frame` |
-| `make`          | target surface                                            |
-| Xcode CLI tools | macOS only — codesign, notarytool                         |
-
-### Checkout and install
+A source checkout carries the build, test and release targets. Installation
+consumes a verified Runtime Pack; plain `make install` does not compile or
+silently fall back to skill-only installation. `make install-source` is the
+retained maintainer spelling, currently `install-source: install`. Compile
+separately, then install the completed carrier:
 
 ```bash
-git clone https://github.com/vetcoders/vibecrafted.git
-cd vibecrafted
-make install
+make runtime-pack
+make install-source
 ```
 
-`make install` runs the guided install. `make install-auto` runs it
-non-interactively — this is what CI uses. `make install-all` additionally builds
-the Rust binaries (`voc`, `vc-admin`, `vc-server`) as real files into
-`~/.local/bin`.
+Source: `Makefile` → `runtime-pack`, `install`, `install-source`.
+The Linux local build lane requires a clean tracked tree and the product release
+key; an independent developer can build/sign with a local key and explicitly
+select its public anchor. The complete Linux and native Windows recipes,
+prerequisites, expected output and failure repairs live in
+[Build from source](public/getting-started/build-from-source.md).
 
 ### Building a Runtime Pack and installing that exact one
 
