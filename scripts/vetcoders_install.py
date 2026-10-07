@@ -27341,9 +27341,73 @@ def _install_runtime_pack(
     result["runtime_views"] = ",".join(runtime_views)
     if not rescue_record:
         result["retirement"] = _finish_runtime_retirement(paths, receipt)
+    foundations = _ensure_foundations_installed(
+        generation,
+        skip=bool(getattr(args, "skip_foundations", False)),
+    )
+    result["foundations"] = foundations
     if emit_result:
         print(json.dumps(result, sort_keys=True))
-    return 0
+    # The runtime generation stays published either way; a red exit here means
+    # "installed, but not a complete product" so wrappers cannot claim success.
+    return (
+        0
+        if foundations["status"] in ("installed", "skipped", "unsupported-platform")
+        else 1
+    )
+
+
+def _ensure_foundations_installed(generation: Path, *, skip: bool) -> dict[str, Any]:
+    """Drive the bundled foundations installer after the runtime transaction.
+
+    No install scenario may finish green without AICX, Loctree, Screenscribe
+    and PRView (Maciej, 2026-10-07). The pack never carries the foundations
+    themselves — it carries their installer, and each foundation comes from
+    its own public channel (npm, GitHub releases, PyPI). A failure here does
+    not undo the already-published runtime generation; it fails the install's
+    exit code so no wrapper can report success without the foundations.
+    """
+    script = generation / "scripts" / "install-foundations.sh"
+    record: dict[str, Any] = {
+        "schema": "vibecrafted.foundations-install.v1",
+        "installer": str(script),
+    }
+    if skip:
+        record["status"] = "skipped"
+        record["reason"] = "--skip-foundations was explicitly requested"
+        return record
+    if os.name == "nt":
+        record["status"] = "unsupported-platform"
+        record["reason"] = (
+            "install-foundations.sh needs a POSIX shell; the Windows "
+            "foundations lane is a separate cut"
+        )
+        return record
+    if not script.is_file():
+        record["status"] = "failed"
+        record["reason"] = "this Runtime Pack does not bundle install-foundations.sh"
+        return record
+    try:
+        proc = subprocess.run(
+            ["bash", str(script)],
+            capture_output=True,
+            text=True,
+            timeout=1800,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        record["status"] = "failed"
+        record["reason"] = f"foundations installer did not complete: {exc}"
+        return record
+    record["exit_code"] = proc.returncode
+    tail = "\n".join((proc.stdout or "").splitlines()[-12:])
+    record["output_tail"] = tail
+    if proc.returncode == 0:
+        record["status"] = "installed"
+    else:
+        record["status"] = "failed"
+        record["reason"] = "\n".join((proc.stderr or tail or "").splitlines()[-6:])
+    return record
 
 
 def _vc_frame_socket_dir() -> Path:
@@ -28057,6 +28121,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_runtime_install.add_argument(
         "--plan-digest",
         help="SHA-256 of the rescue plan this apply is bound to",
+    )
+    p_runtime_install.add_argument(
+        "--skip-foundations",
+        action="store_true",
+        help=(
+            "Explicitly skip the bundled foundations installer "
+            "(AICX/Loctree/Screenscribe/PRView). Development-only: a normal "
+            "install must never finish without the foundations"
+        ),
     )
     p_runtime_install.add_argument(
         "--allow-older-runtime",

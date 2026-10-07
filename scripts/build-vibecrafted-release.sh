@@ -961,6 +961,9 @@ materialize_runtime_payload() {
   install -m 0755 "$canonical_deck" "$runtime/bin/vibecrafted"
   install -m 0755 "$SOURCE_ROOT/scripts/vetcoders_install.py" \
     "$runtime/scripts/vetcoders_install.py"
+  # Pack carries the foundations INSTALLER, never the foundations (Maciej 2026-10-07).
+  install -m 0755 "$SOURCE_ROOT/scripts/install-foundations.sh" \
+    "$runtime/scripts/install-foundations.sh"
   install -m 0644 "$SOURCE_ROOT/scripts/distribution_manifest.py" \
     "$runtime/scripts/distribution_manifest.py"
   install -m 0644 "$SOURCE_ROOT/scripts/installer_brand.py" \

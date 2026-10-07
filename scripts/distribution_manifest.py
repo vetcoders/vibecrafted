@@ -59,6 +59,7 @@ REQUIRED_FILES = (
     "scripts/install-runtime-pack.ps1",
     "scripts/package-runtime-pack.ps1",
     "scripts/installer_brand.py",
+    "scripts/install-foundations.sh",
     "scripts/vetcoders_install.py",
     "scripts/vibecrafted",
     "scripts/verify-vibecrafted-product.sh",

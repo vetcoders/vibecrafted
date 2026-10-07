@@ -72,6 +72,8 @@ function Copy-Tree($Source, $Destination) {
 
 Set-Content -LiteralPath (Join-Path $payload "VERSION") -Value "$version`n" -Encoding ascii
 Copy-Item (Join-Path $repoRoot "scripts\vetcoders_install.py") (Join-Path $payload "scripts\vetcoders_install.py")
+# Pack carries the foundations INSTALLER, never the foundations (Maciej 2026-10-07).
+Copy-Item (Join-Path $repoRoot "scripts\install-foundations.sh") (Join-Path $payload "scripts\install-foundations.sh")
 Copy-Item (Join-Path $repoRoot "scripts\distribution_manifest.py") (Join-Path $payload "scripts\distribution_manifest.py")
 Copy-Item (Join-Path $repoRoot "scripts\installer_brand.py") (Join-Path $payload "scripts\installer_brand.py")
 Copy-Item (Join-Path $repoRoot "scripts\install-runtime-pack.ps1") (Join-Path $payload "scripts\install-runtime-pack.ps1")

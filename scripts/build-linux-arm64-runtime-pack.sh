@@ -135,6 +135,9 @@ install -m 0755 "$repo_root/vibecrafted-core/vibecrafted_core/deck/vibecrafted" 
   "$payload/bin/vibecrafted"
 install -m 0755 "$repo_root/scripts/vibecrafted" "$payload/scripts/vibecrafted"
 install -m 0755 "$repo_root/scripts/vetcoders_install.py" "$payload/scripts/vetcoders_install.py"
+# The pack never carries the foundations themselves (Maciej, 2026-10-07); it
+# carries their installer so runtime-install can pull each from its own channel.
+install -m 0755 "$repo_root/scripts/install-foundations.sh" "$payload/scripts/install-foundations.sh"
 install -m 0644 "$repo_root/scripts/distribution_manifest.py" "$payload/scripts/distribution_manifest.py"
 install -m 0644 "$repo_root/scripts/installer_brand.py" "$payload/scripts/installer_brand.py"
 install -m 0755 "$repo_root/scripts/vc-frame-product-entry.sh" "$payload/scripts/vc-frame-product-entry.sh"

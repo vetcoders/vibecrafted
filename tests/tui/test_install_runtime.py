@@ -171,3 +171,48 @@ def test_install_sh_fail_fast_on_launcher_root_drift(tmp_path: Path) -> None:
     assert result.returncode == 1
     merged_output = f"{result.stdout}\n{result.stderr}"
     assert "✗ launcher root drift:" in merged_output
+
+
+def test_foundations_phase_covers_every_terminal_status(tmp_path: Path) -> None:
+    """No install scenario may finish green without the foundations phase.
+
+    The pack carries the foundations INSTALLER, never the foundations
+    (Maciej, 2026-10-07); each terminal status must be explicit so wrappers
+    cannot mistake a silent gap for success.
+    """
+    generation = tmp_path / "gen"
+    (generation / "scripts").mkdir(parents=True)
+
+    skipped = vetcoders_install._ensure_foundations_installed(generation, skip=True)
+    assert skipped["status"] == "skipped"
+
+    missing = vetcoders_install._ensure_foundations_installed(generation, skip=False)
+    assert missing["status"] == "failed"
+    assert "does not bundle" in missing["reason"]
+
+    script = generation / "scripts" / "install-foundations.sh"
+    script.write_text("#!/bin/bash\necho foundations ready\nexit 0\n", encoding="utf-8")
+    script.chmod(0o755)
+    installed = vetcoders_install._ensure_foundations_installed(generation, skip=False)
+    assert installed["status"] == "installed"
+    assert "foundations ready" in installed["output_tail"]
+
+    script.write_text("#!/bin/bash\necho npm missing >&2\nexit 3\n", encoding="utf-8")
+    failed = vetcoders_install._ensure_foundations_installed(generation, skip=False)
+    assert failed["status"] == "failed"
+    assert failed["exit_code"] == 3
+    assert "npm missing" in failed["reason"]
+
+
+def test_every_pack_carrier_stages_the_foundations_installer() -> None:
+    """All four pack builders and both source inventories carry the installer."""
+    assert FOUNDATIONS_SCRIPT.is_file()
+    carriers = {
+        REPO_ROOT / "scripts" / "build-vibecrafted-release.sh",
+        REPO_ROOT / "scripts" / "build-linux-arm64-runtime-pack.sh",
+        REPO_ROOT / "scripts" / "build-windows-x64-runtime-pack.ps1",
+        REPO_ROOT / "scripts" / "distribution_manifest.py",
+        INSTALL_SH,
+    }
+    for carrier in carriers:
+        assert "install-foundations.sh" in carrier.read_text(encoding="utf-8"), carrier
