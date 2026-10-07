@@ -215,4 +215,8 @@ def test_every_pack_carrier_stages_the_foundations_installer() -> None:
         INSTALL_SH,
     }
     for carrier in carriers:
-        assert "install-foundations.sh" in carrier.read_text(encoding="utf-8"), carrier
+        text = carrier.read_text(encoding="utf-8")
+        assert "install-foundations.sh" in text, carrier
+        # The installer sources this library; a pack without it fails at run
+        # time on a clean host (proven in the container e2e, 2026-10-07).
+        assert "runtime-roots.sh" in text, carrier

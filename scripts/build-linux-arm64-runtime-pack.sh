@@ -138,6 +138,8 @@ install -m 0755 "$repo_root/scripts/vetcoders_install.py" "$payload/scripts/vetc
 # The pack never carries the foundations themselves (Maciej, 2026-10-07); it
 # carries their installer so runtime-install can pull each from its own channel.
 install -m 0755 "$repo_root/scripts/install-foundations.sh" "$payload/scripts/install-foundations.sh"
+mkdir -p "$payload/scripts/lib"
+install -m 0644 "$repo_root/scripts/lib/runtime-roots.sh" "$payload/scripts/lib/runtime-roots.sh"
 install -m 0644 "$repo_root/scripts/distribution_manifest.py" "$payload/scripts/distribution_manifest.py"
 install -m 0644 "$repo_root/scripts/installer_brand.py" "$payload/scripts/installer_brand.py"
 install -m 0755 "$repo_root/scripts/vc-frame-product-entry.sh" "$payload/scripts/vc-frame-product-entry.sh"
