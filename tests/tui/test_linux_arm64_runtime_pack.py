@@ -27,13 +27,13 @@ def _executable(path: Path, body: str) -> None:
     [
         (
             "terminal",
-            "f64b5c15a029a0b3cb8845ea6056142247d2f48b",
-            "9974295fea86696750a36118af679a2b4ef86442cda2bb131dff07dd235556ea",
+            "cfa2c367ed36ba9179a05fff32ab1221060cb04e",
+            "ea2f893250a42b0b2722e835e990d6c8169e4e65d817b99fc951c1f2de128c94",
         ),
         (
             "frame",
-            "9484c3b57f11b7f06a438ffd5c27c8637602b47e",
-            "211a6a93e4b17ea73b4fbfcb8bb7d10dee8c0316eb59772c81bbfcc8fc7c74ec",
+            "a485821727bb1bc1dc27a17d6db78a375e723e63",
+            "a45b32fd356bfb3f343e775f22d8811f74703d8d8db533c4b99b3762c921ddaa",
         ),
     ],
 )
@@ -287,8 +287,8 @@ def test_linux_builder_uses_pinned_public_inputs_for_arm64_and_x64() -> None:
         "WORKDIR /src/vibecrafted"
     )
     assert "69616218470b2ad053617efb9e7027b1518ea38918d933c2791e113d99cec507" in builder
-    assert "f64b5c15a029a0b3cb8845ea6056142247d2f48b" in assembler
-    assert "9484c3b57f11b7f06a438ffd5c27c8637602b47e" in assembler
+    assert "cfa2c367ed36ba9179a05fff32ab1221060cb04e" in assembler
+    assert "a485821727bb1bc1dc27a17d6db78a375e723e63" in assembler
     assert "git clone" not in assembler
     assert "VIBECRAFTED_SOURCE_OWNER_REPO" in assembler
     assert 'export VIBECRAFTED_SOURCE_REVISION="$source_revision"' in assembler
