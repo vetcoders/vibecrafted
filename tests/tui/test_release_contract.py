@@ -86,6 +86,39 @@ def test_make_release_bootstraps_exact_rust_targets_and_uses_classic_ld() -> Non
     assert '-C symbol-mangling-version=v0" \\\n' in server_build
 
 
+def test_gate_rehearsal_workflow_pins_and_provisions_rust_toolchain() -> None:
+    """gate-rehearsal.yml must pin Rust to 1.97.0 and explicitly provision it.
+
+    Pins match vibecrafted-server/rust-toolchain.toml and install-linux.yml.
+    Moving 'stable' channel is forbidden to avoid drift between rehearsal and release.
+    """
+    workflow_path = REPO_ROOT / ".github/workflows/gate-rehearsal.yml"
+    assert workflow_path.is_file()
+    text = workflow_path.read_text(encoding="utf-8")
+
+    # Forbidden: moving stable channel
+    assert "RUSTUP_TOOLCHAIN: stable" not in text
+    assert 'RUSTUP_TOOLCHAIN: "stable"' not in text
+
+    # Pinned channel: 1.97.0 (matching server rust-toolchain.toml)
+    server_toolchain = (REPO_ROOT / "vibecrafted-server/rust-toolchain.toml").read_text(
+        encoding="utf-8"
+    )
+    assert 'channel = "1.97.0"' in server_toolchain
+    assert 'RUSTUP_TOOLCHAIN: "1.97.0"' in text
+
+    # Explicit provisioning step before gates
+    assert "Provision pinned Rust toolchain" in text
+    assert "wasm32-unknown-unknown" in text
+    assert "wasm32-wasip1" in text
+
+    # Provisioning step must appear before test execution steps
+    prov_idx = text.index("Provision pinned Rust toolchain")
+    unified_idx = text.index("Run unified product contract gate")
+    test_idx = text.index("Run installer and product tests")
+    assert prov_idx < unified_idx < test_idx
+
+
 def test_classic_darwin_linker_wrapper_injects_flag_before_cargo_arguments(
     tmp_path: Path,
 ) -> None:

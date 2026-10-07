@@ -41,6 +41,8 @@ jobs:
   gate-rehearsal:
     runs-on: macos-15
     timeout-minutes: 180
+    env:
+      RUSTUP_TOOLCHAIN: "1.97.0"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -51,6 +53,13 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+
+      - name: Provision pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy,rustfmt
+          rustup target add --toolchain "$RUSTUP_TOOLCHAIN" wasm32-unknown-unknown wasm32-wasip1
+          rustup default "$RUSTUP_TOOLCHAIN"
 
       # The same steps release.yml's source-gate runs after its immutable-tag
       # preamble, in the same order, so a red here is a red there.
@@ -74,9 +83,10 @@ jobs:
           # macos-latest images stopped shipping a rustup default toolchain
           # (first seen 2026-10-06): test_voc_core_contract and
           # test_operator_mode shell out to cargo/rustc through rustup shims,
-          # which then refuse to pick a version. Pin the resolution instead of
-          # depending on image-global `rustup default`.
-          RUSTUP_TOOLCHAIN: stable
+          # which then refuse to pick a version. Server rust-toolchain.toml
+          # pins 1.97.0 and install-linux.yml provisions 1.97.0; pin the exact
+          # toolchain instead of depending on the moving stable channel.
+          RUSTUP_TOOLCHAIN: "1.97.0"
 
       - name: Build the portable release channel
         run: make portable

@@ -72,6 +72,26 @@ _RUNTIME_GENERATION_FIXTURE_SOURCES = {
 }
 
 
+SYNTHETIC_FOUNDATIONS_INSTALLER_BODY = """#!/bin/sh
+# Synthetic test-only foundations installer (offline fixture).
+# Note: this is synthetic testing, not real foundation acceptance.
+if [ -n "$VIBECRAFTED_TEST_FOUNDATIONS_FAIL" ]; then
+    echo "synthetic foundations installer failure: $VIBECRAFTED_TEST_FOUNDATIONS_FAIL" >&2
+    exit "${VIBECRAFTED_TEST_FOUNDATIONS_EXIT_CODE:-1}"
+fi
+if [ -n "$VIBECRAFTED_TEST_FOUNDATIONS_OBSERVE" ]; then
+    echo "observation: $VIBECRAFTED_TEST_FOUNDATIONS_OBSERVE"
+fi
+exit_code="${VIBECRAFTED_TEST_FOUNDATIONS_EXIT_CODE:-0}"
+if [ "$exit_code" -ne 0 ]; then
+    echo "synthetic foundations installer intentional exit: $exit_code" >&2
+    exit "$exit_code"
+fi
+echo "synthetic foundations installed (test-only)"
+exit 0
+"""
+
+
 def seed_runtime_pack(
     payload: Path,
     *,
@@ -79,6 +99,8 @@ def seed_runtime_pack(
     frame_config: str | None = None,
     terminal_policy: str | None = None,
     before_source_seal: Callable[[Path], None] | None = None,
+    include_foundations_installer: bool = True,
+    foundations_installer_content: str | None = None,
 ) -> Path:
     """Supply real manifest inputs; publication performs its own sealing.
 
@@ -99,6 +121,7 @@ def seed_runtime_pack(
         "vibecrafted-core/vibecrafted_core/runtime_paths.py",
         "scripts/vc-terminal-product-entry.sh",
         "scripts/vc-frame-product-entry.sh",
+        "scripts/lib/runtime-roots.sh",
         "config/starship.toml",
         "config/atuin/config.toml",
     ):
@@ -157,6 +180,18 @@ def seed_runtime_pack(
     ):
         if content is not None:
             (payload / relative).write_text(content, encoding="utf-8")
+    foundations_target = payload / "scripts/install-foundations.sh"
+    if include_foundations_installer:
+        foundations_target.parent.mkdir(parents=True, exist_ok=True)
+        foundations_target.write_text(
+            foundations_installer_content
+            if foundations_installer_content is not None
+            else SYNTHETIC_FOUNDATIONS_INSTALLER_BODY,
+            encoding="utf-8",
+        )
+        foundations_target.chmod(0o755)
+    elif foundations_target.exists():
+        foundations_target.unlink()
     if before_source_seal is not None:
         before_source_seal(payload)
     # Bind the distribution input before adding native donor payload.
