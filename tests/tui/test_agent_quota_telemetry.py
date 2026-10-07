@@ -52,12 +52,13 @@ def test_telemetry_help_lists_quota_engines(tmp_path: Path) -> None:
     result = _run_telemetry("help", env=_launcher_env(tmp_path))
     assert result.returncode == 0, result.stderr
     out = ANSI.sub("", result.stdout)
-    assert "telemetry agy line|once|sessions|daemon" in out
-    assert "telemetry kimi line|once|daemon" in out
+    assert "telemetry agy line|once|sessions|daemon|archive" in out
+    assert "telemetry kimi line|once|daemon|archive" in out
     for agent in ("codex", "claude", "grok", "junie", "copilot", "cursor"):
-        assert f"telemetry {agent} line|once|sessions|daemon" in out
+        assert f"telemetry {agent} line|once|sessions|daemon|archive" in out
     assert "telemetry line" in out
     assert "telemetry once" in out
+    assert "telemetry archive" in out
     assert "telemetry smoke" in out
 
 
@@ -93,6 +94,18 @@ def test_telemetry_once_union_covers_the_fleet(tmp_path: Path) -> None:
     assert cursor["status"] == "unavailable"
     assert cursor["reason"] == "usage lives in Cursor cloud"
     assert cursor["metrics"] is None
+
+
+def test_telemetry_cursor_archive_does_not_invent_a_ledger(tmp_path: Path) -> None:
+    env = _launcher_env(tmp_path)
+    result = _run_telemetry("cursor", "archive", env=env)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "unavailable"
+    assert payload["live_total"] is None
+    assert payload["archived_total"] is None
+    archive = Path(env["VIBECRAFTED_HOME"]) / "telemetry" / "archive" / "cursor.jsonl"
+    assert not archive.exists()
 
 
 def test_telemetry_unknown_subcommand_fails(tmp_path: Path) -> None:

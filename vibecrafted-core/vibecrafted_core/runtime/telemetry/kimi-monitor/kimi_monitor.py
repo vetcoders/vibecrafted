@@ -29,6 +29,14 @@ from pathlib import Path
 
 import tomllib
 
+_TELEMETRY_ROOT = Path(__file__).resolve().parents[1]
+if str(_TELEMETRY_ROOT) not in sys.path:
+    sys.path.insert(0, str(_TELEMETRY_ROOT))
+import usage_archive
+
+# Day buckets in the kimi scan sidecar. Bump when the wire parser changes.
+KIMI_PARSER = 1
+
 # ---------------------------------------------------------------- config
 
 DEFAULT_CONFIG = """\
@@ -248,6 +256,244 @@ def build_snapshot(auth_data: dict, info_data: dict, usage_data: dict) -> dict:
     return snap
 
 
+def _sessions_dir(cfg: dict, override: str | None = None) -> Path:
+    if override:
+        return Path(override).expanduser()
+    raw = ((cfg.get("paths") or {}).get("sessions_dir")) or "~/.kimi-code/sessions"
+    return Path(str(raw)).expanduser()
+
+
+def _kimi_cache_path() -> Path:
+    return usage_archive.vibecrafted_home() / "telemetry" / "kimi" / "scan-cache.json"
+
+
+def _usage_int(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return 0
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, number)
+
+
+def _kimi_day(value: object, mtime: float) -> str:
+    number = _usage_int(value)
+    if number > 10_000_000_000:
+        number //= 1000
+    if number > 1_000_000_000:
+        return datetime.fromtimestamp(number, tz=timezone.utc).strftime("%Y-%m-%d")
+    return datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%d")
+
+
+def _iter_wire_files(root: Path) -> list[Path]:
+    if not root.is_dir():
+        return []
+    found: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        current = Path(dirpath)
+        dirnames[:] = [name for name in dirnames if not (current / name).is_symlink()]
+        if "wire.jsonl" in filenames:
+            found.append(current / "wire.jsonl")
+    return found
+
+
+def _parse_kimi_wire(path: Path) -> tuple[list[dict], int, bool]:
+    """Sum usage.record and subagent.completed. inputOther is fresh input."""
+
+    try:
+        mtime = path.stat().st_mtime
+        handle = path.open("rb")
+    except OSError:
+        return [], 0, False
+    merged: dict[tuple[str, str], dict[str, int]] = {}
+    with handle:
+        for raw in handle:
+            if b"usage.record" not in raw and b"subagent.completed" not in raw:
+                continue
+            try:
+                obj = json.loads(raw.decode("utf-8", "replace"))
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            if obj.get("type") not in {"usage.record", "subagent.completed"}:
+                continue
+            usage = obj.get("usage")
+            if not isinstance(usage, dict):
+                continue
+            bucket = {
+                "input_tokens": _usage_int(usage.get("inputOther")),
+                "output_tokens": _usage_int(usage.get("output")),
+                "cache_creation_tokens": _usage_int(usage.get("inputCacheCreation")),
+                "cache_read_tokens": _usage_int(usage.get("inputCacheRead")),
+            }
+            if usage_archive.bucket_total(bucket) <= 0:
+                continue
+            model = obj.get("model")
+            model_name = (
+                model.strip() if isinstance(model, str) and model.strip() else "kimi"
+            )
+            key = (_kimi_day(obj.get("time"), mtime), model_name)
+            current = merged.get(key)
+            if current is None:
+                merged[key] = bucket
+            else:
+                for field in usage_archive.TOKEN_FIELDS:
+                    current[field] += bucket[field]
+    rows: list[dict] = []
+    processed = 0
+    for (day, model), bucket in sorted(merged.items()):
+        total = usage_archive.bucket_total(bucket)
+        processed += total
+        rows.append({"day": day, "model": model, **bucket})
+    return rows, processed, True
+
+
+def _kimi_entry_fresh(entry: object, path: Path) -> bool:
+    if not isinstance(entry, dict) or entry.get("parser") != KIMI_PARSER:
+        return False
+    if not isinstance(entry.get("days"), list):
+        return False
+    try:
+        stat = path.stat()
+    except OSError:
+        return False
+    return (
+        entry.get("size") == stat.st_size and entry.get("mtime_ns") == stat.st_mtime_ns
+    )
+
+
+def _kimi_rows(entry: object) -> list[dict]:
+    days = entry.get("days") if isinstance(entry, dict) else None
+    if not isinstance(days, list):
+        return []
+    return [item for item in days if isinstance(item, dict)]
+
+
+def harvest_kimi(sessions_dir: Path, *, mode: str) -> dict:
+    """Upsert kimi day buckets. ``archive`` backfills; ``daemon`` does not.
+
+    A daemon tick re-reads a wire only after ``archive`` has marked
+    ``day_coverage``. An empty sidecar is not a license to reparse the store.
+    Paths that disappear stay in the sidecar, so a shared day does not shrink
+    to the wires still on disk. Unreadable files are left out of the publish
+    so a partial read cannot replace a complete day.
+    """
+
+    files = _iter_wire_files(sessions_dir)
+    cache = read_json(_kimi_cache_path()) or {}
+    file_cache = cache.get("files")
+    if not isinstance(file_cache, dict):
+        file_cache = {}
+    cache["files"] = file_cache
+    live_keys = {str(path.resolve()) for path in files}
+
+    backfill = mode == "archive"
+    if not backfill and cache.get("day_coverage") != "store":
+        return _kimi_summary(files, file_cache, appended=0, published=False)
+
+    for path in files:
+        key = str(path.resolve())
+        entry = file_cache.get(key)
+        if _kimi_entry_fresh(entry, path):
+            continue
+        rows, processed, opened = _parse_kimi_wire(path)
+        if not opened:
+            continue
+        stat = path.stat()
+        file_cache[key] = {
+            "parser": KIMI_PARSER,
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+            "days": rows,
+            "processed": processed,
+        }
+
+    covered = all(
+        _kimi_entry_fresh(file_cache.get(str(path.resolve())), path) for path in files
+    )
+    archive = usage_archive.archive_file("kimi")
+    appended = 0
+    published = False
+    if covered and (backfill or cache.get("day_coverage") == "store"):
+        rows: list[dict] = []
+        for path in files:
+            rows.extend(_kimi_rows(file_cache.get(str(path.resolve()))))
+        for key, entry in file_cache.items():
+            if key in live_keys:
+                continue
+            rows.extend(_kimi_rows(entry))
+        appended = usage_archive.append_days(archive, rows)
+        published = True
+        live = sum(
+            _usage_int((file_cache.get(str(path.resolve())) or {}).get("processed"))
+            for path in files
+        )
+        cache["aggregate"] = {
+            "complete": True,
+            "processed_total": live,
+            "session_count": len(files),
+        }
+        cache["parser"] = KIMI_PARSER
+        cache["day_coverage"] = "store"
+        write_json_atomic(_kimi_cache_path(), cache)
+    elif files and any(str(path.resolve()) in file_cache for path in files):
+        cache["parser"] = KIMI_PARSER
+        write_json_atomic(_kimi_cache_path(), cache)
+    return _kimi_summary(
+        files, file_cache, appended=appended, published=published and covered
+    )
+
+
+def _kimi_summary(
+    files: list[Path], file_cache: dict, *, appended: int, published: bool
+) -> dict:
+    archive = usage_archive.archive_file("kimi")
+    archived = usage_archive.archived_total(archive) if archive.is_file() else 0
+    if files and all(
+        _kimi_entry_fresh(file_cache.get(str(path.resolve())), path) for path in files
+    ):
+        live: int | None = sum(
+            _usage_int((file_cache.get(str(path.resolve())) or {}).get("processed"))
+            for path in files
+        )
+        scope = "store"
+    elif not files:
+        live = 0
+        scope = "store"
+    else:
+        live = None
+        scope = "scanned"
+    return {
+        "agent": "kimi",
+        "status": "ok" if published or not files else "partial",
+        "live_total": live,
+        "archived_total": archived,
+        "appended": appended,
+        "live_scope": scope,
+        "archive": str(archive),
+    }
+
+
+def kimi_archive_view() -> tuple[int | None, int]:
+    """Read the archive and the cached live sum. Does not open wire files."""
+
+    archive = usage_archive.archive_file("kimi")
+    archived = usage_archive.archived_total(archive) if archive.is_file() else 0
+    cache = read_json(_kimi_cache_path()) or {}
+    aggregate = cache.get("aggregate")
+    if isinstance(aggregate, dict) and aggregate.get("complete"):
+        return _usage_int(aggregate.get("processed_total")), archived
+    return None, archived
+
+
+def cmd_archive(cfg: dict, store: str | None = None) -> int:
+    summary = harvest_kimi(_sessions_dir(cfg, store), mode="archive")
+    print(json.dumps(summary, indent=2, ensure_ascii=False))
+    return 0
+
+
 def cmd_once(cfg: dict) -> int:
     probe = KimiWebProbe(cfg)
     try:
@@ -259,6 +505,9 @@ def cmd_once(cfg: dict) -> int:
         probe.stop()
 
     snap = build_snapshot(auth_data, info_data, usage_data)
+    live_total, archived_total = kimi_archive_view()
+    snap["live_total"] = live_total
+    snap["archived_total"] = archived_total
     print(json.dumps(snap, indent=2, ensure_ascii=False))
     write_json_atomic(quota_path(cfg), snap)
     return 0 if snap.get("kind") == "ok" else 1
@@ -287,6 +536,10 @@ def cmd_daemon(cfg: dict) -> int:
     cached_auth = "unknown"
 
     while not stop:
+        try:
+            harvest_kimi(_sessions_dir(cfg), mode="daemon")
+        except OSError as exc:
+            print(f"[kimi-monitor] archive skipped: {exc}", file=sys.stderr, flush=True)
         probe = KimiWebProbe(cfg)
         now = time.time()
         try:
@@ -768,13 +1021,22 @@ def cmd_tui(cfg: dict | None = None) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description="Kimi Code Quota Monitor & Statusline")
     ap.add_argument(
-        "mode", nargs="?", default="line", choices=["daemon", "once", "line", "tui"]
+        "mode",
+        nargs="?",
+        default="line",
+        choices=["daemon", "once", "line", "tui", "archive"],
     )
     ap.add_argument(
         "--config", help="path to TOML config (default: ~/.kimi-code/kimi-monitor.toml)"
     )
+    ap.add_argument(
+        "--store",
+        help="sessions directory for archive backfill (default: config paths.sessions_dir)",
+    )
     args = ap.parse_args()
     cfg = load_config(args.config)
+    if args.mode == "archive":
+        return cmd_archive(cfg, args.store)
     if args.mode == "daemon":
         return cmd_daemon(cfg)
     if args.mode == "once":

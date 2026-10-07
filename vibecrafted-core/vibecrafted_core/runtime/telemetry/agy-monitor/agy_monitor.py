@@ -590,6 +590,9 @@ def cmd_once(cfg: dict, conversation_id: str | None = None) -> int:
             "quota_reset_in": agg.get("quota_reset_in"),
         },
         "processes": procs,
+        # Estimated tokens are not a provider ledger, so there is no archive.
+        "live_total": None,
+        "archived_total": None,
     }
 
     print(json.dumps(snap, indent=2, ensure_ascii=False))
@@ -706,6 +709,8 @@ def cmd_sessions(cfg: dict) -> int:
         toks = _fmt_tokens(agg.get("estimated_tokens", 0))
         cost = f"≈${agg.get('cost_usd', 0.0):.3f}" if agg.get("has_cost") else "-"
         print(f"{dt:<20} {surface:<8} {u_turns:<7} {toks:<12} {cost:<14} {cid}")
+    print("live_total unavailable")
+    print("archived_total unavailable")
     return 0
 
 
@@ -720,7 +725,7 @@ def main() -> int:
         "mode",
         nargs="?",
         default="line",
-        choices=["line", "once", "daemon", "sessions"],
+        choices=["line", "once", "daemon", "sessions", "archive"],
     )
     ap.add_argument(
         "--conversation",
@@ -734,6 +739,21 @@ def main() -> int:
     args = ap.parse_args()
 
     cfg = load_config(args.config)
+    if args.mode == "archive":
+        # Estimated transcript tokens are not a provider usage ledger.
+        print(
+            json.dumps(
+                {
+                    "agent": "agy",
+                    "status": "unavailable",
+                    "reason": "agy transcripts are estimated tokens, not a provider usage ledger",
+                    "live_total": None,
+                    "archived_total": None,
+                },
+                indent=2,
+            )
+        )
+        return 0
     if args.mode == "daemon":
         return cmd_daemon(cfg)
     if args.mode == "once":
