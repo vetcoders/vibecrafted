@@ -1,6 +1,6 @@
 {
   "schema": "vibecrafted.skill-provenance.v3",
-  "generated_at": "2026-10-05",
+  "generated_at": "2026-10-07",
   "skills": {
     "vc-agents": {
       "sha256": [
@@ -167,6 +167,7 @@
           "f84eab0c455ae7cb09a336fb51434b2c5d8d41d9"
         ],
         "references/why-matrix.md": [
+          "71f58886ab5186a59473c25d2914eb5ceebc5280",
           "ad7c115d78f47c85ca1d5b6ab474e89cf87be783",
           "e9075ca1d012c19c748f0911dc89161a4edede64",
           "f4453adfa3966a520988f60285ee67e1c6098eee"
