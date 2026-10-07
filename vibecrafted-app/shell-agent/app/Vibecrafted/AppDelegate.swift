@@ -240,9 +240,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     lifecycleLog(
       "launch ppid=\(getppid()) launchedByLS=\(launchedByLS) args=[\(launchArgs)]")
 
-    // Vibecrafted owns the tray, canvas, and runtime supervision. The embedded
-    // vc-terminal is the only user-facing Dock application.
-    NSApp.setActivationPolicy(.accessory)
+    // Vibecrafted is a full Dock application with its own icon and menu bar,
+    // alongside the tray item (decyzja Macieja 2026-10-06; reverses 1cd41e51,
+    // which hid the app as a tray-only accessory and left the window without
+    // app identity). LSUIElement in Info.plist is false for the same reason.
+    NSApp.setActivationPolicy(.regular)
     configureCommandDeck()
     buildMainMenu()
     buildStatusItem()

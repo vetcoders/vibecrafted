@@ -34,8 +34,10 @@ def test_single_native_host_source_contract() -> None:
     assert delegate.count("WebConsoleSession()") == 1
     assert delegate.count("MainWindowController(model:") == 1
     assert "if mainWindow == nil" in delegate
-    assert "NSApp.setActivationPolicy(.accessory)" in delegate
-    assert "NSApp.setActivationPolicy(.regular)" not in delegate
+    # Decyzja Macieja 2026-10-06: the app carries full Dock identity (icon,
+    # menu bar) alongside the tray; the accessory-only policy is reversed.
+    assert "NSApp.setActivationPolicy(.regular)" in delegate
+    assert "NSApp.setActivationPolicy(.accessory)" not in delegate
     assert main.index("NSApplication.shared") < main.index("AppDelegate()")
     coordinator = (APP / "CommandDeck/NativeTabCoordinator.swift").read_text()
     policy = (APP / "CommandDeck/WebNavigationPolicy.swift").read_text()

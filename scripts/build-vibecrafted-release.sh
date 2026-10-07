@@ -1251,9 +1251,11 @@ build_product() {
     "$APP/Contents/Info.plist" 2>/dev/null \
     || /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string Vibecrafted.icns" \
       "$APP/Contents/Info.plist"
+  # Decyzja Macieja 2026-10-06: full Dock identity; an explicit false keeps
+  # a regression back to the tray-only accessory loud at build time.
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' \
-    "$APP/Contents/Info.plist")" == "true" ]] \
-    || die "Vibecrafted.app must remain a menu-bar application without a Dock tile"
+    "$APP/Contents/Info.plist")" == "false" ]] \
+    || die "Vibecrafted.app must carry full Dock identity (LSUIElement=false)"
   [[ -s "$resources/TrayIcon.png" ]] \
     || die "Vibecrafted.app is missing its dedicated tray pictogram"
   remove_ambient_swift_rpath
