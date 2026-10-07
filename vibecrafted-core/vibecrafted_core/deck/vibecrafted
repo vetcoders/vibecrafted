@@ -1389,16 +1389,17 @@ cmd_telemetry_help() {
   printf '  Nothing is shipped to a Vibecrafted backend.\n'
   printf '\n'
   printf '%bUsage:%b\n' "$_bold" "$_reset"
-  printf '  telemetry agy line|once|sessions|daemon\n'
-  printf '  telemetry kimi line|once|daemon\n'
-  printf '  telemetry codex line|once|sessions|daemon\n'
-  printf '  telemetry claude line|once|sessions|daemon\n'
-  printf '  telemetry grok line|once|sessions|daemon\n'
-  printf '  telemetry junie line|once|sessions|daemon\n'
-  printf '  telemetry copilot line|once|sessions|daemon\n'
-  printf '  telemetry cursor line|once|sessions|daemon\n'
+  printf '  telemetry agy line|once|sessions|daemon|archive\n'
+  printf '  telemetry kimi line|once|daemon|archive\n'
+  printf '  telemetry codex line|once|sessions|daemon|archive\n'
+  printf '  telemetry claude line|once|sessions|daemon|archive\n'
+  printf '  telemetry grok line|once|sessions|daemon|archive\n'
+  printf '  telemetry junie line|once|sessions|daemon|archive\n'
+  printf '  telemetry copilot line|once|sessions|daemon|archive\n'
+  printf '  telemetry cursor line|once|sessions|daemon|archive\n'
   printf '  telemetry line                        Statuslines of present engines\n'
   printf '  telemetry once                        JSON union of agy, kimi, codex, claude, grok, junie, copilot, cursor\n'
+  printf '  telemetry archive                     Backfill daily usage archives for present engines\n'
   printf '  telemetry smoke [--agent <claude|codex|agy|junie|grok|cursor|kimi|copilot>] [--count <n>] [--repo <path>] [--no-watch|--watch]\n'
   printf '  vibecrafted telemetry <same>\n'
   printf '  (--root is the legacy spelling of --repo; the smoke root may be created on demand)\n'
@@ -1407,6 +1408,8 @@ cmd_telemetry_help() {
   printf '  telemetry agy line\n'
   printf '  telemetry kimi daemon\n'
   printf '  telemetry codex sessions\n'
+  printf '  telemetry grok archive\n'
+  printf '  telemetry archive\n'
   printf '  telemetry once\n'
   printf '  telemetry line\n'
   printf '  telemetry smoke --count 1 --no-watch\n'
@@ -1469,17 +1472,17 @@ _telemetry_engine_mode_ok() {
   case "$engine" in
     agy)
       case "$mode" in
-        line|once|sessions|daemon) return 0 ;;
+        line|once|sessions|daemon|archive) return 0 ;;
       esac
       ;;
     kimi)
       case "$mode" in
-        line|once|daemon|tui) return 0 ;;
+        line|once|daemon|tui|archive) return 0 ;;
       esac
       ;;
     codex|claude|grok|junie|copilot|cursor)
       case "$mode" in
-        line|once|sessions|daemon) return 0 ;;
+        line|once|sessions|daemon|archive) return 0 ;;
       esac
       ;;
   esac
@@ -1631,6 +1634,20 @@ EOF
   printf '%s\n' "$plan_path"
 }
 
+cmd_telemetry_archive() {
+  local engine ran=0 rc=0
+  for engine in agy kimi codex claude grok junie copilot cursor; do
+    _telemetry_engine_script "$engine" >/dev/null 2>&1 || continue
+    ran=1
+    _telemetry_run_engine "$engine" archive "$@" || rc=$?
+  done
+  if [[ "$ran" -eq 0 ]]; then
+    printf 'no telemetry engines are present in this package\n' >&2
+    return 1
+  fi
+  return "$rc"
+}
+
 cmd_telemetry_smoke() {
   local agent="codex"
   local count="1"
@@ -1761,6 +1778,9 @@ cmd_telemetry() {
       ;;
     once)
       cmd_telemetry_once "$@"
+      ;;
+    archive)
+      cmd_telemetry_archive "$@"
       ;;
     *)
       printf '%b✗%b Unknown telemetry subcommand: %s\n' "$_red" "$_reset" "$subcommand" >&2

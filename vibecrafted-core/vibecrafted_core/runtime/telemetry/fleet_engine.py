@@ -26,7 +26,15 @@ Measured on this host (2026-10-03), not assumed:
   usage. ``cacheReadTokens <= inputTokens`` on sampled sessions. Nested
   ``agentMetrics`` repeats the same numbers and is ignored. Compaction
   events are a slice, not added on top of shutdown.
-- cursor has no local token ledger.
+- cursor has no local token ledger. It does not grow an archive.
+
+Daily rows are appended to ``telemetry/archive/<agent>.jsonl`` (see
+``usage_archive``). Cache inside input is subtracted for codex, grok, and
+copilot so ``total_tokens`` matches ``processed_total``. A warm ``once`` or
+daemon tick reuses the mtime scan cache and does not reread an unchanged file.
+Rows from a file that later disappears stay in the sidecar, so a shared day
+does not shrink to the files that remain. A file that only moved (same
+session id, new path) is not counted twice.
 """
 
 from __future__ import annotations
@@ -34,6 +42,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import signal
 import sys
 import time
@@ -41,12 +50,21 @@ from collections.abc import Callable, Iterable, Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Tests load this file by path. The deck wrappers put this directory on
+# sys.path first; do the same so `usage_archive` resolves either way.
+_ENGINE_DIR = Path(__file__).resolve().parent
+if str(_ENGINE_DIR) not in sys.path:
+    sys.path.insert(0, str(_ENGINE_DIR))
+import usage_archive
+
 TAIL_BYTES = 400 * 1024
 # Codex usage is cumulative and usually sits near EOF. A fixed 400 KB window
 # misses it when a later oversized event (tool output) pushes the last
 # token_count further back. Walk backward in chunks and stop at the cap.
 CODEX_TAIL_CAP = 32 * 1024 * 1024
-PARSER_VERSION = 2
+# 3: scan-cache entries carry per-file day buckets for the archive.
+PARSER_VERSION = 3
+_CODEX_DAY_IN_PATH = re.compile(r"sessions/(\d{4})/(\d{2})/(\d{2})/")
 
 CODEX_KEYS = (
     "input_tokens",
@@ -174,6 +192,56 @@ def cache_semantics(agent: str) -> str | None:
     return None
 
 
+def _day_from_iso(value: object, fallback_mtime: float) -> str:
+    if (
+        isinstance(value, str)
+        and len(value) >= 10
+        and value[4] == "-"
+        and value[7] == "-"
+    ):
+        return value[:10]
+    return datetime.fromtimestamp(fallback_mtime, tz=timezone.utc).strftime("%Y-%m-%d")
+
+
+def _day_from_epoch(value: object, fallback_mtime: float) -> str:
+    number = _as_int(value)
+    if number > 10_000_000_000:
+        number = int(number / 1000)
+    if number > 1_000_000_000:
+        return datetime.fromtimestamp(number, tz=timezone.utc).strftime("%Y-%m-%d")
+    return _day_from_iso(None, fallback_mtime)
+
+
+def _subset_bucket(
+    input_tokens: int, output_tokens: int, cache_read: int, cache_create: int
+) -> dict[str, int]:
+    """Cache sits inside input. Archive input is the fresh remainder."""
+
+    return {
+        "input_tokens": max(0, input_tokens - cache_read - cache_create),
+        "output_tokens": output_tokens,
+        "cache_creation_tokens": cache_create,
+        "cache_read_tokens": cache_read,
+    }
+
+
+def _separate_bucket(
+    input_tokens: int, output_tokens: int, cache_read: int, cache_create: int
+) -> dict[str, int]:
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_creation_tokens": cache_create,
+        "cache_read_tokens": cache_read,
+    }
+
+
+def _day_row(day: str, model: str, bucket: dict[str, int]) -> dict | None:
+    if usage_archive.bucket_total(bucket) <= 0:
+        return None
+    return {"day": day, "model": model, **bucket}
+
+
 def _walk_files(
     roots: Iterable[Path], name_ok: Callable[[str], bool]
 ) -> Iterator[Path]:
@@ -232,45 +300,65 @@ def _add_native(total: dict[str, int], extra: dict[str, int]) -> None:
         total[key] = total.get(key, 0) + _as_int(value)
 
 
-def _codex_native_from_line(line: bytes) -> dict[str, int] | None:
-    if b"token_count" not in line:
-        return None
+def _codex_meta_from_line(
+    line: bytes,
+) -> tuple[dict[str, int] | None, str | None, str | None]:
+    if b"token_count" not in line and b"turn_context" not in line:
+        return None, None, None
     try:
         obj = json.loads(line)
     except json.JSONDecodeError:
-        return None
+        return None, None, None
     if not isinstance(obj, dict):
-        return None
-    payload = obj.get("payload")
+        return None, None, None
+    payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else None
     payload_type = payload.get("type") if isinstance(payload, dict) else None
+    model = None
+    if payload_type == "turn_context" or obj.get("type") == "turn_context":
+        candidate = payload.get("model") if isinstance(payload, dict) else None
+        if isinstance(candidate, str) and candidate.strip():
+            model = candidate.strip()
     if obj.get("type") != "token_count" and payload_type != "token_count":
-        return None
+        return None, None, model
     info = payload.get("info") if isinstance(payload, dict) else None
     usage = info.get("total_token_usage") if isinstance(info, dict) else None
     if not isinstance(usage, dict):
-        return None
+        return None, None, model
     native = _blank_native(CODEX_KEYS)
     for key in CODEX_KEYS:
         native[key] = _as_int(usage.get(key))
     if native["total_tokens"] <= 0:
         native["total_tokens"] = native["input_tokens"] + native["output_tokens"]
+    timestamp = obj.get("timestamp")
+    iso = timestamp if isinstance(timestamp, str) else None
+    return native, iso, model
+
+
+def _codex_native_from_line(line: bytes) -> dict[str, int] | None:
+    native, _iso, _model = _codex_meta_from_line(line)
     return native
 
 
-def last_codex_native(
+def _walk_codex_tail(
     path: Path, cap: int = CODEX_TAIL_CAP, chunk: int = TAIL_BYTES
-) -> dict[str, int] | None:
-    """Newest cumulative usage within ``cap`` bytes of EOF. Read-only."""
+) -> tuple[dict[str, int] | None, str | None, str | None]:
+    """Newest cumulative usage within ``cap`` bytes of EOF. Read-only.
+
+    The walk stops at the first (newest) ``token_count``. A model seen closer
+    to EOF is kept; the walk does not continue toward the start of a 47 GB
+    rollout just to find an older ``turn_context``.
+    """
 
     try:
         size = path.stat().st_size
     except OSError:
-        return None
+        return None, None, None
     if size <= 0:
-        return None
+        return None, None, None
     remaining = min(size, cap)
     offset = size
     carry = b""
+    found_model: str | None = None
     with path.open("rb") as handle:
         while remaining > 0:
             step = min(chunk, remaining)
@@ -288,12 +376,49 @@ def last_codex_native(
             else:
                 carry = b""
             for line in reversed(block.splitlines()):
-                native = _codex_native_from_line(line)
+                native, iso, model = _codex_meta_from_line(line)
+                if model and found_model is None:
+                    found_model = model
                 if native is not None:
-                    return native
+                    return native, iso, found_model
     if carry:
-        return _codex_native_from_line(carry)
-    return None
+        native, iso, model = _codex_meta_from_line(carry)
+        if model and found_model is None:
+            found_model = model
+        if native is not None:
+            return native, iso, found_model
+    return None, None, found_model
+
+
+def last_codex_native(
+    path: Path, cap: int = CODEX_TAIL_CAP, chunk: int = TAIL_BYTES
+) -> dict[str, int] | None:
+    """Newest cumulative usage within ``cap`` bytes of EOF. Read-only."""
+
+    native, _iso, _model = _walk_codex_tail(path, cap=cap, chunk=chunk)
+    return native
+
+
+def _codex_day(path: Path, iso: str | None, mtime: float) -> str:
+    if iso:
+        return _day_from_iso(iso, mtime)
+    match = _CODEX_DAY_IN_PATH.search(path.as_posix())
+    if match:
+        return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
+    return _day_from_iso(None, mtime)
+
+
+def _codex_day_rows(
+    path: Path, native: dict[str, int], iso: str | None, model: str | None, mtime: float
+) -> list[dict]:
+    bucket = _subset_bucket(
+        native.get("input_tokens", 0),
+        native.get("output_tokens", 0),
+        native.get("cached_input_tokens", 0),
+        native.get("cache_write_input_tokens", 0),
+    )
+    row = _day_row(_codex_day(path, iso, mtime), model or "codex", bucket)
+    return [row] if row else []
 
 
 def parse_codex_tail(text: str) -> dict[str, int] | None:
@@ -338,7 +463,60 @@ def grok_processed(native: dict[str, int]) -> int:
     return native.get("inputTokens", 0) + native.get("outputTokens", 0)
 
 
-def _claude_from_line(line: str, native: dict[str, int]) -> bool:
+def grok_day_rows(document: dict, mtime: float) -> list[dict]:
+    """One row per ``modelUsage`` entry. Session totals are the fallback.
+
+    Cached tokens sit inside input (``subset_of_input``). ``processed_total``
+    stays on ``totalTokens`` and is not rebuilt from the split buckets.
+    """
+
+    iso = (
+        document.get("updatedAt")
+        if isinstance(document.get("updatedAt"), str)
+        else None
+    )
+    day = _day_from_iso(iso, mtime)
+    session = (
+        document.get("session")
+        if isinstance(document.get("session"), dict)
+        else document
+    )
+    if not isinstance(session, dict):
+        return []
+    rows: list[dict] = []
+    usage = session.get("modelUsage")
+    if isinstance(usage, dict):
+        for model, body in usage.items():
+            if not isinstance(body, dict):
+                continue
+            bucket = _subset_bucket(
+                _as_int(body.get("inputTokens")),
+                _as_int(body.get("outputTokens")),
+                _as_int(body.get("cachedReadTokens")),
+                _as_int(body.get("cacheCreationTokens")),
+            )
+            row = _day_row(day, str(model), bucket)
+            if row is not None:
+                rows.append(row)
+    if rows:
+        return rows
+    native, model = parse_grok_document(document)
+    bucket = _subset_bucket(
+        native.get("inputTokens", 0),
+        native.get("outputTokens", 0),
+        native.get("cachedReadTokens", 0),
+        native.get("cacheCreationTokens", 0),
+    )
+    row = _day_row(day, model or "grok", bucket)
+    return [row] if row else []
+
+
+def _claude_from_line(
+    line: str,
+    native: dict[str, int],
+    days: list | None = None,
+    mtime: float = 0.0,
+) -> bool:
     if "usage" not in line:
         return False
     try:
@@ -351,6 +529,20 @@ def _claude_from_line(line: str, native: dict[str, int]) -> bool:
         return False
     for key in CLAUDE_KEYS:
         native[key] += _as_int(usage.get(key))
+    if days is not None:
+        model = message.get("model") if isinstance(message, dict) else None
+        model_name = (
+            model.strip() if isinstance(model, str) and model.strip() else "claude"
+        )
+        bucket = _separate_bucket(
+            _as_int(usage.get("input_tokens")),
+            _as_int(usage.get("output_tokens")),
+            _as_int(usage.get("cache_read_input_tokens")),
+            _as_int(usage.get("cache_creation_input_tokens")),
+        )
+        row = _day_row(_day_from_iso(obj.get("timestamp"), mtime), model_name, bucket)
+        if row is not None:
+            days.append(row)
     return True
 
 
@@ -370,7 +562,12 @@ def _iter_junie_usages(obj: object) -> Iterator[dict]:
             yield from _iter_junie_usages(value)
 
 
-def _junie_from_line(line: str, native: dict[str, int]) -> bool:
+def _junie_from_line(
+    line: str,
+    native: dict[str, int],
+    days: list | None = None,
+    mtime: float = 0.0,
+) -> bool:
     if "inputTokens" not in line:
         return False
     try:
@@ -378,10 +575,29 @@ def _junie_from_line(line: str, native: dict[str, int]) -> bool:
     except json.JSONDecodeError:
         return False
     hit = False
+    day = _day_from_epoch(
+        obj.get("timestampMs") if isinstance(obj, dict) else None, mtime
+    )
     for usage in _iter_junie_usages(obj):
         hit = True
         for key in JUNIE_KEYS:
             native[key] += _as_int(usage.get(key))
+        if days is None:
+            continue
+        model = usage.get("model")
+        model_name = (
+            model.strip() if isinstance(model, str) and model.strip() else "junie"
+        )
+        bucket = _separate_bucket(
+            _as_int(usage.get("inputTokens")),
+            _as_int(usage.get("outputTokens")),
+            _as_int(usage.get("cacheInputTokens"))
+            + _as_int(usage.get("cacheReadTokens")),
+            _as_int(usage.get("cacheCreateTokens")),
+        )
+        row = _day_row(day, model_name, bucket)
+        if row is not None:
+            days.append(row)
     return hit
 
 
@@ -416,6 +632,22 @@ def _copilot_from_line(line: str, state: dict) -> bool:
         if isinstance(metrics, dict):
             state["shutdown"] = _sum_model_metrics(metrics)
             state["saw_shutdown"] = True
+            timestamp = obj.get("timestamp")
+            if isinstance(timestamp, str):
+                state["iso"] = timestamp
+            models: dict[str, dict[str, int]] = {}
+            for model, body in metrics.items():
+                usage = body.get("usage") if isinstance(body, dict) else None
+                if not isinstance(usage, dict):
+                    continue
+                models[str(model)] = _subset_bucket(
+                    _as_int(usage.get("inputTokens")),
+                    _as_int(usage.get("outputTokens")),
+                    _as_int(usage.get("cacheReadTokens")),
+                    _as_int(usage.get("cacheWriteTokens")),
+                )
+            # Cumulative snapshot: this shutdown replaces earlier models.
+            state["models"] = models
             return True
         return False
     if kind == "session.compaction_complete" and not state.get("saw_shutdown"):
@@ -424,6 +656,9 @@ def _copilot_from_line(line: str, state: dict) -> bool:
             fallback = state["fallback"]
             for key in COPILOT_KEYS:
                 fallback[key] += _as_int(blob.get(key))
+            timestamp = obj.get("timestamp")
+            if isinstance(timestamp, str) and "iso" not in state:
+                state["iso"] = timestamp
             return True
     return False
 
@@ -437,7 +672,31 @@ def _empty_copilot_state() -> dict:
         "saw_shutdown": False,
         "shutdown": None,
         "fallback": _blank_native(COPILOT_KEYS),
+        "models": {},
     }
+
+
+def _copilot_day_rows(state: dict, mtime: float) -> list[dict]:
+    day = _day_from_iso(state.get("iso"), mtime)
+    models = state.get("models")
+    rows: list[dict] = []
+    if isinstance(models, dict) and models:
+        for model, bucket in models.items():
+            if not isinstance(bucket, dict):
+                continue
+            row = _day_row(day, str(model), bucket)
+            if row is not None:
+                rows.append(row)
+        return rows
+    native = _copilot_native_from_state(state)
+    bucket = _subset_bucket(
+        native.get("inputTokens", 0),
+        native.get("outputTokens", 0),
+        native.get("cacheReadTokens", 0),
+        native.get("cacheWriteTokens", 0),
+    )
+    row = _day_row(day, "copilot", bucket)
+    return [row] if row else []
 
 
 def _copilot_native_from_state(state: dict) -> dict[str, int]:
@@ -515,19 +774,24 @@ def scan_file(
         and cached.get("size") == size
         and cached.get("mtime_ns") == mtime_ns
         and isinstance(cached.get("record"), dict)
+        and isinstance(cached.get("days"), list)
     ):
         return cached["record"], cached, False
 
     if agent == "codex":
-        native = last_codex_native(path)
+        native, iso, model = _walk_codex_tail(path)
         if native is None:
             native = _blank_native(CODEX_KEYS)
-        record = _record(agent, path, native, None, mtime)
+            days: list[dict] = []
+        else:
+            days = _codex_day_rows(path, native, iso, model, mtime)
+        record = _record(agent, path, native, model, mtime)
         entry = {
             "parser": PARSER_VERSION,
             "size": size,
             "mtime_ns": mtime_ns,
             "record": record,
+            "days": days,
         }
         return record, entry, True
 
@@ -540,28 +804,34 @@ def scan_file(
             "size": size,
             "mtime_ns": mtime_ns,
             "record": record,
+            "days": grok_day_rows(document, mtime),
         }
         return record, entry, True
 
     if agent == "claude":
         native = _blank_native(CLAUDE_KEYS)
+        days = []
         offset = 0
         if (
             isinstance(cached, dict)
             and cached.get("parser") == PARSER_VERSION
             and isinstance(cached.get("native"), dict)
+            and isinstance(cached.get("days"), list)
             and _as_int(cached.get("offset")) > 0
             and _as_int(cached.get("size")) < size
             and _as_int(cached.get("offset")) == _as_int(cached.get("size"))
         ):
             native = {key: _as_int(cached["native"].get(key)) for key in CLAUDE_KEYS}
+            days = [dict(item) for item in cached["days"] if isinstance(item, dict)]
             offset = _as_int(cached.get("offset"))
         try:
             with path.open("rb") as handle:
                 if offset:
                     handle.seek(offset)
                 for raw in handle:
-                    _claude_from_line(raw.decode("utf-8", errors="replace"), native)
+                    _claude_from_line(
+                        raw.decode("utf-8", errors="replace"), native, days, mtime
+                    )
                 end = handle.tell()
         except OSError:
             return None, cached or {}, False
@@ -572,29 +842,35 @@ def scan_file(
             "mtime_ns": mtime_ns,
             "offset": end,
             "native": native,
+            "days": days,
             "record": record,
         }
         return record, entry, True
 
     if agent == "junie":
         native = _blank_native(JUNIE_KEYS)
+        days = []
         offset = 0
         if (
             isinstance(cached, dict)
             and cached.get("parser") == PARSER_VERSION
             and isinstance(cached.get("native"), dict)
+            and isinstance(cached.get("days"), list)
             and _as_int(cached.get("offset")) > 0
             and _as_int(cached.get("size")) < size
             and _as_int(cached.get("offset")) == _as_int(cached.get("size"))
         ):
             native = {key: _as_int(cached["native"].get(key)) for key in JUNIE_KEYS}
+            days = [dict(item) for item in cached["days"] if isinstance(item, dict)]
             offset = _as_int(cached.get("offset"))
         try:
             with path.open("rb") as handle:
                 if offset:
                     handle.seek(offset)
                 for raw in handle:
-                    _junie_from_line(raw.decode("utf-8", errors="replace"), native)
+                    _junie_from_line(
+                        raw.decode("utf-8", errors="replace"), native, days, mtime
+                    )
                 end = handle.tell()
         except OSError:
             return None, cached or {}, False
@@ -605,6 +881,7 @@ def scan_file(
             "mtime_ns": mtime_ns,
             "offset": end,
             "native": native,
+            "days": days,
             "record": record,
         }
         return record, entry, True
@@ -616,6 +893,7 @@ def scan_file(
             isinstance(cached, dict)
             and cached.get("parser") == PARSER_VERSION
             and isinstance(cached.get("state"), dict)
+            and isinstance(cached.get("days"), list)
             and _as_int(cached.get("offset")) > 0
             and _as_int(cached.get("size")) < size
             and _as_int(cached.get("offset")) == _as_int(cached.get("size"))
@@ -639,6 +917,7 @@ def scan_file(
             "mtime_ns": mtime_ns,
             "offset": end,
             "state": state,
+            "days": _copilot_day_rows(state, mtime),
             "record": record,
         }
         return record, entry, True
@@ -745,6 +1024,8 @@ def render_sessions(agent: str, records: list[dict], snapshot: dict) -> str:
     lines.append(f"sessions {len(records)}")
     lines.append(f"processed_total {_as_int(metrics.get('fleet_processed_total'))}")
     lines.append(f"cache_semantics {snapshot.get('cache_semantics')}")
+    lines.append(f"live_total {_as_int(snapshot.get('live_total'))}")
+    lines.append(f"archived_total {_as_int(snapshot.get('archived_total'))}")
     lines.append(f"agent {agent}")
     return "\n".join(lines)
 
@@ -792,6 +1073,8 @@ def collect(
         except OSError:
             continue
         signed.append((mtime, path))
+    # In-memory only. _write_cache drops this before the sidecar is written.
+    cache["__discovered"] = [str(path) for _mtime, path in signed]
     if not signed:
         cache.pop("aggregate", None)
         return [], None, cache
@@ -812,10 +1095,8 @@ def collect(
         return records, records[0] if records else None, cache
 
     records: list[dict] = []
-    seen: set[str] = set()
     for mtime, path in signed:
         key = str(path)
-        seen.add(key)
         record, entry, _scanned = scan_file(
             agent,
             path,
@@ -826,9 +1107,8 @@ def collect(
         record["mtime"] = mtime
         file_cache[key] = entry
         records.append(record)
-    for key in list(file_cache):
-        if key not in seen:
-            file_cache.pop(key, None)
+    # Missing paths stay in the sidecar. Dropping them would let the next
+    # last-wins row replace a shared day with only the files still on disk.
     last = (
         max(records, key=lambda item: float(item.get("mtime") or 0))
         if records
@@ -915,6 +1195,241 @@ def _quota_path(quota_root: Path) -> Path:
     return quota_root / "quota.json"
 
 
+def _write_cache(agent: str, quota_root: Path, cache: dict) -> None:
+    """Persist the scan sidecar without the discovered-path list."""
+
+    discovered = cache.pop("__discovered", None)
+    atomic_write_json(_cache_path(agent, quota_root), cache)
+    if discovered is not None:
+        cache["__discovered"] = discovered
+
+
+def _file_cache(cache: dict) -> dict:
+    files = cache.get("files")
+    if not isinstance(files, dict):
+        files = {}
+        cache["files"] = files
+    return files
+
+
+def _discovered_paths(cache: dict) -> list[Path]:
+    raw = cache.get("__discovered")
+    if not isinstance(raw, list):
+        return []
+    return [Path(item) for item in raw if isinstance(item, str)]
+
+
+def _entry_current(entry: object, path: Path) -> bool:
+    """True when the sidecar already holds this file's day buckets."""
+
+    if not isinstance(entry, dict):
+        return False
+    if entry.get("parser") != PARSER_VERSION:
+        return False
+    if not isinstance(entry.get("days"), list) or not isinstance(
+        entry.get("record"), dict
+    ):
+        return False
+    try:
+        size, mtime_ns, _mtime = _stat_signature(path)
+    except OSError:
+        return False
+    return entry.get("size") == size and entry.get("mtime_ns") == mtime_ns
+
+
+def _has_day_entry(entry: object) -> bool:
+    return (
+        isinstance(entry, dict)
+        and entry.get("parser") == PARSER_VERSION
+        and isinstance(entry.get("days"), list)
+        and isinstance(entry.get("record"), dict)
+    )
+
+
+def _day_rows_of(entry: object) -> list[dict]:
+    days = entry.get("days") if isinstance(entry, dict) else None
+    if not isinstance(days, list):
+        return []
+    return [item for item in days if isinstance(item, dict)]
+
+
+def _rows_for_paths(files: dict, paths: list[Path]) -> list[dict]:
+    rows: list[dict] = []
+    for path in paths:
+        rows.extend(_day_rows_of(files.get(str(path))))
+    return rows
+
+
+def _release_moved_ghosts(files: dict, paths: list[Path]) -> None:
+    """Drop a retained path when that session id is still live under a new path."""
+
+    live = {str(path) for path in paths}
+    live_ids: set[str] = set()
+    for path in paths:
+        entry = files.get(str(path))
+        record = entry.get("record") if isinstance(entry, dict) else None
+        session_id = record.get("id") if isinstance(record, dict) else None
+        if isinstance(session_id, str) and session_id:
+            live_ids.add(session_id)
+    for key in list(files):
+        if key in live or not isinstance(files.get(key), dict):
+            continue
+        record = files[key].get("record")
+        session_id = record.get("id") if isinstance(record, dict) else None
+        if isinstance(session_id, str) and session_id in live_ids:
+            files.pop(key, None)
+
+
+def _retained_rows(files: dict, paths: list[Path]) -> list[dict]:
+    live = {str(path) for path in paths}
+    rows: list[dict] = []
+    for key, entry in files.items():
+        if key in live:
+            continue
+        rows.extend(_day_rows_of(entry))
+    return rows
+
+
+def _processed_for_paths(files: dict, paths: list[Path]) -> int:
+    total = 0
+    for path in paths:
+        entry = files.get(str(path))
+        record = entry.get("record") if isinstance(entry, dict) else None
+        if isinstance(record, dict):
+            total += _as_int(record.get("processed_total"))
+    return total
+
+
+def _coverage_current(files: dict, paths: list[Path]) -> bool:
+    return all(_entry_current(files.get(str(path)), path) for path in paths)
+
+
+def _refresh_stale(agent: str, files: dict, paths: list[Path]) -> None:
+    """Re-read only files whose size or mtime moved. Cache hits do not open."""
+
+    for path in paths:
+        key = str(path)
+        entry = files.get(key)
+        if _entry_current(entry, path):
+            continue
+        record, new_entry, _scanned = scan_file(
+            agent, path, entry if isinstance(entry, dict) else None
+        )
+        if record is not None and isinstance(new_entry, dict):
+            files[key] = new_entry
+
+
+def annotate_archive(
+    agent: str,
+    snapshot: dict,
+    records: list[dict],
+    cache: dict,
+    quota_root: Path,
+    *,
+    mode: str,
+) -> dict:
+    """Attach ``live_total`` / ``archived_total`` and upsert complete days.
+
+    A day is published only when every live file has a current day bucket.
+    Last-wins would otherwise replace a full day with the one file ``once``
+    just scanned. Rows from paths that disappeared stay in the sidecar and
+    are summed again, so a shared day cannot shrink to the surviving files.
+    ``once`` and ``line`` never open an unchanged file. A daemon tick refreshes
+    signature mismatches only after a full ``archive``/``sessions`` pass has
+    marked ``day_coverage``; it does not backfill an empty or pre-v3 sidecar.
+    """
+
+    if agent == "cursor" or cache_semantics(agent) is None:
+        snapshot["live_total"] = None
+        snapshot["archived_total"] = None
+        snapshot["live_scope"] = "unavailable"
+        return snapshot
+
+    archive_path = usage_archive.archive_file(agent, quota_root)
+    paths = _discovered_paths(cache)
+    files = _file_cache(cache)
+    if mode == "daemon" and paths and cache.get("day_coverage") == "store":
+        _refresh_stale(agent, files, paths)
+
+    covered = _coverage_current(files, paths) if paths else True
+    publish = False
+    if (
+        mode in {"archive", "sessions"}
+        and covered
+        or mode == "daemon"
+        and cache.get("day_coverage") == "store"
+        and covered
+        or mode in {"once", "line"}
+        and paths
+        and covered
+        and cache.get("day_coverage") == "store"
+    ):
+        publish = True
+
+    appended = 0
+    if publish:
+        _release_moved_ghosts(files, paths)
+        appended = usage_archive.append_days(
+            archive_path,
+            [*_rows_for_paths(files, paths), *_retained_rows(files, paths)],
+        )
+        if mode in {"archive", "sessions"}:
+            cache["day_coverage"] = "store"
+
+    if not paths:
+        live: int | None = 0
+        scope = "store"
+    elif covered:
+        live = _processed_for_paths(files, paths)
+        scope = "store"
+    else:
+        live = sum(_as_int(record.get("processed_total")) for record in records)
+        scope = "scanned"
+
+    archived = (
+        usage_archive.archived_total(archive_path) if archive_path.is_file() else 0
+    )
+    snapshot["live_total"] = live
+    snapshot["archived_total"] = archived
+    snapshot["live_scope"] = scope
+    snapshot["archive_appended"] = appended
+    snapshot["archive_path"] = str(archive_path)
+    metrics = snapshot.get("metrics")
+    if scope == "store" and isinstance(metrics, dict):
+        metrics["fleet_processed_total"] = live
+        metrics["session_count"] = sum(
+            1
+            for path in paths
+            if isinstance(files.get(str(path)), dict)
+            and isinstance(files[str(path)].get("record"), dict)
+        )
+    return snapshot
+
+
+def render_archive_summary(snapshot: dict) -> str:
+    if (
+        snapshot.get("status") == "unavailable"
+        or snapshot.get("live_scope") == "unavailable"
+    ):
+        payload = {
+            "agent": snapshot.get("agent"),
+            "status": "unavailable",
+            "reason": snapshot.get("reason"),
+            "live_total": None,
+            "archived_total": None,
+        }
+        return json.dumps(payload, indent=2, ensure_ascii=False)
+    payload = {
+        "agent": snapshot.get("agent"),
+        "status": snapshot.get("status"),
+        "live_total": snapshot.get("live_total"),
+        "archived_total": snapshot.get("archived_total"),
+        "appended": snapshot.get("archive_appended"),
+        "archive": snapshot.get("archive_path"),
+    }
+    return json.dumps(payload, indent=2, ensure_ascii=False)
+
+
 def run(
     agent: str, mode: str, store: Path, quota_root: Path, interval: int = 30
 ) -> int:
@@ -922,12 +1437,34 @@ def run(
         print(f"unknown fleet agent: {agent}", file=sys.stderr)
         return 2
     cache = _load_json(_cache_path(agent, quota_root))
-    if mode == "sessions":
+    if mode == "archive" and agent == "cursor":
+        snapshot = build_snapshot(
+            agent,
+            status="unavailable",
+            reason=CURSOR_REASON,
+            last=None,
+            fleet_processed=None,
+            session_count=None,
+        )
+        snapshot["metrics"] = None
+        snapshot = annotate_archive(
+            agent, snapshot, [], cache, quota_root, mode="archive"
+        )
+        print(render_archive_summary(snapshot))
+        return 0
+
+    if mode in {"sessions", "archive"}:
         snapshot, records, cache = snapshot_for(
             agent, store, mode="sessions", cache=cache
         )
-        atomic_write_json(_cache_path(agent, quota_root), cache)
+        snapshot = annotate_archive(
+            agent, snapshot, records, cache, quota_root, mode=mode
+        )
+        _write_cache(agent, quota_root, cache)
         atomic_write_json(_quota_path(quota_root), snapshot)
+        if mode == "archive":
+            print(render_archive_summary(snapshot))
+            return 0
         if agent == "cursor":
             print(render_statusline(snapshot))
             return 0
@@ -937,8 +1474,9 @@ def run(
     if mode == "daemon":
         return _daemon(agent, store, quota_root, interval)
 
-    snapshot, _records, cache = snapshot_for(agent, store, mode="once", cache=cache)
-    atomic_write_json(_cache_path(agent, quota_root), cache)
+    snapshot, records, cache = snapshot_for(agent, store, mode="once", cache=cache)
+    snapshot = annotate_archive(agent, snapshot, records, cache, quota_root, mode=mode)
+    _write_cache(agent, quota_root, cache)
     atomic_write_json(_quota_path(quota_root), snapshot)
     if mode == "line":
         print(render_statusline(snapshot))
@@ -962,8 +1500,11 @@ def _daemon(agent: str, store: Path, quota_root: Path, interval: int) -> int:
     )
     while not stop:
         cache = _load_json(_cache_path(agent, quota_root))
-        snapshot, _records, cache = snapshot_for(agent, store, mode="once", cache=cache)
-        atomic_write_json(_cache_path(agent, quota_root), cache)
+        snapshot, records, cache = snapshot_for(agent, store, mode="once", cache=cache)
+        snapshot = annotate_archive(
+            agent, snapshot, records, cache, quota_root, mode="daemon"
+        )
+        _write_cache(agent, quota_root, cache)
         atomic_write_json(_quota_path(quota_root), snapshot)
         print(
             f"[{agent}-monitor] {snapshot['generated_at']} {render_statusline(snapshot)}",
@@ -982,7 +1523,7 @@ def main(agent: str, argv: list[str] | None = None) -> int:
         "mode",
         nargs="?",
         default="line",
-        choices=["line", "once", "sessions", "daemon"],
+        choices=["line", "once", "sessions", "daemon", "archive"],
     )
     parser.add_argument("--store", help="Agent store root (default: the host store)")
     parser.add_argument(

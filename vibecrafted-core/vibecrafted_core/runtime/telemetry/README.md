@@ -15,12 +15,19 @@ This directory vendors the local quota / statusline engines:
 | `copilot-monitor/` | Copilot                    | `$VIBECRAFTED_HOME/telemetry/copilot/quota.json` |
 | `cursor-monitor/`  | Cursor                     | `$VIBECRAFTED_HOME/telemetry/cursor/quota.json`  |
 
-Codex, Claude, Grok, Junie, and Copilot read the local session store and do not
-modify it. Each snapshot declares `cache_semantics` (`subset_of_input` or
-`separate_buckets`) and a `processed_total` that does not add a cache bucket
-twice. Cursor has no local token ledger: the engine reports `status:
+Codex, Claude, Grok, Junie, Copilot, and Kimi read the local session store and
+do not modify it. Each snapshot declares `cache_semantics` (`subset_of_input`
+or `separate_buckets`) and a `processed_total` that does not add a cache
+bucket twice. A day once observed is appended to
+`$VIBECRAFTED_HOME/telemetry/archive/<agent>.jsonl`. Reading that file is
+last-wins per `(day, model)`; the file is not compacted. A rotated source
+stays in the scan sidecar, so a shared day does not shrink to the files still
+on disk. A session that only moved paths is not counted twice. `live_total`
+is the live store. `archived_total` is the archive. Cursor has no local token ledger: the engine reports `status:
 unavailable` and the reason `usage lives in Cursor cloud`. It does not invent
-zeros. A missing engine script is `status: absent` inside `telemetry once`.
+zeros and it does not grow an archive. Agy transcripts are estimated tokens,
+so `telemetry agy archive` is the same honest unavailable. A missing engine
+script is `status: absent` inside `telemetry once`. Gemini has no engine here.
 
 Both engines are **local-only**. They do not send usage to a Vibecrafted backend.
 Shadow prices are labeled `api-equiv` so they cannot be mistaken for a
@@ -31,16 +38,17 @@ subscription charge.
 ```text
 telemetry                 # help
 telemetry smoke …         # existing marbles smoke (unchanged)
-telemetry agy line|once|sessions|daemon
-telemetry kimi line|once|daemon
-telemetry codex line|once|sessions|daemon
-telemetry claude line|once|sessions|daemon
-telemetry grok line|once|sessions|daemon
-telemetry junie line|once|sessions|daemon
-telemetry copilot line|once|sessions|daemon
-telemetry cursor line|once|sessions|daemon
+telemetry agy line|once|sessions|daemon|archive
+telemetry kimi line|once|daemon|archive
+telemetry codex line|once|sessions|daemon|archive
+telemetry claude line|once|sessions|daemon|archive
+telemetry grok line|once|sessions|daemon|archive
+telemetry junie line|once|sessions|daemon|archive
+telemetry copilot line|once|sessions|daemon|archive
+telemetry cursor line|once|sessions|daemon|archive
 telemetry line            # statuslines of present engines
-telemetry once            # JSON union of all eight agents
+telemetry once            # JSON union; each engine adds live_total and archived_total
+telemetry archive         # backfill every present engine into the daily archive
 ```
 
 `agy-monitor` / `kimi-monitor` are **not** published onto PATH. Standalone
