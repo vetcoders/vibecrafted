@@ -517,3 +517,29 @@ def test_strict_foundations_still_refuse_a_missing_screenscribe(
     )
 
     assert result.returncode != 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("foundation", ["loctree", "aicx"])
+def test_required_failure_remains_named_after_later_agent_success(
+    tmp_path: Path, foundation: str
+) -> None:
+    fake_bin = tmp_path / "bin"
+    for binary in ("node", "claude", "codex", "junie", "grok", "agy", "cursor-agent"):
+        _executable(fake_bin / binary)
+    # A failed foundation channel precedes a successful optional phase. The
+    # caller retains only the final stdout lines and final stderr lines.
+    _executable(fake_bin / "npm", "#!/bin/sh\necho 'channel unavailable'\nexit 1\n")
+    result = _run_installer(
+        tmp_path,
+        foundation,
+        "agents",
+        path=[fake_bin],
+        REQUIRE_FOUNDATIONS="1",
+    )
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "All agent CLIs installed" in result.stdout
+    retained = "\n".join(result.stderr.splitlines()[-6:])
+    assert foundation in retained, (
+        "A failed required foundation must remain identifiable after a later "
+        f"successful phase; final diagnostic was {retained!r}"
+    )
