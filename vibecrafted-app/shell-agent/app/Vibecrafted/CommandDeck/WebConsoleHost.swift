@@ -151,6 +151,9 @@ final class WebConsoleSession: NSObject {
   /// Guards the single automatic reload after a content-process death, so a
   /// repeatedly crashing page can never become a reload loop.
   private var didAutoRecoverFromTermination = false
+  /// Pins for the container that currently holds `webView`. Released before
+  /// the web view moves, including when a direct `attach(to:)` transfers it.
+  private var attachmentConstraints: [NSLayoutConstraint] = []
 
   init(
     role: WebTabRole = .console,
@@ -448,17 +451,24 @@ final class WebConsoleSession: NSObject {
 
   /// Moves the one web view into `container`, keeping the live session.
   /// Idempotent: re-attaching to the same container is a no-op.
+  /// Direct callers, including a second plain `NSView`, always transfer.
+  /// Host updates must not call this for a container that no longer owns
+  /// the web view; see `WebConsoleHost.updateNSView`.
   func attach(to container: NSView) {
     guard webView.superview !== container else { return }
+    NSLayoutConstraint.deactivate(attachmentConstraints)
+    attachmentConstraints.removeAll()
     webView.removeFromSuperview()
     webView.translatesAutoresizingMaskIntoConstraints = false
     container.addSubview(webView)
-    NSLayoutConstraint.activate([
+    let pinned = [
       webView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
       webView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
       webView.topAnchor.constraint(equalTo: container.topAnchor),
       webView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-    ])
+    ]
+    NSLayoutConstraint.activate(pinned)
+    attachmentConstraints = pinned
   }
 }
 
@@ -771,7 +781,16 @@ struct WebConsoleHost: NSViewRepresentable {
 
   /// Rendering only mounts. AppModel callbacks own endpoint changes outside
   /// SwiftUI's update pass, so drawing cannot publish state or reload a page.
+  ///
+  /// Ownership is this session's current host container. SwiftUI updates the
+  /// outgoing representable after `makeNSView` has already moved the web view.
+  /// Attaching from that outgoing container pulls the web view back, and
+  /// removing the outgoing container then detaches the canvas. Another tab
+  /// has its own session, so this check cannot see it.
   func updateNSView(_ nsView: WebConsoleContainerView, context: Context) {
+    if let holder = session.webView.superview as? WebConsoleContainerView, holder !== nsView {
+      return
+    }
     session.attach(to: nsView)
   }
 }
