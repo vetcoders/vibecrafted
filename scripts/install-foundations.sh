@@ -24,7 +24,7 @@ set -euo pipefail
 # COCKPIT READY, not PATH-only:
 #   1. binary exists AND runs
 #   2. product identity (vc-frame, not stock zellij)
-#   3. live config projection (frontier or view) with default_layout / Start here
+#   3. live physical config.kdl; Start here is the layout asset (Frame owns host chrome)
 #   4. operator scripts (at least vc-composer.sh) install-managed or present
 #   5. launch door on PATH (vc-start and/or vibecrafted)
 # Missing any of the hard checks fails foundations so install cannot "succeed"
@@ -197,11 +197,9 @@ verify_vcframe_cockpit() {
   else
     cfg="$cfg_root/config.kdl"
     ok "cockpit: config @ $cfg"
-    if ! grep -qE 'default_layout[[:space:]]+"?(vibecrafted|operator)' "$cfg" 2>/dev/null \
-      && ! grep -q 'default_layout' "$cfg" 2>/dev/null; then
-      warn "cockpit: config has no default_layout (Start here path unclear)"
-      fails=1
-    fi
+    # Frame owns embedded host chrome (8764a248). Shipped config.kdl omits
+    # default_layout on purpose. Start here is checked below as a layout asset,
+    # with the built-in vibecrafted fallback only when that asset is absent.
     # Super/Cmd product contract (install projection must not leave hollow copy).
     if grep -q 'support_kitty_keyboard_protocol[[:space:]]*false' "$cfg" 2>/dev/null; then
       warn "cockpit: support_kitty_keyboard_protocol is false — Super/Cmd chords die"
@@ -213,7 +211,8 @@ verify_vcframe_cockpit() {
     fi
   fi
 
-  # Start here layout: operator.kdl or built-in default_layout vibecrafted.
+  # Start here layout asset (operator.kdl or vibecrafted.kdl). The built-in
+  # default_layout vibecrafted path remains only when no asset file is present.
   layout=""
   if [[ -n "$cfg_root" ]]; then
     for candidate in \
