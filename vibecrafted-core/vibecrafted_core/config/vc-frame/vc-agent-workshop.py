@@ -1112,7 +1112,9 @@ class Workshop:
                 curses.A_DIM,
             )
             list_row += 1
-        buttons = ("New agent", "Voc")
+        # Voc has one global entry beside Composer in the topbar; the Agents
+        # home offers only what belongs to this project.
+        buttons = ("New agent",)
         col = left
         button_row = min(height - 3, list_row + (0 if compact else 1))
         for index, label in enumerate(buttons):
@@ -1145,9 +1147,9 @@ class Workshop:
                     curses.A_DIM,
                 )
         hint = (
-            "n New  v Voc  o other sessions"
+            "n New  o other sessions"
             if compact
-            else "n New agent · v Voc · o other sessions · click a row to open its tab"
+            else "n New agent · o other sessions · click a row to open its tab"
         )
         _safe_addstr(self.window, height - 2, left, hint, curses.A_DIM)
         if self.error:
@@ -1343,21 +1345,15 @@ class Workshop:
             _safe_addstr(self.window, height - 1, left, self.notice, curses.A_BOLD)
 
     def handle_home_key(self, key: int) -> None:
-        if key in (curses.KEY_LEFT, ord("h")):
-            self.home_choice = (self.home_choice - 1) % 2
-        elif key in (curses.KEY_RIGHT, ord("l"), ord("\t")):
-            self.home_choice = (self.home_choice + 1) % 2
-        elif key in (ord("n"), ord("N")):
+        if key in (ord("n"), ord("N")):
             self.open_launcher()
-        elif key in (ord("v"), ord("V")):
-            self.open_voc()
         elif key in (ord("o"), ord("O")):
             self._toggle_other_sessions()
         elif key in (10, 13, curses.KEY_ENTER):
             if self.show_other and self.other_sessions:
                 self._attach_session(self.other_sessions[0])
             else:
-                (self.open_launcher, self.open_voc)[self.home_choice]()
+                self.open_launcher()
 
     def handle_launcher_key(self, key: int) -> None:
         self.error = ""
@@ -1565,7 +1561,7 @@ class Workshop:
                 continue
             if kind == "home":
                 self.home_choice = index
-                (self.open_launcher, self.open_voc)[index]()
+                self.open_launcher()
                 return
             if kind == "face":
                 self._focus_face(index)
@@ -1592,22 +1588,6 @@ class Workshop:
         self.row = 0
         self.advanced = False
         self.error = ""
-
-    def open_voc(self) -> None:
-        try:
-            result = subprocess.run(
-                ["vc-frame", "action", "go-to-tab-name", "Voc"],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-        except FileNotFoundError:
-            self.error = "vc-frame is not available in this Runtime Pack"
-            return
-        if result.returncode != 0:
-            self.error = (
-                result.stderr or result.stdout or "Voc tab is unavailable"
-            ).strip()
 
     def _focus_face(self, index: int) -> None:
         if index < 0 or index >= len(self.face_records):

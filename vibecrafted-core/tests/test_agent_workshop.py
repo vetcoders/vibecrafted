@@ -1879,6 +1879,55 @@ def test_provider_click_then_keyboard_and_launch_keep_exact_project(
     assert command[command.index("--root") + 1] == str(project)
 
 
+def test_agents_home_has_no_second_voc_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Voc has one global entry beside Composer; the Agents home must not
+    offer another one (and no longer has a Voc tab to jump to)."""
+    workshop = _load()
+    writes: list[str] = []
+
+    class FakeWindow:
+        def getmaxyx(self) -> tuple[int, int]:
+            return (14, 90)
+
+        def addstr(self, _row: int, _col: int, text: str, _attr: int = 0) -> None:
+            writes.append(text)
+
+        def erase(self) -> None:
+            pass
+
+        def refresh(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        workshop,
+        "current_agent_presence",
+        lambda: workshop.AgentPresence((), (), status="ok"),
+    )
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        workshop.subprocess,
+        "run",
+        lambda argv, **_kwargs: (
+            calls.append(argv) or SimpleNamespace(returncode=0, stdout="", stderr="")
+        ),
+    )
+    home = workshop.Workshop(FakeWindow(), mode="home")
+    home.draw_home()
+    home_text = "\n".join(writes)
+    assert "[ New agent ]" in home_text
+    assert "Voc" not in home_text
+    assert [kind for *_, kind in home.mouse_targets].count("home") == 1
+    assert not hasattr(home, "open_voc")
+
+    home.handle_home_key(ord("v"))
+    assert home.mode == "home"
+    home.handle_home_key(10)
+    assert home.mode == "launcher"
+    assert not any("Voc" in argv for argv in calls)
+
+
 def test_small_home_and_launcher_render_without_nested_frame(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -175,8 +175,9 @@ Outside Frame, creation is exclusive; a no-TTY caller opens VC Terminal only
 after successful creation, carrying the exact root and created-session marker.
 
 Inside Frame, `vc-start` creates an ordinary project session from
-`operator.kdl`, retaining its Start here, Agents, Shell and Voc tabs plus one
-session canvas. CLI entry uses the native action, subject to the source-client
+`operator.kdl`, retaining its Start here, Agents and Shell tabs plus one
+session canvas. Voc is not a project tab: its single entry is the global chip
+beside Composer in the topbar. CLI entry uses the native action, subject to the source-client
 restriction below:
 
 ```text
