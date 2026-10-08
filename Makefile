@@ -37,7 +37,7 @@ if [ ! -d "$$stable_root/vibecrafted-core" ]; then \
 fi
 endef
 
-.PHONY: help help-dev vibecrafted app dmg dmg-signed release-local notarize runtime-acceptance release runtime-pack release-prereqs portable publish-release release-rehearsal gui-install wizard wizard-dev check skills-check layouts-check deck-mirror-check test test-core test-skills test-install test-parity test-vc-frame test-iterm2-migrate test-memex test-aicx-sync test-hammerspoon test-keychain-session dispatch-test unified-product-contract-gate exact-release-contract-gate release-version-gate payload-hygiene install install-source install-auto install-all install-python-tools install-bundle-tools install-tools install-tools-held install-vendored-binaries install-app install-app-dev install-dev install-app-binaries install-hammerspoon skills helpers setup-dev dry-run doctor review-map formatting-tree list update uninstall restore migrate migrate-dry init-hooks seed-commit-msg-hooks bundle bundle-check foundations foundations-check semgrep version version-show version-bump bump-patch bump-minor bump-major iterm-plugin iterm-plugin-refresh iterm-plugin-show iterm-plugin-uninstall iterm-plugin-migrate demo demo-full checkout-format-only commit-safe test-race-protection skill-new server server-build build-server-release server-check server-test install-server install-server-payload install-server-service reconcile-server-service server-smoke
+.PHONY: help help-dev vibecrafted app dmg dmg-signed release-local notarize runtime-acceptance release runtime-pack release-toolchain-preflight release-prereqs portable publish-release release-rehearsal gui-install wizard wizard-dev check skills-check layouts-check deck-mirror-check test test-core test-skills test-install test-parity test-vc-frame test-iterm2-migrate test-memex test-aicx-sync test-hammerspoon test-keychain-session dispatch-test unified-product-contract-gate exact-release-contract-gate release-version-gate payload-hygiene install install-source install-auto install-all install-python-tools install-bundle-tools install-tools install-tools-held install-vendored-binaries install-app install-app-dev install-dev install-app-binaries install-hammerspoon skills helpers setup-dev dry-run doctor review-map formatting-tree list update uninstall restore migrate migrate-dry init-hooks seed-commit-msg-hooks bundle bundle-check foundations foundations-check semgrep version version-show version-bump bump-patch bump-minor bump-major iterm-plugin iterm-plugin-refresh iterm-plugin-show iterm-plugin-uninstall iterm-plugin-migrate demo demo-full checkout-format-only commit-safe test-race-protection skill-new server server-build build-server-release server-check server-test install-server install-server-payload install-server-service reconcile-server-service server-smoke
 
 help:
 	@printf "\n"
@@ -129,6 +129,17 @@ RELEASE_FLAGS ?=
 RELEASE_TOOLCHAIN_CONTRACT := scripts/lib/release-toolchain-contract.sh
 RELEASE_MIN_FREE_KIB ?= 6291456
 
+# No downloads, signing keys or build tools: detect Apple toolchain drift first.
+release-toolchain-preflight:
+	@set -eu; \
+	. "$(CURDIR)/scripts/lib/xcode-channel.sh"; \
+	vibecrafted_xcode_require_stable; \
+	. "$(RELEASE_TOOLCHAIN_CONTRACT)"; \
+	if [ "$$(uname -s)" = Darwin ]; then \
+		vibecrafted_release_verify_darwin_linker; \
+		printf '==> Apple toolchain ready: profile=%s linker=%s [%s -> %s]\n' "$$VIBECRAFTED_RELEASE_TOOLCHAIN_PROFILE" "$$VIBECRAFTED_RELEASE_DARWIN_LINKER_MODE" "$$VIBECRAFTED_RELEASE_DARWIN_RUST_CLANG" "$$VIBECRAFTED_RELEASE_DARWIN_RUST_LD"; \
+	fi
+
 release-prereqs:
 	@set -eu; \
 	. "$(CURDIR)/scripts/lib/xcode-channel.sh"; \
@@ -138,6 +149,7 @@ release-prereqs:
 		printf '==> %s host: this is the macOS release toolchain contract; the Linux assembler provisions its own\n' "$$(uname -s)"; \
 		exit 0; \
 	fi; \
+	vibecrafted_release_verify_darwin_linker; \
 	command -v rustup >/dev/null 2>&1 || { printf '%s\n' 'FATAL: rustup is required for release' >&2; exit 1; }; \
 	toolchain="$$VIBECRAFTED_RELEASE_RUSTUP_TOOLCHAIN"; \
 	if ! rustup which --toolchain "$$toolchain" rustc >/dev/null 2>&1; then \
@@ -166,9 +178,6 @@ release-prereqs:
 			rustup target add --toolchain "$$toolchain" "$$target"; \
 		fi; \
 	done; \
-	if [ "$$(uname -s)" = Darwin ]; then \
-		vibecrafted_release_verify_darwin_linker; \
-	fi; \
 	free_kib="$$(df -Pk "$(CURDIR)" | awk 'NR == 2 { print $$4 }')"; \
 	case "$$free_kib" in ''|*[!0-9]*) printf '%s\n' 'FATAL: could not measure release disk space' >&2; exit 1;; esac; \
 	if [ "$$free_kib" -lt '$(RELEASE_MIN_FREE_KIB)' ]; then \

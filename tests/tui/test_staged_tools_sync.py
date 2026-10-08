@@ -8,13 +8,14 @@ import multiprocessing
 import os
 import plistlib
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import threading
 import time
 from argparse import Namespace
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -5316,26 +5317,52 @@ def test_fence_release_failure_after_seal_keeps_committed_generation_disabled(
     assert gate_state["disabled"] is True
 
 
+@pytest.mark.parametrize("parent_delay", [0.0, 0.6])
 def test_server_service_mutations_serialize_through_lifecycle_lock(
     tmp_path: Path,
+    parent_delay: float,
 ) -> None:
     home = tmp_path / "home"
     shared_home = home / ".vibecrafted"
     log = tmp_path / "service-mutations.log"
+    release = tmp_path / "release-first-mutation"
+    contention = tmp_path / "second-lock-contention"
     # The deck resolves its owner root one level above itself, so it has to sit
     # in a generation-shaped tree rather than loose in tmp_path.
     deck = tmp_path / "bin" / "vibecrafted"
     _seed_launcher_limits(tmp_path)
     source = (REPO_ROOT / "scripts" / "vibecrafted").read_text(encoding="utf-8")
     harness = r"""
+_server_python() {
+  if [[ "$1" == lock-state && "$VIBECRAFTED_TEST_SERVICE_ROLE" == second ]]; then
+    local state result
+    state="$(_test_real_server_python "$@")"
+    result=$?
+    if [[ "$state" == live:* ]]; then
+      printf '%s\n' "$state" > "$VIBECRAFTED_TEST_LOCK_CONTENTION.tmp"
+      mv "$VIBECRAFTED_TEST_LOCK_CONTENTION.tmp" "$VIBECRAFTED_TEST_LOCK_CONTENTION"
+    fi
+    printf '%s\n' "$state"
+    return "$result"
+  fi
+  _test_real_server_python "$@"
+}
 _server_supervisor_cli() {
   printf 'enter %s\n' "$*" >> "$VIBECRAFTED_TEST_SERVICE_LOG"
-  sleep 0.4
+  if [[ "$VIBECRAFTED_TEST_SERVICE_ROLE" == first ]]; then
+    while [[ ! -f "$VIBECRAFTED_TEST_SERVICE_RELEASE" ]]; do
+      sleep 0.02
+    done
+  fi
   printf 'exit %s\n' "$*" >> "$VIBECRAFTED_TEST_SERVICE_LOG"
 }
 main "$@"
 """
     assert source.endswith('main "$@"\n')
+    # Observe the real owner's liveness result without replacing acquisition,
+    # ownership checks, release, or the lock's retry policy.
+    assert source.count("_server_python() {") == 1
+    source = source.replace("_server_python() {", "_test_real_server_python() {")
     _write_executable(deck, source.removesuffix('main "$@"\n') + harness)
     environment = os.environ.copy()
     environment.update(
@@ -5347,36 +5374,80 @@ main "$@"
                 home / ".local" / "share" / "vibecrafted" / "tools"
             ),
             "VIBECRAFTED_TEST_SERVICE_LOG": str(log),
+            "VIBECRAFTED_TEST_SERVICE_RELEASE": str(release),
+            "VIBECRAFTED_TEST_LOCK_CONTENTION": str(contention),
         }
     )
-    first = subprocess.Popen(
-        [str(deck), "server", "service", "install"],
-        env=environment,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    _wait_for_text(log, "enter service install")
-    second = subprocess.Popen(
-        [str(deck), "server", "service", "restart"],
-        env=environment,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    time.sleep(0.15)
-    assert log.read_text(encoding="utf-8").splitlines() == ["enter service install"]
-    first_stdout, first_stderr = first.communicate(timeout=10)
-    second_stdout, second_stderr = second.communicate(timeout=10)
+    children: list[subprocess.Popen[str]] = []
+    try:
+        first = subprocess.Popen(
+            [str(deck), "server", "service", "install"],
+            env={**environment, "VIBECRAFTED_TEST_SERVICE_ROLE": "first"},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        children.append(first)
+        _wait_for_text(log, "enter service install")
+        # This deliberately exceeds the old 0.4-second child lifetime. The
+        # release gate, rather than parent scheduling, now owns that lifetime.
+        time.sleep(parent_delay)
+        second = subprocess.Popen(
+            [str(deck), "server", "service", "restart"],
+            env={**environment, "VIBECRAFTED_TEST_SERVICE_ROLE": "second"},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        children.append(second)
+        deadline = time.monotonic() + 10
+        while True:
+            entries = log.read_text(encoding="utf-8").splitlines()
+            assert "enter service restart" not in entries, (
+                "second mutation entered before the first was released",
+                entries,
+            )
+            if contention.is_file():
+                break
+            assert first.poll() is None, "first mutation exited before release"
+            assert second.poll() is None, "second mutation exited before contention"
+            assert time.monotonic() < deadline, (
+                "second never observed a live lock owner"
+            )
+            time.sleep(0.02)
+        assert contention.read_text(encoding="utf-8").startswith("live:")
+        assert first.poll() is None
+        assert log.read_text(encoding="utf-8").splitlines() == ["enter service install"]
+        release.touch()
+        first_stdout, first_stderr = first.communicate(timeout=10)
+        second_stdout, second_stderr = second.communicate(timeout=10)
 
-    assert first.returncode == 0, (first_stdout, first_stderr)
-    assert second.returncode == 0, (second_stdout, second_stderr)
-    assert log.read_text(encoding="utf-8").splitlines() == [
-        "enter service install",
-        "exit service install",
-        "enter service restart",
-        "exit service restart",
-    ]
+        assert first.returncode == 0, (first_stdout, first_stderr)
+        assert second.returncode == 0, (second_stdout, second_stderr)
+        assert log.read_text(encoding="utf-8").splitlines() == [
+            "enter service install",
+            "exit service install",
+            "enter service restart",
+            "exit service restart",
+        ]
+    finally:
+        release.touch()
+        for child in children:
+            try:
+                child.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                # Each test child owns a new process group, including the deck's
+                # lock subshell. Reap the group even if an assertion failed.
+                with suppress(ProcessLookupError):
+                    os.killpg(child.pid, signal.SIGTERM)
+                try:
+                    child.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    with suppress(ProcessLookupError):
+                        os.killpg(child.pid, signal.SIGKILL)
+                    child.communicate(timeout=5)
 
 
 def test_lifecycle_fence_loss_terminates_owned_installer_child_before_mutation(

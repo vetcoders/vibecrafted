@@ -75,7 +75,9 @@ def test_make_release_bootstraps_exact_rust_targets_and_uses_classic_ld() -> Non
     )
     assert builder.count('if [[ "$MODE" != "notarize" ]]; then') >= 2
     assert "release-toolchain-contract.sh" in linker
-    assert 'exec "$VIBECRAFTED_RELEASE_DARWIN_CLANG" -Wl,-ld_classic "$@"' in linker
+    assert (
+        'exec "$VIBECRAFTED_RELEASE_DARWIN_RUST_CLANG" -Wl,-ld_classic "$@"' in linker
+    )
     # Legacy mangling spells Leptos view types into 111k-character drop-glue
     # symbols that Apple ld refuses; the server build is mangled v0.
     server_build = builder[
@@ -119,8 +121,10 @@ def test_gate_rehearsal_workflow_pins_and_provisions_rust_toolchain() -> None:
     assert prov_idx < unified_idx < test_idx
 
 
+@pytest.mark.parametrize("profile", ["local", "local-classic"])
 def test_classic_darwin_linker_wrapper_injects_flag_before_cargo_arguments(
     tmp_path: Path,
+    profile: str,
 ) -> None:
     captured = tmp_path / "clang-arguments"
     fake_bin = tmp_path / "bin"
@@ -164,6 +168,7 @@ def test_classic_darwin_linker_wrapper_injects_flag_before_cargo_arguments(
         {
             "CAPTURED": str(captured),
             "VIBECRAFTED_RELEASE_TOOLCHAIN_CONTRACT": str(fake_contract),
+            "VIBECRAFTED_RELEASE_TOOLCHAIN_PROFILE": profile,
         }
     )
     result = subprocess.run(
@@ -208,8 +213,10 @@ def test_classic_darwin_linker_wrapper_injects_flag_before_cargo_arguments(
         assert expected_error in result.stderr
 
 
+@pytest.mark.parametrize("profile", ["local", "local-xcode27"])
 def test_darwin_linker_wrapper_uses_measured_xcode_pair_without_ld_classic(
     tmp_path: Path,
+    profile: str,
 ) -> None:
     """CLT 27 ships no ld-classic; the contract then links with the Xcode pair.
 
@@ -264,6 +271,7 @@ def test_darwin_linker_wrapper_uses_measured_xcode_pair_without_ld_classic(
             "CAPTURED": str(captured),
             "PATH": f"{fake_bin}:{env['PATH']}",
             "VIBECRAFTED_RELEASE_TOOLCHAIN_CONTRACT": str(fake_contract),
+            "VIBECRAFTED_RELEASE_TOOLCHAIN_PROFILE": profile,
         }
     )
     linker = REPO_ROOT / "scripts/lib/rust-linker-darwin-classic.sh"
@@ -302,6 +310,275 @@ def test_darwin_linker_wrapper_uses_measured_xcode_pair_without_ld_classic(
         assert result.returncode != 0
         assert expected_error in result.stderr
         assert not captured.exists()
+
+
+def _release_contract_make() -> str:
+    # Both Apple make entry points are shims. Resolve gnumake before
+    # applying a fixture DEVELOPER_DIR, so the recipe exercises the contract.
+    if sys.platform == "darwin":
+        return subprocess.check_output(
+            ["xcrun", "--find", "gnumake"], text=True
+        ).strip()
+    return "make"
+
+
+def _hosted_release_toolchain_fixture(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+    """Redirect executable paths only; production version pins remain unchanged."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    contract = (REPO_ROOT / "scripts/lib/release-toolchain-contract.sh").read_text()
+    pins = dict(re.findall(r"readonly ([A-Z_]+)='([^']*)'", contract))
+    developer_dir = tmp_path / "Xcode_26.3.0.app/Contents/Developer"
+    hosted_bin = developer_dir / "Toolchains/XcodeDefault.xctoolchain/usr/bin"
+    hosted_bin.mkdir(parents=True)
+    captured = tmp_path / "clang-arguments"
+    rustup_called = tmp_path / "rustup-called"
+    tools = {
+        "clang": '#!/bin/sh\nif [ "${1:-}" = --version ]; then printf \'%s\\n\' "$FAKE_CLANG_VERSION"; else printf \'%s\\n\' "$@" > "$CAPTURED"; fi\n',
+        "ld-classic": "#!/bin/sh\nprintf '%s\\n' \"$FAKE_LD_VERSION\"\n",
+        "xcodebuild": "#!/bin/sh\nprintf '%s\\n' \"$FAKE_XCODE_VERSION\"\n",
+        "uname": "#!/bin/sh\nprintf '%s\\n' Darwin\n",
+        "rustc": "#!/bin/sh\nprintf '%s\\n' \"rustc 1.96.0 (fixture)\"\n",
+        "cargo": "#!/bin/sh\nprintf '%s\\n' \"cargo 1.96.0 (fixture)\"\n",
+        "rustup": '#!/bin/sh\ntouch "$RUSTUP_CALLED"\ncase "$1" in\nwhich) printf \'%s/%s\\n\' "$FAKE_BIN" "$4" ;;\ntarget) printf \'%s\\n\' wasm32-wasip1 wasm32-unknown-unknown ;;\n*) exit 1 ;;\nesac\n',
+    }
+    for name, body in tools.items():
+        tool = fake_bin / name
+        tool.write_text(body)
+        tool.chmod(0o755)
+    # Distinct host and CLT executables expose a hardcoded-CLT wrapper regression.
+    for name in ("clang", "ld-classic"):
+        target = hosted_bin / name
+        target.write_text(tools[name])
+        target.chmod(0o755)
+    fake_xcrun = fake_bin / "xcrun"
+    fake_xcrun.write_text(
+        '#!/bin/sh\ncase "$2" in\nclang) printf \'%s\\n\' "$FAKE_XCRUN_CLANG" ;;\nld-classic) printf \'%s\\n\' "$FAKE_XCRUN_LD" ;;\n*) exit 1 ;;\nesac\n'
+    )
+    fake_xcrun.chmod(0o755)
+    # CLT clang is executable and version-compatible, but must never be selected
+    # by the hosted profile. Its actual invocation leaves a distinct marker.
+    (fake_bin / "clang").write_text(
+        tools["clang"].replace('"$CAPTURED"', '"$CLT_CAPTURED"')
+    )
+    for old, new in (
+        (pins["VIBECRAFTED_RELEASE_DARWIN_CLANG"], str(fake_bin / "clang")),
+        (pins["VIBECRAFTED_RELEASE_DARWIN_LD_CLASSIC"], str(fake_bin / "ld-classic")),
+        (pins["VIBECRAFTED_RELEASE_HOSTED_DEVELOPER_DIR"], str(developer_dir)),
+    ):
+        contract = contract.replace(old, new)
+    fake_contract = tmp_path / "release-toolchain-contract.sh"
+    fake_contract.write_text(contract)
+    env = dict(os.environ)
+    env.update(
+        PATH=f"{fake_bin}:{env['PATH']}",
+        DEVELOPER_DIR=str(developer_dir),
+        VIBECRAFTED_RELEASE_TOOLCHAIN_PROFILE="hosted-macos15-xcode26.3",
+        VIBECRAFTED_RELEASE_TOOLCHAIN_CONTRACT=str(fake_contract),
+        FAKE_CLANG_VERSION=pins["VIBECRAFTED_RELEASE_DARWIN_HOSTED_CLANG_VERSION"],
+        FAKE_LD_VERSION=pins["VIBECRAFTED_RELEASE_DARWIN_HOSTED_LD_CLASSIC_VERSION"],
+        FAKE_XCODE_VERSION=pins["VIBECRAFTED_RELEASE_HOSTED_XCODE_VERSION"],
+        CAPTURED=str(captured),
+        RUSTUP_CALLED=str(rustup_called),
+        FAKE_BIN=str(fake_bin),
+        FAKE_XCRUN_CLANG=str(hosted_bin / "clang"),
+        FAKE_XCRUN_LD=str(hosted_bin / "ld-classic"),
+        CLT_CAPTURED=str(tmp_path / "clt-arguments"),
+        VIBECRAFTED_HOME=str(tmp_path / "home"),
+    )
+    return fake_contract, env
+
+
+def test_hosted_profile_reaches_rust_linker_wrapper(tmp_path: Path) -> None:
+    _, env = _hosted_release_toolchain_fixture(tmp_path)
+    result = subprocess.run(
+        [
+            str(REPO_ROOT / "scripts/lib/rust-linker-darwin-classic.sh"),
+            "object.o",
+            "-o",
+            "product",
+        ],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert not Path(env["CLT_CAPTURED"]).exists()
+    assert Path(env["CAPTURED"]).read_text().splitlines() == [
+        "-Wl,-ld_classic",
+        "object.o",
+        "-o",
+        "product",
+    ]
+
+
+@pytest.mark.parametrize("resolution", ["alias", "canonical"])
+def test_hosted_profile_resolves_xcode_bundle_alias(
+    tmp_path: Path,
+    resolution: str,
+) -> None:
+    _, env = _hosted_release_toolchain_fixture(tmp_path)
+    alias_app = Path(env["DEVELOPER_DIR"]).parents[1]
+    canonical_app = tmp_path / "Xcode_26.3.app"
+    alias_app.rename(canonical_app)
+    alias_app.symlink_to(canonical_app, target_is_directory=True)
+    if resolution == "canonical":
+        env["FAKE_XCRUN_CLANG"] = str(Path(env["FAKE_XCRUN_CLANG"]).resolve())
+        env["FAKE_XCRUN_LD"] = str(Path(env["FAKE_XCRUN_LD"]).resolve())
+    result = subprocess.run(
+        [str(REPO_ROOT / "scripts/lib/rust-linker-darwin-classic.sh"), "object.o"],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert not Path(env["CLT_CAPTURED"]).exists()
+    assert Path(env["CAPTURED"]).read_text().splitlines() == [
+        "-Wl,-ld_classic",
+        "object.o",
+    ]
+
+
+def test_hosted_pair_does_not_replace_the_default_local_pin(tmp_path: Path) -> None:
+    _, env = _hosted_release_toolchain_fixture(tmp_path)
+    env.pop("VIBECRAFTED_RELEASE_TOOLCHAIN_PROFILE")
+    result = subprocess.run(
+        [str(REPO_ROOT / "scripts/lib/rust-linker-darwin-classic.sh"), "object.o"],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "release clang drift (profile=local" in result.stderr
+    assert "clang-1700.6.3.2" in result.stderr
+    assert not Path(env["CAPTURED"]).exists()
+
+
+@pytest.mark.parametrize(
+    ("drift", "error"),
+    [
+        ("FAKE_CLANG_VERSION", "release clang drift"),
+        ("FAKE_LD_VERSION", "release ld-classic drift"),
+        ("FAKE_XCODE_VERSION", "hosted release Xcode version drift"),
+        ("DEVELOPER_DIR", "hosted release Xcode path drift"),
+        ("VIBECRAFTED_RELEASE_TOOLCHAIN_PROFILE", "unknown release toolchain profile"),
+        ("missing-linker", "pinned release ld-classic is not executable"),
+        ("wrong-clang-origin", "hosted release tool resolution drift"),
+        ("wrong-linker-origin", "hosted release tool resolution drift"),
+        ("unresolved-linker", "hosted release tool resolution drift"),
+    ],
+)
+def test_hosted_profile_rejects_drift_before_linking_or_provisioning(
+    tmp_path: Path,
+    drift: str,
+    error: str,
+) -> None:
+    fake_contract, env = _hosted_release_toolchain_fixture(tmp_path)
+    if drift == "missing-linker":
+        Path(env["FAKE_XCRUN_LD"]).unlink()
+    elif drift == "wrong-clang-origin":
+        env["FAKE_XCRUN_CLANG"] = str(Path(env["FAKE_BIN"]) / "clang")
+    elif drift == "wrong-linker-origin":
+        env["FAKE_XCRUN_LD"] = str(Path(env["FAKE_BIN"]) / "ld-classic")
+    elif drift == "unresolved-linker":
+        env["FAKE_XCRUN_LD"] = ""
+    elif drift == "DEVELOPER_DIR":
+        wrong_dir = tmp_path / "wrong-xcode"
+        wrong_dir.mkdir()
+        env[drift] = str(wrong_dir)
+    else:
+        env[drift] = "wrong"
+    for command in (
+        [str(REPO_ROOT / "scripts/lib/rust-linker-darwin-classic.sh"), "object.o"],
+        [
+            _release_contract_make(),
+            "release-prereqs",
+            f"RELEASE_TOOLCHAIN_CONTRACT={fake_contract}",
+        ],
+    ):
+        result = subprocess.run(
+            command, cwd=REPO_ROOT, env=env, text=True, capture_output=True, check=False
+        )
+        assert result.returncode != 0
+        assert error in result.stderr
+        assert not Path(env["CAPTURED"]).exists()
+        assert not Path(env["CLT_CAPTURED"]).exists()
+        assert not Path(env["RUSTUP_CALLED"]).exists()
+
+
+def test_hosted_profile_preflight_has_no_downloads_and_prereqs_use_exact_rust(
+    tmp_path: Path,
+) -> None:
+    fake_contract, env = _hosted_release_toolchain_fixture(tmp_path)
+    for target in ("release-toolchain-preflight", "release-prereqs"):
+        result = subprocess.run(
+            [
+                _release_contract_make(),
+                target,
+                f"RELEASE_TOOLCHAIN_CONTRACT={fake_contract}",
+                "RELEASE_MIN_FREE_KIB=0",
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "classic" in result.stdout
+        assert Path(env["RUSTUP_CALLED"]).exists() == (target == "release-prereqs")
+    assert "Rust 1.96.0" in result.stdout
+
+
+def test_hosted_release_and_pr_smoke_use_same_explicit_profile() -> None:
+    workflow = (REPO_ROOT / ".github/workflows/release-dmg.yml").read_text()
+    probe = (REPO_ROOT / ".github/workflows/release-toolchain-probe.yml").read_text()
+    assert "VIBECRAFTED_RELEASE_TOOLCHAIN_PROFILE: hosted-macos15-xcode26.3" in workflow
+    assert (
+        "DEVELOPER_DIR: /Applications/Xcode_26.3.0.app/Contents/Developer" in workflow
+    )
+    assert "sudo xcode-select" not in workflow
+    assert "sort -V" not in workflow
+    assert workflow.index("make release-toolchain-preflight") < workflow.index(
+        "Install build tools"
+    )
+    assert workflow.index("make release-toolchain-preflight") < workflow.index(
+        "Materialize signing keys"
+    )
+    assert "name: Release Apple toolchain smoke" in probe
+    assert "  pull_request:" in probe
+    assert "  push:" not in probe
+    for owned_path in (
+        "scripts/lib/release-toolchain-contract.sh",
+        "scripts/lib/rust-linker-darwin-classic.sh",
+        "scripts/lib/xcode-channel.sh",
+        ".github/workflows/release-dmg.yml",
+        ".github/workflows/release-toolchain-probe.yml",
+        "tests/tui/test_release_contract.py",
+        "Makefile",
+    ):
+        assert f'      - "{owned_path}"' in probe
+    assert "secrets." not in probe
+    assert "VIBECRAFTED_RELEASE_TOOLCHAIN_PROFILE: hosted-macos15-xcode26.3" in probe
+    assert "DEVELOPER_DIR: /Applications/Xcode_26.3.0.app/Contents/Developer" in probe
+    assert "make release-toolchain-preflight" in probe
+    assert "make release-prereqs" in probe
+    assert "scripts/lib/rust-linker-darwin-classic.sh" in probe
+    assert "xcrun --sdk macosx --show-sdk-path" in probe
+    assert '-isysroot "$sdk"' in probe
+    assert 'rustup run "$VIBECRAFTED_RELEASE_RUSTUP_TOOLCHAIN" rustc' in probe
+    assert '-C linker="$PWD/scripts/lib/rust-linker-darwin-classic.sh"' in probe
+    assert "-C symbol-mangling-version=v0" in probe
+    assert "rust-wrapper-native-fixture=passed" in probe
+    assert "clt-probe" not in probe
+    assert "xcode-probe" not in probe
+    assert "continue-on-error" not in probe
+    assert "make dmg" not in probe
+    assert "build-vibecrafted-release.sh" not in probe
+    assert "publish-vibecrafted-release.sh" not in probe
 
 
 def _native_voc_build_function() -> str:

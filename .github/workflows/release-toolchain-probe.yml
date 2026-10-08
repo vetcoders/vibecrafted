@@ -1,0 +1,71 @@
+name: Release Apple toolchain smoke
+
+# No-secret release-toolchain regression gate on affected pull requests.
+# Compile tiny native fixtures through the same pinned release wrapper.
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/release-toolchain-probe.yml"
+      - "scripts/lib/release-toolchain-contract.sh"
+      - "scripts/lib/rust-linker-darwin-classic.sh"
+      - "scripts/lib/xcode-channel.sh"
+      - "Makefile"
+      - ".github/workflows/release-dmg.yml"
+      - "tests/tui/test_release_contract.py"
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: macos-15
+    timeout-minutes: 10
+    env:
+      VIBECRAFTED_RELEASE_TOOLCHAIN_PROFILE: hosted-macos15-xcode26.3
+      DEVELOPER_DIR: /Applications/Xcode_26.3.0.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Measure CLT and selected Xcode pairs
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'image=%s version=%s arch=%s source=%s\n' "${ImageOS:-unset}" "${ImageVersion:-unset}" "$(uname -m)" "$(git rev-parse HEAD)"
+          xcodebuild -version
+          for root in /Library/Developer/CommandLineTools/usr/bin "$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin"; do
+            printf 'toolchain-root=%s\n' "$root"
+            "$root/clang" --version
+            for linker in ld-classic ld; do
+              if [[ -x "$root/$linker" ]]; then
+                "$root/$linker" -v </dev/null 2>&1
+              else
+                printf 'absent=%s/%s\n' "$root" "$linker"
+              fi
+            done
+          done
+          printf 'int main(void) { return 0; }\n' > "$RUNNER_TEMP/release-linker-probe.c"
+          sdk="$(xcrun --sdk macosx --show-sdk-path)"
+          printf 'native-sdk=%s\n' "$sdk"
+      - name: Verify admitted release profile and prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          make release-toolchain-preflight
+          make release-prereqs
+      - name: Compile and execute through the production linker wrapper
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk="$(xcrun --sdk macosx --show-sdk-path)"
+          scripts/lib/rust-linker-darwin-classic.sh -isysroot "$sdk" "$RUNNER_TEMP/release-linker-probe.c" -o "$RUNNER_TEMP/wrapper-probe"
+          "$RUNNER_TEMP/wrapper-probe"
+          printf 'wrapper-native-fixture=passed profile=%s source=%s\n' "$VIBECRAFTED_RELEASE_TOOLCHAIN_PROFILE" "$(git rev-parse HEAD)"
+          . scripts/lib/release-toolchain-contract.sh
+          printf 'fn main() { println!("release-rust-linker-probe"); }\n' > "$RUNNER_TEMP/release-rust-linker-probe.rs"
+          rustup run "$VIBECRAFTED_RELEASE_RUSTUP_TOOLCHAIN" rustc --version
+          rustup run "$VIBECRAFTED_RELEASE_RUSTUP_TOOLCHAIN" rustc \
+            -C linker="$PWD/scripts/lib/rust-linker-darwin-classic.sh" \
+            -C symbol-mangling-version=v0 \
+            -C link-arg=-isysroot -C link-arg="$sdk" \
+            "$RUNNER_TEMP/release-rust-linker-probe.rs" -o "$RUNNER_TEMP/rust-wrapper-probe"
+          "$RUNNER_TEMP/rust-wrapper-probe"
+          printf 'rust-wrapper-native-fixture=passed profile=%s source=%s\n' "$VIBECRAFTED_RELEASE_TOOLCHAIN_PROFILE" "$(git rev-parse HEAD)"
