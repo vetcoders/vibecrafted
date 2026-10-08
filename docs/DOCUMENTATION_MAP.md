@@ -20,7 +20,7 @@ The product has these working layers:
 | Developer builds      | `docs/public/getting-started/build-from-source.md` — source-backed Linux/Windows build/install recipes        |
 | Operator runbook      | `docs/RUNBOOK.md` · `docs/pl/RUNBOOK.md` — terminal-first: cold start, dispatch, supervision, recovery        |
 | Install and support   | `docs/INSTALL.md` (channel matrix + status), `docs/DOCKER.md`, `make help`, `make help-dev`                   |
-| Release cut           | `docs/RELEASE_KICKOFF.md` (identity), `docs/RELEASE_CHECKLIST.md` (4.3.1 DMG command sequence)                |
+| Release cut           | `docs/RELEASE_KICKOFF.md` (identity), `docs/RELEASE_CHECKLIST.md` (DMG command sequence)                      |
 | Package-manager stage | `packaging/` (Homebrew formula + cask; winget skipped — no published win32-x64 carrier yet)                   |
 | Install (public docs) | `docs/public/getting-started/`: `install.md` · `build-from-source.md` · `first-run.md` · `update.md`          |
 | Command deck          | `scripts/vibecrafted`, `docs/WORKFLOWS.md`, `docs/SKILLS.md`                                                  |

@@ -24,7 +24,7 @@ cask "vibecrafted-app" do
     Verify the adjacent .dmg.sha256 before first launch if you
     downloaded the DMG by hand.
 
-    Fill version.csv (4.3.1, YYYYMMDD, sha8) and sha256 from the
+    Fill version.csv (version, YYYYMMDD, sha8) and sha256 from the
     published asset name after `make publish-release`.
   EOS
 end
