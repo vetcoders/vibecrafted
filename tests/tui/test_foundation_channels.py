@@ -593,3 +593,36 @@ def test_runtime_install_retains_early_failure_evidence(tmp_path: Path) -> None:
         assert not log.is_relative_to(generation.resolve())
         evidence += log.read_text()
     assert marker in evidence, "The caller discarded the actual early failure evidence"
+
+
+@pytest.mark.parametrize(
+    "missing", [None, "config.kdl", "vc-composer.sh", "layouts/operator.kdl"]
+)
+def test_canonical_frame_config_passes_strict_cockpit_gate(
+    tmp_path: Path, missing: str | None
+) -> None:
+    """The shipped Frame-owned layout contract must survive strict install."""
+    source = REPO_ROOT / "vibecrafted-core/vibecrafted_core/config/vc-frame"
+    config = tmp_path / "home/.config/vibecrafted/vc-frame"
+    for name in ("config.kdl", "vc-composer.sh", "layouts/operator.kdl"):
+        target = config / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((source / name).read_bytes())
+        if name.endswith(".sh"):
+            target.chmod(0o755)
+    if missing:
+        (config / missing).unlink()
+    fake_bin = tmp_path / "bin"
+    _executable(fake_bin / "vc-frame", "#!/bin/sh\necho 'vc-frame 4.3.3'\n")
+    _executable(fake_bin / "vc-start")
+
+    result = _run_installer(
+        tmp_path, "vc-frame", path=[fake_bin], REQUIRE_FOUNDATIONS="1"
+    )
+
+    if missing:
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "required foundation failed: vc-frame" in result.stderr
+    else:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "cockpit: READY" in result.stdout
