@@ -554,6 +554,7 @@ def test_hosted_release_and_pr_smoke_use_same_explicit_profile() -> None:
     for owned_path in (
         "scripts/lib/release-toolchain-contract.sh",
         "scripts/lib/rust-linker-darwin-classic.sh",
+        "scripts/lib/xcode-channel.sh",
         ".github/workflows/release-dmg.yml",
         ".github/workflows/release-toolchain-probe.yml",
         "tests/tui/test_release_contract.py",

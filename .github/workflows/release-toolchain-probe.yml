@@ -8,6 +8,7 @@ on:
       - ".github/workflows/release-toolchain-probe.yml"
       - "scripts/lib/release-toolchain-contract.sh"
       - "scripts/lib/rust-linker-darwin-classic.sh"
+      - "scripts/lib/xcode-channel.sh"
       - "Makefile"
       - ".github/workflows/release-dmg.yml"
       - "tests/tui/test_release_contract.py"
