@@ -27357,6 +27357,43 @@ def _install_runtime_pack(
     )
 
 
+_FOUNDATION_SECRET_LINE = re.compile(
+    r"(?i)(?:token|secret|password|api[_-]?key|authorization)\s*[:=]"
+    r"|://[^\s/]+:[^\s/]+@"
+)
+_FOUNDATION_DIAGNOSTIC_CAP = 24_000
+
+
+def _redact_foundation_diagnostic(text: str) -> str:
+    lines = [
+        "[redacted]" if _FOUNDATION_SECRET_LINE.search(line) else line
+        for line in text.splitlines()
+    ]
+    body = "\n".join(lines)
+    if len(body) <= _FOUNDATION_DIAGNOSTIC_CAP:
+        return body
+    omitted = len(body) - _FOUNDATION_DIAGNOSTIC_CAP
+    return (
+        body[:_FOUNDATION_DIAGNOSTIC_CAP]
+        + f"\n... {omitted} characters omitted from foundations diagnostic"
+    )
+
+
+def _foundations_failure_diagnostic(stdout: str, stderr: str) -> str:
+    """Captured installer streams that the short tails discard.
+
+    ``output_tail`` and ``reason`` stay the existing short tails. This text
+    is the receipt inside the same foundations record: output the installer
+    already captured, not a second log and not a write into the generation.
+    """
+    chunks: list[str] = []
+    if stdout.strip():
+        chunks.append("stdout:\n" + stdout.rstrip("\n"))
+    if stderr.strip():
+        chunks.append("stderr:\n" + stderr.rstrip("\n"))
+    return _redact_foundation_diagnostic("\n".join(chunks))
+
+
 def _ensure_foundations_installed(generation: Path, *, skip: bool) -> dict[str, Any]:
     """Drive the bundled foundations installer after the runtime transaction.
 
@@ -27400,13 +27437,23 @@ def _ensure_foundations_installed(generation: Path, *, skip: bool) -> dict[str, 
         record["reason"] = f"foundations installer did not complete: {exc}"
         return record
     record["exit_code"] = proc.returncode
-    tail = "\n".join((proc.stdout or "").splitlines()[-12:])
+    stdout_lines = (proc.stdout or "").splitlines()
+    stderr_lines = (proc.stderr or "").splitlines()
+    tail = "\n".join(stdout_lines[-12:])
     record["output_tail"] = tail
     if proc.returncode == 0:
         record["status"] = "installed"
     else:
         record["status"] = "failed"
         record["reason"] = "\n".join((proc.stderr or tail or "").splitlines()[-6:])
+        # The short tails are what CI kept, and they hid the required failure
+        # behind a later optional phase. Publish the captured streams when
+        # either tail had to drop lines.
+        if len(stdout_lines) > 12 or len(stderr_lines) > 6:
+            record["diagnostic"] = _foundations_failure_diagnostic(
+                proc.stdout or "",
+                proc.stderr or "",
+            )
     return record
 
 

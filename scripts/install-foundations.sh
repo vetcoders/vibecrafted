@@ -93,6 +93,26 @@ info() { printf '\033[36m▸\033[0m %s\n' "$*"; }
 ok()   { printf '\033[32m✓\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m!\033[0m %s\n' "$*"; }
 
+# CI keeps the last few stderr lines and drops earlier stdout. Repeat the
+# required-failure name at the end of stderr. The runtime installer already
+# captures the full stream and publishes what this tail would discard.
+REQUIRED_FAILURES=()
+
+note_required_failure() {
+  REQUIRED_FAILURES+=("$1")
+  exit_code=1
+}
+
+emit_required_failure_names() {
+  local name
+  if [[ ${#REQUIRED_FAILURES[@]} -eq 0 ]]; then
+    return 0
+  fi
+  for name in "${REQUIRED_FAILURES[@]}"; do
+    printf 'required foundation failed: %s\n' "$name" >&2
+  done
+}
+
 detect_os() {
   case "$(uname -s)" in
     Linux*)   echo "linux" ;;
@@ -858,7 +878,7 @@ foundation_channel_fail() {
   elif [[ "$REQUIRE_FOUNDATIONS" == "0" ]]; then
     warn "$name unavailable — REQUIRE_FOUNDATIONS=0 waives the product spine for this run; install it from its channel later."
   else
-    exit_code=1
+    note_required_failure "$name"
   fi
 }
 
@@ -874,7 +894,7 @@ for target in "${TARGETS[@]}"; do
     vc-frame)
       if ! install_vcframe; then
         if [[ -n "$REQUIRE_FOUNDATIONS_WAS_SET" && "$REQUIRE_FOUNDATIONS" == "1" ]]; then
-          exit_code=1
+          note_required_failure vc-frame
         else
           warn "vc-frame cockpit incomplete — deferred (no public channel yet); REQUIRE_FOUNDATIONS=1 re-arms the hard gate."
         fi
@@ -883,7 +903,7 @@ for target in "${TARGETS[@]}"; do
     agents)
       if ! install_agents; then
         if (( AGENTS_REQUIRED )); then
-          exit_code=1
+          note_required_failure agents
         else
           warn "agent CLIs incomplete — optional, install later: vibecrafted doctor"
         fi
@@ -916,4 +936,5 @@ if (( exit_code == 0 )) && (( !CHECK_ONLY )); then
   esac
 fi
 
+emit_required_failure_names
 exit $exit_code
