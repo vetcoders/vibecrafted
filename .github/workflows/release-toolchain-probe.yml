@@ -1,0 +1,54 @@
+name: Release toolchain probe (bounded repair)
+
+# Temporary no-secret evidence lane for the release-toolchain repair branch.
+# This compiles a tiny native fixture, never a product or release carrier.
+on:
+  push:
+    branches:
+      - "agent/ci-release-toolchain-*"
+    paths:
+      - ".github/workflows/release-toolchain-probe.yml"
+      - "scripts/lib/release-toolchain-contract.sh"
+      - "scripts/lib/rust-linker-darwin-classic.sh"
+      - "Makefile"
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: macos-15
+    timeout-minutes: 10
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.0.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Measure CLT and selected Xcode pairs
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'image=%s version=%s arch=%s source=%s\n' "${ImageOS:-unset}" "${ImageVersion:-unset}" "$(uname -m)" "$(git rev-parse HEAD)"
+          xcodebuild -version
+          for root in /Library/Developer/CommandLineTools/usr/bin "$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin"; do
+            printf 'toolchain-root=%s\n' "$root"
+            "$root/clang" --version
+            for linker in ld-classic ld; do
+              if [[ -x "$root/$linker" ]]; then
+                "$root/$linker" -v </dev/null 2>&1
+              else
+                printf 'absent=%s/%s\n' "$root" "$linker"
+              fi
+            done
+          done
+          printf 'int main(void) { return 0; }\n' > "$RUNNER_TEMP/release-linker-probe.c"
+          /Library/Developer/CommandLineTools/usr/bin/clang -Wl,-ld_classic "$RUNNER_TEMP/release-linker-probe.c" -o "$RUNNER_TEMP/clt-probe"
+          "$RUNNER_TEMP/clt-probe"
+          xcrun clang "$RUNNER_TEMP/release-linker-probe.c" -o "$RUNNER_TEMP/xcode-probe"
+          "$RUNNER_TEMP/xcode-probe"
+      - name: Verify current release contract
+        continue-on-error: true # Initial measurement can precede profile admission.
+        shell: bash
+        run: |
+          set -euo pipefail
+          . scripts/lib/release-toolchain-contract.sh
+          vibecrafted_release_verify_darwin_linker
