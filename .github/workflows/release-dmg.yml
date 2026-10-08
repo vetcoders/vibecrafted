@@ -55,6 +55,8 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 180
     env:
+      VIBECRAFTED_RELEASE_TOOLCHAIN_PROFILE: hosted-macos15-xcode26.3
+      DEVELOPER_DIR: /Applications/Xcode_26.3.0.app/Contents/Developer
       KEYS: ${{ github.workspace }}/.keys
       VIBECRAFTED_FRAME_REPO: ${{ github.workspace }}/vc-frame
       VIBECRAFTED_TERMINAL_REPO: ${{ github.workspace }}/vc-terminal
@@ -89,6 +91,10 @@ jobs:
           test "$GITHUB_REF_NAME" = "v$version" \
             || { echo "::error::tag $GITHUB_REF_NAME does not match VERSION $version"; exit 1; }
 
+      - name: Verify explicit hosted Apple toolchain before provisioning
+        working-directory: vibecrafted
+        run: make release-toolchain-preflight
+
       - name: Check out donors (vc-frame, vc-terminal)
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -104,13 +110,6 @@ jobs:
           path: vc-terminal
           fetch-depth: 0
           persist-credentials: false
-
-      - name: Select Xcode
-        run: |
-          set -euo pipefail
-          # shellcheck disable=SC2012 # runner-controlled Xcode bundle names
-          sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -1)/Contents/Developer"
-          xcodebuild -version
 
       - name: Install build tools
         run: |

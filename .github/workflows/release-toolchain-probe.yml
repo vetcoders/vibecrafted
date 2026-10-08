@@ -18,6 +18,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 10
     env:
+      VIBECRAFTED_RELEASE_TOOLCHAIN_PROFILE: hosted-macos15-xcode26.3
       DEVELOPER_DIR: /Applications/Xcode_26.3.0.app/Contents/Developer
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -41,14 +42,29 @@ jobs:
             done
           done
           printf 'int main(void) { return 0; }\n' > "$RUNNER_TEMP/release-linker-probe.c"
-          /Library/Developer/CommandLineTools/usr/bin/clang -Wl,-ld_classic "$RUNNER_TEMP/release-linker-probe.c" -o "$RUNNER_TEMP/clt-probe"
-          "$RUNNER_TEMP/clt-probe"
-          xcrun clang "$RUNNER_TEMP/release-linker-probe.c" -o "$RUNNER_TEMP/xcode-probe"
-          "$RUNNER_TEMP/xcode-probe"
-      - name: Verify current release contract
-        continue-on-error: true # Initial measurement can precede profile admission.
+          sdk="$(xcrun --sdk macosx --show-sdk-path)"
+          printf 'native-sdk=%s\n' "$sdk"
+      - name: Verify admitted release profile and prerequisites
         shell: bash
         run: |
           set -euo pipefail
+          make release-toolchain-preflight
+          make release-prereqs
+      - name: Compile and execute through the production linker wrapper
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk="$(xcrun --sdk macosx --show-sdk-path)"
+          scripts/lib/rust-linker-darwin-classic.sh -isysroot "$sdk" "$RUNNER_TEMP/release-linker-probe.c" -o "$RUNNER_TEMP/wrapper-probe"
+          "$RUNNER_TEMP/wrapper-probe"
+          printf 'wrapper-native-fixture=passed profile=%s source=%s\n' "$VIBECRAFTED_RELEASE_TOOLCHAIN_PROFILE" "$(git rev-parse HEAD)"
           . scripts/lib/release-toolchain-contract.sh
-          vibecrafted_release_verify_darwin_linker
+          printf 'fn main() { println!("release-rust-linker-probe"); }\n' > "$RUNNER_TEMP/release-rust-linker-probe.rs"
+          rustup run "$VIBECRAFTED_RELEASE_RUSTUP_TOOLCHAIN" rustc --version
+          rustup run "$VIBECRAFTED_RELEASE_RUSTUP_TOOLCHAIN" rustc \
+            -C linker="$PWD/scripts/lib/rust-linker-darwin-classic.sh" \
+            -C symbol-mangling-version=v0 \
+            -C link-arg=-isysroot -C link-arg="$sdk" \
+            "$RUNNER_TEMP/release-rust-linker-probe.rs" -o "$RUNNER_TEMP/rust-wrapper-probe"
+          "$RUNNER_TEMP/rust-wrapper-probe"
+          printf 'rust-wrapper-native-fixture=passed profile=%s source=%s\n' "$VIBECRAFTED_RELEASE_TOOLCHAIN_PROFILE" "$(git rev-parse HEAD)"

@@ -62,6 +62,45 @@ the pinned Rust toolchain, WASM targets, linker and free disk. Stable Xcode is
 the default; the documented `VIBECRAFTED_ALLOW_BETA_XCODE=1` override is an
 explicit build choice whose actual compiler/linker result must be recorded.
 
+### Apple release toolchain profiles
+
+`make release-toolchain-preflight` checks the Apple pair without provisioning
+Rust, downloading build tools, or reading signing credentials. The release
+prerequisites repeat that check before any Rust installation.
+
+The shared helper `scripts/lib/release-toolchain-contract.sh` owns the exact
+version pins. Set `VIBECRAFTED_RELEASE_TOOLCHAIN_PROFILE` in the calling shell:
+
+- `local` (default): preserves the measured CLT 26 clang `1700.6.3.2` /
+  ld-classic `956.6` pair. Only an absent ld-classic selects the measured
+  Xcode 27 clang `2100.3.34.2` / ld `27037.1` pair.
+- `local-classic` or `local-xcode27`: explicitly select one of those measured
+  pairs. The classic profile refuses a missing linker.
+- `hosted-macos15-xcode26.3`: uses the selected Xcode classic pair for Rust:
+  clang `1700.6.4.2` / ld-classic `956.6`. It requires `DEVELOPER_DIR=/Applications/Xcode_26.3.0.app/Contents/Developer`,
+  Xcode `26.3` / build `17C529` for Swift, signing, and notarization. Resolved
+  `xcrun` tools must belong to that bundle; the `.0` alias is supported.
+
+Unknown profiles, compiler/linker version drift, and hosted Xcode drift are
+fatal. The hosted DMG workflow runs this gate before dependency provisioning;
+it does not select the newest available Xcode. Rust remains pinned to `1.96.0`
+and the server retains v0 symbol mangling.
+
+The hosted pair was measured on image `20260907.0337.1` in
+[probe run 37802780433](https://github.com/vetcoders/vibecrafted/actions/runs/37802780433).
+That image's CLT pair, clang `1700.0.13.5` / ld-classic `955.13`, remains
+unadmitted. The initial native fixture lacked a sysroot and failed to find
+`-lSystem`; the final probe passes the selected macOS SDK explicitly.
+
+The temporary `release-toolchain-probe.yml` runs only for pushes to
+`agent/ci-release-toolchain-*`. It records image/source identity, CLT and
+selected-Xcode versions, verifies prerequisites, and executes tiny C and Rust `1.96.0` fixtures through
+the production wrapper with the selected SDK, without secrets.
+That receipt proves the pair and wrapper path; a signed, notarized product
+build and artifact execution remain separate acceptance obligations. Retire
+this bounded probe after the repair has been admitted and hosted evidence is
+recorded.
+
 ### In-flight rehearsal — no publish button
 
 `make release-rehearsal` checks identity, inventories and recipe syntax without
