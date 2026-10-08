@@ -86,6 +86,20 @@ struct CommandDeckIntegrationTests {
     func toggle() -> NSToolbarItem? {
       window.toolbar?.items.first { $0.label.contains("Inspector") }
     }
+    func requireMountedDocument(_ checkpoint: String) async throws {
+      // DOM readiness and retained bounds also pass for a detached WKWebView.
+      // Let outgoing SwiftUI containers finish updating before checking ownership.
+      try await Task.sleep(for: .milliseconds(300))
+      try require(session.webView.window === window,
+        "Web document detached from its native window at \(checkpoint)")
+      try require(session.webView.isDescendant(of: window.contentView!),
+        "Web document left the visible content hierarchy at \(checkpoint)")
+      let rect = window.contentView!.convert(session.webView.bounds, from: session.webView)
+      try require(rect.width > 200 && rect.height > 200
+        && window.contentView!.bounds.intersects(rect)
+        && !session.webView.isHiddenOrHasHiddenAncestor,
+        "Web document has no visible native viewport at \(checkpoint): \(rect)")
+    }
     try await waitFor { inspector() != nil && toggle() != nil }
     try await Task.sleep(for: .milliseconds(300))
     FileHandle.standardError.write(Data("SHOWN frame=\(window.frame) visible=\(visible) min=\(window.minSize)\n".utf8))
@@ -96,6 +110,7 @@ struct CommandDeckIntegrationTests {
       try require(inspector() != nil && toggle() != nil, "Inspector or discovery button missing at \(size)")
       try require(session.webView.bounds.width > 200 && session.webView.bounds.height > 200,
         "Inspector squeezed the document out of the window at \(size): \(session.webView.bounds)")
+      try await requireMountedDocument("resize \(size)")
       let webRect = window.contentView!.convert(session.webView.bounds, from: session.webView)
       try require(window.contentView!.bounds.contains(webRect),
         "Ready web document escapes the window content at \(size): \(webRect)")
@@ -119,32 +134,45 @@ struct CommandDeckIntegrationTests {
     NotificationCenter.default.post(name: .commandDeckToggleInspector, object: nil)
     try await waitFor { inspector() == nil }
     try await waitFor { toggle()?.label == "Show Inspector" }
+    try await requireMountedDocument("inspector closed")
     try await Task.sleep(for: .milliseconds(300))
     NotificationCenter.default.post(name: .commandDeckToggleInspector, object: nil)
     try await waitFor { inspector() != nil }
     try await waitFor { toggle()?.label == "Hide Inspector" }
+    try await requireMountedDocument("inspector opened")
     controller.openWorkspacePath("/usage")
     try await waitFor { session.navigation.currentURL?.path == "/usage" }
     try await waitFor { inspector() == nil }
     NotificationCenter.default.post(name: .commandDeckToggleInspector, object: nil)
     try await tick()
     try require(inspector() == nil, "Costs & usage exposed an empty run inspector")
+    try await requireMountedDocument("/usage")
     controller.openWorkspacePath("/runs")
     try await waitFor { session.navigation.currentURL?.path == "/runs" }
     try await waitFor { inspector() != nil }
+    try await requireMountedDocument("/runs")
     // Web navigation bypasses the sidebar; eligibility must follow the actual page.
     try await evaluate("location.href = '/projects'", in: session.webView)
     try await waitFor { session.navigation.currentURL?.path == "/projects" }
     try await waitFor { inspector() == nil }
+    try await requireMountedDocument("/projects")
     try await evaluate("location.href = '/'", in: session.webView)
     try await waitFor { session.navigation.currentURL?.path == "/" }
     try await waitFor { inspector() != nil }
+    try await requireMountedDocument("/")
     NotificationCenter.default.post(name: .commandDeckToggleInspector, object: nil)
     try await waitFor { inspector() == nil }
     controller.openWorkspacePath("/runs")
     try await waitFor { session.navigation.currentURL?.path == "/runs" }
     try await tick()
     try require(inspector() == nil, "Route navigation discarded the user's closed inspector preference")
+    try await requireMountedDocument("/runs with inspector closed")
+    for path in ["/settings", "/skills", "/", "/usage", "/"] {
+      controller.openWorkspacePath(path)
+      try await waitFor { session.navigation.currentURL?.path == path }
+      try await requireMountedDocument(path)
+    }
+    print("Witness: native document remains mounted across inspector eligibility changes")
     print("Witness: existing native inspector defaults open, toolbar and menu toggle it, actual routes govern eligibility, window preference survives navigation at 800×600 and 1200×800")
   }
 
